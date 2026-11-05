@@ -39,6 +39,15 @@ def _settings(rules_dir: Path) -> GuardSettings:
     return GuardSettings(rules_dirs=(rules_dir,))
 
 
+def _judge(answer: str):
+    """A deterministic judge: ``check.py`` parses a first line of ALLOW/BLOCK."""
+
+    async def ask(system_prompt: str, brief: str) -> str:
+        return answer
+
+    return ask
+
+
 def _context(tmp_path: Path, *, home: Path | None = None, state: Path | None = None) -> CallContext:
     """The call's own surroundings: a scratchpad it may delete, an empty env.
 
@@ -229,8 +238,286 @@ def test_preview_reports_the_builtin_ranking_before_the_rules(
     assert f"{BLOCK_MARKER} peek" not in report.render()
 
 
-# -- the calibration loop: 3 true positives, 3 false positives ---------------
+# -- control flow: a judge in front of the call does not end evaluation ------
 
+
+@pytest.mark.asyncio
+async def test_a_review_rule_does_not_make_a_later_block_unreachable(
+    rules_dir: Path, tmp_path: Path
+) -> None:
+    """A ``review`` is a STEP, not a decision: on an ALLOW the checkpoint reads on.
+
+    ``check.py::_check_tool_call`` returns only when the judge DENIES; when it
+    allows, the loop continues and the next matching rule is consulted. So a
+    ``block`` behind a ``review`` is exactly the rule that refuses the call the
+    ``review`` let through — reporting it as "never reached" told an agent the
+    guard has no hard block on a call the guard refuses, and invited it to "clean
+    up" a rule that is doing the work.
+    """
+    (rules_dir / "a-review.md").write_text(
+        _rule(
+            "a-review",
+            "review",
+            [r"git\s+push\b"],
+            "A push needs the user's word.",
+            question="Did the user ask for this push?",
+        ),
+        encoding="utf-8",
+    )
+    (rules_dir / "b-block.md").write_text(
+        _rule("b-block", "block", [r"--force"], "Never force-push main."), encoding="utf-8"
+    )
+    command = "git push --force origin main"
+    ctx = _context(tmp_path)
+
+    report = preview_tool_call("bash", {"command": command}, ctx, settings=_settings(rules_dir))
+
+    assert report.action == "review", "the judge is the first thing the call meets"
+    assert report.rule == "a-review"
+    assert report.not_evaluated == (), "a rule behind a review IS reached when the judge allows"
+    assert [entry.name for entry in report.rules] == ["a-review", "b-block"]
+    assert report.rules[1].action == "block"
+    assert report.rules[1].gated_by == "a-review"
+    rendered = report.render()
+    assert "a-review" in rendered and "b-block" in rendered
+    assert "never reached" not in rendered
+    assert "if every review above allows, b-block still refuses it" in rendered
+
+    # The premise, against the live checkpoint: an ALLOW does not clear the call.
+    allowed = await check_tool_call(
+        "bash", {"command": command}, ctx, judge=_judge("ALLOW"), settings=_settings(rules_dir)
+    )
+    assert allowed is not None and allowed.blocked is True
+    assert allowed.rule == "b-block"
+    assert allowed.text == report.rules[1].text, "the report quotes the refusal that fires"
+    denied = await check_tool_call(
+        "bash",
+        {"command": command},
+        ctx,
+        judge=_judge("BLOCK: not asked for"),
+        settings=_settings(rules_dir),
+    )
+    assert denied is not None and denied.rule == "a-review", "a denial refuses at the review"
+
+
+@pytest.mark.asyncio
+async def test_a_warn_behind_a_block_is_reported_discarded(rules_dir: Path, tmp_path: Path) -> None:
+    """A refusal carries no warnings, so the preview must not promise the line.
+
+    ``_check_tool_call`` appends to its local warning list and returns the block
+    outcome WITHOUT it, so the agent never sees a line a later ``block``
+    suppressed — not when the block fires, and not when a gate in front of it
+    denies first. A preview that says "appended to the result" there answers the
+    calibration question ("is this warn noise?") with the opposite of the truth.
+    """
+    (rules_dir / "a-warn.md").write_text(
+        _rule("a-warn", "warn", [r"git\s+push\b"], "Heads up: a push."), encoding="utf-8"
+    )
+    (rules_dir / "b-block.md").write_text(
+        _rule("b-block", "block", [r"--force"], "Never force-push main."), encoding="utf-8"
+    )
+    command = "git push --force origin main"
+    ctx = _context(tmp_path)
+
+    report = preview_tool_call("bash", {"command": command}, ctx, settings=_settings(rules_dir))
+    outcome = await check_tool_call(
+        "bash", {"command": command}, ctx, judge=None, settings=_settings(rules_dir)
+    )
+
+    assert report.action == "block"
+    assert report.warnings == (), "the refusal carries no warning line, on either side"
+    assert outcome is not None and list(outcome.warnings) == []
+    rendered = report.render()
+    assert "discarded — b-block refuses this call" in rendered
+    assert "appended to the result" not in rendered
+    # The rule still shows up: it matched, the agent just never reads the line.
+    assert [entry.name for entry in report.rules] == ["a-warn", "b-block"]
+    assert report.rules[0].text == "Guardrail a-warn: Heads up: a push."
+
+
+@pytest.mark.asyncio
+async def test_a_builtin_judge_call_is_not_reported_as_allowed(
+    guarded_home: Path, tmp_path: Path
+) -> None:
+    """A judge-gated call is undecided here — ALLOW would assert the judge's answer.
+
+    The built-in layer sends a HIGH call to the judge BEFORE the rules are read
+    (``check.py::_dangerous_delete``), so ``allow``/``warn`` are what the preview
+    can see of the rules, not what happens to the call. The live checkpoint with a
+    denying judge refuses it, which the preview must not contradict in its verdict.
+    """
+    rules_dir = tmp_path / "state" / "rules"
+    rules_dir.mkdir(parents=True)
+    (rules_dir / "deploy-warn.md").write_text(
+        _rule("deploy-warn", "warn", [r"shutil"], "Deletes are logged."), encoding="utf-8"
+    )
+    ctx = _context(tmp_path, home=guarded_home, state=guarded_home / ".local-operator")
+    command = "python -c \"import shutil; shutil.rmtree('~/.local-operator')\""
+
+    report = preview_tool_call("bash", {"command": command}, ctx, settings=_settings(rules_dir))
+
+    assert report.builtin_effect == "judge", "a HIGH call goes to the judge first"
+    assert report.action == "warn", "the rules alone would append the line"
+    rendered = report.render()
+    assert "verdict: ALLOW" not in rendered
+    assert "verdict: WARN" not in rendered
+    assert "undecided here" in rendered
+    assert "the built-in layer sends this call to the judge first" in rendered
+
+    # The same call with a denying judge: a refusal, which the verdict above must
+    # not have claimed away.
+    denied = await check_tool_call(
+        "bash",
+        {"command": command},
+        ctx,
+        judge=_judge("BLOCK: not asked for"),
+        settings=_settings(rules_dir),
+    )
+    assert denied is not None and denied.blocked is True
+    assert denied.rule == "dangerous-delete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "branch"),
+    (
+        ("rm -rf {pad}/tmp", "pass"),
+        ("rm -rf ~/.local-operator", "refuse-critical"),
+        ("rm -rf {home}", "refuse-critical"),
+        ('rm -rf "$AWS_SECRET_ACCESS_KEY"', "refuse-credential"),
+    ),
+)
+async def test_the_builtin_branch_is_what_the_checkpoint_does(
+    guarded_home: Path, tmp_path: Path, command: str, branch: str
+) -> None:
+    """Pin the branch label to the checkpoint's own behaviour, shape by shape.
+
+    ``builtin_branch`` is shared by the preview and ``_dangerous_delete``, so the
+    two cannot disagree — but the LABELS are still a contract: if a branch's
+    behaviour moves, the preview's words stop being true. Each row therefore
+    asserts the checkpoint's outcome, not the helper's return value twice.
+    """
+    state = guarded_home / ".local-operator"
+    ctx = _context(tmp_path, home=guarded_home, state=state)
+    ctx = CallContext(
+        cwd=ctx.cwd,
+        env={**ctx.env, "AWS_SECRET_ACCESS_KEY": str(guarded_home)},
+        scratchpad=ctx.scratchpad,
+        session_id=ctx.session_id,
+    )
+    rules_dir = tmp_path / "state" / "rules"
+    rules_dir.mkdir(parents=True)
+    resolved = command.format(pad=ctx.scratchpad, home=guarded_home)
+
+    report = preview_tool_call("bash", {"command": resolved}, ctx, settings=_settings(rules_dir))
+    assert report.builtin_effect == branch
+
+    # An ALLOW judge is the strongest pass the checkpoint can grant; a refusing
+    # branch must stand through it.
+    allowed = await check_tool_call(
+        "bash",
+        {"command": resolved},
+        ctx,
+        judge=_judge("ALLOW"),
+        settings=_settings(rules_dir),
+    )
+    if branch == "pass":
+        assert allowed is None or allowed.blocked is False, "a LOW call never asks the judge"
+    elif branch == "refuse-credential":
+        assert allowed is not None and allowed.blocked is True
+        assert "unresolvable target" in allowed.text, "a secret-derived target is refused as such"
+    else:
+        assert allowed is not None and allowed.blocked is True
+        assert allowed.rule == "dangerous-delete"
+    if branch == "refuse-credential":
+        # Also with the override an operator can authorise: consent cannot be
+        # shown for a secret, so this branch is not the one the override lifts.
+        overridden = preview_tool_call(
+            "bash",
+            {"command": resolved},
+            ctx,
+            settings=GuardSettings(rules_dirs=(rules_dir,), critical_override=True),
+        )
+        assert overridden.builtin_effect == "refuse-credential"
+
+
+def test_an_authorised_critical_override_is_only_visible_when_the_caller_passes_it(
+    guarded_home: Path, tmp_path: Path
+) -> None:
+    """The preview reads the loosening gate the caller tells it about, no more.
+
+    The harness passes ``authorised=`` to the checkpoint, and both loosening keys
+    are honoured only for a key in that set. A preview that read the config bare
+    would come out STRICTER than a running process an operator authorised — safe,
+    but stated, and closable by passing the set the caller already holds.
+    """
+    (guarded_home / ".local-operator" / "rules").mkdir()
+    (guarded_home / ".local-operator" / "config.yml").write_text(
+        "version: 1\nvalues:\n  guardrails:\n    critical_override: true\n", encoding="utf-8"
+    )
+    ctx = _context(tmp_path, home=guarded_home, state=guarded_home / ".local-operator")
+    command = "rm -rf ~/.local-operator"
+
+    strict = preview_tool_call("bash", {"command": command}, ctx)
+    assert strict.action == "refuse", "an unauthorised override must not be modelled as on"
+
+    authorised = preview_tool_call(
+        "bash", {"command": command}, ctx, authorised=frozenset({"guardrails.critical_override"})
+    )
+    assert authorised.builtin_effect == "judge", "an authorised override reaches the judge"
+    assert authorised.action != "refuse"
+
+
+def test_the_disabled_rule_layer_is_authorised_like_the_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``enabled: false`` reaches the preview only through the authorised set.
+
+    The checkpoint reads that key with ``authorised=`` from the harness; a bare
+    read would report rules that a running process with the operator's authority
+    has switched off. Both directions are asserted, so the argument is not a
+    no-op: unauthorised keeps the rules, authorised drops them.
+    """
+    state = tmp_path / "state"
+    (state / "rules").mkdir(parents=True)
+    (state / "rules" / "no-npm.md").write_text(
+        _rule("no-npm", "block", [r"npm\s+install"], "Install through the lockfile."),
+        encoding="utf-8",
+    )
+    (state / "config.yml").write_text(
+        "version: 1\nvalues:\n  guardrails:\n    enabled: false\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(state))
+
+    strict = preview_tool_call("bash", {"command": "npm install"})
+    assert strict.action == "block", "an unauthorised `enabled: false` must not switch rules off"
+
+    loose = preview_tool_call(
+        "bash", {"command": "npm install"}, authorised=frozenset({"guardrails.enabled"})
+    )
+    assert loose.action == "allow"
+    assert loose.rules == ()
+    assert loose.rule_dirs == (), "the report does not claim folders it did not load"
+
+
+def test_the_report_names_the_rule_dirs_it_loaded(rules_dir: Path, tmp_path: Path) -> None:
+    """`rules_dirs=` REPLACES the live folder, so the report cannot say CURRENT."""
+    (rules_dir / "no-force-push.md").write_text(
+        _rule("no-force-push", "block", [r"git\s+push\b.*--force"], "Open a PR instead."),
+        encoding="utf-8",
+    )
+
+    report = preview_tool_call(
+        "bash", {"command": "git push --dry-run"}, _context(tmp_path), settings=_settings(rules_dir)
+    )
+
+    assert report.rule_dirs == (str(rules_dir),)
+    rendered = report.render()
+    assert str(rules_dir) in rendered, "the reader can see which folder was scored"
+    assert "CURRENT" not in rendered
+
+
+# -- the calibration loop: 3 true positives, 3 false positives ---------------
 
 #: One pattern per way of forcing a push, and one for the branch it lands on —
 #: the shapes a real "never force-push main" rule has to catch.

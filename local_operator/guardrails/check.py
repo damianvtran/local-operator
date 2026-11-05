@@ -255,6 +255,35 @@ def _journal(rule: str, risk: str, verdict: str, latency: float, targets: str) -
     )
 
 
+#: What the built-in dangerous-delete layer does with a ranked call BEFORE any
+#: user rule is consulted. Named constants and one predicate, rather than three
+#: order-sensitive ``if``s inline, because ``guardrails/preview.py`` has to report
+#: the same branch for a call it never runs: a second copy of this order would let
+#: the preview promise a rule protects a call the checkpoint refuses first. Keep
+#: every branch decision here so a new rank or override lands in ONE place.
+BUILTIN_PASS = "pass"
+BUILTIN_JUDGE = "judge"
+BUILTIN_REFUSE_CRITICAL = "refuse-critical"
+BUILTIN_REFUSE_CREDENTIAL = "refuse-credential"
+
+
+def builtin_branch(verdict: Verdict, *, critical_override: bool) -> str:
+    """The branch :func:`_dangerous_delete` takes for this verdict, first match wins.
+
+    Order is the guard's own precedence, not a ranking of severity: CRITICAL
+    without an authorised override refuses before the credential check, which
+    itself refuses before the judge — so a secret-derived target that also ranks
+    CRITICAL is refused for the reason the checkpoint would give it.
+    """
+    if verdict.risk is Risk.LOW:
+        return BUILTIN_PASS
+    if verdict.risk is Risk.CRITICAL and not critical_override:
+        return BUILTIN_REFUSE_CRITICAL
+    if any(t.target.credential_derived for t in verdict.targets):
+        return BUILTIN_REFUSE_CREDENTIAL
+    return BUILTIN_JUDGE
+
+
 async def _dangerous_delete(
     args: Mapping[str, Any],
     ctx: CallContext,
@@ -268,13 +297,14 @@ async def _dangerous_delete(
     verdict = classify_bash(
         command, cwd=ctx.cwd, env=ctx.env, scratchpad=ctx.scratchpad, session_id=ctx.session_id
     )
-    if verdict.risk is Risk.LOW:
+    branch = builtin_branch(verdict, critical_override=settings.critical_override)
+    if branch == BUILTIN_PASS:
         # Ordinary delete: runs with zero model calls. Still marked destructive
         # so a timeout mid-delete tells the agent to check before retrying.
         return GuardOutcome(blocked=False, destructive=True) if verdict.targets else None
     targets = _targets_text(verdict)
     risk = verdict.risk
-    if risk is Risk.CRITICAL and not settings.critical_override:
+    if branch == BUILTIN_REFUSE_CRITICAL:
         _journal(DANGEROUS_DELETE_RULE, "critical", "block", 0.0, targets)
         return GuardOutcome(
             blocked=True,
@@ -283,7 +313,7 @@ async def _dangerous_delete(
             risk="critical",
             destructive=True,
         )
-    if any(t.target.credential_derived for t in verdict.targets):
+    if branch == BUILTIN_REFUSE_CREDENTIAL:
         # Privacy-hidden roots cannot receive meaningful model consent. This
         # refuses even an ALLOW/critical override, while leaving known protected
         # roots on the existing CRITICAL path above. Never expose the env value.

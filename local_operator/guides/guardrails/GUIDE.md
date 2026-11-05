@@ -82,16 +82,23 @@ It reports, in the guard's own order: the built-in's risk, targets and branch;
 every rule that matches; and for `block`/`warn` the exact text the agent would get,
 from the same builders the live checkpoint uses.
 A `review` comes back as the question and policy the judge would be *asked*, never
-a verdict: no judge runs. Test a candidate before it exists with
-`settings=GuardSettings(rules_dirs=(Path("/tmp/candidate"),))`, and pass
-`ctx=CallContext(cwd=…, env=…, scratchpad=…, session_id=…)` to rank paths as your
-session would.
+a verdict: no judge runs. It is also a step, not an end — the checkpoint reads on
+when the judge allows, so a `block` behind a review is shown as reachable (it is
+what refuses the call on an allow), and a call the built-in sends to the judge
+first is reported as undecided rather than as running. Test a candidate before it
+exists with `settings=GuardSettings(rules_dirs=(Path("/tmp/candidate"),))`, and
+pass `ctx=CallContext(cwd=…, env=…, scratchpad=…, session_id=…)` to rank paths as
+your session would. The config is read the way the next call reads it, but the
+host's in-process authority is not knowable from here: when the operator has
+authorised `critical_override` or `enabled: false`, pass
+`authorised=frozenset({"guardrails.critical_override"})` (or `settings=`) or the
+preview will be stricter than the running process.
 
-**What it proves:** one call against the CURRENT rule files, under the built-in
-layer's real precedence (a rule that "passes" a call the built-in refuses protects
-nothing). **What it does not:** that the rule catches forms you did not think of; it
-never runs the call, asks the judge, reads the conversation, or models another
-session's config.
+**What it proves:** one call against the rule files the preview loaded — it names
+the directories — under the built-in layer's real precedence (a rule that
+"passes" a call the built-in refuses protects nothing). **What it does not:**
+that the rule catches forms you did not think of; it never runs the call, asks the
+judge, reads the conversation, or models another session's config.
 
 ## Calibrate: score it before saving
 
@@ -117,14 +124,23 @@ Narrowing is the move: every true positive still blocks, every false positive
 passes, and all six are re-run through `preview_tool_call` after each edit. Drift
 shows up in three places:
 
-- **The log** — the `guardrail.verdict` line per non-LOW decision at INFO
-  (`check.py::_journal`):
-  `guardrail.verdict rule=%s risk=%s verdict=%s latency_s=%.3f targets=%s`. Ask
-  `paths.runtime_log_path()`, never assume: a plain macOS process names
-  `~/Library/Logs/local-operator/runtime.log`, a session runtime (which carries
-  `LOCAL_OPERATOR_CONFIG_DIR`) writes `<config-dir>/logs/runtime.log`, and
-  `paths.log_dirs()` lists both. It carries rule, risk, verdict, latency and
-  targets — never the command text, so it is not a record of what was typed.
+- **The log**: the `guardrail.verdict` line per non-LOW decision, logged at INFO
+  by `check.py::_journal`:
+  `guardrail.verdict rule=%s risk=%s verdict=%s latency_s=%.3f targets=%s`.
+  Which file carries it depends on the shape that made the call: a session
+  runtime writes `<config-dir>/logs/runtime.log` (a process without
+  `LOCAL_OPERATOR_CONFIG_DIR` writes `~/Library/Logs/local-operator/runtime.log`;
+  `paths.log_dirs()` lists both), a foreground TUI writes
+  `<log-dir>/local-operator.log`, and `lop exec` or a team worker writes its own
+  job log, `<config-dir>/logs/exec-<stamp>-<slug>-<job>.log`, because the
+  worker's stderr IS that file. The record is INFO, so a destination running at
+  WARNING never writes it: `lop serve` does at the default `LOG_LEVEL` (raise it
+  to `INFO` to get the line), and the headless REPL pins WARNING and keeps no log
+  file at all. An empty log is therefore not evidence the checkpoint said nothing:
+  say the log did not tell you, ask the user what happened, or read the log of the
+  process that made the call — never conclude the guard was silent. It carries
+  rule, risk, verdict, latency and targets — never the command text, so it is not
+  a record of what was typed.
 - **A user report** ("why was that blocked").
 - **Your own recollection** — a call you had to reword to get past a rule.
 
@@ -142,12 +158,11 @@ shows up in three places:
 
 A calibration edit leaves a short dated comment in the rule body — what fired, what
 evidence, what changed — so the next reader sees why the pattern is shaped that way.
-The body is also what a refusal or warning shows the agent: keep one line.
+The body is also what a refusal or warning shows the agent, HTML comment included, so
+keep it to one line and keep the comment short:
 
 ```
-Never force-push main; open a PR instead.
-<!-- 2026-11-05: broad `git\s+push\b` blocked `git push --dry-run` (user report).
-Narrowed to the force flags; all three forced-push forms still block. -->
+Never force-push main; open a PR instead. <!-- 2026-11-05: narrowed, was broad. -->
 ```
 
 At most **one autonomous calibration per rule per session**, and re-test after
