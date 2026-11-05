@@ -473,15 +473,15 @@ def _receiver_cascade(config_dir: Path, settings: Any) -> list[DefaultSelection]
     if primary is None:
         return []
     hops = [primary]
-    try:
-        from local_operator.model.configure import build_model_spec
-        from local_operator.providers.failover import (
-            RetrySettings,
-            expand_fallback_targets,
-            parse_selector,
-            resolve_chain,
-        )
+    from local_operator.model.configure import build_model_spec
+    from local_operator.providers.failover import (
+        RetrySettings,
+        expand_fallback_targets,
+        parse_selector,
+        resolve_chain,
+    )
 
+    try:
         retry = RetrySettings.from_settings(_retry_values(config_dir, settings))
         if retry.enabled and retry.model_fallback:
             primary_selector = f"{primary.provider}/{primary.model_id}"
@@ -571,8 +571,7 @@ def resolve_screening_chain(
 
         canonical = (credential_provider_id(preferred[0]), preferred[1])
         if canonical in order:
-            order.remove(canonical)
-            order.insert(0, canonical)
+            order = [canonical] + [pair for pair in order if pair != canonical]
     hops: list[DefaultSelection] = []
     for provider, model_id in order:
         if provider not in credentialed:

@@ -249,7 +249,8 @@ def test_sonnet_direct_screens_and_is_preferred(tmp_path, monkeypatch, credentia
     assert result.disposition == "deliver" and result.screener_preferred is True
     assert result.receipt.model == "claude-sonnet-5-5"
     assert _sends(wire) == [SONNET]
-    assert store.receipt_for_message(owner, "bmsg_1")["screener_preferred"] is True
+    stored = store.receipt_for_message(owner, "bmsg_1")
+    assert stored is not None and stored["screener_preferred"] is True
 
 
 def test_sonnet_via_radient_screens_when_direct_is_down(tmp_path, monkeypatch, credentials) -> None:
@@ -313,6 +314,7 @@ def test_no_anthropic_key_and_no_radient_credit_screens_on_the_default(
     assert result.receipt.model == "gpt-6-astra"
     assert _sends(wire) == [SONNET_R, OPUS_R, ("openai", "gpt-6-astra")]
     stored = store.receipt_for_message(owner, "bmsg_1")
+    assert stored is not None
     assert stored["model"] == "gpt-6-astra" and stored["screener_preferred"] is False
     assert _rows(
         tmp_path, "SELECT screener_preferred FROM screening_receipts WHERE message_id = 'bmsg_1'"
@@ -405,7 +407,8 @@ def test_a_preferred_allow_is_reused_for_identical_bytes(
     )
     assert _sends(wire) == [SONNET]  # the second message was a cache hit
     assert second.screener_preferred is True
-    assert store.receipt_for_message(owner, "bmsg_2")["screener_preferred"] is True
+    second_row = store.receipt_for_message(owner, "bmsg_2")
+    assert second_row is not None and second_row["screener_preferred"] is True
 
 
 def test_a_fallback_allow_is_never_reused_it_re_screens(tmp_path, monkeypatch, credentials) -> None:
@@ -442,7 +445,8 @@ def test_a_pre_upgrade_receipt_row_counts_as_not_preferred(
 
     with sqlite3.connect(state_db_path(tmp_path)) as db:
         db.execute("UPDATE screening_receipts SET screener_preferred = NULL")
-    assert store.receipt_for_message(owner, "bmsg_1")["screener_preferred"] is False
+    stored = store.receipt_for_message(owner, "bmsg_1")
+    assert stored is not None and stored["screener_preferred"] is False
 
 
 # -- the owner notice and the table's single edit point ---------------------------
@@ -509,7 +513,8 @@ def test_release_eligibility_input_is_the_strict_list(tmp_path, monkeypatch, cre
     assert result.disposition == "bounce"
     assert result.receipt.categories == ("new_work_request",)
     assert result.screener_preferred is False
-    assert store.receipt_for_message(owner, "bmsg_1")["screener_preferred"] is False
+    stored = store.receipt_for_message(owner, "bmsg_1")
+    assert stored is not None and stored["screener_preferred"] is False
     for _provider, model_id in SCREENING_EVALUATED_MODELS:
         assert model_id != "gpt-6-astra"
 
