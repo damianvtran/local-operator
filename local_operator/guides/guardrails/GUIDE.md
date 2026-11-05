@@ -15,6 +15,9 @@ CRITICAL is refused with no model call, HIGH goes to a forked judge, LOW runs wi
 zero model calls; then (2) **your rules** — `<config_dir>/rules/*.md` (default
 `~/.local-operator/rules`), plus `guardrails.rules_dir` when configured.
 
+Matching sees a bash call's command string, and the JSON of every other tool's
+arguments — which is why `tool:*` reaches them all.
+
 Neither layer can be loosened. `guardrails.enabled` switches user rules only; the
 built-in is not switchable, because a config file the model can write must not lift
 the guard protecting that same file. `guardrails.critical_override` turns CRITICAL
@@ -33,13 +36,6 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined. A target derived from a secret is refused even with an approved
   override: consent cannot be shown for a secret you should never see.
-
-## What matching sees and does
-
-Matching sees the command string for bash and the JSON of all arguments for every
-other tool — which is why `tool:*` works anywhere. `block` refuses with the marker
-plus the body; `review` asks the judge (a denial refuses, a timeout fails closed);
-`warn` runs the call and appends `Guardrail <name>: <body>`.
 
 ## Write a rule
 
@@ -68,7 +64,7 @@ state that limit when you ship the rule.
 | `name` | the rule's name in a refusal; defaults to the filename |
 | `scope` | `tool:<name>`, a glob, or `tool:*` — v1 is tool scopes only |
 | `condition` | one regex or a list; ANY match fires |
-| `action` | `block`, `review` or `warn` |
+| `action` | `block` refuses with the marker plus the body; `review` asks the judge (denial refuses, timeout fails closed); `warn` runs the call and appends `Guardrail <name>` |
 | `question` | asked of the judge; `review` only |
 | body (after `---`) | the guidance the agent and the refusal carry |
 
@@ -82,9 +78,9 @@ from local_operator.guardrails.preview import preview_tool_call
 print(preview_tool_call("bash", {"command": "git push --dry-run"}).render())
 ```
 
-It reports, in the guard's own order: the built-in's risk, targets and branch
-(`pass`, `judge`, `refused outright`); every rule that matches; and for `block`/`warn`
-the exact text the agent would get, from the same builders the live checkpoint uses.
+It reports, in the guard's own order: the built-in's risk, targets and branch;
+every rule that matches; and for `block`/`warn` the exact text the agent would get,
+from the same builders the live checkpoint uses.
 A `review` comes back as the question and policy the judge would be *asked*, never
 a verdict: no judge runs. Test a candidate before it exists with
 `settings=GuardSettings(rules_dirs=(Path("/tmp/candidate"),))`, and pass
@@ -121,13 +117,14 @@ Narrowing is the move: every true positive still blocks, every false positive
 passes, and all six are re-run through `preview_tool_call` after each edit. Drift
 shows up in three places:
 
-- **The log** — the `guardrail.verdict` line the checkpoint writes per non-LOW
-  decision at INFO (`check.py::_journal`):
-  `guardrail.verdict rule=%s risk=%s verdict=%s latency_s=%.3f targets=%s`, in
-  `<config_dir>/logs/runtime.log`
-  (`grep guardrail.verdict ~/.local-operator/logs/runtime.log`). It carries rule, risk,
-  verdict, judge latency and targets — deliberately **not the command text**, so it is
-  not a record of what was typed.
+- **The log** — the `guardrail.verdict` line per non-LOW decision at INFO
+  (`check.py::_journal`):
+  `guardrail.verdict rule=%s risk=%s verdict=%s latency_s=%.3f targets=%s`. Ask
+  `paths.runtime_log_path()`, never assume: a plain macOS process names
+  `~/Library/Logs/local-operator/runtime.log`, a session runtime (which carries
+  `LOCAL_OPERATOR_CONFIG_DIR`) writes `<config-dir>/logs/runtime.log`, and
+  `paths.log_dirs()` lists both. It carries rule, risk, verdict, latency and
+  targets — never the command text, so it is not a record of what was typed.
 - **A user report** ("why was that blocked").
 - **Your own recollection** — a call you had to reword to get past a rule.
 
@@ -145,7 +142,7 @@ shows up in three places:
 
 A calibration edit leaves a short dated comment in the rule body — what fired, what
 evidence, what changed — so the next reader sees why the pattern is shaped that way.
-The body is also the text a refusal or warning shows the agent, so keep one line:
+The body is also what a refusal or warning shows the agent: keep one line.
 
 ```
 Never force-push main; open a PR instead.
@@ -189,8 +186,8 @@ repo root) → HIGH.
 
 ## When the user asks for a rule
 
-1. **Propose it first** — the exact path, frontmatter and body, what it will and will
-   not catch — and let the user see it before it exists.
+1. **Propose it first** — path, frontmatter, body, and what it will and will not
+   catch — before it exists.
 2. **Write it to the real rules directory**, never a scratch or sample copy: a rule
    outside `<config_dir>/rules/` (or `rules_dir`) does nothing. Never edit or delete a
    rule the user did not ask about to make your own fire — a file cannot loosen
