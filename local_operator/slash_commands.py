@@ -20,6 +20,7 @@ from local_operator.i18n.keys import (
     tui_import,
     tui_review,
     tui_schedule,
+    tui_sound,
     tui_tags,
     tui_viewer,
     wire_memory,
@@ -287,6 +288,56 @@ def project_subcommand_rows() -> tuple[tuple[str, str], ...]:
     a blank row.
     """
     return tuple((word, PROJECT_SUBCOMMAND_HELP[word]) for word in PROJECT_SUBCOMMANDS)
+
+
+#: The subcommand vocabulary of ``/sound`` — the TUI front door to the same
+#: notification-sound store ``lop sound`` drives (notification-sounds addendum
+#: 2, §1 U3). ONE tuple for the three readers ``NETWORK_SUBCOMMANDS`` serves:
+#: the handler (``OperatorApp._cmd_sound`` refuses any other word), the picker
+#: (rows from :func:`sound_subcommand_rows`) and ``command_argument_words``.
+#:
+#: The verbs are ``lop sound``'s (``sound_cli.add_parser``) plus the four that
+#: write a setting (``use``, ``volume``, ``on``, ``off``). Those four write
+#: through ``settings_io.write_setting``, never a second writer, so the page,
+#: the desktop and a phone see the same ``config.yml`` change.
+SOUND_SUBCOMMANDS: tuple[str, ...] = (
+    "list",
+    "preview",
+    "use",
+    "volume",
+    "on",
+    "off",
+    "add",
+    "rename",
+    "remove",
+    "doctor",
+)
+
+#: Picker help per word, keyed by the vocabulary word so
+#: :func:`sound_subcommand_rows` is total over ``SOUND_SUBCOMMANDS``. English
+#: like the other subcommand help tables beside it (NETWORK/PROJECT/AGENT).
+SOUND_SUBCOMMAND_HELP: dict[str, str] = {
+    "list": "Every sound, with the selected one marked",
+    "preview": "Play a sound now: preview [id]",
+    "use": "Choose the notification sound: use <id>",
+    "volume": "Set the volume: volume <0-100>",
+    "on": "Play a sound with notifications",
+    "off": "Keep notification banners silent",
+    "add": "Add your own: add <file|digest> [name]",
+    "rename": "Rename one of yours: rename <id> <name>",
+    "remove": "Delete one of yours: remove <id>",
+    "doctor": "What plays on the next notification, and why",
+}
+
+
+def sound_subcommand_rows() -> tuple[tuple[str, str], ...]:
+    """``(word, help)`` for every ``SOUND_SUBCOMMANDS`` entry, in that order.
+
+    The one reader the picker builds its rows from, with the contract
+    :func:`network_subcommand_rows` states: a missing help line raises
+    ``KeyError`` rather than painting a blank row.
+    """
+    return tuple((word, SOUND_SUBCOMMAND_HELP[word]) for word in SOUND_SUBCOMMANDS)
 
 
 AGENT_SUBCOMMANDS: tuple[str, ...] = ("class", "new", "edit", "promote")
@@ -2215,6 +2266,20 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # agent guide drives) rather than a second implementation inside the TUI: the
     # guards, the epochs and the audit lines live there, and a TUI that re-derived
     # them would be a second answer to "what does disconnect do".
+    # The notification-sound controls (addendum 2, §1 U3): the TUI half of the
+    # one centralised `notifications.sound.*` setting. A receipt is the answer,
+    # so no echo. SUBCOMMAND + its vocabulary keeps `/sound use felt-marimba`
+    # the command while a sentence after `/sound` stays prose. Only `/sound
+    # add <file> <name with spaces>` and `rename` read past the second token,
+    # which the handler does from the raw pieces (the `/network` boundary).
+    # No `desktop_destination`: the desktop has its own Sounds section.
+    SlashCommand(
+        "sound",
+        **_desc(tui_sound.slash()),
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.SUBCOMMAND,
+        subcommands=SOUND_SUBCOMMANDS,
+    ),
     SlashCommand(
         "network",
         **_desc(wire_slash.network()),

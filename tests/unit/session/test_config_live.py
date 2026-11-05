@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
 )
+from local_operator.hub_org.settings import auto_enrol_enabled
 from local_operator.memory_capture import policy
 from local_operator.mobile.peer_send import journal_unconfirmed_enabled
 from local_operator.model.configure import (
@@ -431,6 +432,13 @@ def _web_tool_offered(session: Session, name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+def _notification_sound() -> Any:
+    """What the next notification's sound reads, from ``config_dir()`` at call time."""
+    from local_operator.notifications import sound
+
+    return sound.configured()
+
+
 def _librarian_policy(watcher: Any):
     """The engine's resolved policy, read from the watcher's own directory."""
     from local_operator.librarian import proactive
@@ -453,6 +461,17 @@ def _librarian_name(watcher: Any) -> str:
 #: attribute to observe) read the watcher's snapshot — the mapping those
 #: consumers are being pointed at.
 LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
+    # -- notification sound: re-read from config.yml on every notification -----
+    # Not a session attribute: `notifications.sound.configured()` (which
+    # `resolve()` builds the plan from) reads `config_dir()`'s config.yml per
+    # notification, which is why the section is LIVE. Each probe writes a
+    # non-default value and observes the stored reading the next banner uses.
+    "notifications.sound.enabled": (False, lambda s, w: _notification_sound().enabled),
+    "notifications.sound.id": ("felt-marimba", lambda s, w: _notification_sound().sound_id),
+    "notifications.sound.volume": (
+        40,
+        lambda s, w: int(_notification_sound().effective_volume),
+    ),
     # -- scratchpad: re-read from config on every pad-addressed call -----------
     # Not a session attribute: `scratchpad_budget_bytes()` resolves
     # `session.scratchpad.max_bytes` through `config_dir()` at call time, which
@@ -834,6 +853,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         "synthetic-live-probe-session",
         lambda s, w: _bridge_settings().session,
     ),
+    # -- hub_org: the org Agent Hub auto-enrol switch ---------------------------
+    # LIVE because the enrol path re-reads it from config.yml at every boundary
+    # (sign-in, refresh) rather than caching it on the Session. Observed through
+    # that very reader, ``hub_org.settings.auto_enrol_enabled``, on the watched
+    # directory. The shipped default is ON, hence the probe value is False.
+    "hub.org.auto_enrol": (False, lambda s, w: auto_enrol_enabled(w.config_dir)),
     # -- asks: the lapsed-ask display window (decisions D8/D9) -----------------
     # Observed through the ONE reader every surface calls per publish/request
     # (``asks.visibility``), on the watcher's directory. That the RUNNING

@@ -1,0 +1,9 @@
+{
+  "cli.skills_push.stale_base": "El hub avanzó a {head} después de la revisión de referencia {base} para el push de este vínculo, así que no se publicó nada: hacer merge desde una referencia anterior podría volver a publicar texto que el hub ya ha reemplazado.",
+  "cli.skills_push.stale_base_next": "Siguiente paso seguro: la referencia de push ahora apunta a la última revisión del hub, {head}. Revisa los cambios del hub con `lop skills sync --name {name} --check` y vuelve a ejecutar `lop skills push {name}`; tus cambios locales se vuelven a aplicar sobre el documento actual del hub.",
+  "cli.skills_push.stale_base_bundle_next": "Siguiente paso seguro: incorpora el árbol de archivos del hub a tu copia con `lop skills sync --name {name}`, vuelve a aplicar tu cambio y ejecuta de nuevo `lop skills push {name}`.",
+  "cli.skills_push.merge_refused_next": "Siguiente paso seguro: la referencia de push ahora apunta a la última revisión del hub{head}. Ejecuta `lop skills sync --name {name}` para incorporar los cambios del hub a tu copia (resuelve cualquier conflicto que se indique), vuelve a aplicar tu cambio si se perdió y ejecuta `lop skills push {name}`. No sobrescribas el texto del hub con una versión anterior.",
+  "cli.skills_push.verified": "Verificado: la última revisión del hub, {revision}, contiene exactamente el documento enviado por este push.",
+  "cli.skills_push.verify_mismatch": "Advertencia: la última revisión del hub, {revision}, NO coincide con el documento enviado por este push; puede que el hub ahora tenga otro contenido. Revísalo con `lop skills sync --name {name} --check` antes de volver a hacer push.",
+  "cli.skills_push.verify_unavailable": "Sin verificar: no se pudo volver a leer el hub después del push ({reason}). Compruébalo con `lop skills sync --name {name} --check`."
+}

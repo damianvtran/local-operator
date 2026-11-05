@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.settings.account_policy",
+  "history_sha256": "f5f61187de7af18432aa06c19554a4a44a2016100b3217e38631d34dcf48f8e1",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.account_policy",
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Initial 14/14 namespace contribution. Translator session 7fce46e29bee; two independent readers e55f54b6a26e, 6433b7a5b3e9, both actual openai/gpt-6.1-sol, each passed with zero findings. Full immutable records, usage provenance and source/context/target bindings: i18n/audits/evidence/zh-CN/wire.settings.account_policy/integration-binding.json. Auditors bound corrected context 2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02 and reconciled original translator context; English semantics and constraints unchanged. No native/design/pseudo/RTL execution claimed; independent QA/rendered review pending."
+    }
+  ]
+}

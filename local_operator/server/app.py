@@ -75,6 +75,7 @@ from local_operator.server.routes import (
     i18n,
     jobs,
     models,
+    notification_sounds,
     schedules,
     settings,
     speech,
@@ -562,6 +563,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.warning("hub update runner could not start", exc_info=True)
         app.state.hub_sync = None
 
+    # THE ORG AGENT HUB GATE at daemon start: refresh the cached Radient Team
+    # eligibility and enrol new org items, on a daemon thread so readiness
+    # never waits on a memberships read. Never raises; ineligible = no-op.
+    try:
+        from local_operator.hub_org import enrol as hub_org_enrol
+
+        hub_org_enrol.on_boundary(app.state.config_manager.config_dir, "daemon-start")
+    except Exception:  # noqa: BLE001 - the org hub is optional; the daemon is not
+        logger.debug("org hub gate refresh could not start", exc_info=True)
+
     # The record was created before the autonomous hub producer. Publish safety
     # only AFTER every real hook exists; absent/failed hub startup stays unknown.
     if serve_publisher is not None and reload_watch is not None:
@@ -870,7 +881,11 @@ def _legacy_desktop_gated(path: str, method: str) -> bool:
 @app.middleware("http")
 async def managed_desktop_boundary(request: Request, call_next):
     path = request.url.path
-    sensitive = path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/"))
+    # `/v1/notification-sounds` beside `/v1/settings` (design §3.4): its list
+    # reflects the selection, which a cache must not hold past a settings edit.
+    sensitive = path.startswith(
+        ("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/", "/v1/notification-sounds")
+    )
     legacy_control = _legacy_desktop_gated(path, request.method)
     # Managed posture — the desktop app's env capability OR an accepted claim
     # (`server/desktop.py`). A claim that turned the routers on but left this
@@ -892,9 +907,9 @@ async def managed_desktop_boundary(request: Request, call_next):
 async def desktop_validation_error(request: Request, error: RequestValidationError):
     # Pydantic includes the rejected INPUT in its default 422 response. SecretStr
     # protects model dumps, not failures before a model was constructed.
-    if request.url.path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/")) or (
-        desktop_posture().enabled and _legacy_desktop_gated(request.url.path, request.method)
-    ):
+    if request.url.path.startswith(
+        ("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/", "/v1/notification-sounds")
+    ) or (desktop_posture().enabled and _legacy_desktop_gated(request.url.path, request.method)):
         return JSONResponse(status_code=422, content={"detail": "The request has invalid fields."})
     return await request_validation_exception_handler(request, error)
 
@@ -1031,6 +1046,11 @@ app.include_router(desktop_notifications.router)
 # desktop family rather than beside `desktop_profiles` because the preference
 # is renderer state, not a session or catalogue surface.
 app.include_router(desktop_preferences.router)
+# Notification sounds (`features.notification_sounds`): the built-in and custom
+# sound list, rendered audio, and add/rename/remove of the user's own sounds.
+# Its own `/v1/notification-sounds` prefix shares nothing with the desktop
+# family above, and it carries `require_desktop` on the router itself.
+app.include_router(notification_sounds.router)
 
 # Install the loop-local work fence before lifespan publishes its reload
 # capability. It drains real request bodies, not just endpoint construction;

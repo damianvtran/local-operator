@@ -299,6 +299,24 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "agent directory, never in a session directory, and is skipped by clone, "
         "export and import through the same ``.avatar.`` prefix rule",
     ),
+    "local_operator/notifications/custom_sounds.py": (
+        1,
+        "``INDEX_FILE`` ('index.json'): the custom notification-sound index, which lives "
+        "ONLY at <config>/sounds/custom/index.json (``custom_sounds.store_root()``) beside "
+        "the user's <id>.wav files. It is never an entry of a session directory, so no "
+        "session copy carries it. It is machine-level by design: the sounds are the user's "
+        "own audio on this computer, selected by a machine-wide setting, and a moved or "
+        "forked session neither owns nor needs them.",
+    ),
+    "local_operator/notifications/sound.py": (
+        2,
+        "``THROTTLE_FILE`` ('notification-sound.last') and ``RECEIPT_FILE`` "
+        "('notification-sounds.jsonl'): the machine-wide notification-sound throttle "
+        "stamp and the NULL-backend QA receipt, both under <config>/run/ "
+        "(``sound.run_dir()``), never an entry of a session directory -- so no session "
+        "copy carries them. Both are machine-local by design: the throttle bounds sounds "
+        "on THIS computer's speakers",
+    ),
     "local_operator/notifications/store.py": (
         1,
         "notifications.db is the machine-wide config-root inbox, not a session "
@@ -595,6 +613,23 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     # same kind of value as a version tag. The module's real filenames
     # (``SKILL.md``, the archive name) are classified where they live, and no
     # constant here names an entry of a session directory.
+    # The org hub eligibility record and its refresh lock: install-level state
+    # under ``<config>/hub/`` (``record_path``/``_lock_path``), bound to this
+    # machine's sign-in and hub base URL, never an entry of a session directory.
+    "local_operator/hub_org/eligibility.py": (
+        2,
+        "``RECORD_NAME``/``LOCK_NAME`` ('org_catalogue.json', 'org_catalogue.lock'): the "
+        "org hub eligibility record and its refresh lock under ``<config>/hub/``, beside "
+        "``sessions/`` — install-level account state, never inside a session",
+    ),
+    # Bundle adoption's dot-prefixed aside is a sibling of a skill folder under
+    # ``<config>/skills/`` — the managed skill root, not a session directory.
+    "local_operator/hub_sync/service.py": (
+        1,
+        "``_ADOPT_ASIDE_PREFIX`` ('.adopt-'): the transient ``<config>/skills/.adopt-<alias>-"
+        "<hex>`` aside of a bundle adoption, inside the managed skill root beside "
+        "``sessions/``, never an entry of a session directory",
+    ),
     "local_operator/hub_sync/skill_bundle.py": (
         1,
         "``TREE_HASH_PREFIX``: the tree-hash domain separator, not a pathname",

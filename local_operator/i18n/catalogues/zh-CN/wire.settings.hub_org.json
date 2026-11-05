@@ -1,0 +1,8 @@
+{
+  "wire.settings.hub_org.auto_enrol.help": "pull组织新的智能体、团队和技能并保持订阅。",
+  "wire.settings.hub_org.auto_enrol.label": "添加组织新内容",
+  "wire.settings.hub_org.auto_enrol.off.description": "仅在运行lop hub org pull时",
+  "wire.settings.hub_org.auto_enrol.on.description": "自动添加新内容",
+  "wire.settings.hub_org.description": "你的组织通过其私有Agent Hub共享智能体、团队和技能。选择是否将新内容自动添加到这台机器。",
+  "wire.settings.hub_org.title": "组织Agent Hub"
+}

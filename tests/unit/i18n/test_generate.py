@@ -78,14 +78,72 @@ def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate):
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     monkeypatch.setattr(i18n_generate, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(i18n_generate, "KEYS_DIR", tmp_path / "keys")
-    monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "ledger.json")
+    (tmp_path / "i18n").mkdir(exist_ok=True)
+    monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "i18n" / "ledger.json")
     # No shard dir in fixture trees: the aggregate fallback is under test, and
     # the real tree's shards must not shadow the fixture ledger.
-    monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "ledger")
+    monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "i18n" / "ledger")
     # `_check` relativises planned paths against REPO for its messages (and
     # only for that); point it at the temp root so the fixture paths resolve.
     monkeypatch.setattr(i18n_generate, "REPO", tmp_path)
     return root, emitted
+
+
+def test_migration_removes_only_aggregate_from_generation_plan(generated, i18n_generate):
+    """A zero-delta migration changes storage, never shipped/key/relay bytes."""
+    from scripts.i18n import ledger
+
+    root, emitted = generated
+    for locale in ("en", "fr"):
+        (root / locale).mkdir(exist_ok=True)
+        (root / locale / "demo.json").write_text(json.dumps({"demo.x": "fixture"}))
+    row = {
+        "locale": "fr",
+        "namespace": "demo",
+        "status": "passed",
+        "source_sha256": catalogues.catalogue_sha256("en", "demo"),
+        "translator": {"agent": "fixture-translator", "model": "test"},
+        "auditor": {"agent": "fixture-auditor", "model": "test"},
+    }
+    i18n_generate.LEDGER_SHARDS.mkdir()
+    (i18n_generate.LEDGER_SHARDS / "fr.json").write_text(
+        json.dumps({"schema": 1, "entries": [row]})
+    )
+    i18n_generate.LEDGER.write_text(i18n_generate._render_aggregate())
+    before = i18n_generate._planned_files(emitted)
+    ledger.migrate(i18n_generate.LEDGER.parent.parent, apply=True)
+    after = i18n_generate._planned_files(emitted)
+    assert before.pop(i18n_generate.LEDGER) == ledger.export_aggregate(
+        i18n_generate.LEDGER.parent.parent
+    )
+    assert before == after
+
+
+def test_audit_only_suffixes_do_not_change_generated_artifacts(generated, i18n_generate):
+    """Fresh audit storage for independent keys is not a product/key change."""
+    from scripts.i18n import ledger
+
+    root, emitted = generated
+    (root / "en" / "demo.json").write_text(json.dumps({"demo.x": "fixture"}))
+    i18n_generate.LEDGER.write_text(json.dumps({"schema": 1, "entries": []}))
+    ledger.migrate(i18n_generate.LEDGER.parent.parent, apply=True)
+    before = i18n_generate._planned_files(emitted)
+    for namespace in ("wire.audit_a", "wire.audit_b"):
+        row = {
+            "locale": "fr",
+            "namespace": namespace,
+            "status": "passed",
+            "source_sha256": "a" * 64,
+            "translator": {"agent": "fixture-translator", "model": "test"},
+            "auditor": {"agent": "fixture-auditor", "model": "test"},
+        }
+        ledger.append(
+            i18n_generate.LEDGER.parent.parent,
+            row,
+            expected_history_sha=ledger.history_sha256([]),
+            apply=True,
+        )
+    assert i18n_generate._planned_files(emitted) == before
 
 
 def test_account_policy_missing_generated_key_fails_counterfactual(
@@ -392,10 +450,38 @@ def test_shipped_set_requires_fresh_passed_entries(generated, i18n_generate) -> 
     ledger = {
         "schema": 1,
         "entries": [
-            {"locale": "fr", "namespace": "demo", "status": "passed", "source_sha256": fresh},
-            {"locale": "es", "namespace": "demo", "status": "passed", "source_sha256": "stale"},
-            {"locale": "ru", "namespace": "demo", "status": "failed", "source_sha256": fresh},
-            {"locale": "vi", "namespace": "other", "status": "passed", "source_sha256": "x"},
+            {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
+                "locale": "fr",
+                "namespace": "demo",
+                "status": "passed",
+                "source_sha256": fresh,
+            },
+            {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
+                "locale": "es",
+                "namespace": "demo",
+                "status": "passed",
+                "source_sha256": "0" * 64,
+            },
+            {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
+                "locale": "ru",
+                "namespace": "demo",
+                "status": "failed",
+                "source_sha256": fresh,
+            },
+            {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
+                "locale": "vi",
+                "namespace": "other",
+                "status": "passed",
+                "source_sha256": "b" * 64,
+            },
         ],
     }
     Path(i18n_generate.LEDGER).write_text(json.dumps(ledger), encoding="utf-8")
@@ -424,6 +510,8 @@ def test_a_new_en_namespace_does_not_un_ship_carried_locales(generated, i18n_gen
         "schema": 1,
         "entries": [
             {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
                 "locale": "fr",
                 "namespace": "demo",
                 "status": "passed",
@@ -452,6 +540,8 @@ def test_a_carried_namespace_without_a_ledger_entry_un_ships(generated, i18n_gen
         "schema": 1,
         "entries": [
             {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
                 "locale": "fr",
                 "namespace": "demo",
                 "status": "passed",
@@ -482,16 +572,25 @@ def test_a_missing_sha_on_an_en_less_namespace_is_not_fresh(generated, i18n_gene
         "schema": 1,
         "entries": [
             {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
                 "locale": "fr",
                 "namespace": "demo",
                 "status": "passed",
                 "source_sha256": catalogues.catalogue_sha256("en", "demo"),
             },
-            {"locale": "fr", "namespace": "ghost", "status": "passed"},
+            {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
+                "locale": "fr",
+                "namespace": "ghost",
+                "status": "passed",
+            },
         ],
     }
     Path(i18n_generate.LEDGER).write_text(json.dumps(ledger), encoding="utf-8")
-    assert i18n_generate._shipped_locales() == ["en"]
+    with pytest.raises(ValueError, match="source_sha256"):
+        i18n_generate._shipped_locales()
 
 
 def test_a_locale_directory_with_no_namespaces_is_not_shipped(generated, i18n_generate) -> None:
@@ -509,6 +608,8 @@ def test_a_locale_directory_with_no_namespaces_is_not_shipped(generated, i18n_ge
         "schema": 1,
         "entries": [
             {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
                 "locale": "fr",
                 "namespace": "demo",
                 "status": "passed",
@@ -561,6 +662,8 @@ def test_security_hold_cannot_be_bypassed_by_partial_or_forged_passes(
     for locale in ("fr", candidate):
         entries.append(
             {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
                 "locale": locale,
                 "namespace": "wire.exec",
                 "status": "passed",
@@ -573,13 +676,15 @@ def test_security_hold_cannot_be_bypassed_by_partial_or_forged_passes(
         )
         entries.append(
             {
+                "translator": {"agent": "fixture-translator", "model": "test"},
+                "auditor": {"agent": "fixture-auditor", "model": "test"},
                 "locale": candidate,
                 "namespace": "wire.slash",
                 "status": slash_status,
                 "source_sha256": catalogues.catalogue_sha256("en", "wire.slash"),
             }
         )
-    i18n_generate.LEDGER.write_text(json.dumps({"entries": entries}))
+    i18n_generate.LEDGER.write_text(json.dumps({"schema": 1, "entries": entries}))
     # The committed disposition is empty; inject the canonical hold under test.
     assert i18n_generate.SECURITY_HELD_LOCALES == frozenset()
     monkeypatch.setattr(i18n_generate, "SECURITY_HELD_LOCALES", frozenset({"zh-CN"}))

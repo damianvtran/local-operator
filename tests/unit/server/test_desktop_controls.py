@@ -50,24 +50,46 @@ def _reset_bridge_availability():
     in ``test_server_settings_visibility.py``.
     """
 
+    from local_operator.hub_org import eligibility
     from local_operator.team_bridge import availability
 
     availability.clear()
+    eligibility.reset_memo()
     yield
     availability.clear()
+    eligibility.reset_memo()
 
 
 def _show_dynamic_sections(app: Any) -> None:
     """Make dynamically-gated sections render for a census assertion."""
 
+    import time
+
+    from local_operator.hub_org import eligibility
     from local_operator.team_bridge import availability
 
+    config_dir = Path(app.state.config_manager.config_dir)
     availability.record(
-        app.state.config_manager.config_dir,
+        config_dir,
         visible=True,
         state="ready",
         checked_at=1.0,
     )
+    # The org hub section's gate is a different record: the cached Radient
+    # Team eligibility file ``section_visible`` reads (zero network). Seed a
+    # fresh, entitled one bound to this root's resolved base URL -- the same
+    # shape ``eligibility.refresh`` writes -- so the census sees ``hub_org``.
+    base_url = eligibility._configured_base_url(config_dir)
+
+    def _entitled(data: dict[str, Any]) -> None:
+        data.update(
+            account_id="acct-census",
+            base_url=base_url,
+            checked_at=time.time(),
+            orgs=[{"tenant_id": "t-census", "tenant_name": "Census", "role": "member"}],
+        )
+
+    eligibility.update_record(config_dir, _entitled)
 
 
 @pytest_asyncio.fixture
@@ -914,15 +936,31 @@ async def test_settings_projection_carries_the_bounded_duration_contract(desktop
         command_interval["unit"],
     ) == ("int", 5, 3600, "seconds")
     assert command_interval["default"] == 30
+    # The notification-sound volume is the fifth (#3398): a bounded 0-100 INT
+    # whose stored value COUNTS percent, which is the registry's definition of
+    # a unit. It is not a duration, so no duration control picks it up (the
+    # desktop's `durationSpec` matches one key), and it renders as a plain
+    # bounded number with "percent" beside it. Pinned like the others so the
+    # set stays closed and a new unit is a reviewed addition.
+    volume = rows["notifications.sound.volume"]
+    assert (volume["kind"], volume["minimum"], volume["maximum"], volume["unit"]) == (
+        "int",
+        0,
+        100,
+        "percent",
+    )
+    assert volume["default"] == 70
+    assert volume["gated_by"] == "notifications.sound.enabled"
     unit_rows = {
         hours["key"],
         scratchpad["key"],
         compression_age["key"],
         command_interval["key"],
+        volume["key"],
     }
     assert all(
         row["unit"] == "" for key, row in rows.items() if key not in unit_rows
-    ), "only the hours, bytes, days and seconds rows declare a unit"
+    ), "only the hours, bytes, days, seconds and percent rows declare a unit"
 
 
 async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):

@@ -2088,7 +2088,81 @@ class AuthStore:
                 ("identity_unattributed", self._now_ms(), legacy.id, json.dumps(legacy.data)),
             )
         self._conn.commit()
-        return self._after_credential_write("radient", stored.id)
+        written = self._after_credential_write("radient", stored.id)
+        self._org_hub_boundary("sign-in")
+        return written
+
+    def _org_hub_config_dir(self) -> Path | None:
+        """The config root this store belongs to, or ``None`` for an in-memory store.
+
+        The org-hub gate record lives beside ``auth.db``, so the store's own
+        directory — not the process-global ``config_dir()`` — is the root that
+        a scratch or test store must touch.
+        """
+        if str(self._db_path) == ":memory:":
+            return None
+        return self._db_path.parent
+
+    def _org_hub_boundary(self, boundary: str) -> None:
+        """Refresh the org Agent Hub gate (and auto-enrol) after a Radient sign-in.
+
+        WHY HERE. The organization Agent Hub is shown only to a Radient Team
+        member, and the gate is a cached record (``hub_org.eligibility``) read
+        with zero network. Sign-in is the moment that answer can change, and
+        this one completion path is shared by `lop login`, the TUI's `/login`
+        and the desktop login route, so hooking it once covers all three.
+
+        AFTER the commit, on a daemon thread, never raising — the same contract
+        as :meth:`_rearm_parked_tunnel_login`: a login must never fail or stall
+        over a memberships read or a catalogue pull. Lazy import: the hub stack
+        does not belong on a credential write's import path. The thread is
+        kept so a short-lived host (`lop login`) can wait for the gate answer
+        with :meth:`wait_org_hub_gate` before it exits.
+        """
+        root = self._org_hub_config_dir()
+        if root is None:
+            return
+        try:
+            from local_operator.hub_org import enrol
+
+            self._org_hub_thread = enrol.on_boundary(root, boundary, force=True)
+        except Exception:  # noqa: BLE001 — a login must not fail over the org hub
+            logger.debug("org hub refresh after %s could not start", boundary, exc_info=True)
+
+    def wait_org_hub_gate(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` s for the post-sign-in gate refresh; True when done.
+
+        For the CLI login only (agent review R3): the process exits right after
+        sign-in and would kill the refresh with it, so `lop hub --help` stayed
+        closed until some later boundary. Only the memberships read is awaited;
+        the catalogue enrol continues on its daemon thread. A host with an event
+        loop (TUI, desktop) never calls this.
+        """
+        thread = getattr(self, "_org_hub_thread", None)
+        event = getattr(thread, "gate_refreshed", None)
+        if event is None:
+            return True
+        return bool(event.wait(timeout))
+
+    def org_hub_signed_out(self) -> None:
+        """Close the org Agent Hub gate now: a Radient account left this machine.
+
+        Shared by `lop logout radient` and the desktop's account removal
+        (``DELETE /v1/auth/accounts/{id}``, agent review R2) so no org guide,
+        hint, setting or tool op outlives the account. The gate record holds no
+        token, but its answer belongs to the account that left. If another
+        Radient account remains, the next refresh boundary reopens the gate for
+        it. Never raises: a logout must not fail over the org hub.
+        """
+        root = self._org_hub_config_dir()
+        if root is None:
+            return
+        try:
+            from local_operator.hub_org import eligibility
+
+            eligibility.clear(root)
+        except Exception:  # noqa: BLE001 — a logout must not fail over the org hub
+            logger.debug("org hub gate clear after logout failed", exc_info=True)
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
         """Seal Muse secrets before metadata serialization; preserve other providers."""
@@ -2615,6 +2689,8 @@ class AuthStore:
         )
         for row in rows:
             self.delete_credential(row.id)
+        if provider == "radient":
+            self.org_hub_signed_out()
         return len(rows)
 
     # -- blocking --------------------------------------------------------------
@@ -4795,7 +4871,9 @@ class AuthStore:
             account_created_at=row.created_at if row is not None else 0,
         )
 
-    async def get_catalogue_access(self, provider: str) -> OAuthAccess | None:
+    async def get_catalogue_access(
+        self, provider: str, *, eligible_credential_ids: Collection[int] | None = None
+    ) -> OAuthAccess | None:
         """A credential for READING a provider catalogue, not routing inference.
 
         Inference selection deliberately excludes quota-depleted accounts. Model
@@ -4810,15 +4888,29 @@ class AuthStore:
         provider-declared dead grant is never sent. Successful token rotation is
         still persisted because discarding a single-use refresh token would break
         the account, not protect it.
+
+        ``eligible_credential_ids`` is a restrictive owner-row allowlist for
+        metadata-only mesh catalogue reads. It is applied before any refresh and
+        disables ambient/unscoped fallback tiers; None preserves local behavior.
+        It must never be used to return a bearer to a remote catalogue requester.
         """
         provider = self._storage_id(provider)
+        # A mesh catalogue is read with already-approved OWNER row identities.
+        # Filter before refresh, not after bearer selection: a denied login must
+        # never incur an IdP request. Ambient keys cannot satisfy a row-scoped
+        # request. None retains the ordinary local catalogue cascade unchanged.
+        eligible = (
+            frozenset(eligible_credential_ids) if eligible_credential_ids is not None else None
+        )
         override = self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
-        if override:
+        if override and eligible is None:
             return OAuthAccess(access_token=override, credential_id=0, kind="api_key")
 
         key_fn = self._oauth_key_fn(provider)
         oauth_rows = [
-            row for row in self.list_credentials(provider) if row.credential_type == "oauth"
+            row
+            for row in self.list_credentials(provider)
+            if row.credential_type == "oauth" and (eligible is None or row.id in eligible)
         ]
         for row in oauth_rows:
             try:
@@ -4846,7 +4938,9 @@ class AuthStore:
         # applies inference blocks, which are unrelated to catalogue authorization.
         for source in ("login", None):
             for row in self.list_credentials(provider):
-                if row.credential_type != "api_key":
+                if row.credential_type != "api_key" or (
+                    eligible is not None and row.id not in eligible
+                ):
                     continue
                 if (source == "login") != (row.data.get("source") == "login"):
                     continue
@@ -4858,11 +4952,13 @@ class AuthStore:
                         kind="api_key",
                         account_created_at=row.created_at,
                     )
-            if source == "login":
+            if source == "login" and eligible is None:
                 env_key = self._env_api_key(provider)
                 if env_key:
                     return OAuthAccess(access_token=env_key, credential_id=0, kind="api_key")
 
+        if eligible is not None:
+            return None
         resolver = self._fallback_resolvers.get(provider)
         fallback = resolver(provider) if resolver is not None else None
         if fallback:

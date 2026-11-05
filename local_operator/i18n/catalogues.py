@@ -90,6 +90,9 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.settings.hub_defaults": (
         "hub settings keys rendered in-process by settings_io._t as plain strings"
     ),
+    "wire.settings.hub_org": (
+        "org Agent Hub settings section rendered in-process by settings_io._t as plain strings"
+    ),
     "wire.console": "console section title/description and row labels rendered by settings_io._t",
     "wire.memory": "memory section rows rendered by settings_io._t as plain label/help strings",
     "wire.host_speed": "host-speed threshold label/help rendered by settings_io._t",
@@ -98,6 +101,12 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "saver/chain.py::notice_message returns a Msg its caller prints"
     ),
     "wire.aida_cadence": "AIDA cadence label rendered by settings_io._t as a plain string",
+    "wire.notification_sound": (
+        "notification-sound settings rows rendered by settings_io._t, lop sound "
+        "argparse help and CLI refusals printed in-process, and desktop refusals "
+        "sent as finished text under MACHINE codes (too_large, too_long, ...), "
+        "never as message ids"
+    ),
     "wire.exec": (
         "exec CLI/TUI copy printed by exec_mode.py and exec_session.py "
         '(_t = tr("wire.exec") at module level); the sentence is printed'

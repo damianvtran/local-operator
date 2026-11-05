@@ -14,12 +14,10 @@ WHAT THIS OWNS (all of it generated, all of it committed):
   from the audit ledger (§6: a locale ships iff every namespace has a
   ledger entry that passed against the CURRENT en source hash). ``en`` is
   always shipped.
-* ``i18n/ledger.json`` — the legacy aggregate ledger, mirrored from the
-  per-locale shards under ``i18n/ledger/<locale>.json`` (the authoritative
-  source since 2026-10-29: one shared array made every locale PR conflict
-  with every other). Append audit rows to your locale's shard, then
-  regenerate; ``--check`` fails if the aggregate and shards disagree, so a
-  stale aggregate cannot silently win.
+* Legacy-only roots still emit ``i18n/ledger.json`` from locale shards. In a
+  migrated root it and those shards are immutable snapshots pinned by
+  ``i18n/audit-history.json``; current receipts append to per-key suffixes.
+  Use ``scripts/i18n/ledger.py export`` for a current compatibility aggregate.
 
 WHY A DRIFT CHECK. These are generated-but-committed, so a hand edit or a
 catalogue change without regeneration would ship tables that disagree with the
@@ -55,56 +53,26 @@ if str(REPO) not in sys.path:
 from local_operator.i18n import catalogues  # noqa: E402
 from local_operator.i18n import runtime as msg_runtime  # noqa: E402
 from local_operator.i18n.resolve import SUPPORTED_LOCALES  # noqa: E402
+from scripts.i18n import ledger as audit_ledger  # noqa: E402
 
 EMITTER = REPO / "scripts" / "i18n" / "emit.mjs"
 DATA_DIR = REPO / "local_operator" / "i18n" / "data"
 KEYS_DIR = REPO / "local_operator" / "i18n" / "keys"
 LEDGER = REPO / "i18n" / "ledger.json"
 LEDGER_SHARDS = REPO / "i18n" / "ledger"
+# Only the existing explicit legacy removal flag permits discarding stranded rows.
+# Migrated loads validate immutable baseline bytes regardless of this flag.
+_ALLOW_STRANDED = False
 
 
 def _ledger_entries() -> list[dict[str, Any]]:
-    """The authoritative audit rows: per-locale shards, aggregate fallback.
-
-    Shards win whenever ``i18n/ledger/`` holds any ``*.json``; the aggregate
-    is read only for trees that predate sharding (fixture roots, old
-    checkouts). Within each shard, file order is preserved and per-locale
-    last-wins is applied downstream exactly as the aggregate's array order
-    did — the migration is order-preserving per locale, so eligibility
-    semantics cannot move. Cross-locale order never mattered: the shipped
-    computation keys on ``(locale, namespace)`` and iterates SUPPORTED_LOCALES.
-    """
-    shard_paths = sorted(LEDGER_SHARDS.glob("*.json")) if LEDGER_SHARDS.is_dir() else []
-    if shard_paths:
-        entries: list[dict[str, Any]] = []
-        for path in shard_paths:
-            shard = _read_json(path)
-            rows = shard.get("entries", []) if isinstance(shard, dict) else []
-            entries.extend(row for row in rows if isinstance(row, dict))
-        return entries
-    if not LEDGER.is_file():
-        return []
-    ledger = _read_json(LEDGER)
-    if not isinstance(ledger, dict):
-        return []
-    return [row for row in ledger.get("entries", []) if isinstance(row, dict)]
+    """Read explicit fixture/checkout storage; selection remains last-file-row."""
+    return audit_ledger.load_entries(LEDGER.parent.parent, allow_stranded=_ALLOW_STRANDED)
 
 
 def _render_aggregate() -> str:
-    """The legacy aggregate, re-rendered from shards for compatibility.
-
-    Sorted by locale (then each shard's own row order): a deterministic,
-    reviewable mirror. No consumer reads it for eligibility anymore —
-    ``_ledger_entries`` prefers the shards — so its ordering is free to be
-    canonical rather than historical. ``schema`` is carried over from the
-    pre-migration aggregate so existing readers keep working.
-    """
-    payload: dict[str, Any] = {"schema": 1, "entries": _ledger_entries()}
-    if LEDGER.is_file():
-        legacy = _read_json(LEDGER)
-        if isinstance(legacy, dict) and "schema" in legacy:
-            payload["schema"] = legacy["schema"]
-    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    """Explicit compatibility export, never a migrated generation target."""
+    return audit_ledger.export_aggregate(LEDGER.parent.parent, allow_stranded=_ALLOW_STRANDED)
 
 
 def _aggregate_rows_missing_from_shards() -> list[str]:
@@ -127,7 +95,8 @@ def _aggregate_rows_missing_from_shards() -> list[str]:
     legacy_rows = _read_json(LEDGER)
     if not isinstance(legacy_rows, dict):
         return []
-    shard_counts = Counter(json.dumps(row, sort_keys=True) for row in _ledger_entries())
+    shard_rows, _ = audit_ledger._legacy(LEDGER.parent.parent, allow_stranded=True)
+    shard_counts = Counter(json.dumps(row, sort_keys=True) for row in shard_rows)
     stranded: Counter[tuple[str, str]] = Counter()
     for row in legacy_rows.get("entries", []):
         if not isinstance(row, dict):
@@ -653,11 +622,15 @@ def _planned_files(emitted: Path) -> dict[Path, str]:
         DATA_DIR / "formats.json": (emitted / "formats.json").read_text(encoding="utf-8"),
         DATA_DIR / "shipped.json": _render_shipped(),
     }
-    # The aggregate is a generated mirror of the shards whenever shards exist;
+    # Only legacy roots mirror shards. Migrated aggregates are pinned snapshots;
     # planning it here makes `--check` fail when a contributor edits only one
     # of the two, so a stale aggregate cannot silently disagree with the
     # authoritative shards.
-    if LEDGER_SHARDS.is_dir() and any(LEDGER_SHARDS.glob("*.json")):
+    if (
+        not audit_ledger.migrated(LEDGER.parent.parent)
+        and LEDGER_SHARDS.is_dir()
+        and any(LEDGER_SHARDS.glob("*.json"))
+    ):
         planned[LEDGER] = _render_aggregate()
     en_dir = catalogues.catalogue_root() / "en"
     modules: list[str] = []
@@ -775,8 +748,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    global _ALLOW_STRANDED
+    _ALLOW_STRANDED = args.accept_stranded
 
-    stranded = _aggregate_rows_missing_from_shards()
+    try:
+        is_migrated = audit_ledger.migrated(LEDGER.parent.parent)
+        if is_migrated or (LEDGER.parent / "audit-history").exists():
+            _ledger_entries()
+        stranded = _aggregate_rows_missing_from_shards()
+    except ValueError as exc:
+        print(
+            # i18n: ignore developer-only diagnostic; i18n tooling owns this while checkout-only
+            f"generate.py: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     if stranded and args.accept_stranded:
         print(
             # i18n: ignore operator tooling diagnostic (English-only)
@@ -803,6 +789,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    try:
+        _ledger_entries()
+    except ValueError as exc:
+        print(
+            # i18n: ignore developer-only diagnostic; i18n tooling owns this while checkout-only
+            f"generate.py: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     with tempfile.TemporaryDirectory(prefix="i18n-emit-") as td:
         emitted = Path(td)
         _run_emitter(emitted)

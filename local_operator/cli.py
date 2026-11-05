@@ -74,6 +74,7 @@ from local_operator.i18n.keys import cli_failure_details as _failure_details
 from local_operator.i18n.keys import cli_global_help as _gh
 from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.i18n.keys import cli_hub_help as _hu
+from local_operator.i18n.keys import cli_hub_org as _ho
 from local_operator.i18n.keys import cli_hub_shared_help as _hs
 from local_operator.i18n.keys import cli_install_help as _in
 from local_operator.i18n.keys import cli_login_help as _li
@@ -92,6 +93,7 @@ from local_operator.i18n.keys import cli_serve_help as _sv
 from local_operator.i18n.keys import cli_services_help as _sr
 from local_operator.i18n.keys import cli_services_status as _svc
 from local_operator.i18n.keys import cli_sessions_help as _sh
+from local_operator.i18n.keys import cli_skills_push as _sp
 from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
 from local_operator.i18n.keys import cli_update_help as _up
@@ -162,6 +164,7 @@ def _positive_seconds(text: str) -> float:
 #: the exec refusals this module prints).
 _t = tr("wire.exec")
 _bt = tr("cli.browser")
+_spt = tr("cli.skills_push")
 
 
 def build_cli_parser() -> LocalizedArgumentParser:
@@ -772,6 +775,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
         help=_hu.link_set_confirm_public_egress().envelope(locale=help_locale)["text"],
     )
     hub_link.add_argument("--json", action="store_true")
+    _add_hub_org_parser(hub_subparsers, parent_parser=parent_parser, help_locale=help_locale)
 
     # ``skills``: the smallest CLI that exercises publish / pull / subscribe /
     # update for hub skills, including the BUNDLE carrier (--bundle on publish,
@@ -1155,6 +1159,12 @@ def build_cli_parser() -> LocalizedArgumentParser:
     from local_operator.disk_cli import add_parser as add_disk_parser
 
     add_disk_parser(subparsers, parent_parser, help_locale=help_locale)
+
+    # `lop sound list|preview|doctor`: notification sounds. Stdlib-only
+    # registration (the `disk` rule); the catalog loads in the handler.
+    from local_operator.sound_cli import add_parser as add_sound_parser
+
+    add_sound_parser(subparsers, parent_parser, help_locale=help_locale)
 
     # Operator authority (issue #1310, revision 2). Registration is stdlib-only
     # for the same reason `secret`'s is: `lop --version` must not load
@@ -11778,6 +11788,25 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     return 0
 
 
+def _add_hub_org_parser(hub_subparsers: Any, *, parent_parser: Any, help_locale: str) -> None:
+    """``lop hub org``: registered always, LISTED only for an eligible account.
+
+    The gate is the cached, network-free ``hub_org.eligibility`` read; the
+    parser, handlers and hide idiom live in ``hub_org.cli`` (one feature, one
+    gate). Parser construction must never fail over it, so any error hides.
+    """
+
+    from local_operator.hub_org import cli as hub_org_cli
+
+    try:
+        root = config_dir()
+    except Exception:  # noqa: BLE001 - an unreadable root means "not eligible"
+        root = Path.home() / ".local-operator"
+    hub_org_cli.add_parser(
+        hub_subparsers, parent_parser=parent_parser, help_locale=help_locale, config_dir=root
+    )
+
+
 def _add_hub_publish_flags(
     parser: argparse.ArgumentParser, *, help_locale: str | None = None
 ) -> None:
@@ -12079,6 +12108,10 @@ def teams_link_command(args: argparse.Namespace, team_registry: Any, base_dir: P
     if team is None:
         print(f"\n\033[1;31mError: no local team named '{args.name}'.\033[0m")
         return 1
+    resolved_id = _org_ref_to_id(client, tenant, "team", args.hub_team_id, base_dir)
+    if resolved_id is None:
+        return 1
+    args.hub_team_id = resolved_id
     try:
         document = client.get_team(args.hub_team_id)
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
@@ -12193,6 +12226,13 @@ def hub_status_command(args: argparse.Namespace, base_dir: Path) -> int:
         print(_json.dumps(snapshot, indent=2))
         return 0
     print(svc.render_status(snapshot))
+    # Eligible accounts only (the org gate): local copies that share a name with
+    # an org catalogue item but carry no link drift invisibly, because no sync
+    # check can see them. The JSON payload is the desktop route's and unchanged.
+    from local_operator.hub_org.cli import status_unlinked_lines
+
+    for line in status_unlinked_lines(base_dir):
+        print(line)
     return 0
 
 
@@ -12732,6 +12772,26 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     subscribe = not bool(getattr(args, "no_subscribe", False))
     reinstall = bool(getattr(args, "reinstall", False))
     ctx = svc.sync_context(ConfigManager(base_dir))
+    if visibility == "org" and tenant_id:
+        # An org skill may be named by its published NAME or a unique prefix
+        # (the org route takes only ids, so a name used to answer "no such
+        # skill"). An id passes straight through with no extra request.
+        from local_operator.hub_org import catalogue as org_catalogue
+
+        if not org_catalogue.looks_like_hub_id(args.hub_id):
+            from local_operator.hub_org.cli import resolve_org_ref
+
+            # The SAME person-scoped client the install path will use (the
+            # context's own org arm), so no second credential read or remedy
+            # line: with no client the id path below gives its own refusal.
+            client = ctx.client_for_tenant(tenant_id)
+            if client is not None:
+                resolved_id = resolve_org_ref(
+                    client, tenant_id, "skill", args.hub_id, config_dir=ctx.config_dir
+                )
+                if resolved_id is None:
+                    return 1
+                args.hub_id = resolved_id
     alias = getattr(args, "alias", None)
     hub_source = canonical_hub_source(ctx.config_manager) or ""
     adoption_receipt = getattr(args, "adopt_receipt", None)
@@ -12783,12 +12843,70 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     publisher = preview.get("publisher")
     if preview.get("adoption"):
         # An authored collision is reviewed separately from an ordinary new
-        # install. --yes cannot skip that review: a subsequent command must
-        # name the durable receipt bound to these exact proposed bytes.
-        if getattr(args, "json", False):
-            print(_json.dumps(preview, indent=2))
-        else:
+        # install. Without --yes the preview is the answer and a second command
+        # names its receipt. WITH --yes (and an explicit --strategy) the two
+        # steps run in ONE process: a deliberate reversal of the old "--yes
+        # cannot skip it" rule (org hub design §3), safe because the receipt
+        # still binds the snapshot this preview just took and the reviewed
+        # tree hash, so the confirm refuses if anything moved in between. A
+        # ``needs-choice`` proposal is never forced: it prints, exit 0.
+        chain = (
+            getattr(args, "yes", False)
+            and not getattr(args, "dry_run", False)
+            and preview["adoption"].get("state") != "needs-choice"
+        )
+        if not chain:
+            if getattr(args, "json", False):
+                print(_json.dumps(preview, indent=2))
+            else:
+                _print_skill_adoption(preview)
+            return 0
+        if not getattr(args, "json", False):
             _print_skill_adoption(preview)
+        try:
+            adopted = svc.install_skill(
+                ctx,
+                hub_source=hub_source,
+                hub_id=args.hub_id,
+                visibility=visibility,  # type: ignore[arg-type]
+                tenant_id=tenant_id,
+                alias=alias,
+                subscribe=subscribe,
+                confirm=True,
+                adoption_receipt=preview["adoption_receipt"],
+                adoption_strategy=getattr(args, "strategy", "merge"),
+                allow_llm=not getattr(args, "no_llm", False),
+            )
+        except LinkError as error:
+            return _skills_fail(args, error)
+        print(_json.dumps(adopted, indent=2))
+        return 0
+    if preview.get("bundle_adoption"):
+        # A BUNDLE over an unlinked same-named folder: the only adoption is
+        # hub-wins (no archive merge engine). --yes --strategy take-hub applies
+        # it, after the service snapshots the folder under hub/backups/.
+        if not (
+            getattr(args, "yes", False)
+            and getattr(args, "strategy", "merge") == "take-hub"
+            and not getattr(args, "dry_run", False)
+        ):
+            print(_json.dumps(preview, indent=2))
+            return 0
+        try:
+            adopted = svc.install_skill(
+                ctx,
+                hub_source=hub_source,
+                hub_id=args.hub_id,
+                visibility=visibility,  # type: ignore[arg-type]
+                tenant_id=tenant_id,
+                alias=alias,
+                subscribe=subscribe,
+                confirm=True,
+                adoption_strategy="take-hub",
+            )
+        except LinkError as error:
+            return _skills_fail(args, error)
+        print(_json.dumps(adopted, indent=2))
         return 0
     if getattr(args, "dry_run", False):
         print(_json.dumps(preview, indent=2))
@@ -13035,6 +13153,7 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     # outage must not turn an explicit push into a silent skip.
     svc.clear_retry(ctx, "skill", args.name)
     operation_id = f"push-skill-{check.local_id}"
+    outcome_base = outbound.remote_revision
     outcome = asyncio.run(
         push_item(
             kind="skill",
@@ -13054,10 +13173,26 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
             bundle_attested=not is_bundle or svc._capability_bundle(ctx.store().load(), identity),
             bundle_upload=(svc.bundle_upload_hook(ctx, identity, record) if is_bundle else None),
             org_skill=identity.visibility == "org",
+            base_revision=outbound.remote_revision or "",
         )
     )
-    svc.record_push_outcome(ctx, check, outcome)
-    payload = {
+    # Do not mint current ancestry from an old idempotent replay receipt. Only
+    # a matching GET-head proves a returned snapshot is the head we intended;
+    # failed/unavailable verification leaves the prior receipt and local-only
+    # mark untouched, so a later attempt cannot hide an unpublished local edit.
+    verification = svc.verify_skill_push(ctx, check, outcome) if outcome.state == "pushed" else None
+    if verification is None:
+        svc.record_push_outcome(ctx, check, outcome)
+    elif verification.verified is True:
+        from dataclasses import replace as dc_replace
+
+        # A replay may return an older revision even when today's head happens
+        # to contain the same document. Record the revision the GET just proved,
+        # not the pin's historic receipt; otherwise the next push's ancestry is
+        # immediately stale again.
+        confirmed = dc_replace(outcome, revision=verification.head_revision or outcome.revision)
+        svc.record_push_outcome(ctx, check, confirmed)
+    payload: dict[str, Any] = {
         "name": check.name,
         "form": "bundle" if is_bundle else "document",
         "state": outcome.state,
@@ -13067,14 +13202,100 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     }
     if outcome.reason in _SKILL_RECONCILIATION_REASONS:
         payload["recovery_guide"] = "guide://extensions"
+    if outcome.reason == "stale-base":
+        payload["base_revision"] = outcome_base
+        payload["head_revision"] = expected
+    # READ IT BACK (stale-baseline incident): a ``pushed`` outcome only says the
+    # hub accepted a write, not that the head now holds what was meant. The
+    # verification re-reads the head unconditionally and compares it with the
+    # body the commit sent; a mismatch is a failed push for the exit code.
+    if verification is not None:
+        payload["verified"] = verification.verified
+        payload["verified_revision"] = verification.head_revision
+        if verification.reason:
+            payload["verification_reason"] = verification.reason
+    refreshed = True
+    if outcome.reason in svc._REBASE_AFTER_REFUSAL:
+        latest = prov.read_baseline(ctx.config_dir, "skill", check.local_id)
+        refreshed = bool(
+            latest is not None
+            and latest.outbound is not None
+            and latest.outbound.remote_revision == expected
+            and svc._same_content(latest.outbound.accepted_fields, check.remote or {})
+        )
+        payload["baseline_refreshed"] = refreshed
+    next_steps = _skills_push_next_steps(
+        check.name, outcome, expected, is_bundle, verification, baseline_refreshed=refreshed
+    )
+    if next_steps:
+        payload["next_steps"] = next_steps
     if getattr(args, "json", False):
         print(_json.dumps(payload, indent=2))
     else:
         detail = ""
-        if outcome.reason:
+        if outcome.reason == "stale-base":
+            detail = " — " + _spt(_sp.stale_base(head=_safe(expected), base=_safe(outcome_base)))
+        elif outcome.reason:
             detail = f" — {_skills_refusal(_reason_error(outcome.reason))}"
         print(f"{_safe(check.name)}: {outcome.state}{detail}")
+        for line in next_steps:
+            print(line)
+    if verification is not None and verification.verified is not True:
+        return 1
     return 0 if outcome.state in ("pushed", "no-op") else 1
+
+
+#: Push refusals whose safe next step is "bring the hub's changes in, then push":
+#: the merge engine could not combine the local edits with the hub head.
+_SKILL_MERGE_REFUSALS = frozenset({"merge-refused", "bundle-conflict"})
+
+
+def _skills_push_next_steps(
+    name: str,
+    outcome: Any,
+    head: str | None,
+    is_bundle: bool,
+    verification: Any,
+    *,
+    baseline_refreshed: bool = True,
+) -> list[str]:
+    """The operator's safe next step after a push, as printable lines.
+
+    WHY THIS EXISTS (stale-baseline incident, 2026-11-04): after a refused merge
+    the obvious workaround -- copy the hub's text over the local skill and push
+    again -- published an OLD document, because the push still merged against a
+    stale baseline. The refusal now names the step that is safe: bring the hub's
+    changes in through the merge (``sync``), re-apply, push; and the push says
+    whether the hub head really holds what it sent.
+    """
+
+    quoted = _safe(name)
+    lines: list[str] = []
+    if outcome.reason in ({"stale-base"} | _SKILL_MERGE_REFUSALS) and not baseline_refreshed:
+        # A refused bundle or failed receipt write cannot claim the baseline
+        # moved. Taking the hub's changes through sync is safe in either case.
+        lines.append(_spt(_sp.stale_base_bundle_next(name=quoted)))
+    elif outcome.reason == "stale-base":
+        message = (
+            _sp.stale_base_bundle_next(name=quoted)
+            if is_bundle
+            else _sp.stale_base_next(name=quoted, head=_safe(head))
+        )
+        lines.append(_spt(message))
+    elif outcome.reason in _SKILL_MERGE_REFUSALS:
+        suffix = f" {_safe(head)}" if head else ""
+        lines.append(_spt(_sp.merge_refused_next(name=quoted, head=suffix)))
+    if verification is not None:
+        revision = _safe(verification.head_revision or outcome.revision or "")
+        if verification.verified is True:
+            lines.append(_spt(_sp.verified(revision=revision)))
+        elif verification.verified is False:
+            lines.append(_spt(_sp.verify_mismatch(revision=revision, name=quoted)))
+        else:
+            lines.append(
+                _spt(_sp.verify_unavailable(reason=_safe(verification.reason), name=quoted))
+            )
+    return lines
 
 
 _SKILL_RECONCILIATION_REASONS = frozenset(
@@ -13116,7 +13337,15 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
             print(_json.dumps({"checks": rows}, indent=2))
             return 0
         for row in rows:
-            reason = row.get("error_class") or row.get("outcome") or ""
+            # ``local-only`` is the drift a kept-local link exists to show (the
+            # org hub's adopt-link, QA Q3): the pull verdict is up-to-date, so
+            # without the classification the line read `up-to-date up-to-date`.
+            reason = (
+                row.get("error_class")
+                or ("local-only" if row.get("classification") == "local-only" else "")
+                or row.get("outcome")
+                or ""
+            )
             print(f"{row.get('name')}: {row.get('outcome')} {reason}".rstrip())
         return 0
     report = svc.apply_items(
@@ -13460,24 +13689,23 @@ def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
     because its fix is a different one from a missing login's (review round 1,
     R1-2/S-1).
     """
-    from pydantic import SecretStr  # lazy: pydantic stays off the startup path
-
-    from local_operator.clients.radient import RadientClient  # lazy: HTTP stack
     from local_operator.env import (
         DEFAULT_RADIENT_API_BASE_URL,  # quoted, never spelled (see below)
     )
+    from local_operator.hub_org.client import build_org_client
     from local_operator.providers.radient_credentials import (  # lazy: auth stack
         ORG_LOGIN_REMEDY,
         org_destination_refused_sentence,
-        org_oauth_destination_allowed,
-        resolve_radient_oauth_access_sync,
     )
 
     config_manager = ConfigManager(base_dir)
-    base_url = _radient_hub_base_url(config_manager)
-    access = resolve_radient_oauth_access_sync(config_manager.config_dir, base_url)
-    if access is None:
-        if not org_oauth_destination_allowed(base_url):
+    # The decision lives in ``hub_org.client`` (shared with the agent tool and
+    # the background auto-enrol, which cannot print); this function only
+    # renders the reason it answers.
+    built = build_org_client(config_manager)
+    base_url = built.base_url
+    if built.client is None:
+        if built.reason == "destination-refused":
             # The sentence comes from the ONE definition the CLI and the local
             # server share, and the canonical host in it is quoted at runtime
             # from env.py's constant: cli.py must stay free of URL-shaped
@@ -13499,7 +13727,7 @@ def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
                 + "\033[0m"
             )
         return None
-    return RadientClient(api_key=SecretStr(access.access_token), base_url=base_url)
+    return built.client
 
 
 def _org_target_or_picker(
@@ -14827,6 +15055,20 @@ def agents_push_public_republish_command(
     return 0
 
 
+def _org_ref_to_id(client: Any, tenant: str, kind: str, ref: str, base_dir: Path) -> str | None:
+    """An org item's hub id from an id, its name or a unique name prefix (or None, explained).
+
+    The org routes take only ids; operators and agents know NAMES. One rule
+    (``hub_org.catalogue.resolve_reference``) for skills, agents and teams.
+    The chosen id is printed, and an ambiguous prefix lists its candidates and
+    refuses.
+    """
+
+    from local_operator.hub_org.cli import resolve_org_ref
+
+    return resolve_org_ref(client, tenant, kind, ref, config_dir=ConfigManager(base_dir).config_dir)
+
+
 def agents_pull_org_command(args: argparse.Namespace, agent_registry: Any, base_dir: Path) -> int:
     """``lop agents pull --org <tenant>`` -- pull an org agent (§8.3).
 
@@ -14851,6 +15093,10 @@ def agents_pull_org_command(args: argparse.Namespace, agent_registry: Any, base_
     client = _resolve_org_client(base_dir)
     if client is None:
         return 1
+    resolved_id = _org_ref_to_id(client, tenant, "agent", args.id, base_dir)
+    if resolved_id is None:
+        return 1
+    args.id = resolved_id
     try:
         payload = client.get_agent(args.id, with_credential=True)
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
@@ -15146,6 +15392,10 @@ def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: P
     if target is None:
         return 1
     client, tenant = target
+    resolved_id = _org_ref_to_id(client, tenant, "team", args.team_id, base_dir)
+    if resolved_id is None:
+        return 1
+    args.team_id = resolved_id
     try:
         document = client.get_team(args.team_id)
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
@@ -15422,6 +15672,48 @@ def _print_public_team_rows(records: "list[dict[str, Any]]") -> None:
     print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
 
 
+def _print_org_team_rows(records: "list[dict[str, Any]]") -> None:
+    """Org teams after the public answer: one titled tree per organization.
+
+    The same shape as :func:`_print_public_team_rows` (design review D2) so the
+    two scopes read as two blocks, not one list with a stray tail. The block is
+    cyan, the public one green, so the scope is visible at a glance.
+    """
+    by_org: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        label = str(record.get("scope") or "org:").partition(":")[2]
+        by_org.setdefault(label, []).append(record)
+    for label, rows in by_org.items():
+        # The heading's only copy is the "(organization)" qualifier, so it is
+        # keyed; the box-drawing frame and colour codes around it are glyphs.
+        # The pragmas below sit INSIDE each call's span, where check.py reads
+        # them (a comment above the call exempts nothing).
+        heading = _ho.team_block_heading(org=label).envelope()["text"]
+        print(
+            # i18n: ignore glyph frame around keyed copy
+            f"\n\033[1;36m╭─ {heading} ─────────────────────────\033[0m"
+        )
+        for index, record in enumerate(rows):
+            is_last = index == len(rows) - 1
+            branch = "└──" if is_last else "├──"
+            spine = "│  " if is_last else "│ │"
+            print(
+                # i18n: ignore data row (team name, hub id), same shape as the public block
+                f"\033[1;36m│ {branch} {record.get('name', '?')} "
+                f"— id {record.get('id', '?')}\033[0m"
+            )
+            description = _clip_line(record.get("description"), 72)
+            if description:
+                print(
+                    # i18n: ignore data row (hub description)
+                    f"\033[1;36m{spine}   • {description}\033[0m"
+                )
+        print(
+            # i18n: ignore glyph frame, no copy
+            "\033[1;36m╰──────────────────────────────────────────────\033[0m"
+        )
+
+
 def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
     """``lop teams search [query]`` -- browse the public Agent Hub's teams (§9 PR 2).
 
@@ -15436,6 +15728,15 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
     client = RadientClient(api_key=None, base_url=_radient_hub_base_url(ConfigManager(base_dir)))
     query = str(getattr(args, "query", None) or "").strip()
     as_json = bool(getattr(args, "json", False))
+    # ORG ROWS, eligible accounts only. ``org_team_rows`` answers [] with no
+    # network for a signed-out or no-team account, and every branch below
+    # prints EXACTLY what it printed before when it is empty (operator
+    # constraint: the private hub is never advertised outside Radient Team).
+    # Org teams are listed AFTER the public answer, labelled ``[org: <name>]``,
+    # and in JSON every row then carries ``scope`` (public | org:<name>).
+    from local_operator.hub_org.cli import org_team_rows
+
+    org_rows = org_team_rows(base_dir, query)
 
     if query:
         needle = query.casefold()
@@ -15448,8 +15749,12 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
             return 1
         found, complete = scan
         if as_json:
-            _print_payload(found)
+            _print_payload(
+                [{**row, "scope": "public"} for row in found] + org_rows if org_rows else found
+            )
             return 0
+        # The public answer prints exactly as it does for an ineligible account;
+        # org rows, when any, follow it as their own block (D2/Q4).
         if not found:
             if complete:
                 print(f"\n\033[1;33mNo public team matches '{query}'.\033[0m")
@@ -15458,10 +15763,13 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
                     f"\n\033[1;33mNo public team matches '{query}' in the pages read; the "
                     "listing walk stopped at its bound, so a match may exist past it.\033[0m"
                 )
-            return 0
-        teams_label = "team matches" if len(found) == 1 else "teams match"
-        print(f"\n\033[1;33m{len(found)} public {teams_label} '{query}':\033[0m")
-        _print_public_team_rows(found)
+        else:
+            teams_label = "team matches" if len(found) == 1 else "teams match"
+            print(f"\n\033[1;33m{len(found)} public {teams_label} '{query}':\033[0m")
+            _print_public_team_rows(found)
+        # Org rows AFTER the unchanged public answer (header included, D2/Q4).
+        if org_rows:
+            _print_org_team_rows(org_rows)
         return 0
 
     try:
@@ -15473,17 +15781,30 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
         print(f"\n\033[1;31mError searching the public hub: {_hub_cause(exc)}\033[0m")
         return 1
     if as_json:
+        if org_rows:
+            envelope = {
+                **envelope,
+                "records": [
+                    {**row, "scope": "public"}
+                    for row in (envelope.get("records") or [])
+                    if isinstance(row, dict)
+                ],
+                "org_records": org_rows,
+            }
         _print_payload(envelope)
         return 0
     records = [row for row in (envelope.get("records") or []) if isinstance(row, dict)]
-    if not records:
+    if records:
+        _print_public_team_rows(records)
+        print(
+            f"showing page {envelope.get('page', '?')} of {envelope.get('total_pages', '?')} "
+            f"({envelope.get('total_records', '?')} teams)"
+        )
+    else:
         print("\n\033[1;33mNo public teams on this page.\033[0m")
-        return 0
-    _print_public_team_rows(records)
-    print(
-        f"showing page {envelope.get('page', '?')} of {envelope.get('total_pages', '?')} "
-        f"({envelope.get('total_records', '?')} teams)"
-    )
+    # Org rows AFTER the unchanged public answer, footer included (D2/Q4).
+    if org_rows:
+        _print_org_team_rows(org_rows)
     return 0
 
 
@@ -17834,6 +18155,10 @@ def main() -> int:
                 return hub_status_command(args, base_dir)
             if args.hub_command == "links":
                 return hub_links_command(args, base_dir)
+            if args.hub_command == "org":
+                from local_operator.hub_org import cli as hub_org_cli
+
+                return hub_org_cli.command(args, base_dir)
             if args.hub_command == "link":
                 if args.hub_link_command == "set":
                     return hub_link_set_command(args, base_dir)
@@ -17891,6 +18216,10 @@ def main() -> int:
             from local_operator.disk_cli import main as disk_main
 
             return disk_main(args)
+        elif args.subcommand == "sound":
+            from local_operator.sound_cli import main as sound_main
+
+            return sound_main(args)
         elif args.subcommand == "sessions":
             return sessions_command(args)
         elif args.subcommand == "stop":

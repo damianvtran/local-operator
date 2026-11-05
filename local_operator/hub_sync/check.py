@@ -133,6 +133,33 @@ def _served_by(client: Any) -> str | None:
         return None
 
 
+def _trusted_validator(record: prov.BaselineRecord) -> str | None:
+    """The If-None-Match validator to send, or None when B cannot stand in for it.
+
+    A 304 makes the check use the baseline's FIELDS as the hub's document, so the
+    validator is only honest while those fields really are the document at that
+    revision. Records written before the stale-baseline fix (2026-11-04) can
+    break that: a revision advanced without its fields. Such a record is
+    provable when the outbound receipt names the SAME revision with a DIFFERENT
+    accepted document -- one revision cannot hold two documents, and the receipt
+    is the server's own accepted copy. Then this check reads unconditionally (a
+    full body, ~one manifest) so the stale fields can never be substituted as R;
+    the next integration rewrites B consistently and the cheap path resumes.
+    """
+
+    revision = record.remote_revision
+    outbound = record.outbound
+    if not revision or outbound is None or outbound.remote_revision != revision:
+        return revision
+    try:
+        agrees = prov.fingerprint_snapshot(
+            record.kind, dict(outbound.accepted_fields)
+        ) == prov.fingerprint_snapshot(record.kind, dict(record.fields))
+    except Exception:  # noqa: BLE001 - an unprovable pair is not trusted as a 304 stand-in
+        agrees = False
+    return revision if agrees else None
+
+
 def _remote_meta(document: Mapping[str, Any]) -> tuple[str | None, Mapping[str, Any] | None]:
     """``(revision, sync_contract)`` from a hub detail/preview result, tolerantly.
 
@@ -947,7 +974,7 @@ def check_hub_skills(
                 client,
                 record.hub_id,
                 timeout=REQUEST_TIMEOUT_S,
-                if_none_match=record.remote_revision,
+                if_none_match=_trusted_validator(record),
             )
         except NotModified as not_modified:
             # THE HUB SAYS THE REPRESENTATION WE HOLD IS STILL CURRENT, which is
