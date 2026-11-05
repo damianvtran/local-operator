@@ -290,3 +290,60 @@ def test_policy_watermark_is_scoped_and_survives_success(tmp_path):
     assert a.held_policy_fence("openai", "owner-B") == ("", "")
     assert PlacementState("net-B", root=tmp_path / "a").held_policy_fence("openai") == ("", "")
     assert PlacementState("net-A", root=tmp_path / "b").held_policy_fence("openai") == ("", "")
+
+
+def test_inactive_namespace_evicts_all_slots_until_fresh_owner(mesh, monkeypatch):
+    import dataclasses
+    import time
+
+    from local_operator.network import store
+
+    c, grants = seed(mesh, ("sess-A", "sess-B"))
+    sibling = h._client(mesh)
+    sibling_old = sibling.request_grant_sync(KEY, session_id="sess-C")
+    assert isinstance(sibling_old, Grant)
+    # A locally owned safe context is NOT borrowed authority from this namespace.
+    # This cache-only sentinel is never served as a grant or sent over the wire.
+    safe = dataclasses.replace(
+        grants[0],
+        credential_ref=dataclasses.replace(
+            grants[0].credential_ref, owner_device=c.self_device, provider="safe-local"
+        ),
+    )
+    c.grants.put("safe-local", "local", safe)
+    h._stop_owner(mesh)
+    with store.mutate(mesh.network_id, mesh.b.root) as record:
+        member = record.self_member()
+        assert member is not None
+        member.removed_at = time.time()
+        store.save(record, mesh.b.root)
+    inactive = c.request_grant_sync(KEY, session_id="sess-A")
+    assert isinstance(inactive, BrokerError)
+    with store.mutate(mesh.network_id, mesh.b.root) as record:
+        member = record.self_member()
+        assert member is not None
+        member.removed_at = None
+        store.save(record, mesh.b.root)
+    # Reactivating membership supplies no new owner grant. Neither sibling memory
+    # nor a later transport retry is allowed to resurrect old authority.
+    for client, slot in ((c, "sess-A"), (c, "sess-B"), (sibling, "sess-C")):
+        denied = client.request_grant_sync(KEY, session_id=slot)
+        assert isinstance(denied, BrokerError), "reactivation resurrected an old cached grant"
+        assert client.grants.peek(KEY, slot) is None
+    assert c.grants.peek("safe-local", "local") is safe
+    returned = h._restart_owner(mesh, monkeypatch)
+    try:
+        fresh = c.request_grant_sync(KEY, session_id="sess-A")
+        assert isinstance(fresh, Grant) and not fresh.held_offline
+        assert fresh.grant_id != grants[0].grant_id
+        assert sibling.grants.peek(KEY, "sess-C") is None
+    finally:
+        returned.stop()
+    held = c.request_grant_sync(KEY, session_id="sess-A")
+    assert isinstance(held, Grant) and held.held_offline
+    assert held.grant_id == fresh.grant_id
+    assert held.grant_expires_at_ms == fresh.grant_expires_at_ms
+    print(
+        "SAFETY inactive_denied=True reactivated_old_slots_refused=True "
+        "sibling_fenced=True local_safe_preserved=True fresh_owner_then_hold=True"
+    )

@@ -814,6 +814,45 @@ class MeshCredentialClient:
         from local_operator.network.credentials import lifecycle
         from local_operator.network.credentials.effective import note_resolution
 
+        if not self._self_membership_active():
+            # Membership is authority for this client's one root/network, not a
+            # transport hint. Evict every affected provider/session and persist
+            # its existing policy fence before a reactivation can hide the loss.
+            # Other roots/clients and locally owned contexts are not invalidated.
+            for affected in set(self.grants.keys()) | {key}:
+                entry = self.entry(affected)
+                if affected != key and (entry is None or entry.owner_device == self.self_device):
+                    continue
+                self.grants.drop(affected)
+                denied = BrokerError(
+                    code="not_a_holder",
+                    key=affected,
+                    owner_device=self.owner_of(affected),
+                    owner_device_name=self.owner_label(affected),
+                )
+                self._remember(affected, denied)
+            return self._render(
+                BrokerError(
+                    code="not_a_holder",
+                    key=key,
+                    owner_device=self.owner_of(key),
+                    owner_device_name=self.owner_label(key),
+                ),
+                key,
+                key,
+            )
+        if not self.should_borrow(key):
+            # Placement may change while the dial is in flight. This narrower
+            # loss affects all slots of the key, not unrelated provider entries.
+            self.grants.drop(key)
+            denied = BrokerError(
+                code="not_a_holder",
+                key=key,
+                owner_device=self.owner_of(key),
+                owner_device_name=self.owner_label(key),
+            )
+            self._remember(key, denied)
+            return self._render(denied, key, key)
         fence, policy_code = self.state.held_policy_fence(key, self.owner_of(key))
         stale = self.grants.invalidate_policy(key, session_id, fence)
         known_policy = self.state.held_policy_refusal(key, self.owner_of(key))
