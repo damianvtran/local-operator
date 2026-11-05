@@ -3197,11 +3197,18 @@ class ProviderController:
                 else (engaged is None or definition.id in engaged)
             )
             if providers is None and definition.id == "openai":
-                shared = await self.shared_catalogue(definition.id)
+                # Reuse the native view already read for this frame; a wrapped
+                # store must instead inspect its actual local side, not virtual rows.
+                shared = await self.shared_catalogue(
+                    definition.id,
+                    _local_connected=(connected if getattr(self.auth_store, "local", self.auth_store) is self.auth_store else None),
+                )
                 if shared is not None:
                     models, status = shared
                     if status == "ok":
-                        oauth_context[definition.id] = {row.id: row.context_window for row in models}
+                        oauth_context[definition.id] = {
+                            row.id: row.context_window for row in models
+                        }
                     return definition, status == "ok", models, status
             api_key: str | None = None
             is_oauth = False
@@ -3228,10 +3235,10 @@ class ProviderController:
                 "is_oauth": is_oauth,
                 "account_id": account_id,
             }
-            if providers is not None:
-                # The explicit persisted-provider admission must not acquire an
-                # alternate ambient shared source even for an admitted ID.
-                kwargs["allow_shared"] = False
+            # The metadata seam above already chose (or declined) the shared
+            # source using this controller's real native context. Do not let a
+            # lower, ambient cache read undo native overrides or phone admission.
+            kwargs["allow_shared"] = False
             if ttl_s is not None:
                 # The caller's TTL reaches EVERY provider untouched, so
                 # ``PICKER_TTL_S`` stays the single statement of picker freshness
@@ -3338,7 +3345,7 @@ class ProviderController:
         return await self.listing_credential(provider)
 
     async def shared_catalogue(
-        self, provider: str, *, fresh: bool = False
+        self, provider: str, *, fresh: bool = False, _local_connected: bool | None = None
     ) -> tuple[list[DiscoveredModel], str] | None:
         """Metadata-only alternative, distinct from the bearer-shaped seam.
 
@@ -3347,16 +3354,27 @@ class ProviderController:
         """
         if provider != "openai":
             return None
-        # Mesh-aware stores expose their actual local side explicitly. A
-        # synthetic borrower row is not a local native catalogue credential.
-        local = getattr(self.auth_store, "local", self.auth_store)
-        local_controller = self if local is self.auth_store else ProviderController(local, self.config_dir)
-        engaged = local_controller._engaged_providers()
-        if engaged is None or provider in engaged:
-            return None
-        from local_operator.providers import shared_catalogue
         from local_operator.network.types import MeshRefusal
+        from local_operator.providers import shared_catalogue
 
+        if _local_connected is True:
+            return None
+        local = getattr(self.auth_store, "local", self.auth_store)
+        overrides = getattr(local, "override_keys", None)
+        # Explicit in-memory CLI/config keys are not persisted inventory rows.
+        # Their precedence cannot be inferred from a machine share or DB alone.
+        if callable(overrides) and overrides(provider):
+            return None
+        if _local_connected is None:
+            # Mesh-aware stores expose their actual local side explicitly. A
+            # synthetic borrower row is not a local native catalogue credential.
+            local = getattr(self.auth_store, "local", self.auth_store)
+            local_controller = (
+                self if local is self.auth_store else ProviderController(local, self.config_dir)
+            )
+            engaged = local_controller._engaged_providers()
+            if engaged is None or provider in engaged:
+                return None
         try:
             if shared_catalogue.source(self.config_dir, strict=True) is None:
                 return None
@@ -3364,7 +3382,9 @@ class ProviderController:
                 shared_catalogue.refresh, self.config_dir, fresh=fresh
             )
         except MeshRefusal as error:
-            return [], "unsupported" if error.code == "catalogue_unsupported" else "owner_unavailable"
+            return [], (
+                "unsupported" if error.code == "catalogue_unsupported" else "owner_unavailable"
+            )
         except (OSError, ValueError, RuntimeError):
             return [], "owner_unavailable"
         if document is None:

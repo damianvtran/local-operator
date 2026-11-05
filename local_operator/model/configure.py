@@ -2815,10 +2815,19 @@ def resolve_model_info(
             if receipt is not None:
                 # This is ONLY the memo key; never masquerade an opaque scope
                 # as an OAuth account/header or an API-key listing document.
-                scope = "mesh-catalogue:" + ":".join(str(receipt[field]) for field in (
-                    "network_id", "owner_device", "provider", "account_scope", "incarnation",
-                    "material_generation", "login_chain_revision", "validator",
-                ))
+                scope = "mesh-catalogue:" + ":".join(
+                    str(receipt[field])
+                    for field in (
+                        "network_id",
+                        "owner_device",
+                        "provider",
+                        "account_scope",
+                        "incarnation",
+                        "material_generation",
+                        "login_chain_revision",
+                        "validator",
+                    )
+                )
         token = _listing_credential.set(credential)
         try:
             info = _resolve_model_info_cached(

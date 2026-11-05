@@ -1083,17 +1083,18 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
     # provider — offered by the catalogue, buildable) live in the ONE validator
     # the peer model switch shares. No ``usable`` probe: this route never
     # refused on credentials, and its 422 bodies are a pinned wire contract.
-    try:
-        from local_operator.providers.shared_catalogue import prepare_selection_sync
-        from local_operator.network.types import MeshRefusal
+    from local_operator.network.types import MeshRefusal
+    from local_operator.providers.shared_catalogue import prepare_selection_sync
 
+    try:
         # This validator already runs in a worker. A direct cold birth cannot
         # require the user to warm a technical catalogue cache beforehand.
         prepare_selection_sync(provider)
         spec = validate_model_selection(provider, model_id)
     except MeshRefusal as refused:
-        raise HTTPException(503, detail={"code": refused.code,
-            "message": "catalogue metadata unavailable"}) from refused
+        raise HTTPException(
+            503, detail={"code": refused.code, "message": "catalogue metadata unavailable"}
+        ) from refused
     except ModelSelectionRefused as refused:
         raise HTTPException(
             422, _wd.desktop_refusal(error=refused.message).envelope(code=refused.code)

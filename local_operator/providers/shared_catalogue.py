@@ -4,6 +4,7 @@ Only explicit device holders can feed machine-wide pickers. Session/derived
 permissions require a real session context and deliberately do not enter here.
 A catalogue receipt is model metadata, not evidence of inference entitlement.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -15,22 +16,31 @@ from typing import Any
 
 from local_operator.network import store
 from local_operator.network.credentials import lifecycle, reconcile
-from local_operator.network.credentials.catalogue import CAPABILITY, MAX_BYTES, validate_response
-from local_operator.network.types import MeshRefusal
+from local_operator.network.credentials.catalogue import (
+    CAPABILITY,
+    MAX_BYTES,
+    validate_response,
+)
 from local_operator.network.credentials.client import MeshCredentialClient
+from local_operator.network.types import MeshRefusal
 
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.Lock] = {}
 
 
-def source(root: Path | None = None, *, strict: bool = False) -> tuple[MeshCredentialClient, int, int] | None:
+def source(
+    root: Path | None = None, *, strict: bool = False
+) -> tuple[MeshCredentialClient, int, int] | None:
     """Current local namespace/permission only; never resolve a bearer or dial."""
     try:
         # Machine-wide discovery must not outrank a native login, legacy key or
         # environment key. Read metadata only; never resolve/refresh a bearer.
         from local_operator.paths import config_dir
         from local_operator.providers.auth_store import AuthStore
-        from local_operator.providers.registry import resolve_env_key, stored_provider_env_keys
+        from local_operator.providers.registry import (
+            resolve_env_key,
+            stored_provider_env_keys,
+        )
 
         native = AuthStore.native_oauth_inventory((root or config_dir()) / "auth.db")
         if native is None or any(row[0] == "openai" and row[6] is None for row in native):
@@ -55,7 +65,13 @@ def source(root: Path | None = None, *, strict: bool = False) -> tuple[MeshCrede
         network = store.load(client.network_id, root)
         owner = network.member(entry.owner_device)
         self_member = network.member(client.self_device)
-        if network.trust != "active" or owner is None or not owner.active or self_member is None or not self_member.active:
+        if (
+            network.trust != "active"
+            or owner is None
+            or not owner.active
+            or self_member is None
+            or not self_member.active
+        ):
             return None
         return client, network.epoch, entry.doc_rev
     except MeshRefusal as error:
@@ -69,7 +85,11 @@ def source(root: Path | None = None, *, strict: bool = False) -> tuple[MeshCrede
 def _path(client: MeshCredentialClient, root: Path | None, cache_dir: Path | None) -> Path:
     namespace = f"{client.network_id}:{client.owner_of('openai')}:openai:catalogue"
     tag = hashlib.sha256(namespace.encode()).hexdigest()
-    directory = (cache_dir / "mesh-catalogues") if cache_dir is not None else store.network_root(root) / "catalogues"
+    directory = (
+        (cache_dir / "mesh-catalogues")
+        if cache_dir is not None
+        else store.network_root(root) / "catalogues"
+    )
     return directory / (tag + ".json")
 
 
@@ -80,7 +100,11 @@ def _current(document: dict[str, Any], client: MeshCredentialClient, root: Path 
         return False
     for (owner, key, scope), revisions in observed.high_water.items():
         opaque = hashlib.sha256(f"{client.network_id}:{owner}:{scope}".encode()).hexdigest()
-        if owner != client.owner_of("openai") or key != "openai" or opaque != document["account_scope"]:
+        if (
+            owner != client.owner_of("openai")
+            or key != "openai"
+            or opaque != document["account_scope"]
+        ):
             continue
         state = observed.observation_states.get((owner, key, scope))
         if state is not None and state != lifecycle.STATE_AVAILABLE:
@@ -108,25 +132,40 @@ def cached(root: Path | None = None, *, cache_dir: Path | None = None) -> dict[s
         envelope = json.loads(path.read_text())
         if set(envelope) != {"document", "epoch", "placement_revision", "received_at", "purpose"}:
             return None
-        if (type(envelope["epoch"]) is not int or type(envelope["placement_revision"]) is not int
-                or type(envelope["received_at"]) not in (int, float)):
+        if (
+            type(envelope["epoch"]) is not int
+            or type(envelope["placement_revision"]) is not int
+            or type(envelope["received_at"]) not in (int, float)
+        ):
             return None
-        document = validate_response(envelope["document"], network=client.network_id,
-                                     owner=client.owner_of("openai"), key="openai")
-        if document["validator"] != hashlib.sha256(json.dumps(document["models"], sort_keys=True).encode()).hexdigest():
+        document = validate_response(
+            envelope["document"],
+            network=client.network_id,
+            owner=client.owner_of("openai"),
+            key="openai",
+        )
+        if (
+            document["validator"]
+            != hashlib.sha256(json.dumps(document["models"], sort_keys=True).encode()).hexdigest()
+        ):
             return None
         age = time.time() - envelope["received_at"]
-        if (envelope["epoch"] != epoch or envelope["placement_revision"] != revision
-                or envelope["purpose"] != "catalogue" or not 0 <= age < document["ttl"]
-                or not _current(document, client, root)):
+        if (
+            envelope["epoch"] != epoch
+            or envelope["placement_revision"] != revision
+            or envelope["purpose"] != "catalogue"
+            or not 0 <= age < document["ttl"]
+            or not _current(document, client, root)
+        ):
             return None
         return document
     except (OSError, ValueError, TypeError, KeyError):
         return None
 
 
-def refresh(root: Path | None = None, *, fresh: bool = False,
-            cache_dir: Path | None = None) -> dict[str, Any] | None:
+def refresh(
+    root: Path | None = None, *, fresh: bool = False, cache_dir: Path | None = None
+) -> dict[str, Any] | None:
     """Bounded worker-thread fetch; coalesce normal TTL reads, no auth fallback.
 
     Selection calls use fresh=True: cached metadata cannot replace the current
@@ -161,13 +200,31 @@ def refresh(root: Path | None = None, *, fresh: bool = False,
             return None
         now_client, now_epoch, now_revision = current
         if (now_client.network_id, now_client.owner_of("openai"), now_epoch, now_revision) != (
-                client.network_id, client.owner_of("openai"), epoch, revision):
+            client.network_id,
+            client.owner_of("openai"),
+            epoch,
+            revision,
+        ):
             return None
         if not _current(document, now_client, root):
             return None
-        store._write_private_json(path, {"document": document, "epoch": epoch,
-            "placement_revision": revision, "received_at": time.time(), "purpose": "catalogue"})
+        store._write_private_json(
+            path,
+            {
+                "document": document,
+                "epoch": epoch,
+                "placement_revision": revision,
+                "received_at": time.time(),
+                "purpose": "catalogue",
+            },
+        )
         return document
+    except (MeshRefusal, OSError, ValueError):
+        # A fresh authoritative refusal must fence a previously positive TTL
+        # receipt before another reader offers it. This is an owned cache file,
+        # not a credential/placement write; preserve no untrusted error prose.
+        store._write_private_json(path, {"purpose": "catalogue", "unavailable": True})
+        raise
     finally:
         lock.release()
 
@@ -177,13 +234,23 @@ def rows(document: dict[str, Any]) -> list[Any]:
 
     # Native silence must not resurrect a public API context/output budget.
     # Modality None keeps the existing native parser's unknown semantics.
-    return [DiscoveredModel(
-                **{key: value for key, value in row.items() if key != "provider"},
-                authoritative_fields=("context_window", "default_context_window", "max_context_window", "max_tokens"),
-            ) for row in document["models"]]
+    return [
+        DiscoveredModel(
+            **{key: value for key, value in row.items() if key != "provider"},
+            authoritative_fields=(
+                "context_window",
+                "default_context_window",
+                "max_context_window",
+                "max_tokens",
+            ),
+        )
+        for row in document["models"]
+    ]
 
 
-async def prepare_selection(provider: str, root: Path | None = None, *, deadline: float | None = None) -> None:
+async def prepare_selection(
+    provider: str, root: Path | None = None, *, deadline: float | None = None
+) -> None:
     """Refresh only at an explicit model mutation, off the owner event loop.
 
     Offline offered-ID readers are not an authority check. A direct cold

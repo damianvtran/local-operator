@@ -2434,7 +2434,14 @@ def available_models(
         to list and none was supplied) or ``"empty"`` (the provider answered and
         listed no models).
     """
-    if allow_shared and provider_id == "openai" and not api_key and not is_oauth and not account_id and not base_url:
+    if (
+        allow_shared
+        and provider_id == "openai"
+        and not api_key
+        and not is_oauth
+        and not account_id
+        and not base_url
+    ):
         from local_operator.providers import shared_catalogue
 
         receipt = shared_catalogue.cached(config_dir)

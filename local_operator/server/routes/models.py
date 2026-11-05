@@ -342,10 +342,17 @@ async def list_models(
                     is_oauth = True  # Native metadata semantics, NOT a local bearer.
                     if status not in {"ok", "cached"}:
                         if query_params.provider:
-                            raise HTTPException(status_code=503, detail={
-                                "code": "catalogue_unsupported" if status == "unsupported" else "owner_unavailable",
-                                "message": "catalogue metadata unavailable",
-                            })
+                            raise HTTPException(
+                                status_code=503,
+                                detail={
+                                    "code": (
+                                        "catalogue_unsupported"
+                                        if status == "unsupported"
+                                        else "owner_unavailable"
+                                    ),
+                                    "message": "catalogue metadata unavailable",
+                                },
+                            )
                         # Match other failed per-provider sources: omit only its
                         # rows in an all-provider request, never fake readiness.
                         continue
