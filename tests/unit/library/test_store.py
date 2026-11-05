@@ -888,6 +888,98 @@ def test_a_busy_error_is_typed_but_not_corruption(tmp_path, monkeypatch) -> None
     assert recovery_calls == []
 
 
+def test_a_transient_io_error_is_retried_once_and_never_recovered(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """A transient I/O error gets one fresh handle; persistent failure stays typed.
+
+    The two connect/pragma catches used to raise ``IndexUnavailable`` with the
+    default ``corrupt=True``, so a healthy index was rebuilt after an I/O
+    hiccup. The retry is deliberately bounded to the transient codes: a
+    corrupt file is neither retried nor mislabeled.
+    """
+    import logging
+
+    from local_operator.library import service
+    from local_operator.library import store as store_module
+    from local_operator.library.store import IndexUnavailable
+
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    store = LibraryStore(root)
+    with store.read() as connection:
+        row_id = connection.execute("SELECT asset_id FROM idx_assets LIMIT 1").fetchone()[0]
+    real_connect = store_module.sqlite3.connect
+
+    attempts: list[int] = []
+
+    def transient_first(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            error = sqlite3.OperationalError("disk I/O error")
+            error.sqlite_errorcode = 10
+            raise error
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", transient_first)
+    caplog.set_level(logging.WARNING, logger="local_operator.library.store")
+    caplog.clear()
+    with store.read() as connection:
+        assert connection.execute("SELECT 1").fetchone()[0] == 1
+    assert attempts == [1, 1], "one failure plus exactly one fresh handle"
+    assert [
+        record
+        for record in caplog.records
+        if record.name == "local_operator.library.store"
+    ] == []
+
+    recovery_calls: list[int] = []
+    monkeypatch.setattr(
+        "local_operator.library.service._recover_index",
+        lambda config: recovery_calls.append(1),
+    )
+    attempts.clear()
+    row = service.get_asset(root, row_id)
+    assert row["id"] == row_id
+    assert attempts[:2] == [1, 1], "the first connection failed once, then got a fresh handle"
+    assert recovery_calls == []
+
+    def persistent_failure(*args, **kwargs):
+        attempts.append(1)
+        error = sqlite3.OperationalError("disk I/O error")
+        error.sqlite_errorcode = 10
+        raise error
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", persistent_failure)
+    before = len(attempts)
+    with pytest.raises(IndexUnavailable) as caught:
+        with LibraryStore(root).read():
+            pass
+    assert len(attempts) - before == 2, "exactly one retry, never a loop"
+    assert caught.value.corrupt is False
+    assert recovery_calls == []
+    with pytest.raises(service.LibraryUnavailable):
+        service.get_asset(root, row_id)
+    assert recovery_calls == []
+
+    def corrupt_failure(*args, **kwargs):
+        attempts.append(1)
+        error = sqlite3.DatabaseError("database disk image is malformed")
+        error.sqlite_errorcode = 11
+        raise error
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", corrupt_failure)
+    before = len(attempts)
+    with pytest.raises(IndexUnavailable) as caught:
+        with LibraryStore(root).read():
+            pass
+    assert len(attempts) - before == 1, "damage is never retried"
+    assert caught.value.corrupt is True
+    with pytest.raises(service.LibraryUnavailable):
+        service.get_asset(root, row_id)
+    assert recovery_calls == [1], "only damage licenses the recovery"
+
+
 def test_a_torn_authoritative_table_refuses_rather_than_serving_empty(
     tmp_path, monkeypatch
 ) -> None:
