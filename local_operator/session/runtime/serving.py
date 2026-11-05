@@ -5943,6 +5943,9 @@ class ServingSessionHandle(SessionHandle):
         # not propagate contextvars, so install the shared budget explicitly.
         resolution_deadline = time.monotonic() + _MODEL_SWITCH_RESOLVE_S
         async with _model_resolution_window(resolution_deadline):
+            from local_operator.providers.shared_catalogue import prepare_selection
+
+            await prepare_selection(provider, deadline=resolution_deadline)
             warm_info = warm_model_info(provider, model_id)
             if warm_info is not None:
                 spec = build_model_spec(provider, model_id, info=warm_info)

@@ -336,17 +336,31 @@ async def list_models(
                 # scope, sends subscription tokens to the public API, and lets
                 # the API cache impersonate a different account's catalogue.
                 controller = ProviderController(provider_auth_store, config_manager.config_dir)
-                api_key, is_oauth, account_id = await controller.listing_credential(
-                    "openai", read_only=True
-                )
-                rows, status = await asyncio.to_thread(
-                    available_models,
-                    "openai",
-                    api_key=api_key,
-                    is_oauth=is_oauth,
-                    account_id=account_id,
-                    ttl_s=PICKER_TTL_S,
-                )
+                shared = await controller.shared_catalogue("openai")
+                if shared is not None:
+                    rows, status = shared
+                    is_oauth = True  # Native metadata semantics, NOT a local bearer.
+                    if status not in {"ok", "cached"}:
+                        if query_params.provider:
+                            raise HTTPException(status_code=503, detail={
+                                "code": "catalogue_unsupported" if status == "unsupported" else "owner_unavailable",
+                                "message": "catalogue metadata unavailable",
+                            })
+                        # Match other failed per-provider sources: omit only its
+                        # rows in an all-provider request, never fake readiness.
+                        continue
+                else:
+                    api_key, is_oauth, account_id = await controller.listing_credential(
+                        "openai", read_only=True
+                    )
+                    rows, status = await asyncio.to_thread(
+                        available_models,
+                        "openai",
+                        api_key=api_key,
+                        is_oauth=is_oauth,
+                        account_id=account_id,
+                        ttl_s=PICKER_TTL_S,
+                    )
                 for row in rows:
                     # Discovery owns native/API cache isolation, stale fallback,
                     # and subscription pruning. Project its answer without a
