@@ -103,9 +103,9 @@ def test_the_builder_gates_on_reachability(monkeypatch: pytest.MonkeyPatch) -> N
     # the first sentence remains the classifier roster's stable capability.
     # Provider detail stays in the on-demand guide, not the always-paid schema.
     assert len(tool.description) <= 180
-    assert "Read `guide://image-generation` before use" in tool.description
+    assert "Read `guide://image-generation` first" in tool.description
     first = tool.description.split(". ", 1)[0] + "."
-    assert len(first) == 91
+    assert len(first) == 87
     assert tool.describe_approval is not None
 
 
