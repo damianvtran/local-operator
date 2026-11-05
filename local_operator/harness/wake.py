@@ -77,13 +77,15 @@ WAKE_SCHEDULES_CUSTOM_TYPE = "wake_schedules"
 WAKE_PROMPT_MESSAGE_TYPE = "wake_prompt"
 
 #: The accepted time forms, as one sentence fragment, shared by EVERY refusal
-#: that reads a wake time: ``build_wake_schedule``'s invalid-``at`` sentence and
-#: both flag-translation refusals in ``lop wake create``. The CLI rejects an
-#: unreadable ``when``/``until`` BEFORE the validator ever sees the string, so a
-#: second wording there is the one a person at a terminal actually reads — and a
-#: refusal that does not name the accepted forms (nor the local rule that makes
-#: a bare clock ambiguous) teaches nothing about the mistake. One constant, so
-#: the tool, the CLI and the desktop route cannot drift apart.
+#: that reads a wake time: ``build_wake_schedule``'s invalid-``at`` AND
+#: invalid-``until`` sentences, plus both flag-translation refusals in ``lop wake
+#: create``. All four spell it here, because ``until`` is read by the same parser
+#: as ``at`` and the CLI rejects an unreadable ``when``/``until`` BEFORE the
+#: validator ever sees the string — a second wording there is the one a person at
+#: a terminal actually reads, and a refusal that does not name the accepted forms
+#: (nor the local rule that makes a bare clock ambiguous) teaches nothing about
+#: the mistake. One constant, so the tool, the CLI and the desktop route cannot
+#: describe the same value four different ways.
 WAKE_TIME_FORMS = (
     "use a delay ('+30m'), a LOCAL clock time ('HH:MM' or 'local:HH:MM', read in this "
     "machine's zone), or an ISO-8601 timestamp with an offset ('2026-11-05T18:45:00Z') "
@@ -499,7 +501,13 @@ def build_wake_schedule(
     if until_val is not None:
         until_at = parse_wake_at(str(until_val), now_ms)
         if until_at is None:
-            return {"error": f"invalid 'until' time '{until_val}'.", "malformed": True}
+            # Same fragment as the ``at`` refusal above: ``until`` is read by the
+            # same parser, so a bound that cannot be read is the same mistake and
+            # must not describe the accepted forms differently.
+            return {
+                "error": f"invalid 'until' time '{until_val}'; {WAKE_TIME_FORMS}.",
+                "malformed": True,
+            }
 
     limit: int | None = None
     limit_val = request.get("limit")

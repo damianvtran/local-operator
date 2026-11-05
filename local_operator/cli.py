@@ -8441,7 +8441,10 @@ def _wake_create(args: argparse.Namespace) -> int:
     # instant, so the echo is empty and nothing is added.
     echo = format_wake_at_echo(outcome.next_due_at, request.get("at"), now_ms)
     if echo:
-        print(f"  resolved: {echo}")
+        print(
+            # i18n: ignore machine-readable resolved instant, English-only
+            f"  resolved: {echo}"
+        )
     if outcome.supervisor:
         print(f"supervisor: {outcome.supervisor}")
     return 0
