@@ -257,6 +257,7 @@ async def prepare_selection(
     selection must reach the approved owner before it can consume that cache;
     inference still uses the existing grant/budget/credential-selection path.
     """
+    provider = provider.strip().lower()
     if provider != "openai":
         return
     import asyncio
@@ -270,6 +271,7 @@ async def prepare_selection(
 
 def prepare_selection_sync(provider: str, root: Path | None = None) -> None:
     """Worker-only twin for existing synchronous/off-loop birth validators."""
+    provider = provider.strip().lower()
     if provider != "openai" or source(root, strict=True) is None:
         return
     if refresh(root, fresh=True) is None:

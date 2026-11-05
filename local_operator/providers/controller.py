@@ -3201,7 +3201,11 @@ class ProviderController:
                 # store must instead inspect its actual local side, not virtual rows.
                 shared = await self.shared_catalogue(
                     definition.id,
-                    _local_connected=(connected if getattr(self.auth_store, "local", self.auth_store) is self.auth_store else None),
+                    _local_connected=(
+                        connected
+                        if getattr(self.auth_store, "local", self.auth_store) is self.auth_store
+                        else None
+                    ),
                 )
                 if shared is not None:
                     models, status = shared

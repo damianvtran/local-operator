@@ -93,8 +93,9 @@ async def test_plain_controller_imports_native_metadata_without_local_secret(bor
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "OpenAI"])
 async def test_cold_real_owner_model_set_autofetches_without_manual_refresh(
-    borrower, tmp_path, monkeypatch
+    borrower, tmp_path, monkeypatch, provider
 ):
     mesh, plain, controller, state = borrower
     from local_operator.mobile.attach_client import AttachClient
@@ -124,7 +125,7 @@ async def test_cold_real_owner_model_set_autofetches_without_manual_refresh(
     client = AttachClient(lambda _projection: None, lambda _reason: None)
     try:
         await client.connect(runtime.record, runtime.record.session_id)
-        await client.set_model("openai", "gpt-fixture-sol")
+        await client.set_model(provider, "gpt-fixture-sol")
         assert session.model.provider == "openai"
         assert session.model.model_id == "gpt-fixture-sol"
         assert session.model.context_window == 200000
@@ -566,7 +567,9 @@ async def test_local_runtime_override_precedes_session_only_share(borrower, scop
 
 
 @pytest.mark.asyncio
-async def test_wrapped_controller_virtual_rows_do_not_turn_into_bearer_catalogue(borrower, monkeypatch):
+async def test_wrapped_controller_virtual_rows_do_not_turn_into_bearer_catalogue(
+    borrower, monkeypatch
+):
     from local_operator.network.credentials.client import MeshCredentialClient
     from local_operator.network.credentials.store import MeshAwareAuthStore
 
@@ -574,10 +577,19 @@ async def test_wrapped_controller_virtual_rows_do_not_turn_into_bearer_catalogue
     client = MeshCredentialClient.for_this_device(mesh.b.root)
     assert client is not None
     wrapped = MeshAwareAuthStore(plain, mesh=client, config_dir=mesh.b.root)
+
     async def no_bearer(*args, **kwargs):
         raise AssertionError("catalogue must not request a borrowed bearer")
+
     monkeypatch.setattr(wrapped, "get_api_key", no_bearer)
-    controller = ProviderController(wrapped, mesh.b.root)
+    from typing import cast
+
+    from local_operator.providers.controller import ControllerAuthStore
+
+    # The real facade delegates the protocol via __getattr__, which static
+    # structural checks cannot enumerate. Exercise that delegation, not a fake.
+    assert callable(wrapped.get_catalogue_access) and callable(wrapped.override_keys)
+    controller = ProviderController(cast(ControllerAuthStore, wrapped), mesh.b.root)
     rows, statuses = await controller.live_catalogue()
     assert {row.model_id for row in rows if row.provider == "openai"} == {"gpt-fixture-sol"}
     assert statuses["openai"] == "ok" and state["gets"] == 1
