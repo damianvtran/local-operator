@@ -714,7 +714,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # read side: states, the at-most-once registration and the watcher handoff.
     "video_status": 202,
     "wait": 268,
-    "wake": 308,
+    # RE-MEASURED (wake local-clock fix, PR #3485): 308 -> 333 (+25). The `at`
+    # description now says the one thing a model gets wrong about this value —
+    # 'HH:MM' is this device's LOCAL clock, not UTC — and names the two forms
+    # that are exact ('+30m', ISO with an offset). Deliberate and reviewed: the
+    # text is billed every turn, so the cost is paid here in the ledger rather
+    # than discovered as context creep.
+    "wake": 333,
     # RE-MEASURED (web-research-speed): 348 -> 363 — the new optional
     # ``query`` parameter (passage previews for oversized pages) in the
     # rendered schema, net of the description trimmed to pay for it.

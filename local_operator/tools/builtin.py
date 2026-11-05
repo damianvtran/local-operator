@@ -14662,23 +14662,21 @@ class WakeParams(BaseModel):
     )
     at: str | None = Field(
         default=None,
+        # Says the two things a caller gets wrong about this value: a bare clock
+        # is read in the DEVICE's zone (so it is not the UTC instant the caller
+        # may have meant), and the forms that name an instant exactly. Kept to
+        # one sentence of wording on purpose — this text is billed on every
+        # turn, and the context-budget ratchet has almost no headroom left.
         description=(
-            "First fire time. 'HH:MM' (or 'local:HH:MM') is this device's LOCAL wall clock "
-            "and means its next occurrence here, not UTC; name an absolute instant with an "
-            "ISO-8601 offset ('2026-11-05T18:45:00Z') or a delay '+30m'."
+            "First fire: 'HH:MM' (or 'local:HH:MM') is this device's LOCAL clock, not UTC; "
+            "'+30m' or ISO-8601 with an offset is exact."
         ),
     )
     every: str | None = Field(
         default=None,
         description="Repeat interval duration, e.g. '1h' or compound '1h30m'.",
     )
-    until: str | None = Field(
-        default=None,
-        description=(
-            "Retire after this time (ISO datetime with an offset, or 'HH:MM' read as "
-            "device-local)."
-        ),
-    )
+    until: str | None = Field(default=None, description="Retire after this time (ISO datetime).")
     limit: int | None = Field(default=None, ge=1, description="Max number of fires.")
     notify: bool = Field(
         default=False,
