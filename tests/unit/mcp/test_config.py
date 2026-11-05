@@ -255,9 +255,7 @@ class TestEnableDisable:
         self, tmp_path: Path, home: Path, allowlisted: bool, fallback: bool
     ) -> None:
         cwd = tmp_path / "proj"
-        _write(
-            home / ".claude.json", {"mcpServers": {"x": _stdio("claude", enabled=False)}}
-        )
+        _write(home / ".claude.json", {"mcpServers": {"x": _stdio("claude", enabled=False)}})
         if fallback:
             _write_toml(home / ".codex" / "config.toml", '[mcp_servers.x]\ncommand = "codex"')
         if allowlisted:
