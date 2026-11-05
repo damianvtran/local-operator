@@ -613,6 +613,23 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     # same kind of value as a version tag. The module's real filenames
     # (``SKILL.md``, the archive name) are classified where they live, and no
     # constant here names an entry of a session directory.
+    # The org hub eligibility record and its refresh lock: install-level state
+    # under ``<config>/hub/`` (``record_path``/``_lock_path``), bound to this
+    # machine's sign-in and hub base URL, never an entry of a session directory.
+    "local_operator/hub_org/eligibility.py": (
+        2,
+        "``RECORD_NAME``/``LOCK_NAME`` ('org_catalogue.json', 'org_catalogue.lock'): the "
+        "org hub eligibility record and its refresh lock under ``<config>/hub/``, beside "
+        "``sessions/`` — install-level account state, never inside a session",
+    ),
+    # Bundle adoption's dot-prefixed aside is a sibling of a skill folder under
+    # ``<config>/skills/`` — the managed skill root, not a session directory.
+    "local_operator/hub_sync/service.py": (
+        1,
+        "``_ADOPT_ASIDE_PREFIX`` ('.adopt-'): the transient ``<config>/skills/.adopt-<alias>-"
+        "<hex>`` aside of a bundle adoption, inside the managed skill root beside "
+        "``sessions/``, never an entry of a session directory",
+    ),
     "local_operator/hub_sync/skill_bundle.py": (
         1,
         "``TREE_HASH_PREFIX``: the tree-hash domain separator, not a pathname",

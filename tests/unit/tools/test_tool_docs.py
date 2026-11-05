@@ -307,7 +307,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # costs +5, measured by this test's print on both LOP_ASK_NONBLOCKING arms.
     "ask": 1083,
     "ask_withdraw": 452,
-    "bash": 295,
+    # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
+    # ("Files to show.") -- re-measured via this test's own print; bash is the only
+    # entry that moved. eval carries no pin (context budget; see supplements.pins).
+    "bash": 308,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
     # claim lifecycle, and why "decide" is not an op. First measured at 572
     # tokens DELIBERATELY in the canonical (hermetic, tiktoken-exact) arm; every

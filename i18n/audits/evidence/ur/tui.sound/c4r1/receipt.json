@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "tui.sound",
+  "reviewer": {
+    "agent": "C4-i18n-audit",
+    "session": "796c1db4d0d0",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-04",
+    "fallback_used": false
+  },
+  "translator": {
+    "agent": "notif-sounds-C4-tui",
+    "job": "16bed17d35eb",
+    "session": "e87ab06e319f",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-04",
+    "provenance": "Manager supplied author-draft copy and identity in this session"
+  },
+  "scope": "46053ab26a6395d3e1ea501efc3b7018f39ea1b7..27695a49855fc4ddae0450af5e215346ce5b66b5",
+  "source_sha256": "0d23d23b34918c3bdb003afbf6ba6f2694316a7c55214142428185956e4fa578",
+  "target_sha256": "7cad8c5f4b19f373caed684ef472126389deba89109039adc2473a362f002ffb",
+  "result": "passed",
+  "reviewed": 27,
+  "blocker": 0,
+  "major": 0,
+  "corrections_applied": [
+    "tui.sound.save_failed",
+    "tui.sound.slash"
+  ],
+  "approval_applies_to": "Corrected target bytes bound by target_sha256, not uncorrected drafts",
+  "not_a_native_speaker_review": true
+}

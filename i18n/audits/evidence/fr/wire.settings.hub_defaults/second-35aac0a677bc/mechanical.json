@@ -1,0 +1,115 @@
+{
+  "provenance_reference": "record.json:auditor",
+  "locale": "fr",
+  "namespace": "wire.settings.hub_defaults",
+  "key_count": 9,
+  "repo_validator_problems": [],
+  "messages": [
+    {
+      "key": "wire.settings.hub_defaults.agents.help",
+      "arguments": [],
+      "cells": 72,
+      "maxCells": 72,
+      "rendered_parser_sample": "Non : gèle toutes les MAJ agents/compétences. Oui : abonne les nouveaux."
+    },
+    {
+      "key": "wire.settings.hub_defaults.agents.label",
+      "arguments": [],
+      "cells": 54,
+      "maxCells": null,
+      "rendered_parser_sample": "Mises à jour auto des liens d’agents et de compétences"
+    },
+    {
+      "key": "wire.settings.hub_defaults.agents.off.description",
+      "arguments": [],
+      "cells": 71,
+      "maxCells": null,
+      "rendered_parser_sample": "suspendre les mises à jour de tous les liens d’agents et de compétences"
+    },
+    {
+      "key": "wire.settings.hub_defaults.agents.on.description",
+      "arguments": [],
+      "cells": 53,
+      "maxCells": null,
+      "rendered_parser_sample": "abonner les nouveaux liens d’agents et de compétences"
+    },
+    {
+      "key": "wire.settings.hub_defaults.model_default.note",
+      "arguments": [],
+      "cells": 110,
+      "maxCells": null,
+      "rendered_parser_sample": "Les merges du Hub utilisent votre modèle par défaut actuel. L’ancien choix de modèle propre au Hub est ignoré."
+    },
+    {
+      "key": "wire.settings.hub_defaults.teams.help",
+      "arguments": [],
+      "cells": 70,
+      "maxCells": 72,
+      "rendered_parser_sample": "Par défaut pour les nouveaux liens ; les anciens gardent leurs règles."
+    },
+    {
+      "key": "wire.settings.hub_defaults.teams.label",
+      "arguments": [],
+      "cells": 36,
+      "maxCells": null,
+      "rendered_parser_sample": "Abonner les nouveaux liens d’équipes"
+    },
+    {
+      "key": "wire.settings.hub_defaults.teams.off.description",
+      "arguments": [],
+      "cells": 65,
+      "maxCells": null,
+      "rendered_parser_sample": "suspendre les mises à jour entrantes des nouveaux liens d’équipes"
+    },
+    {
+      "key": "wire.settings.hub_defaults.teams.on.description",
+      "arguments": [],
+      "cells": 36,
+      "maxCells": null,
+      "rendered_parser_sample": "abonner les nouveaux liens d’équipes"
+    }
+  ],
+  "cf_count": 0,
+  "numeric_literal_parity": true,
+  "technical_tokens": {},
+  "plural_select_CLDR": "not applicable: zero plural/select in source or target",
+  "negative_controls": [
+    {
+      "name": "missing_key",
+      "rejected_by": "repo check_catalogues",
+      "actual_errors": [
+        "fr/wire.settings.hub_defaults: missing key 'wire.settings.hub_defaults.agents.help'"
+      ]
+    },
+    {
+      "name": "unexpected_argument",
+      "rejected_by": "repo check_catalogues",
+      "actual_errors": [
+        "fr/wire.settings.hub_defaults: wire.settings.hub_defaults.agents.help: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"
+      ]
+    },
+    {
+      "name": "Cf_injection",
+      "rejected_by": "independent extra"
+    }
+  ],
+  "fixture_restored": true,
+  "execution_scope": "core ICU parser/formatter and namespace validator only; no SDK guards, live settings, app or native rendering",
+  "pseudo": "NOT RUN",
+  "RTL_native": "NOT RUN",
+  "native_fit": "NOT RUN",
+  "tool_inputs": [
+    {
+      "path": "/Users/damian/local-operator/scripts/i18n/check.py",
+      "sha256": "98dee7f1112848163c7a3365c39668118caa4bfe13e3afee4b137478d0bf39fb"
+    },
+    {
+      "path": "/Users/damian/local-operator/local_operator/i18n/runtime.py",
+      "sha256": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5"
+    },
+    {
+      "path": "/Users/damian/local-operator/local_operator/i18n/catalogues.py",
+      "sha256": "437179854ac210daeaf01bbecf8d89bfb9c1a901b63c55cbb623d4e4985d351e"
+    }
+  ]
+}

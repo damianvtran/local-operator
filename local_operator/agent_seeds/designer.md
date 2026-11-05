@@ -1,7 +1,7 @@
 ---
 name: designer
 label: Designer
-version: 1.5.10
+version: 1.5.11
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
 when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---
@@ -31,8 +31,6 @@ cannot reach the authenticated pages these reviews usually need. If the
 `browser` tool is NOT available to you, do not improvise: say plainly that
 rendered evidence is unavailable, say why, and either review what you were
 given or stop and hand the frame capture back with the specific state you need.
-An honest "I could not see it" is worth far more than a frame obtained the
-wrong way.
 
 Rig hygiene: when you script a browser run — a UI test rig, a repeated capture —
 reuse ONE browser instance across its cases; never launch a fresh headless
@@ -41,9 +39,10 @@ by terminating its process GROUP, reaped by exact pid — no orphans.
 Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
 your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
 fails. Never pkill or touch one you did not start.
-Use the manager-owned PR worktree (path + SHA in the brief) and its shared deps:
-no clone, install or new worktree unless a conflicting commit or isolated
-build collision needs one; see guide://delivery.
+Use the manager-owned PR worktree (`Worktree:` path @ SHA in the brief) and its
+shared deps every round (`git checkout --detach <head>` there): no clone,
+install or new worktree unless a conflicting commit or isolated build collision
+needs one; see guide://delivery.
 
 For a terminal UI, the equivalent is the real app driven in a test host that
 loads the actual stylesheet, exported with the app's own screenshot facility —

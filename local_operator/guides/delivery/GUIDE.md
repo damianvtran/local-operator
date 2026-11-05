@@ -44,11 +44,14 @@ AGENTS.md's HOME/config, CMUX stripping and exact-process-group teardown rules.
 
 The manager (or lead coder) owns ONE PR worktree in `<repo>/.worktrees/` from
 latest origin/main, briefs its absolute path and SHA, and freezes the head while
-readers work. Reviewer/QA/UX/design/copy/i18n reuse it read-only (`git diff/show`,
-targeted tests, shared deps): no clone, install or new worktree, and no full-tree
-copies into scratch. Exception, with a manager lease: a conflicting commit author
-or an isolated mutable build collision gets a detached-SHA worktree on shared deps,
-bounded and creator-removed. Keep isolated HOME/config. Remove clean
+readers work. Reviewer/QA/UX/design/copy/i18n reuse it read-only every round
+(`git checkout --detach <head>`, `git diff/show`, targeted tests, shared deps):
+no clone, install or new worktree, and no full-tree copies into scratch. Python:
+`PYTHONPATH=<worktree>` with the primary `.venv`; `python -c 'import
+local_operator;print(local_operator.__file__)'` must print a worktree path.
+Exception, with a manager lease: a conflicting commit author or an isolated
+mutable build collision gets a detached-SHA worktree on shared deps, bounded and
+creator-removed. Keep isolated HOME/config. Remove clean
 worktrees on merge/close; the manager verifies (`scripts/worktree_janitor.py`).
 
 ## Never use a live peer as the revoke test
@@ -63,9 +66,10 @@ peer, and record it. Authorization to test is not authorization to delete.
 
 Iterate with targeted tests/lints; heavy runs bounded/serial. Full coverage once
 at the terminal head: when CI runs the same suite, use it, not a duplicate local
-run. Run omitted required surfaces bounded locally/in QA and record them. Merge requires actual checks and independent review/QA;
-CI never replaces independent real-path QA. Resource holds forbid hold-class
-runs, not evidence. Review CI asynchronously; investigate even out-of-slice fails.
+run. Run omitted required surfaces bounded and record them. Merge needs actual
+checks and independent review/QA; CI never replaces real-path QA. Resource
+holds forbid hold-class runs, not evidence. Read CI once at the terminal merge
+gate, never sleep-poll it mid-cycle; investigate even out-of-slice fails.
 
 ## Converge, do not restart
 
@@ -73,18 +77,16 @@ Complete every applicable initial stream (code, independent real-path QA,
 design, UX, security) across its full in-scope surface before remediation.
 Early BLOCKER alerts must say incomplete. Review runs asynchronously with CI.
 
-Manager collects all reports into ONE deduplicated severity/evidence ledger,
-triages conflicts and batches necessary clarifications before edits. Implementer
-verifies claims, then fixes accepted IDs in ONE coordinated pass, answering each
-with fixed SHA, rejection evidence, or deferral reason/location. Default ONE
-batched commit; separate commits need justified independently revertible safety
-or stream boundaries in the SAME round. No per-finding commit/review cycles.
+Manager collects all reports into ONE deduplicated severity/evidence ledger and
+batches clarifications before edits. Implementer verifies claims, then fixes
+accepted IDs in ONE pass, answering each with fixed SHA, rejection evidence, or
+deferral reason. Default ONE commit; no per-finding commit/review cycles.
 
 Follow up on `<previous_reviewed_head>..<new_head>` plus direct regression
 neighbors, never unchanged re-audits. Late BLOCKER/MAJOR needs a concrete code
-path/reproducer in changed/direct-neighbor scope. Retain evidence only with byte/source compatibility proof; backend response-shape
-changes may need rendered proof. Model-header/provenance-only addenda do not reset
-product/suites; executable/user-visible changes are not metadata.
+path/reproducer in changed/direct-neighbor scope. Retain evidence only with
+byte/source compatibility proof; backend response-shape changes may need rendered
+proof. Provenance-only addenda reset nothing.
 
 After two unsuccessful cycles, freeze severity/evidence ledger, root-transition/
 authority matrix (failing state, intended transition, authoritative owner/source)
@@ -103,8 +105,9 @@ correctness, security or regression risk. MINOR/NIT do not force another round.
 
 - **Context contract.** Every review/QA/design/UX brief carries the operator's
   request (verbatim or close paraphrase), intent, acceptance criteria, explicit
-  non-goals, base..head and, round 2+, the prior-round ledger. Missing request:
-  ask once via hub, or state the assumed scope atop the round.
+  non-goals, the prior-round ledger (round 2+) and one field line:
+  `Worktree: <abs path> @ <sha> · Round: <N> · Scope: <prev>..<head> · Retest:
+  <FAIL ids>|none`. Missing request: ask once via hub, or state assumed scope.
 - **Scope.** Judge the diff against the stated request. Pre-existing defects not
   introduced or worsened are listed `out of scope — pre-existing` and never gate.
   No redesigns or extra features. No speculative findings: without a code path
@@ -112,23 +115,22 @@ correctness, security or regression risk. MINOR/NIT do not force another round.
 - **Waves.** All applicable streams run round 1 on the SAME pushed head and
   report before remediation; ONE ledger, ONE remediation commit, ONE follow-up
   wave on that delta. Target <= 2 waves; a third needs a named open BLOCKER/MAJOR.
-- **Minors.** Fold accepted MINOR/NIT into the same commit as the majors, or
-  defer them in the remediation comment. Never a commit just for minors after
-  all streams are terminal: that re-stales the head.
+- **Minors.** Fold accepted MINOR/NIT into the majors' commit or defer them.
+  Never a minors-only commit after all streams are terminal: it re-stales the head.
 - **Freshness.** A delta round is `### Agent review — round <N>`, `Scope:
   <prev-head>..<head>`, by an independent reviewer. MECHANICAL rebase/merge of
-  main (`scripts/rebase_proof.py`) keeps rounds fresh on its proof; docs,
-  comments or tests need only a delta round. Executable code, minor fixes
-  included, needs a delta round plus QA if a QA'd surface moved.
+  main (`scripts/rebase_proof.py`) keeps rounds fresh on its proof. A clean
+  stream is NOT re-run when the delta misses its surface: a test-only, CI-fix or
+  comment-only commit after clean rounds gets at most a delta code check, no
+  QA/design/UX round. Executable code needs a delta round plus QA re-testing prior
+  FAIL rows and the surfaces it moved; other rows stay `retained (<sha>)`.
 - **Hygiene.** Rounds only on pushed heads; one comment per stream per round; no
   `re-pin`/`addendum` comments. Amend your own round (`gh api -X PATCH`) only
   for provenance/typos, before any remediation reply; never change `Scope:`.
-- **Tone.** Collaborative: state the problem, evidence and a suggested fix; note
-  what works in a line. No retraction/correction theatre; disagree once, with
-  evidence, then settle.
-- **Stop.** Past 3 waves, or review-driven growth past ~2x the original diff,
-  the manager splits follow-on scope into a separate PR; an open BLOCKER/MAJOR
-  is never split out of the PR being merged.
+- **Tone.** Collaborative: problem, evidence, suggested fix. No retraction
+  theatre; disagree once, with evidence, then settle.
+- **Stop.** Past 3 waves or ~2x review-driven diff growth, split follow-on scope
+  into another PR; never an open BLOCKER/MAJOR.
 
 ## Model provenance
 
@@ -139,7 +141,6 @@ work around it. A missing required independent round blocks; never invent one.
 ## Rolling out role policy
 
 Seeds update only unedited, install-recorded rows. Pilot via `agent op=show
-<role>` plus a fresh `task(agent=<role>)`, not `load_seed`: it reads this guide,
-keeps scope, escalates a destructive step. Keep prompts, responses, served model
-in scratch. Merge into local prompts: back up, keep edits, security/approval
-policy, tools, model/effort; read back.
+<role>` plus a fresh `task(agent=<role>)`, not `load_seed`. Merge into local
+prompts: back up, keep edits, security/approval policy, tools, model/effort;
+read back.

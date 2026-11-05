@@ -724,3 +724,30 @@ async def test_an_advisory_fault_after_a_delivered_dm_is_never_a_failure(
 
 def refused_code(outcome: dict[str, Any]) -> str:
     return str(outcome.get("code") or "")
+
+
+def test_a_trial_ended_refusal_names_its_typed_code_for_the_agent() -> None:
+    """Teams trial D9: a post into a paused org must tell the agent WHY.
+
+    The hub answers 403 ``team_trial_ended``; ``_refusal`` keeps the code (it is
+    in the machine-code grammar) and the hub's own sentence, and the footer names
+    the code, so the agent reads "subscribe to continue" rather than a generic
+    failure it might retry. The ``details`` (dates, URLs) stay off the footer by
+    the allow-list.
+    """
+
+    failure = BridgeRefusal(
+        "team_trial_ended",
+        "This organization's Team trial ended. Subscribe to continue; history is kept.",
+        http_status=403,
+        details={
+            "tenant_id": "ten_1",
+            "trial_ended_at": "2026-12-03T14:05:00Z",
+            "subscribe_url": "https://console.radienthq.com/dashboard/team?tenant=ten_1",
+        },
+    )
+
+    assert _failure_text(failure) == (
+        "This organization's Team trial ended. Subscribe to continue; history is kept. "
+        "[refusal code=team_trial_ended]"
+    )

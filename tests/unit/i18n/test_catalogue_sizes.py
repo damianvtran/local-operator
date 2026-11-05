@@ -82,6 +82,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
     assert set(catalogues.DEFERRED_NAMESPACES) == {
         "wire.settings",
         "wire.settings.hub_defaults",
+        "wire.settings.hub_org",
         "wire.console",
         "wire.memory",
         "wire.host_speed",

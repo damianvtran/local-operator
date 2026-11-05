@@ -240,7 +240,22 @@ class SupplementBlock(TranscriptBlock):
         # collapse state), and a sound is an artifact, not decoration -- a batch of
         # fourteen must read as fourteen rows, never as a count. The row is text, not
         # a player: see ``supplement_mod.sound_row_text`` for the D10 rule.
-        for text in supplement_mod.sound_rows(self._sounds()):
+        #
+        # A FILE-origin sound (audio the turn wrote to disk) is painted as a FILE ROW
+        # instead: this surface cannot play audio, and the file on disk is the thing the
+        # reader can open -- the same clickable callout a written PDF gets.
+        sounds = self._sounds()
+        generated = [item for item in sounds if item.get("origin") != "file"]
+        written = [
+            {"path": item.get("path"), "name": str(item.get("path", "")).rsplit("/", 1)[-1]}
+            for item in sounds
+            if item.get("origin") == "file"
+            and isinstance(item.get("path"), str)
+            and item.get("path")
+        ]
+        if written:
+            lines.extend(self._file_rows(body, written))
+        for text in supplement_mod.sound_rows(generated):
             lines.append(self._fit(self._line(text, style=self._muted_style()), body))
         sounds_more = self._sounds_more()
         if sounds_more > 0:
@@ -253,6 +268,14 @@ class SupplementBlock(TranscriptBlock):
                     body,
                 )
             )
+
+        withheld = supplement_mod.withheld_line(
+            self._details.get("withheld"), self._details.get("withheld_more")
+        )
+        if withheld:
+            # One quiet line, muted like the state line: a refused pin or answer-named file
+            # must never vanish silently, and it is an explanation, not an artifact.
+            lines.append(self._fit(self._line(withheld, style=self._muted_style()), body))
 
         if show_line:
             line = self._state_line(disposition)
@@ -321,6 +344,12 @@ class SupplementBlock(TranscriptBlock):
         """
         if more_count <= 0:
             return []
+        if not self._more_paths():
+            # A count with no stored paths (unnamed sweep hits past the sweep's file bound,
+            # QA round 2 Q4): state it, but not as a clickable disclosure -- expanding it
+            # would open onto nothing. ``_more_line`` stays unset so no click lands here.
+            text = supplement_mod.more_text(more_count)
+            return [self._fit(self._line(text, style=self._muted_style()), body)]
         if not self._expanded:
             self._more_line = base_index
             text = supplement_mod.more_text(more_count)

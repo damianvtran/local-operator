@@ -922,6 +922,10 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # the more useful of the two answers, and a gate in front of it would put
         # it behind a word (`ls`) nobody needs to type.
         "network": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/network`, whose shape it copies: bare `/sound` answers
+        # with the current sound, on/off and volume, and the space opens the
+        # verb vocabulary (`SOUND_SUBCOMMANDS`), then ids for use/preview.
+        "sound": ArgumentMode.OPTIONAL,
         # NEWLY OPTIONAL, and that is the whole change: the space after `/new`
         # used to offer nothing. It now offers `remote` and every peer this
         # device knows, which is the one path to a session on another device —

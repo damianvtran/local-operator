@@ -2994,6 +2994,12 @@ class ProjectionFold:
                 # the row's own ``sounds_more``. Same absence rule (zero is no fact).
                 if event.sounds_more:
                     beat["sounds_more"] = int(event.sounds_more)
+                # The withheld notice, same absence rule: a refusal the live beat drops
+                # is a refusal the phone never shows until a cold open.
+                if event.withheld:
+                    beat["withheld"] = [dict(item) for item in event.withheld]
+                if event.withheld_more:
+                    beat["withheld_more"] = int(event.withheld_more)
                 p.supplements[event.anchor] = beat
         # Unknown events are dropped by design: the fold renders a SUBSET of
         # the harness taxonomy (the phone has no use for wake/loop internals),

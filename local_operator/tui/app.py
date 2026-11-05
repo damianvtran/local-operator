@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import inspect
 import logging
 import os
@@ -139,8 +140,11 @@ from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
 from local_operator.i18n.keys import tui_setup_cues as _setup_keys
+from local_operator.i18n.keys import tui_small as _small_keys
+from local_operator.i18n.keys import tui_sound as _sound_keys
 from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
+from local_operator.i18n.keys import tui_update as _upd
 from local_operator.i18n.text import register_refresh, tr
 from local_operator.logger import current_log_file
 
@@ -210,6 +214,7 @@ from local_operator.slash_commands import (
     PROJECT_PAGE_VERBS,
     SESSION_COPY_FLAG,
     SLASH_COMMANDS,
+    SOUND_SUBCOMMANDS,
     agent_subcommand_rows,
     network_subcommand_rows,
     primary_slash_name,
@@ -223,6 +228,7 @@ from local_operator.slash_commands import (
     refresh_project_store,
     run_project_slash_op,
     slash_command_for,
+    sound_subcommand_rows,
     unknown_flag_refusal,
 )
 from local_operator.supplements.contract import SUPERSEDED_ERROR, reader_disposition
@@ -605,10 +611,22 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
+#: `/update`'s progress notices. Their own namespace because they carry the
+#: reassurance the operator asked for (2026-11-03): an update does not stop a
+#: running session. Session runtimes are detached processes
+#: (`session/runtime/launch.py`, `spawn_disclaimed`), and `/update` relaunches
+#: only this terminal viewer; `_relaunch_refusal` holds the relaunch whenever
+#: in-process work would be cut, which is the `relaunch_when_idle` arm.
+#: The reassurance is TRUE ONLY ON THE GENERATION LAYOUT
+#: (`update.upgrade_runs_in_generation`): pip, pipx and off-POSIX uv-tool
+#: rewrite site-packages in place under the running fleet, so those installs get
+#: the `*_in_place` keys, which caution rather than reassure (review M1).
+_t_update = tr("tui.update")
 #: `/tag` and `/tags` copy. TUI-owned, English-only: the surface describes THIS
 #: terminal's conversation labels and sidebar grouping, and it has no desktop
 #: counterpart to keep translated in step.
 _t_tags = tr("tui.tags")
+_t_sound = tr("tui.sound")
 #: The queued-ask surfaces' own namespace (R5). Read through the binding at every
 #: use site, never copied: a language move re-materialises the catalogue.
 _t_asks = tr("tui.asks")
@@ -12736,6 +12754,15 @@ class OperatorApp(App[None]):
         self.run_worker(
             self._bridge_receiver_catch_up(), thread=False, group="bridge-receiver-catch-up"
         )
+        # THE ORG AGENT HUB GATE at TUI start. A terminal-only machine never
+        # reaches the daemon lifespan, so without this its cached Radient Team
+        # eligibility (which decides whether the org-hub guide, hints and
+        # settings exist at all) would only move at sign-in. A refresh only —
+        # no catalogue pull from a TUI; enrolment rides sign-in and the daemon.
+        # A thread worker: the memberships read is blocking network I/O.
+        self.run_worker(
+            self._org_hub_gate_refresh, thread=True, group="org-hub-gate", exit_on_error=False
+        )
         # An empty transcript is the boot layout's whole precondition, and the
         # session starts empty — so the app opens in it. Set here rather than in
         # the stylesheet's base rules because this is state, not style: it is the
@@ -13586,11 +13613,12 @@ class OperatorApp(App[None]):
             if window_us > 0 and window_tokens > 0
             else ""
         )
-        billed_unknown = bool(
-            usage is not None
-            and (getattr(usage, "input_tokens", 0) or getattr(usage, "output_tokens", 0))
-            and cost is None
-        )
+        from local_operator.session.spend import has_reported_tokens
+
+        # Legacy snapshots may have no root ledger. Preserve the shared receipt
+        # semantics here too: cache/reasoning-only and stamped-zero receipts are
+        # activity, unlike a never-used session with no reading.
+        billed_unknown = bool(usage is not None and has_reported_tokens(usage) and cost is None)
         mcp_servers = list(getattr(state, "mcp_servers", []) or [])
         task_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "task"]
         bash_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "bash"]
@@ -14324,6 +14352,17 @@ class OperatorApp(App[None]):
                 pass  # a failed probe is the old deferred behaviour, not a crash
 
         self.run_worker(_run(), exclusive=False)
+
+    @staticmethod
+    def _org_hub_gate_refresh() -> None:
+        """Refresh the org Agent Hub gate record for this config root (6 h TTL)."""
+        try:
+            from local_operator.hub_org import eligibility
+            from local_operator.paths import config_dir
+
+            eligibility.refresh(config_dir(), boundary="tui-start")
+        except Exception:  # noqa: BLE001 — a surface start never fails for this
+            pass
 
     async def _bridge_receiver_catch_up(self) -> None:
         """Run the shared receiver catch-up for this TUI's config root.
@@ -18262,7 +18301,7 @@ class OperatorApp(App[None]):
         # upgrade`` used to cancel the relaunch after the wheel was in.
         self._update_in_progress = True
         self._set_composer_read_only(True)
-        self._system_notice("checking for updates…")
+        self._system_notice(_t_update(_upd.checking()))
         # exclusive left false on purpose: Textual exclusivity CANCELS the
         # running worker, and cancelling the installer mid-write is worse
         # than a refused second ``/update``. The flag above is the mutex.
@@ -18294,6 +18333,7 @@ class OperatorApp(App[None]):
             refresh_service_daemons_after_upgrade,
             tui_editable_refusal,
             tui_installer_failure,
+            upgrade_runs_in_generation,
         )
 
         try:
@@ -18331,7 +18371,16 @@ class OperatorApp(App[None]):
             # PyPI after one printed line. CLI already does this; the TUI
             # used to replace the snapshot silently.
             self.call_from_thread(self._system_notice, git_snapshot_notice())
-        self.call_from_thread(self._system_notice, f"updating to v{result.latest}…")
+        # Decided ONCE, before the installer runs: `perform_upgrade` routes on the
+        # same predicate, so the sentence painted here and the closing one below
+        # describe the install that actually happens.
+        in_generation = upgrade_runs_in_generation(kind)
+        updating_msg = (
+            _upd.updating(version=str(result.latest))
+            if in_generation
+            else _upd.updating_in_place(version=str(result.latest))
+        )
+        self.call_from_thread(self._system_notice, _t_update(updating_msg))
 
         def _report_prune(plan: PrunePlan) -> None:
             """Say what a prune removed, in the CLI's own sentence.
@@ -18420,10 +18469,20 @@ class OperatorApp(App[None]):
                 self._system_notice(line)
             if trigger.failure:
                 self._system_notice(trigger.failure, "warning")
+            version = str(installed)
             if self._relaunch_refusal():
-                self._system_notice(f"updated to v{installed}; relaunch when local work is idle")
+                closing = (
+                    _upd.relaunch_when_idle(version=version)
+                    if in_generation
+                    else _upd.relaunch_when_idle_in_place(version=version)
+                )
             else:
-                self._system_notice(f"updated to v{installed} — restarting…")
+                closing = (
+                    _upd.restarting(version=version)
+                    if in_generation
+                    else _upd.restarting_in_place(version=version)
+                )
+            self._system_notice(_t_update(closing))
             self._request_relaunch(force=True)
 
         self.call_from_thread(_relaunch_after_upgrade)
@@ -21137,6 +21196,60 @@ class OperatorApp(App[None]):
             # when the user meant to message"), and the same rule protects
             # ``/agent`` — Tab completes profiles, the picker shows the verb.
             editor.set_name_choices(frozenset(c.name.lower() for c in self._agent_choices()))
+
+    def _sound_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
+        """Rows for ``/sound <…>``: the verbs, then ids for the id-taking verbs.
+
+        UX round 1, U2: custom ids are hashed slugs (``custom-doorbell-fc7204``)
+        that nobody should have to type, and ``/theme `` already lists its
+        values. ``use`` and ``preview`` offer every sound (the registry's
+        choices, so the list matches the ``/settings`` row); ``rename`` and
+        ``remove`` offer only the user's own, the only ids they accept. Rows are
+        ``<verb> <id>`` compounds for the reason ``_project_argument_choices``
+        gives: the matcher compares the whole argument.
+        """
+        from local_operator.tui.widgets.command_picker import slash_argument
+
+        argument = slash_argument(
+            editor.text,
+            editor._argument_commands,
+            editor._caret_offset(),
+            editor._command_names,
+        )
+        if argument is None:
+            return []
+        first, space, _rest = argument.partition(" ")
+        if not space:
+            return [ArgumentChoice(word, help_text) for word, help_text in sound_subcommand_rows()]
+        verb = first.casefold()
+        if verb not in ("use", "preview", "rename", "remove"):
+            return []
+        try:
+            from local_operator import settings_io
+            from local_operator.notifications import custom_sounds, sound
+
+            selected = sound.configured().sound_id
+            choices = settings_io.BY_KEY["notifications.sound.id"].resolved_choices
+            if verb in ("rename", "remove"):
+                own = {row.id for row in custom_sounds.list_sounds()}
+                choices = tuple(choice for choice in choices if choice.value in own)
+        except Exception:  # noqa: BLE001 — a picker list never crashes the app
+            return []
+        return [
+            ArgumentChoice(
+                f"{verb} {choice.value}",
+                str(choice.description),
+                detail="← current" if choice.value == selected else "",
+                # Paint the id alone (design round 2, D10), the `display`
+                # contract `/new`'s device picker uses: the verb is the same on
+                # every row, and leaving it in the name column cost `remove `
+                # seven cells, so a hashed custom slug ellipsized there while
+                # `use ` showed it whole. The VALUE keeps the verb, because the
+                # matcher compares the whole argument.
+                display=str(choice.value),
+            )
+            for choice in choices
+        ]
 
     def _project_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/project <…>`` list: the reserved verbs, then names.
@@ -40180,7 +40293,17 @@ class OperatorApp(App[None]):
 
         directory = config_dir()
         sections = [
-            section
+            (
+                # The shared section description names `lop sound preview`,
+                # right for the desktop and `lop config` but a shell detour
+                # inside the TUI (design round 1, D2): the palette shows the
+                # TUI's own sentence for this one section.
+                dataclasses.replace(
+                    section, description=_t_sound(_sound_keys.section_description())
+                )
+                if section.name == "notification_sound"
+                else section
+            )
             for section in settings_io.SECTIONS
             if bridge_availability.section_visible(section.name, directory)
         ]
@@ -40473,6 +40596,9 @@ class OperatorApp(App[None]):
         if view is None:
             return False
         self._settings_view = None
+        # Leaving the page ends any sound audition it started (UX round 1, U1),
+        # by every route that tears the page down, not only its own `esc`.
+        self._stop_sound_preview()
         # A theme PREVIEW is applied to the running app and never stored
         # (#440 §3), so it has to be undone before the page that owns it goes
         # away. Done here rather than only in the page's own `esc` handler
@@ -42004,6 +42130,11 @@ class OperatorApp(App[None]):
         try:
             if message.key == "tui.theme" and message.value:
                 self._apply_theme(str(message.value), preview=True)
+            elif message.key == "notifications.sound.id" and message.value:
+                # An AUDITION, not a paint: nothing to revert, so the page arms
+                # no capture for it (`SettingsView._preview_choice`). Debounced,
+                # so a held arrow plays only the row the cursor settles on.
+                self._schedule_sound_preview(str(message.value), browsing=True)
         except Exception:  # noqa: BLE001 — a preview is a bonus, never a failure
             logger.debug("settings: preview failed for %s", message.key, exc_info=True)
 
@@ -42028,6 +42159,8 @@ class OperatorApp(App[None]):
                     thread=False,
                     group="bridge-receiver-setting",
                 )
+            if message.key.startswith("notifications.sound."):
+                self._audition_sound_commit(message.key, message.value)
             if message.key == "tui.theme" and message.value:
                 self._apply_theme(str(message.value))
             elif message.key in (
@@ -42051,6 +42184,162 @@ class OperatorApp(App[None]):
                 self._repaint_themed_widgets()
         except Exception:  # noqa: BLE001 — the write landed; the repaint is a bonus
             logger.debug("settings: live apply failed for %s", message.key, exc_info=True)
+
+    #: The trailing debounce for auditioning a notification sound from
+    #: `/settings` (addendum 2, §1 U2). Arrowing through twelve sounds must play
+    #: only the row the cursor LANDS on: a sound per keypress is a burst the
+    #: user cannot stop, and 250 ms is long enough to swallow keyboard
+    #: auto-repeat (~30-80 ms) while short enough to feel immediate on a pause.
+    SOUND_PREVIEW_DEBOUNCE_S = 0.25
+
+    def _schedule_sound_preview(
+        self, sound_id: str, volume: float | None = None, *, browsing: bool = False
+    ) -> None:
+        """Audition ``sound_id`` once the cursor has been still for the debounce.
+
+        ONE pending timer, replaced on every call, so browsing and committing
+        share the window: a commit right after browsing onto the same row
+        restarts the timer instead of adding a second sound (U1's "commit and
+        preview share the one debounce"). The value is read when the timer
+        FIRES, so the last request wins whatever arrived in between.
+
+        ``browsing`` marks a cursor-move audition. It plays only if the sound
+        list is STILL OPEN when the timer fires: arrowing onto a sound and then
+        straight off the group (or pressing esc) inside the window is a cancel,
+        and a sound arriving after the list has closed would be one the user
+        moved away from. A commit is never cancelled this way, because a commit
+        collapses the list by design.
+        """
+        self._sound_preview_request = (sound_id, volume, browsing)
+        # The sound still playing is for a row the cursor has LEFT (or a value
+        # just replaced by a commit), so it stops now, not when the debounce
+        # fires: at most one audition is ever audible (UX round 1, U1).
+        from local_operator.notifications import sound
+
+        sound.stop_preview()
+        pending = getattr(self, "_sound_preview_timer", None)
+        if pending is not None:
+            pending.stop()
+        self._sound_preview_timer = self.set_timer(
+            self.SOUND_PREVIEW_DEBOUNCE_S, self._fire_sound_preview
+        )
+
+    def _fire_sound_preview(self) -> None:
+        self._sound_preview_timer = None
+        request = getattr(self, "_sound_preview_request", None)
+        self._sound_preview_request = None
+        if request is None:
+            return
+        sound_id, volume, browsing = request
+        if browsing:
+            view = self._settings_view
+            if view is None or getattr(view, "_expanded", None) != "notifications.sound.id":
+                return
+        self._play_sound_preview(sound_id, volume, announce=False)
+
+    def _play_sound_preview(self, sound_id: str, volume: float | None, *, announce: bool) -> None:
+        """Start one detached audition through the shared ``sound.preview``.
+
+        ``announce`` is for `/sound preview`, the one caller whose receipt IS
+        the answer. A page preview stays quiet when it plays (the sound is the
+        receipt) and speaks only when it cannot: over SSH, where hearing nothing
+        would otherwise read as a broken feature. That refusal is said ONCE per
+        app run, because browsing a list over SSH would otherwise print a line
+        per settled row.
+        """
+        from local_operator.notifications import sound
+
+        try:
+            result = sound.preview(sound_id, volume)
+        except Exception:  # noqa: BLE001 — an audition must never break the page
+            logger.debug("sound preview failed for %s", sound_id, exc_info=True)
+            return
+        outcome = result.outcome
+        if not announce:
+            if outcome == "ssh" and not getattr(self, "_sound_ssh_noted", False):
+                self._sound_ssh_noted = True
+                self._system_notice(_t_sound(_sound_keys.preview_ssh()), "warning")
+            return
+        if outcome == "play":
+            self._system_notice(
+                _t_sound(
+                    _sound_keys.preview_playing(
+                        name=self._sound_label(result.sound_id), volume=f"{result.volume:g}"
+                    )
+                )
+            )
+        elif outcome == "unknown":
+            self._system_notice(_t_sound(_sound_keys.not_found(id=sound_id)), "warning")
+        else:
+            key = {
+                "system": _sound_keys.preview_system,
+                "muted": _sound_keys.preview_muted,
+                "silent": _sound_keys.preview_silent,
+                "ssh": _sound_keys.preview_ssh,
+                "failed": _sound_keys.preview_failed,
+            }[outcome]
+            self._system_notice(_t_sound(key()), "info" if outcome == "system" else "warning")
+
+    def _audition_sound_commit(self, key: str, value: Any) -> None:
+        """Play the result of a COMMITTED sound setting (addendum 2, §1 U1).
+
+        * ``.id`` → the new sound (``system`` plays nothing: lop has no sound
+          to play for it, which `sound.preview` reports and the page ignores).
+        * ``.volume`` → the CURRENT sound at the new level, so the user hears
+          the level they just chose; 0 plays nothing.
+        * ``.enabled`` → on: the current sound once; off: nothing.
+
+        Through the same debounce as browsing, so Enter on a row the cursor
+        just settled on is ONE sound, not a browse audition plus a commit one.
+        """
+        from local_operator.notifications import sound
+
+        if key == "notifications.sound.enabled" and value is False:
+            # "Off" must silence what is already sounding AND what is queued
+            # (review round 1, m1): a volume commit audition still inside its
+            # window would otherwise play after the user just turned sound off.
+            self._stop_sound_preview()
+            return
+        if key == "notifications.sound.id":
+            if value:
+                self._schedule_sound_preview(str(value))
+            return
+        current = sound.configured().sound_id
+        if key == "notifications.sound.volume":
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                self._schedule_sound_preview(current, float(value))
+        elif key == "notifications.sound.enabled" and value is True:
+            self._schedule_sound_preview(current)
+
+    def _stop_sound_preview(self) -> None:
+        """End the audition: cancel a pending one and stop the one sounding.
+
+        The gestures that mean "not that one any more" (UX round 1, U1): `esc`
+        or leaving the Sound list, closing `/settings`, `/sound off`. A NEW
+        audition needs no call here — ``sound.preview`` supersedes the player
+        itself — so this is only for the exits that start nothing.
+        """
+        pending = getattr(self, "_sound_preview_timer", None)
+        if pending is not None:
+            pending.stop()
+        self._sound_preview_timer = None
+        self._sound_preview_request = None
+        try:
+            from local_operator.notifications import sound
+
+            sound.stop_preview()
+        except Exception:  # noqa: BLE001 — stopping a sound must never break an exit
+            logger.debug("could not stop the sound preview", exc_info=True)
+
+    @staticmethod
+    def _sound_label(sound_id: str) -> str:
+        """The localized display name for ``sound_id`` (a custom sound's own name)."""
+        from local_operator import settings_io
+
+        for choice in settings_io.BY_KEY["notifications.sound.id"].resolved_choices:
+            if choice.value == sound_id:
+                return str(choice.description or sound_id)
+        return sound_id
 
     def _refresh_subagent_view(self, job_id: str | None = None) -> None:
         """Repaint the open view from the ledger's CURRENT state.
@@ -42719,6 +43008,16 @@ class OperatorApp(App[None]):
         changed = sorted(getattr(change, "changed_keys", ()))
         if not changed:
             return
+        if getattr(change, "source", "disk") != "local" and self._settings_view is not None:
+            # An OPEN /settings page holds its own snapshot (TUI audit U4): a
+            # write from another process must reach it, or the page keeps
+            # painting a value the file no longer has. A LOCAL write came from
+            # this page (or a /sound verb, whose write also re-read the file)
+            # and is already painted. The page defers itself mid-edit.
+            try:
+                self._settings_view.reload_from_disk()
+            except Exception:  # noqa: BLE001 — a stale page must not break the listener
+                logger.debug("settings page reload failed", exc_info=True)
         if "aida.name" in changed:
             # THE SETTING-PATH LAG (review round 1, R1-M3): a rename written
             # outside `/aida rename` — the /settings page, `lop config edit`,
@@ -44551,6 +44850,8 @@ class OperatorApp(App[None]):
         # the other.
         elif command == "/network":
             self._cmd_network(arg, notice)
+        elif command == "/sound":
+            self._cmd_sound(arg)
         elif command == "/logout":
             self._cmd_logout(arg, notice)
         elif command == "/credential":
@@ -52694,6 +52995,12 @@ class OperatorApp(App[None]):
             )
             picker.set_notice("")
             return
+        if message.command == "sound":
+            # Two-level like `/project`: the verbs, then sound ids once an
+            # id-taking verb's space is typed (`_sound_argument_choices`).
+            picker.set_choices(self._sound_argument_choices(editor))
+            picker.set_notice("")
+            return
         if message.command == "project":
             # Two-level like `/mcp`, filled by ONE builder that reads the buffer
             # (see `_project_argument_choices`): the reserved verbs first, then
@@ -53195,6 +53502,12 @@ class OperatorApp(App[None]):
             # catch-up used when a team/agent registry appears after the list
             # opened. Reuse the opening fill so rows and snapshots stay paired.
             self._fill_name_argument_list(editor, message.command)
+        elif message.command == "sound":
+            # `/sound use `/`preview `/`rename `/`remove ` crossing into (or out
+            # of) the id slot; the same builder as the opening.
+            picker = editor.picker
+            picker.set_notice("")
+            picker.set_choices(self._sound_argument_choices(editor))
         elif message.command == "project":
             # `/project show `/`delete `/`link `/`unlink ` crossing into (or
             # back out of) the name slot. Same fill as the opening, so the rows
@@ -54311,6 +54624,275 @@ class OperatorApp(App[None]):
         self.run_worker(run(), group="mobile-setup")
 
     # -- /network -----------------------------------------------------------
+
+    def _cmd_sound(self, arg: str) -> None:
+        """``/sound [verb …]`` — the notification sound, from the TUI (addendum 2, §1 U3).
+
+        THE SAME CODE AS ``lop sound``, not a second implementation: the store
+        verbs call ``custom_sounds`` (and ``sound_cli.load_source`` for the
+        file/digest read), the previews call ``sound.preview``, and the four
+        setting verbs write through ``settings_io.write_setting`` — the one
+        funnel the page, ``lop config edit`` and the desktop share. So the
+        config watcher fans the change out to the desktop and the phone exactly
+        as a page write would, and the registry's validation (range, known id)
+        is the refusal the user reads.
+
+        Every verb answers with ONE notice (the receipt). ``add`` decodes up to
+        10 MB of audio, so it runs off the loop; the rest are small file writes.
+
+        The text after ``add`` and ``rename`` is split shell-style, so a path or
+        a name containing spaces can be quoted; an unbalanced quote falls back
+        to plain whitespace splitting rather than refusing the line.
+        """
+        import shlex
+
+        try:
+            pieces = shlex.split(arg)
+        except ValueError:
+            pieces = arg.split()
+        verb = pieces[0].casefold() if pieces else ""
+        rest = pieces[1:]
+        if not verb:
+            self._sound_status()
+            return
+        if verb not in SOUND_SUBCOMMANDS:
+            self._system_notice(_t_sound(_sound_keys.usage()), "warning")
+            return
+        if verb == "list":
+            self._sound_list()
+        elif verb == "preview":
+            from local_operator.notifications import sound
+
+            target = rest[0] if rest else sound.configured().sound_id
+            self._play_sound_preview(target, None, announce=True)
+        elif verb == "use":
+            if len(rest) != 1:
+                self._system_notice(_t_sound(_sound_keys.usage()), "warning")
+                return
+            if not self._sound_known(rest[0]):
+                # The plain sentence `preview` gives (design round 1, D3), not
+                # the validator's wall of every id; range errors still come
+                # from the registry, where its wording reads fine.
+                self._system_notice(_t_sound(_sound_keys.not_found(id=rest[0])), "warning")
+                return
+            if self._sound_write("notifications.sound.id", rest[0]):
+                self._system_notice(_t_sound(_sound_keys.selected(name=self._sound_label(rest[0]))))
+                self._audition_sound_commit("notifications.sound.id", rest[0])
+        elif verb == "volume":
+            try:
+                level = int(rest[0]) if len(rest) == 1 else None
+            except ValueError:
+                level = None
+            if level is None:
+                self._system_notice(_t_sound(_sound_keys.volume_range()), "warning")
+                return
+            # Out-of-range values go to the registry on purpose: its refusal
+            # ("must be at most 100") is the one every writer shows.
+            if self._sound_write("notifications.sound.volume", level):
+                self._system_notice(_t_sound(_sound_keys.volume_set(volume=str(level))))
+                self._audition_sound_commit("notifications.sound.volume", level)
+        elif verb in ("on", "off"):
+            if self._sound_write("notifications.sound.enabled", verb == "on"):
+                self._system_notice(
+                    _t_sound(_sound_keys.enabled() if verb == "on" else _sound_keys.disabled())
+                )
+                self._audition_sound_commit("notifications.sound.enabled", verb == "on")
+        elif verb == "add":
+            if not rest:
+                self._system_notice(_t_sound(_sound_keys.usage()), "warning")
+                return
+            # `--select` chooses the new sound in the same step (UX round 1,
+            # U3), the `lop sound add --select` flag; anywhere after the path.
+            select = "--select" in rest[1:]
+            name = " ".join(word for word in rest[1:] if word != "--select") or None
+            self.run_worker(
+                self._sound_add(rest[0], name, select=select), thread=False, group="sound"
+            )
+        elif verb == "rename":
+            if len(rest) < 2:
+                self._system_notice(_t_sound(_sound_keys.usage()), "warning")
+                return
+            self._sound_store_op("rename", rest[0], " ".join(rest[1:]))
+        elif verb == "remove":
+            if len(rest) != 1:
+                self._system_notice(_t_sound(_sound_keys.usage()), "warning")
+                return
+            self._sound_store_op("remove", rest[0], "")
+        elif verb == "doctor":
+            from local_operator import sound_cli
+
+            # `lop sound doctor`'s own lines, verbatim: a diagnostic of
+            # terminal and cmux config, English operator text by the same rule
+            # as the CLI it comes from (docs/I18N.md, `lop disk`).
+            lines: list[str] = []
+            sound_cli.doctor_command(say=lines.append)
+            # The CLI's `lop:` lead names the program in a shell; inside lop it
+            # is noise (design round 1, D7).
+            report = "\n".join(line.removeprefix("lop: ") for line in lines)
+            self._system_notice(report)
+
+    def _sound_write(self, key: str, value: Any) -> bool:
+        """Write one ``notifications.sound.*`` key through the settings funnel."""
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        try:
+            settings_io.write_setting(ConfigManager(config_dir()), settings_io.BY_KEY[key], value)
+        except (ValueError, OSError) as error:
+            self._system_notice(_t_sound(_sound_keys.save_failed(reason=str(error))), "warning")
+            return False
+        return True
+
+    def _sound_status(self) -> None:
+        from local_operator.notifications import sound
+
+        stored = sound.configured()
+        state = _sound_keys.on() if stored.enabled else _sound_keys.off()
+        self._system_notice(
+            _t_sound(
+                _sound_keys.status(
+                    name=self._sound_label(stored.sound_id),
+                    volume=f"{stored.effective_volume:g}",
+                    state=_t_sound(state),
+                )
+            )
+        )
+
+    def _sound_list(self) -> None:
+        """Every sound in one notice: built-ins, ``system``, then the user's own.
+
+        Read from the registry's choices (the same list the ``/settings`` row
+        expands), so a sound added from any surface is listed here at once.
+        ``●`` marks the selected id, the page's own selected-choice glyph.
+        """
+        from local_operator import settings_io
+        from local_operator.notifications import custom_sounds, sound
+
+        selected = sound.configured().sound_id
+        custom_ids = {row.id for row in custom_sounds.list_sounds()}
+        choices = settings_io.BY_KEY["notifications.sound.id"].resolved_choices
+        # Sized from the CONTENT (design round 1, D1), not a fixed 17 cells,
+        # and from the BUILT-IN ids only: a hashed custom slug (20+ cells) must
+        # not drag every built-in name rightward. A longer id, or a row whose
+        # name would wrap at the transcript's width, puts its name on the next
+        # line under the name column instead, so no row wraps mid-name.
+        builtin = [str(c.value) for c in choices if c.value not in custom_ids]
+        width = max((cell_len(value) for value in builtin), default=0)
+        room = self._notice_text_width()
+        lines = [_t_sound(_sound_keys.list_title()), _t_sound(_sound_keys.list_hint())]
+        mine: list[str] = []
+        for choice in choices:
+            value = str(choice.value)
+            mark = "●" if value == selected else " "
+            # The page's own `(default)` marker for the shipped default (D6),
+            # the same keyed string, so the two surfaces cannot drift.
+            tail = (
+                " " + tr("tui.small")(_small_keys.settings_view_default_marker()).strip()
+                if value == sound.DEFAULT_SOUND_ID
+                else ""
+            )
+            name = f"{choice.description}{tail}"
+            pad = " " * max(0, width - cell_len(value))
+            one_line = f"{mark} {value}{pad} {name}"
+            if cell_len(value) > width or cell_len(one_line) > room:
+                rows = [f"{mark} {value}", f"    {name}"]
+            else:
+                rows = [one_line]
+            (mine if value in custom_ids else lines).extend(rows)
+        if mine:
+            lines.append(_t_sound(_sound_keys.list_yours()))
+            lines.append(_t_sound(_sound_keys.list_yours_hint()))
+            lines.extend(mine)
+        self._system_notice("\n".join(lines))
+
+    def _notice_text_width(self) -> int:
+        """Cells a ``/sound list`` line has before its notice wraps it.
+
+        Derived from the layout, not read off an already-painted notice (design
+        round 2, D8): the first ``/sound list`` of a session is usually typed on
+        the welcome screen, where no notice exists yet. A notice composed under
+        the boot card takes the card's clamp, ``max(75, 70%)`` of the lane
+        (``Screen.boot.boot-card`` in local_operator.tcss), so at 100 columns it
+        is 75 cells wide inside a 96-cell transcript. ``_boot_notice_box`` is the
+        one owner of that answer, shared with the boot-column layout pass, so
+        this cannot drift from where the block is actually drawn. Once the card
+        stands down a notice spans the transcript. The 2-cell gutter lead is
+        subtracted either way.
+        """
+        try:
+            view = self._transcript_view()
+            _box, card, card_up = self._boot_notice_box(self.size.width)
+            width = card if card_up else view.scrollable_content_region.width
+        except Exception:  # noqa: BLE001 — unmounted transcript: no wrap guard
+            return 1_000
+        return max(20, width - 2)
+
+    @staticmethod
+    def _sound_known(sound_id: str) -> bool:
+        from local_operator import settings_io
+
+        choices = settings_io.BY_KEY["notifications.sound.id"].resolved_choices
+        return any(choice.value == sound_id for choice in choices)
+
+    async def _sound_add(self, source: str, name: str | None, *, select: bool = False) -> None:
+        """Import a sound off the loop, then answer with one receipt."""
+        from local_operator import sound_cli
+        from local_operator.notifications import custom_sounds
+
+        def work() -> Any:
+            raw, label = sound_cli.load_source(source)
+            return custom_sounds.add(raw, source_name=label, name=name)
+
+        try:
+            row = await asyncio.to_thread(work)
+        except custom_sounds.SoundRejected as refusal:
+            self._system_notice(refusal.text, "warning")
+            return
+        except sound_cli.AttachmentMissing as missing:
+            self._system_notice(missing.text, "warning")
+            return
+        except OSError as error:
+            self._system_notice(
+                _t_sound(_sound_keys.read_failed(file=source, reason=str(error.strerror or error))),
+                "warning",
+            )
+            return
+        seconds = f"{row.duration_s:.2f}"
+        if select and self._sound_write("notifications.sound.id", row.id):
+            self._system_notice(
+                _t_sound(_sound_keys.added_selected(name=row.name, id=row.id, seconds=seconds))
+            )
+            self._audition_sound_commit("notifications.sound.id", row.id)
+            return
+        self._system_notice(_t_sound(_sound_keys.added(name=row.name, id=row.id, seconds=seconds)))
+
+    def _sound_store_op(self, op: str, sound_id: str, name: str) -> None:
+        """``rename`` / ``remove`` through ``custom_sounds``, with its own refusals."""
+        from local_operator.notifications import custom_sounds
+
+        try:
+            if op == "rename":
+                row = custom_sounds.rename(sound_id, name)
+                self._system_notice(_t_sound(_sound_keys.renamed(id=row.id, name=row.name)))
+                return
+            removal = custom_sounds.remove(sound_id)
+        except custom_sounds.SoundRejected as refusal:
+            # An unknown id gets the TUI's own sentence naming `/sound list`
+            # (review m2, QA Q1, design D2a); the shared copy names the CLI.
+            text = (
+                _t_sound(_sound_keys.not_found(id=sound_id))
+                if refusal.code == "not_found"
+                else refusal.text
+            )
+            self._system_notice(text, "warning")
+            return
+        text = _t_sound(_sound_keys.removed(name=removal.sound.name, id=removal.sound.id))
+        if removal.selection_reset:
+            # The store reset `notifications.sound.id` in the same lock; say so
+            # in the same receipt, since the user's selection just changed.
+            text = f"{text}\n{removal.reset_text()}"
+        self._system_notice(text)
 
     def _cmd_network(self, arg: str, notice: NoticeFn) -> None:
         """``/network [verb …]`` — this device's mesh, through the CLI's own verbs.
@@ -59628,6 +60210,8 @@ class OperatorApp(App[None]):
         # without this - the session's first search-heavy turn would leave the
         # segment holding the previous turn's figure while the ledger moved.
         search_spend = self._session_search_spend()
+        from local_operator.session.spend import has_reported_tokens
+
         if cost is not None or (
             self._session is not None and (self._subagent_costs or search_spend.searches)
         ):
@@ -59644,7 +60228,7 @@ class OperatorApp(App[None]):
             # dict alone would repaint the dead conversation's total into a band
             # that was just emptied on purpose.
             cost_text = self._spend_text(total)
-        elif message.usage is not None and getattr(message.usage, "input_tokens", 0):
+        elif message.usage is not None and has_reported_tokens(message.usage):
             # D20: the turn billed tokens but pricing is unknown — render an
             # explicit "unavailable" so the segment's absence reads as that,
             # not as "free".
@@ -60819,7 +61403,12 @@ class OperatorApp(App[None]):
         published = self._spend_channels_state
         if published is not None:
             if str(getattr(published, "knowledge", "unknown")) == "unknown":
-                return UNKNOWN_COST_CELL if billed_unknown else None
+                # A resumed record can have no last Usage at all. Its typed
+                # root rows already report activity in units (inference: calls),
+                # so the root must not be vetoed by a legacy last-usage flag.
+                # Do not infer activity merely from an unknown zero total.
+                active = any((getattr(row, "units", None) or 0) > 0 for row in published.rows)
+                return UNKNOWN_COST_CELL if active else None
             return self._spend_text() or None
         if cost is not None:
             return self._spend_text((cost or 0.0) + search_usd)

@@ -1540,6 +1540,41 @@ class RadientClient:
         teams = result.get("teams")
         return list(teams) if isinstance(teams, list) else []
 
+    def list_org_skills(self, tenant_id: str) -> List[Dict[str, Any]]:
+        """List an organization's shared skills (``GET /tenants/:tenantid/skills``).
+
+        The skill sibling of :meth:`list_org_teams`, and the read the org
+        catalogue (``hub_org.catalogue``) needs to show a member every kind the
+        organization shares in one place. Member+ with an active plan. The
+        envelope is ``{skills, sync_contract}`` with NO pagination (agent-server
+        ``SkillsResponse``: the tenant list follows the tenant-teams
+        convention), and list rows omit ``files`` -- :meth:`get_skill` is the
+        pull path that carries them. A bundle row carries its ``bundle``
+        identity on the list form too, which is how the catalogue can tell a
+        bundle-form skill from a document-form one without a detail read.
+
+        Returns:
+            The ``skills`` array; no skills is an empty list, not an error.
+
+        Raises:
+            APIError: When the hub refuses (401/403, §2.2's frozen vocabulary).
+        """
+        url = f"{self.base_url}/tenants/{tenant_id}/skills"
+        headers = self._get_headers(content_type="application/json")
+        try:
+            response = requests.get(url, headers=headers, allow_redirects=False)
+            response.raise_for_status()
+            self._refuse_redirect(response)
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not list the organization's shared skills",
+                secrets=self._credential_values(),
+            ) from e
+        result = self._publication_result(response, action="list the organization's shared skills")
+        skills = result.get("skills")
+        return list(skills) if isinstance(skills, list) else []
+
     def get_team(
         self,
         team_id: str,

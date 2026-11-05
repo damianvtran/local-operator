@@ -1,0 +1,7 @@
+{
+  "tui.highlights.withheld.line": "{count, plural, one {# файл не показан} few {# файла не показаны} many {# файлов не показано} other {# файла не показано}}: {reasons}",
+  "tui.highlights.withheld.reason.outside": "вне разрешённых папок",
+  "tui.highlights.withheld.reason.sensitive": "конфиденциальный файл",
+  "tui.highlights.withheld.reason.missing": "файл больше не существует",
+  "tui.highlights.withheld.reason.too_large": "слишком большой для предпросмотра"
+}

@@ -239,6 +239,16 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.chrome.spend.title": "D\u00e9penses et contexte",
     },
   },
+  "relay.composer": {
+    "fr": {
+      "relay.composer.action.connecting": "Connexion",
+      "relay.composer.action.send": "envoyer",
+      "relay.composer.action.steer": "orienter",
+      "relay.composer.action.stop": "arr\u00eater",
+      "relay.composer.action.stop_agent": "arr\u00eater l\u2019agent",
+      "relay.composer.action.stopping": "arr\u00eat en cours",
+    },
+  },
   "relay.health": {
     "fr": {
       "relay.health.dropped_detail": "Votre ordinateur n\u2019arrive pas \u00e0 joindre cette session pour l\u2019instant et continue d\u2019essayer. Tant qu\u2019il n\u2019y parvient pas, un envoi \u00e9choue aussit\u00f4t et votre texte reste dans la zone de saisie.",
@@ -249,6 +259,15 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.health.quiet_detail": "Sur votre ordinateur, cette session ne r\u00e9pond plus \u2014 elle est peut-\u00eatre occup\u00e9e ou bloqu\u00e9e. Un message peut \u00eatre signal\u00e9 en \u00e9chec et arriver malgr\u00e9 tout quand elle aura rattrap\u00e9 son retard. R\u00e9essayer ne l\u2019enverra pas en double.",
       "relay.health.reconnecting": "Reconnexion",
       "relay.health.reconnecting_detail": "Ce t\u00e9l\u00e9phone a perdu la connexion avec votre ordinateur et continue d\u2019essayer de se reconnecter. La session s\u2019y ex\u00e9cute peut-\u00eatre encore\u202f; un envoi peut \u00e9chouer tant que la connexion n\u2019est pas r\u00e9tablie.",
+    },
+  },
+  "relay.highlights": {
+    "fr": {
+      "relay.highlights.withheld.line": "{count, plural, one {# fichier non affich\u00e9} many {# de fichiers non affich\u00e9s} other {# fichiers non affich\u00e9s}}\u202f: {reasons}",
+      "relay.highlights.withheld.reason.missing": "le fichier n\u2019existe plus",
+      "relay.highlights.withheld.reason.outside": "hors des emplacements autoris\u00e9s",
+      "relay.highlights.withheld.reason.sensitive": "fichier sensible",
+      "relay.highlights.withheld.reason.too_large": "trop volumineux pour un aper\u00e7u",
     },
   },
   "relay.library": {

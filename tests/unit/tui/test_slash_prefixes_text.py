@@ -208,6 +208,8 @@ PREFIXES_TEXT_POLICY = {
     # the direction that cannot swallow a user's sentence.
     "tag": False,
     "tags": False,
+    # `/sound`'s words are a SUBCOMMAND vocabulary (below), not an inline list.
+    "sound": False,
 }
 
 
@@ -300,6 +302,9 @@ ARGUMENT_SHAPE_POLICY = {
     # in the design (§2.8.3) rather than left for a reader to discover, and is
     # harmless while no desktop surface queries this family.
     "network": ArgumentShape.SUBCOMMAND,
+    # `<verb> [id]` over `SOUND_SUBCOMMANDS`, the `/network` shape: `/sound use
+    # felt-marimba` is the command, `/sound is too loud today` stays prose.
+    "sound": ArgumentShape.SUBCOMMAND,
     # `<subcommand> [name]` over this command's OWN vocabulary
     # (`PROJECT_SUBCOMMANDS`), the same shape as `/network` and read through the
     # same `command_argument_words`. At most two tokens, the second name-shaped, so

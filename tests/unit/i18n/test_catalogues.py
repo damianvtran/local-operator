@@ -78,6 +78,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.notices",
         "wire.settings",
         "wire.settings.hub_defaults",
+        # The org Agent Hub section (Radient Team only) is its own child so its
+        # copy never moves the audited wire.settings locale hashes.
+        "wire.settings.hub_org",
         # Account-routing policy copy is an approved English-only child, not
         # an edit to the already-audited wire.settings or translated ledgers.
         "wire.settings.account_policy",

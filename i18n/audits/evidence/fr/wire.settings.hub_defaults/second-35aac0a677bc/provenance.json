@@ -1,0 +1,87 @@
+{
+  "auditor_agent": "i18n-auditor",
+  "auditor_session": "35aac0a677bc",
+  "actual_served_model": "openai/gpt-6.1-sol",
+  "actual_model_source": "Own completed assistant payload.usage.provider and payload.usage.model_id in persisted transcript",
+  "transcript_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/transcript.jsonl",
+  "task_start_timestamp": 1793719859.6621702,
+  "usage_entries": [
+    {
+      "entry_id": "b14b884613c54d7493557c01b522c619",
+      "timestamp": 1793720087.79305,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 138380,
+        "output_tokens": 2097,
+        "cache_read_tokens": 138112,
+        "context_tokens": 138380,
+        "reasoning_tokens": 121,
+        "at_ms": 1793720087355,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      },
+      "actions": [
+        "write"
+      ]
+    },
+    {
+      "entry_id": "662dd31b34234466b14d2a958982ac78",
+      "timestamp": 1793720103.733857,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 140701,
+        "output_tokens": 305,
+        "cache_read_tokens": 140544,
+        "context_tokens": 140701,
+        "at_ms": 1793720102809,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      },
+      "actions": [
+        "bash"
+      ]
+    },
+    {
+      "entry_id": "d8615d65c3e4429cbed078a334409073",
+      "timestamp": 1793720128.796768,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 141147,
+        "output_tokens": 1031,
+        "cache_read_tokens": 140800,
+        "context_tokens": 141147,
+        "reasoning_tokens": 336,
+        "at_ms": 1793720128223,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      },
+      "actions": [
+        "eval"
+      ]
+    }
+  ],
+  "known_route_notices": [
+    {
+      "entry_id": "972adc87024b44668b939f625fc4c9f4",
+      "timestamp": 1793697363.543725,
+      "primary": "anthropic/claude-sonnet-5-5",
+      "active": {
+        "selector": "anthropic/claude-opus-5-5",
+        "effort": "medium"
+      },
+      "reason": "provider failure: quota"
+    },
+    {
+      "entry_id": "eb3fea1754a34db0a6f45c83cff0e73f",
+      "timestamp": 1793697364.740569,
+      "primary": "anthropic/claude-sonnet-5-5",
+      "active": {
+        "selector": "openai/gpt-6.1-sol",
+        "effort": "medium"
+      },
+      "reason": "provider failure: quota"
+    }
+  ],
+  "fallback_disclosure": "Own route notices report requested/primary anthropic/claude-sonnet-5-5, then anthropic/claude-opus-5-5 and openai/gpt-6.1-sol fallback selections, each due to provider quota. Completed substantive probe-writing/execution and source-inventory usage here is openai/gpt-6.1-sol. Route selections are not asserted to be completed Opus usage.",
+  "namespace": "wire.settings.hub_defaults"
+}

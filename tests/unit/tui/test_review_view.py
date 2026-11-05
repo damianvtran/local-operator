@@ -1004,6 +1004,10 @@ async def test_the_detail_pane_is_focusable_scrollable_and_wraps_narrow_titles(
         view = await _open_review(pilot, app)
         assert view._narrow is True
         assert view._pane.display is False
+        # Cached-ready precedes the scan/refresh finishing; while it runs the
+        # detail intentionally shows status, not the selected title (CI #3455).
+        # Measure wrapping only once the worker has published its final frame.
+        await _settle(pilot, lambda: not view._refreshing)
         lines = _plain(view._detail).splitlines()
         assert len(lines) == 2
         assert " ".join(line.strip() for line in lines) == long_title

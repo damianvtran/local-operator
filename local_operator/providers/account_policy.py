@@ -91,11 +91,14 @@ def reset_candidate(
     reserve_percent: float = 10.0,
     max_age_ms: int = RESET_REPORT_MAX_AGE_MS,
 ) -> ResetCandidate:
-    """Classify all measured overlaps, then extract only fresh useful resets.
+    """Classify all measured overlaps, then extract the still-true resets.
 
     Older reports can conservatively retain depletion until every relevant
-    measured window is still future, but may never win a reset forecast. Paid
-    balances retain the existing usage_health contract, not invented periods.
+    measured window is still future; a non-depleted older report stays
+    "unknown" (or "reserve", which only grows within an unelapsed window) but
+    keeps its still-future reset deadlines for ranking (never a reopening).
+    Paid balances retain the existing usage_health contract, not
+    invented periods.
     """
     from local_operator.providers.usage import usage_health
 
@@ -138,18 +141,40 @@ def reset_candidate(
         report, limits=current + [limit for limit in report.limits if limit.paid_fallback]
     )
     health = usage_health(safe_report, model_id, reserve_percent=reserve_percent, now_ms=now_ms)
+    weekly, short = _reset_deadlines(current, now_ms, now_ms if fresh else int(report.fetched_at))
     if not fresh:
-        return ResetCandidate(account_id, "depleted" if health.state == "depleted" else "unknown")
-    weekly: list[int] = []
-    short: list[int] = []
-    for limit in current:
-        deadline = limit.resets_at_ms
-        if not _finite_number(deadline) or deadline <= now_ms:
-            continue
-        period = _window_period_ms(limit)
-        if period is None or deadline - now_ms > period + RESET_TOLERANCE_MS:
-            continue
-        (weekly if period == _WEEK_MS else short).append(int(deadline))
+        # STALE DEADLINES STILL RANK (2026-11-04 incident). With the shipped
+        # ``retry.usageAwareFallback=false`` the only Anthropic evidence is the
+        # warmer's row, refreshed only while a TUI warmer runs or someone opens
+        # /usage, so headless sessions routinely read it past ``max_age_ms``.
+        # Returning a deadline-less "unknown" then put every non-depleted account
+        # in ONE neutral bucket and crc32(session) % N spread new sessions: an
+        # account resetting 13h LATER took ~1/3 of them (255/270 measured
+        # receipts were exactly the hash pick). A window's reset instant is fixed
+        # when the window opens and cannot move until it elapses, so age makes
+        # the UTILIZATION unreliable, not the deadline: a finite deadline still
+        # in the future, and within its period of the report's own fetch, is
+        # still true now. The gates above keep everything that is NOT provable:
+        # an elapsed window (``current`` shrank) or a reset-less measured window
+        # leaves the whole report neutral, and a paid balance can move on its
+        # own. The verdict stays conservative — never "healthy" (it may have
+        # filled since; a reactive 429 still fails over), and never a stated
+        # reopening, since a stale depletion's resets are only a lower bound.
+        # Utilization only grows inside an unelapsed window (and the gates
+        # above guarantee none has elapsed), so a stale "reserve" is still at
+        # least reserve exactly as a stale "depleted" is still depleted: keep
+        # it in the reserve tier. Mapping it to "unknown" would let its
+        # still-true deadline rank a nearly spent account FIRST, ahead of
+        # fresh healthy ones. Only "healthy" is unprovable once stale.
+        state = health.state if health.state in ("depleted", "reserve") else "unknown"
+        if state == "depleted":
+            return ResetCandidate(account_id, state)
+        return ResetCandidate(
+            account_id,
+            state,
+            min(weekly) if weekly else None,
+            min(short) if short else None,
+        )
     return ResetCandidate(
         account_id,
         health.state,
@@ -161,6 +186,32 @@ def reset_candidate(
             else None
         ),
     )
+
+
+def _reset_deadlines(
+    current: Sequence[Any], now_ms: int, anchor_ms: int
+) -> tuple[list[int], list[int]]:
+    """Weekly and five-hour deadlines that are finite, future and plausible.
+
+    ``anchor_ms`` is the instant the period sanity bound is measured from: now
+    for a fresh report (unchanged), the report's own ``fetched_at`` for a stale
+    one. A window opened at most one period before its fetch, so a deadline more
+    than ``period + RESET_TOLERANCE_MS`` past the fetch is garbled, however far
+    from now it is. That same bound is what limits how stale a report may be and
+    still rank: once the age exceeds the period (+ tolerance), every plausible
+    deadline it carried is in the past and drops out — no second age constant.
+    """
+    weekly: list[int] = []
+    short: list[int] = []
+    for limit in current:
+        deadline = limit.resets_at_ms
+        if not _finite_number(deadline) or deadline <= now_ms:
+            continue
+        period = _window_period_ms(limit)
+        if period is None or deadline - anchor_ms > period + RESET_TOLERANCE_MS:
+            continue
+        (weekly if period == _WEEK_MS else short).append(int(deadline))
+    return weekly, short
 
 
 def _proven_reopening(

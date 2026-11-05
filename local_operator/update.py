@@ -6741,6 +6741,21 @@ def _note_capacity_after_promotion(promoted: Path) -> None:
     )
 
 
+def upgrade_runs_in_generation(kind: InstallKind) -> bool:
+    """Will :func:`perform_upgrade` land this install in a NEW generation?
+
+    The one answer to "can this upgrade interrupt a running session?", stated
+    once so the router and the copy that reassures about it cannot disagree.
+    True only for a uv-tool install on a platform that can host the generation
+    layout: the build lands in a tree no running runtime imports from and the
+    handover is a pointer flip. Every other kind that upgrades at all (pip,
+    pipx, uv-tool off POSIX) rewrites site-packages IN PLACE under the running
+    fleet, so a front end must not tell the reader their sessions are safe
+    there (review M1 on the update-notice change, 2026-11-03).
+    """
+    return kind is InstallKind.UV_TOOL and generation_layout_supported()
+
+
 def perform_upgrade(
     *,
     target: str,
@@ -6809,7 +6824,7 @@ def perform_upgrade(
             "not using the generation layout on this platform: %s",
             generation_layout_refusal(),
         )
-    if detected is InstallKind.UV_TOOL and run is None and generation_layout_supported():
+    if run is None and upgrade_runs_in_generation(detected):
         # ``target`` is the PyPI version just installed, and this path is always
         # a PyPI wheel unless the caller passed ``source`` (a git snapshot):
         # ``commit``/``ref`` describe that case, and leaving them empty is what

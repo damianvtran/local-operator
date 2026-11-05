@@ -665,6 +665,7 @@ async def status(
         get_status_discipline,
         selected_tenant_id,
         surface_projection,
+        trial_ended_tenant,
     )
 
     # The read family's availability receipt lives with the read family, and the
@@ -729,6 +730,12 @@ async def status(
         # 1, R2): the first eligible tenant in the server's own order, else
         # the retained endpoint's row — never "several rows, so none".
         "tenant_id": selected_tenant_id(check.payload),
+        #: The org whose Team trial ENDED, ``{tenant_id, trial_ended_at}``, when
+        #: no org is eligible and the hub marked a row positively (teams-trial
+        #: QA round 1, Q5): with ``tenant_id`` null in state A this is the only
+        #: way the renderer can reach the paused band for the right org instead
+        #: of offering a new trial. ``None`` otherwise, and on an older hub.
+        "trial_ended": trial_ended_tenant(check.payload),
         "surface_state": projection["surface_state"],
         #: §5.6 F's sentence when this answer PROVES F — the neutral
         #: "Agent messages are turned off" in v1 (review round 2, R9) — else
@@ -1749,6 +1756,27 @@ class ConversationReadIn(ConversationOwnerIn):
             raise ValueError("a read write needs seq, muted, or notify")
         if self.muted is not None and self.notify is not None:
             raise ValueError("muted and notify cannot both be set")
+        return self
+
+
+class ConversationThreadReadIn(_Strict):
+    """A thread acknowledgement always names its captured owner and tenant.
+
+    Unlike the legacy conversation cursor, this new wire has no receipt-less
+    callers to preserve. Do not accept mute/notify here: a thread read must
+    never become a conversation-policy or conversation-cursor mutation.
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+    seq: int = Field(ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def _receipt_grammar(self) -> "ConversationThreadReadIn":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        if not self.tenant_id.strip():
+            raise ValueError("a guarded mutation needs an explicit tenant_id")
         return self
 
 
@@ -3514,6 +3542,39 @@ async def conversation_read(
                 seq=body.seq,
                 muted=body.muted,
                 notify=body.notify,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/read",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_thread_read(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    body: ConversationThreadReadIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Acknowledge a root's replies without advancing the channel cursor.
+
+    The hub owns membership, root binding and cursor clamping. Keep its exact
+    post-state rather than aliasing the thread count to the channel count.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    if request.query_params:
+        _raise_read("invalid_request")
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).conversation_thread_read(
+                conversation_id,
+                message_id,
+                seq=body.seq,
                 tenant_id=body.tenant_id,
                 expected_account_id=body.expected_account_id,
             )

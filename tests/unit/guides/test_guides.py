@@ -46,6 +46,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "mobile",
         "monitor",
         "network",
+        "org-hub",
         "peer-messaging",
         "projects",
         "qwencloud",
@@ -1047,3 +1048,20 @@ def test_browser_guide_makes_the_agent_give_the_pairing_code_first() -> None:
     assert f'"{PAIR_ASK_PHRASE}"' in step
     assert "open the popup, then retry" in step  # quoted as the thing NOT to say
     assert "Do NOT ask them to open\nthe extension popup first" in step
+
+
+def test_org_hub_guide_is_gated_on_the_radient_team_predicate(tmp_path) -> None:
+    """The org-hub guide ships packaged but is dropped for an ineligible root.
+
+    Operator constraint: the private org hub must not be advertised to anyone
+    signed out or outside a team-plan org; an unknown predicate fails closed.
+    """
+    from local_operator.guides.discovery import guides_available
+
+    guides = discover_guides()
+    gated = {g.name: g.requires for g in guides if g.requires}
+    assert gated == {"org-hub": "radient-team"}
+    assert "org-hub" not in {g.name for g in guides_available(guides, tmp_path)}
+    assert "org-hub" not in {g.name for g in guides_available(guides, None)}
+    typo = [guides[0].model_copy(update={"requires": "radient-teem"})]
+    assert guides_available(typo, tmp_path) == []

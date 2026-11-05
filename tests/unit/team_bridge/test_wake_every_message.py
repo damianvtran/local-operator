@@ -1135,6 +1135,238 @@ def test_without_a_connector_scope_the_card_goes_out_immediately(
     assert len(wakes) == 1
 
 
+# -- B3 S-26: the coalescer key carries the destination session --------------
+
+
+def _reserve_admitted(
+    config_dir: Path, owner: Any, message_id: str, seq: int, session: str
+) -> None:
+    """A real ``pending`` body reservation, so flush re-checks and settles it."""
+
+    from local_operator.team_bridge.store import Store
+
+    assert Store(config_dir).record_body_reservation(
+        owner,
+        conversation_id=CONV,
+        message_id=message_id,
+        conversation_seq=seq,
+        mention=False,
+        body_sha256="9f2a" * 16,
+        screening_fingerprint="aa11" * 16,
+        policy_epoch=1,
+        consent_version="bridge_consent_v1",
+        designated_session=session,
+        now=1_800_000_000.0,
+    )
+
+
+def _thread_meta(message_id: str, seq: int, *, mention: bool) -> ConversationCardMetadata:
+    return ConversationCardMetadata(
+        conversation_id=CONV,
+        tenant_id="tnt_1",
+        conversation_label="#agents",
+        sender_label="Ada",
+        sender_kind="human",
+        mention=mention,
+        message_id=message_id,
+        conversation_seq=seq,
+        thread_root_id=ROOT,
+    )
+
+
+def _flush_two(
+    tmp_path: Path, sessions: tuple[str, str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Path]:
+    """Enqueue two messages of ONE thread inside one window, addressed to
+    ``sessions[0]`` and ``sessions[1]``, flush, and return (deliveries,
+    outcomes, config dir)."""
+
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    owner = _owner("a", 1)
+    _enroll(config_dir, owner, "sess_cos")
+    first, second = _thread_meta("bcmsg_m0001", 1, mention=False), _thread_meta(
+        "bcmsg_m0002", 2, mention=True
+    )
+    coalescer = coalesce_mod.WakeCoalescer()  # the default window, not zero
+    for meta, session in zip((first, second), sessions, strict=True):
+        _reserve_admitted(config_dir, owner, meta.message_id, meta.conversation_seq, session)
+        coalescer.enqueue(
+            owner,
+            meta,
+            ref_key=f"{PREFIX}{CONV}/{meta.message_id}/{meta.conversation_seq}/0/human",
+            session_id=session,
+            config_dir=config_dir,
+            now=1_800_000_000.0,
+        )
+    delivered: list[dict[str, Any]] = []
+
+    async def deliver(_owner: Any, metadata: Any, *, session_id: str, config_dir: Path) -> str:
+        delivered.append(
+            {
+                "session": session_id,
+                "message_id": metadata.message_id,
+                "message_ids": metadata.coalesced_message_ids,
+                "card": build_conversation_card(metadata),
+            }
+        )
+        return "delivered and woke the session"
+
+    outcomes = asyncio.run(
+        coalescer.flush_due(
+            deliver=deliver, now=1_800_000_000.5, owner_filter=owner, config_dir=config_dir
+        )
+    )
+    return delivered, outcomes, config_dir
+
+
+def _pending_reservations(config_dir: Path) -> int:
+    """Reservations still owing a card (no ``card_posted_at``)."""
+
+    import sqlite3
+
+    from local_operator.team_bridge.store import state_db_path
+
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM body_reservations WHERE card_posted_at IS NULL"
+        ).fetchone()[0]
+
+
+def test_a_routed_reply_and_a_cos_mention_in_one_thread_are_two_cards(tmp_path: Path) -> None:
+    """S-26: one thread, a reply routed to S1 and a CoS mention, inside one
+    window. Keyed without the session they merged into ONE card handed to the
+    first enqueuer's session, so the CoS was never woken for its mention."""
+
+    delivered, outcomes, config_dir = _flush_two(tmp_path, ("sess_s1", "sess_cos"))
+
+    assert [(d["session"], d["message_id"], d["message_ids"]) for d in delivered] == [
+        ("sess_s1", "bcmsg_m0001", ()),
+        ("sess_cos", "bcmsg_m0002", ()),
+    ], "each session gets exactly its own message, on its own card"
+    assert [o["action"] for o in outcomes] == ["delivered", "delivered"]
+    assert _pending_reservations(config_dir) == 0, "no reservation is left owing a card"
+
+
+def test_two_messages_for_one_session_in_one_thread_still_coalesce(tmp_path: Path) -> None:
+    delivered, outcomes, config_dir = _flush_two(tmp_path, ("sess_cos", "sess_cos"))
+
+    assert len(delivered) == 1, "ONE card for the burst, as before"
+    assert delivered[0]["session"] == "sess_cos"
+    assert delivered[0]["message_ids"] == ("bcmsg_m0001", "bcmsg_m0002")
+    assert delivered[0]["message_id"] == "bcmsg_m0002"
+    assert [o["action"] for o in outcomes] == ["delivered"]
+    assert _pending_reservations(config_dir) == 0
+
+
+def test_the_rate_window_is_per_destination_session(tmp_path: Path) -> None:
+    """``_last_wake`` shares the key: a wake for S1 rate-limits S1 only, so a
+    CoS mention right after it is due at once while S1's next reply waits."""
+
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    owner = _owner("a", 1)
+    _enroll(config_dir, owner, "sess_cos")
+    t0 = 1_800_000_000.0
+    coalescer = coalesce_mod.WakeCoalescer()
+    delivered: list[tuple[str, str]] = []
+
+    async def deliver(_owner: Any, metadata: Any, *, session_id: str, config_dir: Path) -> str:
+        delivered.append((session_id, metadata.message_id))
+        return "delivered and woke the session"
+
+    def push(message_id: str, seq: int, session: str, now: float) -> None:
+        _reserve_admitted(config_dir, owner, message_id, seq, session)
+        coalescer.enqueue(
+            owner,
+            _thread_meta(message_id, seq, mention=session == "sess_cos"),
+            ref_key=f"{PREFIX}{CONV}/{message_id}/{seq}/0/human",
+            session_id=session,
+            config_dir=config_dir,
+            now=now,
+        )
+
+    def flush(now: float) -> None:
+        asyncio.run(
+            coalescer.flush_due(deliver=deliver, now=now, owner_filter=owner, config_dir=config_dir)
+        )
+
+    push("bcmsg_m0001", 1, "sess_s1", t0)
+    flush(t0)
+    push("bcmsg_m0002", 2, "sess_s1", t0 + 1.0)
+    push("bcmsg_m0003", 3, "sess_cos", t0 + 1.0)
+    flush(t0 + 1.0)
+    assert delivered == [("sess_s1", "bcmsg_m0001"), ("sess_cos", "bcmsg_m0003")]
+    flush(t0 + coalescer.window_s)
+    assert delivered[-1] == ("sess_s1", "bcmsg_m0002"), "S1 waited out its own window"
+    assert _pending_reservations(config_dir) == 0
+
+
+def _legacy_group_key(config_dir: Path, owner: Any, metadata: Any, session_id: str) -> Any:
+    """The pre-S-26 key, verbatim from origin/main (e6ab76845782), for the
+    routing-off equivalence proof below. ``session_id`` is accepted and ignored."""
+
+    return (
+        str(config_dir),
+        str(getattr(owner, "endpoint_id", "") or ""),
+        metadata.conversation_id,
+        metadata.thread_root_id or "",
+    )
+
+
+def _run_routing_off_burst(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, legacy: bool
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """Drive the REAL connector iteration (routing off: every card's session is
+    the enrolled CoS) over channel messages, two threads and a second burst
+    inside the window; return the wake log and each iteration's coalesced_wakes."""
+
+    clock = Clock()
+    monkeypatch.setattr(time, "time", clock)
+    if legacy:
+        monkeypatch.setattr(coalesce_mod, "_group_key", _legacy_group_key)
+    a = _owner("a", 1)
+    config_dir = tmp_path / ("legacy" if legacy else "current")
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+    hub = Hub(members=("bep_a",))
+    wakes = _rig(monkeypatch, hub, {"a": config_dir})
+    summaries: list[Any] = []
+
+    hub.post(None, "channel one")
+    hub.post(None, "reply in A", thread_root=ROOT)
+    hub.post(None, "channel two", frozenset({"bep_a"}))
+    hub.post(None, "reply in B", thread_root="bcmsg_root0002")
+    hub.post(None, "again in A", thread_root=ROOT)
+    summaries.append(_iterate(a, config_dir).get("coalesced_wakes"))
+    clock.now += 1.0  # inside the window: rate-limited, buffered
+    hub.post(None, "late in A", thread_root=ROOT)
+    hub.post(None, "late channel")
+    summaries.append(_iterate(a, config_dir).get("coalesced_wakes"))
+    clock.now += 3.0
+    summaries.append(_iterate(a, config_dir).get("coalesced_wakes"))
+    return wakes, summaries
+
+
+def test_with_routing_off_wakes_are_byte_identical_to_the_legacy_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Routing is off (no ``route_to_sessions`` yet), so every enqueue carries
+    the CoS session and adding it to the key must change NOTHING: the same
+    cards, byte for byte, to the same session, in the same order and grouping
+    as the pre-S-26 key produces over the same burst."""
+
+    with monkeypatch.context() as legacy_patch:
+        legacy_wakes, legacy_summaries = _run_routing_off_burst(tmp_path, legacy_patch, legacy=True)
+    current_wakes, current_summaries = _run_routing_off_burst(tmp_path, monkeypatch, legacy=False)
+
+    assert coalesce_mod._group_key is not _legacy_group_key
+    assert len(current_wakes) >= 4, "the burst exercises several groups"
+    assert {w["session"] for w in current_wakes} == {"sess_a"}
+    assert current_wakes == legacy_wakes
+    assert current_summaries == legacy_summaries
+
+
 def test_the_connector_records_the_trigger_the_guard_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

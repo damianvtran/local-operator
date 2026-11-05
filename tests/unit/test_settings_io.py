@@ -71,6 +71,7 @@ def _consumer_defaults() -> dict[str, object]:
         FORWARD_CODEX_DEFAULT,
         NATIVE_DEFAULT,
     )
+    from local_operator.hub_org.settings import DEFAULT_ORG_AUTO_ENROL
     from local_operator.hub_sync.settings import (
         DEFAULT_AUTO_UPDATE_AGENTS,
         DEFAULT_AUTO_UPDATE_TEAMS,
@@ -274,6 +275,7 @@ def _consumer_defaults() -> dict[str, object]:
         "hub.auto_update.agents": DEFAULT_AUTO_UPDATE_AGENTS,
         "hub.auto_update.teams": DEFAULT_AUTO_UPDATE_TEAMS,
         "hub.check_interval_min": DEFAULT_CHECK_INTERVAL_MIN,
+        "hub.org.auto_enrol": DEFAULT_ORG_AUTO_ENROL,
         "agents.auto_update.seeds": AUTO_UPDATE_SEEDS_DEFAULT,
         "session.cleanup.enabled": DEFAULT_ENABLED,
         "session.cleanup.max_sessions": DEFAULT_MAX_SESSIONS,

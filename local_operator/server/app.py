@@ -563,6 +563,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.warning("hub update runner could not start", exc_info=True)
         app.state.hub_sync = None
 
+    # THE ORG AGENT HUB GATE at daemon start: refresh the cached Radient Team
+    # eligibility and enrol new org items, on a daemon thread so readiness
+    # never waits on a memberships read. Never raises; ineligible = no-op.
+    try:
+        from local_operator.hub_org import enrol as hub_org_enrol
+
+        hub_org_enrol.on_boundary(app.state.config_manager.config_dir, "daemon-start")
+    except Exception:  # noqa: BLE001 - the org hub is optional; the daemon is not
+        logger.debug("org hub gate refresh could not start", exc_info=True)
+
     # The record was created before the autonomous hub producer. Publish safety
     # only AFTER every real hook exists; absent/failed hub startup stays unknown.
     if serve_publisher is not None and reload_watch is not None:

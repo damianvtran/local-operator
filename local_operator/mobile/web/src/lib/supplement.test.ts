@@ -58,6 +58,8 @@ function beat(over: Partial<SupplementBeat> = {}): SupplementBeat {
 		more: [],
 		components: [],
 		sounds: [],
+		withheld: [],
+		withheldMore: 0,
 		error: "",
 		cause: "",
 		dismissed: false,
@@ -410,5 +412,47 @@ describe("the file affordance class", () => {
 		expect(supplementFileClass("doc.pdf")).toBe("pdf");
 		expect(supplementFileClass("slides.key")).toBe("other");
 		expect(supplementFileClass("noextension")).toBe("other");
+	});
+});
+
+describe("written deliverables on the wire (highlights contract)", () => {
+	it("reads withheld names/reasons, drops malformed entries, and counts the cut", () => {
+		const parsed = beatFromWire({
+			anchor: "a",
+			job: "j",
+			version: 1,
+			state: "done",
+			files: [],
+			components: [],
+			withheld: [
+				{ name: "x.key", reason: "sensitive" },
+				{ name: "", reason: "outside" },
+				{ name: "y.pdf", reason: "not-a-reason" },
+				"junk",
+			],
+			withheld_more: 3,
+		});
+		expect(parsed?.withheld).toEqual([{ name: "x.key", reason: "sensitive" }]);
+		expect(parsed?.withheldMore).toBe(3);
+		/* A withheld-only row is content: it must render, not vanish. */
+		expect(parsed && supplementDisposition(parsed, false)).toBe("block");
+	});
+
+	it("keeps a file-origin sound's origin and display path", () => {
+		const parsed = beatFromWire({
+			anchor: "a",
+			version: 1,
+			state: "done",
+			sounds: [
+				{ attachment: "b".repeat(32), mime: "audio/mpeg", title: "01", duration_s: 0, origin: "file", path: "picks/01.mp3" },
+			],
+		});
+		expect(parsed?.sounds[0]).toMatchObject({ origin: "file", path: "picks/01.mp3" });
+	});
+
+	it("classes mp4/webm/mov as video", () => {
+		expect(supplementFileClass("out/demo.MP4")).toBe("video");
+		expect(supplementFileClass("a.webm")).toBe("video");
+		expect(supplementFileClass("a.mov")).toBe("video");
 	});
 });

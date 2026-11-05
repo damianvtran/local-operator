@@ -32,6 +32,9 @@ from typing import Any
 #: The one section whose visibility is dynamic (see the module docstring).
 BRIDGE_SECTION = "team_bridge"
 
+#: The organization Agent Hub section: visible only behind the Radient Team gate.
+HUB_ORG_SECTION = "hub_org"
+
 #: ``config root -> {"visible": bool, "state": str, "checked_at": float}``.
 _STATE: dict[str, dict[str, Any]] = {}
 
@@ -87,6 +90,19 @@ def section_visible(name: str, config_dir: Path | str | None = None) -> bool:
     as invisible, which is the direction the contract asks for.
     """
 
+    if name == HUB_ORG_SECTION:
+        # Same fail-closed rule, a different answer: the org hub's gate is the
+        # cached Radient Team eligibility record (zero network, read across
+        # processes), not this process-local bridge record. Lazy import keeps
+        # the drainers off the hub stack.
+        if config_dir is None:
+            return False
+        try:
+            from local_operator.hub_org.eligibility import is_eligible
+
+            return is_eligible(Path(config_dir))
+        except Exception:  # noqa: BLE001 - an unreadable gate reads closed
+            return False
     if name != BRIDGE_SECTION:
         return True
     record_ = _STATE.get(_key(config_dir))

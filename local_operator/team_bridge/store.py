@@ -1425,6 +1425,10 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         # PR #3400: a batch that could not conclude the message; it is
         # re-screened alone at once, so screening is only briefly pending.
         "batch_unresolved",
+        # Nothing could screen (every preferred and fallback screener failed):
+        # nothing judged the message, so the sender is told screening is
+        # unavailable -- never that a human is reviewing it.
+        "screening_model_unavailable",
     }
 )
 
@@ -3094,6 +3098,35 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(body_reservations)")}
         if "card_posted_at" not in columns:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_posted_at REAL")
+
+    @staticmethod
+    def _ensure_receipt_rendered_template_column(conn: sqlite3.Connection) -> None:
+        """Add ``rendered_template_sha256`` to a ``screening_receipts`` that predates it.
+
+        WHY (#3400 code round 1, m4). ``template_sha256`` on a receipt is the
+        SERVED policy's hash: every fence (cache consumption, the proof
+        snapshot, write-once replay) compares it with the published policy, so
+        it cannot change. But a batch verdict was produced by the local batch
+        prompt, and an image verdict by the v3 wrapper, so the row could not say
+        which prompt the model actually read. This column records that, and only
+        that: nothing fences on it, and the hub never sees it.
+
+        Same additive, nullable, no-stamp rule as
+        :meth:`_ensure_hold_failure_class_column`: an older binary never names
+        it, and a pre-upgrade row reads NULL ("not recorded"). Not in
+        ``_V3_COLUMNS``: its absence is not damage.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_receipts)")}
+        if "rendered_template_sha256" not in columns:
+            conn.execute("ALTER TABLE screening_receipts ADD COLUMN rendered_template_sha256 TEXT")
+        # ``screener_preferred`` (operator directive 2026-11-04): whether the
+        # model that answered is on ``SCREENING_EVALUATED_MODELS``. Same
+        # additive, nullable, no-stamp rule; NULL (a pre-upgrade row) reads as
+        # NOT preferred, so an old allow is never reused from the cache. Local
+        # provenance only: the hub tuple is unchanged.
+        if "screener_preferred" not in columns:
+            conn.execute("ALTER TABLE screening_receipts ADD COLUMN screener_preferred INTEGER")
 
     @staticmethod
     def _ensure_policy_serving_column(conn: sqlite3.Connection) -> None:
@@ -5014,6 +5047,146 @@ class Store:
         except sqlite3.Error:
             return None
 
+    def adopt_cached_receipt(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        source_message_id: str,
+        body_sha256: str,
+        template_sha256: str,
+        model: str,
+        admission_revision: str,
+        envelope_digest: str,
+    ) -> dict[str, Any]:
+        """Record a reuse-cache verdict as THIS message's own receipt.
+
+        WHY (pre-existing on 7f93aad, #3400 QA round 1). The reuse cache is
+        keyed by content (body + template + model + revision + envelope), not
+        by message, so a second message with byte-identical bytes from the
+        same sender (two separate ``ack`` posts) is answered from the first
+        one's receipt without a model call. Everything downstream of a verdict
+        is keyed by MESSAGE id, though: the conversation lane's body
+        reservation, the pair lane's recorded verdict and the session's body
+        read all call :meth:`receipt_for_message`. With no row under the new
+        id, the reservation held the message ``receipt_unavailable``; every
+        retry hit the cache again and wrote nothing, so it was held forever.
+
+        WHAT. In ONE write transaction: the live owner, then the EXACT row the
+        cache hit authorized (``source_message_id``, which
+        :meth:`consume_screening_receipt` returns), still carrying the cache
+        key, re-checked by :func:`receipt_authority` against the published
+        policy. Its verdict, provenance and epoch are copied under
+        ``message_id``, and that message's bare hold row is cleared, as
+        :meth:`finish_screening` does for a fresh verdict.
+
+        WHY BY ID (#3420 R1-M1 = S-1a, S-1b). Looking the source up by content
+        alone picked a row of its own (the oldest). Receipts are never deleted,
+        so once a re-login or a policy round trip had outdated an older twin,
+        the hit served the current row while this copied the outdated one,
+        refused it, and held the message ``policy_stale`` on every pass. With
+        two current rows of different verdicts, the verdict acted on and the
+        verdict recorded could differ. Naming the row makes them one row.
+
+        FAIL-CLOSED. Write-once per message: an existing receipt for
+        ``message_id`` must carry the same verdict tuple (an idempotent
+        replay), or this refuses ``write_once_conflict``. A source that is
+        gone or no longer current refuses ``policy_stale``. A refusal admits
+        nothing; the caller holds the message. Returns the receipt as
+        :meth:`receipt_for_message` would read it.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_receipt_rendered_template_column(conn)
+            key = _owner_key(owner)
+            policy = conn.execute(
+                "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+            ).fetchone()
+            # The named row, AND still the cache key: an id alone could point at
+            # a receipt for other bytes.
+            source = conn.execute(
+                "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ? "
+                "AND body_sha256 = ? AND template_sha256 = ? AND model = ? "
+                "AND admission_revision = ? AND envelope_digest = ?",
+                (
+                    key,
+                    str(source_message_id),
+                    body_sha256,
+                    template_sha256,
+                    model,
+                    admission_revision,
+                    envelope_digest,
+                ),
+            ).fetchone()
+            if policy is None or source is None:
+                raise StoreRefused("policy_stale", "the cached verdict is gone")
+            decoded, damage, note = receipt_authority(owner, dict(policy), dict(source))
+            if damage == RECEIPT_CORRUPT:
+                raise StoreRefused("proof_corrupt", note or "the cached receipt failed its checks")
+            if decoded is None:
+                raise StoreRefused("policy_stale", "the cached verdict is no longer current")
+            existing = conn.execute(
+                "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                (key, str(message_id)),
+            ).fetchone()
+            if existing is not None:
+                same = all(
+                    existing[field] == source[field]
+                    for field in (
+                        "verdict",
+                        "model",
+                        "prompt_version",
+                        "template_sha256",
+                        "body_sha256",
+                        "categories",
+                        "envelope_digest",
+                    )
+                )
+                if not same:
+                    raise StoreRefused("write_once_conflict", "this message has another verdict")
+            else:
+                conn.execute(
+                    "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
+                    "template_sha256, prompt_version, model, verdict, categories, "
+                    "envelope_digest, admission_revision, policy_epoch, creator_generation, "
+                    "created_at, rendered_template_sha256, screener_preferred) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        key,
+                        str(message_id),
+                        source["body_sha256"],
+                        source["template_sha256"],
+                        source["prompt_version"],
+                        source["model"],
+                        source["verdict"],
+                        source["categories"],
+                        source["envelope_digest"],
+                        source["admission_revision"],
+                        source["policy_epoch"],
+                        owner.enrollment_generation,
+                        time.time(),
+                        # The prompt that produced the verdict is the SOURCE's:
+                        # this message was never rendered to a model (m4).
+                        source["rendered_template_sha256"],
+                        # So is the screener: a copy is exactly as preferred
+                        # as the verdict it copies (the consumer only ever
+                        # hands a preferred one here).
+                        source["screener_preferred"],
+                    ),
+                )
+            conn.execute(
+                "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                (key, str(message_id)),
+            )
+            return dict(
+                decoded,
+                rendered_template_sha256=source["rendered_template_sha256"],
+                screener_preferred=source["screener_preferred"] == 1,
+            )
+
     def find_screening_receipt(
         self,
         owner: OwnerSnapshot,
@@ -5069,6 +5242,37 @@ class Store:
             # under normal accounting); it can never silently certify.
             return None
 
+    def retire_unsent_fallback_allow(
+        self, owner: OwnerSnapshot, message_id: str, *, body_sha256: str
+    ) -> bool:
+        """Retire ONLY a provisional fallback allow that never crossed a handoff.
+
+        Operator directive 2026-11-04: a weaker screener's allow cannot buy a
+        later retry a free pass. A local receipt with no ACK intent and no body
+        reservation is still UNSENT, so it may be re-screened. Once either
+        durable handoff exists, its write-once tuple must survive (the hub may
+        already have committed it even if its response was lost). Check and
+        retire in ONE transaction, fenced to the live owner; failure never
+        authorizes a cached delivery. NULL legacy provenance is not preferred.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_receipt_rendered_template_column(conn)
+            key = _owner_key(owner)
+            removed = conn.execute(
+                "DELETE FROM screening_receipts WHERE owner_key = ? AND message_id = ? "
+                "AND body_sha256 = ? "
+                "AND verdict = 'allow' AND COALESCE(screener_preferred, 0) != 1 "
+                "AND NOT EXISTS (SELECT 1 FROM ack_intents WHERE owner_key = ? AND message_id = ?) "
+                "AND NOT EXISTS (SELECT 1 FROM body_reservations "
+                "WHERE owner_key = ? AND message_id = ?)",
+                (key, message_id, body_sha256, key, message_id, key, message_id),
+            ).rowcount
+            return removed == 1
+
     def receipt_for_message(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
         """THE trusted record for one screened message, by message id (H5 F3).
 
@@ -5083,15 +5287,19 @@ class Store:
             with self._connect() as conn:
                 self._init(conn)
                 row = conn.execute(
-                    "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
-                    "categories, envelope_digest, admission_revision, policy_epoch, "
-                    "creator_generation, created_at "
-                    "FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
                     (_owner_key(owner), str(message_id)),
                 ).fetchone()
                 if row is None:
                     return None
                 return {
+                    # Which prompt the model read (m4); NULL on a row written
+                    # before the column existed. Provenance only, never a fence.
+                    "rendered_template_sha256": (
+                        row["rendered_template_sha256"]
+                        if "rendered_template_sha256" in row.keys()
+                        else None
+                    ),
                     "verdict": row["verdict"],
                     "model": row["model"],
                     "policy_epoch": row["policy_epoch"],
@@ -5103,6 +5311,11 @@ class Store:
                     "envelope_digest": row["envelope_digest"],
                     "admission_revision": row["admission_revision"],
                     "created_at": row["created_at"],
+                    # Who answered (operator directive 2026-11-04): B4b's
+                    # release check reads it; NULL on an old row is False.
+                    "screener_preferred": (
+                        "screener_preferred" in row.keys() and row["screener_preferred"] == 1
+                    ),
                 }
         except (sqlite3.Error, json.JSONDecodeError):
             return None
@@ -5782,36 +5995,67 @@ class Store:
                 ).fetchone()
                 if policy is None:
                     return None
-                row = conn.execute(
-                    "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
-                    "categories, envelope_digest, admission_revision, policy_epoch, "
-                    "creator_generation FROM screening_receipts "
+                # EVERY row for the content key, in ONE deterministic order
+                # (#3420 R1-M1 = S-1a). Receipts are never deleted, so a row
+                # outdated by a re-login or a policy round trip stays beside
+                # the current one. Reading only the first row by primary key
+                # (random hub ids) made the answer depend on id order, and
+                # :meth:`adopt_cached_receipt` then copied a DIFFERENT row. The
+                # first current row in this order is the hit, and its
+                # ``message_id`` is returned so the copy is that exact row.
+                self._ensure_receipt_rendered_template_column(conn)
+                rows = conn.execute(
+                    "SELECT message_id, verdict, model, prompt_version, template_sha256, "
+                    "body_sha256, categories, envelope_digest, admission_revision, "
+                    "policy_epoch, creator_generation, screener_preferred "
+                    "FROM screening_receipts "
                     "WHERE owner_key = ? AND body_sha256 = ? AND template_sha256 = ? "
-                    "AND model = ? AND admission_revision = ? AND envelope_digest = ?",
+                    "AND model = ? AND admission_revision = ? AND envelope_digest = ? "
+                    "ORDER BY created_at, message_id",
                     (key, body_sha256, template_sha256, model, admission_revision, envelope_digest),
-                ).fetchone()
-                if row is None:
-                    return None
-                # The checks themselves live in ONE pure function (S-RSA-3),
-                # shared with the read slice's proof snapshot: this call site
-                # supplies the two rules that are about BEHAVIOUR here — a stale
-                # receipt is a miss (the caller may screen), a corrupt one is a
-                # typed refusal (a caller that re-screened behind it would
-                # DOUBLE-BILL the account for a verdict nobody can read).
-                # ``dict(...)`` because these are ``sqlite3.Row`` objects: they
-                # index but do not ``.get``, and the shared function takes mappings
-                # exactly as the read path's own decoded rows do.
-                decoded, damage, note = receipt_authority(owner, dict(policy), dict(row))
-                if damage == RECEIPT_CORRUPT:
-                    # ``note`` is the specific damaged field (R-8): this path
-                    # raised a sentence per field before the checks moved into
-                    # the shared function, and a triaging operator keeps it.
-                    raise StoreRefused(
-                        "proof_corrupt", note or "the stored receipt failed its authority checks"
-                    )
-                if decoded is None:
-                    return None
-                return decoded
+                ).fetchall()
+                hit: dict[str, Any] | None = None
+                for row in rows:
+                    # The checks themselves live in ONE pure function (S-RSA-3),
+                    # shared with the read slice's proof snapshot: this call site
+                    # supplies the two rules that are about BEHAVIOUR here — a stale
+                    # receipt is a miss (the caller may screen), a corrupt one is a
+                    # typed refusal (a caller that re-screened behind it would
+                    # DOUBLE-BILL the account for a verdict nobody can read).
+                    # ``dict(...)`` because these are ``sqlite3.Row`` objects: they
+                    # index but do not ``.get``, and the shared function takes mappings
+                    # exactly as the read path's own decoded rows do.
+                    decoded, damage, note = receipt_authority(owner, dict(policy), dict(row))
+                    if damage == RECEIPT_CORRUPT:
+                        # ``note`` is the specific damaged field (R-8): this
+                        # path raised a sentence per field before the checks
+                        # moved into the shared function, and a triaging
+                        # operator keeps it. ANY damaged candidate refuses,
+                        # whatever its position: order must not decide whether
+                        # damaged proof is noticed (fail-closed).
+                        raise StoreRefused(
+                            "proof_corrupt",
+                            note or "the stored receipt failed its authority checks",
+                        )
+                    # NON-PREFERRED ALLOWS ARE NEVER REUSED (Aida's ruling and
+                    # the operator directive, 2026-11-04): an allow from a
+                    # fallback screener (``screener_preferred`` 0, or NULL on a
+                    # row that predates the column) is skipped, so the message
+                    # is screened again rather than admitted on a weaker
+                    # model's word. Skipped AFTER the authority check above, so
+                    # a damaged row still refuses whatever its screener. A
+                    # reject is reused whichever model gave it: replaying a
+                    # refusal can only keep a message out, never let one in.
+                    preferred = row["screener_preferred"] == 1
+                    if decoded is not None and decoded["verdict"] == "allow" and not preferred:
+                        continue
+                    if decoded is not None and hit is None:
+                        hit = dict(
+                            decoded,
+                            source_message_id=row["message_id"],
+                            screener_preferred=preferred,
+                        )
+                return hit
         except sqlite3.Error as error:
             # An interleaved writer that could not take the lock (or any
             # engine-level failure) leaves the authority UNVERIFIED, which is
@@ -6024,8 +6268,14 @@ class Store:
         admission_revision: str | None = None,
         turn: str | None = None,
         failure_class: str | None = None,
+        rendered_template_sha256: str | None = None,
     ) -> None:
         """Commit ONE logical outcome, fenced on every binding that matters.
+
+        ``rendered_template_sha256`` rides a RECEIPT only: the hash of the
+        prompt the model actually read (the batch template, or v3 for an
+        image), recorded as provenance beside the served ``template_sha256``
+        the fences compare (#3400 m4). ``None`` records nothing.
 
         ``failure_class`` rides a HOLD only (the pipeline sets it on the
         dispatch-failure paths: ``provider_error``, and the answered-refusal
@@ -6246,11 +6496,14 @@ class Store:
                         # reject (or any rewrite) through this path.
                         raise StoreRefused("write_once_conflict", message_id)
                 else:
+                    self._ensure_receipt_rendered_template_column(conn)
                     conn.execute(
                         "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
                         "template_sha256, prompt_version, model, verdict, categories, "
                         "envelope_digest, admission_revision, policy_epoch, "
-                        "creator_generation, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "creator_generation, created_at, rendered_template_sha256, "
+                        "screener_preferred) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             key,
                             message_id,
@@ -6271,6 +6524,13 @@ class Store:
                             expected_epoch,
                             owner.enrollment_generation,
                             time.time(),
+                            (
+                                rendered_template_sha256
+                                if isinstance(rendered_template_sha256, str)
+                                and _HEX64.fullmatch(rendered_template_sha256)
+                                else None
+                            ),
+                            1 if receipt.screener_preferred is True else 0,
                         ),
                     )
                 conn.execute(
@@ -6567,6 +6827,51 @@ class Store:
         except sqlite3.Error:
             return None
 
+    def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
+        """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
+
+        WHY (pre-existing on 7f93aad, #3400 QA round 1). Every held
+        conversation message has TWO rows: the screening core's hold under the
+        bare ``bcmsg_`` id it screened, and the connector's under the encoded
+        feed ref, which is the only one that can re-drive the conversation. The
+        retry pass retires the bare row on sight, but it used to do so inside
+        its bounded slots (``RETRY_BATCH_LIMIT``): a pass took bare rows and ref
+        rows alike, so it re-drove about half as many messages as it could, and
+        a refilled backlog drained at half rate. Retiring them here, before the
+        bounded read, gives every slot to a message that can move.
+
+        Only DUE rows (``retry_at`` NULL or past), the timing the pass already
+        applied to them, so nothing about when a duplicate disappears from a
+        status read changes beyond its no longer waiting for a free slot. A
+        bare row never re-drives anything, so deleting it admits nothing: the
+        ref row keeps the message held until a verdict. Live-owner fenced.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            # The prefix narrows the scan; the shared id grammar decides, so a
+            # pair id or an encoded ref is never touched.
+            rows = conn.execute(
+                "SELECT message_id FROM screening_holds WHERE owner_key = ? "
+                "AND message_id LIKE 'bcmsg\\_%' ESCAPE '\\' "
+                "AND (retry_at IS NULL OR retry_at <= ?)",
+                (_owner_key(owner), float(now)),
+            ).fetchall()
+            from local_operator.team_bridge.types import is_conversation_message_id
+
+            retired = [
+                str(row["message_id"])
+                for row in rows
+                if is_conversation_message_id(str(row["message_id"]))
+            ]
+            conn.executemany(
+                "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                [(_owner_key(owner), message_id) for message_id in retired],
+            )
+            return retired
+
     def due_screening_holds(
         self, owner: OwnerSnapshot, *, now: float, limit: int = 8
     ) -> list[dict[str, Any]]:
@@ -6577,7 +6882,9 @@ class Store:
         the smallest one. Local metadata only (never a server poll): a NULL
         ``retry_at`` (a hold written before any schedule existed) counts as
         due so it cannot be stranded. Read under the live-owner fence; a
-        fenced or missing owner reads empty.
+        fenced or missing owner reads empty. The retry pass retires the bare
+        ``bcmsg_`` duplicates first (:meth:`retire_due_bare_conversation_holds`),
+        so the bounded read is spent on rows that can move.
         """
 
         try:
@@ -6595,8 +6902,9 @@ class Store:
                 # rows carry no tier, and they then filled the bounded pass
                 # ahead of real rows (bench hour 2: 2102 vs 1926 unscreened).
                 # Every writer that knows a tier passes it — the pair lane
-                # writes the addressed tier explicitly — so NULL is only a
-                # legacy or duplicate row.
+                # writes the addressed tier explicitly, including a re-drive
+                # from a stale-claim park (R3-m1) — so NULL is only a legacy
+                # or duplicate row.
                 tier = "COALESCE(tier, -1) DESC, " if "tier" in columns else ""
                 no_batch = "COALESCE(no_batch, 0)" if "no_batch" in columns else "0"
                 rows = conn.execute(

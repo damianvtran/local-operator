@@ -4118,9 +4118,11 @@ def test_the_authoring_frame_gains_no_capability_key():
     pin is the cheap half of that argument: it refuses a key named for the frame,
     which is what the comment in that file is there to re-check.
     """
+    from starlette.requests import Request
+
     from local_operator.server.routes.capabilities import capabilities
 
-    result = asyncio.run(capabilities()).result
+    result = asyncio.run(capabilities(Request({"type": "http", "headers": []}))).result
     assert isinstance(result, dict), result
     features = result["features"]
     assert isinstance(features, dict), features

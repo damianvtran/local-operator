@@ -1,0 +1,14 @@
+{
+  "cli.hub_org_help.org": "Agentes, equipos y habilidades compartidos de tu organización (Radient Team)",
+  "cli.hub_org_help.list": "Listar el catálogo de la organización y el estado local de cada elemento",
+  "cli.hub_org_help.pull": "Hacer pull del catálogo de la organización y seguir suscrito a sus actualizaciones",
+  "cli.hub_org_help.org_flag": "Nombre de la organización, prefijo de nombre inequívoco o ID de tenant (por defecto, tu única organización apta)",
+  "cli.hub_org_help.kind": "Solo este tipo (repetible)",
+  "cli.hub_org_help.name": "Solo este elemento: ID del hub, nombre o prefijo de nombre inequívoco (repetible)",
+  "cli.hub_org_help.json": "Emitir JSON legible por máquina",
+  "cli.hub_org_help.on_conflict": "Para una copia local sin vincular con el mismo nombre: adopt-link conserva tu contenido y lo vincula, adopt toma la copia del hub, reconcile hace merge, skip la deja como está",
+  "cli.hub_org_help.no_subscribe": "Hacer pull sin suscribirse a las actualizaciones",
+  "cli.hub_org_help.auto_push": "Publicar también tus cambios locales automáticamente (solo propietarios y administradores de la organización)",
+  "cli.hub_org_help.no_llm": "No llamar nunca a un modelo para hacer merge de copias que difieren",
+  "cli.hub_org_help.yes": "Aplicar el plan en lugar de solo mostrarlo"
+}

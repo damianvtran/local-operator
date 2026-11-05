@@ -478,6 +478,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Drops <config>/operator/anchor.json, the staged statement this run wrote",
         2,
     ),
+    # The effective-access listener registry is a module-level ``list`` of
+    # callbacks, so ``.remove`` there is ``list.remove`` on that registry: the
+    # guard cannot see a NAME's type, only a literal receiver (PR #3427 R1-2).
+    (
+        "local_operator/network/credentials/effective.py::add_listener.remove",
+        "<path>.remove",
+        "list.remove on the in-memory _listeners callback registry; no filesystem path",
+    ),
+    (
+        # `/sound remove <id>` (C4): `custom_sounds.remove` is the custom-sound
+        # store's own entry point, already classified above. It takes an id the
+        # store validates by regex and resolves to a FILE under
+        # <config>/sounds/custom (resolved containment), never a session path.
+        "local_operator/tui/app.py::OperatorApp._sound_store_op",
+        "<path>.remove",
+        "custom_sounds.remove(sound_id): the sound store's id-validated FILE delete under "
+        "<config>/sounds/custom; no session path, no caller path",
+    ),
     (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
         "<path>.remove",
@@ -3788,6 +3806,58 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/hub_sync/service.py::_materialize_published_skill",
         "shutil.rmtree",
         "Removes this publish's own <config_dir>/hub/downloads/<token_hex> archive directory",
+    ),
+    # -- bundle adoption aside (org hub auto-enrol / install over a local skill) --
+    # ``install_skill`` moves the operator's occupying skill folder
+    # ``<config>/skills/<alias>`` to the dot-prefixed sibling
+    # ``<config>/skills/.adopt-<alias>-<hex12>`` (alias is ``validate_name``'d, so
+    # it cannot carry a separator or ``..``), restores it on a refused install,
+    # and drops it once the hub tree commits (the durable backup is in
+    # ``hub/backups/``). ``recover_bundle_adoption_asides`` settles the same
+    # asides after a crash, scanning ONLY direct children of ``<config>/skills``
+    # that match the prefix and are real directories (symlinks skipped). Every
+    # path is ``<config>/skills/...``, a sibling of sessions/; no session id or
+    # caller-named path reaches any of these calls.
+    (
+        "local_operator/hub_sync/service.py::install_skill",
+        "os.replace",
+        "Moves <config>/skills/<alias> to/from its own .adopt-<alias>-<hex> sibling only",
+        2,
+    ),
+    (
+        "local_operator/hub_sync/service.py::install_skill",
+        "shutil.rmtree",
+        "Drops this adoption's own <config>/skills/.adopt-<alias>-<hex> aside after commit",
+    ),
+    (
+        "local_operator/hub_sync/service.py::recover_bundle_adoption_asides",
+        "os.replace",
+        "Restores a crashed <config>/skills/.adopt-<alias>-<hex> aside to <config>/skills/<alias>",
+    ),
+    (
+        "local_operator/hub_sync/service.py::recover_bundle_adoption_asides",
+        "shutil.rmtree",
+        "Drops a <config>/skills/.adopt-* aside whose alias a hub link already owns",
+    ),
+    # -- org hub eligibility record ------------------------------------------
+    # ``hub_org/eligibility.py`` keeps ONE file, ``<config>/hub/org_catalogue.json``
+    # (``record_path``: a fixed name under the fixed hub dir). ``_atomic_write``
+    # replaces it from a mkstemp sibling temp and unlinks that temp on error;
+    # ``clear`` (sign-out) unlinks the record. No session path reaches either.
+    (
+        "local_operator/hub_org/eligibility.py::_atomic_write",
+        "os.replace",
+        "Atomic replace of <config>/hub/org_catalogue.json from its own sibling temp",
+    ),
+    (
+        "local_operator/hub_org/eligibility.py::_atomic_write",
+        "os.unlink",
+        "Clears this call's own same-directory temp on the error path only",
+    ),
+    (
+        "local_operator/hub_org/eligibility.py::clear",
+        "<path>.unlink",
+        "Removes the fixed <config>/hub/org_catalogue.json record on sign-out",
     ),
     (
         "local_operator/hub_sync/skill_bundle.py::extract_archive",

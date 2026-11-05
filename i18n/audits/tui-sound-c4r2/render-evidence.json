@@ -1,0 +1,306 @@
+{
+  "en": {
+    "all_text_rows_stable": true,
+    "grid": [
+      60,
+      80
+    ],
+    "native_pixels": [
+      480.0,
+      1360.0
+    ],
+    "screen": {
+      "class": "TranscriptScreen",
+      "size": [
+        58,
+        78
+      ],
+      "virtual_size": [
+        58,
+        78
+      ],
+      "region": [
+        0,
+        0,
+        60,
+        80
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    "css_path": [
+      "local_operator.tcss"
+    ],
+    "custom_hint_rows": [
+      "/sound rename <id> <name> · /sound remove <id>\n"
+    ]
+  },
+  "es": {
+    "all_text_rows_stable": true,
+    "grid": [
+      60,
+      80
+    ],
+    "native_pixels": [
+      480.0,
+      1360.0
+    ],
+    "screen": {
+      "class": "TranscriptScreen",
+      "size": [
+        58,
+        78
+      ],
+      "virtual_size": [
+        58,
+        78
+      ],
+      "region": [
+        0,
+        0,
+        60,
+        80
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    "css_path": [
+      "local_operator.tcss"
+    ],
+    "custom_hint_rows": [
+      "/sound rename <id> <name> · /sound remove <id>\n"
+    ]
+  },
+  "fr": {
+    "all_text_rows_stable": true,
+    "grid": [
+      60,
+      80
+    ],
+    "native_pixels": [
+      480.0,
+      1360.0
+    ],
+    "screen": {
+      "class": "TranscriptScreen",
+      "size": [
+        58,
+        78
+      ],
+      "virtual_size": [
+        58,
+        78
+      ],
+      "region": [
+        0,
+        0,
+        60,
+        80
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    "css_path": [
+      "local_operator.tcss"
+    ],
+    "custom_hint_rows": [
+      "/sound rename <id> <name> · /sound remove <id>\n"
+    ]
+  },
+  "hi": {
+    "all_text_rows_stable": true,
+    "grid": [
+      60,
+      80
+    ],
+    "native_pixels": [
+      480.0,
+      1360.0
+    ],
+    "screen": {
+      "class": "TranscriptScreen",
+      "size": [
+        58,
+        78
+      ],
+      "virtual_size": [
+        58,
+        78
+      ],
+      "region": [
+        0,
+        0,
+        60,
+        80
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    "css_path": [
+      "local_operator.tcss"
+    ],
+    "custom_hint_rows": [
+      "/sound rename <id> <name> · /sound remove <id>\n"
+    ]
+  },
+  "ru": {
+    "all_text_rows_stable": true,
+    "grid": [
+      60,
+      80
+    ],
+    "native_pixels": [
+      480.0,
+      1360.0
+    ],
+    "screen": {
+      "class": "TranscriptScreen",
+      "size": [
+        58,
+        78
+      ],
+      "virtual_size": [
+        58,
+        78
+      ],
+      "region": [
+        0,
+        0,
+        60,
+        80
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    "css_path": [
+      "local_operator.tcss"
+    ],
+    "custom_hint_rows": [
+      "/sound rename <id> <name> · /sound remove <id>\n"
+    ]
+  },
+  "ur": {
+    "all_text_rows_stable": true,
+    "grid": [
+      60,
+      80
+    ],
+    "native_pixels": [
+      480.0,
+      1360.0
+    ],
+    "screen": {
+      "class": "TranscriptScreen",
+      "size": [
+        58,
+        78
+      ],
+      "virtual_size": [
+        58,
+        78
+      ],
+      "region": [
+        0,
+        0,
+        60,
+        80
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    "css_path": [
+      "local_operator.tcss"
+    ],
+    "custom_hint_rows": [
+      "/sound rename <id> <name> · /sound remove <id>\n"
+    ]
+  },
+  "vi": {
+    "all_text_rows_stable": true,
+    "grid": [
+      60,
+      80
+    ],
+    "native_pixels": [
+      480.0,
+      1360.0
+    ],
+    "screen": {
+      "class": "TranscriptScreen",
+      "size": [
+        58,
+        78
+      ],
+      "virtual_size": [
+        58,
+        78
+      ],
+      "region": [
+        0,
+        0,
+        60,
+        80
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    "css_path": [
+      "local_operator.tcss"
+    ],
+    "custom_hint_rows": [
+      "/sound rename <id> <name> · /sound remove <id>\n"
+    ]
+  },
+  "zh-CN": {
+    "all_text_rows_stable": true,
+    "grid": [
+      60,
+      80
+    ],
+    "native_pixels": [
+      480.0,
+      1360.0
+    ],
+    "screen": {
+      "class": "TranscriptScreen",
+      "size": [
+        58,
+        78
+      ],
+      "virtual_size": [
+        58,
+        78
+      ],
+      "region": [
+        0,
+        0,
+        60,
+        80
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    "css_path": [
+      "local_operator.tcss"
+    ],
+    "custom_hint_rows": [
+      "/sound rename <id> <name> · /sound remove <id>\n"
+    ]
+  }
+}

@@ -448,6 +448,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "session_lifecycle",
         "session_receipt",
         "credential_grant",
+        "credential_catalogue",
         "credential_report",
         "credential_placement",
         "credential_revoke",
@@ -3052,6 +3053,21 @@ def leave(
         record.removed_ids.append(device_id)
     if persist:
         store.save(record, root)
+        from local_operator.network.credentials.state import PlacementState
+
+        # This non-authoritative cache must never interrupt the already committed
+        # departure's audit/epoch rotation, including on a namespace-guard refusal.
+        # Keep membership persistence OUTSIDE this catch; control signals propagate.
+        try:
+            PlacementState.forget_persisted_owner(record.network_id, device_id, root=root)
+        except Exception as exc:  # noqa: BLE001 — cache failure cannot retain the old epoch
+            # Only bounded identifiers: exception text/tracebacks may carry paths,
+            # cached metadata or credential material. The real path guard stays on.
+            logger.warning(
+                "relay: owner observation cleanup failed network=%s exception=%s",
+                record.network_id[:80],
+                type(exc).__name__[:64],
+            )
     return member
 
 
@@ -8060,6 +8076,11 @@ class RelayServer:
                     "pid": record.pid,
                     "kind": record.kind,
                     "capabilities": list(record.capabilities),
+                    # Publish the owner's runtime facts, not this relay's build.
+                    # Missing native inventory must remain unknown on old peers.
+                    "version": record.version,
+                    "source_ref": record.source_ref,
+                    "native_provider_ids": record.native_provider_ids,
                     "state": state,
                     "age_s": 0.0,
                     "placement": (

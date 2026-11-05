@@ -56,6 +56,7 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.keys import tui_sound as _sound_keys
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
@@ -75,6 +76,7 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import wrap_cells
 
 _t = display_tr("tui.small")
+_t_sound = display_tr("tui.sound")
 _raw_t = tr("tui.small")
 _record_t = tr_record("tui.small")
 
@@ -1001,6 +1003,10 @@ class SettingsView(Vertical):
         #: time: two open dropdowns in a vertical list make the second one's
         #: choices read as the first one's.
         self._expanded: str | None = None
+        #: A config change from another process arrived while a gesture held
+        #: snapshot-seeded state (`reload_from_disk`); the next repaint after
+        #: the gesture ends adopts it.
+        self._reload_pending = False
         #: The row being text-edited, its buffer, and the last rejection. The
         #: error is held on the WIDGET rather than flashed as a notice because
         #: it has to survive the repaint that follows the rejected Enter — an
@@ -1930,7 +1936,7 @@ class SettingsView(Vertical):
                 self._select_stored_choice(setting)
                 # Only now, with the cursor on a real choice, can a preview
                 # apply — and on the stored value it is a no-op by construction.
-                self._preview_choice()
+                self._preview_choice(opening=True)
             # Reveal the CHOICES, not just the row that owns them. Scrolling
             # the selected row into view is not enough: expanding a row sitting
             # on the viewport's bottom edge put every choice below the fold, so
@@ -2565,6 +2571,66 @@ class SettingsView(Vertical):
         except Exception:  # noqa: BLE001 — no manager on the bare test hosts
             return {}
 
+    def reload_from_disk(self) -> bool:
+        """Re-read ``config.yml`` and repaint, unless the user is mid-gesture.
+
+        WHY (TUI audit U4). The page holds its own ``ConfigManager``, read once
+        at open. A change from anywhere else (``lop config edit``, the desktop
+        Settings page, a phone, another TUI) reached the app's config listener
+        and the transcript notice, but the OPEN page kept painting the old
+        value — so a user looking at the Sound row read a selection that was no
+        longer true, and an Enter there would write over the newer value.
+
+        WHEN IT DOES NOT. A row in edit (the buffer is the user's typing), an
+        expanded choice list (the cursor is on a choice and a rebuild could
+        move it), a hotkey capture, a chain editor and a pending delete
+        confirmation all hold state seeded from the old snapshot. Reloading
+        under them would either clobber what the user is doing or re-anchor the
+        cursor beneath their finger. The reload is then HELD (``False``) and
+        taken by the first repaint after the gesture ends (``_repaint``), so a
+        cancelled edit lands on the newer value rather than the stale one.
+
+        ``True`` when the page reloaded now.
+        """
+        if self._mid_gesture() or not self._reload_safely():
+            self._reload_pending = True
+            return False
+        self._repaint()
+        return True
+
+    def _reload_safely(self) -> bool:
+        """Re-read the file ONLY if it parses right now; ``False`` keeps the paint.
+
+        ``ConfigManager.reload`` never raises on a broken file: ``_load_config``
+        prints to stderr, RENAMES config.yml to ``config.yml.bad.<stamp>`` and
+        returns defaults (review round 1, M1, reproduced: a held reload landing
+        on a half-saved file left no config.yml at all). That rename is right at
+        startup and wrong here, so the same guard ``settings_io`` runs before
+        its own reloads (``_require_readable_config``) runs first. An unreadable
+        file leaves the reload pending; the watcher delivers again when the
+        file next changes, and the next repaint retries.
+        """
+        try:
+            settings_io._require_readable_config(self._manager)
+        except Exception:  # noqa: BLE001 — unreadable or unstattable: keep the paint
+            return False
+        try:
+            self._manager.reload()
+        except Exception:  # noqa: BLE001 — keep the last good snapshot
+            return False
+        self._reload_pending = False
+        return True
+
+    def _mid_gesture(self) -> bool:
+        """Whether page state seeded from the current snapshot is in use."""
+        return (
+            self._editing is not None
+            or self._expanded is not None
+            or self._capture is not None
+            or self._chain is not None
+            or self._confirm_delete is not None
+        )
+
     # -- text editing -------------------------------------------------------
     def _begin_edit(self, row: "_Row") -> None:
         """Open the inline editor on ``row``, seeded with its STORED value.
@@ -2784,15 +2850,17 @@ class SettingsView(Vertical):
             self._selected = settled
 
     # -- preview ------------------------------------------------------------
-    def _preview_choice(self) -> None:
+    def _preview_choice(self, *, opening: bool = False) -> None:
         """Apply the highlighted choice to the RUNNING APP, storing nothing.
 
-        Only for a setting that opts in with ``Setting.preview`` — today just
-        ``tui.theme``. The value is posted as :class:`SettingsPreview`, which is
-        deliberately a DIFFERENT message from :class:`SettingsChanged`: the
-        latter is the write notification, and routing a preview through it is
-        how a preview would eventually be made to persist by a well-meaning
-        edit to the app's handler. Two messages means the live-apply path is
+        Only for a setting that opts in with ``Setting.preview``: ``tui.theme``
+        (a live repaint, captured and reverted) and ``notifications.sound.id``
+        (an audition, nothing captured; see the comment below). The value is
+        posted as :class:`SettingsPreview`, which is deliberately a DIFFERENT
+        message from :class:`SettingsChanged`: the latter is the write
+        notification, and routing a preview through it is how a preview would
+        eventually be made to persist by a well-meaning edit to the app's
+        handler. Two messages means the live-apply path is
         reachable without the write path being involved at all.
 
         The value the user started on is captured on the way IN, and it is the
@@ -2806,7 +2874,18 @@ class SettingsView(Vertical):
             return
         if not row.setting.preview:
             return
-        if self._preview_before is None:
+        if opening and row.setting.key != "tui.theme":
+            # Opening a list lands on the STORED choice. For the theme that
+            # preview is a no-op; for a sound it would play the current sound
+            # on every open, which the user did not ask to hear. Auditions
+            # start when the cursor MOVES.
+            return
+        # Only the THEME has a state to capture and put back. The other
+        # previewing row, `notifications.sound.id`, auditions a sound: an event
+        # with nothing to restore, so it must not arm `_preview_before` — a
+        # capture taken there would make `_revert_preview` re-apply the theme
+        # (a full transcript re-ink) on every close of the sound list.
+        if row.setting.key == "tui.theme" and self._preview_before is None:
             self._preview_before = theme_mod.current_theme()
         self.post_message(SettingsPreview(row.setting.key, row.choice.value))
 
@@ -2844,6 +2923,15 @@ class SettingsView(Vertical):
         settles the row and then closes the expansion): with nothing captured
         there is nothing to put back.
         """
+        if self._expanded == "notifications.sound.id":
+            # A sound list closing by any cancel route (esc, an arrow off the
+            # group, a click elsewhere) ends its audition too (UX round 1, U1).
+            # Called directly like `_apply_theme` below: the list's own repaint
+            # follows, and a posted message would arrive after the sound has
+            # already played on.
+            stop = getattr(getattr(self, "app", None), "_stop_sound_preview", None)
+            if stop is not None:
+                stop()
         restore = self._preview_before
         if restore is None:
             return
@@ -3664,6 +3752,12 @@ class SettingsView(Vertical):
 
     # -- painting -----------------------------------------------------------
     def _repaint(self) -> None:
+        if self._reload_pending and not self._mid_gesture():
+            # A config change arrived mid-gesture (`reload_from_disk`); the
+            # gesture has ended, so adopt the newer file before painting —
+            # through the same parse guard, so a file broken in the meantime
+            # stays in place and the reload stays pending.
+            self._reload_safely()
         # Height ladder BEFORE the paints: it toggles `display` / padding
         # on the chrome widgets, which is what the layout reads, and the
         # paints (detail text, pane budget) have to see the same decision.
@@ -4803,6 +4897,14 @@ class SettingsView(Vertical):
                 clause_style = _bridge_ink()
             width = self._detail_width()
             help_text = _paint(row.setting.help, source_locale="en")
+            if row.setting.key == "notifications.sound.id":
+                # The registry help is SHARED with the desktop and `lop config`,
+                # so it names `lop sound add` / `lop sound doctor`. Inside the
+                # TUI the same controls are `/sound` (addendum 2, §1 U3), and
+                # pointing a TUI user at a shell command they would have to leave
+                # the app for is the gap the audit named. Only this page's line
+                # is repointed; the CLI and desktop keep their own wording.
+                help_text = _t_sound(_sound_keys.id_help())
             if row.setting.hotkey_scope == "desktop":
                 # The desktop sentence REPLACES the registry help on this page,
                 # for the reason `_DESKTOP_HOTKEY_DETAIL` states. The registry

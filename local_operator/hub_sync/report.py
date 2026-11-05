@@ -195,6 +195,12 @@ def render_entry(report: ItemMergeReport, *, style: Literal["cli", "tool"] = "cl
     name = report.name
     o = report.outcome
     if o == "up-to-date" or o == "unchanged":
+        # ``local-only`` is the drift a kept-local link exists to show (the org
+        # hub's adopt-link, QA round 2 Q5): the pull verdict is up-to-date, so
+        # dropping the classification hid it from `agents/teams sync --check`
+        # while `--json` carried it. Same token the skills check line prints.
+        if report.classification == "local-only":
+            return f"{name}: hub up-to-date (local-only)"
         return f"{name}: hub up-to-date"
     if o == "available":
         cls = f" ({report.classification})" if report.classification else ""
