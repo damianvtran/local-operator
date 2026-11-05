@@ -6503,6 +6503,25 @@
       "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. F1 MINOR fixed: U+202F before both new colons. Filtrer/retenus, vous register, apostrophes and fallback meaning preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
     },
     {
+      "locale": "fr",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "9/9 initial ordinary French settings metadata; translator7b2ba4ed501d plus two independent French readers c44e0f808e48 and 35aac0a677bc, actual openai/gpt-6.1-sol from retained completed-usage provenance, each passed with zero findings. Readers bound source/context/target in i18n/audits/evidence/fr/wire.settings.hub_defaults/integration-binding.json; immutable originals retained. Native French readers approved semantics including the 72-cell hub help budget; semantics: all-agent/skill OFF pauses, ON creates new links, team creation default. No native re-execution/pseudo/RTL claim here."
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",

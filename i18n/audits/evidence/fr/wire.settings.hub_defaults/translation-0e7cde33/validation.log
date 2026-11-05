@@ -1,0 +1,4 @@
+PASS wire.settings.hub_defaults: 9/9 keys; JSON; source key order; literal-only ICU; no bidi; numeric literals preserved.
+PASS: negative controls rejected missing key and unexpected argument.
+CLDR: not applicable, zero plural/select arguments in source and target.
+NOT RUN: full validator/scanner/build/native/rendered/pseudo/RTL/independent semantic audits.

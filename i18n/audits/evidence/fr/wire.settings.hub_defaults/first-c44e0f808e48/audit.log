@@ -1,0 +1,22 @@
+INPUT en.json 8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c
+INPUT context.json a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba
+INPUT fr.json 9733a2653109b4e5b30964d0bbc9fb5974fe799bb086ce8d21354517d1936940
+STYLE SNAPSHOT DIFFERENCE: pinned guide retains unrelated relay.chrome width-exception paragraph; normative rules identical; both retained
+INPUT fr-style.md 5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7
+INPUT glossary.md 0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8
+CORE CHECKER PASS isolated namespace fixture wire.settings.hub_defaults 9
+NEGATIVE REJECTED unexpected argument fr/wire.settings.hub_defaults: wire.settings.hub_defaults.agents.help: arguments (('unexpected_parameter', 'simple'),) != en's (): en has 0 argument(s), translation has 1
+NEGATIVE REJECTED missing key fr/wire.settings.hub_defaults: missing key 'wire.settings.hub_defaults.agents.help'
+NEGATIVE REJECTED bad ICU fr/wire.settings.hub_defaults: wire.settings.hub_defaults.agents.help: expected ',' or '}' after argument name 'unclosed' (at offset 9 of '{unclosed')
+KEY PASS wire.settings.hub_defaults.agents.help argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.settings.hub_defaults.agents.label argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.settings.hub_defaults.agents.off.description argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.settings.hub_defaults.agents.on.description argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.settings.hub_defaults.model_default.note argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.settings.hub_defaults.teams.help argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.settings.hub_defaults.teams.label argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.settings.hub_defaults.teams.off.description argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.settings.hub_defaults.teams.on.description argument_types=() Cf=0 opaque_values_literal=true
+WIDTHS [{"key": "wire.settings.hub_defaults.agents.help", "cells": 72, "maxCells": 72}, {"key": "wire.settings.hub_defaults.teams.help", "cells": 70, "maxCells": 72}]
+SERVED MODEL {"message_id": "fa8c3f7a5e8943c38c20693a0bbf019f", "ts": 1793720089.815171, "provider": "openai", "model_id": "gpt-6.1-sol", "input_tokens": 107196, "output_tokens": 256}
+PASS mechanical; pseudo/native RTL/native fit/real-path/design NOT RUN; no ledger/repo edits

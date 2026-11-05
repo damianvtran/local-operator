@@ -1,0 +1,11 @@
+{
+  "wire.settings.hub_defaults.agents.help": "Non : gèle toutes les MAJ agents/compétences. Oui : abonne les nouveaux.",
+  "wire.settings.hub_defaults.agents.label": "Mises à jour auto des liens d’agents et de compétences",
+  "wire.settings.hub_defaults.agents.off.description": "suspendre les mises à jour de tous les liens d’agents et de compétences",
+  "wire.settings.hub_defaults.agents.on.description": "abonner les nouveaux liens d’agents et de compétences",
+  "wire.settings.hub_defaults.model_default.note": "Les merges du Hub utilisent votre modèle par défaut actuel. L’ancien choix de modèle propre au Hub est ignoré.",
+  "wire.settings.hub_defaults.teams.help": "Par défaut pour les nouveaux liens ; les anciens gardent leurs règles.",
+  "wire.settings.hub_defaults.teams.label": "Abonner les nouveaux liens d’équipes",
+  "wire.settings.hub_defaults.teams.off.description": "suspendre les mises à jour entrantes des nouveaux liens d’équipes",
+  "wire.settings.hub_defaults.teams.on.description": "abonner les nouveaux liens d’équipes"
+}

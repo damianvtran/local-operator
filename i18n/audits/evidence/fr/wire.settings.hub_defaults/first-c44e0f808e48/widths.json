@@ -1,0 +1,12 @@
+[
+  {
+    "key": "wire.settings.hub_defaults.agents.help",
+    "cells": 72,
+    "maxCells": 72
+  },
+  {
+    "key": "wire.settings.hub_defaults.teams.help",
+    "cells": 70,
+    "maxCells": 72
+  }
+]
