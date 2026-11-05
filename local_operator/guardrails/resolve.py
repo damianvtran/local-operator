@@ -64,6 +64,9 @@ _PREFIX_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until",
 _DECLARE_WORDS = frozenset({"export", "declare", "typeset", "local", "readonly"})
 #: Marker for an opaque stretch inside an expanded word; NUL never occurs in argv.
 OPAQUE_MARK = "\x00"
+# Analysis-only provenance; contains the ordinary opaque marker so existing
+# expansion/climb rules still apply without ever retaining a credential value.
+CREDENTIAL_MARK = OPAQUE_MARK + "credential" + OPAQUE_MARK
 #: Same, for a ``$(mktemp …)`` value carried through a variable (R6): still
 #: unknowable, but known to be a fresh entry under the temp directory.
 TEMP_MARK = "\x02"
@@ -747,6 +750,9 @@ class Target:
     #: ABOVE ``path`` by an unknown amount (S4/S2-5b), so ``path`` must not be
     #: presented to the judge as where the deletion lands.
     climbs: bool = False
+    # A judge cannot approve a root deliberately hidden for privacy. Keep this
+    # distinct from ordinary opaque substitutions that can receive review.
+    credential_derived: bool = False
 
 
 @dataclass
@@ -754,6 +760,7 @@ class _State:
     env: dict[str, str]
     cwd: str | None
     home: str
+    private_cwd: bool = False
 
 
 def _absolute(text: str, cwd: str | None) -> tuple[str | None, bool]:
@@ -819,6 +826,9 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
 
         path, unknown = os.path.realpath(tempfile.gettempdir()), False
     return Target(
+        credential_derived=(
+            CREDENTIAL_MARK in exp.text or (state.private_cwd and not exp.text.startswith("/"))
+        ),
         path=path,
         op=op,
         program=program,
@@ -1195,11 +1205,21 @@ class _Snapshot:
     env: dict[str, str]
     cwd: str | None
     home: str
+    private_cwd: bool = False
 
 
 class _Walker:
     def __init__(self, env: Mapping[str, str], cwd: str | None, home: str) -> None:
-        self.state = _State(env=dict(env), cwd=cwd, home=home)
+        from local_operator.tools.shell_env import is_credential_shaped
+
+        # S1: inherited credentials are unknown paths, never empty expansions.
+        # This analysis-only copy must not alter the actual child's grants. An
+        # ordinary literal assignment later in the script can still replace it.
+        private_env = {
+            name: CREDENTIAL_MARK if is_credential_shaped(name) else value
+            for name, value in env.items()
+        }
+        self.state = _State(env=private_env, cwd=cwd, home=home)
         self.result = Resolution()
         #: Paths an earlier segment of THIS command made into a symlink (S7):
         #: what they point at is resolved only at run time.
@@ -1210,10 +1230,11 @@ class _Walker:
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
         st = self.state
-        return _Snapshot(dict(st.env), st.cwd, st.home)
+        return _Snapshot(dict(st.env), st.cwd, st.home, st.private_cwd)
 
     def _restore(self, snap: _Snapshot) -> None:
         self.state.env, self.state.cwd, self.state.home = snap.env, snap.cwd, snap.home
+        self.state.private_cwd = snap.private_cwd
 
     def _isolated_walk(self, command: str, depth: int) -> None:
         """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
@@ -1450,6 +1471,7 @@ class _Walker:
                 haystack = " ".join([inner, *(b for w in args for b in w.substitutions)])
                 if _DELETE_WORD_RE.search(haystack):
                     self.result.opaque_reasons.append("eval of an unresolvable command")
+                    self._private_script_target(inner)
                 return
             self.walk(inner, depth + 1)
             return
@@ -1621,6 +1643,7 @@ class _Walker:
             if script.opaque or not script.text.strip():
                 if _DELETE_WORD_RE.search(segment):
                     self.result.opaque_reasons.append("shell -c with an unresolvable script")
+                    self._private_script_target(script.text)
                 return
             self._isolated_walk(script.text, depth + 1)
             return
@@ -1726,6 +1749,12 @@ class _Walker:
         st = self.state
         operands = [w for w in args if not (w.text.startswith("-") and len(w.text) > 1)]
         previous = st.cwd
+        # A privacy-hidden cd leaves relative deletion roots uninspectable too.
+        # This is cwd provenance, not a whole-command taint: a later successful
+        # literal cd clears it, and the existing shell snapshots isolate it.
+        private_target = st.private_cwd or CREDENTIAL_MARK in (
+            operands[0].text if operands else st.home
+        )
         if not operands or (operands[0].vanished and not operands[0].opaque):
             path = st.home
         else:
@@ -1755,13 +1784,24 @@ class _Walker:
             # assume success (or recover it after an unmodelled popd), so
             # invalidate BOTH instead of letting cd - revive a stale path.
             st.cwd = None
+            st.private_cwd = private_target
             st.env.pop("OLDPWD", None)
             return
+        st.private_cwd = False
         if previous is None:
             st.env.pop("OLDPWD", None)
         else:
             st.env["OLDPWD"] = previous
         st.cwd = path
+
+    def _private_script_target(self, text: str) -> None:
+        # A consuming shell/eval has an unresolved deleting script, not ordinary
+        # argument data. Retain private-root provenance across that uncertainty
+        # path so a judge cannot consent to roots it was deliberately not shown.
+        if CREDENTIAL_MARK in text:
+            self.result.targets.append(
+                Target(None, "delete", "shell", opaque=True, credential_derived=True)
+            )
 
     def _for(self, words: list[Expanded]) -> None:
         """``for VAR in WORDS``: R6 — literal lists bind VAR to their values."""
@@ -1780,7 +1820,9 @@ class _Walker:
             st.env[var] = OPAQUE_MARK
             return
         if any(v.opaque or v.pattern is not None for v in values):
-            st.env[var] = OPAQUE_MARK
+            st.env[var] = (
+                CREDENTIAL_MARK if any(CREDENTIAL_MARK in v.text for v in values) else OPAQUE_MARK
+            )
             return
         # The body runs once per value; the walker sees it once, so the variable
         # carries EVERY value and ``_add`` fans a target out per value.
@@ -1927,6 +1969,7 @@ class _Walker:
                 path=self.state.cwd,
                 op="delete",
                 program=f"xargs {program}",
+                credential_derived=self.state.private_cwd,
                 opaque=True,
                 unknown_cwd=self.state.cwd is None,
             )

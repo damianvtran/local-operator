@@ -373,6 +373,11 @@ def _rank(target: Target, prot: _Protected) -> RankedTarget:
             # An opaque component directly under a protected root still names
             # something inside it — and may be empty or ``..``: no benefit of doubt.
             return RankedTarget(target, Risk.CRITICAL, "; ".join([reason, *notes]))
+    # S1: fresh-temp/contained-path exemptions cannot prove a privacy-hidden
+    # suffix safe. Keep protected-root CRITICAL precedence above, but never let
+    # an uninspectable credential-derived target become LOW.
+    if target.credential_derived:
+        return RankedTarget(target, Risk.HIGH, "; ".join(notes) or "unresolved target")
     # The session's own scratchpad is where the agent is TOLD to work, so a
     # timestamped component there (``$(date +%s)``) stays LOW — but only when the
     # substitution's program cannot print a ``..`` that climbs out of the pad.

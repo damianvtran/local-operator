@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,24 @@ from local_operator.guardrails.judge import (
 from local_operator.guardrails.rules import Rule, call_text, load_rules
 
 logger = logging.getLogger(__name__)
+
+# S1: a guard's resolved target is new data, not a copy already scrubbed by
+# tool-result handling. Scope the same redactor to judge, journal and refusal
+# boundaries; ContextVar keeps concurrent calls' credential sets isolated.
+_OUTPUT_REDACTOR: ContextVar[Callable[[str], str] | None] = ContextVar(
+    "guardrail_output_redactor", default=None
+)
+
+
+def _safe_text(text: str) -> str:
+    from local_operator.secrets.runtime import scrub
+
+    redact = _OUTPUT_REDACTOR.get() or scrub
+    result = redact(text)
+    if not isinstance(result, str):
+        raise TypeError("invalid redactor result")
+    return result
+
 
 #: The stable head of every refusal. Model-facing (the system prompt names it),
 #: so English by design and never localised.
@@ -209,11 +228,11 @@ def _journal(rule: str, risk: str, verdict: str, latency: float, targets: str) -
     # block ratio and judge latency (see the PR's risk notes).
     logger.info(
         "guardrail.verdict rule=%s risk=%s verdict=%s latency_s=%.3f targets=%s",
-        rule,
-        risk,
-        verdict,
+        _safe_text(rule),
+        _safe_text(risk),
+        _safe_text(verdict),
         latency,
-        targets[:500],
+        _safe_text(targets)[:500],
     )
 
 
@@ -243,6 +262,18 @@ async def _dangerous_delete(
             text=_critical_text(verdict),
             rule=DANGEROUS_DELETE_RULE,
             risk="critical",
+            destructive=True,
+        )
+    if any(t.target.credential_derived for t in verdict.targets):
+        # Privacy-hidden roots cannot receive meaningful model consent. This
+        # refuses even an ALLOW/critical override, while leaving known protected
+        # roots on the existing CRITICAL path above. Never expose the env value.
+        _journal(DANGEROUS_DELETE_RULE, "high", "block", 0.0, targets)
+        return GuardOutcome(
+            blocked=True,
+            text=_review_text(DANGEROUS_DELETE_RULE, "an unresolvable target", targets),
+            rule=DANGEROUS_DELETE_RULE,
+            risk="high",
             destructive=True,
         )
     result = await run_judge(
@@ -280,6 +311,62 @@ async def _dangerous_delete(
 
 
 async def check_tool_call(
+    tool_name: str,
+    args: Mapping[str, Any],
+    ctx: CallContext,
+    *,
+    judge: JudgeCall | None,
+    settings: GuardSettings,
+) -> GuardOutcome | None:
+    """Keep analysis-derived data private before any outward boundary.
+
+    Use the existing registry/shape scrubber, not a second masking algorithm.
+    Credential values stay local to this call; they are never registered,
+    journaled, or included in the isolated model request. Fail closed without
+    logging an exception that might itself contain sensitive text.
+    """
+    from local_operator.redaction_shapes import scrub_values
+    from local_operator.secrets.runtime import scrub
+    from local_operator.tools.shell_env import is_credential_shaped
+
+    values = [value for name, value in ctx.env.items() if is_credential_shaped(name)]
+
+    def redact(text: str) -> str:
+        return scrub_values(scrub(text), values)
+
+    async def private_judge(system: str, prompt: str) -> str:
+        assert judge is not None
+        try:
+            return _safe_text(await judge(_safe_text(system), _safe_text(prompt)))
+        except Exception:  # no raw exception/traceback may cross this boundary
+            return "BLOCK"
+
+    token = _OUTPUT_REDACTOR.set(redact)
+    try:
+        outcome = await _check_tool_call(
+            tool_name,
+            args,
+            ctx,
+            judge=private_judge if judge is not None else None,
+            settings=settings,
+        )
+        if outcome is not None:
+            outcome.text = _safe_text(outcome.text)
+            outcome.rule = _safe_text(outcome.rule)
+            outcome.warnings = [_safe_text(warning) for warning in outcome.warnings]
+        return outcome
+    except Exception:
+        return GuardOutcome(
+            blocked=True,
+            text=f"{BLOCK_MARKER} (error): the safety check failed, so this "
+            "command was not run. Ask the user how to proceed.",
+            rule="guardrail-error",
+        )
+    finally:
+        _OUTPUT_REDACTOR.reset(token)
+
+
+async def _check_tool_call(
     tool_name: str,
     args: Mapping[str, Any],
     ctx: CallContext,
