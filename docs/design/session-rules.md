@@ -278,9 +278,20 @@ Verified, with the evidence path named:
 
 **Not proven, stated plainly:**
 
-1. **That rules beat custom instructions.** On deepseek-flash, 15 draws per arm on real replayed
-   failures, `bare_sharpen` broke 19/25 with no rule, 2/20 with custom instructions and 0/15
-   with rules — rules **match** custom instructions, they do not beat them.
+1. **That rules beat custom instructions — measured, and they do not.** Free model
+   (`nvidia/nemotron-3.5-lightning:free`, 1M window, `cost_micro_usd: 0`), 15 draws per arm on the
+   real replayed failure `bare_sharpen`: no rule **6/15** violated (40%), one rule in the
+   custom-instructions file **1/15** (7%), that rule plus 12 other global rules **5/15** (33%),
+   one session rule **4/15** (27%). Fisher one-sided: custom vs custom-loaded **p=0.084**
+   (dilution is a trend, not a finding); session rules vs custom-loaded **p=0.50** (no benefit);
+   session rules vs one clean custom instruction **p=0.98** (worse). Putting the instruction in
+   the prompt is what works; the delivery mechanism does not add obedience, and session rules
+   recover none of the ground that a loaded global file loses.
+   **Consequence: this feature should not be adopted on an adherence argument.** Its case is
+   lifecycle only — scope, edit/remove at zero history cost, durability across restart,
+   compaction and fork (probe: 9/9 on a 182 MB real session; a real snapcompact pass kept the
+   rule with 0 provider calls), and an in-app surface. Whether that is worth a primitive is a
+   product decision, and it is not settled by these numbers.
 2. **`merge_authority` is not a valid scenario, and this was found after seeing its results.** Its
    compliant action is a merge; the replay blocks every tool, so the merge cannot happen and
    "the Terraform change needs your word" is the accurate reply in every arm. The predicate was
