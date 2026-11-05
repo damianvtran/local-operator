@@ -325,13 +325,32 @@ def test_status_files_block_is_normalized_or_dropped() -> None:
 
 
 @asyncio
-async def test_file_mode_refuses_an_agent_actor_before_io() -> None:
-    """Review F1: an agent-addressed file upload must not stage as the human."""
+async def test_file_mode_preserves_agent_actor_without_human_fallback() -> None:
+    """The dark agent extension carries its actor on the existing file route."""
 
     seen, handler = _recorder()
     client = _make_client(handler)
+    actor = "bep_" + "a" * 32
+    await client.upload_attachment(
+        CID,
+        b"%PDF",
+        mode="file",
+        actor_endpoint_id=actor,
+        tenant_id="tnt_1",
+        expected_account_id="acc_1",
+    )
+    assert len(seen) == 1
+    assert seen[0].url.params["actor_endpoint_id"] == actor
+    assert seen[0].url.params["tenant_id"] == "tnt_1"
+    assert seen[0].headers["x-bridge-files-version"] == "1"
+    assert seen[0].content == b"%PDF"
+
+
+@asyncio
+@pytest.mark.parametrize("actor", ["", " ", " bep_actor", 0, False])
+async def test_file_mode_malformed_actor_never_falls_back_to_human(actor) -> None:
+    seen, handler = _recorder()
+    client = _make_client(handler)
     with pytest.raises(ValueError):
-        await client.upload_attachment(
-            CID, b"%PDF", mode="file", actor_endpoint_id="bep_" + "a" * 32
-        )
+        await client.upload_attachment(CID, b"never-human", mode="file", actor_endpoint_id=actor)
     assert seen == []

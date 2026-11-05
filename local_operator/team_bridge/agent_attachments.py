@@ -445,6 +445,104 @@ def _refusal_from_gate(label: str, name: str, reason: str) -> AttachmentRefused:
     return AttachmentRefused("attachment_invalid", f"{label} ({name}) cannot be attached")
 
 
+def read_path_bytes(
+    path_text: str,
+    index: int,
+    session_id: str,
+    *,
+    label_prefix: str = "attachments",
+    max_bytes: int = _SOURCE_MAX_BYTES,
+    anchor_parents: bool = False,
+) -> tuple[bytes, str]:
+    """Share the existing path/FD gate, never image decoding, with generic sends.
+
+    Generic files preserve exact bytes and need the same credential/config-root
+    denial and bounded regular-file open as images, not a weaker second reader.
+    """
+    label = f"{label_prefix}[{index}]"
+    if not isinstance(path_text, str) or not path_text.strip() or "\x00" in path_text:
+        raise AttachmentRefused("attachment_invalid", f"{label} must be a file path")
+    stripped = path_text.strip()
+    if not stripped.startswith(("/", "~")):
+        # No cwd contract exists for this tool, so a relative path would resolve
+        # against whatever the server process happens to be in.
+        raise AttachmentRefused(
+            "attachment_invalid", f"{label} must be an absolute path (or start with ~/)"
+        )
+    # ``expanduser`` raises RuntimeError for ``~nosuchuser/x`` and a lone surrogate
+    # raises UnicodeEncodeError at the first syscall: both are the MODEL's malformed
+    # input, so they are a structured refusal, never an uncaught tool crash.
+    try:
+        name = browser_files.safe_name(Path(stripped).name or "file")
+        policy = browser_files.Policy(upload_max_bytes=max_bytes)
+        resolved, reason = browser_files.check_upload(
+            stripped, cwd="/", policy=policy, session_id=session_id
+        )
+    except (RuntimeError, ValueError, OSError):
+        raise AttachmentRefused("attachment_invalid", f"{label} is not a usable path") from None
+    if resolved is None:
+        raise _refusal_from_gate(label, name, reason)
+    try:
+        # O_NONBLOCK so a FIFO swapped in after the gate cannot hang open();
+        # O_NOFOLLOW so a swap to a symlink after the gate is refused rather than
+        # followed (the resolved path has no link components when it was judged).
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        if anchor_parents:
+            # A resolved path can acquire a symlinked PARENT after the policy
+            # check. Anchor each directory FD without following links, so the
+            # generic byte lane never opens a swapped credential/config target.
+            # Unsupported platforms refuse files, not fall back to a weak open;
+            # the pre-existing image reader retains its original default path.
+            if os.open not in os.supports_dir_fd or not hasattr(os, "O_DIRECTORY"):
+                raise OSError("anchored file reads unavailable")
+            directory_flags = (
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            )
+            directory = os.open(resolved.anchor, directory_flags)
+            try:
+                for component in resolved.parts[1:-1]:
+                    next_directory = os.open(component, directory_flags, dir_fd=directory)
+                    os.close(directory)
+                    directory = next_directory
+                fd = os.open(resolved.name, flags, dir_fd=directory)
+            finally:
+                os.close(directory)
+        else:
+            fd = os.open(resolved, flags)
+    except (OSError, ValueError):
+        raise AttachmentRefused(
+            "attachment_unreadable", f"{label} ({name}) could not be opened"
+        ) from None
+    try:
+        status = os.fstat(fd)
+        if not stat.S_ISREG(status.st_mode):
+            raise AttachmentRefused("attachment_invalid", f"{label} ({name}) is not a regular file")
+        if status.st_size > max_bytes:
+            raise AttachmentRefused(
+                "attachment_too_large",
+                f"{label} ({name}) is larger than {max_bytes // (1024 * 1024)} MiB",
+            )
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            data = handle.read(max_bytes + 1)
+    except OSError:
+        raise AttachmentRefused(
+            "attachment_unreadable", f"{label} ({name}) could not be read"
+        ) from None
+    finally:
+        os.close(fd)
+    if len(data) > max_bytes:
+        raise AttachmentRefused("attachment_too_large", f"{label} ({name}) is too large")
+    if not data:
+        raise AttachmentRefused("attachment_invalid", f"{label} ({name}) is empty")
+
+    return data, name
+
+
 def _read_and_bound(path_text: str, index: int, session_id: str) -> PreparedImage:
     """Read one local file, gate it, sniff it, bound it. Blocking: run in a thread.
 
@@ -471,65 +569,8 @@ def _read_and_bound(path_text: str, index: int, session_id: str) -> PreparedImag
     from local_operator.imaging import bound_image_for_model
     from local_operator.media import sniff_image
 
+    data, name = read_path_bytes(path_text, index, session_id, max_bytes=_SOURCE_MAX_BYTES)
     label = f"attachments[{index}]"
-    if not isinstance(path_text, str) or not path_text.strip() or "\x00" in path_text:
-        raise AttachmentRefused("attachment_invalid", f"{label} must be a file path")
-    stripped = path_text.strip()
-    if not stripped.startswith(("/", "~")):
-        # No cwd contract exists for this tool, so a relative path would resolve
-        # against whatever the server process happens to be in.
-        raise AttachmentRefused(
-            "attachment_invalid", f"{label} must be an absolute path (or start with ~/)"
-        )
-    # ``expanduser`` raises RuntimeError for ``~nosuchuser/x`` and a lone surrogate
-    # raises UnicodeEncodeError at the first syscall: both are the MODEL's malformed
-    # input, so they are a structured refusal, never an uncaught tool crash.
-    try:
-        name = browser_files.safe_name(Path(stripped).name or "file")
-        policy = browser_files.Policy(upload_max_bytes=_SOURCE_MAX_BYTES)
-        resolved, reason = browser_files.check_upload(
-            stripped, cwd="/", policy=policy, session_id=session_id
-        )
-    except (RuntimeError, ValueError, OSError):
-        raise AttachmentRefused("attachment_invalid", f"{label} is not a usable path") from None
-    if resolved is None:
-        raise _refusal_from_gate(label, name, reason)
-    try:
-        # O_NONBLOCK so a FIFO swapped in after the gate cannot hang open();
-        # O_NOFOLLOW so a swap to a symlink after the gate is refused rather than
-        # followed (the resolved path has no link components when it was judged).
-        fd = os.open(
-            resolved,
-            os.O_RDONLY
-            | getattr(os, "O_NONBLOCK", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-        )
-    except (OSError, ValueError):
-        raise AttachmentRefused(
-            "attachment_unreadable", f"{label} ({name}) could not be opened"
-        ) from None
-    try:
-        status = os.fstat(fd)
-        if not stat.S_ISREG(status.st_mode):
-            raise AttachmentRefused("attachment_invalid", f"{label} ({name}) is not a regular file")
-        if status.st_size > _SOURCE_MAX_BYTES:
-            raise AttachmentRefused(
-                "attachment_too_large",
-                f"{label} ({name}) is larger than {_SOURCE_MAX_BYTES // (1024 * 1024)} MiB",
-            )
-        with os.fdopen(fd, "rb", closefd=False) as handle:
-            data = handle.read(_SOURCE_MAX_BYTES + 1)
-    except OSError:
-        raise AttachmentRefused(
-            "attachment_unreadable", f"{label} ({name}) could not be read"
-        ) from None
-    finally:
-        os.close(fd)
-    if len(data) > _SOURCE_MAX_BYTES:
-        raise AttachmentRefused("attachment_too_large", f"{label} ({name}) is too large")
-    if not data:
-        raise AttachmentRefused("attachment_invalid", f"{label} ({name}) is empty")
 
     # The BYTES decide the type, never the extension: a renamed file is still
     # whatever its header says, and only PNG/JPEG are stored by the hub.
@@ -646,6 +687,8 @@ async def stage_attachments(
     conversation_id: str,
     endpoint_id: str,
     prepared: Sequence[PreparedImage],
+    *,
+    pre_http_guard: Any = None,
 ) -> list[StagedImage]:
     """Upload each image as the agent endpoint; return ids + metadata only.
 
@@ -655,15 +698,18 @@ async def stage_attachments(
     that is not minted-shaped must never reach a send body or a URL path.
     """
 
+    tenant_id = runtime.tenant_id
+    account_id = runtime.owner.account_id
     staged: list[StagedImage] = []
     try:
         for item in prepared:
             result = await runtime.client.upload_attachment(
                 conversation_id,
                 item.payload(),
-                tenant_id=runtime.tenant_id,
+                tenant_id=tenant_id,
                 actor_endpoint_id=endpoint_id,
-                expected_account_id=runtime.owner.account_id,
+                expected_account_id=account_id,
+                **({"pre_http_guard": pre_http_guard} if pre_http_guard is not None else {}),
             )
             row = result.get("attachment") if isinstance(result, dict) else None
             attachment_id = row.get("id") if isinstance(row, dict) else None
@@ -682,7 +728,14 @@ async def stage_attachments(
                 )
             )
     except BaseException:
-        await discard_attachments(runtime, conversation_id, endpoint_id, staged)
+        await discard_attachments(
+            runtime,
+            conversation_id,
+            endpoint_id,
+            staged,
+            tenant_id=tenant_id,
+            expected_account_id=account_id,
+        )
         raise
     return staged
 
@@ -697,6 +750,9 @@ async def discard_attachments(
     conversation_id: str,
     endpoint_id: str,
     staged: Sequence[StagedImage],
+    *,
+    tenant_id: str | None = None,
+    expected_account_id: str | None = None,
 ) -> None:
     """Best-effort delete of the ids THIS call staged after a send that did not land.
 
@@ -724,15 +780,20 @@ async def discard_attachments(
     if not staged:
         return
 
+    tenant_id = runtime.tenant_id if tenant_id is None else tenant_id
+    expected_account_id = (
+        runtime.owner.account_id if expected_account_id is None else expected_account_id
+    )
+
     async def _delete_all() -> None:
         for item in staged:
             try:
                 await runtime.client.delete_attachment(
                     conversation_id,
                     item.id,
-                    tenant_id=runtime.tenant_id,
+                    tenant_id=tenant_id,
                     actor_endpoint_id=endpoint_id,
-                    expected_account_id=runtime.owner.account_id,
+                    expected_account_id=expected_account_id,
                 )
             except Exception:  # noqa: BLE001 — see docstring
                 continue

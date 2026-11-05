@@ -38,6 +38,13 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   creator agent member is added automatically (the server requires it); the
   human owner is added ONLY when named explicitly, because an agent-created
   channel is the agent's own space, not a silent copy of its owner's.
+- **files** — absolute local paths on dm/channel_post only (file-only, mixed
+  image/file, and thread replies). Requires fresh files v1 enabled + agent_upload
+  true; an absent/failed capability refuses, never sends text alone or as human.
+  Bytes stay exact; receiving agents get counts, not names/originals/model access.
+  An unconfirmed/interrupted send is delivery-uncertain: do not restage or retry
+  with a new reference. In-call retries preserve the same reference and ordered IDs;
+  no automatic recovery or payload journal exists after process loss.
 - **channel_post** — append one message as the agent. The body is the caller's
   text; one ``client_ref`` is minted per call, so a retry inside the client
   reuses it and a second call is a second message. ``thread_root_id`` posts it
@@ -159,7 +166,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 
-from . import agent_attachments, reply_guard, secret_guard
+from . import agent_attachments, agent_files, reply_guard, secret_guard
 from .client import ATTACHMENT_MAX_COUNT, TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
 from .recipient_resolution import (
@@ -454,6 +461,13 @@ class BridgeToolParams(BaseModel):
     # tells the agent to describe the image or share a link).
     attachments: SkipJsonSchema[list[str]] = Field(
         default_factory=list, max_length=ATTACHMENT_MAX_COUNT
+    )
+
+    files: list[str] = Field(
+        default_factory=list,
+        max_length=agent_files.MAX_FILES,
+        description="dm/channel_post paths; files.agent_upload=true v1 only. "
+        "Agents get counts only; uncertain: don't resend.",
     )
 
     @field_validator("to")
@@ -1152,7 +1166,7 @@ async def _direct_message(
     # ``text`` was already folded onto ``body`` (or refused as a conflicting
     # second message) by ``_normalize_message_field`` in the executor.
     text = params.body
-    if not text.strip():
+    if not text.strip() and not params.files:
         return _error("dm needs non-empty body")
     inline_image = await agent_attachments.refuse_inline_image_data_for(runtime, text)
     if inline_image is not None:
@@ -1166,13 +1180,18 @@ async def _direct_message(
     # Local file checks + the hub's ``agent_upload`` capability, BEFORE the DM is
     # opened: a refused attachment must not leave a conversation behind.
     prepared_images: tuple[agent_attachments.PreparedImage, ...] = ()
-    if params.attachments:
-        try:
+    prepared_files: tuple[agent_files.PreparedFile, ...] = ()
+    file_batch = None
+    try:
+        if params.attachments:
             prepared_images = await agent_attachments.prepare_attachments(
                 runtime, params.attachments
             )
-        except agent_attachments.AttachmentRefused as refused:
-            return _error(refused.message, code=refused.code)
+        if params.files:
+            file_batch = agent_files.FileBatch(runtime, endpoint_id)
+            prepared_files = await file_batch.prepare(params.files, prepared_images)
+    except agent_attachments.AttachmentRefused as refused:
+        return _error(refused.message, code=refused.code)
     creator = {
         "account_id": str(getattr(runtime.owner, "account_id", "") or ""),
         "kind": "agent",
@@ -1209,16 +1228,35 @@ async def _direct_message(
     # into) BEFORE the reply guard is touched: a failed upload then never reserves a
     # slot. Every exit below that does not send must discard them.
     staged_images: list[agent_attachments.StagedImage] = []
-    if prepared_images:
-        try:
+    try:
+        if file_batch:
+            file_batch.bind_conversation(conversation_id)
+            file_batch.check()
+        if prepared_images:
             staged_images = await agent_attachments.stage_attachments(
-                runtime, conversation_id, endpoint_id, prepared_images
+                runtime,
+                conversation_id,
+                endpoint_id,
+                prepared_images,
+                **({"pre_http_guard": file_batch.check} if file_batch else {}),
             )
-        except Exception as failure:
-            return _error(
-                f"the image upload did not confirm; nothing was sent: {_failure_text(failure)}",
-                code="attachment_failed",
-            )
+        if file_batch:
+            file_batch.images = [item.id for item in staged_images]
+            await file_batch.stage(conversation_id, prepared_files)
+    except Exception as failure:
+        if file_batch:
+            await file_batch.cleanup(conversation_id)
+        return _error(
+            (
+                "the file upload did not confirm; nothing was sent"
+                if file_batch
+                else (
+                    "the image upload did not confirm; nothing was sent: "
+                    f"{_failure_text(failure)}"
+                )
+            ),
+            code="attachment_failed",
+        )
     # REPLY GUARD, DM HALF (review round 1, m1). A DM is an ordinary
     # conversation, so it gets the same bookkeeping as `channel_post`, keyed on
     # the DM's own conversation id: never a count refusal (operator, 2026-11-03),
@@ -1243,7 +1281,7 @@ async def _direct_message(
                 runtime.config_dir,
                 endpoint_id=endpoint_id,
                 conversation_id=conversation_id,
-                body=_guard_body(text, prepared_images),
+                body=_guard_body(text, (*prepared_images, *prepared_files)),
                 thread_root_id=thread_root_id,
             )
         except reply_guard.ReplyGuardUnavailable as failure:
@@ -1252,7 +1290,8 @@ async def _direct_message(
         if isinstance(slot, reply_guard.Skipped):
             return slot.as_result(conversation_id)
         try:
-            result = await runtime.client.conversation_send(
+            sender = file_batch.send if file_batch else runtime.client.conversation_send
+            result = await sender(
                 conversation_id,
                 client_ref=str(uuid.uuid4()),
                 text=text,
@@ -1265,7 +1304,7 @@ async def _direct_message(
             )
         except Exception as failure:
             # The hub did not take it: the slot goes back (``reply_guard.release``).
-            if slot is not None:
+            if slot is not None and not (file_batch and file_batch.uncertain):
                 reply_guard.release(
                     runtime.config_dir,
                     slot,
@@ -1273,20 +1312,33 @@ async def _direct_message(
                     conversation_id=conversation_id,
                 )
             return _error(
-                f"the DM {conversation_id} opened but the post did not confirm: "
-                f"{_failure_text(failure)}",
-                code="post_failed",
+                (
+                    agent_files.UNCERTAIN_MESSAGE
+                    if file_batch and file_batch.uncertain
+                    else (
+                        f"the DM {conversation_id} opened but the post did not confirm: "
+                        f"{_failure_text(failure)}"
+                    )
+                ),
+                code=(
+                    "delivery_uncertain" if file_batch and file_batch.uncertain else "post_failed"
+                ),
             )
         landed = True
     finally:
         if not landed:
-            await agent_attachments.discard_attachments(
-                runtime, conversation_id, endpoint_id, staged_images
-            )
+            if file_batch:
+                await file_batch.cleanup(conversation_id)
+            else:
+                await agent_attachments.discard_attachments(
+                    runtime, conversation_id, endpoint_id, staged_images
+                )
     receipt = _post_receipt(
         conversation_id, result, thread_root_id=thread_root_id, lead=f"direct message to {label} in"
     )
     receipt["destination_type"] = "conversation_dm"
+    if file_batch:
+        receipt["file_ids"] = list(file_batch.staged)
     attachment_warning = _annotate_attachments(receipt, staged_images)
     # The target's membership state is the server's admission answer: an
     # ``invited`` agent will not be woken until its owner accepts, and the
@@ -1515,7 +1567,9 @@ def _post_receipt(
     return receipt
 
 
-def _guard_body(text: str, prepared: Sequence[agent_attachments.PreparedImage]) -> str:
+def _guard_body(
+    text: str, prepared: Sequence[agent_attachments.PreparedImage | agent_files.PreparedFile]
+) -> str:
     """The reply guard's duplicate key for a post: the text plus the images it carries.
 
     WHY. The guard skips a byte-identical re-send within 10 s. Keyed on the text
@@ -1945,9 +1999,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     except Exception as failure:  # pydantic ValidationError, kept dependency-free
         return _error(f"bridge args invalid: {failure}", code="invalid_request")
 
-    if params.attachments and params.op not in agent_attachments.ATTACHMENT_OPS:
+    if (params.attachments or params.files) and params.op not in agent_attachments.ATTACHMENT_OPS:
         return _error(
-            "attachments are accepted only by dm and channel_post",
+            "attachments and files are accepted only by dm and channel_post",
             code="attachment_invalid",
         )
 
@@ -2170,7 +2224,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         channel_id = params.channel_id.strip()
         if _CONVERSATION_ID.fullmatch(channel_id) is None:
             return _error("channel_post needs a conversation id (bcv_…)")
-        if not params.body.strip():
+        if not params.body.strip() and not params.files:
             return _error("channel_post needs non-empty body")
         inline_image = await agent_attachments.refuse_inline_image_data_for(runtime, params.body)
         if inline_image is not None:
@@ -2256,22 +2310,48 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # refused or failed image never reserves a slot. Staged ids are deleted
         # below if the send does not land.
         prepared_images: tuple[agent_attachments.PreparedImage, ...] = ()
+        prepared_files: tuple[agent_files.PreparedFile, ...] = ()
         staged_images: list[agent_attachments.StagedImage] = []
-        if params.attachments:
-            try:
+        file_batch = None
+        try:
+            if params.attachments:
                 prepared_images = await agent_attachments.prepare_attachments(
                     runtime, params.attachments
                 )
+            if params.files:
+                file_batch = agent_files.FileBatch(runtime, endpoint_id)
+                prepared_files = await file_batch.prepare(params.files, prepared_images)
+                file_batch.bind_conversation(channel_id)
+                file_batch.check()
+            if prepared_images:
                 staged_images = await agent_attachments.stage_attachments(
-                    runtime, channel_id, endpoint_id, prepared_images
+                    runtime,
+                    channel_id,
+                    endpoint_id,
+                    prepared_images,
+                    **({"pre_http_guard": file_batch.check} if file_batch else {}),
                 )
-            except agent_attachments.AttachmentRefused as refused_attachment:
-                return _error(refused_attachment.message, code=refused_attachment.code)
-            except Exception as failure:
-                return _error(
-                    f"the image upload did not confirm; nothing was sent: {_failure_text(failure)}",
-                    code="attachment_failed",
-                )
+            if file_batch:
+                file_batch.images = [item.id for item in staged_images]
+                await file_batch.stage(channel_id, prepared_files)
+        except agent_attachments.AttachmentRefused as refused_attachment:
+            if file_batch:
+                await file_batch.cleanup(channel_id)
+            return _error(refused_attachment.message, code=refused_attachment.code)
+        except Exception as failure:
+            if file_batch:
+                await file_batch.cleanup(channel_id)
+            return _error(
+                (
+                    "the file upload did not confirm; nothing was sent"
+                    if file_batch
+                    else (
+                        "the image upload did not confirm; nothing was sent: "
+                        f"{_failure_text(failure)}"
+                    )
+                ),
+                code="attachment_failed",
+            )
         # REPLY GUARD (wake contract): never a count refusal (operator,
         # 2026-11-03) — the post is delivered, an exact double send within 10 s
         # is skipped, and a long one-sided run adds a one-line ``warning``.
@@ -2313,7 +2393,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                         runtime.config_dir,
                         endpoint_id=endpoint_id,
                         conversation_id=channel_id,
-                        body=_guard_body(params.body, prepared_images),
+                        body=_guard_body(params.body, (*prepared_images, *prepared_files)),
                         thread_root_id=thread_root_id,
                         addressees=addressees,
                     )
@@ -2336,7 +2416,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         landed = False
         try:
             try:
-                result = await runtime.client.conversation_send(
+                sender = file_batch.send if file_batch else runtime.client.conversation_send
+                result = await sender(
                     channel_id,
                     client_ref=client_ref,
                     text=params.body,
@@ -2349,7 +2430,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                     **agent_attachments.send_kwargs(staged_images),
                 )
             except DispatchRefused as failure:
-                if slot is not None:
+                if file_batch and file_batch.uncertain:
+                    return _error(agent_files.UNCERTAIN_MESSAGE, code="delivery_uncertain")
+                if slot is not None and not (file_batch and file_batch.uncertain):
                     reply_guard.release(
                         runtime.config_dir,
                         slot,
@@ -2359,7 +2442,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 return failure.result
             except Exception as failure:
                 # The hub did not take it: the slot goes back (``reply_guard.release``).
-                if slot is not None:
+                if slot is not None and not (file_batch and file_batch.uncertain):
                     reply_guard.release(
                         runtime.config_dir,
                         slot,
@@ -2367,14 +2450,26 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                         conversation_id=channel_id,
                     )
                 return _error(
-                    f"the post did not confirm: {_failure_text(failure)}", code="post_failed"
+                    (
+                        agent_files.UNCERTAIN_MESSAGE
+                        if file_batch and file_batch.uncertain
+                        else f"the post did not confirm: {_failure_text(failure)}"
+                    ),
+                    code=(
+                        "delivery_uncertain"
+                        if file_batch and file_batch.uncertain
+                        else "post_failed"
+                    ),
                 )
             landed = True
         finally:
             if not landed:
-                await agent_attachments.discard_attachments(
-                    runtime, channel_id, endpoint_id, staged_images
-                )
+                if file_batch:
+                    await file_batch.cleanup(channel_id)
+                else:
+                    await agent_attachments.discard_attachments(
+                        runtime, channel_id, endpoint_id, staged_images
+                    )
         # ONE receipt shape for every conversation write (main's `_post_receipt`,
         # shared with `dm`), EXTENDED with the resolved recipient rather than
         # rebuilt here: a second construction site is how the two lanes drift.
@@ -2386,6 +2481,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             thread_root_id=thread_root_id,
             mention_account_id=recipient_account_id,
         )
+        if file_batch:
+            receipt["file_ids"] = list(file_batch.staged)
         attachment_warning = _annotate_attachments(receipt, staged_images)
         return _with_warnings(
             receipt,
@@ -2975,13 +3072,10 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         name="bridge",
         label="Team Bridge",
         description=(
-            "Team Bridge as this session's agent. directory: teammates and their "
-            "chiefs of staff. dm: message a person or their agent directly (a "
-            "relay request means dm, not 'forward this'); channel_post: rooms; "
-            "send/reply: only to answer a pair-inbox (bmsg_) delivery. "
-            "shared_*: conversations your owner shared with you. Cannot approve "
-            "or deny. The one channel for teammates; reply where it arrived. "
-            "More: read tool://bridge."
+            "Agent bridge: directory teammates/chiefs; dm person/agent direct/relay, "
+            "not 'forward this'; channel_post rooms; send/reply bmsg_ answers only; "
+            "shared_* owner-shared conversations. No approve/deny. "
+            "Reply where received; teammates use bridge. Read tool://bridge."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",
