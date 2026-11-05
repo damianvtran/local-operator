@@ -41,6 +41,9 @@ from lop's config directory, the same way it reads Claude Code's
 - `account_ref`: the same opaque 16-hex id stamped on every call as
   `Usage.account_ref` and recorded in `calls.account_ref` (derivation in
   `docs/USAGE_ANALYTICS_DESIGN.md` §1.1). Stable across re-logins of one account.
+  An OAuth identity ref is the same on every host. A ref for a stored API key, or
+  for an OAuth login with no IdP identity, is namespaced to that machine's auth
+  store, so it is equal across hosts only through the owner's ref on a mesh grant.
 - `kind`: `"oauth"` (a subscription login) or `"api_key"` (a stored key).
 - `org_type`: a short lowercase plan slug when lop already holds one from the
   login exchange, else `null`. Today only OpenAI/ChatGPT logins carry one

@@ -9,8 +9,10 @@ Two consumers, one derivation:
   force at launch, the way it reads ``~/.claude.json`` for Claude Code.
 
 Both go through :func:`account_ref` with the same inputs read from the same
-stored row, so the per-call stamp and the file cannot disagree about who the
-account is. The contract is documented in ``docs/account-file.md``.
+stored row (and the same store's ``store_uid`` namespace), so the per-call stamp
+and the file cannot disagree about who the account is. A mesh borrower does not
+derive a ref at all: it carries the owner's (``OAuthAccess.account_ref``).
+The contract is documented in ``docs/account-file.md``.
 
 NON-SECRET BY CONSTRUCTION. The ref is a truncated SHA-256 over the provider id
 and an identity, so it is stable for one account, opaque to a reader, and not
@@ -58,35 +60,44 @@ def account_ref(
     credential_id: int = 0,
     org_id: str | None = None,
     account_id: str | None = None,
+    store_uid: str | None = None,
+    created_at: int = 0,
 ) -> str | None:
     """The opaque id of the account behind one credential, or ``None``.
 
     * OAuth row with an IdP identity: ``sha256("<provider>\\0<org_id or account_id>")``.
-      The identity, not the row id, so a re-login (new row, same account) keeps
-      the ref.
-    * Stored API-key row: ``sha256("<provider>\\0key\\0<credential_id>")``. A key
-      names no account, so the row is the only stable thing to attribute to.
-    * OAuth row whose IdP returned no identity (Kimi, xAI/Anthropic without an
-      id_token): ``sha256("<provider>\\0oauth\\0<credential_id>")``. The store
-      keeps one such row per provider (``oauth:<provider>`` dedupe key), so this
-      is stable across re-logins too.
+      The identity, not the row id or the store, so a re-login (new row, same
+      account) keeps the ref and every host that knows the account agrees on it.
+    * Row-derived (a stored API key, or an OAuth row whose IdP returned no
+      identity: Kimi, xAI/Anthropic without an id_token):
+      ``sha256("<kind>\\0<store_uid>\\0<credential_id>\\0<created_at>")`` with
+      ``kind`` ``key`` or ``oauth``. A SQLite row id means nothing outside its
+      ``auth.db``, so the store's random ``store_uid`` namespaces it (two
+      machines' row 1 differ) and ``created_at`` keeps a reused id after a
+      delete from aliasing the old account. It needs a positive ``credential_id``
+      and a ``store_uid``; without both there is no durable identity and the
+      answer is ``None``.
     * No stored row (``credential_id`` 0: environment variable, CLI/config
-      override, fallback resolver): ``None``. Nothing durable identifies it.
+      override, fallback resolver): ``None``. A synthetic broker id (negative, a
+      mesh borrower's stand-in for an owner row) never yields a row-derived ref;
+      a borrower carries the OWNER's ref instead (``OAuthAccess.account_ref``).
 
     ``provider`` is canonicalised to its storage id so a login flavour
     (``openai-device``) and its provider (``openai``) are one account.
     """
-    if not credential_id:
-        return None
     from local_operator.providers.registry import credential_provider_id
 
+    if not credential_id:
+        return None
     provider = credential_provider_id(provider)
     if kind == "oauth":
         identity = org_id or account_id
         if identity:
             return _digest(provider, str(identity))
-        return _digest(provider, f"oauth\0{credential_id}")
-    return _digest(provider, f"key\0{credential_id}")
+    if credential_id <= 0 or not store_uid:
+        return None
+    kind_tag = "oauth" if kind == "oauth" else "key"
+    return _digest(provider, f"{kind_tag}\0{store_uid}\0{credential_id}\0{created_at}")
 
 
 def org_type_for(provider: str, kind: str, data: Mapping[str, Any]) -> str | None:
@@ -106,7 +117,7 @@ def org_type_for(provider: str, kind: str, data: Mapping[str, Any]) -> str | Non
     return candidate if _ORG_TYPE_SLUG.match(candidate) else None
 
 
-def _entry_for(row: Any) -> dict[str, Any] | None:
+def _entry_for(row: Any, store_uid: str | None) -> dict[str, Any] | None:
     """One provider's ``{account_ref, kind, org_type}`` entry from a stored row."""
     kind = "oauth" if row.credential_type == "oauth" else "api_key"
     data = row.data if isinstance(row.data, Mapping) else {}
@@ -116,13 +127,17 @@ def _entry_for(row: Any) -> dict[str, Any] | None:
         credential_id=row.id,
         org_id=data.get("org_id"),
         account_id=data.get("account_id"),
+        store_uid=store_uid,
+        created_at=int(getattr(row, "created_at", 0) or 0),
     )
     if ref is None:
         return None
     return {"account_ref": ref, "kind": kind, "org_type": org_type_for(row.provider, kind, data)}
 
 
-def build_account_document(rows: list[Any], hosting: str | None) -> dict[str, Any]:
+def build_account_document(
+    rows: list[Any], hosting: str | None, store_uid: str | None = None
+) -> dict[str, Any]:
     """The ``account.json`` document for ``rows`` and the configured ``hosting``.
 
     PER-PROVIDER RULE. The row lop would reach first in its credential cascade:
@@ -152,7 +167,7 @@ def build_account_document(rows: list[Any], hosting: str | None) -> dict[str, An
             continue
         if row.provider in chosen:
             continue
-        entry = _entry_for(row)
+        entry = _entry_for(row, store_uid)
         if entry is not None:
             chosen[row.provider] = entry
 
@@ -174,7 +189,11 @@ def _render(document: Mapping[str, Any]) -> bytes:
 
 
 def refresh_account_file(
-    config_dir: Path, rows: list[Any] | None = None, *, only_if_changed: bool = True
+    config_dir: Path,
+    rows: list[Any] | None = None,
+    *,
+    only_if_changed: bool = True,
+    store_uid: str | None = None,
 ) -> bool:
     """Rewrite ``<config_dir>/account.json`` from the credential store and config.
 
@@ -198,6 +217,7 @@ def refresh_account_file(
             store = AuthStore.open_read_only(db_path)
             try:
                 rows = store.list_credentials(include_disabled=True)
+                store_uid = store.store_uid
             finally:
                 store.close()
         from local_operator.config import read_config_values
@@ -205,7 +225,7 @@ def refresh_account_file(
         values = read_config_values(config_dir)
         hosting = values.get("hosting") if isinstance(values, dict) else None
         payload = _render(
-            build_account_document(rows, hosting if isinstance(hosting, str) else None)
+            build_account_document(rows, hosting if isinstance(hosting, str) else None, store_uid)
         )
         if only_if_changed:
             try:

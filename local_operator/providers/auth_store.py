@@ -63,6 +63,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import stat
 import sys
@@ -377,6 +378,11 @@ CREATE TABLE IF NOT EXISTS auth_credential_refresh_leases (
   credential_id INTEGER PRIMARY KEY,
   holder TEXT NOT NULL,
   expires_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_store_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 """
 
@@ -851,6 +857,11 @@ class OAuthAccess:
     # Captured from the selected stored row, never inferred from a mutable
     # current-account pointer when a slower request eventually completes.
     account_created_at: int = 0
+    #: The opaque, non-secret ``account_ref`` of the stored row this record was
+    #: built from (``providers/account_provenance.py``), set by the store that owns
+    #: the row. A mesh borrower carries the OWNER's ref here; its own synthetic
+    #: credential id must never be hashed into one.
+    account_ref: str | None = None
 
 
 def default_db_path() -> Path:
@@ -1472,6 +1483,7 @@ class AuthStore:
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
         self._fallback_resolvers: dict[str, Callable[[str], str | None]] = {}
+        self._store_uid: str | None = None
         self._sticky: dict[tuple[str, str], int] = {}
         self._round_robin: dict[str, int] = {}
         # Credentials that just failed on a PROVIDER-side fault, which is not
@@ -1740,6 +1752,45 @@ class AuthStore:
         """
         return self._db_path
 
+    @property
+    def store_uid(self) -> str | None:
+        """This store's random namespace id, or ``None`` when it has none.
+
+        Minted once on the first WRITABLE open. A read-only open of an older
+        database (no table or no row) reports ``None`` and creates nothing, so
+        a row-derived ``account_ref`` is simply unavailable there rather than
+        guessed. Only a found value is cached.
+        """
+        if self._store_uid is not None:
+            return self._store_uid
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT value FROM auth_store_meta WHERE key = 'store_uid'"
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row and isinstance(row[0], str) and row[0]:
+            self._store_uid = row[0]
+        return self._store_uid
+
+    def _account_ref_for_row(self, row: StoredCredential) -> str | None:
+        """The ``account_ref`` of one stored row, namespaced by this store."""
+        from local_operator.providers.account_provenance import account_ref
+
+        data = row.data if isinstance(row.data, Mapping) else {}
+        return account_ref(
+            row.provider,
+            kind="oauth" if row.credential_type == "oauth" else "api_key",
+            credential_id=row.id,
+            org_id=data.get("org_id"),
+            account_id=data.get("account_id"),
+            store_uid=self.store_uid,
+            created_at=row.created_at,
+        )
+
     # -- connection ----------------------------------------------------------
 
     def _connect(self) -> _SerializedConnection:
@@ -1780,6 +1831,15 @@ class AuthStore:
                 conn.execute("PRAGMA synchronous=NORMAL")
                 conn.execute("PRAGMA busy_timeout=5000")
                 conn.executescript(_SCHEMA)
+                # The per-store namespace for row-derived ``account_ref``s: a
+                # random id minted once, so two auth.db files never share a ref
+                # for the same SQLite row id. INSERT OR IGNORE keeps the first
+                # writer's value under concurrent startup.
+                conn.execute(
+                    "INSERT OR IGNORE INTO auth_store_meta (key, value) VALUES ('store_uid', ?)",
+                    (secrets.token_hex(16),),
+                )
+                conn.commit()
                 # Local metadata, never credential payload: old rows remain unknown until
                 # a real login write attests an incarnation. Refresh cannot create one.
                 # Concurrent process startup must serialize the check and ALTER, not
@@ -2453,7 +2513,7 @@ class AuthStore:
             rows = self.list_credentials(include_disabled=True)
         except Exception:  # noqa: BLE001 — a login must not fail over a host convenience file
             return
-        refresh_account_file(self._db_path.parent, rows)
+        refresh_account_file(self._db_path.parent, rows, store_uid=self.store_uid)
 
     def _rearm_parked_tunnel_login(self, provider: str, stored: StoredCredential) -> None:
         """Let a login that fixed a dead grant bring the tunnel connector back.
@@ -4877,6 +4937,7 @@ class AuthStore:
                 kind="oauth",
                 raw=data,
                 account_created_at=row.created_at,
+                account_ref=self._account_ref_for_row(row),
             )
         from local_operator.providers.local import LOCAL_PROVIDER_IDS
 
@@ -4891,6 +4952,7 @@ class AuthStore:
             kind="api_key",
             api_endpoint=endpoint if isinstance(endpoint, str) else None,
             account_created_at=row.created_at if row is not None else 0,
+            account_ref=self._account_ref_for_row(row) if row is not None else None,
         )
 
     async def get_catalogue_access(
@@ -4953,6 +5015,7 @@ class AuthStore:
                     kind="oauth",
                     raw=data,
                     account_created_at=current.created_at,
+                    account_ref=self._account_ref_for_row(current),
                 )
 
         # Preserve the ordinary cascade's API-key tiers and environment fallback.
@@ -4973,6 +5036,7 @@ class AuthStore:
                         credential_id=row.id,
                         kind="api_key",
                         account_created_at=row.created_at,
+                        account_ref=self._account_ref_for_row(row),
                     )
             if source == "login" and eligible is None:
                 env_key = self._env_api_key(provider)
@@ -5074,6 +5138,7 @@ class AuthStore:
                         kind="oauth",
                         raw=data,
                         credential_invalid=True,
+                        account_ref=self._account_ref_for_row(row),
                     )
                 )
                 continue
@@ -5099,6 +5164,7 @@ class AuthStore:
                         kind="oauth",
                         raw=data,
                         credential_invalid=True,
+                        account_ref=self._account_ref_for_row(row),
                     )
                 )
                 continue
@@ -5141,6 +5207,7 @@ class AuthStore:
                     api_endpoint=creds.get("api_endpoint"),
                     kind="oauth",
                     raw=creds,
+                    account_ref=self._account_ref_for_row(row),
                 )
             )
         return accesses
@@ -5189,6 +5256,7 @@ class AuthStore:
                     api_endpoint=data.get("api_endpoint"),
                     kind="oauth",
                     raw=data or None,
+                    account_ref=self._account_ref_for_row(row),
                 )
             )
         return identities

@@ -92,10 +92,35 @@ def test_ref_depends_on_provider_and_login_flavour_is_canonicalised() -> None:
 
 
 def test_api_key_ref_is_per_row_and_ignores_identity_fields() -> None:
-    one = account_ref("openai", kind="api_key", credential_id=4)
-    assert one == account_ref("openai", kind="api_key", credential_id=4, org_id="ignored")
-    assert one != account_ref("openai", kind="api_key", credential_id=5)
-    assert one != account_ref("openai", kind="oauth", credential_id=4)
+    one = account_ref("openai", kind="api_key", credential_id=4, store_uid="s1")
+    assert one == account_ref(
+        "openai", kind="api_key", credential_id=4, store_uid="s1", org_id="ignored"
+    )
+    assert one != account_ref("openai", kind="api_key", credential_id=5, store_uid="s1")
+    assert one != account_ref("openai", kind="oauth", credential_id=4, store_uid="s1")
+
+
+def test_row_derived_ref_is_namespaced_by_store_and_guarded_by_created_at() -> None:
+    def ref(store_uid: str = "store-a", created_at: int = 10) -> str | None:
+        return account_ref(
+            "openai", kind="api_key", credential_id=1, store_uid=store_uid, created_at=created_at
+        )
+
+    assert ref() != ref(store_uid="store-b")
+    assert ref() != ref(created_at=11)
+
+
+def test_row_derived_ref_needs_a_store_uid_and_a_positive_row_id() -> None:
+    assert account_ref("openai", kind="api_key", credential_id=1) is None
+    assert account_ref("openai", kind="api_key", credential_id=1, store_uid="") is None
+    assert account_ref("kimi", kind="oauth", credential_id=1) is None
+    # A mesh borrower's synthetic (negative) id must never become a ref.
+    assert account_ref("openai", kind="api_key", credential_id=-9, store_uid="s") is None
+    assert account_ref("kimi", kind="oauth", credential_id=-9, store_uid="s") is None
+    # ...but an OAuth identity is global, so owner and borrower agree on it.
+    assert account_ref("openai", kind="oauth", credential_id=-9, org_id="o") == account_ref(
+        "openai", kind="oauth", credential_id=4, org_id="o"
+    )
 
 
 def test_env_credentials_have_no_ref() -> None:
@@ -104,9 +129,9 @@ def test_env_credentials_have_no_ref() -> None:
 
 
 def test_oauth_without_idp_identity_is_keyed_on_its_single_row() -> None:
-    ref = account_ref("kimi", kind="oauth", credential_id=7)
+    ref = account_ref("kimi", kind="oauth", credential_id=7, store_uid="s")
     assert ref is not None
-    assert ref != account_ref("kimi", kind="api_key", credential_id=7)
+    assert ref != account_ref("kimi", kind="api_key", credential_id=7, store_uid="s")
 
 
 # -- the per-call stamp ---------------------------------------------------
@@ -126,8 +151,10 @@ def test_stamp_carries_ref_for_oauth_and_key_rows_not_env() -> None:
     assert oauth.account_ref == account_ref(
         "anthropic", kind="oauth", credential_id=3, org_id="org-1"
     )
-    keyed = _stamp(SimpleNamespace(kind="api_key", credential_id=5))
-    assert keyed.account_ref == account_ref("anthropic", kind="api_key", credential_id=5)
+    keyed = _stamp(SimpleNamespace(kind="api_key", credential_id=5, account_ref="0123456789abcdef"))
+    assert keyed.account_ref == "0123456789abcdef"
+    # No store-minted ref on the access: a key has no global identity to recompute.
+    assert _stamp(SimpleNamespace(kind="api_key", credential_id=5)).account_ref is None
     assert (
         _stamp(SimpleNamespace(kind="api_key", credential_id=0), key="sk-env").account_ref is None
     )
@@ -289,3 +316,80 @@ def test_read_only_store_writes_no_file(config: Path, store: AuthStore) -> None:
     finally:
         reader.close()
     assert not (config / ACCOUNT_FILE_NAME).exists()
+
+
+# -- store namespacing ----------------------------------------------------
+
+
+def _row_ref(auth: AuthStore, credential_id: int) -> str | None:
+    row = auth.get_credential(credential_id)
+    assert row is not None
+    return auth._account_ref_for_row(row)  # noqa: SLF001
+
+
+@pytest.fixture()
+def other_store(tmp_path: Path) -> Iterator[AuthStore]:
+    other = AuthStore(db_path=tmp_path / "other" / "auth.db")
+    yield other
+    other.close()
+
+
+def test_independent_stores_give_different_refs_for_the_same_row_id(
+    store: AuthStore, other_store: AuthStore
+) -> None:
+    other = other_store
+    assert store.store_uid and other.store_uid and store.store_uid != other.store_uid
+    first = store.upsert_credential("openai", {"type": "api_key", "key": "sk-a"})
+    second = other.upsert_credential("openai", {"type": "api_key", "key": "sk-b"})
+    assert first.id == second.id == 1
+    assert _row_ref(store, first.id) != _row_ref(other, second.id)
+    # Identityless OAuth is row-derived too.
+    kimi_a = store.upsert_credential("kimi", {"type": "oauth", "access": "a", "expires": 1})
+    kimi_b = other.upsert_credential("kimi", {"type": "oauth", "access": "b", "expires": 1})
+    assert _row_ref(store, kimi_a.id) != _row_ref(other, kimi_b.id)
+
+
+def test_store_uid_is_stable_across_opens_and_read_only_never_creates_it(
+    config: Path, store: AuthStore
+) -> None:
+    uid = store.store_uid
+    store.close()
+    again = AuthStore(db_path=config / "auth.db")
+    try:
+        assert again.store_uid == uid
+    finally:
+        again.close()
+    import sqlite3
+
+    legacy = config / "legacy.db"
+    conn = sqlite3.connect(legacy)
+    conn.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    reader = AuthStore.open_read_only(legacy)
+    try:
+        assert reader.store_uid is None
+    finally:
+        reader.close()
+    conn = sqlite3.connect(legacy)
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert "auth_store_meta" not in tables
+
+
+def test_relogin_of_identityless_oauth_keeps_the_ref(config: Path, store: AuthStore) -> None:
+    first = store.upsert_credential("kimi", {"type": "oauth", "access": "a", "expires": 1})
+    ref = _row_ref(store, first.id)
+    assert ref is not None
+    again = store.upsert_credential("kimi", {"type": "oauth", "access": "b", "expires": 2})
+    assert again.id == first.id
+    assert _row_ref(store, again.id) == ref
+
+
+def test_oauth_access_carries_the_stores_ref(config: Path, store: AuthStore) -> None:
+    import asyncio
+
+    row = store.upsert_credential("openai", {"type": "api_key", "key": "sk-a"})
+    access = asyncio.run(store.get_oauth_access("openai"))
+    assert access is not None and access.account_ref == _row_ref(store, row.id)
+    assert access.account_ref is not None

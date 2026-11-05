@@ -4033,15 +4033,22 @@ def _stamp_serving_spec(
         # env/override credential, which has no stored row to attribute to). The
         # OAuth identity rides the access record; ``raw`` is the stored payload
         # for the paths that built the record without the flat fields.
-        raw = getattr(access, "raw", None)
-        raw = raw if isinstance(raw, dict) else {}
-        ref = account_ref(
-            spec.provider,
-            kind=kind,
-            credential_id=int(getattr(access, "credential_id", 0) or 0),
-            org_id=getattr(access, "org_id", None) or raw.get("org_id"),
-            account_id=getattr(access, "account_id", None) or raw.get("account_id"),
-        )
+        #
+        # The store that owns the row mints the ref (``access.account_ref``): a
+        # row-derived ref needs that store's namespace, and a mesh borrower
+        # carries the OWNER's. The fallback recomputes only the global OAuth
+        # identity ref (no store namespace, so ``None`` for a key).
+        ref = getattr(access, "account_ref", None)
+        if not (isinstance(ref, str) and ref):
+            raw = getattr(access, "raw", None)
+            raw = raw if isinstance(raw, dict) else {}
+            ref = account_ref(
+                spec.provider,
+                kind=kind,
+                credential_id=int(getattr(access, "credential_id", 0) or 0),
+                org_id=getattr(access, "org_id", None) or raw.get("org_id"),
+                account_id=getattr(access, "account_id", None) or raw.get("account_id"),
+            )
         stamped = usage.model_copy(
             update={
                 "provider": spec.provider,

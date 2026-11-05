@@ -45,14 +45,26 @@ can rotate between API keys and OAuth credentials, and provider variants include
 token-plan and local endpoints with different economics, so the stamp is the only
 source and nothing guesses a billing mode from the session's selected provider.
 
-`account_ref` answers WHICH account served the call. It is 16 hex characters of
-`sha256("<provider>\0<org_id or account_id>")` for an OAuth row with an IdP
-identity (a re-login of the same account keeps it), of
-`sha256("<provider>\0key\0<credential_id>")` for a stored API-key row (a key names
-no account, so the row is the unit), and of `sha256("<provider>\0oauth\0<credential_id>")`
-for an OAuth row whose IdP returned no identity. It is absent (`None`) for an
-environment, CLI or config-override credential, which has no stored row to
-attribute to, and for any call recorded before the stamp existed. It is opaque by
+`account_ref` answers WHICH account served the call. It is 16 hex characters. For
+an OAuth row with an IdP identity it is `sha256("<provider>\0<org_id or account_id>")`:
+global, so a re-login of the same account keeps it and every host that knows the
+account agrees. For a stored API-key row, and for an OAuth row whose IdP returned
+no identity, it is `sha256("<key|oauth>\0<store_uid>\0<credential_id>\0<created_at>")`,
+where `store_uid` is a random id minted once in that `auth.db`
+(`auth_store_meta`), so two machines' row 1 never share a ref, and `created_at`
+stops a reused row id from aliasing a deleted account. A key names no account, so
+the row is the unit. Without a `store_uid` (an older database opened read-only) or
+with a non-positive row id there is no durable identity and the ref is absent.
+
+A mesh borrower never derives a ref: the credential id it sees is a synthetic
+stand-in. The owner puts its own ref on the grant (`credential_ref.account_ref`,
+validated as 16 lowercase hex on receipt) and the borrower stamps that, so owner
+and borrower attribute the same account identically and two rows behind one owner
+stay distinct. An owner that predates the field yields no ref for a key, and the
+global identity ref for an OAuth login that carries an org or account id. A ref is
+also absent (`None`) for an environment, CLI or config-override credential, which
+has no stored row to attribute to, and for any call recorded before the stamp
+existed. It is opaque by
 construction: it never contains, and cannot be reversed to, an email, an
 organization name or a raw IdP id. It is recorded in the nullable
 `calls.account_ref` column (additive migration; old rows read NULL) and omitted
