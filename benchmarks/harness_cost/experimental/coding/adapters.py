@@ -313,6 +313,7 @@ class _Native(BaseInstalledAgent):
 EDGE_ENV_KEYS = (
     "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
     "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "RADIENT_API_KEY",
+    "PIP_CERT", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "BENCH_EDGE_CA_SHA256",
 )
 
 

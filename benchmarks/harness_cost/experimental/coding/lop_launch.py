@@ -46,6 +46,9 @@ NO_PROXY = "127.0.0.1,localhost,::1"
 # Must equal ``lop_edge.DUMMY_RADIENT_KEY`` (asserted by test_lop_container):
 # the edge strips it and injects the host-held bearer on the decisions route.
 DUMMY_RADIENT_KEY = 'bench-dummy'
+# Tool-child trust variables that must name the same bundle (pip, curl, node);
+# must equal ``lop_edge.CA_PARITY_KEYS``.
+PARITY_KEYS = ("PIP_CERT", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
 
 
 def require_edge_environment(environ: dict[str, str] | os._Environ[str] = os.environ) -> None:
@@ -79,10 +82,37 @@ def require_edge_environment(environ: dict[str, str] | os._Environ[str] = os.env
     if not Path(CA_BUNDLE).is_file() or os.access(CA_BUNDLE, os.W_OK):
         # Writable would let a tool swap in its own CA and MITM-bypass the meter.
         raise SystemExit("run CA bundle must be present and read-only")
+    for key in PARITY_KEYS:
+        if environ.get(key) != CA_BUNDLE:
+            raise SystemExit(f"{key} must name the mounted trust bundle")
+    if not _bundle_holds(Path(CA_BUNDLE), environ.get("BENCH_EDGE_CA_SHA256", "")):
+        # The bundle also carries public roots (R8 F24) so tool children can
+        # verify tunnelled registries; the run CA must still be IN it, or the
+        # product could not complete TLS to the edge's metered routes.
+        raise SystemExit("trust bundle does not contain this run's edge CA")
     if environ.get("NO_PROXY") != NO_PROXY:
         raise SystemExit("NO_PROXY must exempt loopback only")
     if environ.get("RADIENT_API_KEY") != DUMMY_RADIENT_KEY:
         raise SystemExit("RADIENT_API_KEY must be the edge's dummy value")
+
+
+def _bundle_holds(bundle: Path, fingerprint: str) -> bool:
+    """True iff a certificate in ``bundle`` has DER SHA-256 ``fingerprint``."""
+    import re
+    import ssl
+
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        return False
+    text = bundle.read_text(errors="replace")
+    for pem in re.findall(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----",
+                          text, flags=re.S):
+        try:
+            der = ssl.PEM_cert_to_DER_cert(pem)
+        except ValueError:
+            continue
+        if hashlib.sha256(der).hexdigest() == fingerprint:
+            return True
+    return False
 
 
 def _record_hash(path: Path) -> str:

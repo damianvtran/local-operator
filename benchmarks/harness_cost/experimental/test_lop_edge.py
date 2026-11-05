@@ -368,6 +368,89 @@ class EdgeTests(unittest.IsolatedAsyncioTestCase):
                          ("example.invalid", False, "not-allowlisted"))
         self.assertTrue(self.rows()[-1]["denied"])
 
+    async def _trust_edge(self):
+        """A container-lane edge (public roots given) plus a TLS 'public' registry.
+
+        The registry's certificate is signed by an independent CA that stands
+        in for the image's public roots, so only a child trusting BOTH the run
+        CA (metered hosts) and those roots (tunnelled hosts) can use it.
+        """
+        package = load("package_egress")
+        public = edge.RunCA()
+        roots = public.write_certificate(self.root / "public-roots.pem")
+        trust = edge.EdgeServer(
+            run_id="trial", run_dir=self.root / "trust-run", radient_token=FAKE_RADIENT,
+            meter_base="http://meter", meter_client=self.to_meter,
+            decisions_client=self.to_radient, public_roots=roots,
+        )
+        await trust.start()
+        self.addAsyncCleanup(trust.close)
+
+        async def registry(reader, writer):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nwheels")
+            await writer.drain()
+            writer.close()
+
+        fixture = await asyncio.start_server(registry, "127.0.0.1", 0,
+                                             ssl=public.server_context("pypi.org"))
+        self.addAsyncCleanup(self._close_server, fixture)
+        port = fixture.sockets[0].getsockname()[1]
+
+        async def opener(host, p):
+            return await asyncio.open_connection("127.0.0.1", port)
+
+        trust._packages = package.PackageProxy(
+            package.Policy(["pypi.org"]),
+            package.ConnectionLog(trust.package_log_path, via="edge"), opener=opener)
+        return trust
+
+    FETCH = (
+        "import httpx, requests\n"
+        "try:\n"
+        "    a = httpx.Client(timeout=10).get('https://pypi.org/simple/six/').text\n"
+        "    b = requests.get('https://pypi.org/simple/six/', timeout=10).text\n"
+        "    print(a, b)\n"
+        "except Exception as e:\n"
+        "    print('failed', type(e).__name__, e)\n"
+    )
+
+    async def test_https_package_fetch_works_in_lops_exact_child_env(self):
+        # R8 F24: with run-CA-only trust, LoP's tool children failed TLS to
+        # every tunnelled registry; the other six harnesses keep public roots.
+        trust = await self._trust_edge()
+        env = trust.child_env()
+        bundle = Path(env["SSL_CERT_FILE"])
+        for key in ("REQUESTS_CA_BUNDLE", "PIP_CERT", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"):
+            self.assertEqual(env[key], str(bundle), key)
+        self.assertNotEqual(bundle, trust.ca_path)
+        self.assertEqual(bundle.name, "edge-ca.pem")  # the one mountable name
+        self.assertEqual(bundle.read_text().count("BEGIN CERTIFICATE"), 2)
+        self.assertNotIn("PRIVATE KEY", bundle.read_text())
+        out = await self.sandboxed_child(self.FETCH, env, port=trust.port)
+        self.assertEqual(out.split(), ["wheels", "wheels"])
+        # Negative control: the same env with the run CA alone cannot verify.
+        only_ca = {**env, **{k: str(trust.ca_path) for k in
+                             ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")}}
+        out = await self.sandboxed_child(self.FETCH, only_ca, port=trust.port)
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", out)
+
+    async def test_model_hosts_stay_intercepted_under_the_trust_bundle(self):
+        trust = await self._trust_edge()
+        env = trust.child_env()
+        self.assertEqual(env["BENCH_EDGE_CA_SHA256"], trust.ca_fingerprint())
+        code = (
+            "import httpx\n"
+            f"r = httpx.Client(timeout=10).post({MESSAGES!r}, json={{'model': "
+            "'claude-sonnet-5-5', 'max_tokens': 128000, 'messages': "
+            "[{'role': 'user', 'content': 'hi'}]})\n"
+            "print(r.status_code)\n"
+        )
+        out = await self.sandboxed_child(code, env, port=trust.port)
+        self.assertEqual(out.split(), ["200"])
+        self.assertEqual(len(self.model_calls), 1)  # through the meter, not tunnelled
+        self.assertFalse(trust.package_log_path.exists())
+
     def test_entrypoint_loads_the_package_allowlist(self):
         src = (ROOT / "lop_edge.py").read_text()
         self.assertIn('package_egress.Policy.load(config["package_allowlist"])', src)
@@ -516,12 +599,12 @@ class EdgeTests(unittest.IsolatedAsyncioTestCase):
 
     # --- inherited environment, real child process, kernel sandbox ------------
 
-    async def sandboxed_child(self, code: str, env: dict[str, str]) -> str:
+    async def sandboxed_child(self, code: str, env: dict[str, str], port: int = 0) -> str:
         """Run ``code`` under the egress profile allowing only the edge port."""
         proc = await asyncio.create_subprocess_exec(
             "/usr/bin/sandbox-exec",
             "-p",
-            edge.sandbox_profile([self.edge.port]),
+            edge.sandbox_profile([port or self.edge.port]),
             sys.executable,
             "-c",
             code,

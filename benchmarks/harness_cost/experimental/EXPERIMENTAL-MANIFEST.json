@@ -93,12 +93,12 @@
       "sha256": "5edb5921bd4851546221bd116e80f6536d2751aaeb48c333db00c334a2f3ea47"
     },
     "coding/THIRD_PARTY_NOTICES.md": {
-      "bytes": 2494,
-      "sha256": "fa04dcf380284e2482ef255952687030dbc6867781165e384f6620d37a311225"
+      "bytes": 2945,
+      "sha256": "e11b39d2c3665a8b248b23a7aa52343e1fb38694dae9058d190a58544481725a"
     },
     "coding/adapters.py": {
-      "bytes": 19004,
-      "sha256": "96dc2adf85ec12dbed1b187727565bb4d7df319ad4ffe6d8cc6c72c2f8607a20"
+      "bytes": 19085,
+      "sha256": "2a5a2165eb01b37ced4b5aa3e31613f1bf26077268091aedac1657f964d47961"
     },
     "coding/bench_verifier.py": {
       "bytes": 5208,
@@ -113,8 +113,8 @@
       "sha256": "1adf87f9009d1d7a366f7b2ff5bda6894d0e859c0dc7314bec518342a39210df"
     },
     "coding/driver.py": {
-      "bytes": 38397,
-      "sha256": "20f8556ac3c4769f006571a92288e3a06f98f1c3112dcc59cd8c81ab9e26a241"
+      "bytes": 39149,
+      "sha256": "0401d1c6f0b2fb77f34dc2e84262352a826a3117f160b90c56cb2eb5504ceb0e"
     },
     "coding/egress.py": {
       "bytes": 13650,
@@ -129,8 +129,8 @@
       "sha256": "369157ee83c1cb0f552277aea7944b19ef6ff8e8131b59d28b4605b0dae82d09"
     },
     "coding/lop_launch.py": {
-      "bytes": 8026,
-      "sha256": "ee72621286be05fd11388744d1e96e7c83c602d09f38b4bf0d1fab643b925154"
+      "bytes": 9379,
+      "sha256": "9a40c33f035214927068790fe073694b877aec8d47d2eb750d0c4b886d0751ee"
     },
     "coding/oracle_sweep.py": {
       "bytes": 10828,
@@ -139,6 +139,10 @@
     "coding/package-egress-allowlist.json": {
       "bytes": 1416,
       "sha256": "34a2088db869a2b0ad91e8a9ebad2226138653f35659a59f7942e1b57ab180b0"
+    },
+    "coding/public-roots.pem": {
+      "bytes": 240216,
+      "sha256": "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"
     },
     "coding/subset.json": {
       "bytes": 8795,
@@ -157,12 +161,12 @@
       "sha256": "5bf759f765c33ddaad7c707f3223243b7a6d6591d4a9bb59e924f14eb6b62009"
     },
     "coding/test_lop_container.py": {
-      "bytes": 39907,
-      "sha256": "1976ada0ac4e92b49e4eb7e24e911c80d3efa82c3f7a4fb838a29b2f818715c0"
+      "bytes": 42627,
+      "sha256": "b63055346b32c4f13a3ad59554a84528d4371e287189c6e294bc87c5c40ff1e4"
     },
     "coding/test_package_egress.py": {
-      "bytes": 15527,
-      "sha256": "31a771ff54855151edaa28be1d1da6d799a3e4bc41c023b4493ccb2667ad7b81"
+      "bytes": 18839,
+      "sha256": "b3bb7691e299912210c04ecd3a7b83d750b06cef07d54fac32db20aa0ff9f8cc"
     },
     "evaluate.py": {
       "bytes": 7630,
@@ -184,6 +188,10 @@
       "bytes": 2778,
       "sha256": "df6f1c8dc17caecedb53464d831ad4565098464bccf4999c6f664f83600c9381"
     },
+    "licenses/CERTIFI-MPL-2.0-NOTICE.txt": {
+      "bytes": 989,
+      "sha256": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7"
+    },
     "licenses/CODEX-APACHE-2.0.txt": {
       "bytes": 10926,
       "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
@@ -197,8 +205,8 @@
       "sha256": "a8d1d88a0f9cce3cdbff73b03a80dc5e5d69e3ba2443946c268815a550c9e0ec"
     },
     "lop_edge.py": {
-      "bytes": 35259,
-      "sha256": "ed28e05f4b10854c38222a15c9021f8ea6e2a7df4db1a22264c4f1b20d8fbd42"
+      "bytes": 37492,
+      "sha256": "d29f2d4d4ed41dbd3359f9dfd54e43df0e8bab47607b958e0b155efaef6c39ec"
     },
     "lop_launch.py": {
       "bytes": 4331,
@@ -209,8 +217,8 @@
       "sha256": "b91f7716622fda9fd433a52e95345b730453c94b42f5ccd6af49aadf48116bd1"
     },
     "package_egress.py": {
-      "bytes": 11842,
-      "sha256": "9218cbab5fdd0048e7830db0c5ee6e8f32303e0a9f9c846a3f4aba6729d37d0d"
+      "bytes": 12711,
+      "sha256": "0837572de66a7576845b7c3b85f9f5c9aae79a10ca56b33f82f947a1f4cf5a13"
     },
     "radient_meter/classifier.py": {
       "bytes": 6611,
@@ -261,8 +269,8 @@
       "sha256": "43edde0d35b83e19d6f830e4859b0199cec7e08be0f06fc07c67edc6fcfe52de"
     },
     "test_lop_edge.py": {
-      "bytes": 36191,
-      "sha256": "89a83c26b6dd34c9847bbbf1017f864ee9b4efa2b248742f20f29f28851a96d5"
+      "bytes": 40266,
+      "sha256": "7bbba426c24d288b50a28a093b46133319de050af051ccf4f99e6df9064ffabb"
     },
     "test_runner_v2.py": {
       "bytes": 31751,

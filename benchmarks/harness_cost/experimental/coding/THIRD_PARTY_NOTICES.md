@@ -36,3 +36,10 @@ The common public MCP schema snapshot and its third-party notices remain at
 `../../public_loadout` and `../../THIRD_PARTY_NOTICES.md`; no schema copy is added
 here. This records what was examined locally, not legal advice or a statement
 that unbundled payloads are relicensable under the kit's MIT license.
+
+`public-roots.pem` is certifi 2026.07.22's `cacert.pem`, copied byte-for-byte:
+Mozilla's public root CA certificates (from NSS `certdata.txt`), distributed
+under the Mozilla Public License 2.0. certifi's license notice is preserved as
+`../licenses/CERTIFI-MPL-2.0-NOTICE.txt`; MPL-2.0 text:
+https://mozilla.org/MPL/2.0/. Used only as the trust anchors appended to Local
+Operator's run CA so its tool children can verify tunnelled package registries.

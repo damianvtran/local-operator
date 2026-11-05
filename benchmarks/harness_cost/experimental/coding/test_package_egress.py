@@ -30,6 +30,15 @@ import package_egress  # noqa: E402
 ALLOWLIST = HERE / "package-egress-allowlist.json"
 
 
+def _const_tuple(path: Path, name: str) -> tuple[str, ...]:
+    import ast
+
+    tree = ast.parse(path.read_text())
+    node = next(n for n in tree.body if isinstance(n, ast.Assign)
+                and getattr(n.targets[0], "id", "") == name)
+    return tuple(ast.literal_eval(node.value))
+
+
 class Fixture:
     """A loopback 'registry': records what it received, answers one response."""
 
@@ -126,6 +135,30 @@ class PackageEgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.opened, [("deb.debian.org", 80)])
         [row] = self.rows()
         self.assertEqual((row["method"], row["port"], row["allowed"]), ("GET", 80, True))
+
+    async def test_plain_http_always_sends_the_checked_host(self):
+        # R8 F25: a client Host naming another CDN tenant must not reach upstream.
+        await self.exchange(
+            b"GET http://deb.debian.org/v1/x HTTP/1.1\r\n"
+            b"Host: some-other-tenant.example\r\nhost: second.example\r\n\r\n"
+        )
+        sent = self.fixture.received.decode().lower()
+        self.assertEqual([x for x in sent.split("\r\n") if x.startswith("host:")],
+                         ["host: deb.debian.org"])
+        self.assertNotIn("tenant", sent)
+
+    async def test_malformed_authority_is_logged_redacted(self):
+        # R8 N7: userinfo in a proxy authority must never reach the trial record.
+        # Assembled from parts: the publication scanner rightly flags any
+        # literal ``x@host`` in shipped source.
+        authority = b"user:s3cret" + b"\x40" + b"deb.debian.org:443"
+        out = await self.exchange(b"CONNECT " + authority + b" HTTP/1.1\r\n\r\n")
+        self.assertTrue(out.startswith(b"HTTP/1.1 403 "))
+        row = self.rows()[-1]
+        self.assertEqual(row["reason"], "malformed")
+        self.assertNotIn("s3cret", self.log_path.read_text())
+        self.assertRegex(row["host"], r"^redacted-sha256:[0-9a-f]{16}$")
+        self.assertEqual(self.opened, [])
 
     async def test_denials_never_open_an_upstream_and_are_logged(self):
         cases = {
@@ -257,7 +290,8 @@ class GateWiringTests(unittest.TestCase):
         self.assertEqual(
             driver.package_egress_hashes(),
             {"policy": driver.digest(HERE.parent / "package_egress.py"),
-             "allowlist": driver.digest(ALLOWLIST)},
+             "allowlist": driver.digest(ALLOWLIST),
+             "public_roots": driver.digest(HERE / "public-roots.pem")},
         )
 
     def test_non_lop_harnesses_get_the_package_proxy_and_bypass_it_for_the_gate(self):
@@ -290,6 +324,34 @@ class GateWiringTests(unittest.TestCase):
         self.assertEqual(plan["env"]["NO_PROXY"], "127.0.0.1,localhost,::1")
         src = (HERE / "driver.py").read_text()
         self.assertIn('"package_allowlist": str(PACKAGE_ALLOWLIST)', src)
+
+    def test_lop_trust_bundle_is_mounted_read_only_and_hashed(self):
+        # R8 F24: LoP's tool children trust run CA + frozen public roots.
+        roots = HERE / "public-roots.pem"
+        self.assertIn("public-roots.pem", driver.CONTAINER_CLOSURE)
+        self.assertEqual(driver.package_egress_hashes()["public_roots"], driver.digest(roots))
+        self.assertGreater(roots.read_text().count("BEGIN CERTIFICATE"), 50)
+        self.assertNotIn("PRIVATE KEY", roots.read_text())
+        src = (HERE / "driver.py").read_text()
+        self.assertIn('"public_roots": str(PUBLIC_ROOTS)', src)
+        child = {k: "http://run1:n@127.0.0.1:41000" for k in
+                 ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")}
+        for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "PIP_CERT", "CURL_CA_BUNDLE",
+                    "NODE_EXTRA_CA_CERTS"):
+            child[key] = "/host/run/edge-ca.pem"
+        child["BENCH_EDGE_CA_SHA256"] = "a" * 64
+        plan = driver.container_plan(
+            "run1", "local-operator", self.IMAGE, meter_port=8787, bridge_port=8789,
+            edge={"port": 41000, "env": child, "ca_file": Path("/host/run/edge-ca.pem")},
+        )
+        for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "PIP_CERT", "CURL_CA_BUNDLE",
+                    "NODE_EXTRA_CA_CERTS"):
+            self.assertEqual(plan["env"][key], egress.CA_TARGET, key)
+        self.assertEqual(plan["env"]["BENCH_EDGE_CA_SHA256"], "a" * 64)
+        # Harbor forwards only the listed keys to the agent.
+        keys = _const_tuple(HERE / "adapters.py", "EDGE_ENV_KEYS")
+        for key in child:
+            self.assertIn(key, keys)
 
     def test_trial_record_collects_every_logged_connection(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as t:

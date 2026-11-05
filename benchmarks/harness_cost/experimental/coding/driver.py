@@ -96,12 +96,20 @@ CONTAINER_CLOSURE = (
     "gold_probe.py",
     "lop_launch.py",
     "package-egress-allowlist.json",
+    "public-roots.pem",
 )
 # Agent-phase package egress (egress.py, ../package_egress.py): the policy code
 # and its frozen exact-host allowlist. Both are closure members AND a named
 # preregistration input, so widening the allowlist voids the container S4
 # record and any frozen preregistration.
 PACKAGE_ALLOWLIST = HERE / "package-egress-allowlist.json"
+# Frozen public roots (certifi 2026.07.22, Mozilla; MPL-2.0 notice in
+# ../licenses) appended to LoP's run CA so its tool children can verify the
+# registries the edge tunnels (R8 F24). Frozen, not the host's store, so every
+# run trusts the same bytes and the S4 record binds them.
+PUBLIC_ROOTS = HERE / "public-roots.pem"
+# Must equal lop_launch.PARITY_KEYS / lop_edge.CA_PARITY_KEYS (tested).
+LOP_PARITY_KEYS = ("PIP_CERT", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
 
 
 def container_closure_hashes():
@@ -110,7 +118,8 @@ def container_closure_hashes():
 
 def package_egress_hashes():
     return {"policy": digest(HERE.parent / "package_egress.py"),
-            "allowlist": digest(PACKAGE_ALLOWLIST)}
+            "allowlist": digest(PACKAGE_ALLOWLIST),
+            "public_roots": digest(PUBLIC_ROOTS)}
 
 
 def package_egress_summary(logs):
@@ -313,7 +322,9 @@ def container_plan(run_id, harness, image, *, meter_port, bridge_port, edge=None
         )
         for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
             child[key] = gated
-        for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        # The mounted trust bundle (run CA + public roots, R8 F24) for every
+        # trust variable the launcher checks; the edge pins its CA fingerprint.
+        for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", *LOP_PARITY_KEYS):
             child[key] = egress.CA_TARGET
         env.update(child)
     elif edge:
@@ -656,7 +667,7 @@ def start_edge(args, run_id):
     # proxy variables must keep naming the edge, so its tool children reach
     # registries through it under the same policy as the gate's proxy.
     config = {"run_id": run_id, "run_dir": str(run_dir), "meter_base": args.meter_url.rstrip("/"),
-              "package_allowlist": str(PACKAGE_ALLOWLIST)}
+              "package_allowlist": str(PACKAGE_ALLOWLIST), "public_roots": str(PUBLIC_ROOTS)}
     if os.environ.get("BENCH_DECISIONS_URL"):  # zero-paid rig fixture only
         config["decisions_url"] = os.environ["BENCH_DECISIONS_URL"]
     proc.stdin.write(json.dumps({**config, "radient_token": token}) + "\n")

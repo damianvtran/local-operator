@@ -104,6 +104,8 @@ DECISIONS_ROUTE = ("POST", "api.radienthq.com", "/v1/decisions")
 # it and injects the host-held bearer on the decisions route only.
 DUMMY_RADIENT_KEY = "bench-dummy"
 NO_PROXY = "127.0.0.1,localhost,::1"
+# Extra trust-file variables set to the bundle when public roots are given.
+CA_PARITY_KEYS = ("PIP_CERT", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
 DENIED_BODY = b'{"error":"route not metered by the benchmark edge"}'
 LEDGER_REFUSED_BODY = b'{"error":"budget ledger unavailable, exhausted, or unreconciled"}'
 # The edge re-frames relayed bodies itself (chunked), so the upstream's own
@@ -321,6 +323,7 @@ class EdgeServer:
         decisions_client: httpx.AsyncClient | None = None,
         decisions_url: str = DECISIONS_URL,
         package_policy: package_egress.Policy | None = None,
+        public_roots: Path | None = None,
     ) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", run_id):
             raise ValueError("invalid run identifier")
@@ -349,7 +352,16 @@ class EdgeServer:
                 package_policy, package_egress.ConnectionLog(self.package_log_path, via="edge")
             )
         self.ca = RunCA()
-        self.ca_path = self.run_dir / "edge-ca.pem"
+        # ``public_roots`` (container lane, R8 F24): the child's trust file
+        # becomes run CA + frozen public roots. Model and decisions hosts are
+        # still MITM'd with the run CA, so trusting public roots too opens no
+        # unmetered model route; it only lets tool children verify the real
+        # registries the package policy tunnels unintercepted. The bundle keeps
+        # the mountable name ``edge-ca.pem``; the bare run CA moves aside.
+        self.public_roots = Path(public_roots) if public_roots is not None else None
+        self.bundle_path = self.run_dir / "edge-ca.pem"
+        self.ca_path = self.bundle_path if self.public_roots is None else (
+            self.run_dir / "edge-run-ca.pem")
         self.log_path = self.run_dir / "edge-requests.jsonl"
         # One guard per edge, built now (F6): a misconfigured meter environment
         # refuses to construct the edge instead of failing open per request.
@@ -365,6 +377,11 @@ class EdgeServer:
 
     async def start(self) -> None:
         self.ca.write_certificate(self.ca_path)
+        if self.public_roots is not None:
+            roots = self.public_roots.read_bytes()
+            if b"PRIVATE KEY" in roots or b"BEGIN CERTIFICATE" not in roots:
+                raise ValueError("public roots must be a PEM bundle of certificates only")
+            self.bundle_path.write_bytes(self.ca.certificate_pem() + roots)
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
         self.port = self._server.sockets[0].getsockname()[1]
 
@@ -406,10 +423,24 @@ class EdgeServer:
             "http_proxy": proxy,
             "NO_PROXY": NO_PROXY,
             "no_proxy": NO_PROXY,
-            "SSL_CERT_FILE": str(self.ca_path),
-            "REQUESTS_CA_BUNDLE": str(self.ca_path),
+            "SSL_CERT_FILE": str(self.bundle_path),
+            "REQUESTS_CA_BUNDLE": str(self.bundle_path),
             "RADIENT_API_KEY": DUMMY_RADIENT_KEY,
+            # Trust parity for tool children that ignore SSL_CERT_FILE (pip
+            # prefers PIP_CERT, curl CURL_CA_BUNDLE, node adds
+            # NODE_EXTRA_CA_CERTS) and the run CA's fingerprint, which the
+            # container launcher requires to be IN the bundle. Container lane
+            # only: the desktop child env is unchanged.
+            **({k: str(self.bundle_path) for k in CA_PARITY_KEYS}
+               | {"BENCH_EDGE_CA_SHA256": self.ca_fingerprint()}
+               if self.public_roots is not None else {}),
         }
+
+    def ca_fingerprint(self) -> str:
+        """SHA-256 of the run CA certificate's DER bytes."""
+        return hashlib.sha256(
+            self.ca.certificate.public_bytes(serialization.Encoding.DER)
+        ).hexdigest()
 
     # --- accounting --------------------------------------------------------------
 
@@ -518,7 +549,11 @@ class EdgeServer:
             await self._packages.dispatch(reader, writer, method, target, headers)
             return True
         if reason != "model-host":
-            self._packages.log.write(method=method, host=parsed[0].lower(), port=parsed[1],
+            import package_egress  # loaded already: a policy exists
+
+            self._packages.log.write(method=method,
+                                     host=package_egress.logged_host(parsed[0], reason),
+                                     port=parsed[1],
                                      allowed=False, reason=reason, bytes_up=0, bytes_down=0)
         return False
 
@@ -794,6 +829,7 @@ async def _serve_from_stdin() -> None:
         meter_base=config["meter_base"],
         decisions_url=config.get("decisions_url", DECISIONS_URL),
         package_policy=policy,
+        public_roots=Path(config["public_roots"]) if config.get("public_roots") else None,
     )
     await server.start()
     sys.stdout.write(json.dumps({"port": server.port, "env": server.child_env()}) + "\n")

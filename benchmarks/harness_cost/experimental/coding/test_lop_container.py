@@ -39,6 +39,18 @@ def _load_launcher():
     return module
 
 
+def _fake_ca() -> tuple[str, bytes]:
+    """A real CA certificate (PEM, DER) from the edge's own RunCA."""
+    import sys
+    import ssl as _ssl
+
+    sys.path.insert(0, str(HERE.parent))
+    import lop_edge
+
+    pem = lop_edge.RunCA().certificate_pem().decode()
+    return pem, _ssl.PEM_cert_to_DER_cert(pem)
+
+
 def _const(path: Path, name: str) -> str:
     tree = ast.parse(path.read_text())
     return next(
@@ -54,8 +66,10 @@ class LauncherTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
         self.ca = self.tmp / "edge-ca.pem"
-        self.ca.write_text("ca")
+        ca_pem, der = _fake_ca()
+        self.ca.write_text(ca_pem)
         self.ca.chmod(0o444)
+        self.fingerprint = hashlib.sha256(der).hexdigest()
 
     def env(self, **over):
         proxy = "http://run1:nonce@bench-gate:41000"
@@ -64,6 +78,8 @@ class LauncherTests(unittest.TestCase):
             "NO_PROXY": self.launch.NO_PROXY, "no_proxy": self.launch.NO_PROXY,
             "SSL_CERT_FILE": self.launch.CA_BUNDLE, "REQUESTS_CA_BUNDLE": self.launch.CA_BUNDLE,
             "RADIENT_API_KEY": self.launch.DUMMY_RADIENT_KEY,
+            **{k: self.launch.CA_BUNDLE for k in self.launch.PARITY_KEYS},
+            "BENCH_EDGE_CA_SHA256": self.fingerprint,
         }
         base.update(over)
         return {k: v for k, v in base.items() if v is not None}
@@ -102,6 +118,45 @@ class LauncherTests(unittest.TestCase):
         for name, env in cases.items():
             with self.subTest(name), self.assertRaises(SystemExit):
                 self.check(env)
+
+    def test_bundle_must_contain_the_run_ca(self):
+        # R8 F24: the bundle is run CA + public roots; the launcher still
+        # requires the run CA (by DER fingerprint) to be IN it.
+        import ssl as _ssl
+        ca_pem, der = _fake_ca()
+        roots = (HERE / "public-roots.pem").read_text()
+        self.ca.chmod(0o644)
+        self.ca.write_text(ca_pem + roots)
+        self.ca.chmod(0o444)
+        fp = hashlib.sha256(der).hexdigest()
+        self.check(self.env(BENCH_EDGE_CA_SHA256=fp))
+        self.assertEqual(_ssl.PEM_cert_to_DER_cert(ca_pem), der)
+        for bad in ("0" * 64, None):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                self.check(self.env(BENCH_EDGE_CA_SHA256=bad))
+        # Roots alone (no run CA) are refused even with a matching-looking pin.
+        self.ca.chmod(0o644)
+        self.ca.write_text(roots)
+        self.ca.chmod(0o444)
+        with self.assertRaises(SystemExit):
+            self.check(self.env(BENCH_EDGE_CA_SHA256=fp))
+
+    def test_parity_keys_agree_across_edge_launcher_and_driver(self):
+        edge_keys = tuple(ast.literal_eval(next(
+            n.value for n in ast.parse((HERE.parent / "lop_edge.py").read_text()).body
+            if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "CA_PARITY_KEYS")))
+        self.assertEqual(self.launch.PARITY_KEYS, edge_keys)
+        self.assertEqual(driver.LOP_PARITY_KEYS, edge_keys)
+
+    def test_parity_trust_variables_must_name_the_bundle(self):
+        ca_pem, der = _fake_ca()
+        self.ca.chmod(0o644)
+        self.ca.write_text(ca_pem)
+        self.ca.chmod(0o444)
+        fp = hashlib.sha256(der).hexdigest()
+        for key in ("PIP_CERT", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"):
+            with self.subTest(key=key), self.assertRaises(SystemExit):
+                self.check(self.env(BENCH_EDGE_CA_SHA256=fp, **{key: "/etc/ssl/other.pem"}))
 
     def test_writable_ca_refused(self):
         self.ca.chmod(0o644)
@@ -534,10 +589,14 @@ class DriverContainerTests(unittest.TestCase):
         self.assertEqual(plan["urls"]["anthropic"], "http://bench-gate:8787/r/run1")
         # The launcher accepts exactly what the driver produces.
         launch = _load_launcher()
+        ca_pem, der = _fake_ca()
         with tempfile.NamedTemporaryFile(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as ca:
+            Path(ca.name).write_text(ca_pem + (HERE / "public-roots.pem").read_text())
             os.chmod(ca.name, 0o444)
-            env = {**plan["env"], "SSL_CERT_FILE": ca.name, "REQUESTS_CA_BUNDLE": ca.name,
-                   "RADIENT_API_KEY": launch.DUMMY_RADIENT_KEY}
+            env = {**plan["env"], "RADIENT_API_KEY": launch.DUMMY_RADIENT_KEY,
+                   "BENCH_EDGE_CA_SHA256": hashlib.sha256(der).hexdigest(),
+                   **{k: ca.name for k in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+                                           *launch.PARITY_KEYS)}}
             with patch.object(launch, "CA_BUNDLE", ca.name):
                 launch.require_edge_environment(env)
 

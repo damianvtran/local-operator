@@ -35,6 +35,7 @@ CONSTRAINTS:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import re
@@ -114,6 +115,18 @@ class Policy:
         if name not in self.allow:
             return "not-allowlisted"
         return None
+
+
+def logged_host(host: str, reason: str | None) -> str:
+    """The host as it may appear in the published trial record.
+
+    A ``malformed`` authority is client-controlled bytes (e.g. a proxy URL's
+    ``user:password@host``), so only a short digest is kept: enough to group
+    repeats, never the credential (R8 N7). Checked names are logged verbatim.
+    """
+    if reason == "malformed":
+        return "redacted-sha256:" + hashlib.sha256(host.encode("utf-8", "replace")).hexdigest()[:16]
+    return host.lower().rstrip(".")
 
 
 def public_address(addr: str) -> bool:
@@ -242,8 +255,9 @@ class PackageProxy:
         parsed = self.target(method, target)
         host, port, path = parsed or ("", 0, "")
         reason = "malformed" if parsed is None else self.policy.decide(host, port)
+        row: dict[str, object] = {"method": method, "host": logged_host(host, reason),
+                                  "port": port}
         host = host.lower().rstrip(".")
-        row: dict[str, object] = {"method": method, "host": host, "port": port}
         if reason is not None:
             self.log.write(**row, allowed=False, reason=reason, bytes_up=0, bytes_down=0)
             writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n"
@@ -271,9 +285,12 @@ class PackageProxy:
                 # A pipelined follow-up still reaches only THIS host (the TCP
                 # destination was checked), and apt retries what it loses.
                 lines = [f"{method} {path} HTTP/1.1"]
-                lines += [f"{k}: {v}" for k, v in headers.items() if k not in _DROP]
-                if "host" not in headers:
-                    lines.append(f"Host: {host}")
+                # Host is ALWAYS the checked destination, never the client's:
+                # on a shared CDN edge plain-HTTP routing follows Host, so a
+                # forwarded client Host could reach another tenant (R8 F25).
+                lines += [f"{k}: {v}" for k, v in headers.items()
+                          if k not in _DROP and k != "host"]
+                lines.append(f"Host: {host}" if port == 80 else f"Host: {host}:{port}")
                 lines.append("Connection: close")
                 request = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
                 up_writer.write(request)
