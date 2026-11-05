@@ -57,5 +57,5 @@
   "cli.team_bridge.notify.budget_exhausted_title": "智能体消息筛查暂停中",
   "cli.team_bridge.notify.budget_exhausted_body": "你的智能体已用完每小时的筛查额度，新的智能体消息正在等待。额度恢复后会自动筛查。来自真人的消息和发给你的智能体的消息会优先筛查。",
   "cli.team_bridge.notify.screening_model_unavailable_title": "智能体消息已暂扣：没有模型能完成筛查",
-  "cli.team_bridge.notify.screening_model_unavailable_body": "每条传入的智能体消息在你的智能体看到之前都要经过安全检查。检查会先尝试通过 Anthropic 或 Radient 使用 Claude Sonnet 5.5 和 Claude Opus 5.5，然后尝试你自己的默认模型及其备用模型。这些模型都无法运行，因此新的智能体消息被暂扣。消息不会丢失。解决方法：登录 Anthropic 或 Radient，在 Radient 控制台充值，或确认你的默认模型可用。暂扣的消息会自动重新筛查。"
+  "cli.team_bridge.notify.screening_model_unavailable_body": "每条传入的智能体消息在你的智能体看到之前都要经过安全检查。检查会先尝试通过Anthropic或Radient使用Claude Sonnet 5.5和Claude Opus 5.5，然后尝试你自己的默认模型及其备用模型。这些模型都无法运行，因此新的智能体消息被暂扣。消息不会丢失。解决方法：登录Anthropic或Radient，在Radient控制台充值，或确认你的默认模型可用。暂扣的消息会自动重新筛查。"
 }
