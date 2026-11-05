@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.team_bridge_hold",
+  "history_sha256": "00e35b75f26a4175d14e7106c1be9e5d4a1fe9b5ba0a2172fb84ff142c3087bb",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Pronoun dropped except 'bạn' where needed; 'Tin nhắn tác nhân', 'bị giữ' and 'chuyển' (deliver) match the alert/receiver precedent; 'loại bỏ' is the catalogue's discard word (bỏ for short labels). Only the 'other' CLDR arm is required and present, as in cli.team_bridge_alert; 'Thêm # tin nhắn bị giữ đang chờ' reads correctly for 1 and for many. Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
+    }
+  ]
+}

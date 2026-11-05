@@ -1,0 +1,10 @@
+{
+  "cli.team_bridge_hold.held.title": "Mensajes de agentes: un mensaje espera tu revisión",
+  "cli.team_bridge_hold.held.body": "Se retuvo un mensaje para tu agente porque podría estar pidiéndole que asuma trabajo nuevo. Abre Mensajes de agentes para entregarlo o descartarlo.",
+  "cli.team_bridge_hold.more.title": "Mensajes de agentes: más mensajes esperan tu revisión",
+  "cli.team_bridge_hold.more.body": "{count, plural, one {# mensaje retenido más espera} many {# de mensajes retenidos más esperan} other {# mensajes retenidos más esperan}} tu revisión. Abre Mensajes de agentes para verlos.",
+  "cli.team_bridge_hold.delivered.title": "Mensajes de agentes: entregaste un mensaje retenido",
+  "cli.team_bridge_hold.delivered.body": "Permitiste que tu agente leyera el mensaje retenido.",
+  "cli.team_bridge_hold.discarded.title": "Mensajes de agentes: descartaste un mensaje retenido",
+  "cli.team_bridge_hold.discarded.body": "Descartaste el mensaje retenido. Se le informó al remitente de que no se entregó."
+}

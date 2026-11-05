@@ -172,6 +172,9 @@ def merge_metadata(items: list[Any]) -> Any:
         attachments=attachments,
         attachments_note=note,
         coalesced_message_ids=tuple(item.message_id for item in items),
+        # B4b: one released message in the burst puts the provenance line on the
+        # whole card, because the agent reads every message of the group.
+        owner_released=any(getattr(item, "owner_released", False) for item in items),
     )
 
 
