@@ -92,6 +92,7 @@ from local_operator.i18n.keys import cli_serve_help as _sv
 from local_operator.i18n.keys import cli_services_help as _sr
 from local_operator.i18n.keys import cli_services_status as _svc
 from local_operator.i18n.keys import cli_sessions_help as _sh
+from local_operator.i18n.keys import cli_skills_push as _sp
 from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
 from local_operator.i18n.keys import cli_update_help as _up
@@ -162,6 +163,7 @@ def _positive_seconds(text: str) -> float:
 #: the exec refusals this module prints).
 _t = tr("wire.exec")
 _bt = tr("cli.browser")
+_spt = tr("cli.skills_push")
 
 
 def build_cli_parser() -> LocalizedArgumentParser:
@@ -13035,6 +13037,7 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     # outage must not turn an explicit push into a silent skip.
     svc.clear_retry(ctx, "skill", args.name)
     operation_id = f"push-skill-{check.local_id}"
+    outcome_base = outbound.remote_revision
     outcome = asyncio.run(
         push_item(
             kind="skill",
@@ -13054,10 +13057,26 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
             bundle_attested=not is_bundle or svc._capability_bundle(ctx.store().load(), identity),
             bundle_upload=(svc.bundle_upload_hook(ctx, identity, record) if is_bundle else None),
             org_skill=identity.visibility == "org",
+            base_revision=outbound.remote_revision or "",
         )
     )
-    svc.record_push_outcome(ctx, check, outcome)
-    payload = {
+    # Do not mint current ancestry from an old idempotent replay receipt. Only
+    # a matching GET-head proves a returned snapshot is the head we intended;
+    # failed/unavailable verification leaves the prior receipt and local-only
+    # mark untouched, so a later attempt cannot hide an unpublished local edit.
+    verification = svc.verify_skill_push(ctx, check, outcome) if outcome.state == "pushed" else None
+    if verification is None:
+        svc.record_push_outcome(ctx, check, outcome)
+    elif verification.verified is True:
+        from dataclasses import replace as dc_replace
+
+        # A replay may return an older revision even when today's head happens
+        # to contain the same document. Record the revision the GET just proved,
+        # not the pin's historic receipt; otherwise the next push's ancestry is
+        # immediately stale again.
+        confirmed = dc_replace(outcome, revision=verification.head_revision or outcome.revision)
+        svc.record_push_outcome(ctx, check, confirmed)
+    payload: dict[str, Any] = {
         "name": check.name,
         "form": "bundle" if is_bundle else "document",
         "state": outcome.state,
@@ -13067,14 +13086,100 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     }
     if outcome.reason in _SKILL_RECONCILIATION_REASONS:
         payload["recovery_guide"] = "guide://extensions"
+    if outcome.reason == "stale-base":
+        payload["base_revision"] = outcome_base
+        payload["head_revision"] = expected
+    # READ IT BACK (stale-baseline incident): a ``pushed`` outcome only says the
+    # hub accepted a write, not that the head now holds what was meant. The
+    # verification re-reads the head unconditionally and compares it with the
+    # body the commit sent; a mismatch is a failed push for the exit code.
+    if verification is not None:
+        payload["verified"] = verification.verified
+        payload["verified_revision"] = verification.head_revision
+        if verification.reason:
+            payload["verification_reason"] = verification.reason
+    refreshed = True
+    if outcome.reason in svc._REBASE_AFTER_REFUSAL:
+        latest = prov.read_baseline(ctx.config_dir, "skill", check.local_id)
+        refreshed = bool(
+            latest is not None
+            and latest.outbound is not None
+            and latest.outbound.remote_revision == expected
+            and svc._same_content(latest.outbound.accepted_fields, check.remote or {})
+        )
+        payload["baseline_refreshed"] = refreshed
+    next_steps = _skills_push_next_steps(
+        check.name, outcome, expected, is_bundle, verification, baseline_refreshed=refreshed
+    )
+    if next_steps:
+        payload["next_steps"] = next_steps
     if getattr(args, "json", False):
         print(_json.dumps(payload, indent=2))
     else:
         detail = ""
-        if outcome.reason:
+        if outcome.reason == "stale-base":
+            detail = " — " + _spt(_sp.stale_base(head=_safe(expected), base=_safe(outcome_base)))
+        elif outcome.reason:
             detail = f" — {_skills_refusal(_reason_error(outcome.reason))}"
         print(f"{_safe(check.name)}: {outcome.state}{detail}")
+        for line in next_steps:
+            print(line)
+    if verification is not None and verification.verified is not True:
+        return 1
     return 0 if outcome.state in ("pushed", "no-op") else 1
+
+
+#: Push refusals whose safe next step is "bring the hub's changes in, then push":
+#: the merge engine could not combine the local edits with the hub head.
+_SKILL_MERGE_REFUSALS = frozenset({"merge-refused", "bundle-conflict"})
+
+
+def _skills_push_next_steps(
+    name: str,
+    outcome: Any,
+    head: str | None,
+    is_bundle: bool,
+    verification: Any,
+    *,
+    baseline_refreshed: bool = True,
+) -> list[str]:
+    """The operator's safe next step after a push, as printable lines.
+
+    WHY THIS EXISTS (stale-baseline incident, 2026-11-04): after a refused merge
+    the obvious workaround -- copy the hub's text over the local skill and push
+    again -- published an OLD document, because the push still merged against a
+    stale baseline. The refusal now names the step that is safe: bring the hub's
+    changes in through the merge (``sync``), re-apply, push; and the push says
+    whether the hub head really holds what it sent.
+    """
+
+    quoted = _safe(name)
+    lines: list[str] = []
+    if outcome.reason in ({"stale-base"} | _SKILL_MERGE_REFUSALS) and not baseline_refreshed:
+        # A refused bundle or failed receipt write cannot claim the baseline
+        # moved. Taking the hub's changes through sync is safe in either case.
+        lines.append(_spt(_sp.stale_base_bundle_next(name=quoted)))
+    elif outcome.reason == "stale-base":
+        message = (
+            _sp.stale_base_bundle_next(name=quoted)
+            if is_bundle
+            else _sp.stale_base_next(name=quoted, head=_safe(head))
+        )
+        lines.append(_spt(message))
+    elif outcome.reason in _SKILL_MERGE_REFUSALS:
+        suffix = f" {_safe(head)}" if head else ""
+        lines.append(_spt(_sp.merge_refused_next(name=quoted, head=suffix)))
+    if verification is not None:
+        revision = _safe(verification.head_revision or outcome.revision or "")
+        if verification.verified is True:
+            lines.append(_spt(_sp.verified(revision=revision)))
+        elif verification.verified is False:
+            lines.append(_spt(_sp.verify_mismatch(revision=revision, name=quoted)))
+        else:
+            lines.append(
+                _spt(_sp.verify_unavailable(reason=_safe(verification.reason), name=quoted))
+            )
+    return lines
 
 
 _SKILL_RECONCILIATION_REASONS = frozenset(

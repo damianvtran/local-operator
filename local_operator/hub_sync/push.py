@@ -359,6 +359,12 @@ class PushOutcome:
     #: just ran, not from a later read of outbox state a failed or fenced settle
     #: would leave stale.
     outage: bool = False
+    #: The exact document a ``pushed`` outcome sent on the commit (the preview's
+    #: returned, possibly generalized, body). It is what the publication INTENDED
+    #: the hub to hold, so a caller can re-read the hub head and verify the two
+    #: agree: the server's ``accepted_document`` cannot serve that role, because
+    #: an idempotent replay answers with the pin's ORIGINAL snapshot.
+    document: Mapping[str, Any] | None = None
 
 
 def _canonical_equal(kind: Kind, a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
@@ -403,8 +409,15 @@ async def push_item(
     bundle_attested: bool = False,
     bundle_upload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     org_skill: bool = False,
+    base_revision: str | None = None,
 ) -> PushOutcome:
-    """Serialize an org skill's dispatch so a pending intent has one live owner."""
+    """Serialize an org skill's dispatch so a pending intent has one live owner.
+
+    ``base_revision`` is the hub revision the outbound receipt's accepted document
+    P was recorded at. When the caller names one, a push whose ``expected_revision``
+    (the hub head this push conditions on) differs is refused ``stale-base``: see
+    ``_push_item_inner``.
+    """
     kwargs: dict[str, Any] = dict(
         kind=kind,
         local_id=local_id,
@@ -422,6 +435,7 @@ async def push_item(
         bundle_attested=bundle_attested,
         bundle_upload=bundle_upload,
         org_skill=org_skill,
+        base_revision=base_revision,
     )
     if kind != "skill":
         return await _push_item_inner(**kwargs)
@@ -485,6 +499,7 @@ async def _push_item_inner(
     bundle_attested: bool = False,
     bundle_upload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     org_skill: bool = False,
+    base_revision: str | None = None,
 ) -> PushOutcome:
     """Project and conditionally publish one authored item; settle the outbox.
 
@@ -502,6 +517,41 @@ async def _push_item_inner(
         # deliberate, separate action -- an unattended push must not invent one.
         # Checked BEFORE any outbox write: a refusal must not even fence a record.
         return PushOutcome("refused", reason="no-outbound-receipt")
+
+    # STALE-BASE GUARD (stale-baseline incident, 2026-11-04): the projection
+    # merges against P, the document accepted at ``base_revision``, while the CAS
+    # conditions on the hub head. When the two revisions differ, the CAS passing
+    # proves only that the head did not move during THIS push -- not that the
+    # merge saw it as its base -- so stale hunks from P (or from a remote read
+    # that was not the head's document) could land as the new head with no
+    # conflict reported. Refuse by name instead, BEFORE any outbox write or paid
+    # call; the caller refreshes the receipt to the head (``record_push_outcome``)
+    # so the next push projects onto what the hub really holds.
+    #
+    # An uncertain earlier commit is exempt: its own landing is the commonest
+    # reason the head moved, and its verbatim replay/landed check below is the
+    # only thing that can settle it.
+    base = str(base_revision or "").strip()
+    head = str(expected_revision or "").strip()
+    if base_revision is not None and head and not reconcilable(outbox.read(operation_id)):
+        # One revision has one document. A damaged historic receipt may name
+        # today's head while carrying an older P; revision equality alone must
+        # not bless that inconsistent pair as an ancestor either.
+        try:
+            if kind == "skill":
+                # The skill carrier is a union: document text is normalized,
+                # while a bundle compares by exact tree identity. Reuse the
+                # same comparator as read-after-push verification/reconciliation
+                # rather than feeding a bundle into the text-document decoder.
+                from local_operator.hub_sync.service import _same_content
+
+                same_head = base == head and _same_content(accepted, remote_latest)
+            else:
+                same_head = base == head and _canonical_equal(kind, accepted, remote_latest)
+        except (KeyError, ValueError, TypeError, LinkError):
+            same_head = False
+        if not same_head:
+            return PushOutcome("refused", operation_id=operation_id, reason="stale-base")
 
     input_fp = _projection_fingerprint(
         kind, captured_local, accepted, current_local, remote_latest, expected_revision
@@ -740,6 +790,7 @@ async def _push_item_inner(
         operation_id=operation_id,
         accepted=result,
         revision=accepted_revision,
+        document=dict(preview_document),
     )
 
 
@@ -862,6 +913,7 @@ async def _replay_verbatim(
             operation_id=operation_id,
             accepted={"accepted_document": dict(remote_latest), "operation_id": operation_id},
             revision=remote_revision,
+            document=dict(document),
         )
     try:
         result = await transport.commit(
@@ -885,7 +937,11 @@ async def _replay_verbatim(
         result={"revision": accepted_revision, "operation_id": result.get("operation_id")},
     )
     return PushOutcome(
-        "pushed", operation_id=operation_id, accepted=result, revision=accepted_revision
+        "pushed",
+        operation_id=operation_id,
+        accepted=result,
+        revision=accepted_revision,
+        document=dict(document),
     )
 
 

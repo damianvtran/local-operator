@@ -649,6 +649,9 @@ class HubSyncRunner:
                 and record.identity is not None
                 and record.identity.visibility == "org"
             ),
+            # The stale-base guard: a head that moved past P's revision refuses
+            # by name, and ``_record_push`` rebases the receipt for the next tick.
+            base_revision=outbound.remote_revision or "",
         )
         report.skipped = None
         await self._offload(self._record_push, ctx, c, outcome)

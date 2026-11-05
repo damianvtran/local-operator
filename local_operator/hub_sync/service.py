@@ -1347,10 +1347,35 @@ def _mark_integrated(
         # to a live-revision read that came from the recorded base) IS the
         # verification A2.3 asks for, so the record advances to a vouching one.
         updated = dc_replace(updated, recorded_by="adopt")
-    if c.remote_revision and c.remote_revision != updated.remote_revision:
+    if c.remote_revision:
+        # Even when the revision is unchanged, repair records written by older
+        # runtimes with a mismatched (revision, fields) pair: the unconditional
+        # read selected by ``_trusted_validator`` just supplied the real body.
         # The revision is the ancestry fact this agreement observed, and the
         # fallback expected token a later conditional write uses.
         updated = dc_replace(updated, remote_revision=c.remote_revision)
+        if c.remote is not None:
+            # THE REVISION AND THE FIELDS MOVE TOGETHER (stale-baseline incident,
+            # 2026-11-04). ``remote_revision`` is the validator the next check
+            # sends as If-None-Match, and a 304 answer makes the check use THESE
+            # fields as the hub's document at that revision. Advancing only the
+            # revision left a record claiming "revision X holds the old text":
+            # after a push (which deliberately leaves B alone) and a later L == R
+            # agreement, the next push merged onto the old text under a passing
+            # CAS and republished it. A genuine agreement means the remote just
+            # read IS what is integrated here, so it is the honest B.
+            updated = dc_replace(
+                updated,
+                fields=dict(c.remote),
+                fingerprint=prov.fingerprint_fields(c.kind, c.remote),
+            )
+    # The hub content just integrated here is the honest merge base for the
+    # NEXT push too: without this, a link that pulled the head would still push
+    # against the receipt's older revision and be refused ``stale-base`` once
+    # before the refusal itself refreshed it.
+    rebased = rebased_outbound_receipt(updated.outbound, c, integrated=True)
+    if rebased is not None:
+        updated = dc_replace(updated, outbound=rebased)
     if updated == record:
         return
     try:
@@ -1425,6 +1450,13 @@ def _apply_skill(
         ctx.store().mutate(inner)
 
     def fail(cls: str, message: str, outcome: ItemOutcome = "failed") -> ItemMergeReport:
+        if not dry_run and cls == "merge-refused":
+            from local_operator.hub_sync.push import PushOutcome
+
+            # Refusing an inbound merge must not strand the next outbound push
+            # on older ancestry either. B and every local file stay untouched;
+            # only P/revision move to the head this check just read.
+            rebase_outbound_after_refusal(ctx, c, PushOutcome("needs-review", reason=cls))
         fold(lambda item: st.record_failure(item, cls, message))
         return ItemMergeReport(
             c.kind,
@@ -2949,6 +2981,151 @@ def bundle_upload_hook(
     return upload
 
 
+#: Push refusals after which the outbound receipt is REBASED onto the hub head
+#: the push just read (``rebased_outbound_receipt``): the named stale-base guard,
+#: and a projection the merge engine refused. Deliberately not ``conflict`` (the
+#: head moved DURING the push, so the read is not the head either) nor refusals
+#: unrelated to the merge base (an unacknowledged generalization, a missing
+#: capability), which a refreshed base would not change.
+_REBASE_AFTER_REFUSAL = frozenset({"stale-base", "merge-refused", "bundle-conflict"})
+
+
+def rebased_outbound_receipt(existing: Any, c: Any, *, integrated: bool = False) -> Any:
+    """The outbound receipt moved onto the hub head ``c`` read, or None to keep it.
+
+    THE OPERATOR'S REQUIREMENT (stale-baseline incident, 2026-11-04): after a
+    refused merge or an integration of the hub head, the push's baseline must be
+    the hub's CURRENT revision, never an older accepted document a later merge
+    could resurrect. So P := the remote just read and the revision := its ETag.
+
+    A (the captured local input) is KEPT on purpose, which is what makes this
+    lossless: stage one of the projection re-applies every local edit since A
+    onto the new P, so an unpublished local edit survives, and content only the
+    hub has is never reverted because the local side never touched it. (Setting
+    A := P would make the next push publish the local copy VERBATIM, silently
+    reverting any hub change the local copy lacks.)
+
+    A BUNDLE has no per-file merge: its projection publishes the local tree only
+    when the hub still holds P. Moving P onto a different hub tree after a mere
+    refusal would turn that refusal into an overwrite, so a refused bundle is
+    rebased only when the head holds the SAME tree (a revision-only move).
+    ``integrated`` lifts that: the caller just wrote the head's tree locally, so
+    the head IS the local tree's ancestor.
+    """
+
+    if existing is None or c is None:
+        return None
+    remote = getattr(c, "remote", None)
+    revision = getattr(c, "remote_revision", None)
+    if remote is None or not revision:
+        return None
+    if existing.remote_revision == revision:
+        try:
+            same = prov.fingerprint_snapshot(
+                c.kind, dict(existing.accepted_fields)
+            ) == prov.fingerprint_snapshot(c.kind, dict(remote))
+        except Exception:  # noqa: BLE001 - an unreadable P is rebased onto the read
+            same = False
+        if same:
+            return None
+    if not integrated and ("bundle" in remote or "bundle" in (existing.accepted_fields or {})):
+        try:
+            same_tree = prov.fingerprint_snapshot(
+                c.kind, dict(existing.accepted_fields)
+            ) == prov.fingerprint_snapshot(c.kind, dict(remote))
+        except Exception:  # noqa: BLE001 - an unprovable tree never rebases
+            return None
+        if not same_tree:
+            return None
+    from local_operator.hub_sync.provenance import OutboundReceipt
+
+    return OutboundReceipt(
+        local_fields=existing.local_fields,
+        accepted_fields=dict(remote),
+        input_fingerprint=existing.input_fingerprint,
+        remote_revision=str(revision),
+        operation_id=existing.operation_id,
+    )
+
+
+def rebase_outbound_after_refusal(ctx: HubSyncContext, c: Any, outcome: Any) -> bool:
+    """Persist ``rebased_outbound_receipt`` after a merge-base refusal; True if moved."""
+
+    if str(getattr(outcome, "reason", "") or "") not in _REBASE_AFTER_REFUSAL:
+        return False
+    try:
+        record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
+    except (prov.BaselineError, OSError):
+        return False
+    if record is None:
+        return False
+    rebased = rebased_outbound_receipt(record.outbound, c)
+    if rebased is None:
+        return False
+    try:
+        prov.write_baseline(ctx.config_dir, replace(record, outbound=rebased))
+    except (prov.BaselineError, OSError, LinkError):
+        logger.debug("could not rebase outbound receipt for %s %s", c.kind, c.local_id)
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class PushVerification:
+    """What a post-push re-read of the hub head proved.
+
+    ``verified`` is True when the head serves the document the push committed,
+    False when it serves something else, and None when the head could not be
+    read (an outage proves nothing either way; the caller says so).
+    """
+
+    verified: bool | None
+    head_revision: str | None = None
+    reason: str = ""
+
+
+def verify_skill_push(ctx: HubSyncContext, check: Any, outcome: Any) -> PushVerification:
+    """Re-read the hub head after a ``pushed`` outcome and compare it with the intent.
+
+    WHY (stale-baseline incident, 2026-11-04): the CLI reported ``pushed`` while
+    the hub had accepted an OLDER document as its new head; only reading the raw
+    hub document back revealed it. So the push now verifies on its own:
+    unconditionally (no If-None-Match -- a 304 would answer from the local
+    baseline, which is exactly the copy that was wrong), through the same
+    per-tenant client the check uses, comparing with the one skill-content
+    comparator (``_same_content``: tolerant of the hub's canonical respelling,
+    exact for a bundle tree).
+
+    The comparison target is ``outcome.document`` -- the body the commit SENT --
+    never the server's ``accepted_document``: an idempotent replay answers with
+    the pin's original snapshot, which may be older than the head.
+    """
+
+    intended = getattr(outcome, "document", None)
+    if not isinstance(intended, Mapping):
+        return PushVerification(None, reason="no-intended-document")
+    try:
+        client = ctx.client_for_tenant(check.tenant_id if check.tenant_id else "")
+    except Exception:  # noqa: BLE001 - no client is an unverifiable read, not a failure
+        client = None
+    if client is None:
+        return PushVerification(None, reason="no-credential")
+    try:
+        document = chk._fetch_skill(
+            client, check.hub_id, timeout=chk.REQUEST_TIMEOUT_S, if_none_match=None
+        )
+        from local_operator.hub_sync.adapters import SkillAdapter
+
+        head = SkillAdapter().canonical_fields(document)
+    except Exception as error:  # noqa: BLE001 - the read failed; nothing was proved
+        logger.debug("post-push verification read failed for %s", check.name, exc_info=True)
+        return PushVerification(None, reason=type(error).__name__)
+    head_revision = str(document.get("revision") or "") or None
+    if _same_content(head, intended):
+        return PushVerification(True, head_revision=head_revision)
+    return PushVerification(False, head_revision=head_revision, reason="head-differs")
+
+
 def record_push_outcome(ctx: HubSyncContext, c: Any, outcome: Any) -> None:
     """Persist one push outcome: advance the receipt on success, name a skip.
 
@@ -2982,6 +3159,7 @@ def record_push_outcome(ctx: HubSyncContext, c: Any, outcome: Any) -> None:
 
         ctx.store().mutate(fold)
         return
+    rebase_outbound_after_refusal(ctx, c, outcome)
     if outcome.reason:
         reason = str(outcome.reason)
 
@@ -5903,6 +6081,12 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
             if value
         }
         if not check.remote_revision or check.remote_revision not in allowed:
+            from local_operator.hub_sync.push import PushOutcome
+
+            # This refusal occurs before dispatch (the reviewed proposal's head
+            # moved). Refresh the outbound base just as a refused CLI/runner
+            # merge does, without modifying any local file or publishing it.
+            rebase_outbound_after_refusal(ctx, check, PushOutcome("refused", reason="stale-base"))
             raise LinkError(
                 "remote-revision-changed", "the hub changed since the preview was reviewed"
             )
@@ -5918,6 +6102,9 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
             remote_latest=check.remote or {},
         )
         if refuse := refuses(projection):
+            from local_operator.hub_sync.push import PushOutcome
+
+            rebase_outbound_after_refusal(ctx, check, PushOutcome("needs-review", reason=refuse))
             raise LinkError(refuse, "the merged result cannot be published")
         if _proposal_fingerprint(dict(projection.fields)) != receipt.get("proposal_fingerprint"):
             raise changed("the proposal differs from the one reviewed")
@@ -5952,6 +6139,7 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
                 bundle_attested=not is_bundle or _capability_bundle(ctx.store().load(), identity),
                 bundle_upload=(bundle_upload_hook(ctx, identity, record) if is_bundle else None),
                 org_skill=identity.visibility == "org",
+                base_revision=outbound.remote_revision or "",
             )
         )
         record_push_outcome(ctx, check, outcome)
