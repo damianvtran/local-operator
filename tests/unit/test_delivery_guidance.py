@@ -270,7 +270,9 @@ def test_stale_copy_reviewer_gets_the_pointer_with_worktree_rule(tmp_path):
 def test_qa_round_two_retests_only_failed_and_reimpacted_rows():
     # Measured: QA round 2+ re-ran a median 66% of round-1 rows. The seed
     # states the delta rule, keeps real majors blocking, and reuses one tree.
-    body = " ".join(load_seed("qa-tester").instructions.split())
+    seed = load_seed("qa-tester")
+    assert seed is not None
+    body = " ".join(seed.instructions.split())
     for required in (
         "Round 1: the full in-scope QA matrix",
         "re-test only prior FAIL/BLOCKED rows",
@@ -360,7 +362,9 @@ async def test_task_receipt_carries_worktree_notice_for_unbriefed_reader(tmp_pat
                 {"label": "Rev", "prompt": f"Worktree: {tmp_path} @ abc", "agent": "reviewer"},
             ]
         },
-        context=context,
+        None,
+        None,
+        context,
     )
     assert result.is_error is False
     assert result.text.count(MISSING_WORKTREE_NOTICE) == 1
@@ -380,9 +384,9 @@ def test_attached_stale_registered_role_and_team_manager_get_delivery_pointer(tm
     session = make_session(tmp_path, ScriptedStream([]), agent_registry=registry)
     assert session.attach_agent_profile("reviewer") == "reviewer"
     assert DELIVERY_POINTER in session._goal_state.agent_brief
-    assert registry.get_agent_system_prompt(registry.get_agent_by_name("reviewer").id) == (
-        "Old reviewer rules."
-    )
+    reviewer = registry.get_agent_by_name("reviewer")
+    assert reviewer is not None
+    assert registry.get_agent_system_prompt(reviewer.id) == "Old reviewer rules."
     team = Team(
         id="12345678-1234-1234-1234-123456789013",
         name="stale-team",
