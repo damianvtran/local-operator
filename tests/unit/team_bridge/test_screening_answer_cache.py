@@ -219,6 +219,9 @@ def test_the_cache_key_is_content_equality_only(tmp_path) -> None:
             # A categoryless bounce is the model refusing the message too: it
             # explained instead of naming a category.
             "bounce_without_category",
+            # B4b (S-4 / D5): a converted work-scope bounce, cached so a re-draw
+            # can never turn a held message into a delivered one.
+            "work_scope_hold",
         }
     )
 

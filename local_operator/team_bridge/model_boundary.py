@@ -1491,10 +1491,17 @@ class ScreenChainRunner:
         self._hops = list(hops)
         self._factory = factory
         self._built: list[Any] = []
+        #: Set by :meth:`acall` to the hop that answered (B4b D4); ``""`` until then.
+        self.served_provider = ""
+        #: The answering hop's index, for B4b's signed audit (DESIGN §3, a-3f46).
+        #: Eligibility comes from the resolver-derived preferred flag below,
+        #: not this position: a later preferred Opus may release; ordinary
+        #: default/cascade Opus never may (corrected Amendment 2).
+        self.served_hop_index: int | None = None
         self._job: AdmissionJob | None = None
         #: The hop whose reply carried a model identity on the last call, or
         #: ``None``. The pipeline reads :attr:`answered_preferred` from it to
-        #: stamp ``screener_preferred``; a fallback hop is never preferred.
+        #: stamp ``screener_preferred``; an ordinary cascade hop is never preferred.
         self.answered_hop: DefaultSelection | None = None
 
     @property
@@ -1569,7 +1576,7 @@ class ScreenChainRunner:
         last_failure: BaseException | None = None
         attempts = 0
         unevidenced: tuple[str, str | None] = ("", None)
-        for hop in self._hops:
+        for index, hop in enumerate(self._hops):
             runner = self._build(hop)
             if runner is None:
                 continue
@@ -1623,6 +1630,12 @@ class ScreenChainRunner:
                 last_failure = failure
                 continue
             if actual is not None:
+                # B4b D4: the provider of the hop that ANSWERED, read by the
+                # pipeline for release eligibility. A model id alone cannot
+                # tell the direct Anthropic route from a re-seller serving the
+                # same id, and eligibility is keyed on the (provider, model) pair.
+                self.served_provider = hop.provider
+                self.served_hop_index = index
                 self.answered_hop = hop
                 return reply, actual
             unevidenced = (reply, actual)

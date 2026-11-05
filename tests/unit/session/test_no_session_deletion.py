@@ -829,6 +829,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "planted in that slot (the link itself, never its target)",
         2,
     ),
+    # notification-sounds C5: the phone's built-in WAV is decoded through a
+    # private temp file (miniaudio writes WAV only to a path), read, then removed.
+    (
+        "local_operator/notifications/catalog_view.py::_builtin_wav",
+        "os.unlink",
+        "The tempfile.mkstemp(suffix='.wav') FILE this call created in the system temp "
+        "dir; never a directory and never under sessions/",
+    ),
     (
         "local_operator/notifications/custom_sounds.py::_drop_renders",
         "<path>.unlink",

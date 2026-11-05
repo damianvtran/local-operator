@@ -50,11 +50,16 @@ not tied to a real plan.
 
 HOWTO: [`docs/I18N.md`](docs/I18N.md). Contract:
 [`docs/design/i18n.md`](docs/design/i18n.md). `local_operator/i18n/data/shipped.json`
-is GENERATED from ledger completeness — **never hand-edit it**. The audit
-ledger is sharded per locale: append audit rows to `i18n/ledger/<locale>.json`
-(authoritative, append-only, last row per `(locale, namespace)` wins), never to
-`i18n/ledger.json` — that aggregate is a generated mirror re-rendered by
-`scripts/i18n/generate.py`, and `--check` fails if the two disagree.
+is GENERATED from ledger completeness — **never hand-edit it**.
+
+Audit storage: `i18n/audit-history.json` pins immutable historical ledger
+snapshots byte-for-byte; append new receipts only to ordered per-key suffixes
+`i18n/audit-history/<locale>/<namespace>.json` via `scripts/i18n/ledger.py append`.
+Never edit or regenerate `i18n/ledger.json` or `i18n/ledger/*.json` after migration.
+Read current history with the explicit-root shared reader or `ledger.py export`;
+normal `check.py` requires append-only proof against the actual PR base. See the
+HOWTO for migration, detached legacy import, expected-history digests and the
+mandatory actual-result-tree preflight when old-format contributions overlap.
 
 ## Environment
 

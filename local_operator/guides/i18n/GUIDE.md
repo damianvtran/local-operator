@@ -31,11 +31,18 @@ description: Contribute localized product copy, add message keys or locales, che
    Require placeholder/CLDR/RTL/pseudo and rendered evidence; high-visibility
    copy needs a second independent audit. Mechanical green is not native/design
    sign-off. Do not translate/audit your own contribution or erase a failed row.
-   Append the audit row to your locale's shard `i18n/ledger/<locale>.json`
-   (append-only; the last row per `(locale, namespace)` wins), then run
-   `generate.py` to re-render the aggregate mirror `i18n/ledger.json` — never
-   hand-edit or append to the aggregate; `--check` fails when it disagrees
-   with the shards.
+   Append the audit receipt to `i18n/audit-history/<locale>/<namespace>.json`
+   using `scripts/i18n/ledger.py append --receipt <scratch-json>
+   --expected-history-sha <digest> --dry-run/--apply` (obtain the digest with
+   `ledger.py history-sha --locale <locale> --namespace <namespace>`). Last file
+   row per key wins, never timestamps. Preserve failed/stale rows and provenance.
+   The immutable marker pins `i18n/ledger.json` and locale shards as historical
+   snapshots: never rewrite them. Use `ledger.py export` for current JSON, then
+   `generate.py`/`--check` and normal `check.py` for generated/base-aware validation.
+   Salvage old branches with explicit detached `import-legacy`, not the old shard
+   writer or an integrity bypass. Follow the HOWTO's actual-merge-tree preflight
+   when one-time migration overlaps an old-format append. External raw-file
+   current-view consumers remain unknown; retained snapshots are not current APIs.
 6. Prove counterfactual guard failures and passing controls in isolated fixtures.
    The current Python ratchet blocks only activated scopes; advisory green does
    not prove global enforcement. Exempt only legitimate non-product text with

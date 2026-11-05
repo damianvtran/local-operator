@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.team_bridge_hold",
+  "history_sha256": "95d0e4354ea4995880b0f8a18615ff00a08aa4cc4df4d4118677f6e9866f9bcd",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Pronoun 你 (guide); '智能体消息', '暂扣' and '送达' (deliver) match the alert/receiver precedent; classifier 条; full-width punctuation; no space between CJK and digits; only the 'other' arm is required and present. FINDING 1 (minor, FIXED): the translator rendered Discard as 舍弃 (held.body, discarded.title, discarded.body), a fourth word for one concept — the zh-CN catalogue's term for discarding messages is 丢弃 (tui.notices.kept_going_stopped '待处理消息已丢弃', cli.hub_shared_help.sync_replace), 放弃 is used for abandoning an edit/attempt. Replaced 舍弃→丢弃 in those three strings; no other wording touched and the audit covers the post-fix bytes. Remaining 0 blocker / 0 major. Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
+    }
+  ]
+}

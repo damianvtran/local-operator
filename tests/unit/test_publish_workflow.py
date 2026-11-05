@@ -73,7 +73,10 @@ def _release_invariant_problems(doc: dict[Any, Any]) -> list[str]:
     if not python or str(python[0].get("with", {}).get("python-version")) != "3.12":
         problems.append("invariant Python is not 3.12")
     run = "\n".join(step.get("run", "") for step in steps)
-    commands = ["python scripts/i18n/generate.py --check", "python scripts/i18n/check.py"]
+    commands = [
+        "python scripts/i18n/generate.py --check",
+        "python scripts/i18n/check.py --audit-base HEAD^",
+    ]
     if not all(command in run.splitlines() for command in commands):
         problems.append("invariant commands missing")
     elif run.index(commands[0]) > run.index(commands[1]):
@@ -274,7 +277,7 @@ def test_release_invariant_commands_cannot_be_dropped_or_reordered() -> None:
         doc = copy.deepcopy(_workflow())
         step = doc["jobs"][INVARIANT_JOB]["steps"][-1]
         generation = "python scripts/i18n/generate.py --check"
-        parity = "python scripts/i18n/check.py"
+        parity = "python scripts/i18n/check.py --audit-base HEAD^"
         if mutation == "drop":
             step["run"] = step["run"].replace(parity, "echo parity skipped")
             expected = "invariant commands missing"
@@ -749,3 +752,37 @@ def test_the_sdist_is_attached_to_the_github_release() -> None:
     job = doc["jobs"]["sdist-release"]
     assert job["permissions"] == {"contents": "write"}
     assert "release-sdist" in str(job["steps"])
+
+
+@pytest.mark.parametrize("workflow", ["release-gate.yml", "publish.yml"])
+def test_release_audit_gate_validates_the_event_parent(workflow: str) -> None:
+    """Both paths must carry the real parent into the append-only audit gate;
+    fixing only the rehearsal leaves publication broken after tagging."""
+    doc = yaml.safe_load((Path(__file__).parents[2] / ".github/workflows" / workflow).read_text())
+
+    def problems(candidate: dict[Any, Any]) -> list[str]:
+        steps = candidate["jobs"][INVARIANT_JOB]["steps"]
+        checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@"))
+        run = "\n".join(s.get("run", "") for s in steps)
+        result = []
+        if checkout.get("with", {}).get("fetch-depth") != 2:
+            result.append("parent unavailable")
+        if "python scripts/i18n/check.py --audit-base HEAD^" not in run.splitlines():
+            result.append("parent not validated")
+        if "--audit-structural-only" in run:
+            result.append("validation bypassed")
+        return result
+
+    assert problems(doc) == []
+    for mutation, expected in [("depth", "parent unavailable"), ("base", "parent not validated")]:
+        altered = copy.deepcopy(doc)
+        steps = altered["jobs"][INVARIANT_JOB]["steps"]
+        if mutation == "depth":
+            next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@"))[
+                "with"
+            ].pop("fetch-depth")
+        else:
+            for step in steps:
+                if "run" in step:
+                    step["run"] = step["run"].replace(" --audit-base HEAD^", "")
+        assert expected in problems(altered)

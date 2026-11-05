@@ -1,0 +1,10 @@
+{
+  "cli.team_bridge_hold.held.title": "Messages des agents : un message attend votre examen",
+  "cli.team_bridge_hold.held.body": "Un message destiné à votre agent a été retenu, car il pourrait lui demander de prendre en charge un nouveau travail. Ouvrez Messages des agents pour le transmettre ou l’écarter.",
+  "cli.team_bridge_hold.more.title": "Messages des agents : d’autres messages attendent votre examen",
+  "cli.team_bridge_hold.more.body": "{count, plural, one {# message retenu supplémentaire attend} many {# de messages retenus supplémentaires attendent} other {# messages retenus supplémentaires attendent}} votre examen. Ouvrez Messages des agents pour les voir.",
+  "cli.team_bridge_hold.delivered.title": "Messages des agents : vous avez transmis un message retenu",
+  "cli.team_bridge_hold.delivered.body": "Vous avez permis à votre agent de lire le message retenu.",
+  "cli.team_bridge_hold.discarded.title": "Messages des agents : vous avez écarté un message retenu",
+  "cli.team_bridge_hold.discarded.body": "Vous avez écarté le message retenu. L’expéditeur a été informé qu’il n’a pas été transmis."
+}

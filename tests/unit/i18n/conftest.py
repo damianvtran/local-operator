@@ -2,8 +2,9 @@
 
 They are scripts (stdlib-only entry points), so tests load them by path with
 `sys.modules` registration (dataclasses need the module present under its own
-name). One instance per session; tests patch the module's globals with
-`monkeypatch.setattr`, which restores them automatically.
+name). Generator/watch instances are session-scoped. The checker is function-
+scoped so its explicit synthetic-root structural adapter cannot leak to another
+case or depend on a shorter-lived monkeypatch from a session fixture.
 """
 
 from __future__ import annotations
@@ -27,9 +28,33 @@ def _load(name: str, path: Path) -> ModuleType:
     return module
 
 
-@pytest.fixture(scope="session")
-def i18n_check() -> ModuleType:
-    return _load("i18n_check_under_test", REPO / "scripts" / "i18n" / "check.py")
+@pytest.fixture()
+def i18n_check(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    checker = _load("i18n_check_under_test", REPO / "scripts" / "i18n" / "check.py")
+    normal_audit_gate = checker.check_audit_history
+
+    def fixture_audit_gate(base=None, *, structural_only=False):
+        # Existing ratchet cases deliberately construct repo-less mini-roots.
+        # Model ONLY those invocations as structural fixtures, without clearing
+        # CI/event environment globally or weakening the actual CLI's base gate.
+        # Real checkout/Git-root calls retain the unmodified production gate;
+        # test_audit_history also imports production check directly for its CI
+        # negative controls, independent of this fixture adapter.
+        if (
+            checker.REPO.resolve() == REPO.resolve()
+            or checker._git("rev-parse", "--is-inside-work-tree").returncode == 0
+        ):
+            return normal_audit_gate(base, structural_only=structural_only)
+        from scripts.i18n.ledger import load_entries
+
+        try:
+            load_entries(checker.REPO)
+        except (ValueError, OSError) as exc:
+            return [f"audit history: {exc}"]
+        return []
+
+    monkeypatch.setattr(checker, "check_audit_history", fixture_audit_gate)
+    return checker
 
 
 @pytest.fixture(scope="session")

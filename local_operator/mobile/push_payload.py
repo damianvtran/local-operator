@@ -85,6 +85,7 @@ from typing import Any
 #: reach into the block's producer to name the block's key, and this module's tests
 #: assert the imported value against the filed fixtures' literal.
 from local_operator.mobile.push_credentials import REPORT_DEVICES_FIELD
+from local_operator.notifications.catalog_view import PUSH_STEM_RE
 from local_operator.notifications.sound import (
     DEFAULT_SOUND_ID,
     SYSTEM_SOUND_ID,
@@ -136,15 +137,22 @@ IDEMPOTENCY_HEADER = "Idempotency-Key"
 #: :data:`SOUND_NONE`. The cloud MAPS it (iOS ``aps.sound = "<id with - → _>.wav"``,
 #: the bundled file name, since Android ``res/raw`` names allow no hyphen;
 #: ``android.channel_id = "sound.<id>"``) and never composes from it, so P2
-#: holds. ADR 0006 (amendment 2026-11-04) also RESERVES the optional
-#: ``sound_custom`` (``"c_<sha256[:16]>"``) beside it and a per-device
-#: ``sound_custom_ready`` in the report block; this module emits NEITHER yet
-#: (notification-sounds C5 does), and ``fixtures/push/`` lists them under
-#: ``reserved_not_sent`` so the suite proves today's output carries neither.
+#: holds. ADR 0006 (amendment 2026-11-04) adds the optional
+#: :data:`SOUND_CUSTOM_FIELD` beside it and a per-device ``sound_custom_ready``
+#: in the report block (``push_credentials.with_sound_readiness``); both are
+#: sent from notification-sounds C5, when a custom sound is selected.
 #: It rides completion and digest only: the attention form is a silent
 #: wake, so a sound on it would have nothing to accompany (design §6 C3:
 #: "``sound`` absent on attention, which is silent by definition").
 SOUND_FIELD = "sound"
+#: The computer's CUSTOM sound, by content: ``"c_" + sha256(stored_wav)[:16]``
+#: (``catalog_view.push_stem``). Optional, on completion and digest only, and
+#: present only when sound is on and a custom sound is selected; ``sound`` still
+#: carries the ``soft-pulse`` fallback beside it, which is what the cloud maps for
+#: every device whose ``sound_custom_ready`` is not true (ADR 0006 §3.2's
+#: ``sound_custom`` row). The name is a hash, never the user's sound name, so P2
+#: holds; the underscore makes it the phone's file stem (``c_<sha16>.wav``).
+SOUND_CUSTOM_FIELD = "sound_custom"
 #: The computer's ``system`` choice: "play the platform's own sound", which on
 #: the phone is the OS default notification sound.
 SOUND_DEFAULT = "default"
@@ -284,8 +292,8 @@ def push_sound(values: Mapping[str, Any] | None) -> str:
 
     Any id that is not a built-in — a custom sound (C2), or a hand-edited typo —
     sends :data:`~local_operator.notifications.sound.DEFAULT_SOUND_ID`: a phone
-    may not hold a custom file (the reserved ``sound_custom`` names it for a
-    device that does, from C5 on), and it has no file to play for any other
+    may not hold a custom file (:data:`SOUND_CUSTOM_FIELD` names it for a
+    device that does), and it has no file to play for any other
     name. ``data.sound`` is the value every not-ready device plays.
     ``system`` maps to :data:`SOUND_DEFAULT`.
     """
@@ -314,6 +322,20 @@ def _checked_sound(sound: str) -> str:
     raise ValueError(f"unknown push sound: {sound!r}")
 
 
+def _checked_sound_custom(sound_custom: str, sound: str) -> str:
+    """``sound_custom`` if it is the frozen ``c_<sha16>`` form, else ``ValueError``.
+
+    Refused beside ``sound == "none"`` as well: a custom name is only meaningful
+    when sound is on, and a body carrying both would ask the cloud to play a file
+    for a banner the user silenced.
+    """
+    if not isinstance(sound_custom, str) or PUSH_STEM_RE.fullmatch(sound_custom) is None:
+        raise ValueError(f"unknown custom push sound: {sound_custom!r}")
+    if sound == SOUND_NONE:
+        raise ValueError("a custom push sound cannot ride a silenced banner")
+    return sound_custom
+
+
 def completion_payload(
     *,
     computer: str,
@@ -323,6 +345,7 @@ def completion_payload(
     emit_id: str,
     count: int,
     sound: str,
+    sound_custom: str | None = None,
 ) -> dict[str, Any]:
     """One completion emit's payload — the ``data`` object of ADR §3.2 #2.
 
@@ -340,11 +363,14 @@ def completion_payload(
 
     ``sound`` is :func:`push_sound`'s answer, required rather than defaulted so a
     caller cannot forget the user's setting and silently send Soft pulse.
+    ``sound_custom`` (:data:`SOUND_CUSTOM_FIELD`) is OMITTED when ``None`` — the
+    repo's absence rule, so a built-in selection's body is byte-for-byte the
+    pre-C5 shape.
     """
     if kind not in PUSH_KINDS:
         raise ValueError(f"unknown completion kind: {kind!r}")
     sound = _checked_sound(sound)
-    return {
+    payload: dict[str, Any] = {
         "v": PAYLOAD_VERSION,
         "type": TYPE_COMPLETION,
         "computer": computer,
@@ -356,6 +382,9 @@ def completion_payload(
         ALERT_FIELD: completion_alert(kind, count),
         SOUND_FIELD: sound,
     }
+    if sound_custom is not None:
+        payload[SOUND_CUSTOM_FIELD] = _checked_sound_custom(sound_custom, sound)
+    return payload
 
 
 def attention_payload(
@@ -398,6 +427,7 @@ def digest_payload(
     kinds: Sequence[str],
     sound: str,
     exclude: Sequence[str] | None = None,
+    sound_custom: str | None = None,
 ) -> dict[str, Any]:
     """One digest emit's payload — the coalesced catch-up of ADR §2.1's burst rule.
 
@@ -419,7 +449,8 @@ def digest_payload(
     which is the one spelling of "exclude nobody".
 
     ``sound`` is :func:`push_sound`'s answer, as on the completion form: the
-    digest is the other VISIBLE type, so its banner plays the user's sound.
+    digest is the other VISIBLE type, so its banner plays the user's sound, and
+    ``sound_custom`` rides it on the same terms.
     """
     payload: dict[str, Any] = {
         "v": PAYLOAD_VERSION,
@@ -430,6 +461,8 @@ def digest_payload(
         ALERT_FIELD: digest_alert(kinds, count),
         SOUND_FIELD: _checked_sound(sound),
     }
+    if sound_custom is not None:
+        payload[SOUND_CUSTOM_FIELD] = _checked_sound_custom(sound_custom, payload[SOUND_FIELD])
     if exclude is not None:
         payload["exclude"] = list(exclude)
     return payload

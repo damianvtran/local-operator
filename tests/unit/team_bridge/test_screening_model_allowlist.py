@@ -672,3 +672,35 @@ def test_bare_runner_preferred_looking_allow_stays_nonpreferred_in_store(tmp_pat
     row = store.receipt_for_message(owner, "bmsg_1")
     assert row is not None and row["model"] == SONNET[1]
     assert row["screener_preferred"] is False
+
+
+@pytest.mark.parametrize("preference", [None, 0], ids=["legacy-null", "ordinary-false"])
+def test_unsent_model_allow_without_preference_is_still_retired(
+    tmp_path, monkeypatch, credentials, preference
+) -> None:
+    """S-11 negative: exempt only owner-release template, not all NULL provenance."""
+
+    import sqlite3
+
+    from local_operator.team_bridge.store import state_db_path
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    credentials.add("openai")
+    wire = _Wire({"gpt-6-astra": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+    first = _cycle(tmp_path, owner)
+    assert first.disposition == "deliver" and first.receipt is not None
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        conn.execute(
+            "UPDATE screening_receipts SET screener_preferred = ? WHERE message_id = 'bmsg_1'",
+            (preference,),
+        )
+    assert (
+        store.retire_unsent_fallback_allow(owner, "bmsg_1", body_sha256=first.receipt.body_sha256)
+        is True
+    )
+    assert store.receipt_for_message(owner, "bmsg_1") is None
+    before = len(wire.sends)
+    assert _cycle(tmp_path, owner).disposition == "deliver"
+    assert len(wire.sends) == before + 1  # genuine fallback really screens again
