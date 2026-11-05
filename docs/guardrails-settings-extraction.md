@@ -2,15 +2,17 @@
 
 The settings registry renders its guardrails section from the independently
 translated `wire.guardrails` child namespace. The older extraction contract in
-`test_wire_settings_slice.py`, however, names every registry slot under
-`wire.settings`: for example `wire.settings.guardrails_enabled.help`. Both are
-real public catalogue keys. Exempting the new section from that contract would
-leave clients of those historical slots without their copy.
+`test_wire_settings_slice.py`, however, derives a `wire.settings` key from
+every registry slot: for example `wire.settings.guardrails_enabled.help`.
+These guardrails compatibility slots are new in this PR, not historical keys
+used by external clients. Adding them satisfies the registry-derived extraction
+contract without exempting the new section or changing its canonical messages.
 
 The CI remediation copies the ten existing, audited guardrails values into
 `wire.settings` in **all eight locales**, and adds the English values to the
-extraction golden. These are compatibility aliases by exact value, not new
-translations. Runtime registry messages continue to use the child namespace.
+extraction golden. These new registry-derived compatibility slots reuse exact
+audited values; they are not new translations. Runtime registry messages
+continue to use the child namespace.
 The mapping is:
 
 - `wire.settings.guardrails.title` → `wire.guardrails.section.title`

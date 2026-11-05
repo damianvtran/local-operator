@@ -1021,10 +1021,68 @@ def test_r10_split_unquoted_substitution_keeps_shell_heredoc(home: Path, separat
 
 
 def test_ci_cd_dash_tracks_known_previous_directory(home: Path) -> None:
+    (home / "workspace/a").mkdir(parents=True)
+    (home / "workspace/b").mkdir(parents=True)
     command = "cd ~/workspace/a; cd ~/workspace/b; cd -; echo REAL > dash.md"
     assert _classify(home, command).risk is Risk.LOW
 
 
 def test_ci_cd_dash_still_protects_previous_state_directory(home: Path) -> None:
     command = "cd ~/.local-operator; cd /tmp; cd -; rm -rf ."
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+def test_ci_r2_popd_invalidates_previous_directory(home: Path) -> None:
+    command = "cd /tmp; pushd ~/.local-operator; popd; cd -; rm -rf sessions"
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize("bad_target", ["missing-directory", "config.yml"])
+def test_ci_r2_failed_cd_preserves_state_root_risk(home: Path, bad_target: str) -> None:
+    # The config file exists but is not a directory; the other path is absent.
+    command = f"cd /tmp; cd {home / '.local-operator' / bad_target}; cd -; rm -rf secrets"
+    assert _classify(home, command, cwd=home / ".local-operator").risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize("shape", ["popd", "missing", "not-directory", "success"])
+def test_ci_r2_real_bash_cwd_only_control(home: Path, shape: str) -> None:
+    """Use real cd/pushd/popd semantics as the oracle, NEVER a delete payload."""
+    import os
+    import subprocess
+
+    state = home / ".local-operator"
+    if shape == "popd":
+        command = f"cd /tmp; pushd '{state}'; popd; cd -; pwd -P"
+        expected = state
+    elif shape in ("missing", "not-directory"):
+        target = state / ("missing-directory" if shape == "missing" else "config.yml")
+        command = f"cd /tmp; cd '{target}'; cd -; pwd -P"
+        expected = state
+    else:
+        a, b = home / "workspace/a", home / "workspace/b"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        command = f"cd '{a}'; cd '{b}'; cd -; pwd -P"
+        expected = a
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+    env.pop("XPC_FLAGS", None)
+    env.pop("OLDPWD", None)
+    env["HOME"] = str(home)
+    result = subprocess.run(
+        ["/bin/bash", "-c", command],
+        cwd=state,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    )
+    assert Path(result.stdout.splitlines()[-1]).resolve() == expected.resolve()
+    if shape in ("missing", "not-directory"):
+        assert "cd:" in result.stderr
+
+
+@pytest.mark.parametrize("child", ["(popd)", "popd | cat", "popd &"])
+def test_ci_r2_child_directory_uncertainty_stays_isolated(home: Path, child: str) -> None:
+    command = f"cd ~/.local-operator; cd /tmp; {child}; cd -; rm -rf ."
     assert _classify(home, command).risk is Risk.CRITICAL

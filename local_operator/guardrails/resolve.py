@@ -1392,6 +1392,7 @@ class _Walker:
             return
         if name == "popd":
             st.cwd = None
+            st.env.pop("OLDPWD", None)
             return
         if name == "for" and len(words) >= 2:
             self._for(words[1:])
@@ -1739,6 +1740,13 @@ class _Walker:
                 path = os.path.normpath(oldpwd) if oldpwd.startswith("/") else None
             else:
                 path, _unknown = _absolute(w.text, st.cwd)
+        if path is None or not os.path.isdir(path):
+            # A failed cd preserves the shell's old cwd/OLDPWD. We cannot
+            # assume success (or recover it after an unmodelled popd), so
+            # invalidate BOTH instead of letting cd - revive a stale path.
+            st.cwd = None
+            st.env.pop("OLDPWD", None)
+            return
         if previous is None:
             st.env.pop("OLDPWD", None)
         else:
