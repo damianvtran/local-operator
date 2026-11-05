@@ -141,6 +141,12 @@ HOLD_CODES = (
     # owner has no designated session, or a session/spine holds the claim.
     "badge_only",
     "claimed_elsewhere",
+    # NOTHING could screen: every preferred screener and the owner's own
+    # default/fallback cascade failed on route errors (no credential, rate
+    # limit, out of quota or credit), or nothing is configured. An infra hold,
+    # never a verdict: never answer-cached, never releasable, re-screened on
+    # the retry pass, which re-resolves the chain.
+    "screening_model_unavailable",
 )
 
 #: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).
@@ -274,6 +280,18 @@ class ScreenResult:
     #: cache hit, which rendered nothing.
     rendered_version: str | None = None
     rendered_template_sha256: str | None = None
+
+    @property
+    def screener_preferred(self) -> bool:
+        """Whether a PREFERRED screener produced this verdict (``False`` for a hold).
+
+        Read from the receipt, the one record of who answered, so the result
+        and the stored proof can never disagree. A non-preferred allow is
+        delivered normally; it is excluded only from receipt reuse and from
+        B4b release (operator directive 2026-11-04).
+        """
+
+        return bool(self.receipt is not None and self.receipt.screener_preferred)
 
     def __post_init__(self) -> None:
         self._private_reason: str | None = None
@@ -1155,6 +1173,9 @@ def _screen_prepare(
     #    row exists, the caller must EQUAL it, so a stale retained caller
     #    can neither screen against it nor rewind it (H3-Q3).
     try:
+        # Same-message retries must not keep an UNSENT fallback allow in the
+        # write-once slot: a new preferred verdict needs its own receipt.
+        store.retire_unsent_fallback_allow(owner, message_id, body_sha256=envelope.body_sha256)
         current = store.current_screening_policy(owner)
         if current is None:
             try:
@@ -1270,6 +1291,7 @@ def _screen_prepare(
                 template_sha256=cached["template_sha256"],
                 body_sha256=cached["body_sha256"],
                 categories=tuple(cached["categories"]),
+                screener_preferred=bool(cached.get("screener_preferred")),
             )
             disposition = "deliver" if cached["verdict"] == "allow" else "bounce"
             return ScreenResult(
@@ -1347,9 +1369,13 @@ def _screen_prepare(
     # so the registered input proof pins the same value the job will carry.
     _canonical_provider = getattr(snapshot, "provider", None) or ""
     if not _canonical_provider:
-        from local_operator.team_bridge.model_boundary import resolve_default_selection
+        from local_operator.team_bridge.model_boundary import (
+            resolve_screening_selection,
+        )
 
-        _resolved = resolve_default_selection(config_dir)
+        # The screening model, never the bare configured default: the two
+        # differ whenever the default is not an evaluated screener.
+        _resolved = resolve_screening_selection(config_dir)
         _canonical_provider = _resolved.provider if _resolved is not None else ""
 
     # 8b. IMMUTABLE INPUT PROOF (R8/Q3): every canonical field of this
@@ -1692,7 +1718,11 @@ async def _screen_spend(
 
         failure_class = screening_failure_class(failure)
         retry_at = _record_failure(store, owner, failure_class=failure_class)
+        # A 402 is its own owner-visible reason (an empty balance only a
+        # top-up clears), still a route failure for the breaker.
+        from local_operator.team_bridge.model_boundary import provider_hold_code
 
+        route_code = provider_hold_code(failure)
         _commit_hold(
             store,
             owner,
@@ -1700,10 +1730,10 @@ async def _screen_spend(
             attempt_id,
             fingerprint,
             epoch,
-            "provider_error",
+            route_code,
             failure_class=failure_class,
         )
-        return ScreenResult("hold", hold_code="provider_error", retry_at=retry_at)
+        return ScreenResult("hold", hold_code=route_code, retry_at=retry_at)
 
     # 11b. A provider RESPONSE — even a valid model HOLD — is a provider
     #      SUCCESS: it resets consecutive failures (A5). Only the exception
@@ -1760,7 +1790,25 @@ async def _screen_spend(
         ),
         rendered_template_sha256=rendered.template_sha256,
         prompt_template_sha256=rendered.template_sha256,
+        screener_preferred=_answered_preferred(runner, actual_model),
     )
+
+
+def _answered_preferred(runner: Any, actual_model: str | None) -> bool:
+    """Whether the screener that answered is a PREFERRED one.
+
+    Only the trusted chain's answering-hop provenance qualifies. A bare runner
+    cannot manufacture preferred status with a model name or a boolean field.
+    Missing/legacy provenance is False; ordinary cascade hops stay False even
+    if their model names resemble an evaluated screener.
+    """
+
+    from local_operator.team_bridge.model_boundary import ScreenChainRunner
+
+    if not isinstance(runner, ScreenChainRunner):
+        return False
+    hop = runner.answered_hop
+    return bool(hop is not None and hop.model_id == actual_model and hop.preferred)
 
 
 def _conclude_parsed(
@@ -1778,6 +1826,7 @@ def _conclude_parsed(
     rendered_version: str | None = None,
     rendered_template_sha256: str | None = None,
     prompt_template_sha256: str | None = None,
+    screener_preferred: bool = False,
 ) -> ScreenResult:
     """Step 14 for ONE message: a parsed verdict -> its write-once outcome.
 
@@ -1855,6 +1904,10 @@ def _conclude_parsed(
         template_sha256=snapshot.template_sha256,
         body_sha256=envelope.body_sha256,
         categories=categories,
+        # Which screener answered: a fallback (non-preferred) verdict is
+        # delivered like any other, but is never reused from the receipt
+        # cache and never feeds a B4b release (operator directive 2026-11-04).
+        screener_preferred=screener_preferred,
     )
     try:
         store.finish_screening(
@@ -2597,8 +2650,10 @@ async def _screen_batch_core(
                 pass
             _commit_each(HOLD_BATCH_UNRESOLVED, failure_class=failure_class)
             return _finish()
+        from local_operator.team_bridge.model_boundary import provider_hold_code
+
         _record_failure(store, owner, failure_class=failure_class)
-        _commit_each("provider_error", failure_class=failure_class)
+        _commit_each(provider_hold_code(failure), failure_class=failure_class)
         return _finish()
 
     try:
@@ -2659,6 +2714,7 @@ async def _screen_batch_core(
             turn=turn,
             screened_bytes=len(prepared.envelope.private_body().encode("utf-8")),
             prompt_template_sha256=SCREENING_BATCH_TEMPLATE_SHA256,
+            screener_preferred=_answered_preferred(runner, actual_model),
         )
     return _finish()
 

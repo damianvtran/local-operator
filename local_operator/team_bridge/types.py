@@ -704,6 +704,13 @@ class ScreeningReceipt:
     template_sha256: str
     body_sha256: str
     categories: tuple[str, ...] = ()
+    #: Whether the model that answered is on the PREFERRED screener list
+    #: (``model_boundary.SCREENING_EVALUATED_MODELS``). LOCAL provenance only:
+    #: it is not part of the §6.2 tuple (:meth:`tuple_key`, :meth:`to_json`),
+    #: so the hub contract is unchanged. ``False`` is the safe default: a
+    #: verdict from a fallback screener is never reused from the receipt cache
+    #: and never feeds a B4b release.
+    screener_preferred: bool = False
 
     def validated(self) -> "ScreeningReceipt":
         if self.verdict not in _VERDICTS:
