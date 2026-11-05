@@ -914,3 +914,18 @@ async def test_image_entries_mount_through_the_existing_transport(tmp_path: Path
             )
     finally:
         monkeypatch.undo()
+
+
+def test_an_unlisted_more_count_is_a_plain_line_not_a_click_target() -> None:
+    """QA round 2 Q4: ``files_more`` with no stored ``more`` paths (unnamed sweep hits past
+    the sweep's file bound) is stated, but never armed as a disclosure that opens onto
+    nothing."""
+    details = _rows(
+        [_file("reports/q3.md")],
+        more=[],
+        files_more=2,
+        components=[{"attachment": "d" * 32, "mime": "text/html"}],
+    )
+    block = _block(details)
+    assert _painted(block).plain.splitlines()[-1] == "  2 more files"
+    assert block._more_line is None

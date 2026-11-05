@@ -1,0 +1,56 @@
+{
+  "status": "PASS",
+  "key_count": 21,
+  "parser": "existing @formatjs/icu-messageformat-parser via UI dependencies",
+  "heap_limit_MiB": 256,
+  "negative_controls": [
+    {
+      "name": "missing-key",
+      "rejected": true
+    },
+    {
+      "name": "renamed-placeholder",
+      "rejected": true
+    },
+    {
+      "name": "wrong-placeholder-type",
+      "rejected": true
+    },
+    {
+      "name": "mutated-identifier",
+      "rejected": true
+    },
+    {
+      "name": "English-duplication",
+      "rejected": true
+    },
+    {
+      "name": "bidi-injection",
+      "rejected": true
+    },
+    {
+      "name": "malformed-ICU",
+      "rejected": true
+    },
+    {
+      "name": "quote-token-loss",
+      "rejected": true
+    }
+  ],
+  "rendered_fit": "NOT RUN",
+  "pseudo": "NOT RUN",
+  "RTL": "NOT RUN",
+  "production_renderer": "NOT RUN",
+  "log": [
+    "PASS: 21/21 JSON keys; exact English key order; actual Chinese translations; ICU argument names/types/order; all technical token checks; no bidi; source has no width caps",
+    "PASS negative control rejected: missing-key",
+    "PASS negative control rejected: renamed-placeholder",
+    "PASS negative control rejected: wrong-placeholder-type",
+    "PASS negative control rejected: mutated-identifier",
+    "PASS negative control rejected: English-duplication",
+    "PASS negative control rejected: bidi-injection",
+    "PASS negative control rejected: malformed-ICU",
+    "PASS negative control rejected: quote-token-loss",
+    "PASS: parser-AST interpolation smoke preserves opaque argument data without reparsing (not production renderer proof)"
+  ]
+}

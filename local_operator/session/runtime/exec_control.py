@@ -156,6 +156,10 @@ class ExecControl:
             self.handle.close_secret_registration()
         except Exception:  # noqa: BLE001 — teardown must not fail the run
             logger.debug("exec control: secret deregistration failed", exc_info=True)
+        # The same teardown owes the effective-access listener the handle
+        # installed at construction: undisposed, it would keep republishing the
+        # finished run's band into a store nothing serves (PR #3427 R1-3).
+        self.handle.close_access_listener()
 
 
 async def start_exec_control(

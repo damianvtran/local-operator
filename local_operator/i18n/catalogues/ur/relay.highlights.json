@@ -1,0 +1,7 @@
+{
+  "relay.highlights.withheld.line": "{count, plural, one {# فائل نہیں دکھائی گئی} other {# فائلیں نہیں دکھائی گئیں}}: {reasons}",
+  "relay.highlights.withheld.reason.outside": "اجازت شدہ مقامات سے باہر",
+  "relay.highlights.withheld.reason.sensitive": "حساس فائل",
+  "relay.highlights.withheld.reason.missing": "فائل اب موجود نہیں",
+  "relay.highlights.withheld.reason.too_large": "پیش نظارہ کے لیے بہت بڑی"
+}

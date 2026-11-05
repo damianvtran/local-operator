@@ -60,6 +60,15 @@ def _snap(
     )
 
 
+def test_service_tier_column_exists_on_new_ledger(tmp_path):
+    store = AnalyticsStore(tmp_path / "tier.db")
+    conn = store._connect()
+    assert conn is not None
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(calls)")}
+    assert "openai_service_tier" in columns
+    store.close()
+
+
 def test_record_and_aggregate_roundtrip(tmp_path):
     store = AnalyticsStore(tmp_path / "a.db")
     assert store.record_batch([_snap(), _snap()]) == 2
@@ -826,16 +835,19 @@ def test_cache_write_1h_tokens_is_recorded_and_migrated(tmp_path):
     import dataclasses
 
     snap = dataclasses.replace(
-        _snap(cache_write=300), cache_write_1h_tokens=120, openai_long_context=True
+        _snap(cache_write=300),
+        cache_write_1h_tokens=120,
+        openai_long_context=True,
+        openai_service_tier="fast",
     )
     assert store.record_batch([snap]) == 1
     conn = store._connect()
     assert conn is not None
     rows = conn.execute(
         "SELECT session_id, cache_write_tokens, cache_write_1h_tokens, "
-        "openai_long_context FROM calls ORDER BY id"
+        "openai_long_context, openai_service_tier FROM calls ORDER BY id"
     ).fetchall()
-    assert rows == [("old", 500, 0, 0), ("s1", 300, 120, 1)]
+    assert rows == [("old", 500, 0, 0, None), ("s1", 300, 120, 1, "fast")]
     store.close()
 
 

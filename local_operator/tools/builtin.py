@@ -193,6 +193,7 @@ from local_operator.scratchpad import (
     scratchpad_refusal,
     scratchpad_size_text,
 )
+from local_operator.supplements.pins import DELIVER_DESCRIPTION, with_deliver_notice
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import (
     group_reaper,
@@ -714,6 +715,41 @@ def may_delegate_env_injection(context: object | None) -> dict[str, str]:
     if MAY_DELEGATE_ENV in os.environ:
         # Clear what this child would otherwise inherit — and only that.
         return {MAY_DELEGATE_ENV: ""}
+    return {}
+
+
+def session_id_env_injection(session_id: object) -> dict[str, str]:
+    """The three-arm ``LOCAL_OPERATOR_SESSION_ID`` write for a tool child's env.
+
+    WHAT IT IS FOR: attribution only. A ``lop`` command the model runs from a
+    tool (``lop network approvals request``, ``lop secret get``) records which
+    session filed it, and without this every such record said ``session_id: ""``
+    — the operator could not tell which conversation asked. The name and its
+    contract are ``secrets.access.SESSION_ID_ENV``: read for AUDIT ONLY, never
+    trusted for authorization, because a same-uid process can set any variable
+    it likes. The broker authenticates by process ancestry, and nothing that
+    reads this value may grant, sign or widen anything on its word.
+
+    THREE ARMS, the shape :func:`may_delegate_env_injection` and the scratchpad
+    export already use, for the same reasons: SET from the tool context's own
+    ``session_id`` (the nested context wins, because it is the one running the
+    command); CLEARED when this process inherited the name and the context has
+    none, so a child never files under its PARENT's session; otherwise not
+    written. Pure: no store, keychain or broker is read to build an env.
+
+    The id is a PARAMETER, like ``scratchpad_env_injection``'s root: the caller
+    knows which session it spawns for, and one process hosts several. Callers
+    pass ``ToolContext.session_id`` itself, never a derived registry key (the
+    eval kernel's ``ctx-<id>`` fallback is not a session id and must not be
+    exported as one).
+    """
+    from local_operator.secrets.access import SESSION_ID_ENV
+
+    value = session_id.strip() if isinstance(session_id, str) else ""
+    if value:
+        return {SESSION_ID_ENV: value}
+    if SESSION_ID_ENV in os.environ:
+        return {SESSION_ID_ENV: ""}
     return {}
 
 
@@ -2700,6 +2736,9 @@ class BashParams(BaseModel):
             "bash.memory.enabled=true. Exceeding the limit kills the group."
         ),
     )
+    # Highlights pin (``supplements.pins``): files to show under the final answer. Read by
+    # the supplement prefilter from the call's arguments, never by the command itself.
+    deliver: list[str] = Field(default_factory=list, description=DELIVER_DESCRIPTION)
 
 
 #: What the live card shows while the pipe is holding an unterminated line.
@@ -4247,6 +4286,11 @@ async def execute_bash(
     # the session's own answer — does it hold ``task`` — has to travel with the
     # command, and a name that was never exported cannot be used as one.
     injections.update(may_delegate_env_injection(context))
+    # Which session filed what a child `lop` records (approval requests, secret
+    # audit rows): audit attribution only, same three arms (see the helper).
+    injections.update(
+        session_id_env_injection(getattr(context, "session_id", None) if context else None)
+    )
     # The session's scratchpad root rides the SAME three arms, from one helper, so
     # the two writers of an inherited-shaped variable cannot drift apart: set to
     # this session's root, cleared when the name is inherited and this session has
@@ -5652,7 +5696,7 @@ def build_bash_tool(context: ToolContext | None = None) -> AgentTool:
         # #1546). The execute-time check below stays as the backstop for the
         # direct ``execute`` callers no hook reaches.
         refuse_args=_long_foreground_sleep_refusal,
-        execute=execute_bash,
+        execute=with_deliver_notice(execute_bash, "bash"),
     )
 
 

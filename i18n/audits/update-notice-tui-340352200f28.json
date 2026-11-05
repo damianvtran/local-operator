@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "record_kind": "independent_translation_audit",
+  "date": "2026-11-03",
+  "namespace": "tui.update",
+  "keys": [
+    "tui.update.checking",
+    "tui.update.updating",
+    "tui.update.restarting",
+    "tui.update.relaunch_when_idle"
+  ],
+  "locales": [
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+  "context_sha256": "a2407188494d34a850d5ea55c9cd4aa1609955ba50a255dfc0f084c9934fd6b1",
+  "glossary_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+  "style_guide_sha256": {
+    "fr": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+    "es": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6",
+    "zh-CN": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+    "ru": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5",
+    "vi": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888",
+    "ur": "c0eecf7f7b5e89956b7de9ab7a9eb647ff1a7ef701ccf2a7f0264d5eea15ca60",
+    "hi": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+  },
+  "target_sha256": {
+    "fr": "7b384116d3a982b8744529db3515fc1429421a1995a9f5e7287ea0bd68d1f298",
+    "es": "714827c5c1b2ba14506f27a26e35250f75fc8f66456eb34c5a94fba900eb4dbb",
+    "zh-CN": "74d8ef2a00e182a49e03f76c737082475e3104a4036dc9f5286a579bd8ade91c",
+    "ru": "27bdd8f54291378d109f488eda899423613cf8ffa01d77512d409ed6f91fac15",
+    "vi": "1005d04c04e7d7ab296adadd9e84e5d289c149801fe583bd21a94101da78f5f1",
+    "ur": "1752e97f3ba79662cd4f2c50666bb6bcad8c3f14cf74994dabe134380e89c9c8",
+    "hi": "d59edfe5c45023eeea66526c5b5c06e4746550be36da419ee4f2242eb54b682c"
+  },
+  "auditor": {
+    "agent": "reviewer / independent i18n auditor (team lopdev)",
+    "session": "340352200f28",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-03",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "coder (team lopdev, update-notice-reassure)",
+    "session": "9615db04a717",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-03"
+  },
+  "independence": "Auditor session 340352200f28 differs from translator session 9615db04a717 and authored no English copy or code in PR #3401; it only corrected the translations listed under findings and wrote this record plus ledger rows. Same model family (anthropic/claude-opus-5-5) as translator; disclosed, separate agent instance.",
+  "scope": "New tui.update namespace, all 4 keys x 7 locales, read against English source, context sidecar, glossary and each locale style guide. Checks: key parity, {version} placeholder parity, no em/en dashes, register (tu/vous/bạn/आप/आप/вы/你), meaning matches source behaviour (only the terminal viewer relaunches; detached session runtimes keep running; relaunch_when_idle = in-terminal work blocks the relaunch).",
+  "findings_resolved": {
+    "fr": [
+      "I1 MINOR: ASCII space before ';' in restarting/relaunch_when_idle; style guide requires U+202F before ; in prose. Fixed by auditor."
+    ],
+    "zh-CN": [
+      "I2 MINOR: single '…' in checking/updating; zh-CN style guide requires '……'. Fixed by auditor.",
+      "I3 NIT: space between Han text and 'v{version}'; style guide forbids inserted CJK/Latin spacing (matches tui.welcome.status.update). Fixed by auditor."
+    ],
+    "vi": [
+      "I4 MINOR: relaunch_when_idle 'công việc cục bộ rảnh' (work is free/idle) read awkwardly; changed to 'công việc cục bộ đã xong' (local work has finished), matching the refusal condition. Fixed by auditor."
+    ]
+  },
+  "unresolved_blocker_major": 0,
+  "not_claimed": "No rendered TUI fit, native RTL or second safety audit."
+}

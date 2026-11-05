@@ -1,0 +1,237 @@
+# Captured command output for audit tbb3400 (shared across the seven locale bundles; record: record.json)
+
+## Negative control 1 — generator eligibility at head 5456b8db, rows absent
+$ .venv/bin/python -c 'import generate; print(generate._shipped_locales())'  # scripts/i18n on sys.path
+pre-row _shipped_locales(): ['en']
+
+## Negative control 2 — the three named tests at head 5456b8db (audit changes stashed)
+$ (changes stashed, head 5456b8db) .venv/bin/python -m pytest -q tests/unit/i18n/test_generate.py tests/unit/i18n/test_hold_split.py tests/unit/i18n/test_ledger_shards.py
+        # a passed audit at the CURRENT en bytes; a row for a namespace with no
+        # passed, and the latest row per namespace is at the current English bytes
+        assert all(entry["status"] == "passed" for entry in chinese)
+FAILED tests/unit/i18n/test_hold_split.py::test_active_ledger_carries_the_released_chinese_candidate - AssertionError: ('cli.team_bridge', 'stale audit against the current English bytes')
+FAILED tests/unit/i18n/test_ledger_shards.py::test_shards_and_aggregate_yield_identical_shipped_set - AssertionError: assert ['en', 'fr', ...u', 'vi', ...] == ['en']
+FAILED tests/unit/i18n/test_generate.py::test_drift_check_passes_on_the_committed_tree - AssertionError: generate.py --check: committed artifacts are stale — regenerate with
+3 failed, 60 passed in 6.83s
+
+## Mechanical render checks after rows + regeneration
+$ env -i HOME=<iso> LOCAL_OPERATOR_CONFIG_DIR=<iso>/.lo PATH=/usr/bin:/bin:/opt/homebrew/bin PYTHONPATH=$PWD ~/local-operator/.venv/bin/python audit_checks.py  # after scripts/i18n/generate.py
+en catalogue_sha256 4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b raw 4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b keys 57
+  en budget_exhausted_title len=38
+  en budget_exhausted_body len=220
+shipped ['en', 'fr', 'es', 'zh-CN', 'ru', 'vi', 'ur', 'hi']
+fr target_sha256 f2ade7381a742f9a2017b1aa54790c23f1c41236559a6968acb2ed6bec3aa99b parity 57/57 OK
+  budget_exhausted_title len=56 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Filtrage des messages des agents en pause pour l’instant
+  budget_exhausted_body len=273 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Votre agent a épuisé son budget de filtrage horaire : les nouveaux messages des agents sont en attente. Ils seront filtrés automatiquement à mesure que le budget se reconstitue. Les messages envoyés par des personnes et ceux adressés à votre agent sont filtrés en priorité.
+es target_sha256 970c3eaeebbf0e8dace7894cb41ba4c429339249d753e9aac7a988ee23d6e524 parity 57/57 OK
+  budget_exhausted_title len=50 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Filtrado de mensajes de agentes en pausa por ahora
+  budget_exhausted_body len=256 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Tu agente ha agotado su presupuesto de filtrado por hora, así que los nuevos mensajes de agentes están en espera. Se filtrarán automáticamente a medida que se recupere el presupuesto. Los mensajes de personas y los dirigidos a tu agente se filtran primero.
+zh-CN target_sha256 f7d5a8c48fb42a6e92d426cd1c2eb44b1284a918b276bd632ebb25c645ec2a5d parity 57/57 OK
+  budget_exhausted_title len=10 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    智能体消息筛查暂停中
+  budget_exhausted_body len=64 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    你的智能体已用完每小时的筛查额度，新的智能体消息正在等待。额度恢复后会自动筛查。来自真人的消息和发给你的智能体的消息会优先筛查。
+ru target_sha256 3a0011313832c034dbf6d44e6c39e6456af9a265c7ebe0f32a5303684b680125 parity 57/57 OK
+  budget_exhausted_title len=48 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Фильтрация сообщений агентов пока приостановлена
+  budget_exhausted_body len=251 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Ваш агент исчерпал часовой лимит фильтрации, поэтому новые сообщения агентов ждут своей очереди. Они пройдут фильтрацию автоматически, когда лимит восстановится. Сообщения от людей и сообщения, адресованные вашему агенту, фильтруются в первую очередь.
+vi target_sha256 053ca5299343cf46efc7a31a99c3559699dccac9546601282b17743e633d9be8 parity 57/57 OK
+  budget_exhausted_title len=40 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Sàng lọc tin nhắn tác nhân đang tạm dừng
+  budget_exhausted_body len=232 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Tác nhân của bạn đã dùng hết hạn mức sàng lọc theo giờ, nên các tin nhắn tác nhân mới đang chờ. Chúng sẽ được sàng lọc tự động khi hạn mức được bổ sung. Tin nhắn từ con người và tin nhắn gửi tới tác nhân của bạn được sàng lọc trước.
+ur target_sha256 4f3e938c78b5914335a25172b42af6aed2d1c4acef72b13a4833a08cc49e0427 parity 57/57 OK
+  budget_exhausted_title len=49 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    ایجنٹ کے پیغامات کی اسکریننگ فی الحال رکی ہوئی ہے
+  budget_exhausted_body len=266 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    آپ کے ایجنٹ نے اس گھنٹے کا اسکریننگ بجٹ پورا استعمال کر لیا ہے، اس لیے ایجنٹ کے نئے پیغامات انتظار میں ہیں۔ بجٹ دوبارہ بھرنے پر ان کی اسکریننگ خود بخود ہو جائے گی۔ لوگوں کے بھیجے ہوئے پیغامات اور آپ کے ایجنٹ کو مخاطب کر کے بھیجے گئے پیغامات کی اسکریننگ پہلے ہوتی ہے۔
+hi target_sha256 0664f411190e10375cbcee15909919d43c97557de36eb4d409ff26c0a98f3fec parity 57/57 OK
+  budget_exhausted_title len=39 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    एजेंट संदेशों की स्क्रीनिंग अभी रुकी है
+  budget_exhausted_body len=241 cf=[] nfc=True untranslated=False rendered_eq=True OK
+    आपके एजेंट ने इस घंटे का स्क्रीनिंग बजट पूरा इस्तेमाल कर लिया है, इसलिए नए एजेंट संदेश प्रतीक्षा में हैं। बजट फिर से भरने पर उनकी स्क्रीनिंग अपने-आप हो जाएगी। लोगों के भेजे संदेशों और आपके एजेंट को संबोधित संदेशों की स्क्रीनिंग पहले होती है।
+RESULT PASS failures 0
+exit=0
+
+## Gates (post-change)
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/generate.py
+wrote local_operator/i18n/data/plural_rules.json
+wrote local_operator/i18n/data/formats.json
+wrote local_operator/i18n/data/shipped.json
+wrote i18n/ledger.json
+wrote local_operator/i18n/keys/cli_agents_help.py
+wrote local_operator/i18n/keys/cli_agents_picture.py
+wrote local_operator/i18n/keys/cli_aida_help.py
+wrote local_operator/i18n/keys/cli_browser.py
+wrote local_operator/i18n/keys/cli_browser_help.py
+wrote local_operator/i18n/keys/cli_config_help.py
+wrote local_operator/i18n/keys/cli_credential_help.py
+wrote local_operator/i18n/keys/cli_exec_help.py
+wrote local_operator/i18n/keys/cli_exec_remote_help.py
+wrote local_operator/i18n/keys/cli_exec_runtime.py
+wrote local_operator/i18n/keys/cli_exec_worker_help.py
+wrote local_operator/i18n/keys/cli_failure_details.py
+wrote local_operator/i18n/keys/cli_failures.py
+wrote local_operator/i18n/keys/cli_global_help.py
+wrote local_operator/i18n/keys/cli_group_help.py
+wrote local_operator/i18n/keys/cli_hub_help.py
+wrote local_operator/i18n/keys/cli_hub_shared_help.py
+wrote local_operator/i18n/keys/cli_install_help.py
+wrote local_operator/i18n/keys/cli_login_help.py
+wrote local_operator/i18n/keys/cli_login_status_help.py
+wrote local_operator/i18n/keys/cli_logout_help.py
+wrote local_operator/i18n/keys/cli_mcp_help.py
+wrote local_operator/i18n/keys/cli_memory_help.py
+wrote local_operator/i18n/keys/cli_mobile_help.py
+wrote local_operator/i18n/keys/cli_model_help.py
+wrote local_operator/i18n/keys/cli_monitor_help.py
+wrote local_operator/i18n/keys/cli_qwencloud_help.py
+wrote local_operator/i18n/keys/cli_refresh_help.py
+wrote local_operator/i18n/keys/cli_resume_click_help.py
+wrote local_operator/i18n/keys/cli_send_help.py
+wrote local_operator/i18n/keys/cli_serve_help.py
+wrote local_operator/i18n/keys/cli_services_help.py
+wrote local_operator/i18n/keys/cli_services_status.py
+wrote local_operator/i18n/keys/cli_sessions_help.py
+wrote local_operator/i18n/keys/cli_stop_help.py
+wrote local_operator/i18n/keys/cli_team_bridge.py
+wrote local_operator/i18n/keys/cli_teams_help.py
+wrote local_operator/i18n/keys/cli_update_help.py
+wrote local_operator/i18n/keys/cli_wake_help.py
+wrote local_operator/i18n/keys/mobile_setup.py
+wrote local_operator/i18n/keys/relay_account_policy.py
+wrote local_operator/i18n/keys/relay_agent_avatar.py
+wrote local_operator/i18n/keys/relay_approvals.py
+wrote local_operator/i18n/keys/relay_ask.py
+wrote local_operator/i18n/keys/relay_asks.py
+wrote local_operator/i18n/keys/relay_chrome.py
+wrote local_operator/i18n/keys/relay_health.py
+wrote local_operator/i18n/keys/relay_library.py
+wrote local_operator/i18n/keys/relay_login.py
+wrote local_operator/i18n/keys/relay_notifications.py
+wrote local_operator/i18n/keys/relay_session.py
+wrote local_operator/i18n/keys/relay_session_tags.py
+wrote local_operator/i18n/keys/relay_shell.py
+wrote local_operator/i18n/keys/relay_skills.py
+wrote local_operator/i18n/keys/relay_transcript.py
+wrote local_operator/i18n/keys/tui_analytics.py
+wrote local_operator/i18n/keys/tui_app.py
+wrote local_operator/i18n/keys/tui_asks.py
+wrote local_operator/i18n/keys/tui_authoring.py
+wrote local_operator/i18n/keys/tui_hub_links.py
+wrote local_operator/i18n/keys/tui_import.py
+wrote local_operator/i18n/keys/tui_library.py
+wrote local_operator/i18n/keys/tui_notices.py
+wrote local_operator/i18n/keys/tui_notifications.py
+wrote local_operator/i18n/keys/tui_palette.py
+wrote local_operator/i18n/keys/tui_projects.py
+wrote local_operator/i18n/keys/tui_projects_edit.py
+wrote local_operator/i18n/keys/tui_review.py
+wrote local_operator/i18n/keys/tui_schedule.py
+wrote local_operator/i18n/keys/tui_setup_cues.py
+wrote local_operator/i18n/keys/tui_small.py
+wrote local_operator/i18n/keys/tui_status.py
+wrote local_operator/i18n/keys/tui_status_command.py
+wrote local_operator/i18n/keys/tui_tags.py
+wrote local_operator/i18n/keys/tui_team_authoring.py
+wrote local_operator/i18n/keys/tui_transcript.py
+wrote local_operator/i18n/keys/tui_usage.py
+wrote local_operator/i18n/keys/tui_viewer.py
+wrote local_operator/i18n/keys/tui_welcome.py
+wrote local_operator/i18n/keys/wire_aida_cadence.py
+wrote local_operator/i18n/keys/wire_console.py
+wrote local_operator/i18n/keys/wire_errors.py
+wrote local_operator/i18n/keys/wire_errors_agent_avatar.py
+wrote local_operator/i18n/keys/wire_errors_agents.py
+wrote local_operator/i18n/keys/wire_errors_auth.py
+wrote local_operator/i18n/keys/wire_errors_desktop.py
+wrote local_operator/i18n/keys/wire_errors_files.py
+wrote local_operator/i18n/keys/wire_errors_media.py
+wrote local_operator/i18n/keys/wire_errors_notifications.py
+wrote local_operator/i18n/keys/wire_errors_sdk_spec.py
+wrote local_operator/i18n/keys/wire_errors_sdk_startup.py
+wrote local_operator/i18n/keys/wire_errors_session_host.py
+wrote local_operator/i18n/keys/wire_errors_settings.py
+wrote local_operator/i18n/keys/wire_exec.py
+wrote local_operator/i18n/keys/wire_host_speed.py
+wrote local_operator/i18n/keys/wire_incidents.py
+wrote local_operator/i18n/keys/wire_memory.py
+wrote local_operator/i18n/keys/wire_notices.py
+wrote local_operator/i18n/keys/wire_radient_saver.py
+wrote local_operator/i18n/keys/wire_remote_compute.py
+wrote local_operator/i18n/keys/wire_sessions.py
+wrote local_operator/i18n/keys/wire_settings.py
+wrote local_operator/i18n/keys/wire_settings_account_policy.py
+wrote local_operator/i18n/keys/wire_settings_hub_defaults.py
+wrote local_operator/i18n/keys/wire_skill_adoption.py
+wrote local_operator/i18n/keys/wire_slash.py
+wrote local_operator/i18n/keys/wire_slash_library.py
+wrote local_operator/i18n/keys/wire_slash_notifications_page.py
+wrote local_operator/i18n/keys/wire_tool_rows_bridge.py
+wrote local_operator/i18n/keys/wire_tunnel_setup.py
+wrote local_operator/i18n/keys/__init__.py
+wrote local_operator/mobile/web/src/i18n/keys.gen.ts
+wrote local_operator/mobile/web/src/i18n/bundled.gen.ts
+wrote local_operator/mobile/web/src/i18n/bundled.es.gen.ts
+wrote local_operator/mobile/web/src/i18n/bundled.fr.gen.ts
+wrote local_operator/mobile/web/src/i18n/bundled.hi.gen.ts
+wrote local_operator/mobile/web/src/i18n/bundled.ru.gen.ts
+wrote local_operator/mobile/web/src/i18n/bundled.ur.gen.ts
+wrote local_operator/mobile/web/src/i18n/bundled.vi.gen.ts
+wrote local_operator/mobile/web/src/i18n/bundled.zh-CN.gen.ts
+exit=0
+$ /Users/damian/local-operator/.venv/bin/python -c import sys;sys.path.insert(0,'scripts/i18n');import generate;print('post-row _shipped_locales():',generate._shipped_locales())
+post-row _shipped_locales(): ['en', 'fr', 'es', 'zh-CN', 'ru', 'vi', 'ur', 'hi']
+exit=0
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/generate.py --check
+generate.py --check: 124 artifact(s) byte-identical
+exit=0
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py
+check.py: ok — 200 file(s) scanned, 2406 literal(s) at or below the baseline, catalogues consistent; 61 advisory finding(s) (report-only until activated)
+exit=0
+$ /Users/damian/local-operator/.venv/bin/python -m pytest -q -p no:cacheprovider tests/unit/i18n/test_generate.py -k drift tests/unit/i18n/test_hold_split.py tests/unit/i18n/test_ledger_shards.py
+pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4, available 5,466 MB, reserve 2,048 MB, siblings 1)
+ERROR: Test interpreter/source mismatch: children must import the checkout under test.
+  expected package: /Users/damian/.local-operator/sessions/0ca4d09f6337/scratchpad/wt/local_operator
+  interpreter:      /Users/damian/local-operator/.venv/bin/python
+  child package:    /Users/damian/local-operator/local_operator
+A foreign editable venv makes pytest test one tree while real children execute another.
+Use this worktree's own venv; install it from this checkout (AGENTS.md):
+  uv venv --python 3.12 .venv
+  uv pip install -e '.[all,dev]' --python .venv/bin/python
+exit=4
+=== branch worktree ~/local-operator/.worktrees/batch-screening (own .venv) ===
+$ .venv/bin/python scripts/i18n/generate.py --check
+generate.py --check: 124 artifact(s) byte-identical
+exit=0
+$ .venv/bin/python scripts/i18n/check.py
+check.py: ok — 200 file(s) scanned, 2406 literal(s) at or below the baseline, catalogues consistent; 61 advisory finding(s) (report-only until activated)
+exit=0
+$ .venv/bin/python -m pytest -q -p no:cacheprovider tests/unit/i18n/test_generate.py tests/unit/i18n/test_hold_split.py tests/unit/i18n/test_ledger_shards.py
+pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4, available 5,204 MB, reserve 2,048 MB, siblings 2)
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+/Users/damian/local-operator/.worktrees/batch-screening/.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+bringing up nodes...
+/Users/damian/local-operator/.worktrees/batch-screening/.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+/Users/damian/local-operator/.worktrees/batch-screening/.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+/Users/damian/local-operator/.worktrees/batch-screening/.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+/Users/damian/local-operator/.worktrees/batch-screening/.venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+bringing up nodes...
+...............................................................          [100%]
+63 passed in 9.63s
+exit=0

@@ -10,16 +10,25 @@ from pathlib import Path
 import pytest
 
 from local_operator.agent_profiles import (
+    DELIVERY_POINTER,
     install_seed,
     load_seed,
     resolve_profile,
     sync_installed_seeds,
 )
-from local_operator.agents import AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.skills.discovery import discover_skills, packaged_skill_root
 from local_operator.teams import Team
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _fields(**overrides):
+    # AgentEditFields validates strictly, so every field is spelled out.
+    names = AgentEditFields.model_fields
+    return AgentEditFields(**{name: overrides.get(name) for name in names})
+
+
 # Budgets cover the installed body, not YAML metadata, and allow small edits
 # without letting an incident archive grow into every delegated turn again.
 # The review-economy pointers (context contract, scope, freshness, round
@@ -128,3 +137,131 @@ def test_packaged_skills_expose_compact_delivery_controls():
         body = skill.file_path.read_text()
         assert marker in body
         assert len(body) < 6500
+
+
+def _child_prompt(tmp_path, registry, role):
+    # The real launch assembler (what ``task(agent=role)`` sends the child), so
+    # the check sits at the registered-role boundary, not on seed Markdown.
+    from local_operator.harness.subagent import _effective_prompt
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    parent = make_session(tmp_path, ScriptedStream([]), agent_registry=registry)
+    return _effective_prompt("Synthetic bounded task", role, parent)
+
+
+def test_registered_engineering_role_predating_seed_gets_delivery_pointer(tmp_path):
+    """Pilots that loaded seeds passed while operator rows from October kept
+    running their old prompts; this launches a hand-edited registered row and
+    checks the pointer arrives without losing anything, and without writing."""
+
+    registry = AgentRegistry(tmp_path / "config")
+    legacy = "Old October review rules.\nCUSTOM safety block: never touch prod."
+    row = registry.create_agent(
+        _fields(
+            name="reviewer",
+            description="custom reviewer",
+            tags=["role", "tools:read,grep", "effort:hi"],
+            model="anthropic/claude-opus-5-5",
+        )
+    )
+    registry.set_agent_system_prompt(row.id, legacy)
+
+    prompt, profile = _child_prompt(tmp_path, registry, "reviewer")
+    assert profile is not None
+    assert legacy in prompt and prompt.count(DELIVERY_POINTER) == 1
+    assert profile.instructions == f"{legacy}\n\n{DELIVERY_POINTER}"
+    assert profile.tools == ("read", "grep") and profile.effort == "hi"
+    assert profile.model == "anthropic/claude-opus-5-5"
+    assert profile.description == "custom reviewer"
+    # Show/edit surfaces read resolve_profile: they keep the exact stored text.
+    shown = resolve_profile("reviewer", registry=registry)
+    assert shown is not None and shown.instructions == legacy
+    assert registry.get_agent_system_prompt(row.id) == legacy
+
+    # A prompt already carrying the pointer is not given a second one.
+    registry.set_agent_system_prompt(row.id, profile.instructions)
+    again, _ = _child_prompt(tmp_path, registry, "reviewer")
+    assert again.count(DELIVERY_POINTER) == 1
+
+
+def test_delivery_pointer_skips_current_seed_rows_and_other_roles(tmp_path):
+    registry = AgentRegistry(tmp_path / "config")
+    seed = load_seed("coder")
+    assert seed is not None
+    # Packaged seed (no row) and an installed, edited-by-addition seed row both
+    # already carry the current rules: no pointer, bytes unchanged.
+    fresh, _ = _child_prompt(tmp_path, registry, "coder")
+    assert DELIVERY_POINTER not in fresh
+    installed = install_seed("coder", registry=registry, scope="global")
+    assert installed is not None and installed[0].agent_id is not None
+    extended = seed.instructions + "\nCUSTOM house rule"
+    registry.set_agent_system_prompt(installed[0].agent_id, extended)
+    _, coder = _child_prompt(tmp_path, registry, "coder")
+    assert coder is not None and coder.instructions == extended
+
+    # A non-engineering registered role keeps its own text exactly.
+    row = registry.create_agent(_fields(name="scout-custom", tags=["role"]))
+    registry.set_agent_system_prompt(row.id, "Own rules.")
+    _, custom = _child_prompt(tmp_path, registry, "scout-custom")
+    assert custom is not None and custom.instructions == "Own rules."
+
+
+@pytest.mark.parametrize(
+    "name", ["manager", "coder", "reviewer", "qa-tester", "designer", "ux-reviewer", "architect"]
+)
+def test_engineering_seeds_carry_batching_and_minor_rule(name):
+    # Every built-in engineering role states the one rule that most often
+    # caused extra waves: accepted minors never earn their own round.
+    profile = load_seed(name)
+    assert profile is not None
+    assert "guide://delivery" in profile.instructions
+    assert "MINOR/NIT never force another round" in profile.instructions
+
+
+@pytest.mark.parametrize(
+    "name", ["reviewer", "qa-tester", "ux-reviewer", "designer", "copy-reviewer", "architect"]
+)
+def test_read_only_roles_reuse_the_manager_owned_pr_worktree(name):
+    # Readers clone/install by default was measured filling the shared disk;
+    # the default is reuse, and only a conflicting commit or an isolated build
+    # collision may justify another checkout.
+    profile = load_seed(name)
+    assert profile is not None
+    body = " ".join(profile.instructions.split())
+    assert "manager-owned PR worktree" in body
+    assert "no own clone/install" in body or "no clone, install or new worktree" in body
+    if name != "architect":
+        assert "conflicting commit or isolated build collision" in body
+        assert "guide://delivery" in body
+
+
+@pytest.mark.parametrize("name", ["manager", "coder"])
+def test_owning_roles_hold_one_pr_worktree_lifecycle(name):
+    profile = load_seed(name)
+    assert profile is not None
+    body = " ".join(profile.instructions.split())
+    assert "ONE PR worktree" in body and "origin/main" in body
+    assert "merges or closes" in body or "merges/closes" in body
+
+
+def test_delivery_guide_owns_the_shared_worktree_rule():
+    policy = " ".join((ROOT / "local_operator/guides/delivery/GUIDE.md").read_text().split())
+    for required in (
+        "owns ONE PR worktree",
+        "no clone, install or new worktree",
+        "conflicting commit author",
+        "isolated mutable build collision",
+        "no full-tree copies into scratch",
+        "isolated HOME/config",
+    ):
+        assert required in policy
+
+
+def test_stale_copy_reviewer_gets_the_pointer_with_worktree_rule(tmp_path):
+    registry = AgentRegistry(tmp_path / "config")
+    row = registry.create_agent(_fields(name="copy-reviewer", tags=["role"]))
+    registry.set_agent_system_prompt(row.id, "Old copy rules.")
+    _, profile = _child_prompt(tmp_path, registry, "copy-reviewer")
+    assert profile is not None and profile.instructions.endswith(DELIVERY_POINTER)
+    assert "no clone, install or new worktree" in DELIVERY_POINTER
+    assert registry.get_agent_system_prompt(row.id) == "Old copy rules."

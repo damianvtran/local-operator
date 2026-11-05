@@ -239,6 +239,16 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.chrome.spend.title": "\u8d39\u7528\u4e0e\u4e0a\u4e0b\u6587",
     },
   },
+  "relay.composer": {
+    "zh-CN": {
+      "relay.composer.action.connecting": "\u6b63\u5728\u8fde\u63a5",
+      "relay.composer.action.send": "\u53d1\u9001",
+      "relay.composer.action.steer": "\u5f15\u5bfc",
+      "relay.composer.action.stop": "\u505c\u6b62",
+      "relay.composer.action.stop_agent": "\u505c\u6b62\u667a\u80fd\u4f53",
+      "relay.composer.action.stopping": "\u6b63\u5728\u505c\u6b62",
+    },
+  },
   "relay.health": {
     "zh-CN": {
       "relay.health.dropped_detail": "\u7535\u8111\u76ee\u524d\u65e0\u6cd5\u8fde\u63a5\u5230\u6b64\u4f1a\u8bdd\uff0c\u6b63\u5728\u4e0d\u65ad\u91cd\u8bd5\u3002\u8fde\u4e0a\u4e4b\u524d\uff0c\u53d1\u9001\u4f1a\u7acb\u5373\u5931\u8d25\uff0c\u5df2\u8f93\u5165\u7684\u6587\u5b57\u4f1a\u4fdd\u7559\u5728\u8f93\u5165\u6846\u4e2d\u3002",
@@ -249,6 +259,15 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.health.quiet_detail": "\u7535\u8111\u4e0a\u7684\u6b64\u4f1a\u8bdd\u5df2\u505c\u6b62\u54cd\u5e94\u2014\u2014\u53ef\u80fd\u6b63\u5fd9\u6216\u5361\u4f4f\u4e86\u3002\u53d1\u9001\u53ef\u80fd\u663e\u793a\u5931\u8d25\uff0c\u4f46\u4f1a\u8bdd\u91cd\u65b0\u54cd\u5e94\u540e\u4ecd\u53ef\u80fd\u9001\u8fbe\u3002\u91cd\u8bd5\u4e5f\u4e0d\u4f1a\u91cd\u590d\u9001\u8fbe\u3002",
       "relay.health.reconnecting": "\u91cd\u8fde\u4e2d",
       "relay.health.reconnecting_detail": "\u6b64\u624b\u673a\u4e0e\u7535\u8111\u7684\u8fde\u63a5\u5df2\u65ad\u5f00\uff0c\u6b63\u5728\u4e0d\u65ad\u5c1d\u8bd5\u91cd\u8fde\u3002\u4f1a\u8bdd\u53ef\u80fd\u4ecd\u5728\u7535\u8111\u4e0a\u8fd0\u884c\uff1b\u91cd\u65b0\u8fde\u4e0a\u4e4b\u524d\uff0c\u53d1\u9001\u6d88\u606f\u53ef\u80fd\u4f1a\u5931\u8d25\u3002",
+    },
+  },
+  "relay.highlights": {
+    "zh-CN": {
+      "relay.highlights.withheld.line": "{count, plural, other {# \u4e2a\u6587\u4ef6\u672a\u663e\u793a}}\uff1a{reasons}",
+      "relay.highlights.withheld.reason.missing": "\u6587\u4ef6\u5df2\u4e0d\u5b58\u5728",
+      "relay.highlights.withheld.reason.outside": "\u4e0d\u5728\u5141\u8bb8\u7684\u4f4d\u7f6e",
+      "relay.highlights.withheld.reason.sensitive": "\u654f\u611f\u6587\u4ef6",
+      "relay.highlights.withheld.reason.too_large": "\u6587\u4ef6\u8fc7\u5927\u65e0\u6cd5\u9884\u89c8",
     },
   },
   "relay.library": {

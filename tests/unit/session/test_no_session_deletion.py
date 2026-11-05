@@ -156,6 +156,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears only that write's own .tmp FILE beside the counter; never a session path",
     ),
+    # The reply guard's per-install digest key (#3377, review round 1 S-3) is
+    # created atomically: random bytes go to a ``tempfile.mkstemp`` FILE in
+    # ``<config_dir>/team_bridge/`` (prefix ``.reply_guard.key.``), published with
+    # ``os.link`` onto ``reply_guard.key``, and the temp NAME is then unlinked
+    # whether or not this process won the publish race. The unlinked path is only
+    # ever the name mkstemp returned a few lines earlier — a regular file the call
+    # itself created, beside the guard's own state — never a directory, never a
+    # transcript, never under ``sessions/``, and never caller input.
+    (
+        "local_operator/team_bridge/reply_guard.py::_digest_key",
+        "os.unlink",
+        "Removes only the mkstemp temp FILE this call created in the config dir's team_bridge/",
+    ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
     # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
@@ -464,6 +477,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         # caller path, and the call can only ever name that one regular file.
         "Drops <config>/operator/anchor.json, the staged statement this run wrote",
         2,
+    ),
+    # The effective-access listener registry is a module-level ``list`` of
+    # callbacks, so ``.remove`` there is ``list.remove`` on that registry: the
+    # guard cannot see a NAME's type, only a literal receiver (PR #3427 R1-2).
+    (
+        "local_operator/network/credentials/effective.py::add_listener.remove",
+        "<path>.remove",
+        "list.remove on the in-memory _listeners callback registry; no filesystem path",
     ),
     (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",

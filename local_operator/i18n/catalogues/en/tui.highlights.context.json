@@ -1,0 +1,27 @@
+{
+  "tui.highlights.withheld.line": {
+    "role": "quiet notice line under a Highlights block",
+    "tone": "Muted, factual; no blame, no alarm.",
+    "note": "Says how many files the agent pinned or named were NOT shown under the answer, then why. {count} is the number of withheld files (plural arms required). {reasons} is one or more of the withheld.reason.* phrases, already translated and joined with the locale's list separator; it is lower-case and never starts the sentence."
+  },
+  "tui.highlights.withheld.reason.outside": {
+    "role": "reason phrase inside withheld.line",
+    "tone": "Short, lower-case fragment.",
+    "note": "The file is outside the folders Highlights may show (the session folder, home, or this session's scratchpad), or under an operator deny rule."
+  },
+  "tui.highlights.withheld.reason.sensitive": {
+    "role": "reason phrase inside withheld.line",
+    "tone": "Short, lower-case fragment.",
+    "note": "The file looks like a credential or secret (for example .env or a key file) and is never shown."
+  },
+  "tui.highlights.withheld.reason.missing": {
+    "role": "reason phrase inside withheld.line",
+    "tone": "Short, lower-case fragment.",
+    "note": "The file the agent named was not found on disk when the turn ended."
+  },
+  "tui.highlights.withheld.reason.too_large": {
+    "role": "reason phrase inside withheld.line",
+    "tone": "Short, lower-case fragment.",
+    "note": "The file exceeds the size Highlights will preview."
+  }
+}

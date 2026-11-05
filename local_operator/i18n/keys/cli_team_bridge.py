@@ -54,6 +54,14 @@ def logs_none(*, path: str) -> Msg:
     return Msg("cli.team_bridge.logs.none", {"path": path})
 
 
+def notify_budget_exhausted_body() -> Msg:
+    return Msg("cli.team_bridge.notify.budget_exhausted_body", {})
+
+
+def notify_budget_exhausted_title() -> Msg:
+    return Msg("cli.team_bridge.notify.budget_exhausted_title", {})
+
+
 def notify_probe_suspected_body() -> Msg:
     return Msg("cli.team_bridge.notify.probe_suspected_body", {})
 

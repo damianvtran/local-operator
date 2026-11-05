@@ -213,6 +213,12 @@ export type MessageParams = {
   "relay.chrome.session.tray.tasks": { "done": number; "total": number };
   "relay.chrome.snackbar.dismiss": undefined;
   "relay.chrome.spend.title": undefined;
+  "relay.composer.action.connecting": undefined;
+  "relay.composer.action.send": undefined;
+  "relay.composer.action.steer": undefined;
+  "relay.composer.action.stop": undefined;
+  "relay.composer.action.stop_agent": undefined;
+  "relay.composer.action.stopping": undefined;
   "relay.health.dropped_detail": undefined;
   "relay.health.ended_detail": undefined;
   "relay.health.ended_send_failed": undefined;
@@ -221,6 +227,11 @@ export type MessageParams = {
   "relay.health.quiet_detail": undefined;
   "relay.health.reconnecting": undefined;
   "relay.health.reconnecting_detail": undefined;
+  "relay.highlights.withheld.line": { "count": number; "reasons": string };
+  "relay.highlights.withheld.reason.missing": undefined;
+  "relay.highlights.withheld.reason.outside": undefined;
+  "relay.highlights.withheld.reason.sensitive": undefined;
+  "relay.highlights.withheld.reason.too_large": undefined;
   "relay.library.count": { "count": number };
   "relay.login.error.password": undefined;
   "relay.login.page.title": undefined;
@@ -1796,6 +1807,9 @@ export type MessageParams = {
   "wire.tool_rows.bridge.verb_settled.shared_history": undefined;
   "wire.tool_rows.bridge.verb_settled.take_up": undefined;
   "wire.tool_rows.bridge.verb_settled.unknown": undefined;
+  "wire.tool_rows.bridge.skipped.expanded": undefined;
+  "wire.tool_rows.bridge.skipped.verb.channel_post": undefined;
+  "wire.tool_rows.bridge.skipped.verb.dm": undefined;
   "wire.tunnel_setup.checking": undefined;
   "wire.tunnel_setup.corrupt_intent": undefined;
   "wire.tunnel_setup.deadline": undefined;

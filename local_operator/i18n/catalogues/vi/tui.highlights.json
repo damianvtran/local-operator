@@ -1,0 +1,7 @@
+{
+  "tui.highlights.withheld.line": "{count, plural, other {# tệp không được hiển thị}}: {reasons}",
+  "tui.highlights.withheld.reason.outside": "nằm ngoài vị trí được phép",
+  "tui.highlights.withheld.reason.sensitive": "tệp nhạy cảm",
+  "tui.highlights.withheld.reason.missing": "tệp không còn tồn tại",
+  "tui.highlights.withheld.reason.too_large": "quá lớn để xem trước"
+}
