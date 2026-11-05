@@ -832,6 +832,8 @@ async def deliver_wake(
     """
 
     from local_operator.mobile.peer_send import (
+        DELIVERY_FAILED,
+        DeliveryFailed,
         deliver_peer_message_outcome,
         session_has_durable_history,
     )
@@ -874,6 +876,13 @@ async def deliver_wake(
             # as clearance (see the receive hook).
             bridge_meta=bridge_meta,
         )
+        # Only a confirmed non-delivery is retryable. Returning its detail as
+        # success would let the conversation caller mark its card posted and
+        # discard the feed ref, permanently losing the message on replay.
+        # Mailbox/unconfirmed outcomes may already have landed: keep their
+        # existing handoff semantics rather than risking a duplicate resend.
+        if outcome.state == DELIVERY_FAILED:
+            raise DeliveryFailed(outcome.detail)
         return str(outcome.detail)
     # Cold with NO durable history: exactly the designated-CoS engagement
     # exception. The typed history predicate — never an error string — selects
