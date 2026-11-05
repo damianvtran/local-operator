@@ -1,0 +1,37 @@
+{
+  "source": "/Users/damian/.local-operator/sessions/c44e0f808e48/transcript.jsonl",
+  "completed_usage_rows": [
+    {
+      "message_id": "bce98b5691644c0cbe5e218cc0881438",
+      "ts": 1793720051.137526,
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol",
+      "input_tokens": 105412,
+      "output_tokens": 97
+    },
+    {
+      "message_id": "a3225b9f04b547e48caed0dd287700bd",
+      "ts": 1793720068.1675699,
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol",
+      "input_tokens": 105815,
+      "output_tokens": 435
+    },
+    {
+      "message_id": "834c2e82cae74fb9aa67c67cab35f532",
+      "ts": 1793720079.908282,
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol",
+      "input_tokens": 106564,
+      "output_tokens": 259
+    },
+    {
+      "message_id": "fa8c3f7a5e8943c38c20693a0bbf019f",
+      "ts": 1793720089.815171,
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol",
+      "input_tokens": 107196,
+      "output_tokens": 256
+    }
+  ]
+}

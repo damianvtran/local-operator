@@ -6525,6 +6525,25 @@
     },
     {
       "locale": "fr",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "9/9 initial ordinary French settings metadata; translator7b2ba4ed501d plus two independent French readers c44e0f808e48 and 35aac0a677bc, actual openai/gpt-6.1-sol from retained completed-usage provenance, each passed with zero findings. Readers bound source/context/target in i18n/audits/evidence/fr/wire.settings.hub_defaults/integration-binding.json; immutable originals retained. Native French readers approved semantics including the 72-cell hub help budget; semantics: all-agent/skill OFF pauses, ON creates new links, team creation default. No native re-execution/pseudo/RTL claim here."
+    },
+    {
+      "locale": "fr",
       "namespace": "cli.team_bridge_hold",
       "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
       "translator": {

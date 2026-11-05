@@ -1,0 +1,8 @@
+INPUT en.json 8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c
+INPUT context.json a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba
+INPUT fr.json 9733a2653109b4e5b30964d0bbc9fb5974fe799bb086ce8d21354517d1936940
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-three-first-audit.py", line 25, in <module>
+    assert hashb(inputs[name])==expected[p],(name,hashb(inputs[name]),expected[p])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('fr-style.md', '5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7', 'ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226')

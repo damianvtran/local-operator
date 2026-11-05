@@ -46,10 +46,10 @@ The same practice for any agent: reviewing a diff, a patch, or another agent's w
 - A genuine late BLOCKER/MAJOR with a reproduced code path stays admissible;
   delta scope is not a waiver for correctness, security or regression risk.
 - Collect all initial review streams before ONE batched remediation round,
-  defaulting to ONE commit. Only justified, independently revertible safety or
-  stream boundaries allow separate commits within that SAME round; never use
-  per-finding commit/review cycles. See `guide://delivery` for convergence,
-  compatibility proof and metadata-only addenda.
+  defaulting to ONE commit; never per-finding commit/review cycles.
+- A clean stream whose surface the delta misses is retained, not re-run; a
+  test-only, CI-fix or comment-only commit after clean rounds gets at most a
+  delta code check. See `guide://delivery`.
 
 ## Verdict
 
