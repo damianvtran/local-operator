@@ -274,6 +274,15 @@ class HubSyncRunner:
         self._last_check_started = self._clock()
         return await self._dispatch(lambda: self._tick_locked(reason))
 
+    @staticmethod
+    def _org_enrol(config_dir: Any) -> None:
+        try:
+            from local_operator.hub_org import enrol
+
+            enrol.on_boundary(config_dir, "timer", background=False)
+        except Exception:  # noqa: BLE001 - org enrol must never cost the update tick
+            logger.debug("org hub enrol skipped", exc_info=True)
+
     async def _tick_locked(self, reason: str) -> TickReport:
         report = TickReport(reason=reason)
         ctx = await self._context()
@@ -283,6 +292,13 @@ class HubSyncRunner:
             self._last_credential = ctx.credential
 
         settings = HubSyncSettings.read_fresh(self._cm)
+        # ORG AUTO-ENROL rides this tick (no new poller) and runs BEFORE the
+        # no-links early return below: a machine that has linked nothing yet is
+        # exactly the one that most needs its organization's catalogue. The
+        # call is gated (Radient Team members only), floored (6 h gate TTL, 60
+        # min per-org catalogue), single-flight and never raising; inline on a
+        # worker because this tick already holds the runner's lock.
+        await self._offload(self._org_enrol, ctx.config_dir)
         links = await self._offload(list_links, ctx.agents(), ctx.teams())
         if not links:
             report.skipped = "no-linked-items"
@@ -649,6 +665,9 @@ class HubSyncRunner:
                 and record.identity is not None
                 and record.identity.visibility == "org"
             ),
+            # The stale-base guard: a head that moved past P's revision refuses
+            # by name, and ``_record_push`` rebases the receipt for the next tick.
+            base_revision=outbound.remote_revision or "",
         )
         report.skipped = None
         await self._offload(self._record_push, ctx, c, outcome)

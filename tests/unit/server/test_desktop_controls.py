@@ -50,24 +50,46 @@ def _reset_bridge_availability():
     in ``test_server_settings_visibility.py``.
     """
 
+    from local_operator.hub_org import eligibility
     from local_operator.team_bridge import availability
 
     availability.clear()
+    eligibility.reset_memo()
     yield
     availability.clear()
+    eligibility.reset_memo()
 
 
 def _show_dynamic_sections(app: Any) -> None:
     """Make dynamically-gated sections render for a census assertion."""
 
+    import time
+
+    from local_operator.hub_org import eligibility
     from local_operator.team_bridge import availability
 
+    config_dir = Path(app.state.config_manager.config_dir)
     availability.record(
-        app.state.config_manager.config_dir,
+        config_dir,
         visible=True,
         state="ready",
         checked_at=1.0,
     )
+    # The org hub section's gate is a different record: the cached Radient
+    # Team eligibility file ``section_visible`` reads (zero network). Seed a
+    # fresh, entitled one bound to this root's resolved base URL -- the same
+    # shape ``eligibility.refresh`` writes -- so the census sees ``hub_org``.
+    base_url = eligibility._configured_base_url(config_dir)
+
+    def _entitled(data: dict[str, Any]) -> None:
+        data.update(
+            account_id="acct-census",
+            base_url=base_url,
+            checked_at=time.time(),
+            orgs=[{"tenant_id": "t-census", "tenant_name": "Census", "role": "member"}],
+        )
+
+    eligibility.update_record(config_dir, _entitled)
 
 
 @pytest_asyncio.fixture

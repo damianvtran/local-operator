@@ -1,0 +1,36 @@
+{
+  "wire.settings.hub_org.auto_enrol.help": {
+    "maxCells": 72,
+    "note": "'subscribed' = they keep receiving the organization's updates. Same subscription vocabulary as wire.settings.hub_defaults.",
+    "role": "setting help line",
+    "tone": "plain"
+  },
+  "wire.settings.hub_org.auto_enrol.label": {
+    "maxCells": 40,
+    "note": "Toggle: whether items the organization newly publishes (agents, teams, skills) are pulled to this machine automatically.",
+    "role": "setting label",
+    "tone": "plain"
+  },
+  "wire.settings.hub_org.auto_enrol.off.description": {
+    "maxCells": 40,
+    "note": "'lop hub org pull' is a CLI command: keep it byte-identical, untranslated.",
+    "role": "toggle choice description (off)",
+    "tone": "plain, lowercase fragment"
+  },
+  "wire.settings.hub_org.auto_enrol.on.description": {
+    "maxCells": 40,
+    "note": "Fragment shown beside the 'on' choice; follows the lowercase fragment style of the other hub choices.",
+    "role": "toggle choice description (on)",
+    "tone": "plain, lowercase fragment"
+  },
+  "wire.settings.hub_org.description": {
+    "note": "Shown only to Radient Team members. Never an upsell. 'private' = visible only to members of the organization. Applies immediately (live setting).",
+    "role": "settings section description",
+    "tone": "plain, precise"
+  },
+  "wire.settings.hub_org.title": {
+    "note": "Heading of a section shown ONLY to members of a Radient Team organization. 'Agent Hub' is the product name used in wire.settings.hub.title; keep it identical. 'Organization' = the user's company/team account, not a local team.",
+    "role": "settings section title",
+    "tone": "plain"
+  }
+}
