@@ -1,0 +1,42 @@
+{
+  "wire.console.title": {
+    "role": "Console capacity settings section or numeric row in TUI and desktop settings",
+    "tone": "concise, neutral",
+    "note": "Live admission only. Retained history and existing processes are protected. Numeric ranges are inclusive; memory accounting is modeled, not arbitrary child RSS. English fallback until independently translated."
+  },
+  "wire.console.description": {
+    "role": "Console capacity settings section or numeric row in TUI and desktop settings",
+    "tone": "concise, neutral",
+    "note": "Live admission only. Retained history and existing processes are protected. Numeric ranges are inclusive; memory accounting is modeled, not arbitrary child RSS. English fallback until independently translated."
+  },
+  "wire.console.max_live.label": {
+    "role": "Console capacity settings section or numeric row in TUI and desktop settings",
+    "tone": "concise, neutral",
+    "note": "Live admission only. Retained history and existing processes are protected. Numeric ranges are inclusive; memory accounting is modeled, not arbitrary child RSS. English fallback until independently translated."
+  },
+  "wire.console.max_live.help": {
+    "role": "Console capacity settings section or numeric row in TUI and desktop settings",
+    "tone": "concise, neutral",
+    "note": "Live admission only. Retained history and existing processes are protected. Numeric ranges are inclusive; memory accounting is modeled, not arbitrary child RSS. English fallback until independently translated."
+  },
+  "wire.console.max_owner.label": {
+    "role": "Console capacity settings section or numeric row in TUI and desktop settings",
+    "tone": "concise, neutral",
+    "note": "Live admission only. Retained history and existing processes are protected. Numeric ranges are inclusive; memory accounting is modeled, not arbitrary child RSS. English fallback until independently translated."
+  },
+  "wire.console.max_owner.help": {
+    "role": "Console capacity settings section or numeric row in TUI and desktop settings",
+    "tone": "concise, neutral",
+    "note": "Live admission only. Retained history and existing processes are protected. Numeric ranges are inclusive; memory accounting is modeled, not arbitrary child RSS. English fallback until independently translated."
+  },
+  "wire.console.user_reserved.label": {
+    "role": "Console capacity settings section or numeric row in TUI and desktop settings",
+    "tone": "concise, neutral",
+    "note": "Live admission only. Retained history and existing processes are protected. Numeric ranges are inclusive; memory accounting is modeled, not arbitrary child RSS. English fallback until independently translated."
+  },
+  "wire.console.user_reserved.help": {
+    "role": "Console capacity settings section or numeric row in TUI and desktop settings",
+    "tone": "concise, neutral",
+    "note": "Live admission only. Retained history and existing processes are protected. Numeric ranges are inclusive; memory accounting is modeled, not arbitrary child RSS. English fallback until independently translated."
+  }
+}

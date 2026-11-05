@@ -1,0 +1,10 @@
+{
+  "wire.console.title": "Capacité de la console",
+  "wire.console.description": "Admission des terminaux actifs. L’historique des terminaux terminés n’occupe pas d’emplacements de processus. Les modifications s’appliquent aux prochains démarrages, sans jamais arrêter les tâches en cours.",
+  "wire.console.max_live.label": "Plafond de terminaux actifs",
+  "wire.console.max_live.help": "32–256 ; 128 par défaut. La mémoire gérée, les cellules de terminal et les ressources natives disponibles peuvent réduire le nombre de terminaux admis. Ce réglage ne limite pas la mémoire des processus enfants.",
+  "wire.console.max_owner.label": "Terminaux d’agents par conversation",
+  "wire.console.max_owner.help": "1–32 ; 8 par défaut. Chaque conversation partage le quota global de terminaux actifs ; les terminaux terminés ne comptent pas.",
+  "wire.console.user_reserved.label": "Emplacements réservés aux terminaux utilisateur",
+  "wire.console.user_reserved.help": "4–32 ; 16 par défaut, au maximum un quart du plafond de terminaux actifs. Les démarrages d’agents ne peuvent pas utiliser ces emplacements. Les tâches existantes ne sont jamais arrêtées."
+}

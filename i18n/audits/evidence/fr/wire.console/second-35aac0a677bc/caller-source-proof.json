@@ -1,0 +1,106 @@
+{
+  "kind": "source inspection only, not runtime or native evidence",
+  "provenance_reference": "record.json:auditor",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "settings_source_sha256": "c6462e6b01cfd9f12610aadf24cb890ca97f3405a38c69b1290ddbadbe9ea724",
+  "excerpts": [
+    {
+      "start_line": 846,
+      "lines": [
+        "    # at click time and an edit lands on the very next click. Nothing is",
+        "    # threaded through a running session, which is why this cannot be",
+        "    # NEW_SESSIONS like the knobs that gate a session's construction.",
+        "    # Admission changes apply live in the desktop host without terminating work.",
+        "    Section(\"console\", _t(_cs.title()), Scope.LIVE, _t(_cs.description())),",
+        "    Section(",
+        "        \"desktop\",",
+        "        _t(_ws.desktop_title()),",
+        "        Scope.LIVE,"
+      ]
+    },
+    {
+      "start_line": 4938,
+      "lines": [
+        "    Setting(",
+        "        key=\"console.max_live\",",
+        "        path=(\"console\", \"max_live\"),",
+        "        section=\"console\",",
+        "        label=_t(_cs.max_live_label()),",
+        "        kind=Kind.INT,",
+        "        default=DEFAULT_LIVE_LIMIT,",
+        "        minimum=32,",
+        "        maximum=256,"
+      ]
+    },
+    {
+      "start_line": 4943,
+      "lines": [
+        "        kind=Kind.INT,",
+        "        default=DEFAULT_LIVE_LIMIT,",
+        "        minimum=32,",
+        "        maximum=256,",
+        "        help=_t(_cs.max_live_help()),",
+        "    ),",
+        "    Setting(",
+        "        key=\"console.max_owner\",",
+        "        path=(\"console\", \"max_owner\"),"
+      ]
+    },
+    {
+      "start_line": 4949,
+      "lines": [
+        "    Setting(",
+        "        key=\"console.max_owner\",",
+        "        path=(\"console\", \"max_owner\"),",
+        "        section=\"console\",",
+        "        label=_t(_cs.max_owner_label()),",
+        "        kind=Kind.INT,",
+        "        default=DEFAULT_OWNER_LIMIT,",
+        "        minimum=1,",
+        "        maximum=32,"
+      ]
+    },
+    {
+      "start_line": 4954,
+      "lines": [
+        "        kind=Kind.INT,",
+        "        default=DEFAULT_OWNER_LIMIT,",
+        "        minimum=1,",
+        "        maximum=32,",
+        "        help=_t(_cs.max_owner_help()),",
+        "    ),",
+        "    Setting(",
+        "        key=\"console.user_reserved\",",
+        "        path=(\"console\", \"user_reserved\"),"
+      ]
+    },
+    {
+      "start_line": 4960,
+      "lines": [
+        "    Setting(",
+        "        key=\"console.user_reserved\",",
+        "        path=(\"console\", \"user_reserved\"),",
+        "        section=\"console\",",
+        "        label=_t(_cs.user_reserved_label()),",
+        "        kind=Kind.INT,",
+        "        default=DEFAULT_USER_RESERVED,",
+        "        minimum=4,",
+        "        maximum=32,"
+      ]
+    },
+    {
+      "start_line": 4965,
+      "lines": [
+        "        kind=Kind.INT,",
+        "        default=DEFAULT_USER_RESERVED,",
+        "        minimum=4,",
+        "        maximum=32,",
+        "        help=_t(_cs.user_reserved_help()),",
+        "    ),",
+        "    Setting(",
+        "        key=\"desktop.launch_command\",",
+        "        path=(\"desktop\", \"launch_command\"),"
+      ]
+    }
+  ]
+}

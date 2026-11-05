@@ -4,23 +4,6 @@
   "pairs": [
     {
       "locale": "fr",
-      "namespace": "wire.console",
-      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2026-12-31",
-      "missing": [
-        "wire.console.description",
-        "wire.console.max_live.help",
-        "wire.console.max_live.label",
-        "wire.console.max_owner.help",
-        "wire.console.max_owner.label",
-        "wire.console.title",
-        "wire.console.user_reserved.help",
-        "wire.console.user_reserved.label"
-      ]
-    },
-    {
-      "locale": "fr",
       "namespace": "wire.errors.sdk_spec",
       "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
       "owner": "i18n-translator lane",

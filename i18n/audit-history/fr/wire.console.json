@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "wire.console",
+  "history_sha256": "39a70dda5292775f398c63db07f08e8760b2d2ac2eefe30c5ab2bb6c52b2e6a8",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "wire.console",
+      "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "8/8 initial ordinary French console settings metadata; translator7b2ba4ed501d plus two independent French readers c44e0f808e48 and 35aac0a677bc, actual openai/gpt-6.1-sol from retained completed-usage provenance, each passed zero findings. Readers bound source/context/target in i18n/audits/evidence/fr/wire.console/integration-binding.json; immutable originals retained. Semantics approved: live ceiling caps/defaults, one-quarter user-reserve cap, changes affect future starts only, no child-memory-limit promise. No native re-execution/pseudo/RTL claim."
+    }
+  ]
+}
