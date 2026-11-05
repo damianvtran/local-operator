@@ -323,3 +323,120 @@ async def test_model_slash_lost_socket_ack_keeps_busy_disposition(desktop, tmp_p
         server.close()
         await server.wait_closed()
         await asyncio.wait_for(settled.wait(), 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record_path", ["row", "facts"])
+@pytest.mark.parametrize(
+    ("native", "expected"),
+    [(["openai"], 200), ([], 409), (None, 409), (["anthropic"], 409)],
+)
+async def test_owner_inventory_survives_peer_projection_before_model_slash(
+    desktop, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_path, native, expected
+) -> None:
+    """Carry OWNER evidence from relay wire row to the public model slash.
+
+    Reachability and the origin's newer build are not provider support. A real
+    loopback control stream records exactly what admission allows through;
+    neither the provider nor any live session or credential is consulted.
+    """
+    import os
+
+    from local_operator.network import projection, relay
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    client, facade = desktop
+    monkeypatch.setattr(
+        __import__(__name__, fromlist=["_PRIMARY"]),
+        "_PRIMARY",
+        configure.ModelSpec(provider="anthropic", model_id="fixture-old", context_window=128000),
+    )
+    owner_record = SessionRecord(
+        pid=os.getpid(),
+        kind="daemon",
+        session_id=SESSION,
+        conversation_name="synthetic",
+        cwd=str(tmp_path),
+        model_label="anthropic/fixture-old",
+        control_port=0,
+        version="owner-distinct-build",
+        source_ref="owner-distinct-ref",
+        native_provider_ids=native,
+        control_key="owner-private-never-export",
+    )
+    root = tmp_path / "owner"
+    root.mkdir()
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    monkeypatch.setattr(registry, "scan", lambda _root: [(owner_record, "live")])
+    wire = next(row for row in server.local_session_rows() if row["session_id"] == SESSION)
+    assert "owner-private-never-export" not in json.dumps(wire)
+    row = projection.PeerRow.from_json(wire, device_id="synthetic-owner-device")
+    # Federated catalogue serialization is another real consumer boundary.
+    row = projection.PeerRow.from_json(row.to_row_json(), device_id=row.device_id)
+    record = (
+        row.to_record()
+        if record_path == "row"
+        else projection.RemoteSessionFacts.from_row(row).record()
+    )
+    facade._runtime_record = record
+    frames = []
+    settled = asyncio.Event()
+
+    async def owner(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            while line := await reader.readline():
+                frame = json.loads(line)
+                frames.append(frame)
+                writer.write(
+                    json.dumps(
+                        {
+                            "op": "result",
+                            "req": frame["req"],
+                            "data": {
+                                "kind": "notice",
+                                "text": "synthetic owner accepted",
+                                "style": "info",
+                            },
+                        }
+                    ).encode()
+                    + b"\n"
+                )
+                await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            settled.set()
+
+    control = await asyncio.start_server(owner, "127.0.0.1", 0)
+    transport = AttachClient(lambda _: None, lambda _: None)
+    try:
+        reader, writer = await asyncio.open_connection(*control.sockets[0].getsockname()[:2])
+        transport._reader, transport._writer = reader, writer
+        transport._connected = True
+        transport._reader_task = asyncio.create_task(transport._pump())
+        facade._client = transport
+        response = await _model(client, "openai/gpt-6.1-sol medium")
+        assert response.status_code == expected, response.text
+        assert record.version == owner_record.version
+        assert record.source_ref == owner_record.source_ref
+        assert record.native_provider_ids == native
+        assert record.control_key == ""
+        if expected == 200:
+            assert len(frames) == 1
+            assert frames[0]["command"] == "model"
+            assert frames[0]["args"] == "openai/gpt-6.1-sol medium"
+        else:
+            assert response.json()["detail"]["code"] == "runtime_upgrade_needed"
+            assert frames == []
+    finally:
+        if transport._writer is not None:
+            transport._writer.close()
+            await transport._writer.wait_closed()
+        control.close()
+        await control.wait_closed()
+        await asyncio.wait_for(settled.wait(), 2)
+        if transport._reader_task is not None:
+            await transport._reader_task

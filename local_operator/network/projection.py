@@ -306,6 +306,11 @@ class PeerRow:
     #: team badge on a remote row exactly as on a local one.
     team: str = ""
     agent: str = ""
+    # Admission uses the OWNER runtime's advertised build and provider inventory,
+    # never the origin's registry defaults. None is unknown; () is known empty.
+    version: str = ""
+    source_ref: str = ""
+    native_provider_ids: tuple[str, ...] | None = None
 
     @property
     def peer_block(self) -> dict[str, Any]:
@@ -342,6 +347,11 @@ class PeerRow:
             # on #2044). Zero here is the facade's own "no time" answer.
             started_at=self.started,
             capabilities=list(self.capabilities),
+            version=self.version,
+            source_ref=self.source_ref,
+            native_provider_ids=(
+                list(self.native_provider_ids) if self.native_provider_ids is not None else None
+            ),
             waiting_on=self.waiting_on,
             jobs_running=self.jobs_running,
             subagents_running=self.subagents_running,
@@ -369,6 +379,14 @@ class PeerRow:
             conversation_name=str(data.get("conversation_name") or ""),
             cwd=str(data.get("cwd") or ""),
             model_label=str(data.get("model_label") or ""),
+            version=data["version"] if isinstance(data.get("version"), str) else "",
+            source_ref=data["source_ref"] if isinstance(data.get("source_ref"), str) else "",
+            native_provider_ids=(
+                tuple(data["native_provider_ids"])
+                if isinstance(data.get("native_provider_ids"), list)
+                and all(isinstance(item, str) and item for item in data["native_provider_ids"])
+                else None
+            ),
             # EVERY NUMBER HERE IS THE PEER'S CLAIM (QA round 2, one slice over:
             # ``pid: "abc"`` raised ``ValueError`` into this reader, so one listed peer
             # broke the listing for all of them, and ``pid: 10**400`` was ACCEPTED as a
@@ -444,6 +462,11 @@ class PeerRow:
             "pending": self.pending,
             "detached": self.detached,
             "capabilities": list(self.capabilities),
+            "version": self.version,
+            "source_ref": self.source_ref,
+            "native_provider_ids": (
+                list(self.native_provider_ids) if self.native_provider_ids is not None else None
+            ),
             "started": self.started,
             "last_user_at": self.last_user_at,
             "age_s": self.age_s,
@@ -949,6 +972,7 @@ class RemoteSessionFacts:
     protocol: int = 0
     version: str = ""
     source_ref: str = ""
+    native_provider_ids: tuple[str, ...] | None = None
     state: str = ""
     reachable: bool = True
     control_port: int = 0
@@ -974,6 +998,9 @@ class RemoteSessionFacts:
             cwd=row.cwd,
             model_label=row.model_label,
             capabilities=row.capabilities,
+            version=row.version,
+            source_ref=row.source_ref,
+            native_provider_ids=row.native_provider_ids,
             state=row.state,
             reachable=row.reachable,
             control_port=relay_port,
@@ -994,6 +1021,9 @@ class RemoteSessionFacts:
             capabilities=list(self.capabilities),
             version=self.version,
             source_ref=self.source_ref,
+            native_provider_ids=(
+                list(self.native_provider_ids) if self.native_provider_ids is not None else None
+            ),
         )
 
     def seed(self) -> SessionSeed:
