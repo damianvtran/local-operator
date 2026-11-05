@@ -1,0 +1,72 @@
+{
+  "kind": "namespace_translation_packet_manifest_not_audit",
+  "namespace": "wire.console",
+  "root": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-console-0e7cde33",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "1c12436d00e7e4eec0df7dd41464c55d12c8500b1c2f52bd1b20403125434bcb",
+      "bytes": 2217
+    },
+    {
+      "path": "caller-proof.json",
+      "sha256": "6cd47aa61f397177cdc9a4d682be539159c21c3e017ea58d35c8b5241474e9f0",
+      "bytes": 9236
+    },
+    {
+      "path": "inputs/en.context.json",
+      "sha256": "453aadc8095e93122719cef9b8da2ed9f8b57170449804e6af716fe684ef2dd9",
+      "bytes": 3104
+    },
+    {
+      "path": "inputs/en.json",
+      "sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "bytes": 924
+    },
+    {
+      "path": "inputs/fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "bytes": 4196
+    },
+    {
+      "path": "inputs/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "bytes": 13399
+    },
+    {
+      "path": "provenance.json",
+      "sha256": "a54006feffc8e430f225e186ca3125a705f38692f113ea3d113774d369b792aa",
+      "bytes": 1451
+    },
+    {
+      "path": "record.json",
+      "sha256": "a00980f57d45ca93609450029a2ed7afba0dfae3dd6921f9da24abc377d81a76",
+      "bytes": 5257
+    },
+    {
+      "path": "validate.mjs",
+      "sha256": "687fb11a20c8b41507a9e442ea08130f939405498ade2d9efc77fb3858adbfd4",
+      "bytes": 1836
+    },
+    {
+      "path": "validation.log",
+      "sha256": "ff7c82b7cae8f03718555b2dc3507fb0cd1fd306f0a3ffdd07225704f6aa6833",
+      "bytes": 345
+    },
+    {
+      "path": "widths.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "bytes": 3
+    },
+    {
+      "path": "widths.log",
+      "sha256": "80abb865f4828179fda612e5f65e49d4236a30c09481e9eeca11cbdc73d1ea34",
+      "bytes": 87
+    },
+    {
+      "path": "wire.console.json",
+      "sha256": "7f499e6ab9f8db5c9953e6782357d4da38554ac89250f6fc6616b77069d4c8b2",
+      "bytes": 1203
+    }
+  ]
+}

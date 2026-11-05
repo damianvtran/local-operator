@@ -35418,6 +35418,10 @@ _NOTIFY_DESCRIPTION = (
 )
 
 
+#: Inbox keys only the Team Bridge connector writes (B4b DESIGN §6).
+_RESERVED_NOTIFY_KEY_PREFIX = "team-bridge-"
+
+
 def build_notify_tool(context: ToolContext) -> AgentTool | None:
     """CreateIf builder: present only where the session bound its inbox door.
 
@@ -35457,6 +35461,17 @@ async def execute_notify(
         params = NotifyParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "notify", exc)
+    if params.key.strip().startswith(_RESERVED_NOTIFY_KEY_PREFIX):
+        # B4b DESIGN §6: agent-message items (a held message waiting for its
+        # owner, the long-hold count) are keyed ``team-bridge-…`` and raised by
+        # the connector. A model must not be able to update one in place or
+        # mint a lookalike ("Deliver this message?") in its own session.
+        return _error(
+            tool_call_id,
+            "notify",
+            f"refused: keys starting with `{_RESERVED_NOTIFY_KEY_PREFIX}` are reserved for "
+            "agent-message notices; nothing was posted. Use a different key.",
+        )
     door = getattr(context, "notify_inbox", None) if context is not None else None
     if door is None:
         return _error(

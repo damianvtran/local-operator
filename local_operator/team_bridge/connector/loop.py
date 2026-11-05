@@ -150,6 +150,8 @@ _RETRY_ALONE_HOLD_CODES = frozenset(
         "reply_truncated",
         "parse_failed",
         "bounce_without_category",
+        # B4b: a converted work-scope bounce is the message's own doing too.
+        "work_scope_hold",
     }
 )
 

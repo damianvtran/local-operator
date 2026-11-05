@@ -1,0 +1,42 @@
+{
+  "cli.team_bridge_hold.held.title": {
+    "role": "local owner notification (inbox item) title, raised when screening holds one message for the owner to decide",
+    "tone": "calm, factual, operator-facing; no urgency, no alarm",
+    "note": "Agent messages is the product name of Team Bridge. This text can reach a phone lock screen and an OS banner, so it deliberately names no sender, conversation, body or category: the sender controls their own display name. Short fragment, no full stop."
+  },
+  "cli.team_bridge_hold.held.body": {
+    "role": "local owner notification (inbox item) body for one held message",
+    "tone": "calm, factual",
+    "note": "Says three facts: a message to the owner's agent was held; the reason is that it may be asking the agent to take on NEW work (not that it is harmful); the owner can open Agent messages to deliver or discard it. 'Deliver' and 'discard' are the two button names in the app. Must not name the sender or the place, and must not suggest urgency."
+  },
+  "cli.team_bridge_hold.more.title": {
+    "role": "local owner notification title, the single overflow item once ten held-message notices are standing",
+    "tone": "calm, factual",
+    "note": "Short fragment, no full stop. Names no sender or conversation."
+  },
+  "cli.team_bridge_hold.more.body": {
+    "role": "local owner notification body, overflow count",
+    "tone": "calm, factual",
+    "note": "{count} is an integer >= 1: how many further held messages have no notice of their own. ICU plural with `#`. Names no sender, conversation or content."
+  },
+  "cli.team_bridge_hold.delivered.title": {
+    "role": "local owner notification title, the update after the owner delivered a held message",
+    "tone": "calm, factual",
+    "note": "Replaces the held-message notification. Short fragment, no full stop. The owner did this themselves."
+  },
+  "cli.team_bridge_hold.delivered.body": {
+    "role": "local owner notification body after Deliver",
+    "tone": "calm, factual",
+    "note": "Deliver only lets the agent READ the message; it does not approve anything the message asks. Do not say 'approved' or 'accepted'."
+  },
+  "cli.team_bridge_hold.discarded.title": {
+    "role": "local owner notification title, the update after the owner discarded a held message",
+    "tone": "calm, factual",
+    "note": "Replaces the held-message notification. Short fragment, no full stop."
+  },
+  "cli.team_bridge_hold.discarded.body": {
+    "role": "local owner notification body after Discard",
+    "tone": "calm, factual",
+    "note": "States that the message was discarded and that the sender was told it was not delivered. Do not say 'deleted' or 'blocked'."
+  }
+}

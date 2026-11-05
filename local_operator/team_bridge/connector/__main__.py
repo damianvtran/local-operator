@@ -306,6 +306,7 @@ async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = Non
 
     config_dir = Path(args.config_dir)
     _configure_logging(config_dir)
+    _activate_operator_locale(config_dir)
     # Restart-scoped transport root: read HERE, once.
     base_url = args.base_url or DEFAULT_RADIENT_API_BASE_URL
 
@@ -529,6 +530,34 @@ async def _supervise(args: argparse.Namespace) -> int:
                 logger.warning("bridge connector stop: stage=stop code=%s", type(failure).__name__)
         for sig in installed:
             loop.remove_signal_handler(sig)
+
+
+def _activate_operator_locale(config_dir: Path) -> None:
+    """Render this process's inbox notices in the operator's language (QA #3443 Q2).
+
+    The connector is a launchd/systemd daemon, so nothing upstream activates a
+    locale for it, and every notice it raises (``cli.team_bridge_hold``,
+    ``cli.team_bridge_alert``) used to be stored in English whatever the
+    operator chose. The language is read from the ``--config-dir`` this process
+    serves — not ``paths.config_dir()``, which follows the environment and can
+    name a different home under a service manager. Once, at start: a language
+    change made later reaches the connector on its next restart.
+    """
+
+    from local_operator.config import read_config_values
+    from local_operator.i18n.boot import activate_resolved_locale
+    from local_operator.i18n.resolve import (
+        CONFIG_KEY,
+        DEFAULT_LANGUAGE,
+        resolve_language,
+    )
+
+    def resolve() -> str:
+        values = read_config_values(config_dir)
+        value = values.get(CONFIG_KEY) if isinstance(values, dict) else None
+        return resolve_language(value if isinstance(value, str) else DEFAULT_LANGUAGE)
+
+    activate_resolved_locale(resolve)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -141,6 +141,12 @@ HOLD_CODES = (
     # owner has no designated session, or a session/spine holds the claim.
     "badge_only",
     "claimed_elsewhere",
+    # B4b (operator decision a-3f46; DECISIONS Amendment 1): a v2 bounce whose
+    # categories are EXACTLY ``(new_work_request,)``, recorded as a hold the
+    # receiving person may Deliver or Discard (``hold_release.py``). Written
+    # only with ``team_bridge.hold_release`` on; a model answer, so it is
+    # answer-cached (S-4) and re-screened alone.
+    "work_scope_hold",
     # NOTHING could screen: every preferred screener and the owner's own
     # default/fallback cascade failed on route errors (no credential, rate
     # limit, out of quota or credit), or nothing is configured. An infra hold,
@@ -868,7 +874,20 @@ def _persist_hold(
 #: ceiling fix bumps that stamp and clears them, so an engine bug can never
 #: become a permanent denial and no republish is needed to fix one.
 _ANSWER_HOLD_CACHEABLE = frozenset(
-    {"model_hold", "model_refused", "reply_truncated", "parse_failed", "bounce_without_category"}
+    {
+        "model_hold",
+        "model_refused",
+        "reply_truncated",
+        "parse_failed",
+        "bounce_without_category",
+        # B4b security review S-4 / decision D5: today a v2 bounce is a TERMINAL
+        # reject; converted into a hold it would be due on every pass, and the
+        # same body does not always draw the same verdict (adv-064: deliver 5,
+        # hold 5 on v2), so an uncached converted hold would re-draw until a
+        # ``deliver`` came up and auto-deliver it. Cached under the answering
+        # model like every other answer here.
+        "work_scope_hold",
+    }
 )
 
 
@@ -1097,6 +1116,11 @@ class _Prepared:
     fingerprint: str
     input_proof: dict[str, Any]
     provider: str
+    #: The hub-verified sender (allocation) and the conversation id, carried
+    #: ONLY for B4b's work-scope decision row (per-sender budget, S-6; the
+    #: release binds the conversation). Neither is a label.
+    sender_account_id: str = ""
+    conversation_id: str = ""
 
 
 def _screen_prepare(
@@ -1219,6 +1243,19 @@ def _screen_prepare(
         _persist_hold(store, owner, message_id, "ack_recovery")
         return ScreenResult("hold", hold_code="ack_recovery")
 
+    # 5b. OWNER RELEASE (B4b DESIGN §3.2 step 4, operator decision a-3f46). A
+    #     person's signed Deliver/Discard for THIS message is its answer. It
+    #     runs BEFORE both caches: the model's cached ``work_scope_hold`` stays
+    #     in place for the next identical body (DESIGN §5), and the release's
+    #     own receipt carries a template no cache lookup asks for. Inert unless
+    #     a release row exists, so with the setting off nothing here runs.
+    released = _consume_owner_release(store, owner, envelope, snapshot, epoch)
+    if released is not None:
+        return released
+    replayed = _replay_work_scope_decision(store, owner, envelope, epoch, prepared_item=item)
+    if replayed is not None:
+        return replayed
+
     # 6. Fingerprint cache: reuse ONLY under the FULL current admission tuple
     #    (body + template + model + revision + envelope digest). A changed
     #    sender/type/request/revision misses and re-screens; a reject is
@@ -1325,6 +1362,19 @@ def _screen_prepare(
             # reservation below re-verifies owner, policy and turn before any
             # spend, so a miss here can never launder a stale answer.
             cached_answer = None
+        if cached_answer is not None and cached_answer[0] == "work_scope_hold":
+            # A NEW message whose body+envelope a converted decision already
+            # covered (an identical re-send; code review #3443 M2 / QA Q1). It
+            # is the person's decision again: it gets its own decision row,
+            # copied from the source decision and charged to the sender budget,
+            # so it is actionable and notified like the first — never a hold
+            # nobody can release. With the setting OFF there is no source to
+            # copy, and the cache row falls through to a fresh screen, exactly
+            # as a pre-B4b build (which never wrote this code) would.
+            copied = _copy_work_scope_decision(store, owner, envelope, item)
+            if copied is not None:
+                return copied
+            cached_answer = None
         if cached_answer is not None and cached_answer[0] in _ANSWER_HOLD_CACHEABLE:
             code, cached_class = cached_answer
             # The class rides along so the receiver status shows the SAME closed
@@ -1415,6 +1465,8 @@ def _screen_prepare(
         fingerprint=fingerprint,
         input_proof=input_proof,
         provider=_canonical_provider,
+        sender_account_id=screening_allocation(item)[1],
+        conversation_id=_conversation_of(item),
     )
 
 
@@ -1790,6 +1842,8 @@ async def _screen_spend(
         ),
         rendered_template_sha256=rendered.template_sha256,
         prompt_template_sha256=rendered.template_sha256,
+        served_provider=_served_provider(runner, actual_model, prepared),
+        served_hop=_served_hop(runner, actual_model, prepared),
         screener_preferred=_answered_preferred(runner, actual_model),
     )
 
@@ -1826,6 +1880,8 @@ def _conclude_parsed(
     rendered_version: str | None = None,
     rendered_template_sha256: str | None = None,
     prompt_template_sha256: str | None = None,
+    served_provider: str = "",
+    served_hop: int | None = None,
     screener_preferred: bool = False,
 ) -> ScreenResult:
     """Step 14 for ONE message: a parsed verdict -> its write-once outcome.
@@ -1848,6 +1904,34 @@ def _conclude_parsed(
     envelope, snapshot, epoch = prepared.envelope, prepared.snapshot, prepared.epoch
     message_id = envelope.message_id
     disposition, categories, reason, _verdict = parsed
+    if disposition == "hold" and _work_scope_hold_conversion(
+        store,
+        snapshot,
+        reason,
+        actual_model=actual_model,
+        served_provider=served_provider,
+        served_hop=served_hop,
+        screener_preferred=screener_preferred,
+    ):
+        # B4b scope update (2026-11-04, operator + Aida): under v2 the B4 relay
+        # (rel-l01) is a HOLD naming new_work_request, not a bounce — measured on
+        # #3434's committed trials, 8/10 holds on both Sonnet 5.5 and Opus 5.5.
+        # From an allowlisted screener that hold is the same owner decision as
+        # the bounce below, recorded the same way (same code, budget, no re-draw,
+        # signed record).
+        return _commit_work_scope_hold(
+            store,
+            owner,
+            prepared,
+            attempt_id=attempt_id,
+            fingerprint=fingerprint,
+            categories=("new_work_request",),
+            actual_model=actual_model,
+            served_provider=served_provider,
+            served_hop=served_hop,
+            screener_preferred=screener_preferred,
+            screener_verdict="hold",
+        ).set_private_reason(reason)
     if disposition == "hold":
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "model_hold")
         _remember_answer_hold(
@@ -1883,6 +1967,29 @@ def _conclude_parsed(
                 store, owner, message_id, attempt_id, fingerprint, epoch, "local_quarantine"
             )
             return ScreenResult("hold", hold_code="local_quarantine").set_private_reason(reason)
+        if _work_scope_conversion(
+            store,
+            snapshot,
+            categories,
+            reason,
+            actual_model=actual_model,
+            served_provider=served_provider,
+            served_hop=served_hop,
+            screener_preferred=screener_preferred,
+        ):
+            return _commit_work_scope_hold(
+                store,
+                owner,
+                prepared,
+                attempt_id=attempt_id,
+                fingerprint=fingerprint,
+                categories=categories,
+                actual_model=actual_model,
+                served_provider=served_provider,
+                served_hop=served_hop,
+                screener_preferred=screener_preferred,
+                screener_verdict="bounce",
+            ).set_private_reason(reason)
     # 12b. Final admission fence (R6/Q15): the receipt may only be admitted
     #      while THIS call still owns the account turn — a successor that
     #      took over mid-callback must never inherit our outcome.
@@ -1938,6 +2045,506 @@ def _conclude_parsed(
         rendered_version=rendered_version,
         rendered_template_sha256=rendered_template_sha256,
     ).set_private_reason(reason)
+
+
+def _consume_owner_release(
+    store: Store,
+    owner: OwnerSnapshot,
+    envelope: Envelope,
+    snapshot: "PolicySnapshot",
+    epoch: int,
+) -> ScreenResult | None:
+    """A signed owner release for this message as a :class:`ScreenResult`, or ``None``.
+
+    THE CONNECTOR IS THE AUTHORITY, not the route (DESIGN §3.2; D7, S-7/S-8).
+    Each check below is fail-closed:
+
+    * the setting is on (a release row left behind after it was turned off
+      does nothing);
+    * the signature re-verifies against the operator anchor, cryptographically,
+      over the dedicated release domain — never a stored ``verified`` flag, so a
+      row written straight into SQLite does not pass (``release_unverified``);
+    * the decision row still exists for this message, was eligible, and its
+      code, screener identity, template, categories, body hash and envelope
+      digest equal the signed ones; the hold row still exists;
+    * the release's body hash and envelope digest equal the bytes just fetched
+      and validated: otherwise the agent could get bytes the person never saw
+      (``body_hash_mismatch``).
+
+    Deliver commits an ``allow`` with ``categories=()`` and owner-release
+    provenance; Discard commits a ``reject`` carrying the screener's REAL
+    categories (S-7). Neither spends screening budget.
+    """
+
+    from local_operator.team_bridge import hold_release as hr
+
+    release = store.owner_release(owner, envelope.message_id)
+    if release is None or not hr.enabled(store.config_dir):
+        return None
+    import time as _time
+
+    now = _time.time()
+    outcome = store.set_owner_release_outcome
+    spki, _key_id = hr.anchor_spki(store.config_dir)
+    if not hr.verify_row(release, spki):
+        hr.log_release("unverified")
+        outcome(owner, envelope.message_id, "refused:release_unverified", now=now)
+        return None
+    deliver = release["word"] == "deliver"
+    replay = _replay_consumed_release(store, owner, envelope, release)
+    if replay is not None:
+        return replay
+    decision = store.work_scope_decision(owner, envelope.message_id)
+    hold = store.screening_hold(owner, envelope.message_id)
+    if (
+        decision is None
+        or hold is None
+        or not decision.get("eligible")
+        or not hr.release_matches_decision(release, decision)
+    ):
+        hr.log_release("decision_changed")
+        outcome(owner, envelope.message_id, "refused:decision_changed", now=now)
+        return None
+    if (
+        release["body_sha256"] != envelope.body_sha256
+        or release["envelope_digest"] != envelope.envelope_digest
+    ):
+        hr.log_release("snapshot_stale")
+        outcome(owner, envelope.message_id, "refused:body_hash_mismatch", now=now)
+        _persist_hold(store, owner, envelope.message_id, "body_hash_mismatch")
+        return ScreenResult("hold", hold_code="body_hash_mismatch")
+    return _commit_release_receipt(store, owner, envelope, epoch, release, deliver=deliver)
+
+
+def _replay_consumed_release(
+    store: Store, owner: OwnerSnapshot, envelope: Envelope, release: Mapping[str, Any]
+) -> ScreenResult | None:
+    """The committed answer of a release ALREADY consumed, or ``None``.
+
+    A hub re-delivery or a crash before the ref delete re-drives a message the
+    person already decided. The commit deleted the hold, so without this the
+    answer cache would re-hold it; the spine's reservation check keeps the
+    replay from waking twice. Shared by the setting-on and setting-off paths:
+    an already-made decision outlives the setting.
+    """
+
+    from local_operator.team_bridge import hold_release as hr
+
+    deliver = release.get("word") == "deliver"
+    committed = store.receipt_for_message(owner, envelope.message_id)
+    if not (
+        committed is not None
+        and committed.get("template_sha256") == hr.OWNER_RELEASE_SHA256
+        and committed.get("verdict") == ("allow" if deliver else "reject")
+        and committed.get("body_sha256") == envelope.body_sha256
+        and committed.get("envelope_digest") == envelope.envelope_digest
+    ):
+        return None
+    return ScreenResult(
+        "deliver" if deliver else "bounce",
+        receipt=ScreeningReceipt(
+            verdict=str(committed["verdict"]),
+            model=str(committed["model"]),
+            prompt_version=str(committed["prompt_version"]),
+            template_sha256=str(committed["template_sha256"]),
+            body_sha256=str(committed["body_sha256"]),
+            categories=tuple(committed["categories"]),
+        ),
+        screened_bytes=len(envelope.private_body().encode("utf-8")),
+    )
+
+
+def _commit_release_receipt(
+    store: Store,
+    owner: OwnerSnapshot,
+    envelope: Envelope,
+    epoch: int,
+    release: Mapping[str, Any],
+    *,
+    deliver: bool,
+) -> ScreenResult:
+    """Commit a VERIFIED release's owner-release receipt and answer with it."""
+
+    import time as _time
+
+    from local_operator.team_bridge import hold_release as hr
+
+    now = _time.time()
+    outcome = store.set_owner_release_outcome
+    receipt = ScreeningReceipt(
+        verdict="allow" if deliver else "reject",
+        model=hr.OWNER_RELEASE_MODEL,
+        prompt_version=hr.OWNER_RELEASE_PROMPT_VERSION,
+        template_sha256=hr.OWNER_RELEASE_SHA256,
+        body_sha256=envelope.body_sha256,
+        categories=() if deliver else tuple(hr.decoded_categories(release)),
+    )
+    try:
+        store.commit_owner_release(
+            owner,
+            envelope.message_id,
+            receipt=receipt,
+            envelope_digest=envelope.envelope_digest,
+            expected_epoch=epoch,
+        )
+    except StoreRefused as failure:
+        code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
+        outcome(owner, envelope.message_id, f"refused:{code}", now=now)
+        _persist_hold(store, owner, envelope.message_id, code)
+        return ScreenResult("hold", hold_code=code)
+    hr.log_release("consumed")
+    return ScreenResult(
+        "deliver" if deliver else "bounce",
+        receipt=receipt,
+        screened_bytes=len(envelope.private_body().encode("utf-8")),
+        # Text only (DESIGN §3.2 step 8): no screener saw the images under a
+        # release, so none is ever admitted on one.
+        attachments_hash=None,
+    )
+
+
+def _replay_work_scope_decision(
+    store: Store,
+    owner: OwnerSnapshot,
+    envelope: Envelope,
+    epoch: int,
+    *,
+    prepared_item: Mapping[str, Any],
+) -> ScreenResult | None:
+    """A converted hold's OWN decision, settled per message with no model call (D5).
+
+    WHY BESIDE THE ANSWER CACHE. That cache is keyed by the REQUESTED model and
+    remembers only a primary hop's answer, so a re-drive could otherwise re-draw
+    — and the same body does not always draw the same verdict (S-4), so the
+    conversion would become a lottery that ends in ``deliver``. The decision row
+    is per message and fixed at decision time.
+
+    SETTING ON: the same hold, again.
+
+    SETTING OFF after a conversion (code review #3443 M1 / security S-3): the
+    message takes the outcome it would have had before B4b, from its OWN row and
+    again with NO model call — a ``bounce`` origin commits the reject with the
+    screener's real categories, a ``hold`` origin becomes ``model_hold``. A
+    verified Discard the person already signed is honoured first (it can only
+    narrow); a pending Deliver is refused ``hold_release_off`` and never admitted.
+    Turning the feature off is the operator's fail-safe, so it must never buy a
+    parked message a fresh draw or override an explicit Discard.
+    """
+
+    from local_operator.team_bridge import hold_release
+
+    decision = store.work_scope_decision(owner, envelope.message_id)
+    if (
+        decision is None
+        or decision.get("body_sha256") != envelope.body_sha256
+        or decision.get("envelope_digest") != envelope.envelope_digest
+    ):
+        return None
+    if hold_release.enabled(store.config_dir):
+        _persist_hold(store, owner, envelope.message_id, hold_release.WORK_SCOPE_HOLD)
+        return ScreenResult("hold", hold_code=hold_release.WORK_SCOPE_HOLD)
+    return _settle_without_release(store, owner, envelope, epoch, decision)
+
+
+def _settle_without_release(
+    store: Store,
+    owner: OwnerSnapshot,
+    envelope: Envelope,
+    epoch: int,
+    decision: Mapping[str, Any],
+) -> ScreenResult:
+    """The pre-B4b outcome of a converted decision, with the setting OFF."""
+
+    import time as _time
+
+    from local_operator.team_bridge import hold_release as hr
+
+    message_id = envelope.message_id
+    release = store.owner_release(owner, message_id)
+    if release is not None:
+        replay = _replay_consumed_release(store, owner, envelope, release)
+        if replay is not None:
+            return replay
+        spki, _key_id = hr.anchor_spki(store.config_dir)
+        verified = hr.verify_row(release, spki) and hr.release_matches_decision(release, decision)
+        if verified and release.get("word") == "discard":
+            # A signed Discard narrows: honour it through the ordinary
+            # owner-release commit even though new releases are off.
+            return _commit_release_receipt(store, owner, envelope, epoch, release, deliver=False)
+        if release.get("outcome") == "pending":
+            store.set_owner_release_outcome(
+                owner, message_id, "refused:hold_release_off", now=_time.time()
+            )
+    categories = tuple(hr.decoded_categories(decision))
+    if decision.get("screener_verdict") == "bounce" and "<damaged>" not in categories:
+        receipt = ScreeningReceipt(
+            verdict="reject",
+            model=str(decision.get("screener_model") or ""),
+            prompt_version=str(decision.get("prompt_version") or ""),
+            template_sha256=str(decision.get("template_sha256") or ""),
+            body_sha256=envelope.body_sha256,
+            categories=categories,
+        )
+        try:
+            store.commit_owner_release(
+                owner,
+                message_id,
+                receipt=receipt,
+                envelope_digest=envelope.envelope_digest,
+                expected_epoch=epoch,
+            )
+        except StoreRefused as failure:
+            code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
+            _persist_hold(store, owner, message_id, code)
+            return ScreenResult("hold", hold_code=code)
+        hr.log_release("settled_off verdict=bounce")
+        return ScreenResult(
+            "bounce", receipt=receipt, screened_bytes=len(envelope.private_body().encode("utf-8"))
+        )
+    # A hold origin (or a row that cannot say): the pre-B4b answer is a doubt
+    # hold. No receipt, no model call; the row keeps it from ever re-drawing.
+    _persist_hold(store, owner, message_id, "model_hold")
+    hr.log_release("settled_off verdict=hold")
+    return ScreenResult("hold", hold_code="model_hold")
+
+
+def _copy_work_scope_decision(
+    store: Store, owner: OwnerSnapshot, envelope: Envelope, item: Mapping[str, Any]
+) -> ScreenResult | None:
+    """An identical re-send's own decision row, from the source decision (M2/Q1, S-4).
+
+    Same body, same envelope digest (sender, type, request block) and same
+    template, so the source row's screener identity, hop, verdict and categories
+    describe this message too. The copy is charged to the sender budget like a
+    fresh decision, so a re-send loop cannot multiply releasable holds. ``None``
+    (fall through to a fresh screen) when the setting is off or no source row
+    matches.
+    """
+
+    import time as _time
+
+    from local_operator.team_bridge import hold_release as hr
+
+    if not hr.enabled(store.config_dir):
+        return None
+    source = store.work_scope_decision_for_content(
+        owner, body_sha256=envelope.body_sha256, envelope_digest=envelope.envelope_digest
+    )
+    if source is None:
+        return None
+    _persist_hold(store, owner, envelope.message_id, hr.WORK_SCOPE_HOLD)
+    try:
+        store.record_work_scope_decision(
+            owner,
+            envelope.message_id,
+            conversation_id=_conversation_of(item),
+            body_sha256=envelope.body_sha256,
+            envelope_digest=envelope.envelope_digest,
+            screener_provider=str(source["screener_provider"]),
+            screener_model=str(source["screener_model"]),
+            template_sha256=str(source["template_sha256"]),
+            prompt_version=str(source["prompt_version"]),
+            categories=tuple(hr.decoded_categories(source)),
+            policy_epoch=int(source["policy_epoch"]),
+            sender_digest=hr.sender_digest(screening_allocation(item)[1]),
+            now=_time.time(),
+            screener_verdict=str(source.get("screener_verdict") or ""),
+            screener_hop=_hop_of(source),
+            screener_preferred=bool(source.get("screener_preferred")),
+        )
+    except StoreRefused:
+        pass
+    return ScreenResult("hold", hold_code=hr.WORK_SCOPE_HOLD)
+
+
+def _hop_of(row: Mapping[str, Any]) -> int:
+    value = row.get("screener_hop")
+    return -1 if value is None else int(value)
+
+
+def _work_scope_conversion(
+    store: Store,
+    snapshot: "PolicySnapshot",
+    categories: Any,
+    reason: str,
+    *,
+    actual_model: str,
+    served_provider: str,
+    served_hop: int | None,
+    screener_preferred: bool,
+) -> bool:
+    """Whether THIS bounce is recorded as a releasable ``work_scope_hold`` instead.
+
+    B4b DECISIONS Amendment 1, D2: only a v2 decision naming EXACTLY
+    ``new_work_request``; ``out_of_scope_work`` and ``personal_info_request``
+    are disclosure-class and stay terminal bounces under every template (S-1).
+    Amendment 2 adds two gates, both of which only ever keep the pre-B4b
+    terminal reject: the answer must carry trusted PREFERRED-stage provenance
+    from #3444 (including later preferred hops, never the ordinary cascade), and the
+    REASON must pass the release-only check (``hold_release.strict_release_reason``:
+    no prose-named second category, no negation, no format characters). A
+    non-preferred answer is therefore a bounce, not an ineligible hold (code
+    review m2), and with the setting off this is False and the path below is
+    byte-identical to the pre-B4b build.
+    """
+
+    from local_operator.team_bridge import hold_release
+    from local_operator.team_bridge.client import SCREENING_VERSION_V2
+
+    if snapshot.screening_version != SCREENING_VERSION_V2:
+        return False
+    if not hold_release.converts(tuple(categories)):
+        return False
+    if not hold_release.preferred_answer(served_provider, actual_model, screener_preferred):
+        return False
+    if not hold_release.strict_release_reason(reason):
+        return False
+    return hold_release.enabled(store.config_dir)
+
+
+def _reason_categories(reason: str) -> tuple[str, ...]:
+    """The category tokens a REASON names: ``parse_verdict``'s bounce rule.
+
+    ``parse_verdict`` extracts no categories from a v2 HOLD (its tuple is
+    empty, and the setting-off path must stay byte-identical), so the B4b hold
+    conversion reads them here with the SAME exact-token rule: canonical order,
+    de-duplicated, never a substring of a longer word.
+    """
+
+    return tuple(
+        category
+        for category in SCREENING_CATEGORIES
+        if re.search(rf"(?<![A-Za-z_]){re.escape(category)}(?![A-Za-z_])", reason)
+    )
+
+
+def _work_scope_hold_conversion(
+    store: Store,
+    snapshot: "PolicySnapshot",
+    reason: str,
+    *,
+    actual_model: str,
+    served_provider: str,
+    served_hop: int | None,
+    screener_preferred: bool,
+) -> bool:
+    """Whether a v2 HOLD is recorded as a releasable ``work_scope_hold`` instead.
+
+    B4b Amendment 2 (operator + Aida, 2026-11-04): under v2 the B4 relay is a
+    doubt hold naming ``new_work_request``. It converts ONLY with trusted
+    PREFERRED-stage answering-hop provenance (#3444), only when the reason's
+    exact category tokens are ``new_work_request`` alone, and only when the
+    reason passes the release-only check (no second category in prose, no
+    negation, no format characters; security review #3443 S-2). Anything else
+    stays ``model_hold``, byte-identical to today.
+    """
+
+    from local_operator.team_bridge import hold_release
+    from local_operator.team_bridge.client import SCREENING_VERSION_V2
+
+    if snapshot.screening_version != SCREENING_VERSION_V2:
+        return False
+    if not hold_release.preferred_answer(served_provider, actual_model, screener_preferred):
+        return False
+    if not hold_release.converts(_reason_categories(reason)):
+        return False
+    if not hold_release.strict_release_reason(reason):
+        return False
+    return hold_release.enabled(store.config_dir)
+
+
+def _served_provider(runner: Any, actual_model: str | None, prepared: "_Prepared") -> str:
+    """The trusted answering hop's provider, never a bare runner's claim (D4/D7)."""
+
+    from local_operator.team_bridge.model_boundary import ScreenChainRunner
+
+    if not isinstance(runner, ScreenChainRunner):
+        return ""
+    hop = runner.answered_hop
+    return hop.provider if hop is not None and hop.model_id == actual_model else ""
+
+
+def _served_hop(runner: Any, actual_model: str | None, prepared: "_Prepared") -> int | None:
+    """Answering chain index for the signed audit, NOT an eligibility gate."""
+
+    from local_operator.team_bridge.model_boundary import ScreenChainRunner
+
+    if not isinstance(runner, ScreenChainRunner):
+        return None
+    hop = runner.answered_hop
+    if hop is None or hop.model_id != actual_model:
+        return None
+    return runner.served_hop_index
+
+
+def _commit_work_scope_hold(
+    store: Store,
+    owner: OwnerSnapshot,
+    prepared: "_Prepared",
+    *,
+    attempt_id: str | None,
+    fingerprint: str,
+    categories: Sequence[str],
+    actual_model: str,
+    served_provider: str,
+    served_hop: int | None,
+    screener_preferred: bool,
+    screener_verdict: str,
+) -> ScreenResult:
+    """Record the converted hold, its answer-cache row and its decision row.
+
+    The decision row is the release's authority source (D4/D7): the answering
+    hop's identity, the template and the real categories, written NOW. Its
+    eligibility is fixed here and never recomputed from the session or default
+    model. Best effort: a refused decision write leaves a hold with no row,
+    which offers no buttons (fail closed) and is counted by the 60-minute alert.
+    """
+
+    import time as _time
+
+    from local_operator.team_bridge import hold_release
+
+    envelope, snapshot, epoch = prepared.envelope, prepared.snapshot, prepared.epoch
+    code = hold_release.WORK_SCOPE_HOLD
+    if attempt_id is not None:
+        _commit_hold(store, owner, envelope.message_id, attempt_id, fingerprint, epoch, code)
+        _remember_answer_hold(
+            store, owner, envelope, snapshot, code, epoch, answered_model=actual_model
+        )
+    else:
+        _persist_hold(store, owner, envelope.message_id, code)
+    try:
+        store.record_work_scope_decision(
+            owner,
+            envelope.message_id,
+            conversation_id=prepared.conversation_id,
+            body_sha256=envelope.body_sha256,
+            envelope_digest=envelope.envelope_digest,
+            screener_provider=served_provider,
+            screener_model=actual_model,
+            template_sha256=snapshot.template_sha256,
+            prompt_version=snapshot.screening_version,
+            categories=tuple(categories),
+            policy_epoch=epoch,
+            # An older hub states no sender: such messages share ONE bucket
+            # rather than escaping the budget (fail closed, S-6).
+            sender_digest=hold_release.sender_digest(prepared.sender_account_id),
+            now=_time.time(),
+            screener_verdict=screener_verdict,
+            screener_hop=-1 if served_hop is None else int(served_hop),
+            screener_preferred=hold_release.preferred_answer(
+                served_provider, actual_model, screener_preferred
+            ),
+        )
+    except StoreRefused:
+        pass
+    return ScreenResult("hold", hold_code=code)
+
+
+def _conversation_of(item: Mapping[str, Any]) -> str:
+    message = item.get("message")
+    thread = message.get("thread_id") if isinstance(message, Mapping) else None
+    return thread if isinstance(thread, str) and thread.startswith("bcv_") else ""
 
 
 def _policy_row_matches(row: Mapping[str, Any], snapshot: "PolicySnapshot") -> bool:
@@ -2714,6 +3321,8 @@ async def _screen_batch_core(
             turn=turn,
             screened_bytes=len(prepared.envelope.private_body().encode("utf-8")),
             prompt_template_sha256=SCREENING_BATCH_TEMPLATE_SHA256,
+            served_provider=_served_provider(runner, actual_model, prepared),
+            served_hop=_served_hop(runner, actual_model, prepared),
             screener_preferred=_answered_preferred(runner, actual_model),
         )
     return _finish()

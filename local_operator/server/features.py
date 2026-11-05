@@ -501,6 +501,12 @@ def static_feature_flags() -> dict[str, Any]:
         # the section over one conversation (#3022 R1-N2). A hub that predates
         # #221 is detected on the LIST route only (its 404 there).
         "team_bridge_owner_audit": 1,
+        # B4b held messages (operator decision a-3f46): `GET
+        # /v1/desktop/team-bridge/holds` and `POST …/holds/{id}/deliver|discard`.
+        # The key says the ROUTES exist, never that the feature is on: the list
+        # answers `enabled` from `team_bridge.hold_release` (default off), and a
+        # UI without this key shows nothing new. 1 is the route-contract version.
+        "team_bridge_hold_release": 1,
         # The chief-of-staff read grant (agent-server §17): `PUT`/`DELETE
         # /v1/desktop/team-bridge/conversations/{id}/cos-read`, both guarded
         # (tenant_id + expected_account_id required). The renderer shows

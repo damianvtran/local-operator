@@ -56,6 +56,16 @@ DEVICE_CERT_DOMAIN = b"lop-operator-device-v1\x00"
 #: declared in one module.
 APPROVAL_DOMAIN = b"lop-approval-v1\x00"
 
+#: The domain tag for a Team Bridge OWNER RELEASE (B4b DESIGN §3.2, operator
+#: decision a-3f46; security review S-8 / decision D7). A fourth tag, NOT a new
+#: member of :data:`ACTIONS`: ``signed_message`` binds a session/challenge pair
+#: that a release does not have, and a release must never be presentable as a
+#: loosen/approve/decide signature or the reverse. The payload's ONE builder is
+#: ``team_bridge.hold_release.release_payload`` (length-prefixed with this
+#: module's framing); the TAG lives here so every domain this key signs is
+#: declared in one module.
+RELEASE_DOMAIN = b"lop-bridge-release-v1\x00"
+
 #: A signature is DER-encoded ECDSA over a P-256 key: 8 (sequence) + up to 2*33
 #: of integers. Bounded rather than exact, because DER length varies with the
 #: leading byte of each integer; the bound exists so a megabyte of junk cannot

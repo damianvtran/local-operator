@@ -179,11 +179,30 @@ DEFAULT_TEAM_BRIDGE_SESSION = ""
 DEFAULT_HOLD_ALERT_AFTER_MINUTES = 60
 HOLD_ALERT_MAX_MINUTES = 10080
 
+#: ``team_bridge.hold_release`` — B4b owner release (operator decision a-3f46,
+#: reversing a-d9c6): a screening hold whose decision is EXACTLY one work-scope
+#: category is surfaced to the receiving person per message, with Deliver and
+#: Discard, instead of sitting cached forever behind a count-only alert.
+#:
+#: OFF BY DEFAULT (B4b DESIGN §8.1 slice S1). With it off, screening, the
+#: connector and every notice are byte-identical to the build before B4b; the
+#: desktop routes still exist so QA can drive them, and they refuse every
+#: write with ``hold_release_off``. Turning it on by default is slice S3a,
+#: which waits for the S2 UI and for B5's receiver-adherence results.
+#:
+#: Read from the config file like ``hold_alert_after_minutes`` and for the same
+#: reason has NO ``/settings`` registry row: a row would change
+#: ``wire.settings`` copy and un-ship every locale's audited ledger row. Only a
+#: real ``true`` turns it on; anything else (absent, ``null``, a string) reads
+#: OFF, because a release path must never open on a value nobody wrote.
+DEFAULT_HOLD_RELEASE = False
+
 ENABLED_PATH = ("team_bridge", "enabled")
 ONBOARDING_PATH = ("team_bridge", "onboarding")
 DEFAULT_ENROLLMENT_PATH = ("team_bridge", "default_enrollment")
 SESSION_PATH = ("team_bridge", "session")
 HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
+HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
 
 
 #: Distinguishes "the key is absent" (the shipped default) from "the key is
@@ -273,6 +292,8 @@ class TeamBridgeSettings:
     default_enrollment: Mapping[str, str] = field(default_factory=dict)
     #: Minutes a held conversation message ages before the owner is told; 0 = off.
     hold_alert_after_minutes: int = DEFAULT_HOLD_ALERT_AFTER_MINUTES
+    #: B4b owner release (``hold_release.py``); OFF unless a real ``true``.
+    hold_release: bool = DEFAULT_HOLD_RELEASE
     #: Whether ``team_bridge.enabled`` was PRESENT in the document (any value,
     #: including a hand-edited ``null``, which reads OFF). It is what separates
     #: "the user said so" from "nobody said anything", the one distinction the
@@ -330,6 +351,8 @@ class TeamBridgeSettings:
             hold_alert_after_minutes=_hold_alert_after_minutes(
                 get(HOLD_ALERT_AFTER_PATH, DEFAULT_HOLD_ALERT_AFTER_MINUTES)
             ),
+            # ``is True``: a release path opens on an explicit boolean only.
+            hold_release=get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE) is True,
         )
 
 

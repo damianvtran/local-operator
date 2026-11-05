@@ -204,6 +204,9 @@ CHANNEL_OPS: tuple[str, ...] = (
 #: team, each person's chief-of-staff endpoint and its current name). It acts
 #: as nobody, so unlike the channel ops it needs no agent endpoint.
 BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply", "directory", *CHANNEL_OPS)
+#: Words a model might invent for B4b's owner release. Refused by name, never
+#: accepted: like ``decide``, release authority is the human's (DESIGN §4).
+RELEASE_WORDS: frozenset[str] = frozenset({"release", "deliver", "discard"})
 #: The COLLABORATION surface: the ops the user story needs from ANY bridge-
 #: connected session of the enrolled owner ("two people's article-search manager
 #: sessions coordinating on campaigns"). Only these take the outbound fence
@@ -1805,6 +1808,15 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         return _error(
             "decisions are made by the human through the ask queue — this tool has "
             "no decide authority (contract §10.3, #125)",
+            code="not_permitted",
+        )
+    if op in RELEASE_WORDS:
+        # B4b DESIGN §4: a held message is released only by the receiving
+        # PERSON, in the desktop app, with an operator signature. There is no
+        # such op; a model that invents one is told who decides, before any gate.
+        return _error(
+            "held messages are delivered or discarded by your owner in the desktop "
+            "app — this tool cannot release a held message",
             code="not_permitted",
         )
     if op and op not in BRIDGE_OPS:
