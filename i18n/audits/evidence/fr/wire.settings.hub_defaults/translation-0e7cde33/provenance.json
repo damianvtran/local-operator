@@ -1,0 +1,64 @@
+{
+  "agent": "i18n-translator",
+  "session": "7b2ba4ed501d",
+  "actual_model_source": "Persisted assistant translation write/edit tool-call usage.provider and usage.model_id, not header",
+  "transcript_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/transcript.jsonl",
+  "translation_entries": [
+    {
+      "entry_id": "2293a6c4e0dc45ee9e28b0691ce05dd5",
+      "timestamp": 1793713953.1828961,
+      "tool": "write",
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 101211,
+        "output_tokens": 367,
+        "cache_read_tokens": 99200,
+        "context_tokens": 101211,
+        "reasoning_tokens": 41,
+        "at_ms": 1793713952745,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      }
+    },
+    {
+      "entry_id": "b11b52f1d41f476e86bcd173c65e62c6",
+      "timestamp": 1793714022.218669,
+      "tool": "edit",
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 103504,
+        "output_tokens": 174,
+        "cache_read_tokens": 103296,
+        "context_tokens": 103504,
+        "reasoning_tokens": 68,
+        "at_ms": 1793714021578,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      }
+    }
+  ],
+  "fallback_routes": [
+    {
+      "entry_id": "b890d01d056149efa86ce524b5919819",
+      "primary": "anthropic/claude-sonnet-5-5",
+      "active": {
+        "selector": "anthropic/claude-opus-5-5",
+        "effort": "medium"
+      },
+      "reason": "provider failure: quota"
+    },
+    {
+      "entry_id": "9db45f79733b4e59a7181e007150d99f",
+      "primary": "anthropic/claude-sonnet-5-5",
+      "active": {
+        "selector": "openai/gpt-6.1-sol",
+        "effort": "medium"
+      },
+      "reason": "provider failure: quota"
+    }
+  ],
+  "method": "Direct LLM reasoning; no translation API/SDK/MT service/site.",
+  "actual_models": [
+    "openai/gpt-6.1-sol"
+  ]
+}

@@ -1,0 +1,137 @@
+"""Caller-level French metadata proof for ONE ordinary settings namespace.
+
+Runs the real production boot activation, then reads the two surfaces a user
+actually sees: the settings registry (TUI) and the desktop `/v1/settings` HTTP
+metadata. An unresolved English value for a key whose French differs is a LEAK
+and is listed, never suppressed. Exit 1 when a leak exists.
+"""
+
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+
+import httpx
+from fastapi import FastAPI
+
+from local_operator import settings_io
+from local_operator.config import ConfigManager
+from local_operator.i18n import text
+from local_operator.i18n.boot import activate_resolved_locale
+from local_operator.server.app import managed_desktop_boundary
+from local_operator.server.routes import settings
+
+token = 'synthetic-metadata-probe'
+os.environ['LOCAL_OPERATOR_DESKTOP_TOKEN'] = token
+ns = sys.argv[1]
+manager_dir = Path(sys.argv[2])
+root = Path.cwd()
+assert str(root) in str(__import__('local_operator').__file__)
+en = json.loads((root / f'local_operator/i18n/catalogues/en/{ns}.json').read_text())
+fr = json.loads((root / f'local_operator/i18n/catalogues/fr/{ns}.json').read_text())
+translated = {k: v for k, v in fr.items() if v != en[k]}
+
+
+def registry_surface() -> dict[str, str]:
+    found: dict[str, str] = {}
+    for section in settings_io.SECTIONS:
+        found.setdefault(section.title, f'section:{section.name}:title')
+        if section.description:
+            found.setdefault(section.description, f'section:{section.name}:description')
+    for setting in settings_io.SETTINGS:
+        found.setdefault(setting.label, f'{setting.key}:label')
+        if setting.help:
+            found.setdefault(setting.help, f'{setting.key}:help')
+        for choice in getattr(setting, 'choices', ()):
+            found.setdefault(choice.label, f'{setting.key}:choice:{choice.value}:label')
+            if choice.description:
+                found.setdefault(
+                    choice.description, f'{setting.key}:choice:{choice.value}:description'
+                )
+    return found
+
+
+async def http_metadata() -> tuple[int, dict[str, dict], dict[str, dict]]:
+    app = FastAPI()
+    app.include_router(settings.router)
+    app.middleware('http')(managed_desktop_boundary)
+    app.state.config_manager = ConfigManager(manager_dir)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url='http://localhost',
+        headers={'Authorization': f'Bearer {token}'},
+    ) as client:
+        response = await client.get('/v1/settings')
+    payload = response.json()
+    body = payload.get('result', {}) if isinstance(payload, dict) else {}
+    rows = {row['key']: row for row in (body.get('settings') or [])}
+    sections = {row['name']: row for row in (payload.get('result', {}).get('sections') or [])}
+    return response.status_code, rows, sections
+
+
+def http_surface(rows: dict[str, dict], sections: dict[str, dict]) -> dict[str, str]:
+    surface: dict[str, str] = {}
+    for key, row in rows.items():
+        for value in (row.get('label'), row.get('help')):
+            if value:
+                surface[value] = f'{key}'
+        for choice in row.get('choices') or []:
+            for value in (choice.get('label'), choice.get('description')):
+                if value:
+                    surface[value] = f'{key}:choice:{choice.get("value")}'
+    for name, section in sections.items():
+        for value in (section.get('title'), section.get('description')):
+            if value:
+                surface[value] = f'section:{name}'
+    return surface
+
+
+previous = text.active_locale()
+try:
+    activate_resolved_locale()
+    active = text.active_locale()
+    registry = registry_surface()
+    # The HTTP read runs INSIDE the same activation: a production process keeps
+    # its boot locale for the life of the request, so restoring first would
+    # measure my harness, not the product.
+    status, rows, sections = asyncio.run(http_metadata())
+finally:
+    text.set_active_locale(previous)
+http = http_surface(rows, sections)
+
+report = {}
+for name, surface in (('registry', registry), ('http', http)):
+    report[name] = {
+        'french_fields': sorted(
+            ({'key': key, 'field': surface[translated[key]]}
+             for key in translated if translated[key] in surface),
+            key=lambda row: row['key'],
+        ),
+        'english_leaks': sorted(
+            ({'key': key, 'field': surface[en[key]]}
+             for key in translated if en[key] in surface),
+            key=lambda row: row['key'],
+        ),
+        'not_exposed': sorted(
+            key for key in translated if en[key] not in surface and translated[key] not in surface
+        ),
+    }
+print(
+    json.dumps(
+        {
+            'source': str(__import__('local_operator').__file__),
+            'namespace': ns,
+            'configured_language': ConfigManager(manager_dir).get_config().values.get('language'),
+            'active_locale_after_boot': active,
+            'http_status': status,
+            'translated_keys': len(translated),
+            'registry': report['registry'],
+            'http': report['http'],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+)
+leaks = len(report['registry']['english_leaks']) + len(report['http']['english_leaks'])
+sys.exit(1 if leaks else 0)

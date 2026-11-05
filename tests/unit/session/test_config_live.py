@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
 )
+from local_operator.hub_org.settings import auto_enrol_enabled
 from local_operator.memory_capture import policy
 from local_operator.mobile.peer_send import journal_unconfirmed_enabled
 from local_operator.model.configure import (
@@ -834,6 +835,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         "synthetic-live-probe-session",
         lambda s, w: _bridge_settings().session,
     ),
+    # -- hub_org: the org Agent Hub auto-enrol switch ---------------------------
+    # LIVE because the enrol path re-reads it from config.yml at every boundary
+    # (sign-in, refresh) rather than caching it on the Session. Observed through
+    # that very reader, ``hub_org.settings.auto_enrol_enabled``, on the watched
+    # directory. The shipped default is ON, hence the probe value is False.
+    "hub.org.auto_enrol": (False, lambda s, w: auto_enrol_enabled(w.config_dir)),
     # -- asks: the lapsed-ask display window (decisions D8/D9) -----------------
     # Observed through the ONE reader every surface calls per publish/request
     # (``asks.visibility``), on the watcher's directory. That the RUNNING

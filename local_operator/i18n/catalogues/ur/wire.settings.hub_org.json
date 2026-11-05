@@ -1,0 +1,8 @@
+{
+  "wire.settings.hub_org.auto_enrol.help": "تنظیم کے نئے ایجنٹس، ٹیمیں اور مہارتیں pull کر کے سبسکرائب رکھیں۔",
+  "wire.settings.hub_org.auto_enrol.label": "تنظیم کے نئے آئٹمز شامل کریں",
+  "wire.settings.hub_org.auto_enrol.off.description": "صرف جب میں lop hub org pull چلاؤں",
+  "wire.settings.hub_org.auto_enrol.on.description": "نئے آئٹمز خودکار طور پر شامل کریں",
+  "wire.settings.hub_org.description": "آپ کی تنظیم اپنے نجی Agent Hub کے ذریعے ایجنٹس، ٹیمیں اور مہارتیں شیئر کرتی ہے۔ منتخب کریں کہ نئے آئٹمز اس مشین پر خودکار طور پر شامل ہوں یا نہیں۔",
+  "wire.settings.hub_org.title": "تنظیم کا Agent Hub"
+}

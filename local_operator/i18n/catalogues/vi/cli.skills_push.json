@@ -1,0 +1,9 @@
+{
+  "cli.skills_push.stale_base": "Hub đã chuyển sang {head} sau phiên bản cơ sở {base} dùng để push của liên kết này, nên không có nội dung nào được xuất bản: merge dựa trên phiên bản cơ sở cũ có thể xuất bản lại văn bản mà hub đã thay thế.",
+  "cli.skills_push.stale_base_next": "Bước tiếp theo an toàn: phiên bản cơ sở dùng để push hiện trỏ đến phiên bản mới nhất của hub là {head}. Xem các thay đổi trên hub bằng `lop skills sync --name {name} --check`, rồi chạy lại `lop skills push {name}`; các chỉnh sửa cục bộ sẽ được áp dụng lại trên tài liệu hiện tại của hub.",
+  "cli.skills_push.stale_base_bundle_next": "Bước tiếp theo an toàn: đưa cây tệp của hub vào bản sao của bạn bằng `lop skills sync --name {name}`, áp dụng lại thay đổi của bạn, rồi chạy lại `lop skills push {name}`.",
+  "cli.skills_push.merge_refused_next": "Bước tiếp theo an toàn: phiên bản cơ sở dùng để push hiện trỏ đến phiên bản mới nhất của hub{head}. Chạy `lop skills sync --name {name}` để đưa các thay đổi trên hub vào bản sao của bạn (giải quyết mọi xung đột được báo), áp dụng lại chỉnh sửa của bạn nếu bị mất, rồi chạy `lop skills push {name}`. Đừng ghi đè văn bản trên hub bằng phiên bản cũ hơn.",
+  "cli.skills_push.verified": "Đã xác minh: phiên bản mới nhất của hub là {revision} chứa đúng tài liệu mà lần push này đã gửi.",
+  "cli.skills_push.verify_mismatch": "Cảnh báo: phiên bản mới nhất của hub là {revision} KHÔNG khớp với tài liệu mà lần push này đã gửi; hub hiện có thể chứa nội dung khác. Kiểm tra bằng `lop skills sync --name {name} --check` trước khi push lại.",
+  "cli.skills_push.verify_unavailable": "Chưa xác minh: không thể đọc lại hub sau khi push ({reason}). Kiểm tra bằng `lop skills sync --name {name} --check`."
+}

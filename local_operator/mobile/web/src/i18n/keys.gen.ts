@@ -1650,6 +1650,12 @@ export type MessageParams = {
   "wire.settings.hub_defaults.teams.label": undefined;
   "wire.settings.hub_defaults.teams.off.description": undefined;
   "wire.settings.hub_defaults.teams.on.description": undefined;
+  "wire.settings.hub_org.auto_enrol.help": undefined;
+  "wire.settings.hub_org.auto_enrol.label": undefined;
+  "wire.settings.hub_org.auto_enrol.off.description": undefined;
+  "wire.settings.hub_org.auto_enrol.on.description": undefined;
+  "wire.settings.hub_org.description": undefined;
+  "wire.settings.hub_org.title": undefined;
   "wire.skill_adoption.alias_occupied": undefined;
   "wire.skill_adoption.backup_label": { "path": string; "hash": string };
   "wire.skill_adoption.cancelled": undefined;

@@ -63,6 +63,7 @@ from .wake import (
     _producer_fence,
     deliver_wake,
     engagement_hold,
+    notify_screening_infra_hold,
     screen_item,
 )
 
@@ -775,9 +776,9 @@ def _screener_sees_images(config_dir: Path) -> bool:
     disagree. Unknown/unusable selection reads as "no vision": fail closed.
     """
 
-    from ..model_boundary import resolve_default_selection
+    from ..model_boundary import resolve_screening_selection
 
-    selection = resolve_default_selection(config_dir)
+    selection = resolve_screening_selection(config_dir)
     if selection is None:
         return False
     # A STATED capability only. ``build_model_spec`` defaults an undescribed
@@ -1195,6 +1196,9 @@ async def handle_conversation_available(
                 # re-screening. The hub's admission and this machine's own
                 # receipt for these exact body bytes decide what was already
                 # concluded; only a message with neither is screened.
+                # Do not let the image shortcut revive an UNSENT fallback
+                # allow. ACK/reservation-bound decisions remain write-once.
+                store.retire_unsent_fallback_allow(owner, message_id, body_sha256=served_digest)
                 prior = store.receipt_for_message(owner, message_id)
                 if prior is not None and prior.get("body_sha256") != served_digest:
                     prior = None
@@ -1322,6 +1326,8 @@ async def handle_conversation_available(
                 # poll; and the owner hears about it once per episode.
                 outcome["retry_at"] = getattr(result, "retry_at", None)
                 await _notify_budget_exhausted(store, owner, config_dir, designation)
+            else:
+                await notify_screening_infra_hold(owner, config_dir, designation, code)
             return outcome
         receipt = getattr(result, "receipt", None)
         if disposition == "bounce":

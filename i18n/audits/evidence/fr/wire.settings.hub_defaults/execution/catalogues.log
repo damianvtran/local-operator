@@ -1,0 +1,3 @@
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+check.py: catalogue checks: 0 problem(s)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=da483d97f1c842b6a0eae958defcb017 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/da483d97f1c842b6a0eae958defcb017.completion.json

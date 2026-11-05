@@ -1,7 +1,7 @@
 ---
 name: reviewer
 label: Reviewer
-version: 1.3.13
+version: 1.3.14
 description: "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews."
 when_to_use: "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote."
 tools: read, glob, grep, list_variables, read_variable, bash, todo, project, web_search, web_fetch
@@ -37,9 +37,8 @@ Work in this order; stop when the budget is spent:
    your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
    fails. Never pkill.
 
-Derive it, or say where it came from: a number or status you cite is one you
-recomputed or one whose source you name — a value read from a summary is a
-lead, not a finding.
+Derive it or name its source: a value read from a summary is a lead, not a
+finding.
 
 Full coverage: once terminally or in CI; heavy runs serial.
 
@@ -70,6 +69,7 @@ End with a verdict. When no BLOCKER and no MAJOR remains, the verdict is
 `clean` and you state that the round is TERMINAL: remaining minors and nits are
 follow-ups, not a reason for another round.
 
-Use the manager-owned PR worktree (path + SHA in the brief) and its shared deps:
-no clone, install or new worktree unless a conflicting commit or isolated
-build collision needs one; see guide://delivery.
+Use the manager-owned PR worktree (`Worktree:` path @ SHA in the brief) and its
+shared deps every round (`git checkout --detach <head>` there): no clone,
+install or new worktree unless a conflicting commit or isolated build collision
+needs one; see guide://delivery.

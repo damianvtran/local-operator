@@ -637,7 +637,9 @@ def recorded_read_verdict(
     Returns ``(RECORDED_VERDICT, receipt)`` to hand off on a recorded decision
     with no model call, ``(RECORDED_HOLD, code)`` to hold, or
     ``(RECORDED_SCREEN, None)`` when no verdict exists and screening decides.
-    Pure local reads; it never deletes or rewrites a record.
+    Local-only recovery. An UNSENT non-preferred allow is retired atomically
+    so the next screen can commit a new decision; ACK/reservation-bound tuples
+    remain immutable.
 
     NEVER DISCARD A VERDICT THE HUB OR THE LEDGER ALREADY HOLDS (PR #3063
     review r7 M8). The hub's ack ledger is WRITE-ONCE per message
@@ -655,7 +657,8 @@ def recorded_read_verdict(
     * the message's own committed ``allow`` receipt (decided, not yet sent)
       → hand off on it, unless it was made by another enrollment generation:
       the hub was never told, so a new owner's own screen is still possible
-      and is the honest decision;
+      and is the honest decision. An UNSENT non-preferred allow is likewise
+      provisional: retire it and screen again, never replay the weak decision;
     * nothing recorded → screen.
 
     What a recorded verdict replaces is the MODEL DECISION only. Every gate
@@ -674,7 +677,15 @@ def recorded_read_verdict(
     from local_operator.team_bridge.store import Store, StoreRefused
 
     store = Store(config_dir)
+    # Validate before retiring anything: a changed body must never erase the
+    # old receipt's hash binding in order to manufacture a new decision.
+    envelope, bad_code = validate_envelope(owner, item)
+    if envelope is None:
+        return RECORDED_HOLD, bad_code or "envelope_malformed"
     try:
+        # An unsent fallback allow is provisional, not an immutable hub ACK.
+        # Retire it before recovery so the same message must screen again.
+        store.retire_unsent_fallback_allow(owner, message_id, body_sha256=envelope.body_sha256)
         recorded = store.recorded_intent(owner, message_id, "read")
         own_receipt = None if recorded is not None else store.receipt_for_message(owner, message_id)
     except StoreRefused as refusal:
@@ -696,10 +707,6 @@ def recorded_read_verdict(
         stored, identity = own_receipt, None
     else:
         return RECORDED_SCREEN, None
-    # The envelope gate, exactly as a fresh screen's step 3.
-    envelope, bad_code = validate_envelope(owner, item)
-    if envelope is None:
-        return RECORDED_HOLD, bad_code or "envelope_malformed"
     if stored.get("body_sha256") != envelope.body_sha256:
         return RECORDED_SCREEN, None
     if (
@@ -889,6 +896,50 @@ async def deliver_wake(
     return f"engaged {session_id} ({getattr(outcome, 'state', 'started')})"
 
 
+async def notify_screening_infra_hold(
+    owner: Any, config_dir: Path, session_id: str, hold_code: Any
+) -> None:
+    """Tell the owner ONCE why agent messages are held when only they can fix it.
+
+    WHY. Screening tries the preferred screeners
+    (``model_boundary.SCREENING_EVALUATED_MODELS``; PROTOCOL A6/A7 on PR #3438)
+    and then the owner's own configured model and fallbacks (operator directive
+    2026-11-04). ``screening_model_unavailable`` means EVERY one of them failed
+    or none is configured, so every inbound message is held, fail-closed, and
+    the hold may not clear on its own: the owner is told what is wrong and how
+    to fix it.
+
+    ONCE per receiving endpoint: the item is keyed by endpoint with fixed copy,
+    so a repeat is absorbed by the notification store (same key, same content
+    hash) instead of adding one item per held message. Contentless like the
+    budget notice: no sender, body or conversation. Any other hold code is a
+    no-op. Best-effort: never turns the hold into a failure.
+    """
+
+    from local_operator.team_bridge.model_boundary import SCREENING_MODEL_UNAVAILABLE
+
+    if hold_code != SCREENING_MODEL_UNAVAILABLE:
+        return
+    from local_operator.i18n.keys import cli_team_bridge as _k
+    from local_operator.i18n.text import tr
+    from local_operator.notifications.store import NotificationStore
+
+    def _notify() -> None:
+        t = tr("cli.team_bridge")
+        NotificationStore(config_dir).notify(
+            session_id,
+            title=t(_k.notify_screening_model_unavailable_title()),
+            body_md=t(_k.notify_screening_model_unavailable_body()),
+            priority="high",
+            key=f"team-bridge-screening-model:{owner.endpoint_id}",
+        )
+
+    try:
+        await asyncio.to_thread(_notify)
+    except Exception:  # noqa: BLE001 — a notification is chrome, the hold stands
+        logger.info("bridge: screening-model notification unrecorded code=notify_failed")
+
+
 def _badge_only(config_dir: Path, message_id: str) -> dict[str, Any]:
     """The ``no_designation`` outcome: nothing delivered, and nothing hidden.
 
@@ -994,6 +1045,9 @@ async def handle_message_available(
             return {"action": "hold", "message_id": message_id, "code": "screening_unavailable"}
         disposition = getattr(result, "disposition", None)
         if disposition == "hold":
+            await notify_screening_infra_hold(
+                owner, config_dir, designation, getattr(result, "hold_code", None)
+            )
             return {
                 "action": "hold",
                 "message_id": message_id,

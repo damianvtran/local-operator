@@ -2088,7 +2088,81 @@ class AuthStore:
                 ("identity_unattributed", self._now_ms(), legacy.id, json.dumps(legacy.data)),
             )
         self._conn.commit()
-        return self._after_credential_write("radient", stored.id)
+        written = self._after_credential_write("radient", stored.id)
+        self._org_hub_boundary("sign-in")
+        return written
+
+    def _org_hub_config_dir(self) -> Path | None:
+        """The config root this store belongs to, or ``None`` for an in-memory store.
+
+        The org-hub gate record lives beside ``auth.db``, so the store's own
+        directory — not the process-global ``config_dir()`` — is the root that
+        a scratch or test store must touch.
+        """
+        if str(self._db_path) == ":memory:":
+            return None
+        return self._db_path.parent
+
+    def _org_hub_boundary(self, boundary: str) -> None:
+        """Refresh the org Agent Hub gate (and auto-enrol) after a Radient sign-in.
+
+        WHY HERE. The organization Agent Hub is shown only to a Radient Team
+        member, and the gate is a cached record (``hub_org.eligibility``) read
+        with zero network. Sign-in is the moment that answer can change, and
+        this one completion path is shared by `lop login`, the TUI's `/login`
+        and the desktop login route, so hooking it once covers all three.
+
+        AFTER the commit, on a daemon thread, never raising — the same contract
+        as :meth:`_rearm_parked_tunnel_login`: a login must never fail or stall
+        over a memberships read or a catalogue pull. Lazy import: the hub stack
+        does not belong on a credential write's import path. The thread is
+        kept so a short-lived host (`lop login`) can wait for the gate answer
+        with :meth:`wait_org_hub_gate` before it exits.
+        """
+        root = self._org_hub_config_dir()
+        if root is None:
+            return
+        try:
+            from local_operator.hub_org import enrol
+
+            self._org_hub_thread = enrol.on_boundary(root, boundary, force=True)
+        except Exception:  # noqa: BLE001 — a login must not fail over the org hub
+            logger.debug("org hub refresh after %s could not start", boundary, exc_info=True)
+
+    def wait_org_hub_gate(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` s for the post-sign-in gate refresh; True when done.
+
+        For the CLI login only (agent review R3): the process exits right after
+        sign-in and would kill the refresh with it, so `lop hub --help` stayed
+        closed until some later boundary. Only the memberships read is awaited;
+        the catalogue enrol continues on its daemon thread. A host with an event
+        loop (TUI, desktop) never calls this.
+        """
+        thread = getattr(self, "_org_hub_thread", None)
+        event = getattr(thread, "gate_refreshed", None)
+        if event is None:
+            return True
+        return bool(event.wait(timeout))
+
+    def org_hub_signed_out(self) -> None:
+        """Close the org Agent Hub gate now: a Radient account left this machine.
+
+        Shared by `lop logout radient` and the desktop's account removal
+        (``DELETE /v1/auth/accounts/{id}``, agent review R2) so no org guide,
+        hint, setting or tool op outlives the account. The gate record holds no
+        token, but its answer belongs to the account that left. If another
+        Radient account remains, the next refresh boundary reopens the gate for
+        it. Never raises: a logout must not fail over the org hub.
+        """
+        root = self._org_hub_config_dir()
+        if root is None:
+            return
+        try:
+            from local_operator.hub_org import eligibility
+
+            eligibility.clear(root)
+        except Exception:  # noqa: BLE001 — a logout must not fail over the org hub
+            logger.debug("org hub gate clear after logout failed", exc_info=True)
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
         """Seal Muse secrets before metadata serialization; preserve other providers."""
@@ -2615,6 +2689,8 @@ class AuthStore:
         )
         for row in rows:
             self.delete_credential(row.id)
+        if provider == "radient":
+            self.org_hub_signed_out()
         return len(rows)
 
     # -- blocking --------------------------------------------------------------
