@@ -16,9 +16,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
-from local_operator.team_bridge.store import Store, StoreRefused, state_db_path
+from local_operator.team_bridge.store import Store, StoreRefused, _PROOF_PREFIX, state_db_path
 from tests.unit.team_bridge import test_screening_chain as chain
 from tests.unit.team_bridge.test_screening import _item, _setup
+from tests.unit.team_bridge.test_screening_chain import _chain_rig  # noqa: F401
 
 
 @contextmanager
@@ -44,7 +45,6 @@ def _provider(monkeypatch, root, *, status=200, error="", fallback=False, script
     real_transport = httpx.AsyncHTTPTransport
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
     chain._config(root, chain=["deepseek/deepseek-flash"] if fallback else None)
     chain._install_wire(monkeypatch, chain._Wire({}))
 
@@ -56,6 +56,7 @@ def _provider(monkeypatch, root, *, status=200, error="", fallback=False, script
             return await super().handle_async_request(request)
 
     monkeypatch.setattr(httpx, "AsyncHTTPTransport", LoopbackTransport)
+    thread.start()
     try:
         yield observed
     finally:
@@ -185,7 +186,7 @@ def test_parallel_last_allowance_and_clock_rollback_keep_spend(tmp_path, monkeyp
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(reserve, range(2)))
-    assert sum(r == "budget_exhausted" for r in results) == 1
+    assert sum(r == "sender_exhausted" for r in results) == 1
     assert _counts(tmp_path) == [("logical", "sender-a", 20)]
     now = store_module.time.time()
     monkeypatch.setattr(store_module.time, "time", lambda: now - 3600)
@@ -205,7 +206,7 @@ def test_account_ceilings_shared_across_namespaces_and_unknown_types(tmp_path):
             })
     other = replace(owner, tenant_id="tnt_other", endpoint_id="bep_other", credential_id=9)
     store.commit_enrollment(other, OwnerReceipt("bridge_consent_v1", "other"))
-    with pytest.raises(StoreRefused, match="account hourly"):
+    with pytest.raises(StoreRefused, match="units/hour/account"):
         Store(tmp_path).reserve_screening_attempt(other, input_proof={
             "sender_account_id": "sender-c", "sender_kind": "agent",
         })
@@ -231,11 +232,12 @@ def test_each_account_bucket_stays_independently_forty_with_two_known_senders(tm
     for bucket in ("logical", "http"):
         for sender in ("sender-a", "sender-b"):
             for _ in range(20):
-                store._reserve_bucket(owner, kind=bucket, message_id="bmsg_one", fingerprint="f",
-                                      sender_account_id=sender, sender_kind="human")
-        with pytest.raises(StoreRefused, match="account hourly"):
+                store._reserve_bucket(owner, kind=bucket, message_id="bmsg_one", fingerprint=_PROOF_PREFIX + json.dumps({
+                                          "sender_account_id": sender, "sender_kind": "human"}),
+                                      sender_account_id=sender)
+        with pytest.raises(StoreRefused, match="units/hour/account"):
             store._reserve_bucket(owner, kind=bucket, message_id="bmsg_one", fingerprint="f",
-                                  sender_account_id="sender-c", sender_kind="agent")
+                                  sender_account_id="sender-c")
     assert _counts(tmp_path) == [
         ("http", "sender-a", 20), ("http", "sender-b", 20),
         ("logical", "sender-a", 20), ("logical", "sender-b", 20),
@@ -262,3 +264,67 @@ def test_pre_contract_rows_are_not_reset_or_ignored(tmp_path):
         })
     with sqlite3.connect(state_db_path(tmp_path)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM screening_attempts").fetchone()[0] == 20
+
+
+def test_pair_allocation_uses_stored_participant_not_display_sender(tmp_path):
+    from local_operator.team_bridge.screening import validate_envelope
+
+    _, owner = _setup(tmp_path)
+    item = _identity_item("bmsg_pair", "stored-sender", "agent")
+    item["message"]["sender"] = {"account_id": "stored-sender", "endpoint_id": "bep_sender"}
+    item["sender"]["account_id"] = "display-spoof"
+    envelope, refusal = validate_envelope(owner, item)
+    assert refusal is None
+    assert (envelope.sender_account, envelope.sender_kind) == ("stored-sender", "agent")
+
+
+def _batch_cycle(root, owner, items):
+    import asyncio
+    from local_operator.team_bridge import scheduler
+    from tests.unit.team_bridge.test_screening import _consent_status
+
+    raw = _consent_status(owner, {"version": "bridge_consent_v1", "text": "v1 consent"})
+    verified = scheduler.VerifiedStatus(scheduler._VERIFIED_TOKEN, raw)
+
+    async def fetch():
+        return verified
+
+    return asyncio.run(scheduler.run_screening_cycle(
+        config_dir=root, owner=owner, items=items, auth_store=None,
+        status_fetcher=fetch, batch=True,
+    ))
+
+
+def test_batch_real_http_is_one_unit_charged_to_every_sender(tmp_path, monkeypatch):
+    _, owner = _setup(tmp_path)
+    items = [_identity_item("bmsg_a", "sender-a"), _identity_item("bmsg_b", "sender-b")]
+    reply = "ID: m1\nVERDICT: deliver\nREASON: ordinary.\nID: m2\nVERDICT: deliver\nREASON: ordinary."
+    with _provider(monkeypatch, tmp_path, reply=reply) as requests:
+        results = _batch_cycle(tmp_path, owner, items)
+        assert [result.disposition for result in results] == ["deliver", "deliver"]
+        assert len(requests) == 1
+    assert _counts(tmp_path) == [
+        ("http", "sender-a", 1), ("http", "sender-b", 1),
+        ("logical", "sender-a", 1), ("logical", "sender-b", 1),
+    ]
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        assert conn.execute("SELECT kind, COUNT(DISTINCT COALESCE(batch_id, attempt_id)) "
+                            "FROM screening_attempts GROUP BY kind").fetchall() == [
+            ("http", 1), ("logical", 1),
+        ]
+
+
+def test_batch_noncarrier_sender_mutation_blocks_fallback_http(tmp_path, monkeypatch):
+    _, owner = _setup(tmp_path)
+    items = [_identity_item("bmsg_a", "sender-a"), _identity_item("bmsg_b", "sender-b")]
+
+    def mutate(_payload):
+        with sqlite3.connect(state_db_path(tmp_path)) as conn:
+            conn.execute("UPDATE screening_attempts SET sender_account_id = 'laundered' "
+                         "WHERE kind = 'logical' AND message_id = 'bmsg_b'")
+
+    with _provider(monkeypatch, tmp_path, fallback=True,
+                   script={"gpt-5.4": (503, "provider unavailable")}, on_request=mutate) as requests:
+        results = _batch_cycle(tmp_path, owner, items)
+        assert all(result.disposition == "hold" for result in results)
+        assert len(requests) == 1

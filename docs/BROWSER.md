@@ -268,14 +268,30 @@ never overwrites. Omitting it lands the clip under
 The host writes the file at stop; bytes never cross the RPC. The harness then
 judges what landed from disk — size equal to the host's report, non-zero, and
 the MP4 `ftyp` box at bytes 4..8 — so a path is only ever reported for a
-complete file. Capture parameters are fixed at up to 1280x720 (a ceiling: the
-clip is scaled to fit), 10 fps, audio off. The clip is an MP4 with an AV1 track,
-which decoded in AVFoundation in the desktop PR's real-path run and is expected
-not to play in Chrome's `<video>` or H.264-only players (not tested in Chrome).
+complete file. Capture size is the caller's: omit `width`/`height` and the clip is
+1280x720 as before (a ceiling, not a promise: the clip is scaled to fit, so a
+visible, larger tab can come out smaller, e.g. 1144x720), or give both (even,
+240-3840, area at most 3840x2160) and
+the host resizes the tab's viewport to exactly that before it starts.
+`fps` (10) and audio (off) stay fixed. The default clip is an MP4 with an AV1
+track, which decoded in AVFoundation in the desktop PR's real-path run and is
+refused by Chromium's `<video>` in testing (macOS arm64); H.264-only players
+are expected not to play it (untested). `quality: "high"` (capability
+`record_quality`) records the same tab through a separate encoder into an H.264
+MP4 that played in Chromium's `<video>` and macOS AVFoundation (other players
+and platforms untested). On macOS arm64 with the hardware encoder it used less
+whole-app CPU than the default clip, but more main-process CPU and about
+0.5-0.7 GB more RAM. Software encoding is limited to 1920x1080, and a host
+without a usable encoder refuses (`record_quality_unavailable`) rather than
+falling back. A host without the capability is refused after the approval
+prompt but before anything starts or is sent to the app, and a start that does
+not echo `codec: "h264"` is a failed start.
 Limits: `timeout_s` is the length (default 120 s, max 600 s; the host auto-stops
 and saves at it), 64 MiB per clip (32 MiB under a scratchpad, where a larger
 clip is discarded rather than truncated), one recording per session per tab and
-two app-wide. Closing the tab, losing the
+two app-wide, and only one recording above 1920x1080 at a time — a second large
+clip is refused as `record_limit`: stop the running large clip (or wait for its
+timer), or record at 1920x1080 or below. Closing the tab, losing the
 debugger to another client, or quitting the app discards an in-progress
 recording; nothing is on disk before the stop.
 

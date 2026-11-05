@@ -40,6 +40,7 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -76,6 +77,7 @@ from local_operator.i18n.frames import config_frame_payload
 from local_operator.i18n.keys import relay_login
 from local_operator.i18n.messages import Msg, render
 from local_operator.i18n.resolve import resolve_language
+from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.mobile import mesh as mobile_mesh
 from local_operator.mobile import projects as mobile_projects
 from local_operator.mobile import push_devices as mobile_push_devices
@@ -107,7 +109,6 @@ from local_operator.mobile.types import (
     SubagentRow,
 )
 from local_operator.network.types import MeshRefusal
-from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import ENGAGED_ENV, reported_subagent_count
@@ -3771,6 +3772,49 @@ def _mirror_dial_health(entry: SessionEntry) -> None:
         entry.projection.degraded = bool(entry.degraded)
 
 
+def _spawn_watched_runtime(
+    loop: asyncio.AbstractEventLoop,
+    exited: asyncio.Future[int],
+    argv: list[str],
+    **kwargs: Any,
+) -> Any:
+    """Spawn a phone-started runtime disclaimed, and park ONE thread on its exit.
+
+    WHY A THREAD: ``spawn_disclaimed`` returns a ``Popen`` or ``DisclaimedProcess``
+    with a blocking ``wait``. ``create_subprocess_exec`` used to give two things for
+    free: an awaitable exit, which ``_spawn_session`` races against readiness, and a
+    reap through asyncio's child watcher. Without a waiter, a detached child that
+    exits after the relay stopped watching (a timed-out start the relay must not
+    signal, or a runtime's normal idle exit) stays ``<defunct>`` under a relay that
+    lives for weeks. That is the leak ``launch._harvest_on_exit`` was written for.
+    One daemon thread parked on ``wait()`` covers both: it reaps the child whatever
+    the outcome of the start, and it resolves ``exited`` for the race. Not
+    ``SIGCHLD``/``waitpid(-1)``, which are process-wide and could steal another
+    child's status (same reasoning as ``_harvest_on_exit``).
+
+    The thread starts INSIDE this function, which runs under ``asyncio.to_thread``,
+    so a caller cancelled while the spawn is in flight still leaves its child
+    reaped. The future is resolved through ``call_soon_threadsafe``, and only if it
+    is still pending, so a finished start's cancelled future, or a closed loop,
+    cannot make the reaper raise.
+    """
+    process = spawn_disclaimed(argv, **kwargs)
+
+    def resolve(code: int) -> None:
+        if not exited.done():
+            exited.set_result(code)
+
+    def reap() -> None:
+        code = process.wait()
+        try:
+            loop.call_soon_threadsafe(resolve, code)
+        except RuntimeError:  # loop closed: nobody is racing the exit any more
+            pass
+
+    threading.Thread(target=reap, name=f"reap-phone-{process.pid}", daemon=True).start()
+    return process
+
+
 # ---------------------------------------------------------------------------
 # The daemon
 # ---------------------------------------------------------------------------
@@ -5416,10 +5460,19 @@ class MobileDaemon:
         # The claim is set in a WARM child's environment, so a daemon started
         # from inside a session inherits it and — without this line — hands every
         # session it starts a record claiming an engage that never happened, i.e.
-        # the 300 s keep-alive window bought by the wrong fact. This is the one
-        # runtime spawn outside ``launch._spawn_runtime``, so it does not get
-        # that function's scrub (review round 1, M1).
+        # the 300 s keep-alive window bought by the wrong fact. This spawn builds
+        # its environment by hand rather than through ``launch._spawn_runtime``, so
+        # it does not get that function's scrub (review round 1, M1). It DOES share
+        # that function's spawn primitive (``spawn_disclaimed``, below).
         env.pop(ENGAGED_ENV, None)
+        # A daemon started from a wake-owned runtime is not that supervisor.
+        # Match the viewer spawn's ownership boundary: only the actual minting
+        # supervisor may pass its owner token, never an inherited PID/marker.
+        # Boot also strips these, but the exec-time environment is what a stop
+        # sweep inspects, so clearing only after boot is too late (#3028 r5).
+        from local_operator.wakes.owned_runtimes import stamp_child_env
+
+        stamp_child_env(env)
         # The desktop bearer, for the same reason as the claim above: the viewer's spawn in
         # ``launch._spawn_runtime`` scrubs it and this one did not (#3002 review r2, R2-1).
         # A mobile daemon started from inside a desktop-owned tree would otherwise put the
@@ -5444,7 +5497,31 @@ class MobileDaemon:
         argv0, executable = procname.spawn_identity(
             procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
         )
-        process = await asyncio.create_subprocess_exec(
+        # A SURFACE DYING IS A DISPLAY EVENT, NOT A LIFECYCLE EVENT (operator,
+        # 2026-11): closing or force-quitting any surface -- the app, the TUI, this
+        # relay -- must never terminate a runtime. ``setsid`` alone does not buy
+        # that on macOS. On 2026-10-09 an Activity Monitor force-quit SIGTERMed
+        # nine detached runtimes within 17 ms because they still sat in the app's
+        # macOS RESPONSIBILITY scope, which survives ``setsid`` and reparenting
+        # (see ``local_operator.macos_disclaim``). Every other runtime spawn
+        # (``launch._spawn_runtime``, standby warms, ``lop exec``) already goes
+        # through ``spawn_disclaimed``. This one used ``create_subprocess_exec`` +
+        # ``detached_popen_kwargs`` and so stayed in whatever responsibility chain
+        # the relay sat in, e.g. a relay started from inside the app's tree.
+        #
+        # Constraints kept: the helper's fallback (non-macOS, missing symbols, a
+        # refused attribute) is exactly the old ``Popen`` +
+        # ``detached_popen_kwargs()`` -- Windows keeps its console detachment --
+        # and it logs why it fell back, never silently. It is SYNCHRONOUS
+        # (posix_spawn/Popen), so it runs off the loop. It returns a
+        # ``Popen``/``DisclaimedProcess``, not an asyncio ``Process``: see
+        # ``_spawn_watched_runtime`` for how exit and reaping are observed.
+        loop = asyncio.get_running_loop()
+        exited: asyncio.Future[int] = loop.create_future()
+        process = await asyncio.to_thread(
+            _spawn_watched_runtime,
+            loop,
+            exited,
             # ``python_argv``'s shape with the label in element 0: the label
             # replaces only argv[0], and ``SAFE_PATH_FLAG`` stays at index 1
             # because interpreter options are recognised only before ``-m``.
@@ -5455,13 +5532,15 @@ class MobileDaemon:
             # ``session/runtime/launch.py``, and harder to notice here because
             # nobody is watching a phone daemon's version. See
             # :mod:`local_operator.interpreter`.
-            argv0,
-            SAFE_PATH_FLAG,
-            "-m",
-            # THE SPAWN CONTRACT, from its one home: the residency sweep's census
-            # matches this module by this exact argv word, so a literal here could
-            # drift from ``session/runtime/launch.py``'s without anything failing.
-            RUNTIME_MODULE,
+            [
+                argv0,
+                SAFE_PATH_FLAG,
+                "-m",
+                # THE SPAWN CONTRACT, from its one home: the residency sweep's census
+                # matches this module by this exact argv word, so a literal here could
+                # drift from ``session/runtime/launch.py``'s without anything failing.
+                RUNTIME_MODULE,
+            ],
             executable=executable,
             env=env,
             # Detached stdio: the child speaks through its record and socket;
@@ -5470,14 +5549,6 @@ class MobileDaemon:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            # REAL detachment, per platform. ``start_new_session=True`` is
-            # documented "(POSIX only)" and the Windows ``_execute_child``
-            # parameter is literally ``unused_start_new_session``: a child
-            # spawned for a phone session would silently stay on this daemon's
-            # console, where a console close takes it down — the one thing this
-            # spawn exists to survive. The helper also keeps POSIX on
-            # ``setsid`` (byte-identical behaviour there).
-            **detached_popen_kwargs(),
         )
 
         async def ready() -> None:
@@ -5494,7 +5565,6 @@ class MobileDaemon:
                 await asyncio.sleep(0.05)
 
         readiness = asyncio.create_task(ready())
-        exited = asyncio.create_task(process.wait())
         try:
             async with asyncio.timeout(SESSION_START_TIMEOUT_S):
                 done, _ = await asyncio.wait(
@@ -5507,7 +5577,18 @@ class MobileDaemon:
                 return process.pid
         except BaseException:
             self.release_phone_view(session_id)
-            if process.returncode is None:
+            # ``poll`` rather than ``returncode``: a sync process object only
+            # learns its status when someone asks, and the watcher thread may not
+            # have run yet. It is best-effort, not authoritative: on the ``Popen``
+            # fallback (Linux, Windows) a ``poll`` racing the reaper thread's
+            # blocking ``wait`` can still read ``None`` for a child that has just
+            # exited (only ``DisclaimedProcess`` serialises the two on one lock).
+            # That misread is harmless: the branch below only asks a published,
+            # pid-matched owner to retire itself. ``find_runtime_record`` resolves
+            # only a LIVE owner, so a dead child matches nothing, and a stale match
+            # fails at connect, which the bounded wait below swallows. Either way
+            # nothing is signalled.
+            if process.poll() is None:
                 # A known resume route can receive work from another surface
                 # before this HTTP request finishes. Even a missing welcome is
                 # not proof of an idle constructor: inbox/wake work starts
@@ -5737,6 +5818,11 @@ _SUPPLEMENT_FILE_TYPES: dict[str, str] = {
     ".heic": "image/heic",
     ".heif": "image/heif",
     ".avif": "image/avif",
+    # Video for the written-video preview tile. Inert media types (the player decodes;
+    # nothing executes), still under the 10 MB cap and ``nosniff`` like every entry.
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
 }
 
 #: The read family's response policy (file-serving RFC D5; memo §2.7): the pair rides
@@ -6093,6 +6179,11 @@ def build_app(daemon: MobileDaemon):
                 # never sends a flag an older relay would silently drop — which
                 # on the wire looks exactly like a skill that did not fire.
                 "skill_invocation": {"available": True},
+                # The paired phone's notification-sound routes (C5): the list,
+                # the sha-checked audio and the per-device cache report. A
+                # RELAY capability like ``session_tags``: an older daemon lacks
+                # the key, and the phone then stays on its bundled built-ins.
+                "notification_sounds": {"available": True},
                 # Authenticated build support, not a claim that receipt storage
                 # is writable right now. Typed refusals preserve the same key.
                 "session_start": dict(START_CAPABILITY),
@@ -6190,20 +6281,38 @@ def build_app(daemon: MobileDaemon):
         from local_operator.paths import config_dir
 
         agent_id = str(request.path_params["agent_id"])
+        # ``?size=64|128|256`` (feature ``agent_avatar_sizes``): the core route's
+        # downscaled variant, so a 24px phone row is not sent the 512px original.
+        # Absent keeps the original bytes and the bare-sha ETag.
+        try:
+            size = agent_avatar.parse_size(request.query_params.get("size"))
+        except ValueError:
+            return JSONResponse(
+                # i18n: ignore protocol diagnostic
+                {"error": "invalid size", "code": "invalid_size"},
+                status_code=422,
+            )
         root = config_dir()
         known = await asyncio.to_thread(agent_avatar.stored_sha, root, agent_id)
-        if known and etag_matches(request.headers.get("if-none-match", ""), known):
+        known_tag = agent_avatar.sized_tag(known, size) if known else None
+        if known_tag and etag_matches(request.headers.get("if-none-match", ""), known_tag):
             return Response(
                 status_code=304,
-                headers={"ETag": agent_avatar.etag(known), "Cache-Control": "private, no-cache"},
+                headers={
+                    "ETag": agent_avatar.etag(known_tag),
+                    "Cache-Control": "private, no-cache",
+                },
             )
         try:
-            data, mime, sha = await asyncio.to_thread(agent_avatar.read_stored, root, agent_id)
+            data, mime, sha = await asyncio.to_thread(
+                agent_avatar.read_stored_sized, root, agent_id, size
+            )
         except agent_avatar.AvatarError as exc:
             return JSONResponse(
                 {"error": exc.reason, "code": exc.reason},
                 status_code=agent_avatar.HTTP_STATUS.get(exc.reason, 404),
             )
+        # ``sha`` is the variant's tag here (``sized_tag``), the bare sha when unsized.
         headers = {"ETag": agent_avatar.etag(sha), "Cache-Control": "private, no-cache"}
         if etag_matches(request.headers.get("if-none-match", ""), sha):
             return Response(status_code=304, headers=headers)
@@ -7927,13 +8036,29 @@ def build_app(daemon: MobileDaemon):
                     return "no-cwd"
                 expanded = os.path.join(cwd, expanded)
             resolved_path = Path(os.path.realpath(expanded))
-            allowed_roots = [Path(os.path.realpath(root)) for root in (cwd, home) if root]
+            # The row's own session scratchpad is a root beside cwd/home (a relocated config
+            # dir may sit outside ``~``), mirroring the prefilter that admitted the path.
+            from local_operator.scratchpad import scratchpad_root
+
+            own_pad = scratchpad_root(directory)
+            allowed_roots = [
+                Path(os.path.realpath(root))
+                for root in (cwd, home, str(own_pad) if own_pad is not None else "")
+                if root
+            ]
             if not any(
                 resolved_path == root or resolved_path.is_relative_to(root)
                 for root in allowed_roots
             ):
                 return "missing"
-            if denylist.is_sensitive(str(resolved_path), cwd=cwd or home):
+            # The row's own session scratchpad is servable (the prefilter admitted it under
+            # the same carve-out); every credential rule and every OTHER session's store
+            # stay refused. Derived from the requested session's directory, never the env.
+            if denylist.is_sensitive_for_supplements(
+                str(resolved_path),
+                cwd=cwd or home,
+                session_scratchpad=str(own_pad) if own_pad is not None else None,
+            ):
                 logger.info("supplement file refused by the denylist for %s", session_id)
                 return "missing"
             try:
@@ -9347,6 +9472,101 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": "Cached usage unavailable"}, status_code=503)
         return JSONResponse(snapshot)
 
+    # One phone usage refresh at a time, per daemon. A second POST while one runs
+    # JOINS it (no second vendor fan-out); the forced floor caps how often a
+    # paired phone -- or a stolen pairing cookie -- can skip the cache, the lease
+    # and per-account backoff. Lives in this closure so each app has its own.
+    usage_refresh: dict[str, Any] = {"task": None, "task_forced": False, "last_forced_ms": 0}
+
+    async def api_usage_refresh(request: Request) -> Response:
+        """``POST /api/usage/refresh`` -- the phone sheet's refresh, body ``{force}``.
+
+        POST rather than ``GET ?refresh=``: it reaches vendors and writes the
+        usage cache (and rotated OAuth tokens), and ``cross_origin_mutation``
+        only checks Origin on non-GET methods. ``force:false`` (sent on open)
+        respects the 5-minute cache, lease and backoff; ``force:true`` (the
+        button) is floored at ``desktop_quota.REFRESH_FLOOR_MS``.
+
+        The task is NEVER cancelled: ``wait_for(shield(task))`` stops waiting
+        after :data:`PHONE_REFRESH_BOUND_S`, but a refresh cancelled mid OAuth
+        rotation could lose a refresh token the vendor already replaced. It
+        finishes in the background and its cache write serves the next open.
+        On timeout/failure the answer is the cached projection plus that status,
+        so the last good numbers stay on screen.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.server.routes.desktop_quota import REFRESH_FLOOR_MS
+
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001 - an empty/garbled body is a plain refresh
+            payload = {}
+        want_force = isinstance(payload, dict) and payload.get("force") is True
+        now_ms = int(time.time() * 1000)
+        retry_after_ms: int | None = None
+        throttled = False
+        in_flight: asyncio.Task[dict[str, Any]] | None = usage_refresh["task"]
+        joined = in_flight is not None and not in_flight.done()
+        if in_flight is not None and joined:
+            task = in_flight
+            # JOIN the in-flight refresh: no second vendor fan-out, and no
+            # throttle -- the caller gets a refresh that is already running, so
+            # "try again in 15 s" over numbers that are about to land would be
+            # wrong (QA round 1, Q2). ``forced`` reports what the JOINED task
+            # does, so a forced tap that lands on an unforced open-refresh can
+            # tell it was not honoured (review round 1, R3).
+            forced = bool(usage_refresh["task_forced"])
+        else:
+            if want_force:
+                elapsed = now_ms - int(usage_refresh["last_forced_ms"])
+                if elapsed < REFRESH_FLOOR_MS:
+                    throttled = True
+                    retry_after_ms = REFRESH_FLOOR_MS - elapsed
+            forced = want_force and not throttled
+            if forced:
+                usage_refresh["last_forced_ms"] = now_ms
+            task = asyncio.create_task(_refresh_phone_usage(forced))
+            # The shielded task outlives a timed-out request, and ``shield``
+            # drops its own done-callback when the waiter is cancelled, so an
+            # exception raised after the bound would otherwise surface only as
+            # asyncio's GC-time "never retrieved" traceback (review round 1, R1).
+            task.add_done_callback(_log_phone_refresh_failure)
+            usage_refresh["task"] = task
+            usage_refresh["task_forced"] = forced
+
+        status = "throttled" if throttled else "ok"
+        body: dict[str, Any] | None = None
+        try:
+            body = await asyncio.wait_for(asyncio.shield(task), PHONE_REFRESH_BOUND_S)
+        except asyncio.TimeoutError:
+            status = "timeout"
+        except Exception:  # noqa: BLE001 - no raw vendor/store errors over the tunnel
+            status = "failed"
+        if body is None:
+            try:
+                body = await asyncio.to_thread(_cached_phone_usage)
+            except Exception:  # noqa: BLE001
+                return JSONResponse({"error": "Cached usage unavailable"}, status_code=503)
+            body["refreshed_at"] = None
+        elif status == "ok" and forced and body.get("source") != "live":
+            # A FORCED refresh exists to reach vendors. The controller isolates
+            # per-account vendor failures (last-good numbers are kept), so the
+            # task "succeeds" even when every vendor refused; the only proof a
+            # vendor answered is a report fetched after the task started, which
+            # ``source`` already derives. Without it the tap fetched nothing new
+            # and the phone must say so rather than "Updated" (QA round 1, Q1).
+            # An UNFORCED refresh served from a fresh cache is still "ok".
+            status = "failed"
+        body["refresh"] = {
+            "status": status,
+            "forced": forced,
+            "joined": joined,
+            "retry_after_ms": retry_after_ms,
+        }
+        return JSONResponse(body)
+
     async def api_models(request: Request) -> Response:
         """The model sheet's catalogue: providers with stored credentials and
         their models, reusing the server's model listing so the phone and the
@@ -9955,6 +10175,110 @@ def build_app(daemon: MobileDaemon):
             str(request.path_params["device_id"]),
         )
 
+    # -- notification sounds for the paired phone (notification-sounds C5) ------
+    #
+    # WHY HERE AND NOT C2's ROUTER (addendum 2 §2.3): ``/v1/notification-sounds*``
+    # is ``require_desktop`` — the desktop bearer, which a phone never holds. The
+    # phone reaches this daemon (directly, or through the tunnel gateway), whose
+    # one auth model is the paired cookie, so every route below sits behind
+    # ``gate``. The rows come from ``notifications.catalog_view``, the builder the
+    # desktop list also uses, so the two surfaces cannot disagree about which
+    # sounds exist.
+
+    async def api_notification_sounds(request: Request) -> Response:
+        """Every sound the phone may fetch, plus the computer's selection.
+
+        ``no-store``: the list changes whenever a sound is added, renamed or
+        selected (on any surface), and a cached list would make the phone
+        prefetch yesterday's selection.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.notifications import catalog_view
+
+        payload = await asyncio.to_thread(catalog_view.phone_listing)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    async def api_notification_sound_audio(request: Request) -> Response:
+        """One sound's WAV bytes, by id, IF ``?sha=`` names exactly those bytes.
+
+        The phone caches by sha and names the file after it (``c_<sha16>.wav``),
+        so it asks for the sha it expects. A sha that does not match the bytes
+        the id holds right now is a 404, never the current bytes: a stale
+        prefetch (the sound was replaced since the list was read) must not cache
+        new bytes under an old name. That match is also what makes the reply
+        content-addressed, so it is ``immutable`` for a year with ``ETag`` = sha,
+        exactly the policy ``api_session_sound`` uses for its digests.
+
+        Unity gain (the stored/decoded file), never the computer's volume: the
+        phone plays at its own notification volume (design §3.6). ``{id}`` is
+        looked up in the catalog or the custom index and never reaches a path.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return _sound_response(denied)
+        sound_id = str(request.path_params["sound_id"])
+        expected = request.query_params.get("sha", "")
+        if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+            return _sound_response(
+                JSONResponse(
+                    {"error": "bad sha"}, status_code=400, headers={"Cache-Control": "no-store"}
+                )
+            )
+        from local_operator.notifications import catalog_view
+
+        try:
+            found = await asyncio.to_thread(catalog_view.phone_audio, sound_id)
+        except OSError:
+            logger.warning("notification sound %s could not be read", sound_id, exc_info=True)
+            found = None
+        if found is None or found[1] != expected:
+            return _sound_response(
+                JSONResponse(
+                    {"error": "no such sound"},
+                    status_code=404,
+                    headers={"Cache-Control": "no-store"},
+                )
+            )
+        data, sha = found
+        etag = f'"{sha}"'
+        headers = {"Cache-Control": "public, max-age=31536000, immutable", "ETag": etag}
+        inm = request.headers.get("if-none-match", "")
+        if any(tag.strip().removeprefix("W/") == etag for tag in inm.split(",")):
+            return _sound_response(Response(status_code=304, headers=headers))
+        return _sound_response(_ranged_media_response(request, data, "audio/wav", headers))
+
+    async def api_notification_sounds_cached(request: Request) -> Response:
+        """``PUT {shas: ["c_<sha16>", …]}``: the custom sounds THIS phone holds.
+
+        The cookie proves the caller is paired; ``X-Lop-Device`` +
+        ``X-Lop-Device-Key`` prove WHICH device it is, which is what the
+        per-device ``sound_custom_ready`` bit needs (``push_devices.
+        note_sound_cache`` carries the reasoning). Same-origin is enforced by
+        ``gate`` for this mutation, like every other.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            body: object = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            body = None
+        if not isinstance(body, dict) or set(body) != {"shas"}:
+            return JSONResponse({"error": 'body must be {"shas": [...]}'}, status_code=422)
+        from local_operator.paths import config_dir
+
+        config = config_dir()
+        await _note_device_credential(request, config)
+        return await _push_call(
+            mobile_push_devices.note_sound_cache,
+            config,
+            install_id=request.headers.get(mobile_push_devices.DEVICE_HEADER),
+            device_key=request.headers.get(mobile_push_devices.DEVICE_KEY_HEADER),
+            stems=body["shas"],
+        )
+
     # -- library --------------------------------------------------------------
     #
     # Transport only: every handler below calls ``local_operator.mobile.library``
@@ -10385,6 +10709,9 @@ def build_app(daemon: MobileDaemon):
         Route("/api/skills", api_skills),
         Route("/api/models", api_models),
         Route("/api/usage", api_usage),
+        # The ONLY phone usage path that reaches vendors and writes the cache;
+        # GET /api/usage above stays write-free (see PAID_USAGE.md "Refresh").
+        Route("/api/usage/refresh", api_usage_refresh, methods=["POST"]),
         Route("/api/config/events", api_config_events),
         Route("/api/settings/account-routing", api_account_routing, methods=["GET", "PATCH"]),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
@@ -10440,6 +10767,15 @@ def build_app(daemon: MobileDaemon):
         Route("/api/library/assets/{asset_id:str}/content", api_library_bytes),
         Route("/api/library/assets/{asset_id:str}/thumbnail", api_library_thumb),
         Route("/api/library/assets/{asset_id:str}/waveform", api_library_waveform),
+        Route("/api/notification-sounds", api_notification_sounds),
+        # Before ``{sound_id}/audio`` only for reading order: the two paths
+        # cannot collide (``cached`` has no ``/audio`` suffix).
+        Route(
+            "/api/notification-sounds/cached",
+            api_notification_sounds_cached,
+            methods=["PUT"],
+        ),
+        Route("/api/notification-sounds/{sound_id:str}/audio", api_notification_sound_audio),
         Route("/api/push/register", api_push_register, methods=["POST"]),
         Route("/api/push/devices", api_push_devices),
         Route("/api/push/devices/{device_id:str}", api_push_device_delete, methods=["DELETE"]),
@@ -10707,7 +11043,36 @@ def _cached_phone_usage() -> dict[str, Any]:
     # may-be-stale flag instead of guessing freshness from report timestamps.
     if snapshot.unavailable:
         raise RuntimeError("cached usage unavailable")
+    return {
+        "reports": _phone_usage_projection(snapshot.reports, snapshot.account_positions),
+        "source": "cached",
+        "may_be_stale": snapshot.may_be_stale,
+        "cached_at": snapshot.cached_at,
+    }
+
+
+def _phone_usage_projection(
+    reports: "list[Any]",
+    positions: "list[tuple[int, int]] | None" = None,
+) -> list[dict[str, Any]]:
+    """Project identity-free ``UsageReport``s into the phone's display rows.
+
+    Shared by the cached GET and the refresh POST so both answer in ONE shape:
+    a second projection would let the two routes disagree about what a phone
+    may see. ``reports`` must already be identity-stripped; ``positions`` is the
+    parallel ``(account_index, account_count)`` list from
+    :meth:`ProviderController.order_persisted_usage_reports`. When it is absent
+    (an early Muse-only answer, a test double) each report is numbered by its
+    order within its provider, which is the best the payload can say.
+
+    Every key added after the first release (``account_index``,
+    ``account_count``, ``state``, ``credential_invalid``, ``provider_name``,
+    and per limit ``remaining_fraction``/``tone``) is ADDITIVE: older phone
+    builds read only the original keys and must keep working.
+    """
     import math
+
+    from local_operator.providers.usage import usage_report_state
 
     def finite(value: Any) -> float | None:
         # Invalid numeric data is unavailable, never a fake zero or JSON NaN.
@@ -10719,14 +11084,26 @@ def _cached_phone_usage() -> dict[str, Any]:
             else None
         )
 
+    if not positions or len(positions) != len(reports):
+        counts: dict[str, int] = {}
+        for report in reports:
+            counts[report.provider] = counts.get(report.provider, 0) + 1
+        seen: dict[str, int] = {}
+        positions = []
+        for report in reports:
+            index = seen.get(report.provider, 0)
+            seen[report.provider] = index + 1
+            positions.append((index, counts[report.provider]))
+
     result: list[dict[str, Any]] = []
-    for report in snapshot.reports:
+    for report, (account_index, account_count) in zip(reports, positions):
         provider = report.provider
         limits = []
         for limit in report.limits:
             amount = limit.amount
             # fraction() is Optional; bind once so the comparison narrows.
             fraction = amount.fraction()
+            finite_fraction = finite(fraction)
             # Names/details/identity are not required for quota display.
             # Permit only normalized units; arbitrary vendor strings
             # must not become remote account/credential disclosures.
@@ -10734,6 +11111,22 @@ def _cached_phone_usage() -> dict[str, Any]:
                 amount.unit
                 if amount.unit in {"credits", "usd", "percent", "tokens", "requests", "unknown"}
                 else "unknown"
+            )
+            # The phone draws REMAINING, so Python owns the clamp: a vendor
+            # reporting 104% used must render an empty bar, not a negative one.
+            remaining_fraction = (
+                min(1.0, max(0.0, 1.0 - finite_fraction)) if finite_fraction is not None else None
+            )
+            # A vendor-declared status wins when it is one the phone can colour;
+            # otherwise the shared 0.85 threshold in UsageAmount.status() decides.
+            # "unknown" means NO FRACTION TO JUDGE AGAINST (a paid wallet with a
+            # balance and no limit, or an amount the vendor did not report). It
+            # does not mean "not reported": the amount says which, and the sheet
+            # prints no tone word for it (design round 1, D1/D3).
+            tone = (
+                limit.status
+                if limit.status in {"ok", "warning", "exhausted", "unknown"}
+                else amount.status() if finite_fraction is not None else "unknown"
             )
             limits.append(
                 {
@@ -10772,22 +11165,98 @@ def _cached_phone_usage() -> dict[str, Any]:
                     # Python owns the exact fraction-first eligibility.
                     "payable": limit.paid_usable(),
                     "exhausted": fraction is not None and fraction >= 1,
+                    "remaining_fraction": remaining_fraction,
+                    "tone": tone,
                 }
             )
         result.append(
             {
                 "provider": provider,
+                # The registry's human name: the sheet heads each provider with
+                # it rather than shipping a second id->name map to the SPA.
+                "provider_name": _provider_display_name(provider),
                 "limits": limits,
                 "unavailable": report.usage_unavailable,
                 "fetched_at": report.fetched_at,
+                # Login-order numbering; no email or hashed id crosses the
+                # tunnel (a per-daemon hash would be a trackable pseudonym).
+                "account_index": account_index,
+                "account_count": account_count,
+                "state": usage_report_state(report),
+                "credential_invalid": report.credential_invalid,
             }
         )
+    return result
+
+
+#: How long the phone's refresh POST waits for vendors before answering with the
+#: cached projection. The fetchers' own HTTP timeout is 10 s; the desktop banner's
+#: 4 s bound is sized for a banner, not a sheet the operator is staring at.
+PHONE_REFRESH_BOUND_S = 8.0
+
+
+async def _refresh_phone_usage(force: bool) -> dict[str, Any]:
+    """Refresh stored logins' usage and project it, on the event-loop thread.
+
+    Builds the persisted-only controller INSIDE the task so its SQLite handles
+    live and die on one thread (the thread-affinity rule desktop_quota.py
+    documents). Returns the projection directly rather than re-reading through
+    the GET: the GET opens the cache ``immutable=1`` and cannot see the WAL
+    frames this refresh just wrote.
+    """
+    from typing import cast
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.controller import ProviderController
+
+    started_at = int(time.time() * 1000)
+    controller = ProviderController.for_persisted_usage_refresh()
+    try:
+        reports = await controller.refresh_persisted_usage(force)
+        ordered = controller.order_persisted_usage_reports(reports)
+    finally:
+        try:
+            controller.close()
+        finally:
+            # The factory always builds a concrete AuthStore (see the GET's note).
+            cast(AuthStore, controller.auth_store).close()
+    stripped = [ProviderController._without_identity(report) for report, _, _ in ordered]
+    fetched = [r.fetched_at for r in stripped if r.fetched_at > 0]
+    # Only a report fetched after this refresh started proves a vendor was
+    # reached. The rest are last-good rows kept for accounts whose probe failed
+    # (or a reauth account's final numbers, which keep their old fetched_at).
+    fresh = [at for at in fetched if at >= started_at]
     return {
-        "reports": result,
-        "source": "cached",
-        "may_be_stale": snapshot.may_be_stale,
-        "cached_at": snapshot.cached_at,
+        "reports": _phone_usage_projection(
+            stripped, [(index, count) for _, index, count in ordered]
+        ),
+        # "live" is derived, never claimed.
+        "source": "live" if fresh else "cached",
+        "may_be_stale": False,
+        "cached_at": max(fetched, default=None),
+        # The status line's "Updated" time: what THIS refresh fetched, never a
+        # kept last-good row -- a yesterday timestamp read as "Updated 3:40 PM"
+        # looks like today (review round 1, R2). None when nothing was fetched.
+        "refreshed_at": min(fresh, default=None),
+        # The OLDEST report is the honest "as of" for the sheet as a whole: the
+        # footer's fine print. Additive key, refresh answers only.
+        "as_of": min(fetched, default=None),
     }
+
+
+def _log_phone_refresh_failure(task: "asyncio.Task[Any]") -> None:
+    """Retrieve a background phone-refresh exception and log it once, sanitized.
+
+    Only the exception TYPE is logged: the message of a vendor/store error can
+    carry account identities or vendor text, and this path exists precisely
+    because nobody else will look at it (the request may already have answered
+    ``timeout``).
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("phone usage refresh failed in the background (%s)", type(exc).__name__)
 
 
 def _provider_display_name(provider_id: str) -> str:

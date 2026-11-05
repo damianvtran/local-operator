@@ -242,3 +242,29 @@ def test_the_guard_passes_the_published_bundle_for_these_sources() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("css", "accepted"),
+    [
+        (r".\!text-ink-disabled{color:red!important}", True),
+        (r".\!text-ink-disabled{color:red}", False),
+        (".flex{display:flex}", False),
+        (
+            r".\!text-ink-disabled:hover{color:red!important}" r".\!text-ink-disabled{color:red}",
+            False,
+        ),
+    ],
+    ids=["important-base", "missing-priority", "missing-rule", "hover-decoy"],
+)
+def test_inert_ink_priority_is_required_only_when_rendered(tmp_path, css, accepted):
+    """The real source token opts in; hover priority cannot cover the base.
+
+    The ordinary synthetic trees above intentionally do not render this token,
+    so they retain their generic coverage/ownership diagnostics.
+    """
+    web, dist = _tree(tmp_path, css=css, source='<span className="!text-ink-disabled" />')
+    result = _run_guard(web, dist)
+    assert result.returncode == (0 if accepted else 1), result.stderr
+    if not accepted:
+        assert "inert icon ink must have an emitted important color declaration" in result.stderr

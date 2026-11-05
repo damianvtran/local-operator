@@ -1238,7 +1238,12 @@ async def test_screening_hold_on_an_image_message_admits_nothing(
 
     monkeypatch.setattr(conversation_mod, "screen_item", held)
     out = await _deliver(owner, ref, tmp_path, hub)
-    assert out == {"action": "hold", "message_id": MID, "code": "parse_failed"}
+    # The hold carries its budget tier for the retry order (#3400). This ref is
+    # a mention and the body read states no ``sender_kind``, so it is the
+    # agent-addressed tier (2): an unstated sender never claims the person
+    # reserve (tier 3).
+    assert out == {"action": "hold", "message_id": MID, "code": "parse_failed", "tier": 2}
+    assert screened[0]["allocation"]["tier"] == 2
     assert hub.admits == [] and cards == []
     assert ("attachments" in screened[0]) is vision
     data, _mime = hub.fetch(hub.descriptors[0]["id"], "screen")
@@ -1276,3 +1281,66 @@ async def test_screen_not_found_with_no_verdict_anywhere_stays_metadata_only(
     assert len(cards) == 1
     assert "[1 image attachment withheld: could not be verified]" in cards[0]
     assert "returns the admitted images" not in cards[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovered", [True, False])
+async def test_unsent_fallback_image_allow_never_bypasses_rescreening(
+    monkeypatch, tmp_path, recovered
+) -> None:
+    """S-1: the image recovery shortcut obeys the same UNSENT boundary.
+
+    Real local receipt/reservation store and production conversation connector;
+    the existing hub/model transport seams let the retry recover or fail.
+    The weak decision was committed locally, but no admission or card happened.
+    """
+    import sqlite3
+    from dataclasses import replace
+
+    from local_operator.team_bridge.store import Store, state_db_path
+
+    hub = Hub([_png()])
+    owner, ref, screened, cards = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
+    store = Store(tmp_path)
+    _persist_receipt(tmp_path, _receipt("allow", hub.body), MID)
+    assert store.recorded_intent(owner, MID, "read") is None
+    assert hub.admits == [] and cards == []
+    model_screen = conversation_mod.screen_item
+    calls = []
+
+    async def preferred_screen(owner_, item, **kwargs):
+        calls.append(item)
+        # The stale write-once slot must be gone BEFORE attempting the new
+        # screen. Otherwise a legitimate different model cannot commit.
+        assert store.receipt_for_message(owner, MID) is None
+        if not recovered:
+            return ScreenResult("hold", hold_code="screening_model_unavailable")
+        result = await model_screen(owner_, item, **kwargs)
+        with sqlite3.connect(state_db_path(tmp_path)) as db:
+            db.execute(
+                "UPDATE screening_receipts SET model = ?, screener_preferred = 1 "
+                "WHERE message_id = ?",
+                ("claude-sonnet-5-5", MID),
+            )
+        result.receipt = replace(result.receipt, model="claude-sonnet-5-5", screener_preferred=True)
+        return result
+
+    monkeypatch.setattr(conversation_mod, "screen_item", preferred_screen)
+    out = await _deliver(owner, ref, tmp_path, hub)
+    assert len(calls) == 1
+    assert any(purpose == "screen" for _aid, purpose in hub.fetches)
+    if recovered:
+        assert out["action"] == "delivered" and len(hub.admits) == 1 and len(cards) == 1
+        row = store.receipt_for_message(owner, MID)
+        assert row is not None and row["screener_preferred"] is True
+        assert row["model"] == "claude-sonnet-5-5"
+        # Admission created a durable reservation: no later retry may retire it.
+        assert (
+            store.retire_unsent_fallback_allow(owner, MID, body_sha256=row["body_sha256"]) is False
+        )
+    else:
+        assert out["action"] == "hold" and hub.admits == [] and cards == []
+        assert store.receipt_for_message(owner, MID) is None
+        again = await _deliver(owner, ref, tmp_path, hub)
+        assert again["action"] == "hold" and len(calls) == 2
+        assert hub.admits == [] and cards == []

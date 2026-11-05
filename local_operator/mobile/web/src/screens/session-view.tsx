@@ -22,6 +22,7 @@
  * pinned height as a custom property gives those caps the same unit as the
  * box they are bounded by, so they tighten exactly when the space does.
  */
+import { contentDir } from "../lib/content-direction";
 import { flushSync } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { setSessionPin } from "../api";
@@ -302,6 +303,7 @@ function Header({
 					    reachable is truthful; a name painted in full that pushes the phone
 					    sideways is not. */}
 					<span
+						dir={contentDir(projection.conversation_name || "untitled")}
 						className="block truncate text-heading font-semibold"
 						title={projection.conversation_name || undefined}
 					>{projection.conversation_name || "untitled"}</span>
@@ -861,11 +863,22 @@ export function SessionScreen({
 					pending={pendingEchoes}
 					streaming={projection.streaming}
 					topInset={0}
-					tailContent={projection.streaming ? <WorkingLine activity={projection.activity} startedS={projection.activity_started_s} /> : undefined}
 					supplements={projection.supplements}
 					projectionPid={projection.pid}
 				/>
 			)}
+
+			{/* THE WORKING LINE LIVES HERE, NOT IN THE TRANSCRIPT'S SCROLLING TAIL. It
+			    carries the turn's Stop, and a control inside the scroller is out of
+			    reach whenever the reader has scrolled up or the keyboard has shrunk
+			    the column. As a `shrink-0` sibling at a fixed 44 px it is always on
+			    screen while a turn is alive; the transcript above takes whatever
+			    height is left. */}
+			{projection.streaming ? (
+				<div className="shrink-0">
+					<WorkingLine activity={projection.activity} startedS={projection.activity_started_s} stopPid={sessionId} />
+				</div>
+			) : null}
 
 			{/* EVERYTHING BETWEEN THE TRANSCRIPT AND THE COMPOSER sits in ONE slot
 			    with one gap and one inset (`components/above-composer.tsx`), never

@@ -142,3 +142,52 @@ def test_unknown_revision_is_an_error_not_a_pass(tmp_path: Path) -> None:
     result = _run(repo, old, "0" * 40)
     assert result.returncode == 2
     assert "could not be computed" in result.stderr
+
+
+def _merge_main_into_pr(repo: Path) -> str:
+    _git(repo, "checkout", "-q", "pr")
+    _git(repo, "merge", "-q", "--no-edit", "main")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def test_merge_of_main_without_overlap_is_mechanical(tmp_path: Path) -> None:
+    # Review economy: updating a PR by MERGING main (GitHub's "Update branch")
+    # is the same mechanical move as a rebase and must not force a review round.
+    repo, old = _setup(tmp_path)
+    _git(repo, "checkout", "-q", "main")
+    _commit(repo, {"unrelated.txt": "upstream\n"}, "chore: upstream")
+    new = _merge_main_into_pr(repo)
+    assert len(_git(repo, "rev-list", "--parents", "-n1", new).split()) == 3
+    result = _run(repo, old, new)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "MECHANICAL — no re-review needed" in result.stdout
+
+
+def test_merge_of_main_that_resolves_into_a_pr_file_needs_review(tmp_path: Path) -> None:
+    # A merge whose resolution rewrites PR content (or upstream touching a PR
+    # file) is not mechanical, merge commit or not.
+    repo, old = _setup(tmp_path)
+    _git(repo, "checkout", "-q", "main")
+    _commit(repo, {"pr.txt": "ONE\ntwo\n"}, "fix: upstream edits pr.txt")
+    new = _merge_main_into_pr(repo)
+    result = _run(repo, old, new)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "CONVERGENCE REVIEW NEEDED — files: `pr.txt`" in result.stdout
+
+
+def test_merge_of_main_with_an_evil_resolution_needs_review(tmp_path: Path) -> None:
+    # An "evil merge" sneaks a PR-file change into the merge commit itself:
+    # range-diff (which skips merges) stays '=', so the patch comparison is
+    # what must catch it.
+    repo, old = _setup(tmp_path)
+    _git(repo, "checkout", "-q", "main")
+    _commit(repo, {"unrelated.txt": "upstream\n"}, "chore: upstream")
+    _git(repo, "checkout", "-q", "pr")
+    _git(repo, "merge", "-q", "--no-commit", "main")
+    (repo / "pr.txt").write_text("one\ntwo\nthree\nsmuggled\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "--no-edit")
+    new = _git(repo, "rev-parse", "HEAD")
+    result = _run(repo, old, new)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "patch lines differ" in result.stdout

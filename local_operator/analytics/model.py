@@ -270,6 +270,8 @@ class CallSnapshot:
     #: positional writer keeps its existing field order.
     cache_miss_type: str = ""
     cache_missed_tokens: int = 0
+    # Nullable: historical rows never established a terminal service tier.
+    openai_service_tier: str | None = None
 
 
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:

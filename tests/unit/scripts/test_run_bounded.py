@@ -38,6 +38,16 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 WRAPPER = REPO / "scripts" / "run_bounded.py"
 
+#: The contract these real-process cases exercise. Linux keeps the strict
+#: certified path (its /proc backend exists). Elsewhere cleanup-required refuses
+#: before spawn by design, so the same group-reaping behaviours -- bound, sweep,
+#: forwarded signal, external kill -- are asserted through command-status, which
+#: signals the owned group too (architect ruling on PR #3274). The safety
+#: assertions (`_wait_until_gone(token) == []`) are identical on both.
+CONTRACT_ARGS: tuple[str, ...] = (
+    () if sys.platform.startswith("linux") else ("--contract=command-status",)
+)
+
 #: These spawn real processes and wait on real signals; the suite marks that
 #: shape `slow` (see pyproject.toml's marker list).
 pytestmark = pytest.mark.slow
@@ -126,7 +136,7 @@ def _wrapper(args: Sequence[str], *, timeout_s: float = 60.0) -> subprocess.Comp
         err_path = Path(tmp) / "stderr"
         with out_path.open("w") as out, err_path.open("w") as err:
             result = subprocess.run(
-                [sys.executable, str(WRAPPER), *args],
+                [sys.executable, str(WRAPPER), *CONTRACT_ARGS, *args],
                 stdout=out,
                 stderr=err,
                 text=True,
@@ -162,7 +172,7 @@ def test_handlers_are_installed_before_the_child_is_spawned():
     cannot be hit on demand.
     """
     source = (REPO / "scripts" / "run_bounded.py").read_text()
-    body = source[source.index("def run(") : source.index("def main(")]
+    body = source[source.index("def _run_cleanup_required(") : source.index("def run(")]
 
     assert "signal.signal(" in body, "the wrapper installs no signal handler at all"
     assert body.index("signal.signal(") < body.index("subprocess.Popen("), (
@@ -245,7 +255,13 @@ def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers, forwarded):
         err_path = Path(tmp) / "stderr"
         with err_path.open("w") as err:
             wrapper = subprocess.Popen(
-                [sys.executable, str(WRAPPER), "--", *_spawning_inner(token, linger=True)],
+                [
+                    sys.executable,
+                    str(WRAPPER),
+                    *CONTRACT_ARGS,
+                    "--",
+                    *_spawning_inner(token, linger=True),
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=err,
                 text=True,
@@ -267,7 +283,13 @@ def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers, forwarded):
 
     assert returncode == 128 + forwarded, f"rc={returncode}, stderr={stderr!r}"
     assert f"signal {forwarded}" in stderr
-    assert _wait_until_gone(token) == [], "a signalled wrapper left its group running"
+    # STDERR IN THE MESSAGE: CI keeps only the assertion, and #3368 CI job
+    # 126130789160 failed here with rc 143 and no visible cause -- the wrapper's
+    # own `... refused: <reason>` line is what separates a churn refusal from a
+    # deadline one, and without it the failure could only be argued about.
+    assert (
+        _wait_until_gone(token) == []
+    ), f"a signalled wrapper left its group running; stderr={stderr!r}"
 
 
 def test_a_child_killed_by_someone_else_reports_128_plus_the_signal(reap_markers):
@@ -286,7 +308,13 @@ def test_a_child_killed_by_someone_else_reports_128_plus_the_signal(reap_markers
         err_path = Path(tmp) / "stderr"
         with err_path.open("w") as err:
             wrapper = subprocess.Popen(
-                [sys.executable, str(WRAPPER), "--", *_spawning_inner(token, linger=True)],
+                [
+                    sys.executable,
+                    str(WRAPPER),
+                    *CONTRACT_ARGS,
+                    "--",
+                    *_spawning_inner(token, linger=True),
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=err,
                 text=True,
@@ -322,6 +350,14 @@ def memory_wrapper(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.delenv(module.memory_guard.RESOLVED_MEMORY_MB_ENV, raising=False)
+    # These tests inject kernel/process facts, so choose the synthetic authority
+    # explicitly. Native Darwin cannot supply coverage and must never be promoted
+    # merely to keep this shared synthetic matrix running.
+    monkeypatch.setattr(
+        module.bounded_contract,
+        "selected_backend",
+        lambda: module.bounded_contract.Backend("synthetic-authoritative", True, "test kernel"),
+    )
     return module
 
 
@@ -420,7 +456,9 @@ def test_child_memory_unsupported_positive_refuses_before_spawn(memory_wrapper, 
     from types import SimpleNamespace
 
     monkeypatch.setattr(memory_wrapper, "_memory_budget", lambda value: (_test_budget(48), "unit"))
-    monkeypatch.setattr(memory_wrapper, "os", SimpleNamespace())
+    # Remove only the unsupported primitive; the real dispatcher now builds the
+    # environment and receipt before entering this synthetic strict boundary.
+    monkeypatch.setattr(memory_wrapper, "os", SimpleNamespace(environ=dict(os.environ)))
     monkeypatch.setattr(
         memory_wrapper,
         "subprocess",
@@ -439,12 +477,13 @@ def test_child_memory_unsupported_positive_refuses_before_spawn(memory_wrapper, 
         ("unknown", 0),
         ("timeout", 124),
         ("interrupt", 130),
+        ("child-signal", 137),
         ("monitor-error", None),
         ("spawn-error", 125),
     ],
 )
 def test_child_memory_loop_preserves_owned_cleanup_contract(
-    memory_wrapper, monkeypatch, mode, expected
+    memory_wrapper, monkeypatch, tmp_path, mode, expected
 ):
     """Exercise real Guard decisions; fake only readings/process/clock/syscalls.
 
@@ -455,6 +494,7 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     from types import SimpleNamespace
 
     wrapper = memory_wrapper
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
     mg = wrapper.memory_guard
     budget = _test_budget(48)
     monkeypatch.setattr(wrapper, "_memory_budget", lambda value: (budget, "inherited"))
@@ -490,13 +530,20 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
             self.polls += 1
             if mode == "interrupt" and self.polls == 1:
                 handlers[signal.SIGINT](signal.SIGINT, None)
+            if self.status is None and mode == "child-signal":
+                self.status = -signal.SIGKILL
             if self.status is None and self.polls >= 12 and mode in ("soft", "unknown"):
                 self.status = 0
             return self.status
 
-        def wait(self):
+        def wait(self, timeout=None):
             self.waits += 1
             return self.status
+
+        @property
+        def returncode(self):
+            # The strict runner reads the reaped status here after its one wait.
+            return self.status if self.waits else None
 
     process = Process()
 
@@ -506,19 +553,71 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
         spawned.append(kwargs)
         return process
 
-    monkeypatch.setattr(wrapper, "subprocess", SimpleNamespace(Popen=popen))
+    monkeypatch.setattr(
+        wrapper,
+        "subprocess",
+        SimpleNamespace(Popen=popen, TimeoutExpired=subprocess.TimeoutExpired),
+    )
 
-    def group(pgid, signum):
-        assert pgid == process.pid
-        group_calls.append((pgid, signum))
-        process.status = -int(signum)
-        return True
+    # This memory-policy matrix fakes the authority boundary. The separate
+    # owned-group matrix exercises real authority with injected kernel facts.
+    opg = wrapper.owned_process_group
 
-    monkeypatch.setattr(wrapper, "_signal_group", group)
+    class Owner:
+        pgid = process.pid
+        receipts = {}
+        last = opg.Verdict("VERIFIED", "fake acquisition")
+        # The capability surface the strict finalizer now calls: terminal census
+        # flag, revoke-before-wait, and exact-terminal acceptance. Missing these
+        # made finalization raise and soft/unknown spin forever (CI shard stall).
+        terminating_sends = [signal.SIGKILL]
+        revoked = False
+
+        def revoke(self):
+            self.revoked = True
+
+        terminal = None
+
+        def accepted_terminal(self, verdict):
+            # Exact-object acceptance before revocation, as the real owner does:
+            # strict rc 0 now requires this certificate, not merely child status.
+            return not self.revoked and verdict is self.terminal
+
+        def refresh(self, *, terminal=False, **kwargs):
+            verdict = opg.Verdict(
+                "OBSERVED_EMPTY" if process.status is not None else "VERIFIED", "fake"
+            )
+            if terminal:
+                self.terminal = verdict
+            return verdict
+
+        def leader_terminal(self, deadline):
+            # The seam that replaced Popen.poll(): the same mode gating (the fake's
+            # poll counter drives soft/unknown exit and the interrupt), asked of
+            # the capability instead of the child handle, so the loop never reaps.
+            return process.poll() is not None
+
+        def signal(self, signum, **kwargs):
+            group_calls.append((self.pgid, signum))
+            # A signal cannot rewrite a corpse's status: once the leader has
+            # exited, the finalizer's group SIGKILL leaves its exit code alone.
+            if process.status is None:
+                process.status = -int(signum)
+            return opg.Verdict("SIGNALED", "fake")
+
+    monkeypatch.setattr(
+        wrapper,
+        "owned_process_group",
+        SimpleNamespace(
+            OwnedGroup=SimpleNamespace(capture=lambda *args, **kwargs: Owner()), Verdict=opg.Verdict
+        ),
+    )
     real_guard = mg.Guard
 
-    def guard(pgid, resolved):
-        instance = real_guard(pgid, resolved)
+    def guard(pgid, resolved, **kwargs):
+        # **kwargs: run_bounded now asks for descendants=True; the faked
+        # sample_sync below never runs the census either way.
+        instance = real_guard(pgid, resolved, **kwargs)
 
         def reading():
             if mode == "monitor-error":
@@ -538,9 +637,12 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     monkeypatch.setattr(mg, "Guard", guard)
     output = io.StringIO()
     if mode == "monitor-error":
-        with pytest.raises(RuntimeError, match="controlled monitor failure"):
-            wrapper.run(["synthetic"], timeout=None, grace=0, stream=output)
+        # The contract dispatcher turns a monitor exception into a published
+        # failure receipt and 126 instead of letting it escape (the safety
+        # property -- never success, failure named -- is what is asserted).
+        assert wrapper.run(["synthetic"], timeout=None, grace=0, stream=output) == 126
         assert "owned-child monitor failed" in output.getvalue()
+        assert "cause=supervision-failure" in output.getvalue()
     else:
         assert (
             wrapper.run(
@@ -558,6 +660,13 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     if mode == "hard":
         assert "MEMORY LIMIT EXCEEDED" in output.getvalue()
         assert "BOUND" not in output.getvalue()
+    if mode == "interrupt":
+        assert "signal 2 received" in output.getvalue()
+    if mode == "child-signal":
+        assert "child killed by signal 9" in output.getvalue()
+    if mode == "timeout":
+        assert "that is the BOUND" in output.getvalue()
+        assert "raise it" in output.getvalue()
     if mode == "soft":
         assert output.getvalue().count("advisory only") == 1
     if mode == "unknown":
@@ -575,7 +684,229 @@ def test_help_describes_memory_exit_status_and_budget_defaults(memory_wrapper, c
     assert stopped.value.code == 0
     help_text = " ".join(capsys.readouterr().out.split())
     assert "default: bash tool's resolved budget, otherwise auto" in help_text
-    assert "child process-group ceiling in MiB" in help_text
+    assert "owned-group ceiling in MiB, enforced by both contracts" in help_text
+    # D2/D3/Q2: what command-status enforces and never certifies, and which
+    # record is authoritative, are stated in --help itself.
+    assert "NEVER certifies cleanup" in help_text
+    assert "<invocation_id>.completion.json" in help_text
+    assert "legacy <run_id>.spawn.json/.exit.json" in help_text
     assert "137 with MEMORY LIMIT EXCEEDED" in help_text
     assert "137 alone can also mean external SIGKILL" in help_text
     assert "124 on timeout" in help_text and "125 on start or budget refusal" in help_text
+
+
+#: The setsid'd grandchild writes its pid here so the test can reap it by exact
+#: pid whatever the wrapper did.
+_ESCAPE_CODE = """
+import os, sys, time
+pidfile = sys.argv[1]
+child = os.fork()
+if child == 0:
+    os.setsid()
+    # Off the captured pipes: a surviving grandchild holding them would turn a
+    # RED run into a pipe-EOF hang instead of a status assertion.
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    buf = bytearray(240 * 1024 * 1024)
+    for i in range(0, len(buf), 4096):
+        buf[i] = 1
+    open(pidfile, "w").write(str(os.getpid()))
+    time.sleep(60)
+    os._exit(0)
+time.sleep(60)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "setsid"), reason="POSIX only")
+def test_negative_control_an_over_budget_setsid_descendant_is_stopped(tmp_path):
+    """The measured miss, as a real process tree: a grandchild that left the
+    group by setsid() holds 240 MB under a 120 MiB grant. Before the descendant
+    census this ran to its own exit with status 0 (repro: 600 MB under 300 MiB,
+    rc=0 after 12 s); it must now end 137 with the grandchild dead."""
+    pidfile = tmp_path / "escaped.pid"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+    env.pop("LOCAL_OPERATOR_RESOLVED_MEMORY_MB", None)
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(WRAPPER),
+                *CONTRACT_ARGS,
+                "--memory-mb",
+                "120",
+                "--timeout",
+                "20",
+                "--",
+                sys.executable,
+                "-c",
+                _ESCAPE_CODE,
+                str(pidfile),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+        assert result.returncode == 137, result.stderr
+        assert "MEMORY LIMIT EXCEEDED" in result.stderr
+        assert elapsed < 30, (elapsed, result.stderr)
+        escaped = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(escaped, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail(f"escaped descendant {escaped} survived the memory stop")
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+
+_SETUID_TOP_CODE = """
+import os, sys, time
+child = os.fork()
+if child == 0:
+    os.setsid()
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    os.execv("/usr/bin/top", ["top", "-l", "4", "-s", "1"])
+os.waitpid(child, 0)
+"""
+
+
+@pytest.mark.skipif(
+    not os.path.exists("/usr/bin/top") or sys.platform != "darwin",
+    reason="setuid top is the macOS EPERM case",
+)
+def test_a_setuid_escaped_descendant_is_disclosed_not_failed_closed():
+    """Review R1 repro on PR #3369: a setsid'd child exec'ing setuid `top`
+    (~14 MiB, footprint EPERM) under a generous grant must finish rc 0 with the
+    pid disclosed, not be stopped fail-closed as "unreadable"."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+    env.pop("LOCAL_OPERATOR_RESOLVED_MEMORY_MB", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(WRAPPER),
+            *CONTRACT_ARGS,
+            "--memory-mb",
+            "512",
+            "--timeout",
+            "30",
+            "--",
+            sys.executable,
+            "-c",
+            _SETUID_TOP_CODE,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "fail closed" not in result.stderr
+    assert "not readable by this account" in result.stderr
+    assert result.stderr.count("not readable by this account") == 1  # once
+
+
+#: QA's f4 shape from PR #3369: the leader hogs memory in-group while a
+#: setsid'd child execs setuid ``top -l 0`` (runs forever). The child writes its
+#: pid first so the test can reap it by exact pid whatever the wrapper did, and
+#: points fds 0-2 at /dev/null BEFORE the exec: QA saw a surviving ``top``
+#: holding the captured pipe turn the run into a pipe-EOF hang.
+_SETUID_TOP_BREACH_CODE = """
+import os, sys, time
+pidfile = sys.argv[1]
+child = os.fork()
+if child == 0:
+    os.setsid()
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    open(pidfile, "w").write(str(os.getpid()))
+    os.execv("/usr/bin/top", ["top", "-l", "0"])
+while not os.path.exists(pidfile):
+    time.sleep(0.05)
+time.sleep(1.0)  # let the census see the exec'd top before the breach
+buf = bytearray(200 * 1024 * 1024)
+for i in range(0, len(buf), 4096):
+    buf[i] = 1
+time.sleep(60)
+"""
+
+
+@pytest.mark.skipif(
+    not os.path.exists("/usr/bin/top") or sys.platform != "darwin",
+    reason="setuid top is the macOS EPERM case",
+)
+def test_a_setuid_escaped_descendant_at_a_breach_is_killed_or_named(tmp_path):
+    """QA Q2 on PR #3369: a setuid escaped ``top`` present at a memory stop was
+    skipped before any signal (its fork-free parentage read refuses) and
+    outlived the stop with no line at all. It must now be killed, or at worst
+    named in the stop output — never silent — and the wrapper must return
+    within its bound."""
+    pidfile = tmp_path / "top.pid"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+    env.pop("LOCAL_OPERATOR_RESOLVED_MEMORY_MB", None)
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(WRAPPER),
+                *CONTRACT_ARGS,
+                "--memory-mb",
+                "120",
+                "--timeout",
+                "30",
+                "--",
+                sys.executable,
+                "-c",
+                _SETUID_TOP_BREACH_CODE,
+                str(pidfile),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+        assert result.returncode == 137, result.stderr
+        assert "MEMORY LIMIT EXCEEDED" in result.stderr
+        assert elapsed < 30, (elapsed, result.stderr)
+        top = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(top, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        named = str(top) in result.stderr and (
+            "could not verify" in result.stderr or "could not signal" in result.stderr
+        )
+        assert not alive or named, f"setuid top {top} survived silently:\n{result.stderr}"
+        # On this host the parent listing verifies it, so it is actually killed.
+        assert f"SIGKILL to escaped descendant(s) {top}" in result.stderr, result.stderr
+        assert not alive
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass

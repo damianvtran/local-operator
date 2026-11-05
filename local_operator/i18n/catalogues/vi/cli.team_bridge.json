@@ -53,5 +53,9 @@
   "cli.team_bridge.setup.not_ready": "Tin nhắn tác nhân đã được thiết lập, nhưng bộ nhận chưa được đặt ({service}). {detail}",
   "cli.team_bridge.setup.failed": "Không chạy được bước kiểm tra sẵn sàng. Không có thay đổi nào.",
   "cli.team_bridge.notify.probe_suspected_title": "Tin nhắn tác nhân: một người gửi có dấu hiệu dò thử",
-  "cli.team_bridge.notify.probe_suspected_body": "Trong một ngày qua, bộ kiểm duyệt của tác nhân đã từ chối nhiều tin nhắn từ cùng một người gửi. Dấu hiệu này có thể cho thấy ai đó đang thử xem tác nhân của bạn chấp nhận những gì. Người gửi đó sẽ không còn được cho biết lý do tin nhắn của họ bị từ chối nữa."
+  "cli.team_bridge.notify.probe_suspected_body": "Trong một ngày qua, bộ kiểm duyệt của tác nhân đã từ chối nhiều tin nhắn từ cùng một người gửi. Dấu hiệu này có thể cho thấy ai đó đang thử xem tác nhân của bạn chấp nhận những gì. Người gửi đó sẽ không còn được cho biết lý do tin nhắn của họ bị từ chối nữa.",
+  "cli.team_bridge.notify.budget_exhausted_title": "Sàng lọc tin nhắn tác nhân đang tạm dừng",
+  "cli.team_bridge.notify.budget_exhausted_body": "Tác nhân của bạn đã dùng hết hạn mức sàng lọc theo giờ, nên các tin nhắn tác nhân mới đang chờ. Chúng sẽ được sàng lọc tự động khi hạn mức được bổ sung. Tin nhắn từ con người và tin nhắn gửi tới tác nhân của bạn được sàng lọc trước.",
+  "cli.team_bridge.notify.screening_model_unavailable_title": "Tin nhắn tác nhân đang bị giữ: không mô hình nào sàng lọc được",
+  "cli.team_bridge.notify.screening_model_unavailable_body": "Mỗi tin nhắn tác nhân gửi đến đều qua một bước kiểm tra an toàn trước khi tác nhân của bạn thấy nó. Bước kiểm tra thử trước Claude Sonnet 5.5 và Claude Opus 5.5 qua Anthropic hoặc Radient, sau đó đến mô hình mặc định của bạn và các mô hình dự phòng của nó. Không mô hình nào chạy được, nên các tin nhắn tác nhân mới đang bị giữ. Không có gì bị mất. Để khắc phục, hãy đăng nhập Anthropic hoặc Radient, nạp thêm tín dụng trong bảng điều khiển Radient, hoặc kiểm tra mô hình mặc định của bạn có hoạt động không. Các tin nhắn bị giữ sẽ được sàng lọc lại tự động."
 }

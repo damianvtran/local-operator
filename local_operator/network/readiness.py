@@ -1223,6 +1223,7 @@ def selected_model_row(
     session_id: str,
     peer_label: str,
     source: str = SOURCE_PEER,
+    observer_is_admin: bool = False,
 ) -> dict[str, Any]:
     """Selected access in the established readiness sentence/remedy register.
 
@@ -1290,6 +1291,18 @@ def selected_model_row(
     if state not in readings:
         state = "pending"
     detail, remedies = readings[state]
+    if state == "expired" and observer_is_admin and getattr(member, "role", "") == "admin":
+        import shlex
+
+        # The command runs as the BORROWER, not the observer: observing admin
+        # authority cannot make a drive/read borrower eligible to force refresh.
+        # Require its known member role as well; missing role fails closed. The
+        # owner's independent ADMIN/holder checks remain the final authority.
+        # Quote peer facts so a provider name cannot become shell syntax.
+        remedies = (
+            *remedies,
+            f"{peer_label}: `lop network credential refresh {shlex.quote(provider)} --json`",
+        )
     row = _capability_row(
         device_id=member.device_id,
         device_name=peer_label,
@@ -1819,9 +1832,14 @@ def serve_daemon_row(
         # A peer that predates identity proofs sends no ``identity``: its pid was
         # never checked against a start time, so it is UNPROVEN, never proven.
         identity = entry.get("identity", "unproven")
+        # A peer PID is a positive signed pid_t, not an arbitrary JSON integer.
+        # Reject group/broadcast selectors and overflow before rendering; bounding
+        # strings alone leaves hostile integer detail unbounded. Do not use this
+        # viewer's host-specific PID limit to judge a different device's PID.
         if (
             not isinstance(pid, int)
             or isinstance(pid, bool)
+            or not 1 <= pid <= 2**31 - 1
             or version is None
             or ref is None
             or (cgroup is not None and not isinstance(cgroup, str))
@@ -4731,6 +4749,7 @@ def _peer_checks(
             selector=selector,
             session_id=session_id,
             peer_label=peer_label,
+            observer_is_admin=getattr(record, "self_role", "") == "admin",
         )
         selected_row.update(row)
     rows.append(tooling_row(member, facts, peer_label=peer_label))

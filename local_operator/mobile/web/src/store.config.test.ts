@@ -47,6 +47,11 @@ describe("retainConfigStream", () => {
 		// relay.skills is the composer's `$skill` picker (SKM-D6): its tray
 		// labels and the one skipped-skill notice.
 		// relay.agent_avatar is the agent picture's alt/label/desktop hint.
+		// relay.highlights is the supplement block's withheld-files line and
+		// its reasons (#3392); bundled like every other owned surface, so the
+		// line renders on a cold open with no catalogue fetch.
+		// relay.composer is the composer's button vocabulary (send/steer/stop/...)
+		// and the working line's Stop.
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
@@ -55,7 +60,9 @@ describe("retainConfigStream", () => {
 			"relay.ask",
 			"relay.asks",
 			"relay.chrome",
+			"relay.composer",
 			"relay.health",
+			"relay.highlights",
 			"relay.library",
 			"relay.notifications",
 			"relay.session",

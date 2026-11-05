@@ -41,6 +41,33 @@ from local_operator.team_bridge.types import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fixture_models_are_evaluated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admit this file's FIXTURE models to the screening allowlist.
+
+    These tests pin the connector's screening plumbing on stand-in models; which model MAY screen is
+    policy, pinned against the real closed table in
+    ``test_screening_model_allowlist.py``. Without this every fixture default
+    (``openai/gpt-5.4`` ...) would fail closed before the mechanism under test
+    ran.
+    """
+
+    from local_operator.team_bridge import model_boundary
+
+    fixtures = (("openai", "gpt-5.4"), ("openai", "gpt-5.4-mini"))
+    monkeypatch.setattr(
+        model_boundary,
+        "SCREENING_EVALUATED_MODELS",
+        fixtures + model_boundary.SCREENING_EVALUATED_MODELS,
+    )
+    # Every fixture provider is "signed in": the chain walks credentialed pairs.
+    monkeypatch.setattr(
+        model_boundary,
+        "_credentialed_providers",
+        lambda _config_dir: {provider for provider, _model in fixtures},
+    )
+
+
 def _access(owner: Any) -> SimpleNamespace:
     """The authenticated access double the producer fence PINS (TB-14).
 
@@ -1893,7 +1920,18 @@ async def message(owner, message_id, *, config_dir, access, client=None):
     return SimpleNamespace(message_id=message_id)
 
 async def fetch(owner, message_id, *, config_dir, access, auth_store):
-    return {"message": {"id": message_id}}
+    import hashlib
+    # Recovery now validates the envelope before consulting an unsent receipt.
+    # This stop-signal rig must reach screen(), not hold on malformed input.
+    body = "stop-signal fixture"
+    return {
+        "message": {
+            "id": message_id, "type": "note", "body": {"text": body},
+            "body_hash": hashlib.sha256(body.encode()).hexdigest(),
+        },
+        "sender": {"account_id": "acc_sender"},
+        "thread": {"tenant_id": owner.tenant_id},
+    }
 
 async def screen(owner, item, *, config_dir, auth_store, settings=None):
     marker.write_text("in-spine")  # the claim is held from here on
@@ -2803,24 +2841,23 @@ def _expected_model_calls(source: str, intent: str, change: str) -> int:
     cache then serves). A stop at ANY point after that screen leaves a recorded
     decision — the message's own receipt (stopped before the ACK), or its read
     intent — and the restart hands off on it with NO second model call, even
-    under a changed model. Two cases re-screen, by design: a re-login (a new
+    under a changed model. One case re-screens, by design: a re-login (a new
     enrollment generation is a new owner, whose decision must be its own; the
-    cache is generation-fenced too), and a CACHE-SERVED message stopped before
-    its ACK under a model change — the cache writes no row for it and the hub
-    was never told, so there is no decision to carry and re-screening under
-    the new model is harmless."""
+    cache is generation-fenced too).
 
+    A CACHE-SERVED message now behaves exactly like a fresh one. The cache hit
+    records the message's OWN receipt (#3400 follow-up: without it a
+    byte-identical second message was held ``receipt_unavailable`` forever),
+    so a stop before its ACK leaves the same recorded decision a fresh screen
+    leaves, and a model change or rename carries it instead of re-screening.
+    ``source`` therefore no longer changes the count."""
+
+    del source  # kept in the signature: the matrix still runs both sources
     # A re-login re-screens only where the hub holds no verdict yet (r7 M8):
     # a recorded intent, pending or confirmed, is the hub's write-once
     # decision and is carried, never re-made.
     relogin = "relogin" in change and intent == "none"
-    # The fingerprint cache keys on the FULL envelope, display name included
-    # (A6), so a rename misses it exactly like a model change does; with no
-    # record and nothing at the hub, that re-screen is the only honest path.
-    model_miss = (
-        source == "cache_hit" and intent == "none" and ("model" in change or "rename" in change)
-    )
-    return 1 + (1 if relogin or model_miss else 0)
+    return 1 + (1 if relogin else 0)
 
 
 def _run_recovery_cell(
@@ -2933,7 +2970,7 @@ def _run_recovery_cell(
 
     # -- while the device is down (a compound change applies each part) ----
     for part in change.split("+"):
-        owner = _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path)
+        owner = _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path, monkeypatch)
 
     out: dict[str, Any] = {}
     drive(owner)
@@ -2956,7 +2993,9 @@ def _run_recovery_cell(
     return out
 
 
-def _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path) -> OwnerSnapshot:
+def _apply_matrix_change(
+    part, store, owner, status, hub, sender, tmp_path, monkeypatch
+) -> OwnerSnapshot:
     """One change while the device is down; returns the (possibly new) owner."""
 
     if part == "none":
@@ -2965,7 +3004,15 @@ def _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path) -> O
         sender["name"] = "Org Member (renamed)"
         return owner
     if part == "model":
-        _matrix_config(tmp_path, "gpt-5.4-mini")  # a ``lop`` update moved the default
+        # A ``lop`` update moved the SCREENING model: the chat default no longer
+        # picks it, so the change is the allowlist's first entry.
+        from local_operator.team_bridge import model_boundary as boundary_mod
+
+        monkeypatch.setattr(
+            boundary_mod,
+            "SCREENING_EVALUATED_MODELS",
+            (("openai", "gpt-5.4-mini"),) + boundary_mod.SCREENING_EVALUATED_MODELS,
+        )
         return owner
     if part == "relogin":
         owner = OwnerSnapshot(
@@ -3146,7 +3193,13 @@ def test_recovery_matrix_request_across_a_policy_republish(tmp_path, monkeypatch
     assert recorded is not None and recorded["state"] == "confirmed"
     request_calls = len(model_calls)
 
-    _matrix_config(tmp_path, "gpt-5.4-mini")  # an update changes the default model
+    # An update changes the SCREENING model. The chat default no longer picks
+    # it (the screener is the allowlist walked in order), so the change is the
+    # table's first entry, which is what republishes the policy.
+    table = boundary_mod.SCREENING_EVALUATED_MODELS
+    monkeypatch.setattr(
+        boundary_mod, "SCREENING_EVALUATED_MODELS", (("openai", "gpt-5.4-mini"),) + table
+    )
     publish_by_screening("bmsg_8")
     for _ in range(4):
         _iterate(owner, tmp_path, access)
@@ -3154,7 +3207,7 @@ def test_recovery_matrix_request_across_a_policy_republish(tmp_path, monkeypatch
     refused = len(record["delivered"])
     held = store.screening_hold(owner, "bmsg_1")
 
-    _matrix_config(tmp_path, "gpt-5.4")  # rolled back
+    monkeypatch.setattr(boundary_mod, "SCREENING_EVALUATED_MODELS", table)  # rolled back
     publish_by_screening("bmsg_9")
     for _ in range(4):
         _iterate(owner, tmp_path, access)
@@ -3294,3 +3347,132 @@ def test_a_confirmed_read_ack_under_a_revoked_sender_holds_then_recovers(
     assert len(record["delivered"]) == 1
     assert store.screening_hold(owner, "bmsg_1") is None
     assert len(model_calls) == 1 and hub.applied.count("bmsg_1") == 1
+
+
+def test_a_pair_hold_ranks_as_addressed_not_behind_ambient(tmp_path, monkeypatch) -> None:
+    """#3400 round 2, R2-m1: the pair lane writes its hold with the
+    agent-addressed tier (a pair message is addressed to this agent by
+    construction), so the bounded retry pass serves it before a newer
+    ambient conversation backlog, as it did before tiers existed."""
+
+    store, owner = _enroll(tmp_path)
+    for index in range(10):
+        store.persist_hold(
+            owner, f"conv_amb{index}", "budget_exhausted", retry_at=time.time() - 5, tier=0
+        )
+    ref = "message_available:message_id=bmsg_pair1"
+
+    async def events(owner_, **kwargs):
+        store.record_feed_batch(owner, feed_seq(1), [ref], resync_required=False)
+        return {"cursor": 1, "refs": [ref], "resync": False}
+
+    async def pair_spine(owner_, message_id, **kwargs):
+        return {"action": "hold", "message_id": message_id, "code": "provider_error"}
+
+    monkeypatch.setattr(pull_mod, "events", events)
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
+    monkeypatch.setattr(loop_mod, "retry_due_holds", _no_retry)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    asyncio.run(
+        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    loop_mod._RETRY_ATTEMPTS.clear()
+    due = store.due_screening_holds(owner, now=time.time() + 7200, limit=8)
+    assert due[0]["message_id"] == "bmsg_pair1"
+    # The row carries the tier itself, not only the NULL-ranks-as-2 reading.
+    with store._connect() as conn:  # noqa: SLF001 — test introspection
+        row = conn.execute(
+            "SELECT tier FROM screening_holds WHERE message_id = ?", ("bmsg_pair1",)
+        ).fetchone()
+    assert row is not None and row[0] == store_mod.Store.SCREENING_TIER_ADDRESSED
+
+
+async def _no_retry(*args, **kwargs):
+    return {"due": 0, "outcomes": []}
+
+
+def test_a_pair_hold_redriven_from_a_stale_claim_keeps_the_addressed_tier(
+    tmp_path, monkeypatch
+) -> None:
+    """#3400 round 3, R3-m1: a pair message whose connector died mid-spine is
+    parked (``stale_claim``, no tier), re-coded for the re-drive (no tier), and
+    a hold on that re-drive went through the retry pass's writer with
+    ``outcome.get("tier")``, which the pair spine never sets. The row stayed
+    NULL, so it ranked behind every ambient row for its whole retry life. A
+    pair row is addressed to this agent by construction, wherever it is held."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    _wire_spine(monkeypatch, tmp_path, disposition="hold")
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    store.claim(
+        owner, "bmsg_1", "sess_cos", "connector:dead-owner", expiry=clock.now + wake_mod.CLAIM_TTL_S
+    )
+    _one_pending_ref(store, owner)
+    _iterate(owner, tmp_path)
+    clock.now += wake_mod.CLAIM_TTL_S + loop_mod.STALE_CLAIM_MARGIN_S + 1
+    retried = _iterate(owner, tmp_path)
+    assert retried["retries"]["outcomes"] == [{"message_id": "bmsg_1", "action": "hold"}]
+    with store._connect() as conn:  # noqa: SLF001 — test introspection
+        row = conn.execute(
+            "SELECT hold_code, tier FROM screening_holds WHERE message_id = ?", ("bmsg_1",)
+        ).fetchone()
+    assert row is not None and row[0] == "screening_hold"
+    assert row[1] == store_mod.Store.SCREENING_TIER_ADDRESSED
+    for index in range(10):
+        store.persist_hold(
+            owner, f"conv_amb{index}", "budget_exhausted", retry_at=clock.now - 5, tier=0
+        )
+    due = store.due_screening_holds(owner, now=clock.now + 7200, limit=8)
+    assert due[0]["message_id"] == "bmsg_1"
+
+
+def test_a_parked_pair_row_is_redriven_ahead_of_an_ambient_backlog(tmp_path, monkeypatch) -> None:
+    """#3420 R1-m1 = QA Q-1: the stale-claim park itself is a pair row, so it
+    carries the addressed tier from the start. It was written with no tier and
+    ranked last until its first re-drive, which a due ambient backlog of 8 or
+    more never let it reach."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    _wire_spine(monkeypatch, tmp_path, disposition="hold")
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    store.claim(
+        owner, "bmsg_1", "sess_cos", "connector:dead-owner", expiry=clock.now + wake_mod.CLAIM_TTL_S
+    )
+    _one_pending_ref(store, owner)
+    _iterate(owner, tmp_path)
+    with store._connect() as conn:  # noqa: SLF001 — test introspection
+        parked = conn.execute(
+            "SELECT hold_code, tier FROM screening_holds WHERE message_id = ?", ("bmsg_1",)
+        ).fetchone()
+    assert tuple(parked) == (loop_mod.HOLD_STALE_CLAIM, store_mod.Store.SCREENING_TIER_ADDRESSED)
+    clock.now += wake_mod.CLAIM_TTL_S + loop_mod.STALE_CLAIM_MARGIN_S + 1
+    for index in range(10):
+        store.persist_hold(
+            owner, f"bmsg_amb{index}", "budget_exhausted", retry_at=clock.now - 5, tier=0
+        )
+    retried = _iterate(owner, tmp_path)
+    actions = {o["message_id"]: o["action"] for o in retried["retries"]["outcomes"]}
+    assert actions.get("bmsg_1") == "hold", "re-driven in the first pass"
+
+
+def test_a_parked_conversation_ref_takes_no_tier_from_the_park() -> None:
+    """#3420 R2-m2 (b): only a PAIR row is addressed by construction. A
+    conversation ref's tier is the one its handler stamps; the park must not
+    promote an ambient conversation row to ADDRESSED."""
+
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    ref = ConversationFeedRef(
+        conversation_id="bcv_abcdefgh",
+        message_id="bcmsg_abcdef01",
+        conversation_seq=1,
+        mention=False,
+    ).validated()
+    assert loop_mod._parked_tier(ref.encode()) is None  # noqa: SLF001
+    assert loop_mod._parked_tier("bmsg_1") == store_mod.Store.SCREENING_TIER_ADDRESSED

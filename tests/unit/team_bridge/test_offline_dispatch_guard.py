@@ -7,7 +7,6 @@ import json
 import pytest
 
 from local_operator.evaluation.team_bridge_moderation.agent import RecordingClient
-from local_operator.team_bridge import reply_guard
 from local_operator.team_bridge.tool import execute_bridge
 from tests.unit.team_bridge.test_exact_reply_destination import (  # noqa: F401
     A,
@@ -73,25 +72,25 @@ async def test_peer_passthrough_does_not_double_invoke_or_serialize_guard():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cooldown", [False, True])
-async def test_offline_tool_preserves_budget_and_cooldown(bound_runtime, cooldown):  # noqa: F811
+async def test_offline_tool_preserves_the_reply_guard(bound_runtime):  # noqa: F811
+    """The offline dispatch path keeps the guard: count never refuses (12 posts
+    with nothing new to answer all go out, warned at 5 and 10), and an exact
+    double send is skipped before it reaches the wire."""
+
     runtime, _, _ = bound_runtime
     sink = []
     runtime.client = RecordingClient(sink)
-    count = reply_guard.COOLDOWN_AFTER if cooldown else reply_guard.BUDGET_POSTS
-    if cooldown:
-        reply_guard.record_trigger(
-            runtime.config_dir,
-            endpoint_id=runtime.owner.endpoint_id,
-            conversation_id=A,
-            sender_kind="agent",
-            mention=False,
+    warned = []
+    for index in range(1, 13):
+        out = await execute_bridge(
+            runtime, {"op": "channel_post", "channel_id": A, "body": f"part {index}"}
         )
-    for _ in range(count):
-        out = await execute_bridge(runtime, {"op": "channel_post", "channel_id": A, "body": "ok"})
-        assert out["ok"], out
-    refused = await execute_bridge(
-        runtime, {"op": "channel_post", "channel_id": A, "body": "denied"}
+        assert out["ok"] and not out.get("skipped"), out
+        if "warning" in out:
+            warned.append(index)
+    assert warned == [5, 10]
+    again = await execute_bridge(
+        runtime, {"op": "channel_post", "channel_id": A, "body": "part 12"}
     )
-    assert refused["code"] == (reply_guard.CODE_COOLDOWN if cooldown else reply_guard.CODE_BUDGET)
-    assert len(sink) == count
+    assert again["ok"] is True and again["skipped"] is True
+    assert len(sink) == 12

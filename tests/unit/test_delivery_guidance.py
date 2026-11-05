@@ -10,26 +10,38 @@ from pathlib import Path
 import pytest
 
 from local_operator.agent_profiles import (
+    DELIVERY_POINTER,
     install_seed,
     load_seed,
     resolve_profile,
     sync_installed_seeds,
 )
-from local_operator.agents import AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.skills.discovery import discover_skills, packaged_skill_root
 from local_operator.teams import Team
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _fields(**overrides):
+    # AgentEditFields validates strictly, so every field is spelled out.
+    names = AgentEditFields.model_fields
+    return AgentEditFields(**{name: overrides.get(name) for name in names})
+
+
 # Budgets cover the installed body, not YAML metadata, and allow small edits
 # without letting an incident archive grow into every delegated turn again.
+# The review-economy pointers (context contract, scope, freshness, round
+# hygiene) raised coder/manager/designer/ux/qa slightly after trimming the
+# duplicated coverage prose; reviewer stayed inside its 3500 by trimming.
 BUDGETS = {
-    "coder": 2300,
+    "coder": 2400,
     "reviewer": 3500,
-    "manager": 3300,
-    "designer": 5450,
-    "ux-reviewer": 4500,
+    "manager": 3450,
+    "designer": 5650,
+    "ux-reviewer": 4650,
     "aida": 8000,
-    "qa-tester": 2600,
+    "qa-tester": 2700,
 }
 
 
@@ -56,9 +68,17 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
         "BLOCKER",
         "byte-identical",
         "actual served model",
+        "Review economy",
+        "Context contract",
+        "pre-existing",
+        "merge of main",
     ):
         assert required in policy
-    assert len(policy) < 6800
+    # Raised from 6800 for the review-economy section: measured review churn
+    # (median 6-7 rounds/PR, ~55% no-BLOCKER/MAJOR re-runs after a clean round) costs far more
+    # tokens than ~1.7k always-loaded chars. Still a hard cap: detail belongs
+    # in AGENTS.md, not here.
+    assert len(policy) < 8500
 
 
 def test_root_instructions_link_detail_instead_of_duplicating_it():
@@ -117,3 +137,262 @@ def test_packaged_skills_expose_compact_delivery_controls():
         body = skill.file_path.read_text()
         assert marker in body
         assert len(body) < 6500
+
+
+def _child_prompt(tmp_path, registry, role):
+    # The real launch assembler (what ``task(agent=role)`` sends the child), so
+    # the check sits at the registered-role boundary, not on seed Markdown.
+    from local_operator.harness.subagent import _effective_prompt
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    parent = make_session(tmp_path, ScriptedStream([]), agent_registry=registry)
+    return _effective_prompt("Synthetic bounded task", role, parent)
+
+
+def test_registered_engineering_role_predating_seed_gets_delivery_pointer(tmp_path):
+    """Pilots that loaded seeds passed while operator rows from October kept
+    running their old prompts; this launches a hand-edited registered row and
+    checks the pointer arrives without losing anything, and without writing."""
+
+    registry = AgentRegistry(tmp_path / "config")
+    legacy = "Old October review rules.\nCUSTOM safety block: never touch prod."
+    row = registry.create_agent(
+        _fields(
+            name="reviewer",
+            description="custom reviewer",
+            tags=["role", "tools:read,grep", "effort:hi"],
+            model="anthropic/claude-opus-5-5",
+        )
+    )
+    registry.set_agent_system_prompt(row.id, legacy)
+
+    prompt, profile = _child_prompt(tmp_path, registry, "reviewer")
+    assert profile is not None
+    assert legacy in prompt and prompt.count(DELIVERY_POINTER) == 1
+    assert profile.instructions == f"{legacy}\n\n{DELIVERY_POINTER}"
+    assert profile.tools == ("read", "grep") and profile.effort == "hi"
+    assert profile.model == "anthropic/claude-opus-5-5"
+    assert profile.description == "custom reviewer"
+    # Show/edit surfaces read resolve_profile: they keep the exact stored text.
+    shown = resolve_profile("reviewer", registry=registry)
+    assert shown is not None and shown.instructions == legacy
+    assert registry.get_agent_system_prompt(row.id) == legacy
+
+    # A prompt already carrying the pointer is not given a second one.
+    registry.set_agent_system_prompt(row.id, profile.instructions)
+    again, _ = _child_prompt(tmp_path, registry, "reviewer")
+    assert again.count(DELIVERY_POINTER) == 1
+
+
+def test_delivery_pointer_skips_current_seed_rows_and_other_roles(tmp_path):
+    registry = AgentRegistry(tmp_path / "config")
+    seed = load_seed("coder")
+    assert seed is not None
+    # Packaged seed (no row) and an installed, edited-by-addition seed row both
+    # already carry the current rules: no pointer, bytes unchanged.
+    fresh, _ = _child_prompt(tmp_path, registry, "coder")
+    assert DELIVERY_POINTER not in fresh
+    installed = install_seed("coder", registry=registry, scope="global")
+    assert installed is not None and installed[0].agent_id is not None
+    extended = seed.instructions + "\nCUSTOM house rule"
+    registry.set_agent_system_prompt(installed[0].agent_id, extended)
+    _, coder = _child_prompt(tmp_path, registry, "coder")
+    assert coder is not None and coder.instructions == extended
+
+    # A non-engineering registered role keeps its own text exactly.
+    row = registry.create_agent(_fields(name="scout-custom", tags=["role"]))
+    registry.set_agent_system_prompt(row.id, "Own rules.")
+    _, custom = _child_prompt(tmp_path, registry, "scout-custom")
+    assert custom is not None and custom.instructions == "Own rules."
+
+
+@pytest.mark.parametrize(
+    "name", ["manager", "coder", "reviewer", "qa-tester", "designer", "ux-reviewer", "architect"]
+)
+def test_engineering_seeds_carry_batching_and_minor_rule(name):
+    # Every built-in engineering role states the one rule that most often
+    # caused extra waves: accepted minors never earn their own round.
+    profile = load_seed(name)
+    assert profile is not None
+    assert "guide://delivery" in profile.instructions
+    assert "MINOR/NIT never force another round" in profile.instructions
+
+
+@pytest.mark.parametrize(
+    "name", ["reviewer", "qa-tester", "ux-reviewer", "designer", "copy-reviewer", "architect"]
+)
+def test_read_only_roles_reuse_the_manager_owned_pr_worktree(name):
+    # Readers clone/install by default was measured filling the shared disk;
+    # the default is reuse, and only a conflicting commit or an isolated build
+    # collision may justify another checkout.
+    profile = load_seed(name)
+    assert profile is not None
+    body = " ".join(profile.instructions.split())
+    assert "manager-owned PR worktree" in body
+    assert "no own clone/install" in body or "no clone, install or new worktree" in body
+    if name != "architect":
+        assert "conflicting commit or isolated build collision" in body
+        assert "guide://delivery" in body
+
+
+@pytest.mark.parametrize("name", ["manager", "coder"])
+def test_owning_roles_hold_one_pr_worktree_lifecycle(name):
+    profile = load_seed(name)
+    assert profile is not None
+    body = " ".join(profile.instructions.split())
+    assert "ONE PR worktree" in body and "origin/main" in body
+    assert "merges or closes" in body or "merges/closes" in body
+
+
+def test_delivery_guide_owns_the_shared_worktree_rule():
+    policy = " ".join((ROOT / "local_operator/guides/delivery/GUIDE.md").read_text().split())
+    for required in (
+        "owns ONE PR worktree",
+        "no clone, install or new worktree",
+        "conflicting commit author",
+        "isolated mutable build collision",
+        "no full-tree copies into scratch",
+        "isolated HOME/config",
+    ):
+        assert required in policy
+
+
+def test_stale_copy_reviewer_gets_the_pointer_with_worktree_rule(tmp_path):
+    registry = AgentRegistry(tmp_path / "config")
+    row = registry.create_agent(_fields(name="copy-reviewer", tags=["role"]))
+    registry.set_agent_system_prompt(row.id, "Old copy rules.")
+    _, profile = _child_prompt(tmp_path, registry, "copy-reviewer")
+    assert profile is not None and profile.instructions.endswith(DELIVERY_POINTER)
+    assert "no clone, install or new worktree" in DELIVERY_POINTER
+    assert registry.get_agent_system_prompt(row.id) == "Old copy rules."
+
+
+def test_qa_round_two_retests_only_failed_and_reimpacted_rows():
+    # Measured: QA round 2+ re-ran a median 66% of round-1 rows. The seed
+    # states the delta rule, keeps real majors blocking, and reuses one tree.
+    seed = load_seed("qa-tester")
+    assert seed is not None
+    body = " ".join(seed.instructions.split())
+    for required in (
+        "Round 1: the full in-scope QA matrix",
+        "re-test only prior FAIL/BLOCKED rows",
+        "`retained (<sha>)`",
+        "Real BLOCKER/MAJOR still block",
+        "git checkout --detach <new-head>",
+        "HEAD == briefed SHA",
+    ):
+        assert required in body
+
+
+def test_delivery_guide_carries_brief_field_line_and_clean_stream_retention():
+    policy = " ".join((ROOT / "local_operator/guides/delivery/GUIDE.md").read_text().split())
+    for required in (
+        "`Worktree: <abs path> @ <sha> · Round: <N> · Scope: <prev>..<head> · "
+        "Retest: <FAIL ids>|none`",
+        "A clean stream is NOT re-run when the delta misses its surface",
+        "no QA/design/UX round",
+        "never sleep-poll it mid-cycle",
+        "PYTHONPATH=<worktree>",
+    ):
+        assert required in policy
+
+
+@pytest.mark.parametrize("name", ["reviewer", "qa-tester", "designer", "ux-reviewer", "manager"])
+def test_roles_name_the_worktree_brief_field(name):
+    profile = load_seed(name)
+    assert profile is not None and "Worktree:" in profile.instructions
+
+
+def test_reader_launch_without_worktree_field_notices_the_parent_only(tmp_path):
+    from local_operator.harness.subagent import (
+        MISSING_WORKTREE_NOTICE,
+        missing_worktree_notice,
+    )
+
+    assert missing_worktree_notice("qa-tester", "Test PR #1") == MISSING_WORKTREE_NOTICE
+    # A named but nonexistent path is the same omission.
+    gone = tmp_path / "gone"
+    unresolved = missing_worktree_notice("Reviewer", f"Worktree: {gone} @ abc")
+    assert unresolved is not None and str(gone) in unresolved
+    brief = f"Request: x\nWorktree: {tmp_path} @ abc1234 · Round: 2 · Scope: a..b"
+    assert missing_worktree_notice("reviewer", brief) is None
+    # The field is found wherever and however managers write it.
+    for brief in (
+        f"PR: #1 · Worktree: {tmp_path} @ abc",
+        f"Worktree: `{tmp_path}` @ abc",
+        f"`Worktree: {tmp_path} @ abc`",
+        f"**Worktree:** {tmp_path} @ abc",
+        f"- Worktree: {tmp_path} @ abc",
+    ):
+        assert missing_worktree_notice("qa-tester", brief) is None, brief
+
+
+def test_worktree_field_expands_home(tmp_path, monkeypatch):
+    from local_operator.harness.subagent import missing_worktree_notice
+
+    (tmp_path / "w").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert missing_worktree_notice("reviewer", "PR: #1 · Worktree: ~/w @ abc") is None
+    # Writers and plain tasks own their tree; no notice.
+    assert missing_worktree_notice("coder", "no field") is None
+    assert missing_worktree_notice("task", "no field") is None
+
+
+@pytest.mark.asyncio
+async def test_task_receipt_carries_worktree_notice_for_unbriefed_reader(tmp_path):
+    from local_operator.harness.jobs import AsyncJobManager
+    from local_operator.harness.subagent import MISSING_WORKTREE_NOTICE
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    prompts: list[str] = []
+
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
+        prompts.append(prompt)
+        return f"job-{len(prompts)}"
+
+    context = ToolContext(
+        cwd=str(tmp_path), session_id="s", subagent_launcher=launcher, jobs=AsyncJobManager()
+    )
+    result = await builtin.execute_task(
+        "t1",
+        {
+            "tasks": [
+                {"label": "QA", "prompt": "Test PR #9", "agent": "qa-tester"},
+                {"label": "Rev", "prompt": f"Worktree: {tmp_path} @ abc", "agent": "reviewer"},
+            ]
+        },
+        None,
+        None,
+        context,
+    )
+    assert result.is_error is False
+    assert result.text.count(MISSING_WORKTREE_NOTICE) == 1
+    # Advisory only: both launched, and the child never sees the notice.
+    assert len(prompts) == 2 and all(MISSING_WORKTREE_NOTICE not in p for p in prompts)
+
+
+def test_attached_stale_registered_role_and_team_manager_get_delivery_pointer(tmp_path):
+    """The child-launch pointer used to miss ``/agent`` attach and a team's
+    manager session; both resolve through the session's one resolver."""
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    registry = AgentRegistry(tmp_path / "config")
+    for name in ("reviewer", "manager"):
+        row = registry.create_agent(_fields(name=name, tags=["role"]))
+        registry.set_agent_system_prompt(row.id, f"Old {name} rules.")
+    session = make_session(tmp_path, ScriptedStream([]), agent_registry=registry)
+    assert session.attach_agent_profile("reviewer") == "reviewer"
+    assert DELIVERY_POINTER in session._goal_state.agent_brief
+    reviewer = registry.get_agent_by_name("reviewer")
+    assert reviewer is not None
+    assert registry.get_agent_system_prompt(reviewer.id) == "Old reviewer rules."
+    team = Team(
+        id="12345678-1234-1234-1234-123456789013",
+        name="stale-team",
+        manager="manager",
+        created_date=datetime.now(timezone.utc),
+    )
+    session.attach_team(team)
+    brief = session._goal_state.team_brief
+    assert "Old manager rules." in brief and brief.count(DELIVERY_POINTER) == 1

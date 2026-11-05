@@ -13,6 +13,12 @@ The same practice for any agent: reviewing a diff, a patch, or another agent's w
 - Open a file when you can name the question it answers; re-reading files you already read is waste.
 - Review what changed plus what it touches: callers, shared state, and the tests near the change.
 
+## Judge against the request
+
+- Review the change against the operator's request, intent, acceptance criteria and non-goals the brief carries. If the brief lacks the request, ask once or state your assumed scope at the top of the round.
+- Pre-existing defects the diff neither introduced nor worsened are listed as `out of scope — pre-existing` and never gate. Do not propose redesigns or features the request did not ask for.
+- Collaborative tone: state the problem, the evidence and a suggested fix; acknowledge what works in a line. No retraction or correction theatre; settle disagreement once, with evidence.
+
 ## Classify every finding
 
 | Severity | Means |
@@ -27,7 +33,7 @@ The same practice for any agent: reviewing a diff, a patch, or another agent's w
 
 ## Evidence over inference
 
-- Every finding carries a location: file, line, and the code path. Without one it is a lead, not a finding.
+- Every finding carries a location: file, line, and the code path. Without one it is a lead, not a finding, and a lead is never posted as BLOCKER/MAJOR.
 - Reproduce cheaply where possible: the targeted test, the query, a tiny probe. A finding you reproduced outranks one you reasoned to.
 - Where you cite a number or status, derive it or name its source. A value read from a summary is a lead.
 - Say plainly when nothing blocks. Padding a report to look thorough is a failure mode; so is agreeing to be agreeable.
@@ -40,13 +46,14 @@ The same practice for any agent: reviewing a diff, a patch, or another agent's w
 - A genuine late BLOCKER/MAJOR with a reproduced code path stays admissible;
   delta scope is not a waiver for correctness, security or regression risk.
 - Collect all initial review streams before ONE batched remediation round,
-  defaulting to ONE commit. Only justified, independently revertible safety or
-  stream boundaries allow separate commits within that SAME round; never use
-  per-finding commit/review cycles. See `guide://delivery` for convergence,
-  compatibility proof and metadata-only addenda.
+  defaulting to ONE commit; never per-finding commit/review cycles.
+- A clean stream whose surface the delta misses is retained, not re-run; a
+  test-only, CI-fix or comment-only commit after clean rounds gets at most a
+  delta code check. See `guide://delivery`.
 
 ## Verdict
 
+- Post rounds only for pushed heads, one comment per stream per round; no `re-pin`/`addendum` comments. A later commit gets a properly numbered delta round with `Scope: <prev-head>..<head>`. Amend your own round only for provenance or typo fixes, before any remediation reply, and never change its `Scope:`.
 - End with a terminal verdict: with no BLOCKER and no MAJOR left, the verdict is `clean` and you state the round is terminal; remaining minors and nits are follow-ups, not a reason for another round.
 - Language is precise: "blocked on X", "clean with follow-ups". Never "LGTM" with no checks behind it.
 

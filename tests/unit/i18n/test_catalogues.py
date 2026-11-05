@@ -54,7 +54,13 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.agents",
         "wire.errors.auth",
         "wire.errors.desktop",
+        # Receipt-bound skill adoption owns its preview/consent vocabulary.
+        "wire.skill_adoption",
         "wire.errors.files",
+        # The owned "hosting is not configured" cause clause, composed INTO the
+        # startup refusals above: without its own key a locale that translates
+        # the frame still inherits that one English sentence mid-sentence.
+        "wire.errors.hosting",
         "wire.errors.media",
         # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
         # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
@@ -72,6 +78,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.notices",
         "wire.settings",
         "wire.settings.hub_defaults",
+        # The org Agent Hub section (Radient Team only) is its own child so its
+        # copy never moves the audited wire.settings locale hashes.
+        "wire.settings.hub_org",
         # Account-routing policy copy is an approved English-only child, not
         # an edit to the already-audited wire.settings or translated ledgers.
         "wire.settings.account_policy",
@@ -95,6 +104,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.tunnel_setup",
         # Memory settings copy (LOH-25): the registry rows resolve through it.
         "wire.memory",
+        # Notification sounds (#3398): the settings section, rows, the built-in
+        # sound names and `lop sound` help, in its own namespace so the audited
+        # wire.settings hashes are untouched.
+        "wire.notification_sound",
         # The tier-1 remote-compute CLI copy is its own English-only namespace,
         # the `wire.host_speed` shape: `lop exec --remote` adds keys to `wire.exec`,
         # which fr/hi/vi CARRY, and an English edit to a carried namespace
@@ -112,6 +125,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; the
         # translation wave lands its seven locales in a follow-up.
         "wire.tool_rows.bridge",
+        # The reply guard's skipped double send (#3377 follow-up, design D1/D2):
+        # a dedicated verb and expanded sentence as a CHILD of the bridge rows,
+        # so the 85 audited `wire.tool_rows.bridge` bytes and their ledger
+        # hashes do not move. Carried by all seven locales.
+        "wire.tool_rows.bridge.skipped",
         # The sessions tool's own operator-visible stop receipts (agent review
         # round 1 R2). Its own namespace, the `wire.host_speed` shape: the
         # receipts are new copy, and adding them to a namespace fr/hi/vi CARRY

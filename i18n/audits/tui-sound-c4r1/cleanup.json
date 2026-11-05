@@ -1,0 +1,16 @@
+{
+  "checked_groups": [
+    67532,
+    65677,
+    84247,
+    60976,
+    64061,
+    56939,
+    62286,
+    59645,
+    70268
+  ],
+  "remaining_processes": [],
+  "method": "ps -axo pid=,pgid=,comm= after bounded runner SIGTERM of each exact owned group",
+  "claim": "no remaining matching PGIDs at observation; not authoritative Darwin descendant census"
+}

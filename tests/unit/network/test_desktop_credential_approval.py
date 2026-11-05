@@ -1404,3 +1404,49 @@ def test_the_desktop_refusal_does_not_promise_a_time_limited_share() -> None:
     text = approval_copy.inheritance_desktop_refusal(False)
     assert "time-limited" not in text and "just the current sign-in" in text
     assert "review the card and approve again" in approval_copy.KEY_DID_NOT_SIGN  # U11
+
+
+@pytest.mark.parametrize(
+    ("code", "reason_fragment", "repair_fragments"),
+    [
+        ("catalogue_invalid", "invalid", ("protocol compatibility", "do not bypass validation")),
+        (
+            "catalogue_unavailable",
+            "could not be read",
+            ("credential-owning device", "when available"),
+        ),
+        (
+            "catalogue_unsupported",
+            "not supported",
+            ("supported catalogue", "this device's relay", "update that device"),
+        ),
+        (
+            "identity_mismatch",
+            "different sending device",
+            ("identity", "do not retry as a different device"),
+        ),
+        ("owner_offline", "could not be reached", ("Reconnect", "credential-owning device")),
+    ],
+)
+def test_catalogue_refusals_have_actionable_copy_without_reauthorizing_a_card(
+    code: str, reason_fragment: str, repair_fragments: tuple[str, ...]
+) -> None:
+    from local_operator.network.credentials import approval_copy
+
+    result = approval_copy.outcome(code)
+    assert code in approval_copy.KNOWN_CODES
+    assert result["code"] == code
+    assert reason_fragment in result["reason"]
+    assert result["reason"] != approval_copy.reason_for("unknown_code")
+    assert all(fragment in result["remedy"] for fragment in repair_fragments)
+    # Sharing a vocabulary is NOT authority to rerun a spent signed approval.
+    assert not result["retryable"] and not approval_copy.retryable(code)
+    assert result["remedy"].endswith(approval_copy.NEW_REQUEST_NEEDED)
+    sentence = approval_copy.refusal_sentence(code)
+    assert sentence == result["reason"] + " " + result["remedy"]
+    assert (
+        approval_copy.last_failure({"state": "failed", "receipts": [{"ok": False, "detail": code}]})
+        == result
+    )
+    for misleading in ("sign in", "sign-in", "log in", "lop "):
+        assert misleading not in sentence.lower()

@@ -1,0 +1,248 @@
+{
+  "kind": "metadata_corrections",
+  "correction_version": 1,
+  "audit_id": "ruh-r2a1",
+  "locale": "ru",
+  "namespace": "wire.errors.hosting",
+  "key_count": 1,
+  "correction_date": "2026-11-03",
+  "status": "metadata_correction_only",
+  "verdict": "passed",
+  "verdict_changed": false,
+  "verdict_statement": "The audit verdict does not change: still `passed`, 0 BLOCKER, 0 MAJOR. What changes is only the factual accuracy of provenance metadata and of the served summary. No new translation, round, re-audit, validator, test, build, render or native run was performed, and none is implied.",
+  "revalidated": false,
+  "new_validation_pass": false,
+  "native_or_rendered_proof": "NOT RUN",
+  "fit_claim": "WITHDRAWN — no fit, width-budget or overflow conclusion is made anywhere: the context sidecar declares no maxChars/maxCells, and no rendering or budget measurement was performed.",
+  "independent_recompute": {
+    "method": "this session, Python stdlib json/len/hashlib over the actual bytes; no value copied from the parent or from the translator record",
+    "key": "wire.errors.hosting.not_configured",
+    "key_observed_in": {
+      "en": "wire.errors.hosting.not_configured",
+      "ru_r2": "wire.errors.hosting.not_configured",
+      "ru_r1": "wire.errors.hosting.not_configured",
+      "context": "wire.errors.hosting.not_configured"
+    },
+    "key_all_equal": true,
+    "en_value": "Hosting platform is not configured.",
+    "en_len_codepoints": 35,
+    "en_len_utf8_bytes": 35,
+    "ru_r2_value": "Платформа размещения не настроена.",
+    "ru_r2_len_codepoints": 34,
+    "ru_r2_len_utf8_bytes": 64,
+    "ru_r1_value": "Платформа хостинга не настроена.",
+    "ru_r1_len_codepoints": 32,
+    "ru_minus_en_codepoints": -1,
+    "ru_minus_r1_codepoints": 2,
+    "context_field_names": [
+      "role",
+      "tone",
+      "note"
+    ],
+    "context_declares_max_cells_or_max_chars_or_budget": false,
+    "context_search": "no key named maxCells/maxChars/max_cells/max_chars/budget; the sidecar holds role, tone, note only",
+    "icu_arguments": "none — no braces, no <tag>, no %/$, no plural/select/number construct",
+    "actual_exception_class": "HostingNotConfiguredError(ValueError), defined local_operator/session_factory.py:365, raised at :816 with the English text 'Hosting platform is not configured.'; subclasses HostingUnknownError:378, HostingNotChatError:429, ModelNotConfiguredError:463",
+    "actual_exception_class_source": "grep tool over ~/local-operator/.worktrees/startup-owned-copy/local_operator/session_factory.py (read-only)"
+  },
+  "exact_paths": {
+    "en": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+    "context": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+    "ru_r2": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru-r2/target/ru/wire.errors.hosting.json",
+    "ru_r1": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru/target/ru/wire.errors.hosting.json",
+    "author_record": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru-r2/record.json",
+    "record": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/record.json",
+    "report": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/report.md",
+    "receipt": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/receipt.json"
+  },
+  "hashes": {
+    "original_record_sha256": "f0756cf8aa9869619485d0995df51c5f6fc46d0dd3f183f7b723c620ddc2f614",
+    "original_report_sha256": "8fad20ce9bd75e2fc7245647e41189cc44075659fd8617c730f1f038c82b717b",
+    "original_receipt_sha256": "613e1a297b15802325f6425f7e3d7eb088cfae19645cad3f98d5195f1583aa09",
+    "inputs": {
+      "en": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "context": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "ru_r2": "38478ec0af7bdcb739dcd1bbbd82c8c50345e9869c2b21921f9a46d4bab1737a",
+      "ru_r1": "6fe2a88318b042c082047f0ac4b6a76c88d68957a1053f75ce9c0617efd0317d",
+      "author_record": "1b9876bb90059fd2e037f57394df6edbaf7f401f313a9095dc6ae080755e4684"
+    },
+    "original_record_sha256_note": "This is the hash of record.json exactly as it stands now and is left unchanged by this companion. Earlier in the same session, before this correction request, record.json was rewritten once to fix a missing opening guillemet in a prose field; the first written bytes hashed 12386576ce3710136ffbcbd9c59276b582d90417236151f35883e6fa1d31b77c. Nothing else in the record changed in that rewrite, and no file is edited now."
+  },
+  "wrong_statements": [
+    {
+      "where": "record.json",
+      "field": "verdict_basis.fit",
+      "claimed": "…; +1 char vs EN",
+      "actual": "RU is 34 codepoints, EN is 35, so RU is 1 codepoint SHORTER than EN (-1), not +1",
+      "evidence": "len() over the two JSON values in this correction pass"
+    },
+    {
+      "where": "report.md",
+      "line": 16,
+      "field": "Key table, EN row",
+      "claimed": "`Hosting platform is not configured.` (33 chars)",
+      "actual": "35 codepoints / 35 UTF-8 bytes",
+      "evidence": "len(EN value) = 35"
+    },
+    {
+      "where": "report.md",
+      "line": 32,
+      "field": "Mechanical table, width row",
+      "claimed": "34 chars (+1 vs EN, +2 vs R1)",
+      "actual": "34 chars; -1 vs EN (35); +2 vs R1 (32) — only the R1 comparison was right",
+      "evidence": "recomputed lengths"
+    },
+    {
+      "where": "report.md",
+      "line": 76,
+      "field": "§5 Fit",
+      "claimed": "34 chars / 64 bytes: +1 over EN",
+      "actual": "34 chars / 64 bytes is correct; the EN comparison is inverted: RU is 1 shorter than EN",
+      "evidence": "recomputed lengths"
+    },
+    {
+      "where": "served final message",
+      "field": "headline key",
+      "claimed": "hosting.platform_not_configured",
+      "actual": "wire.errors.hosting.not_configured (identical in EN, context, RU R2 and RU R1)",
+      "evidence": "key read from all four files"
+    },
+    {
+      "where": "served final message",
+      "field": "width budget",
+      "claimed": "34/50 budget",
+      "actual": "invented: no budget of any kind exists for this key — the sidecar has role/tone/note only, and no maxChars/maxCells value appears anywhere in the inputs",
+      "evidence": "context JSON key scan"
+    },
+    {
+      "where": "served final message",
+      "field": "parameters",
+      "claimed": "three parameters (`timeout_sec`, `max_retries` implied defaults) are not part of this clause",
+      "actual": "invented: the key has zero parameters; no `timeout_sec` or `max_retries` appears in the source, the sidecar, the target or the consumer path. The correct statement is that the message is a literal with no ICU arguments at all",
+      "evidence": "regex scan for placeholders/params over EN, RU and context"
+    },
+    {
+      "where": "report.md",
+      "line": 89,
+      "field": "Observations",
+      "claimed": "Width: +2 chars over R1",
+      "actual": "correct (34 vs 32); retained unchanged",
+      "evidence": "recomputed lengths"
+    }
+  ],
+  "statement_classes": {
+    "withdrawn": [
+      "the +1-vs-EN length direction",
+      "the 33-char EN figure",
+      "the 34/50 budget",
+      "the timeout_sec/max_retries parameters",
+      "the wrong key spelling in the served summary"
+    ],
+    "unchanged_and_reverified": [
+      "verdict passed; 0 BLOCKER/MAJOR",
+      "key wire.errors.hosting.not_configured",
+      "RU wording «Платформа размещения не настроена.»",
+      "one-word delta from R1",
+      "initial capital and single terminal full stop",
+      "zero ICU arguments",
+      "NFC",
+      "no Cf/Cc characters",
+      "no budget declared",
+      "legacy English exception untouched and unshipped state"
+    ],
+    "not_claimed": [
+      "no fit/width/overflow conclusion",
+      "no native-speaker judgement as proof",
+      "no render, runtime or pseudo-localisation result",
+      "no ledger row and no repo write in this correction"
+    ]
+  },
+  "append_only": {
+    "companion_kind": "metadata corrections, append-only",
+    "modifies": [],
+    "preserved_unchanged": [
+      "record.json",
+      "report.md",
+      "receipt.json"
+    ],
+    "note": "The wrong facts above remain visible in report.md and in the served message as history. This companion corrects the record without rewriting it, and it does not supersede the verdict.",
+    "artifacts_manifest": [
+      {
+        "path": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/record.json",
+        "sha256": "f0756cf8aa9869619485d0995df51c5f6fc46d0dd3f183f7b723c620ddc2f614",
+        "role": "original audit record",
+        "contains_superseded_facts": true
+      },
+      {
+        "path": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/report.md",
+        "sha256": "8fad20ce9bd75e2fc7245647e41189cc44075659fd8617c730f1f038c82b717b",
+        "role": "original audit report",
+        "contains_superseded_facts": true
+      },
+      {
+        "path": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/receipt.json",
+        "sha256": "613e1a297b15802325f6425f7e3d7eb088cfae19645cad3f98d5195f1583aa09",
+        "role": "original receipt",
+        "contains_superseded_facts": false
+      },
+      {
+        "path": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/metadata-corrections.json",
+        "sha256": null,
+        "role": "this companion",
+        "contains_superseded_facts": false,
+        "sha256_note": "self-reference not possible; the hash is computable from the file and is reported in the served reply"
+      }
+    ]
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "ac46f9462716",
+    "requested_model": "radient/auto",
+    "served_model": "UNKNOWN",
+    "served_model_reason": "the route exposes only `radient/auto`; no provider/model is inferred and no fallback is claimed",
+    "actual_model_source": "session model header `Model: radient/auto`; no separate served-model field was exposed",
+    "independent_from_translator_session": true,
+    "correction_author": "same session that served the erroneous summary — this is self-correction under the manager's instruction, not an independent re-audit"
+  },
+  "audit_notes_not_execution_log": [
+    "the prose in wrong_statements and statement_classes"
+  ],
+  "execution_log_actual": [
+    {
+      "seq": 1,
+      "tool": "eval, stdlib json/hashlib/os",
+      "observed": "hashes and realpaths of en/context/ru_r2/ru_r1/author record/record/report/receipt; EN 35, RU 34/64B, R1 32; keys identical; context fields role/tone/note; no ICU args; NFC; no Cf/Cc"
+    },
+    {
+      "seq": 2,
+      "tool": "grep tool",
+      "observed": "class HostingNotConfiguredError(ValueError) at session_factory.py:365; raise at :816"
+    },
+    {
+      "seq": 3,
+      "tool": "eval, stdlib json",
+      "observed": "this companion written and re-parsed"
+    }
+  ],
+  "not_run": [
+    "repo catalogue validator",
+    "project imports",
+    "tests",
+    "build/install",
+    "TUI or desktop render",
+    "pseudo-localisation",
+    "any native-speaker or fit measurement",
+    "ledger write",
+    "any git command in this correction pass"
+  ],
+  "checked_not_wrong": [
+    {
+      "where": "served final message",
+      "field": "exception class",
+      "claimed": "exact-type HostingNotConfiguredError",
+      "actual": "correct as stated — HostingNotConfiguredError(ValueError), session_factory.py:365, raised at :816; recorded here because the parent asked for the class to be recomputed independently, not because this statement was wrong",
+      "evidence": "grep tool over session_factory.py",
+      "status": "checked_correct"
+    }
+  ]
+}

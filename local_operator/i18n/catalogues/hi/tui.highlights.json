@@ -1,0 +1,7 @@
+{
+  "tui.highlights.withheld.line": "{count, plural, one {# फ़ाइल नहीं दिखाई गई} other {# फ़ाइलें नहीं दिखाई गईं}}: {reasons}",
+  "tui.highlights.withheld.reason.outside": "अनुमत स्थानों से बाहर",
+  "tui.highlights.withheld.reason.sensitive": "संवेदनशील फ़ाइल",
+  "tui.highlights.withheld.reason.missing": "फ़ाइल अब मौजूद नहीं है",
+  "tui.highlights.withheld.reason.too_large": "पूर्वावलोकन के लिए बहुत बड़ी"
+}

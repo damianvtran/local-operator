@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.94.22"
+version = "0.99.0"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -75,6 +75,10 @@ dependencies = [
     "textual>=8.0.0",
     "rich>=13.7",
     "pygments>=2.13",
+    # Skill adoption relies on CommonMark physical source maps and the inspected
+    # 4.2 inline-backtick emission contract to protect raw authored payloads. This
+    # is our direct runtime API, not an incidental Rich transitive dependency.
+    "markdown-it-py>=4.2,<5",
     # The desktop UI's installer runs a BARE `pip install local-operator` and
     # then launches `local-operator serve`, so the default set must stay fully
     # functional (0.15.10 had these in base; splitting them into extras broke
@@ -282,6 +286,13 @@ local_operator = [
     # recurse — see the note on the mobile/web sources below this list).
     "i18n/catalogues/*/*.json",
     "i18n/data/*.json",
+    # The built-in notification sounds and their catalog (notifications/sound.py
+    # reads both at runtime). 16-bit FLAC, ~0.26 MiB for all ten. The 24-bit
+    # masters and the export script under assets/notification-sounds/ stay
+    # git-only. tests/unit/notifications/test_sound_assets.py checks the
+    # catalog against the files.
+    "notifications/sounds/*.flac",
+    "notifications/sounds/catalog.json",
     # The turn-supplement ("Highlights") prelude: the minified stylesheet and
     # script the document assembler injects into every generated component. Both
     # are read at runtime (``supplements/document.py``), so a wheel without them
@@ -383,6 +394,9 @@ local_operator = [
     "mobile/web/src/*.ts",
     "mobile/web/src/*.tsx",
     "mobile/web/src/components/*.tsx",
+    # Sheet components import pure .ts models too; the installed SPA repair
+    # build must receive these alongside the .tsx views that depend on them.
+    "mobile/web/src/components/*.ts",
     "mobile/web/src/components/ui/*.tsx",
     # The modal layer's own hook (`ui/use-modal-layer.ts`): drawer and sheet both
     # import it, and an omitted `.ts` glob here is the same omission class as the

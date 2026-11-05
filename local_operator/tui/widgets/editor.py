@@ -8321,7 +8321,7 @@ class Editor(TextArea):
                 self._name_choices = frozenset()
                 self._name_choices_family = None
                 self.post_message(ArgumentQueryOpened(command or ""))
-            elif command in ("mcp", "team", "teams", "project", "agent", "agents"):
+            elif command in ("mcp", "team", "teams", "project", "agent", "agents", "sound"):
                 # `/mcp`, `/team`, `/project` and `/agent` are two-level: `/mcp`
                 # reserves verbs in the first argument slot and offers servers
                 # in the second; `/team` reserves the `chart` subcommand in the
@@ -8369,7 +8369,11 @@ class Editor(TextArea):
                     if subcommand != (self._argument_subcommand or ""):
                         self._argument_subcommand = subcommand
                         self.post_message(RefreshArgumentChoices(command, cursor))
-                elif command == "project":
+                elif command in ("project", "sound"):
+                    # `/sound` follows `/project` exactly: verbs in the first
+                    # slot, sound ids once `use `/`preview `/`rename `/`remove `
+                    # is typed (UX round 1, U2).
+                    #
                     # `/project` is two-level exactly as `/mcp` is: reserved
                     # verbs in the first slot, that verb's project NAMES in the
                     # second — for the NAME-TAKING verbs only; `list` and `new`

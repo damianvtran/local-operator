@@ -10,7 +10,13 @@ best-effort imports of other tools' configs (`~/.claude.json` — top-level
 only, meaning literally that path: Codex's `CODEX_HOME` override is not
 consulted). Project configs win over user configs, which win over imports;
 `disabledServers` beats `enabledServers`, which beats a server's own
-`enabled: false`.
+`enabled: false`. Within that ordering, an `enabled: false` declaration in a
+Local Operator-owned file (either project file or the user file) reserves its
+name and blocks lower-priority definitions, including imports. This prevents a
+disabled server from reconnecting through another tool's config. A higher-priority
+project declaration still beats a user-level `enabled: false`; this is not a
+global denylist. Disabled foreign imports alone retain their skip-and-fallback
+behavior. Suppressed names are absent from both effective configs and provenance.
 
 ## Trust model — read this before enabling project MCP configs
 

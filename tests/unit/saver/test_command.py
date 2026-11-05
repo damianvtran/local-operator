@@ -15,7 +15,6 @@ notice said "not available"). The shapes below make the fake impossible:
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -465,13 +464,15 @@ def test_the_ledger_row_and_the_catalogue_agree(tmp_path):
     digest = hashlib.sha256(
         (root / "local_operator/i18n/catalogues/en/wire.radient_saver.json").read_bytes()
     ).hexdigest()
-    ledger = json.loads((root / "i18n/ledger.json").read_text(encoding="utf-8"))
+    from scripts.i18n.ledger import load_entries
+
+    entries = load_entries(root)
     # The ledger is append-only since #3154 (per-locale shards, last row per
     # (locale, namespace) wins), so the rows audited against earlier source
     # digests legitimately stay as history. What must hold is the row the ship
     # gate reads: the LAST one per locale carries the current digest.
     effective: dict[str, str] = {}
-    for entry in ledger["entries"]:
+    for entry in entries:
         if entry["namespace"] == "wire.radient_saver":
             effective[entry["locale"]] = entry["source_sha256"]
     assert effective

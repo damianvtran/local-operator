@@ -51,12 +51,19 @@ from ..attachments import (
 )
 from ..client import SCREENING_TEMPLATE_V3_SHA256, BridgeRefusal
 from ..types import ConversationFeedRef
+from .batch_screen import (
+    allocation_for,
+    came_from_void_batch,
+    take_fetched,
+    take_result,
+)
 from .coalesce import CARD_COALESCED, card_is_buffered
 from .wake import (
     CLAIM_TTL_S,
     _producer_fence,
     deliver_wake,
     engagement_hold,
+    notify_screening_infra_hold,
     screen_item,
 )
 
@@ -109,7 +116,7 @@ def card_directed(metadata: ConversationCardMetadata) -> str:
 
     THE ONE predicate the card's ``directed:`` line, its ``expect:`` line and
     the reply guard's trigger record share, so "was this addressed to me" cannot
-    drift between what the agent is told and what the guard counts.
+    drift between what the agent is told and what the guard records.
 
     THE SERVER'S ``thread_follower`` BIT DECIDES WHEN IT IS PRESENT (E2E round 1,
     Q-1). A thread reply can reach a member that never joined the thread — the
@@ -144,10 +151,12 @@ def wake_is_addressed(metadata: ConversationCardMetadata) -> bool:
     value (round 6, M1/M2). The card may still derive ``directed: thread`` from a
     thread root on an older server, because that is the reader's best guess and
     the cost of a wrong guess is one wasted paragraph. The reply brake is
-    different: it LIFTS an agent-to-agent cool-down, so a wrong guess hands the
-    agents a fresh run. Without the server's ``thread_follower`` bit an ambient
-    reply in a thread the agent never joined is indistinguishable from a followed
-    one — so on an older server only a mention lifts it.
+    different: it LIFTS an agent-to-agent cool-down (today only an OLDER build's,
+    still honoured while builds are mixed mid-upgrade — the current guard has no
+    cool-down), so a wrong guess hands the agents a fresh run. Without the
+    server's ``thread_follower`` bit an ambient reply in a thread the agent never
+    joined is indistinguishable from a followed one — so on an older server only
+    a mention lifts it.
 
     ``thread_follower is True`` requires the server to say so explicitly; absent
     (``None``) therefore never counts, and neither does ``False``.
@@ -226,8 +235,12 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # billed on EVERY wake in every conversation.
         if metadata.sender_kind == "agent":
             # Two agents answering each other's ambient chatter is the loop this
-            # whole contract guards against; the server and the reply guard cap
-            # it, and this line keeps it from starting.
+            # whole contract guards against, and this line is what keeps it from
+            # starting. Nothing else ends it once it has: the client never caps
+            # replies (operator, 2026-11-03), and after agent-server #294 the
+            # server's only bound is the S-2 room wake budget, which covers
+            # unaddressed group/channel posts — a DM or @-mention loop is
+            # unbounded by operator decision (#3377 round 3, S-8).
             lines.append("expect: weigh relevance; no_reply unless it asks you directly")
         else:
             lines.append("expect: weigh relevance; no_reply if nothing is needed")
@@ -664,18 +677,18 @@ async def _hand_off_card(
     # The reply guard's trigger record: WHAT woke the agent here (closed sender
     # kind + mention bit, never a body or name). Per message, oldest → newest
     # as the connector admits them, so the newest wins — which is the message
-    # an answer follows. The tool's channel_post reads it to tell an
-    # agent-to-agent turn from a human-prompted one.
+    # an answer follows. The tool's channel_post/dm reads its time as the
+    # "new inbound" that resets the one-sided-run warning and separates an
+    # answer to a new message from an accidental double send.
     record_trigger(
         config_dir,
         endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),
         conversation_id=ref.conversation_id,
         sender_kind=metadata.sender_kind,
         mention=metadata.mention,
-        # The brake's exemption wants the STRICTER predicate (round 6, M2): an
-        # explicit mention, or a reply the server says this endpoint follows.
-        # Deriving it from the thread root would let any human reply in any
-        # thread lift an agent-to-agent cool-down on an older server.
+        # The STRICTER predicate (round 6, M2): an explicit mention, or a reply
+        # the server says this endpoint follows. Recorded as a diagnostic and
+        # to lift an OLDER build's cool-down while builds are mixed mid-upgrade.
         directed=wake_is_addressed(metadata),
     )
     coalescer = active_coalescer()
@@ -767,9 +780,9 @@ def _screener_sees_images(config_dir: Path) -> bool:
     disagree. Unknown/unusable selection reads as "no vision": fail closed.
     """
 
-    from ..model_boundary import resolve_default_selection
+    from ..model_boundary import resolve_screening_selection
 
-    selection = resolve_default_selection(config_dir)
+    selection = resolve_screening_selection(config_dir)
     if selection is None:
         return False
     # A STATED capability only. ``build_model_spec`` defaults an undescribed
@@ -970,6 +983,50 @@ def _notify_probe_suspected(config_dir: Path, session_id: str, endpoint_id: str)
         logger.info("bridge: probe notification unrecorded code=notify_failed")
 
 
+async def _notify_budget_exhausted(
+    store: Any, owner: Any, config_dir: Path, session_id: str
+) -> None:
+    """Tell the owner ONCE per episode that screening ran out of budget.
+
+    WHY (agent-server #294 security review, S-1). With the hub's wake caps
+    gone, the per-account screening budget is the real ceiling, and an owner
+    whose messages silently wait for an hour has no way to know why. One item
+    per exhaustion episode (``Store.claim_budget_notification``), keyed per
+    endpoint AND episode: a new episode is a new, unread item even after the
+    owner read or dismissed the last (#3400 QA Q-2), while repeats inside one
+    episode never re-notify. Contentless like the probe notification: no
+    sender, body, room or count. Best-effort: never turns the hold into a
+    failure.
+    """
+
+    import asyncio
+
+    try:
+        episode = await asyncio.to_thread(store.claim_budget_notification, owner)
+    except Exception:  # noqa: BLE001 — chrome; the hold stands
+        return
+    if episode is None:
+        return
+    from local_operator.i18n.keys import cli_team_bridge as _k
+    from local_operator.i18n.text import tr
+    from local_operator.notifications.store import NotificationStore
+
+    def _notify() -> None:
+        t = tr("cli.team_bridge")
+        NotificationStore(config_dir).notify(
+            session_id,
+            title=t(_k.notify_budget_exhausted_title()),
+            body_md=t(_k.notify_budget_exhausted_body()),
+            priority="normal",
+            key=f"team-bridge-budget:{owner.endpoint_id}:{int(episode)}",
+        )
+
+    try:
+        await asyncio.to_thread(_notify)
+    except Exception:  # noqa: BLE001 — a notification is chrome, the hold stands
+        logger.info("bridge: budget notification unrecorded code=notify_failed")
+
+
 def _badge_only(config_dir: Path, message_id: str) -> dict[str, Any]:
     """The §5.6 badge-only outcome, made COUNTABLE (review round 1, 7b).
 
@@ -1082,7 +1139,9 @@ async def handle_conversation_available(
         # post even a metadata-only card: that would still wake the recipient.
         sender: Mapping[str, Any] = {}
 
-        fetched = await _fetch_body(client, ref, owner, access)
+        # The iteration's batch pass may already hold this message's body
+        # read (connector/batch_screen.py); reuse it rather than a second GET.
+        fetched = take_fetched(ref) or await _fetch_body(client, ref, owner, access)
         if fetched is None:
             # Missing/old classification route or an unbound response: keep
             # the hold rather than treating a weaker history read as authority.
@@ -1155,6 +1214,9 @@ async def handle_conversation_available(
                 # re-screening. The hub's admission and this machine's own
                 # receipt for these exact body bytes decide what was already
                 # concluded; only a message with neither is screened.
+                # Do not let the image shortcut revive an UNSENT fallback
+                # allow. ACK/reservation-bound decisions remain write-once.
+                store.retire_unsent_fallback_allow(owner, message_id, body_sha256=served_digest)
                 prior = store.receipt_for_message(owner, message_id)
                 if prior is not None and prior.get("body_sha256") != served_digest:
                     prior = None
@@ -1252,14 +1314,39 @@ async def handle_conversation_available(
         )
         if screened_images is not None:
             item["attachments"] = screened_images
-        result = await screen_item(
+        # EVERY screen carries its budget tier (#3400 round 1, M1 = Q-1 = S-3):
+        # the single path is most live traffic (a one-message wake, the 21st
+        # of a split, an image, a retry), and an unstamped item defaults to
+        # the addressed tier, which let agent chatter spend the people's
+        # reserve. One allocation source for both paths.
+        allocation = allocation_for(ref, display)
+        item["allocation"] = allocation
+        # A batch screen of THIS body hash in this pass is this message's own
+        # verdict (one call, one verdict per message); anything else screens
+        # here, unchanged.
+        result = take_result(ref, body_hash) or await screen_item(
             owner, item, config_dir=config_dir, auth_store=auth_store, settings=settings
         )
         if result is None:
             return await held("screening_unavailable")
         disposition = getattr(result, "disposition", None)
         if disposition == "hold":
-            return await held(getattr(result, "hold_code", None) or "screening_hold")
+            code = getattr(result, "hold_code", None) or "screening_hold"
+            outcome = await held(code)
+            # The tier rides the durable hold so the bounded retry pass serves
+            # a person's DM before an ambient backlog (#3400 m3).
+            outcome["tier"] = allocation["tier"]
+            if came_from_void_batch(ref):
+                # Sticky retry-alone mark for the hold row (R2-M1 = S-7).
+                outcome["no_batch"] = True
+            if code == "budget_exhausted":
+                # The durable retry fires when the budget refills, never on a
+                # poll; and the owner hears about it once per episode.
+                outcome["retry_at"] = getattr(result, "retry_at", None)
+                await _notify_budget_exhausted(store, owner, config_dir, designation)
+            else:
+                await notify_screening_infra_hold(owner, config_dir, designation, code)
+            return outcome
         receipt = getattr(result, "receipt", None)
         if disposition == "bounce":
             if receipt is None:

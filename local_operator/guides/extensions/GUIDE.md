@@ -88,6 +88,22 @@ local-operator hub link set <link-id> --auto-push true     # outbound on (needs 
 
 Pulling and pushing **skills**: a skill link pulls through the managed skill storage — the write is journaled and the baseline advances only with the write, so "baseline moved, bytes did not" cannot happen — and pushes through the same revision-CAS preview/commit path as agents and teams. Unattended push needs, beyond the revision-CAS attestation, the **skill family** on that link's source (`sync_contract.skills >= 1`). A link with no agreed point yet reports the named `no-receipt`: an accepted manual publish, an adopt of an equal copy, or a pull that integrates the remote seeds the outbound receipt the first unattended push derives from — nothing is invented client-side, and the inbound baseline is never advanced by a push.
 
+## Adopt an existing local skill
+
+A same-name local folder is not permission to overwrite it. Run
+`lop skills pull <id> --org <tenant> --dry-run`, review both diffs, then apply that preview with
+`lop skills pull <id> --org <tenant> --adopt-receipt=<receipt> --yes`. The preview snapshots the
+complete original folder before calling a merge model; local assets are preserved
+without being sent to that model. For no model egress, preview with `--no-llm`
+and an explicit `--strategy keep-local` or `--strategy take-hub`, then review and
+confirm the resulting receipt. Changed inputs or link policy invalidate it.
+Use `--public` instead of `--org <tenant>` for a public Hub skill. Keep the
+same scope, alias, `--no-subscribe` policy and `--strategy` choice from preview
+through confirmation; changing them requires a new preview.
+
+Never move the real folder or silently delete local guidance to resolve a name
+collision. The Hub service's strict skill-document schema remains unchanged.
+
 ## Hub skill reconciliation
 
 `legacy-reconciliation-required` or `prior-version-reconciliation-required` means

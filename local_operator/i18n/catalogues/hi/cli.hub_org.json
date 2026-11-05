@@ -1,0 +1,16 @@
+{
+  "cli.hub_org.ineligible": "संगठन कैटलॉग Radient Team की सुविधा हैं; यह खाता किसी Team प्लान वाले संगठन में नहीं है।",
+  "cli.hub_org.choose_org": "आप कई Team प्लान वाले संगठनों के सदस्य हैं; इनमें से किसी एक के साथ --org दें:",
+  "cli.hub_org.resolved": "“{ref}” का मिलान → {hub_id}",
+  "cli.hub_org.ambiguous": "“{ref}” कई आइटम से मेल खाता है; हब id या लंबा नाम दें:",
+  "cli.hub_org.not_found": "संगठन “{org}” में कोई आइटम “{ref}” से मेल नहीं खाता।",
+  "cli.hub_org.unlinked_copies": "बिना लिंक वाली स्थानीय प्रतियाँ: {names} — इन्हें लिंक करने के लिए `lop hub org pull` चलाएँ",
+  "cli.hub_org.plan": "pull के लिए {count, plural, one {# आइटम} other {# आइटम}}, {conflicts, plural, one {बिना लिंक वाली # स्थानीय प्रति} other {बिना लिंक वाली # स्थानीय प्रतियाँ}}; लागू करने के लिए --yes के साथ फिर से चलाएँ।",
+  "cli.hub_org.adopted_heading": "लिंक की गई स्थानीय प्रतियाँ:",
+  "cli.hub_org.last_enrol": "पिछला स्वचालित सिंक: {at}, {pulled, plural, one {# आइटम pull हुआ} other {# आइटम pull हुए}}",
+  "cli.hub_org.list_failed": "संगठन के {kind} आइटम सूचीबद्ध नहीं हो सके: {cause}",
+  "cli.hub_org.ineligible_signed_out": "संगठन कैटलॉग Radient Team की सुविधा हैं; आप Radient में साइन इन नहीं हैं (lop login radient)।",
+  "cli.hub_org.unknown_org": "आपका कोई भी Team प्लान वाला संगठन “{ref}” से मेल नहीं खाता; इनमें से किसी एक के साथ --org दें:",
+  "cli.hub_org.plan_empty": "सब कुछ पहले से लिंक है; pull करने के लिए कुछ नहीं है।",
+  "cli.hub_org.team_block_heading": "{org} (संगठन)"
+}

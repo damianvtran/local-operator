@@ -544,6 +544,14 @@ class ProcessSample:
     #: DOUBT, never death: see :func:`same_birth`.
     birth: str | None
 
+    #: Linux only: ``num_threads`` (``/proc/<pid>/stat`` field 20) from the SAME
+    #: read as ``zombie``. ``None`` where the platform reports no thread count.
+    #: Why it exists: on Linux a thread-group leader whose MAIN thread exited while
+    #: other threads still run reads state ``Z`` (fs/proc/array.c reports the
+    #: leader's state) yet its live threads can still fork, so a ``Z`` row alone
+    #: does not mean "exited" -- see ``owned_process_group._exited``.
+    threads: int | None = None
+
     def is_birth(self, scheme: str | None, token: str | None) -> bool | None:
         """Whether THIS sample's process is the one that produced ``token``.
 
@@ -634,7 +642,9 @@ def _ps_samples(pids: Sequence[int]) -> dict[int, ProcessSample]:
     return samples
 
 
-def _proc_samples(pids: Sequence[int]) -> dict[int, ProcessSample]:
+def _proc_samples(
+    pids: Sequence[int], *, diagnostics: list[dict[str, object]] | None = None
+) -> dict[int, ProcessSample]:
     """The Linux answer: state and start time from ``/proc/<pid>/stat``.
 
     One read per pid and no fork. Field 22 (``starttime``, in clock ticks since
@@ -644,22 +654,46 @@ def _proc_samples(pids: Sequence[int]) -> dict[int, ProcessSample]:
     rule — strictly better than a wall-clock rendering, which is why they are
     never converted.
     """
+
+    def note(pid: int, reason: str, error: int | None) -> None:
+        # Optional observations must never change the reader's lenient contract.
+        # ENOENT describes this read, NOT authoritative process/group absence.
+        # Bound metadata and omit raw rows/exception text (which may carry copy
+        # of a command line). A broken diagnostic consumer cannot affect safety.
+        if diagnostics is not None:
+            try:
+                if len(diagnostics) < 16:
+                    diagnostics.append({"pid": pid, "reason": reason, "errno": error})
+            except Exception:  # noqa: BLE001 - diagnostics cannot decide liveness
+                pass
+
     samples: dict[int, ProcessSample] = {}
     for pid in pids:
         try:
             data = Path(f"/proc/{pid}/stat").read_text()
-        except OSError:
+        except OSError as exc:
+            note(pid, "read-error", exc.errno)
             continue
         # The command name is parenthesised and may itself contain spaces and
         # parentheses, so the remaining fields are read from the LAST ')'.
         tail = data.rpartition(")")[2].split()
         # tail[0] is field 3 (state); ``starttime`` (field 22) is tail[19].
         if len(tail) < 20:
+            note(pid, "short-stat-row", None)
             continue
         starttime = tail[19]
+        # ``num_threads`` (field 20) is tail[17]. An unparseable count OMITS the
+        # row rather than recording ``threads=None``: on this reader ``None`` would
+        # read as single-threaded, letting a threaded "zombie" pass as exited --
+        # the false-cleanup direction. An omitted row is an unresolved member,
+        # which every caller already refuses.
+        if not tail[17].isdigit():
+            note(pid, "short-stat-row", None)
+            continue
         samples[pid] = ProcessSample(
             zombie=_is_zombie_state(tail[0]),
             birth=starttime if starttime.isdigit() else None,
+            threads=int(tail[17]),
         )
     return samples
 

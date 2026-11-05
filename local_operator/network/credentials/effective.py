@@ -8,8 +8,10 @@ not persisted: after restart the next request must verify the owner again.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,8 +22,46 @@ from local_operator.network.credentials.types import (
     is_device_bound_provider,
 )
 
+logger = logging.getLogger(__name__)
+
 _lock = threading.Lock()
 _receipts: dict[tuple[str, str], EffectiveAccess] = {}
+
+#: Who to tell when a receipt changes: ``(root, provider) -> None`` callbacks.
+#: The published access claim (the composer band, its "Last checked" line) is
+#: computed FROM these receipts, but its hosts recompute it only at open and on a
+#: model switch. Without this, a band set to ``owner_unavailable`` while the
+#: owner device slept stayed frozen, with its old ``observed_at``, through every
+#: later verified borrow from that owner. Only provider+root are passed: nothing
+#: keyless or otherwise is handed out, and each listener decides by its own
+#: serving provider whether the change is about it, so a receipt for one
+#: provider can never restate another's.
+_listeners: list[Callable[[str, str], None]] = []
+
+
+def add_listener(listener: Callable[[str, str], None]) -> Callable[[], None]:
+    """Call ``listener(root, provider)`` after every receipt write; returns removal."""
+    with _lock:
+        _listeners.append(listener)
+
+    def remove() -> None:
+        with _lock:
+            if listener in _listeners:
+                _listeners.remove(listener)
+
+    return remove
+
+
+def _notify(key: tuple[str, str]) -> None:
+    # Outside the lock and never raising: a listener schedules its own
+    # republish, and the resolve that wrote the receipt must not fail on it.
+    with _lock:
+        listeners = list(_listeners)
+    for listener in listeners:
+        try:
+            listener(*key)
+        except Exception:  # noqa: BLE001 — publication is additive state
+            logger.debug("effective-access listener failed", exc_info=True)
 
 
 @dataclass(frozen=True)
@@ -111,6 +151,7 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
         )
     with _lock:
         _receipts[key] = receipt
+    _notify(key)
 
 
 #: What a lifecycle ANNOUNCEMENT may record. Deliberately closed and with no usable
@@ -156,6 +197,7 @@ def note_lifecycle_observation(
             ),
         )
         _receipts[key] = receipt
+    _notify(key)
     return receipt
 
 

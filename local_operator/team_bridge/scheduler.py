@@ -844,8 +844,13 @@ async def run_screening_cycle(
     ttl: float = 120.0,
     accepted_capture: "AcceptedCapture | None" = None,
     status_fetcher: "Callable[[], Awaitable[Any]] | None" = None,
+    batch: bool = False,
 ) -> Any:
     """The SHIPPED THIN production composition (R6/Q3).
+
+    ``batch=True`` screens EVERY item in one model call and returns a list of
+    results in item order (``None`` when the account turn is busy); the
+    default screens the cursor's one target, exactly as before.
 
     accepted-status/config-default PUBLISHER -> durable account cycle ->
     lazy production factory -> PUBLIC screening core, as ONE ordinary
@@ -860,11 +865,12 @@ async def run_screening_cycle(
     """
 
     from local_operator.team_bridge.model_boundary import (
+        SCREENING_MODEL_UNAVAILABLE,
         ScreenChainRunner,
         make_screening_runner,
         resolve_screening_chain,
     )
-    from local_operator.team_bridge.screening import screen_message_async
+    from local_operator.team_bridge.screening import ScreenResult, screen_message_async
     from local_operator.team_bridge.store import Store, StoreRefused, serialize_serving
 
     # ONE capture of the whole hop list: hop 0 is the configured default (the
@@ -873,7 +879,19 @@ async def run_screening_cycle(
     # own chain for isolated requests (see resolve_screening_chain).
     chain = resolve_screening_chain(config_dir, settings)
     if not chain:
-        return None
+        # FAIL CLOSED: no preferred screener is credentialed AND the owner has
+        # no usable configured model, so nothing can screen and the message is
+        # held, never delivered unscreened.
+        # A TYPED hold rather than ``None`` so the owner surface can say why;
+        # it is decided before any status fetch, reservation or spend, and it
+        # writes no receipt and no answer cache, so the retry pass re-screens
+        # the message once a model is configured.
+        # A batch answers ``None`` ("the single path decides"), so each message
+        # takes this same hold from its own single screen, and the pass does
+        # not count a model call that never happened.
+        if batch:
+            return None
+        return ScreenResult("hold", hold_code=SCREENING_MODEL_UNAVAILABLE)
     selection = chain[0]
     # ACCEPTED STATUS (R8/Q3): the owner-pinned SDK status is received
     # through the normal accepted-status seam — an injected fetcher (the
@@ -1058,6 +1076,40 @@ async def run_screening_cycle(
         provider=selection.provider,
     )
     cycle = AccountScreeningCycle(store=store, owner=owner, holder=holder, ttl=ttl)
+
+    if batch:
+        from local_operator.team_bridge.screening import screen_batch_async
+
+        def _batch_hop(hop: Any) -> Any:
+            # The guard binds the message that CARRIES the call: the bound
+            # job's, read when the hop is built (after binding), so a cache
+            # hit that drops out of the batch can never be the carrier.
+            bound = chain_runner.bound_job
+            return make_screening_runner(
+                config_dir=config_dir,
+                store=store,
+                owner=owner,
+                message_id=bound.message_id if bound is not None else "",
+                auth_store=auth_store,
+                settings=settings,
+                selection=hop,
+                reply_messages=len(items),
+            )
+
+        chain_runner = ScreenChainRunner(chain, _batch_hop)
+
+        async def _screen_all(_target: "Mapping[str, Any]") -> Any:
+            return await screen_batch_async(
+                owner,
+                items,
+                config_dir=config_dir,
+                policy=cast("ScreeningPolicy", policy),
+                runner=chain_runner,
+            )
+
+        # ONE turn, ONE call: the cycle's single-target selection only picks
+        # the cursor's sender here; the batch screens every item in the wake.
+        return await cycle.run_once(items, _screen_all)
 
     async def _screen(item: "Mapping[str, Any]") -> Any:
         message_block = item.get("message")

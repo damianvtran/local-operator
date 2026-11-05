@@ -88,9 +88,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from local_operator.config import read_config_values
 from local_operator.mobile import push_devices as mobile_push_devices
 from local_operator.mobile import push_handles
+from local_operator.mobile.push_credentials import with_sound_readiness
 from local_operator.mobile.push_payload import (
+    SOUND_CUSTOM_FIELD,
     attention_emit_key,
     attention_payload,
     completion_emit_key,
@@ -98,7 +101,9 @@ from local_operator.mobile.push_payload import (
     digest_emit_key,
     digest_payload,
     emit_body,
+    push_sound,
 )
+from local_operator.notifications.catalog_view import selected_push_stem
 from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.presence import PRESENCE_TTL_S, desktop_presence
 
@@ -417,6 +422,9 @@ class PushWorker:
         #: What the last successful write put on disk, so an unchanged position
         #: costs no rename (see :meth:`_save`).
         self._written: dict[str, Any] | None = None
+        #: The last ``data.sound`` read from a GOOD config (see :meth:`_sound`),
+        #: kept so a torn read repeats the user's choice instead of the default.
+        self._last_sound: tuple[str, str | None] | None = None
         #: The single-claimant guard over one pass (see :meth:`tick`).
         self._pass = threading.Lock()
         #: The highest positions READ this run, so the cursor can move to them
@@ -1068,6 +1076,7 @@ class PushWorker:
         count = self._count()
         emit_id = item.emit_id or uuid.uuid4().hex
         payload: dict[str, Any]
+        sound, sound_custom = self._sound()
         if item.kind == EVENT_COMPLETION:
             conversation_identity = item.conversations[0] if item.conversations else ""
             session_id = _session_id_of(conversation_identity)
@@ -1091,6 +1100,8 @@ class PushWorker:
                 kind=kind,
                 emit_id=emit_id,
                 count=count,
+                sound=sound,
+                sound_custom=sound_custom,
             )
         elif item.kind == EVENT_DIGEST:
             # The coalesced catch-up: a set, so it names no conversation and
@@ -1105,7 +1116,12 @@ class PushWorker:
                 if isinstance(member_kind, str):
                     kinds.append(member_kind)
             payload = digest_payload(
-                computer=self.computer, count=count, emit_id=emit_id, kinds=kinds
+                computer=self.computer,
+                count=count,
+                emit_id=emit_id,
+                kinds=kinds,
+                sound=sound,
+                sound_custom=sound_custom,
             )
         else:
             # The badge correction: it stands for no record at all and carries a
@@ -1119,9 +1135,61 @@ class PushWorker:
                 # detected change has nothing here at all.
                 exclude=list(item.exclude) if item.exclude else None,
             )
-        if self._report_block is None:
+        rows = list(self._report_block()) if self._report_block is not None else None
+        if SOUND_CUSTOM_FIELD in payload:
+            # The cloud picks the custom file PER DEVICE, so an emit naming one
+            # must say, for every device it may reach, whether that device holds
+            # it — including when no coalescer is wired (the block is then the
+            # readiness rows alone, each a real registry fact).
+            rows = self._with_readiness(rows or [], payload[SOUND_CUSTOM_FIELD])
+        if rows is None:
             return payload
-        return emit_body(payload, self._report_block())
+        return emit_body(payload, rows)
+
+    def _with_readiness(
+        self, rows: Sequence[Mapping[str, Any]], sound_custom: str
+    ) -> list[dict[str, Any]]:
+        """``rows`` plus ``sound_custom_ready`` per live device; never raises.
+
+        An unreadable registry yields every row marked NOT ready rather than an
+        exception: not-ready plays the ``sound`` fallback, which is the honest
+        answer when the machine cannot tell, and a push must never stall on it.
+        """
+        try:
+            facts = mobile_push_devices.credential_facts(self.config_dir)
+        except (mobile_push_devices.PushRegistryCorrupt, OSError):
+            facts = []
+        return with_sound_readiness(rows, facts, sound_custom, now=self._clock())
+
+    def _sound(self) -> tuple[str, str | None]:
+        """``(data.sound, data.sound_custom)`` for the emit being composed; never raises.
+
+        Read at composition, like ``count``: the sound section is LIVE, so a
+        change in /settings applies to the next push without a daemon restart,
+        and ``read_config_values`` memoises an unchanged file to one fstat.
+
+        A read that fails (``None``: a torn editor save, a bad byte) repeats the
+        LAST GOOD value, as that reader's contract asks ("keep what it had"): a
+        user who turned sound off must not hear Soft pulse because a save raced
+        a push. The default is used only when no good read has happened yet.
+        Waiting for a clean read instead would delay a banner the user is
+        waiting for, and an exception here would stall every queued emit
+        (#3405 R1-M1), so anything unexpected degrades the same way.
+
+        The second value is ``data.sound_custom`` (``c_<sha16>``, or ``None``),
+        read under the same rule: the custom stem needs the custom index as well
+        as the config, and both are remembered together from the last good read
+        so a torn read cannot pair one setting's sound with another's stem.
+        """
+        try:
+            values = read_config_values(self.config_dir)
+            if values is not None:
+                self._last_sound = (push_sound(values), selected_push_stem(values))
+        except Exception:  # noqa: BLE001 — a sound setting must never block a push
+            logger.warning("push worker could not read the sound setting", exc_info=True)
+        if self._last_sound is not None:
+            return self._last_sound
+        return push_sound({}), None
 
     def _handle(self, session_id: str | None) -> str | None:
         """The conversation handle for one session id, or ``None``.

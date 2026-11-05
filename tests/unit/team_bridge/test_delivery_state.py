@@ -94,6 +94,9 @@ _SCREENING_UNAVAILABLE = {
     # Transient, so screening is "unavailable", not "awaiting review".
     "model_refused",
     "reply_truncated",
+    "batch_unresolved",
+    # No evaluated screening model is reachable: nothing judged the message.
+    "screening_model_unavailable",
 }
 _DELIVERY_PENDING = {"delivery_failed", "bridge_off", "phase_refused"}
 
@@ -623,6 +626,8 @@ def test_every_held_path_returns_its_own_code(tmp_path, monkeypatch, setup, scre
         monkeypatch.setattr(conversation_mod, "screen_item", no_result)
     out = _call_handler(a, _ref(server), config_dir)
 
+    # A model's own hold also carries its budget tier for the retry order (#3400).
+    out.pop("tier", None)
     assert out == {"action": "hold", "message_id": MID, "code": code}
     assert admits == []
     # And the sender still learns it is held, under a coarse class only.
@@ -641,6 +646,8 @@ def test_a_failing_publish_never_changes_the_hold_code(tmp_path, monkeypatch) ->
     monkeypatch.setattr(FakeWire, "put_delivery_state", exploding, raising=False)
     out = _call_handler(a, _ref(server), config_dir)
 
+    # A screening hold also carries its budget tier for the retry order (#3400).
+    assert isinstance(out.pop("tier"), int)
     assert out == {"action": "hold", "message_id": MID, "code": "screening_hold"}
 
 

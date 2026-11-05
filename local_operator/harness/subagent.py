@@ -122,6 +122,7 @@ import contextlib
 import logging
 import math
 import os
+import re
 import time
 import uuid
 import weakref
@@ -1222,9 +1223,12 @@ def _resolve_role(agent: str, parent_session: "Session") -> "AgentProfile | None
     if not agent or agent == "task":
         return None
     try:
-        from local_operator.agent_profiles import resolve_profile
+        from local_operator.agent_profiles import resolve_profile, with_delivery_pointer
 
-        return resolve_profile(agent, registry=getattr(parent_session, "agent_registry", None))
+        profile = resolve_profile(agent, registry=getattr(parent_session, "agent_registry", None))
+        # Child construction is the one boundary where a stale registered
+        # engineering role gets the delivery pointer; see with_delivery_pointer.
+        return with_delivery_pointer(profile) if profile is not None else None
     except Exception:  # noqa: BLE001 - role guidance is enrichment, not a gate
         logger.warning("could not resolve agent role %r; launching a full child", agent)
         return None
@@ -1835,6 +1839,57 @@ def run_subagent(
     if queued:
         logger.info("subagent job %s (%s) queued: manager at capacity", job_id, label)
     return job_id
+
+
+#: Read-only review roles that should reuse the manager-owned PR worktree.
+#: Measured 2026-11-04 over 141 PRs: QA cut a fresh worktree per round
+#: (qa-1602, qa-1602-r2, qa-1602-r3) when the brief named none, each one a
+#: clone/install on a disk ~25 sessions share. Prose in the seeds alone kept
+#: failing, so the launch receipt names the omission to the one who can fix it.
+READER_ROLES = frozenset({"reviewer", "qa-tester", "designer", "ux-reviewer", "copy-reviewer"})
+
+#: ``Worktree: <path>`` ANYWHERE in the brief, optionally followed by
+#: ``@ <sha>`` and the other brief fields (guide://delivery, context contract).
+#: Not anchored to line start: managers inline it (``PR: #1 · Worktree: ~/w @
+#: abc``), list it (``- Worktree:``) or decorate it (``**Worktree:**``,
+#: `` `~/w` ``), and a line-start anchor false-fired the notice on all of
+#: those. Markdown emphasis/code marks around the path are skipped, never
+#: captured, so they cannot make a real directory look missing.
+_WORKTREE_FIELD = re.compile(r"\bWorktree:[*_`\s]*([^\s`*]+)")
+
+#: Shown to the PARENT only. The child never sees it: a reader cannot fix a
+#: brief it was handed, and a refusal would cost a whole relaunch for a field
+#: the reader may not even need (a doc-only review).
+MISSING_WORKTREE_NOTICE = (
+    "note: brief has no `Worktree: <abs path> @ <sha>` line naming an existing "
+    "directory; brief the shared PR worktree so this reader does not clone or cut its own."
+)
+
+
+def missing_worktree_notice(agent: str, prompt: str) -> str | None:
+    """:data:`MISSING_WORKTREE_NOTICE` when a reader role's brief names no
+    existing worktree directory, else None.
+
+    Advisory by design: the launch already happened and is never refused.
+    ``~`` is expanded because briefs are written portable (AGENTS.md forbids
+    home-folder absolute paths in shared docs, and managers copy that habit).
+    """
+
+    if agent.strip().lower() not in READER_ROLES:
+        return None
+    named = [match.group(1) for match in _WORKTREE_FIELD.finditer(prompt or "")]
+    if any(Path(path).expanduser().is_dir() for path in named):
+        return None
+    if named:
+        # The field is there but points nowhere: name the path so the parent
+        # can spot the typo or the reaped worktree instead of re-adding a
+        # field it already wrote.
+        return (
+            f"note: brief's `Worktree:` path {named[0]} is not an existing "
+            "directory; brief the shared PR worktree so this reader does not "
+            "clone or cut its own."
+        )
+    return MISSING_WORKTREE_NOTICE
 
 
 def _effective_prompt(

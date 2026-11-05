@@ -15,6 +15,7 @@
  * how a flat/legacy list is carried — renders HEADERLESS and identical to the
  * pre-phase flat list, matching the TUI's `_IMPLICIT_PHASE` rule.
  */
+import { contentDir } from "../lib/content-direction";
 import { cn } from "../lib/cn";
 import { PANEL_FRACTION, columnCap } from "../lib/column";
 import type { TodoItem, TodoPhase } from "../types";
@@ -144,7 +145,7 @@ export function TodosPanel({
 						forceCollapsed && HELD_DIM,
 					)}
 				>
-					<span className="min-w-0 truncate">
+					<span dir={contentDir("tasks")} className="min-w-0 truncate">
 						tasks{" "}
 						<span className="font-mono text-mono-sm text-ink-dim">
 							{done}/{items.length}

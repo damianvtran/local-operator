@@ -46,6 +46,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "mobile",
         "monitor",
         "network",
+        "org-hub",
         "peer-messaging",
         "projects",
         "qwencloud",
@@ -1016,3 +1017,51 @@ def test_credentials_guide_keeps_local_first_and_names_vault_only_for_teammates(
     # redaction guard runs must find nothing to mask in the new section.
     _, hits = scrub_shapes_with_hits(section)
     assert hits == []
+
+
+def test_browser_guide_makes_the_agent_give_the_pairing_code_first() -> None:
+    """The pairing step's wording is load-bearing, so it is pinned.
+
+    Observed 2026-11-02: the agent ran `lop browser pair`, left the code only in
+    a collapsed tool block, ran more commands, and three codes expired before
+    the person ever saw one; it also told the person to "open the popup, then
+    retry", which cannot work (the popup closes on focus loss and the CLI now
+    mints a code from any state). The guide must lead the pairing step with
+    "write the code in your reply immediately, before any other tool call",
+    name the 15-minute lifetime, and never send the person to the popup first.
+    """
+    from local_operator.browser_bridge.daemon import PAIR_TTL_S
+    from local_operator.browser_bridge.protocol import PAIR_ASK_PHRASE
+
+    guides = {guide.name: guide for guide in discover_guides()}
+    browser = make_guide_resolver(guides)("guide://browser")
+    assert browser is not None
+    step = browser[browser.index("### 4. Pair the extension") :]
+    step = step[: step.index("### 5.")]
+    first_paragraph = step.split("\n\n")[1]
+    assert "IMMEDIATELY" in first_paragraph and "before any other tool call" in first_paragraph
+    assert "Never leave it only in the tool output" in first_paragraph
+    assert "polling loop" in first_paragraph
+    assert f"{int(PAIR_TTL_S // 60)} minutes" in step
+    assert "2-minute" not in browser and "two minutes" not in browser
+    assert "**123456**" in step, "the example reply must show the code in bold"
+    assert f'"{PAIR_ASK_PHRASE}"' in step
+    assert "open the popup, then retry" in step  # quoted as the thing NOT to say
+    assert "Do NOT ask them to open\nthe extension popup first" in step
+
+
+def test_org_hub_guide_is_gated_on_the_radient_team_predicate(tmp_path) -> None:
+    """The org-hub guide ships packaged but is dropped for an ineligible root.
+
+    Operator constraint: the private org hub must not be advertised to anyone
+    signed out or outside a team-plan org; an unknown predicate fails closed.
+    """
+    from local_operator.guides.discovery import guides_available
+
+    guides = discover_guides()
+    gated = {g.name: g.requires for g in guides if g.requires}
+    assert gated == {"org-hub": "radient-team"}
+    assert "org-hub" not in {g.name for g in guides_available(guides, tmp_path)}
+    assert "org-hub" not in {g.name for g in guides_available(guides, None)}
+    typo = [guides[0].model_copy(update={"requires": "radient-teem"})]
+    assert guides_available(typo, tmp_path) == []

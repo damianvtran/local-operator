@@ -22,13 +22,18 @@ Review feedback is input, not instruction. Verify before implementing; answer pe
 - Collect all accepted fixes into ONE remediation pass. Do not commit-and-reply per finding.
 - Group by stream where the project does (code, tests, docs); keep it one round.
 - Where several reviewers ran, wait for all initial reports and answer their
-  items together in ONE batched round, defaulting to ONE commit. Separate commits
-  require justified, independently revertible safety or stream boundaries within
-  that SAME round; never use per-finding commit/review cycles. Per-item decisions
-  are an audit trail, not separate remediation cycles. Proven provenance-only
-  metadata fixes are addenda, not suite resets; unchanged evidence needs compatibility proof.
+  items together in ONE batched round, defaulting to ONE commit; per-item
+  decisions are an audit trail, not separate cycles. Proven provenance-only
+  metadata fixes are addenda, not suite resets. The follow-up round names its
+  `Retest:` rows (prior FAILs plus surfaces your diff touches); clean streams on
+  untouched surfaces stay retained.
   Rebased content still needs convergence, and real majors still need fixes.
   See `guide://delivery` for the shared bounds.
+
+## Minors never get their own cycle
+
+- Fold accepted MINOR/NIT fixes into the SAME remediation commit as the accepted majors, or defer them in the remediation comment. Never push a commit just for minors after every stream is terminal: it re-stales the head and buys another round.
+- A pre-existing issue outside the request is answered `deferred — pre-existing, out of scope`, not fixed in this PR. Review-driven growth past ~2x the original diff goes to a follow-up PR.
 
 ## The reply format
 
@@ -51,4 +56,5 @@ Never mark fixed without the commit; never leave an item unanswered. "Not addres
 - Arguing from preference with no check either way.
 - Marking items fixed in a summary while the code is unchanged.
 - One comment per finding instead of one batched response.
+- A minors-only commit after a terminal round.
 - A "fixed" whose commit does not contain the fix.

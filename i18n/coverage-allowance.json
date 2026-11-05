@@ -4,17 +4,6 @@
   "pairs": [
     {
       "locale": "fr",
-      "namespace": "wire.aida_cadence",
-      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2026-12-31",
-      "missing": [
-        "wire.aida_cadence.interval_hours.help",
-        "wire.aida_cadence.interval_hours.label"
-      ]
-    },
-    {
-      "locale": "fr",
       "namespace": "wire.console",
       "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
       "owner": "i18n-translator lane",
@@ -97,24 +86,6 @@
       ]
     },
     {
-      "locale": "fr",
-      "namespace": "wire.settings.hub_defaults",
-      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2026-12-31",
-      "missing": [
-        "wire.settings.hub_defaults.agents.help",
-        "wire.settings.hub_defaults.agents.label",
-        "wire.settings.hub_defaults.agents.off.description",
-        "wire.settings.hub_defaults.agents.on.description",
-        "wire.settings.hub_defaults.model_default.note",
-        "wire.settings.hub_defaults.teams.help",
-        "wire.settings.hub_defaults.teams.label",
-        "wire.settings.hub_defaults.teams.off.description",
-        "wire.settings.hub_defaults.teams.on.description"
-      ]
-    },
-    {
       "locale": "es",
       "namespace": "wire.errors.sdk_spec",
       "reason": "English-pinned by CALLER CONTRACT, not untranslated debt: these diagnostics are raised by SessionSpec/ApprovalPolicy and parsed by SDK callers, and their bytes are deliberately byte-compatible English (the en sidecars say 'English source only ... translation requires caller-contract migration'). Translating them requires moving callers to stable codes first, which is a mechanism change, not a locale wave.",
@@ -155,36 +126,6 @@
         "wire.errors.sdk_startup.attach_runtime_missing",
         "wire.errors.sdk_startup.profile_attach_failed",
         "wire.errors.sdk_startup.tool_inventory_mismatch"
-      ]
-    },
-    {
-      "locale": "zh-CN",
-      "namespace": "wire.errors.sdk_spec",
-      "reason": "English-only namespace: zh-CN does not carry it; renders the English child fallback.",
-      "owner": "i18n-translator lane",
-      "payoff": "2027-02-28",
-      "missing": [
-        "wire.errors.sdk_spec.agent_identity_conflict",
-        "wire.errors.sdk_spec.approval_callback_gate_required",
-        "wire.errors.sdk_spec.approval_declared_tools_empty",
-        "wire.errors.sdk_spec.approval_handler_wrong_mode",
-        "wire.errors.sdk_spec.approval_tools_wrong_mode",
-        "wire.errors.sdk_spec.attach_fields_unsupported",
-        "wire.errors.sdk_spec.attach_output_unsupported",
-        "wire.errors.sdk_spec.attach_resume_required",
-        "wire.errors.sdk_spec.mode_invalid",
-        "wire.errors.sdk_spec.output_format_invalid",
-        "wire.errors.sdk_spec.output_retries_range",
-        "wire.errors.sdk_spec.output_retries_requires_format",
-        "wire.errors.sdk_spec.output_schema_requires_format",
-        "wire.errors.sdk_spec.resume_empty",
-        "wire.errors.sdk_spec.spawn_birth_effort_pair_required",
-        "wire.errors.sdk_spec.spawn_fields_unsupported",
-        "wire.errors.sdk_spec.spawn_model_pair_required",
-        "wire.errors.sdk_spec.spawn_output_unsupported",
-        "wire.errors.sdk_spec.tools_empty",
-        "wire.errors.sdk_spec.world_root_empty",
-        "wire.errors.sdk_spec.yolo_approval_unreachable"
       ]
     },
     {

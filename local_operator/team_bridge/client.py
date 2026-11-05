@@ -989,6 +989,19 @@ def _require_attachment_id(attachment_id: str) -> None:
         raise ValueError("attachment id is not a minted batt_ id")
 
 
+def _attachment_write_params(
+    tenant_id: str | None, actor_endpoint_id: str | None
+) -> dict[str, str] | None:
+    """Query for an attachment upload/delete; ``None`` when there is nothing to say."""
+
+    params: dict[str, str] = {}
+    if tenant_id:
+        params["tenant_id"] = tenant_id
+    if actor_endpoint_id:
+        params["actor_endpoint_id"] = actor_endpoint_id
+    return params or None
+
+
 def _sniff_image(data: bytes) -> str | None:
     """The image type ``data`` actually is, by magic bytes, or ``None``.
 
@@ -1041,6 +1054,15 @@ def attachments_capability(payload: Any) -> dict[str, Any] | None:
     the unknown field. A present block must say ``enabled: true`` and list at
     least one type this client can handle; anything malformed reads as off
     rather than as a guess at the hub's limits.
+
+    ``agent_upload`` (agent-server PR #283) says the hub also lets an AGENT
+    endpoint stage images (``POST …/attachments?actor_endpoint_id=``). The hub
+    emits it ``omitempty`` and only once endpoint-scoped staging is enabled
+    fleet-wide, so the key is carried through ONLY when it is the literal
+    ``True``: absent, ``false``, ``"true"`` or ``1`` all read as off and add no
+    key, which keeps every existing consumer's normalized block (the desktop
+    status route re-serves this dict to the renderer) byte-identical on a hub
+    that does not advertise it.
     """
 
     if not isinstance(payload, Mapping):
@@ -1059,6 +1081,8 @@ def attachments_capability(payload: Any) -> dict[str, Any] | None:
         value = block.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             out[key] = value
+    if block.get("agent_upload") is True:
+        out["agent_upload"] = True
     return out
 
 
@@ -1089,6 +1113,198 @@ def _envelope_result(response: httpx.Response) -> dict[str, Any]:
     return result
 
 
+#: Generic FILE attachments (agent-server S3a/S3b, ``docs/bridge-files-s3b-binding.md``).
+#: The hub's transport bound is its largest class cap (``BridgeFileMaxBytes`` =
+#: container/other, 25 MiB); pdf (20 MiB) and text (2 MiB) are tighter, but the
+#: CLASS is the hub's byte sniff, which this client deliberately does not
+#: second-guess. Refusing above the transport bound BEFORE any I/O is what keeps a
+#: 26 MiB pick from being streamed to a hub that would only answer 413.
+FILE_MAX_BYTES = 25 * 1024 * 1024
+#: The hub's combined per-message bound: images AND files together (at most
+#: :data:`ATTACHMENT_MAX_COUNT` of them images).
+FILE_MAX_PER_MESSAGE = 10
+#: The only ``status.files`` / upload wire version this client speaks. The hub
+#: REQUIRES ``X-Bridge-Files-Version`` in file mode, and a block of another
+#: version reads as off: a future incompatible shape is negotiated, never guessed.
+FILES_VERSION = 1
+#: The closed class vocabulary the hub sniffs into (``BridgeFileClasses``). A
+#: class is a LABEL for display and caps, never a safety claim.
+FILE_CLASSES = ("pdf", "text", "container", "other")
+#: The hub's bound on the ENCODED ``X-Bridge-File-Name`` (``BridgeFileMaxNameEncoded``).
+#: Checked locally so an over-long name is the same ``attachment_invalid`` the hub
+#: would answer, without a 25 MiB body travelling first.
+FILE_NAME_MAX_ENCODED = 1024
+
+
+def encode_file_name(name: str) -> str:
+    """``name`` as the hub's ``X-Bridge-File-Name`` value: percent-encoded UTF-8.
+
+    A header cannot be trusted to carry UTF-8 or to avoid CR/LF, so the contract
+    is percent-encoding, and the hub decodes it with Go's ``url.PathUnescape``.
+    ``safe=""`` escapes EVERYTHING outside the RFC 3986 unreserved set — notably
+    ``+`` (``%2B``), ``/`` and ``%`` — so the hub's decode returns exactly these
+    characters and a literal ``+`` is never read back as a space. Cleaning
+    (bidi controls, path parts, the 120-scalar bound) is the hub's job; this
+    function only transports. The name is user content: it is never logged.
+    """
+
+    encoded = urllib.parse.quote(name, safe="", encoding="utf-8", errors="strict")
+    if len(encoded) > FILE_NAME_MAX_ENCODED:
+        raise BridgeRefusal(
+            "attachment_invalid",
+            "The file name is too long.",  # i18n: ignore, no code
+            http_status=422,
+        )
+    return encoded
+
+
+def _file_ids(ids: Sequence[str] | None, image_ids: Sequence[str]) -> list[str]:
+    """The validated generic-file id list for a send, or ``[]`` for "none".
+
+    File ids share the image id grammar (the hub mints both as ``batt_``). The
+    hub refuses a duplicate, an id in both lists, and more than
+    :data:`FILE_MAX_PER_MESSAGE` items across both; refusing here saves a round
+    trip and keeps the send order — which is the display order — untouched.
+    """
+
+    if not ids:
+        return []
+    out = list(ids)
+    if len(set(out)) != len(out):
+        raise ValueError("file ids must be distinct")
+    if set(out) & set(image_ids):
+        raise ValueError("an id may not be both an image and a file")
+    if len(out) + len(image_ids) > FILE_MAX_PER_MESSAGE:
+        raise ValueError(f"at most {FILE_MAX_PER_MESSAGE} images and files per message")
+    for value in out:
+        _require_attachment_id(value)
+    return out
+
+
+def files_capability(payload: Any) -> dict[str, Any] | None:
+    """The hub's ``files`` capability block, or ``None`` = generic files off.
+
+    The sibling of :func:`attachments_capability`, with the same reading rule:
+    every surface hides file affordances and never sends ``files`` unless this
+    returns a block. The hub serves ``files`` whenever its attachment service is
+    wired, with ``enabled`` mirroring ``BRIDGE_FILES_ENABLED`` (off in every
+    deployment today), so ``enabled: false`` is the COMMON answer, not an error.
+    Only ``version == 1`` (the one shape this client speaks), ``enabled: true``
+    and ``download_only: true`` (the S3 promise: no inline rendering) read as
+    on; a class is kept only when it is in :data:`FILE_CLASSES` with a positive
+    cap no larger than :data:`FILE_MAX_BYTES`, and a block with no usable class
+    is off — a malformed block is never a guess at the hub's limits.
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    block = payload.get("files")
+    if not isinstance(block, Mapping):
+        return None
+    version = block.get("version")
+    if isinstance(version, bool) or version != FILES_VERSION:
+        return None
+    if block.get("enabled") is not True or block.get("download_only") is not True:
+        return None
+    raw_classes = block.get("classes")
+    if not isinstance(raw_classes, list):
+        return None
+    classes: list[dict[str, Any]] = []
+    for entry in raw_classes:
+        if not isinstance(entry, Mapping):
+            continue
+        name, cap = entry.get("class"), entry.get("max_bytes")
+        if (
+            name in FILE_CLASSES
+            and isinstance(cap, int)
+            and not isinstance(cap, bool)
+            and 0 < cap <= FILE_MAX_BYTES
+            and all(c["class"] != name for c in classes)
+        ):
+            classes.append({"class": name, "max_bytes": cap})
+    if not classes:
+        return None
+    out: dict[str, Any] = {
+        "version": FILES_VERSION,
+        "enabled": True,
+        "download_only": True,
+        "classes": classes,
+    }
+    for key in ("max_items", "max_images"):
+        value = block.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            out[key] = value
+    return out
+
+
+#: An EDGE refusal: the request never reached agent-server (2026-11-04). The
+#: AWS WAF in front of ``api.radienthq.com`` (radient-infra
+#: ``pulumi/radient_infra/waf.py``, managed rule ``GenericLFI_Body``) answers a
+#: body that looks like a file-inclusion probe — a ``../`` or ``~/.aws/…`` path —
+#: with a plain ``403`` HTML page, no JSON. That used to decode as the generic
+#: ``bridge_error`` "Radient refused the request (HTTP 403)", so the agent read a
+#: firewall block as the hub's judgement and retried the same body. The hub's
+#: OWN 403s are always a coded JSON object, so a 403 that is not one (or is
+#: served as HTML) is the edge's. Scoped to 403 on purpose: an HTML 502/503 is a
+#: gateway failure, not a block, and an uncoded 404 is the outdated-hub signal
+#: (see ``owned_agent_invitations``) and must stay ``bridge_error``.
+EDGE_BLOCKED_CODE = "edge_blocked"
+#:
+#: WHAT THE SENTENCE MUST NOT SAY (security review S-1). It never tells the agent
+#: what tripped the firewall or to retry without it: in the incident class the
+#: block fires BECAUSE the message quoted a credentials file, so for a credential
+#: the local guard missed, the firewall is the last barrier, and "remove the path
+#: and try again" is instructions for getting round it. Nor does it spell a
+#: trigger (a parent-directory or home-directory path): an agent that relays this
+#: sentence into a post would trip the same rule (review n1). The decision goes
+#: back to the human. A test pins both.
+EDGE_BLOCKED_SENTENCE = (  # i18n: ignore model-facing refusal sentence, like the §6.5 class
+    "The edge firewall in front of Radient blocked this request before it reached "
+    "Radient, so nothing was posted or changed. Do not resend a credential, a file's "
+    "contents, or the same text in any form. If this was ordinary text, tell your "
+    "user what you tried to send and let them decide."
+)
+
+#: An edge header value is untrusted text that lands in a log and a tool
+#: result: one bounded token of a conservative alphabet, or nothing. Whatever
+#: the edge (or an intermediary) puts there still reaches the model, up to 64
+#: characters of that alphabet — accepted (review N-2): it is the response's,
+#: never the request's, so it can disclose nothing the caller sent, and it is
+#: the evidence of WHICH layer refused.
+_EDGE_HEADER_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ./;=+_-]{0,63}")
+
+
+def _is_html(response: httpx.Response) -> bool:
+    return "text/html" in response.headers.get("content-type", "").lower()
+
+
+def _edge_header(response: httpx.Response, name: str) -> str:
+    value = " ".join(response.headers.get(name, "").split())
+    return value if _EDGE_HEADER_VALUE.fullmatch(value) else ""
+
+
+def _edge_blocked(response: httpx.Response) -> BridgeRefusal:
+    """The refusal for a non-JSON 403: the edge's block, with its evidence.
+
+    ``details`` keeps the response's ``content-type`` and ``server`` header
+    VALUES — which edge answered, and how — so the next report can name the
+    layer without anyone reproducing it. The BODY never travels: it is the
+    edge's page, not an answer, and it may echo the request back.
+    """
+
+    details: dict[str, Any] = {}
+    for header, key in (("content-type", "content_type"), ("server", "server")):
+        value = _edge_header(response, header)
+        if value:
+            details[key] = value
+    return BridgeRefusal(
+        EDGE_BLOCKED_CODE,
+        EDGE_BLOCKED_SENTENCE,
+        http_status=response.status_code,
+        details=details,
+    )
+
+
 def _refusal(response: httpx.Response) -> BridgeRefusal:
     """Map one non-2xx answer onto :class:`BridgeRefusal` (§6.5).
 
@@ -1106,6 +1322,8 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
             body = parsed
     except (ValueError, UnicodeDecodeError):
         body = None
+    if status == 403 and (body is None or _is_html(response)):
+        return _edge_blocked(response)
     code = body.get("code") if body else None
     message = body.get("error") if body else None
     details = body.get("details") if body else None
@@ -3261,6 +3479,7 @@ class TeamBridgeClient:
         thread_root_id: str | None = None,
         attachment_ids: Sequence[str] | None = None,
         mentions: Sequence[Mapping[str, Any]] | None = None,
+        files: Sequence[str] | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
         pre_http_guard: Callable[[], None] | None = None,
@@ -3292,12 +3511,20 @@ class TeamBridgeClient:
         like a directed one in the server's answer. Omitted when empty, so an
         undirected post remains byte-identical to the pre-mention wire (the same
         capability-negotiation rule the attachments key follows).
+
+        ``files`` binds staged GENERIC files (``upload_attachment(mode="file")``),
+        in display order. Sent only when non-empty, for the same reason as
+        ``attachment_ids``: a hub predating S3b, or one with files off, must
+        see the unchanged wire. Callers gate on :func:`files_capability`.
         """
 
         body: dict[str, Any] = {"client_ref": client_ref, "body": text}
         ids = _attachment_ids(attachment_ids)
         if ids:
             body["attachment_ids"] = ids
+        file_ids = _file_ids(files, ids)
+        if file_ids:
+            body["files"] = file_ids
         if tenant_id:
             body["tenant_id"] = tenant_id
         if agent_label:
@@ -3837,16 +4064,46 @@ class TeamBridgeClient:
         data: bytes,
         *,
         tenant_id: str | None = None,
+        actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
+        mode: Literal["image", "file"] = "image",
+        name: str | None = None,
     ) -> dict[str, Any]:
         """Stage one image for a later send: ``{attachment: {id, mime, ...}}``.
+
+        ``actor_endpoint_id`` stages the image AS that agent endpoint (the hub
+        refuses it unless it advertises ``attachments.agent_upload``, and binds
+        the staged row to that exact endpoint). The query key is omitted when
+        unset so a human upload stays byte-identical to the pre-agent wire.
 
         The size bound refuses before any I/O. Type is deliberately NOT checked
         here: the hub sniffs the bytes and answers ``415``/``422`` itself, and a
         second local opinion would only be a way for the two to disagree.
         """
 
+        # ``mode="file"`` is the S3a generic-file contract on the SAME hub route
+        # (see :meth:`_upload_file`). It branches before the image path so the
+        # image upload below stays byte-identical, and ``name`` is a file-only
+        # field: an image never carries one.
+        if mode == "file":
+            # Agents may not stage files (the hub refuses ``agent_actor``, and
+            # no screening path exists), and ``_upload_file`` has no actor
+            # query: an agent-addressed file call must fail loudly rather than
+            # stage the bytes as the HUMAN (review F1). Spelled like #3335's
+            # agent-image parameter so the two signatures merge as one.
+            if actor_endpoint_id is not None:
+                raise ValueError("an agent endpoint cannot upload files")
+            return await self._upload_file(
+                conversation_id,
+                data,
+                name=name,
+                tenant_id=tenant_id,
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+        if mode != "image" or name is not None:
+            raise ValueError("an image upload takes no name; mode is 'image' or 'file'")
         if not data:
             raise BridgeRefusal(
                 "attachment_invalid",
@@ -3859,7 +4116,7 @@ class TeamBridgeClient:
                 "The attachment is larger than allowed.",  # i18n: ignore, no code
                 http_status=413,
             )
-        params = {"tenant_id": tenant_id} if tenant_id else None
+        params = _attachment_write_params(tenant_id, actor_endpoint_id)
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/attachments",
@@ -3869,19 +4126,85 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    async def _upload_file(
+        self,
+        conversation_id: str,
+        data: bytes,
+        *,
+        name: str | None,
+        tenant_id: str | None,
+        access: OAuthAccess | None,
+        expected_account_id: str | None,
+    ) -> dict[str, Any]:
+        """Stage one GENERIC file: ``{file: {id, class, mime, size, ...}}``.
+
+        The hub's file mode (agent-server ``messaging_attachments.go``): the same
+        raw-body ``POST …/attachments``, negotiated by ``X-Bridge-Attachment-Mode:
+        file`` plus the REQUIRED ``X-Bridge-Files-Version: 1`` (an absent version
+        is a 400 there, not an implicit v1). ``name`` rides percent-encoded in
+        the optional ``X-Bridge-File-Name``; it is the user's content, so it never
+        reaches a URL, a query or a log line here. The hub answers ``415
+        file_class_disabled`` while files are off, so callers gate on
+        :func:`files_capability` rather than probing with bytes.
+
+        Bound and encoding are both checked BEFORE any I/O, and the pinned
+        ``expected_account_id`` is compared in :meth:`_authorized` before the
+        request is built, so a wrong account never sends a byte either.
+        """
+
+        if not data:
+            raise BridgeRefusal(
+                "attachment_invalid",
+                "The file is empty.",  # i18n: ignore, no code
+                http_status=422,
+            )
+        if len(data) > FILE_MAX_BYTES:
+            raise BridgeRefusal(
+                "attachment_too_large",
+                "The file is larger than allowed.",  # i18n: ignore, no code
+                http_status=413,
+                details={"limit_bytes": FILE_MAX_BYTES},
+            )
+        headers = {
+            "X-Bridge-Attachment-Mode": "file",
+            "X-Bridge-Files-Version": str(FILES_VERSION),
+        }
+        # An empty name is "no name", exactly as the hub reads an absent header.
+        if name:
+            headers["X-Bridge-File-Name"] = encode_file_name(name)
+        params = {"tenant_id": tenant_id} if tenant_id else None
+        response = await self._authorized(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/attachments",
+            params=params,
+            content=bytes(data),
+            extra_headers=headers,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+        if response.status_code >= 400:
+            raise _refusal(response)
+        return _envelope_result(response)
+
     async def delete_attachment(
         self,
         conversation_id: str,
         attachment_id: str,
         *,
         tenant_id: str | None = None,
+        actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """Discard one STAGED upload (idempotent on the hub; bound ones stay)."""
+        """Discard one STAGED upload (idempotent on the hub; bound ones stay).
+
+        An agent-staged row is owned by its endpoint, so deleting it needs the
+        same ``actor_endpoint_id`` it was uploaded with; the human form cannot
+        see it.
+        """
 
         _require_attachment_id(attachment_id)
-        params = {"tenant_id": tenant_id} if tenant_id else None
+        params = _attachment_write_params(tenant_id, actor_endpoint_id)
         response = await self._authorized(
             "DELETE",
             f"/messaging/conversations/{conversation_id}/attachments/{attachment_id}",
@@ -4623,6 +4946,30 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    async def conversation_thread_read(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        seq: int,
+        tenant_id: str,
+        expected_account_id: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Advance only the thread cursor, never the conversation cursor.
+
+        Keep the hub's four-key post-state intact: its thread unread count is
+        not the channel total. The captured owner is checked by ``_send`` and
+        stays local, just as on the other guarded thread mutations.
+        """
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}/read",
+            body={"seq": seq, "tenant_id": tenant_id},
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
     async def conversation_notify(
         self,
         conversation_id: str,
@@ -5030,6 +5377,47 @@ def selected_tenant_id(payload: Any) -> str | None:
     return tenant_id if isinstance(tenant_id, str) and tenant_id else None
 
 
+def trial_ended_tenant(payload: Any) -> dict[str, str] | None:
+    """The organization whose no-card Team trial ENDED, when nothing is eligible.
+
+    Why this exists (teams-trial QA round 1, Q5): after a trial ends the hub
+    answers the org's row with ``eligible:false`` and, for an owner or a member
+    the end disabled, no endpoint — so :func:`select_tenant` selects nothing,
+    the surface reads A with ``tenant_id: null``, and the renderer could not
+    reach its paused band (it fell through to the trial on-ramp instead). The
+    hub now marks such a row POSITIVELY with ``trial_ended_at`` (agent-server
+    #296), which is exactly the positive evidence R9 asked for before any
+    surface may speak of an ended plan; ``eligible:false`` alone still proves
+    nothing and still reads nothing here.
+
+    Constraints: this NEVER changes the §3.2 selection or the A–G letter (those
+    stay the backend-policy reading every consumer shares); it is a separate,
+    additive marker. It answers only when no row is eligible — an eligible
+    organization is this machine's subject and an older ended trial elsewhere
+    is not news. When a row IS selected (state F, a retained endpoint) the
+    answer is that row's marker or nothing — never another org's, because
+    ``tenant_id`` already names the selected org and the status contract is
+    shared by consumers that would otherwise read two different organizations
+    off one payload (agent review round 2, R2-1). Only when nothing is selected
+    does it fall through to the first marked row in the server's own order. An older hub
+    without the field yields ``None`` and the surface keeps today's reading.
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    tenants = [t for t in (payload.get("tenants") or []) if isinstance(t, Mapping)]
+    if any(bool(t.get("eligible")) for t in tenants):
+        return None
+    selected = select_tenant(payload)
+    ordered = [selected] if selected is not None else tenants
+    for tenant in ordered:
+        tenant_id = tenant.get("tenant_id")
+        ended_at = tenant.get("trial_ended_at")
+        if isinstance(tenant_id, str) and tenant_id and isinstance(ended_at, str) and ended_at:
+            return {"tenant_id": tenant_id, "trial_ended_at": ended_at}
+    return None
+
+
 def _surface_state(check: StatusCheck) -> str | None:
     if check.state == STATE_READY:
         selected = select_tenant(check.payload)
@@ -5171,6 +5559,38 @@ class StatusDiscipline:
     @property
     def base_url(self) -> str:
         return self._client.base_url
+
+    def cached_thread_read_features(self) -> dict[str, int]:
+        """Forward the current owner's fresh hub flag without another status read.
+
+        Capability polling is not a status boundary: calling ``check`` here
+        could enroll the default-on bridge or publish identity. Only the normal
+        status reader may populate this receipt. A cold/expired/failed cache or
+        changed login withholds it until that reader proves support again.
+        """
+        self._client._require_destination()
+        row = self._client._pinned_row()
+        raw = row.data if row is not None and isinstance(row.data, Mapping) else {}
+        owner = raw.get("account_id")
+        if not isinstance(owner, str) or not owner:
+            return {}
+        state = self._states.get(owner)
+        if (
+            state is None
+            or state.check.error is not None
+            or state.check.state != STATE_READY
+            or time.monotonic() - state.last_attempt >= self._ttl(state)
+        ):
+            return {}
+        payload = state.check.payload
+        features = payload.get("features") if isinstance(payload, Mapping) else None
+        version = (
+            features.get("team_bridge_thread_reads") if isinstance(features, Mapping) else None
+        )
+        # bool is an int in Python, but is not a protocol version on the wire.
+        if type(version) is int and version >= 1:
+            return {"team_bridge_thread_reads": version}
+        return {}
 
     def _ttl(self, state: _AccountState) -> float:
         return STATUS_ERROR_TTL_S if state.check.error is not None else STATUS_CACHE_TTL_S

@@ -7,6 +7,7 @@
  * The row itself is the state indicator: composing/running glyphs pulse,
  * there is no separate spinner.
  */
+import { contentDir } from "../lib/content-direction";
 import { useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { formatElapsed } from "../lib/format";
@@ -190,6 +191,9 @@ const OUTCOME_TONE: Record<NonNullable<BridgeRowFacts["outcome"]>, OutcomeTone> 
 	   keeps the wash, so it stays the loudest of the three. */
 	unconfirmed: "pending",
 	awaiting_acceptance: "pending",
+	/* The reply guard skipped an exact double send: nothing failed, but it was
+	   not posted, so it must not read as a plain landed post (#3377 round 3). */
+	skipped: "pending",
 };
 
 const OUTCOME_MARK: Partial<Record<NonNullable<BridgeRowFacts["outcome"]>, keyof typeof LUCIDE>> = {
@@ -464,7 +468,7 @@ export function ToolRow({
 				   (it names the op and who), so at 320px the chip and the name
 				   share the squeeze instead of crushing the summary to one glyph
 				   ("bridge o." measured before this floor). */}
-				<span
+				<span dir={contentDir(bridge ? bridgeSummary(entry.summary, outcome) : entry.summary)}
 					className={cn(
 						"min-w-0 flex-1 truncate text-body-sm text-ink-dim",
 						bridge && outcome && "min-w-[4.5rem]",

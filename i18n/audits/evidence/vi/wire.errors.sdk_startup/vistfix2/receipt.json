@@ -1,0 +1,36 @@
+{
+  "audit_id": "vi-sdkstartup-r2-20261103",
+  "locale": "vi",
+  "namespace": "wire.errors.sdk_startup",
+  "produced_by": {
+    "agent": "local operator i18n-auditor",
+    "session": "7188e3347110",
+    "model": "radient/auto (requested; served UNKNOWN)"
+  },
+  "inputs": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e"
+    },
+    "vi_target": {
+      "path": "/Users/damian/.local-operator/sessions/15986c0af719/scratchpad/sdk-startup-vi-remedy-fix/target/vi/wire.errors.sdk_startup.json",
+      "sha256": "7c9a6bfb0907dc38d2b22e8dfb808f61852479b1d8d9b10b7ad8c7c8c99ef95e"
+    },
+    "vi_baseline": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/vi/wire.errors.sdk_startup.json",
+      "sha256": "ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd"
+    }
+  },
+  "artifacts": {
+    "report.md": "f625e81b2136a8ae538215a4e3d6cd7fe54f423adbbb1a6eb37a943819a1ae35",
+    "record.json": "0b6afb23264e5ed9fb831c52ccf7d30c51730922c158a2f380ef9d19e2d3c896"
+  },
+  "verdict": "passed",
+  "unresolved_blocker_major_count": 0,
+  "proof_method": "stdlib hashlib/json only; no validator, no subprocess",
+  "tracked_bundle_committed": false
+}

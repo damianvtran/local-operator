@@ -136,6 +136,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -218,6 +219,10 @@ DEVICE_UNPAIRED_MESSAGE = "this computer is no longer paired"
 DEVICE_ABSENT_CODE = "device_absent"
 MACHINE_ONLY_CODE = "machine_only"
 MACHINE_ONLY_MESSAGE = "a device cannot restore itself — use the computer or your account"
+#: A device-scoped write (``PUT /api/notification-sounds/cached``) without the
+#: device's own key, or with a key no row holds.
+DEVICE_KEY_REQUIRED_CODE = "device_key_required"
+DEVICE_KEY_REQUIRED_MESSAGE = "this request needs this device's push key"
 
 #: The header an operator surface presents to the unrevoke route, and the store's
 #: field holding the key it must match. Both spelled here so the daemon, the CLI
@@ -248,6 +253,12 @@ DEVICE_KEY_HEADER = "X-Lop-Device-Key"
 #: deletion, and conflating the two would tell the user their device was removed
 #: when the machine has no way to know that.
 CLOUD_IDLE_DROP_DAYS = 60
+
+#: The most custom-sound stems one device may report cached (notification-sounds
+#: addendum 2 §2.3). The phone keeps the selected sound plus up to four previous
+#: ones, so 5 is its real ceiling; 16 leaves room for a future cache policy
+#: while still bounding what one request can write into a row.
+MAX_SOUND_CACHED = 16
 
 #: Bound on every free-text field, the token included. Generous on purpose:
 #: the token is opaque, and an over-tight bound would refuse a future
@@ -301,6 +312,7 @@ _OPTIONAL_RECORD_FIELDS = frozenset(
         "expired_at",
         "unpaired_at",
         "revoked_at",
+        "sound_cached",
     }
 )
 _RECORD_FIELDS = _REQUIRED_RECORD_FIELDS | _OPTIONAL_RECORD_FIELDS
@@ -766,6 +778,101 @@ def note_credential(
         }
 
 
+def note_sound_cache(
+    config_dir: Path,
+    *,
+    install_id: object,
+    device_key: object,
+    stems: object,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Record the custom notification sounds ONE device holds (``PUT .../cached``).
+
+    WHY PER DEVICE, AND WHY THE KEY (notification-sounds addendum 2 §2.2-2.3).
+    The cloud plays the computer's custom sound on a device only when that
+    device's ``sound_custom_ready`` is true, because a push naming a file the
+    phone does not hold plays the OS default (iOS) or FCM's default channel
+    (Android), neither of which is the fallback. Readiness is therefore a fact
+    about one device, and the paired cookie cannot attribute a request to one
+    device (it is the computer's, shared by every phone). ``X-Lop-Device`` +
+    ``X-Lop-Device-Key`` can: the same proof :func:`note_credential` requires,
+    compared in constant time by :func:`device_key_matches`.
+
+    ``stems`` is the phone's WHOLE cache, replacing what was stored (the phone
+    re-PUTs after every cache change, including evictions), so a sound it
+    evicted stops counting as ready on the next emit. Each entry is the wire
+    form ``c_<sha256[:16]>``; anything else refuses the request rather than
+    being dropped, so a client bug is a visible 422 and not a silently
+    never-ready device.
+
+    Refuses (typed, for the route) a missing/wrong key, and a revoked or
+    unpaired device: a device the machine has refused may not write state.
+    Returns ``{"ok", "device_id", "sound_cached"}``.
+    """
+    cached = _checked_sound_cache(stems)
+    if not isinstance(install_id, str) or not install_id or not isinstance(device_key, str):
+        raise PushDeviceStateRefusal(
+            DEVICE_KEY_REQUIRED_CODE, DEVICE_KEY_REQUIRED_MESSAGE, status_code=401
+        )
+    del now  # accepted for signature parity with the other writers; no stamp is kept
+    with _LOCK:
+        store = _load_store(config_dir)
+        record = next(
+            (
+                candidate
+                for candidate in store["devices"]
+                if candidate.get("install_id") == install_id
+                and device_key_matches(candidate, device_key)
+            ),
+            None,
+        )
+        if record is None:
+            # One answer for "no such device" and "wrong key": distinguishing
+            # them would tell a caller which install ids exist.
+            raise PushDeviceStateRefusal(
+                DEVICE_KEY_REQUIRED_CODE, DEVICE_KEY_REQUIRED_MESSAGE, status_code=401
+            )
+        state = device_state(record)
+        if state == STATE_REVOKED:
+            raise PushDeviceStateRefusal(DEVICE_REVOKED_CODE, DEVICE_REVOKED_MESSAGE)
+        if state == STATE_UNPAIRED:
+            raise PushDeviceStateRefusal(DEVICE_UNPAIRED_CODE, DEVICE_UNPAIRED_MESSAGE)
+        if record.get("sound_cached") != cached:
+            record["sound_cached"] = cached
+            _save(config_dir, store)
+        return {"ok": True, "device_id": record["device_id"], "sound_cached": list(cached)}
+
+
+#: ``c_<sha256[:16]>`` — the one spelling a cached stem may have (ADR 0006,
+#: amendment 2026-11-04). Mirrored from ``notifications.catalog_view`` rather
+#: than imported so this store stays free of the sound stack at import.
+_SOUND_STEM_RE = re.compile(r"^c_[0-9a-f]{16}$")
+
+
+def _valid_sound_cached(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= MAX_SOUND_CACHED
+        and all(isinstance(item, str) and _SOUND_STEM_RE.fullmatch(item) for item in value)
+        and len(set(value)) == len(value)
+    )
+
+
+def _checked_sound_cache(stems: object) -> list[str]:
+    """The request's stem list, de-duplicated in order, or a 422 refusal."""
+    if not isinstance(stems, list):
+        raise PushDeviceRefusal("shas must be a list of c_<sha16> sound names")
+    if len(stems) > MAX_SOUND_CACHED:
+        raise PushDeviceRefusal(f"at most {MAX_SOUND_CACHED} cached sounds may be reported")
+    cached: list[str] = []
+    for item in stems:
+        if not isinstance(item, str) or _SOUND_STEM_RE.fullmatch(item) is None:
+            raise PushDeviceRefusal("shas must be a list of c_<sha16> sound names")
+        if item not in cached:
+            cached.append(item)
+    return cached
+
+
 def credential_facts(config_dir: Path, *, now: float | None = None) -> list[dict[str, Any]]:
     """READ-ONLY per-device credential facts — the emit path's only input.
 
@@ -798,6 +905,10 @@ def credential_facts(config_dir: Path, *, now: float | None = None) -> list[dict
         for field in ("credential_expires_at", "last_authenticated_at", "expired_at"):
             if field in record:
                 fact[field] = record[field]
+        # The custom-sound stems this device reported holding: what the emit side
+        # derives ``sound_custom_ready`` from. Read-only like the rest of this row.
+        if "sound_cached" in record:
+            fact["sound_cached"] = list(record["sound_cached"])
         facts.append(fact)
     return facts
 
@@ -1287,6 +1398,11 @@ def _validated_record(entry: object, index: int) -> dict[str, Any]:
                 f"push device registry record {index} has an invalid {field};"
                 " refusing to rewrite it"
             )
+    if "sound_cached" in entry and not _valid_sound_cached(entry["sound_cached"]):
+        raise PushRegistryCorrupt(
+            f"push device registry record {index} has an invalid sound_cached;"
+            " refusing to rewrite it"
+        )
     if "credential_live" in entry and not isinstance(entry["credential_live"], bool):
         raise PushRegistryCorrupt(
             f"push device registry record {index} has an invalid credential_live;"

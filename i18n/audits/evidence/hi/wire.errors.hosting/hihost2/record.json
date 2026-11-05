@@ -1,0 +1,170 @@
+{
+  "record_kind": "translation_audit",
+  "audit_id": "hi-hosting-r1-786d3d9f",
+  "locale": "hi",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "key_count": 1,
+  "audited_keys": [
+    "wire.errors.hosting.not_configured"
+  ],
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "786d3d9ff0bb",
+    "role": "independent reader 2",
+    "model_requested": "radient/auto",
+    "model_requested_source": "session route header",
+    "model_served": "UNKNOWN",
+    "model_served_reason": "the auto route does not disclose the served provider/model to this session; not inferred, no fallback claimed",
+    "actual_fallback_disclosure": "none performed by this agent; the route's own selection is not exposed",
+    "independent_from_translator_session": "b60b4bdc8c47",
+    "independent_from_code_author": "94dcef624dec",
+    "independence_statement": "Did not translate these bytes. Read my own prior reports and this packet's author notes only; no other reader's verdict was read before this one.",
+    "method": "reasoned in-session as a native-fluent reader; no translation API, SDK, MT service or website used"
+  },
+  "source": {
+    "root": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1",
+    "base_commit": "87ca846245b2",
+    "namespace_state": "NEW English namespace, uncommitted, absent at the base commit; not shipped and not claimed shipped",
+    "consumer": "display copy composed into startup refusals; the legacy HostingNotConfiguredError message is separate and stays English by contract"
+  },
+  "input_hashes": [
+    {
+      "role": "en",
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "matches_manager_declared": true
+    },
+    {
+      "role": "context",
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "matches_manager_declared": true
+    },
+    {
+      "role": "target_hi",
+      "path": "/Users/damian/.local-operator/sessions/b60b4bdc8c47/scratchpad/hosting-hi/target/hi/wire.errors.hosting.json",
+      "sha256": "22989094e5c759832fbd1e22220b68d0b5a7165c9dca9df6690b587d5add8f2e",
+      "matches_manager_declared": true
+    }
+  ],
+  "copy": {
+    "en": "Hosting platform is not configured.",
+    "hi": "होस्टिंग प्लेटफ़ॉर्म कॉन्फ़िगर नहीं है।"
+  },
+  "checks_executed": {
+    "tools": "read, grep, glob; eval with pure-standard-library json/hashlib/unicodedata only (no subprocess, no project imports, no formatter, no tests)",
+    "json_valid": true,
+    "key_parity_with_en": true,
+    "nfc_normalized": true,
+    "no_cf_or_bidi_controls": true,
+    "no_icu_arguments": true,
+    "no_markup_or_code_spans": true,
+    "no_ascii_letters_no_english_fallback": true,
+    "terminal_danda_present_no_ascii_period": true,
+    "trailing_newline_and_no_bom_no_cr": true,
+    "sidecar_has_no_maxCells_maxChars": true
+  },
+  "placeholder_and_cldr": {
+    "status": "N/A",
+    "reason": "the English entry has no placeholders or selection arguments and the sidecar states 'No placeholders and no dynamic detail'; there is nothing to compare and no plural category to require"
+  },
+  "meaning_review": {
+    "condition_named": "hosting platform not configured",
+    "remedy_added": false,
+    "dynamic_detail_added": false,
+    "reads_complete_after_colon": true,
+    "period_and_capitalisation": "period kept as U+0964 danda per the hi style guide; Hindi has no letter case, clause opens with the term as English does",
+    "verdict": "accurate"
+  },
+  "terminology_review": {
+    "term": "होस्टिंग प्लेटफ़ॉर्म",
+    "settled_in_corpus": true,
+    "evidence_keys": [
+      "cli.global_help.hosting",
+      "cli.exec_worker_help.hosting",
+      "cli.credential_help.credential"
+    ],
+    "corpus_note": "byte-identical term (NFC, same nukta order) in three shipped hi strings; कॉन्फ़िगर नहीं है reproduces the corpus state pattern (wire.errors.desktop.aida_no_provider)",
+    "provider_vs_platform": "wire.settings.hosting.label uses प्रोवाइडर for the default-provider field; the English subject here is the platform, and the corpus has the exact platform term, so no change is warranted. vi's provider wording is not a reason to diverge in hi",
+    "verdict": "consistent"
+  },
+  "findings": [],
+  "advisories": [
+    {
+      "id": "A-hi-01",
+      "severity": "info",
+      "topic": "glossary row",
+      "note": "no i18n/glossary.md row exists for 'hosting platform'; the author proposes होस्टिंग प्लेटफ़ॉर्म and this audit supports it. Repo glossary edit is outside this packet."
+    },
+    {
+      "id": "A-hi-02",
+      "severity": "info",
+      "topic": "legacy exception boundary",
+      "note": "HostingNotConfiguredError.__str__ stays English by contract and is not this key's consumer text; no code, caller or frame was edited or claimed translated here."
+    },
+    {
+      "id": "A-hi-03",
+      "severity": "info",
+      "topic": "scope",
+      "note": "one display key only; this is not frame or page clearance and not a shipped-state claim"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "scope": "wire.errors.hosting.not_configured display copy"
+  },
+  "native_holds": {
+    "rendered": {
+      "status": "NOT RUN",
+      "note": "source-only verdict; no pixels, width, shaping or real-terminal fit claimed"
+    },
+    "pseudo_localisation": {
+      "status": "NOT RUN",
+      "note": "no generator available or permitted; no pseudo evidence claimed"
+    },
+    "rtl": {
+      "status": "N/A",
+      "note": "hi is LTR and the value contains no bidi controls"
+    },
+    "width": {
+      "status": "N/A",
+      "note": "sidecar publishes no maxCells/maxChars for this key"
+    }
+  },
+  "limits": [
+    "Single-key source audit; it does not validate the surrounding SDK refusal frame, other namespaces or any rendered surface.",
+    "The legacy exception's English contract is taken from the sidecar statement; this audit did not read Python source (out of scope).",
+    "No executed catalogue validator, generator or formatter ran; mechanical facts were computed directly from the bytes."
+  ],
+  "not_run": [
+    "bash/console/subprocess/git/tests/scanner/generation/formatter/build/install",
+    "native TUI or browser render, screenshots, pseudo-localisation",
+    "repo, catalogue, ledger, generated-key, baseline, caller or SDK-frame edit",
+    "activation, PR comment, frame clearance"
+  ],
+  "artifacts": [
+    {
+      "role": "report",
+      "path": "/Users/damian/.local-operator/sessions/786d3d9ff0bb/scratchpad/hosting-hi-audit-reader2/report.md",
+      "sha256": "2ce97c3aa7887034a1d5d256e67124b7e4a1502a455c573ad3c2132647e2bffe"
+    }
+  ],
+  "retention": {
+    "staged_in": "/Users/damian/.local-operator/sessions/786d3d9ff0bb/scratchpad/hosting-hi-audit-reader2",
+    "committed": false,
+    "recommended_tracked_path": "i18n/audits/evidence/hi/wire.errors.hosting/hi-hosting-r1-786d3d9f/{record.json,report.md}",
+    "note": "this audit wrote no repository file; the manager commits the bundle with the catalogue change"
+  },
+  "preserved": {
+    "finished_tui_records": "the tui.settings_chrome R1 and R2 packets, records, reports and companions were not read for modification and are untouched"
+  }
+}

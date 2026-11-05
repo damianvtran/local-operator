@@ -8,7 +8,6 @@ matter here: a mocked immediate failure cannot reproduce the validity race.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import os
 import time
 from typing import Any
@@ -203,9 +202,36 @@ async def test_r3_concurrent_rotation_still_inside_effective_lead(
         monkeypatch.setattr(
             provider._refresh_coord_storage, "stored_token_expiry", lambda: time.time() + 5
         )
+        # This test is about adopting a peer's rotation, not the early-wait
+        # bound: with the real 250ms budget the second request falls back to
+        # the old token whenever it waits that long on the refresh lock (a
+        # loaded CI runner), which is designed behaviour pinned separately by
+        # test_r3_waiter_past_budget_sends_old_token_without_refreshing.
+        monkeypatch.setattr(auth_mod, "_EARLY_REFRESH_WAIT_BUDGET_S", 30.0)
         headers = await asyncio.gather(_resource_request(provider), _resource_request(provider))
         assert headers == [["Bearer access-1"], ["Bearer access-1"]]
         assert len(endpoint.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_r3_waiter_past_budget_sends_old_token_without_refreshing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _ShortLived() as endpoint:
+        provider, _, _ = await _connected_provider(endpoint, remaining=10)
+        monkeypatch.setattr(
+            provider._refresh_coord_storage, "stored_token_expiry", lambda: time.time() + 5
+        )
+        monkeypatch.setattr(auth_mod, "_EARLY_REFRESH_WAIT_BUDGET_S", 0.05)
+        # A peer (same process, separate fd: flock conflicts) holds the refresh
+        # lock for the whole request, so the wait can only end by the budget
+        # expiring. No sleeps decide the outcome: the holder releases only
+        # after the request has returned.
+        async with auth_mod._oauth_refresh_lock(SERVER_URL):
+            headers = await _resource_request(provider)
+        assert headers == ["Bearer access-0"]
+        # The waiter must not spend the grant behind the holder's back.
+        assert endpoint.requests == []
 
 
 @pytest.mark.asyncio
@@ -256,12 +282,3 @@ async def test_r5_outside_lead_guard_rejects_m9_mutation(
     monkeypatch.setattr(auth_mod, "build_oauth_provider", mutated_provider)
     with pytest.raises(pytest.fail.Exception, match="must not lock or re-read"):
         await test_outside_lead_does_not_lock_or_reread(monkeypatch)
-
-
-def test_r6_refresh_documentation_is_reflowed() -> None:
-    # These are intentionally source-format checks: R6 is comment-only and has
-    # no runtime behavior to regress. Keep the affected prose readable without
-    # coupling the test to executable statements or exact line numbers.
-    source = inspect.getsource(auth_mod._make_refresh_coordinating_provider)
-    assert "refreshes — so a\n    session can hold" not in source
-    assert "# the moment any sibling process\n" not in source

@@ -325,6 +325,10 @@ async def remove_account(account_id: int, host: DesktopAuth = Depends(get_deskto
     if row is None or get_provider_definition(row.provider) is None:
         raise HTTPException(404, w.account_not_found().envelope())
     host.store.delete_credential(account_id)
+    if row.provider == "radient":
+        # The same gate close as `lop logout radient` (agent review R2): the org
+        # Agent Hub must not stay advertised for an account that was removed.
+        host.store.org_hub_signed_out()
     from local_operator.providers.auth_cli import _invalidate_cached_listing
 
     _invalidate_cached_listing(row.provider)

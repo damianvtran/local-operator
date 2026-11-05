@@ -58,6 +58,9 @@ VIEW_COMMAND = "view"
 #: (the exact count below still pins both rows).
 TAG_COMMAND = "tag"
 TAGS_COMMAND = "tags"
+#: `/sound` (notification-sounds C4) keeps its copy in `tui.sound` with the
+#: rest of the command's receipts, so the audited wire.slash hash is untouched.
+SOUND_COMMAND = "sound"
 #: ``/notifications`` became the Notifications PAGE (decision D2): its new
 #: description lives in the English-only ``wire.slash.notifications_page`` child
 #: namespace, the ``/library`` precedent, so the audited catalogue stays
@@ -154,9 +157,10 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # and `/view` are deliberately absent from wire.slash: their copy lives
     # in separate namespaces (tui.viewer is fully translated), preserving the
     # audited wire.slash hash. The census still catches an unaccounted row.
-    # +12: the ten commands above plus the LO2 pair (/radient, /saver), whose
-    # copy lives in wire.radient_saver rather than in this audited namespace.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 12 == 64
+    # +13: the ten commands above, the LO2 pair (/radient, /saver), whose
+    # copy lives in wire.radient_saver rather than in this audited namespace,
+    # and `/sound`, whose copy lives in tui.sound.
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 13 == 65
     for command in SLASH_COMMANDS:
         if command.name in (
             MEMORY_COMMAND,
@@ -168,6 +172,7 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
             VIEW_COMMAND,
             TAG_COMMAND,
             TAGS_COMMAND,
+            SOUND_COMMAND,
             NOTIFICATIONS_PAGE_COMMAND,
             RADIENT_COMMAND,
             SAVER_COMMAND,
@@ -203,6 +208,7 @@ def test_each_generated_key_resolves_to_the_previous_english_under_en() -> None:
             VIEW_COMMAND,
             TAG_COMMAND,
             TAGS_COMMAND,
+            SOUND_COMMAND,
             NOTIFICATIONS_PAGE_COMMAND,
             RADIENT_COMMAND,
             SAVER_COMMAND,

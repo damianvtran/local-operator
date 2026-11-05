@@ -52,22 +52,51 @@ from local_operator.team_bridge.store import (
 )
 from tests.unit.team_bridge.test_screening import _consent_status, _item, _setup
 
+#: The monkeypatch of the running test, so ``_config`` can install the chain.
+_MONKEYPATCH: list[pytest.MonkeyPatch] = []
+
+
+@pytest.fixture(autouse=True)
+def _chain_rig(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Let each test name its hops; every provider counts as credentialed.
+
+    The screening chain is the PREFERRED table walked in order, then the
+    receiver's own cascade (``model_boundary.resolve_screening_chain``). This
+    rig expresses "hop 0 then hop 1" by installing the fixture models AS the
+    preferred table, with the same pairs as the configured default, so the
+    cascade stage adds nothing. Which models are preferred, and the cascade
+    itself, are pinned in ``test_screening_model_allowlist.py``; this file pins
+    the WALK (what advances, what holds, identity, breaker, receipts).
+    """
+
+    from local_operator.team_bridge import model_boundary
+
+    monkeypatch.setattr(
+        model_boundary,
+        "_credentialed_providers",
+        lambda _config_dir: {"openai", "deepseek", "openrouter"},
+    )
+    _MONKEYPATCH.append(monkeypatch)
+    yield
+    _MONKEYPATCH.pop()
+
+
 DELIVER = "VERDICT: deliver\nREASON: ordinary."
 HOLD = "VERDICT: hold\nREASON: needs a human."
 VENDOR_CANARY = "VENDOR-PROSE-CANARY upstream exploded"
 
 
-def _config(tmp_path: Path, *, chain: list[str] | None, model_fallback: bool = True) -> None:
-    lines = ["values:", "  hosting: openai", "  model_name: gpt-5.4"]
-    if chain is not None:
-        lines += [
-            "  retry:",
-            f"    modelFallback: {'true' if model_fallback else 'false'}",
-            "    fallbackChains:",
-            "      default:",
-            *[f"        - {entry}" for entry in chain],
-        ]
-    (tmp_path / "config.yml").write_text("\n".join(lines) + "\n")
+def _config(tmp_path: Path, *, chain: list[str] | None) -> None:
+    """Default ``openai/gpt-5.4``; ``chain`` lists the hops after it, in order."""
+
+    from local_operator.team_bridge import model_boundary
+
+    (tmp_path / "config.yml").write_text("values:\n  hosting: openai\n  model_name: gpt-5.4\n")
+    table = [("openai", "gpt-5.4")]
+    for entry in chain or ():
+        provider, _, model = entry.partition("/")
+        table.append((provider, model))
+    _MONKEYPATCH[-1].setattr(model_boundary, "SCREENING_EVALUATED_MODELS", tuple(table))
 
 
 class _Wire:
@@ -288,7 +317,7 @@ def test_every_hop_failing_is_one_breaker_failure_and_one_classed_hold(
 
     result = _cycle(tmp_path, owner)
 
-    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert result.disposition == "hold" and result.hold_code == "screening_model_unavailable"
     assert [s["model"] for s in wire.sends] == ["gpt-5.4", "deepseek-flash", "qa-model"]
     breaker = store.screening_breaker_state(owner)
     assert breaker is not None and int(breaker["failures"]) == 1
@@ -297,7 +326,9 @@ def test_every_hop_failing_is_one_breaker_failure_and_one_classed_hold(
         "SELECT hold_code, failure_class FROM screening_holds WHERE owner_key = ?",
         _owner_key(owner),
     )
-    assert holds == [("provider_error", "chain_exhausted")]
+    # Every hop failed on a route error: nothing could screen, so this is the
+    # owner-notice hold, still classed by the chain walk.
+    assert holds == [("screening_model_unavailable", "chain_exhausted")]
     assert _rows(tmp_path, "SELECT 1 FROM screening_receipts") == []
     # No vendor prose was persisted anywhere.
     assert VENDOR_CANARY.encode() not in state_db_path(tmp_path).read_bytes()
@@ -381,7 +412,7 @@ def test_foreign_provider_serving_an_approved_model_id_is_refused(tmp_path, monk
 
     result = _cycle(tmp_path, owner)
 
-    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert result.disposition == "hold" and result.hold_code == "screening_model_unavailable"
     assert _rows(tmp_path, "SELECT 1 FROM screening_receipts") == []
     assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("chain_exhausted",)]
 
@@ -406,9 +437,8 @@ def test_foreign_provider_serving_an_approved_model_id_is_refused(tmp_path, monk
 
 
 def test_each_hop_approves_only_its_own_tuple(tmp_path) -> None:
-    _config(tmp_path, chain=["deepseek/deepseek-flash", "deepseek/deepseek-flash", "openai/*"])
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
     hops = resolve_screening_chain(tmp_path)
-    # Deduped by tuple (``openai/*`` expands to the primary itself and is dropped).
     assert [(h.provider, h.model_id) for h in hops] == [
         ("openai", "gpt-5.4"),
         ("deepseek", "deepseek-flash"),
@@ -417,19 +447,19 @@ def test_each_hop_approves_only_its_own_tuple(tmp_path) -> None:
     assert hops[0].approved_tuples == frozenset({("openai", "gpt-5.4")})
 
 
-# -- (e) modelFallback off: a single attempt, exactly as before ---------------
+# -- (e) a one-entry table is a single attempt -----------------------------------
 
 
-def test_model_fallback_false_is_a_single_attempt(tmp_path, monkeypatch) -> None:
+def test_a_single_evaluated_model_is_a_single_attempt(tmp_path, monkeypatch) -> None:
     store, owner = _setup(tmp_path)
-    _config(tmp_path, chain=["deepseek/deepseek-flash"], model_fallback=False)
+    _config(tmp_path, chain=None)
     assert [h.model_id for h in resolve_screening_chain(tmp_path)] == ["gpt-5.4"]
     wire = _Wire({"gpt-5.4": ("fail", 503), "deepseek-flash": ("reply", DELIVER)})
     _install_wire(monkeypatch, wire)
 
     result = _cycle(tmp_path, owner)
 
-    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert result.disposition == "hold" and result.hold_code == "screening_model_unavailable"
     assert [s["model"] for s in wire.sends] == ["gpt-5.4"]
     breaker = store.screening_breaker_state(owner)
     assert breaker is not None and int(breaker["failures"]) == 1
@@ -644,7 +674,7 @@ def test_legacy_policy_table_gains_approved_serving_and_keeps_its_row(tmp_path) 
 
 
 def test_editing_the_chain_advances_the_admission_revision(tmp_path, monkeypatch) -> None:
-    """S-4: the chain in force is part of the authority a receipt binds to."""
+    """S-4: the chain in force (the reachable allowlist) is part of the authority."""
 
     store, owner = _setup(tmp_path)
     wire = _Wire({"gpt-5.4": ("reply", DELIVER), "deepseek-flash": ("reply", DELIVER)})
@@ -655,7 +685,7 @@ def test_editing_the_chain_advances_the_admission_revision(tmp_path, monkeypatch
         _cycle(tmp_path, owner, message_id=f"bmsg_{len(revisions)}")
         revisions.append((store.current_screening_policy(owner) or {})["revision"])
     single, chained, same, back = revisions
-    assert single != chained, "adding a fallback hop must advance the revision"
+    assert single != chained, "a newly reachable hop must advance the revision"
     assert chained == same, "an unchanged chain must not churn the revision"
     assert back == single, "a one-hop chain keeps the pre-chain revision byte-for-byte"
 

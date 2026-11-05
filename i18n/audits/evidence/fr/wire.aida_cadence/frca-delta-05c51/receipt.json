@@ -1,0 +1,18 @@
+{
+  "provenance_record": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-05c51/record.json",
+  "provenance_record_sha256": "e496265ee2a3e61354c47d296ee49c45a068f22056022bdf0a5718fcb4f833af",
+  "files": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-05c51/record.json",
+      "sha256": "e496265ee2a3e61354c47d296ee49c45a068f22056022bdf0a5718fcb4f833af"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-05c51/report.md",
+      "sha256": "71b6c37664c26a27ded085ed2aeea15ee956968d25bc141c9ee41622225fbc7c"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-05c51/audit.log",
+      "sha256": "bfa770cb7efdbb9b5f4101c187f176c0f22f9e7cf4c90586f779161da8538e10"
+    }
+  ]
+}

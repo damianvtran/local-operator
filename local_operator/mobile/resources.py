@@ -55,7 +55,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from local_operator import procstate
 
@@ -285,6 +285,45 @@ def _darwin_footprint_bytes(pid: int) -> int | None:
         return None
 
 
+def footprint_denied(pid: int) -> bool:
+    """Whether this account is NOT PERMITTED to read ``pid``'s footprint.
+
+    The distinction the descendant census needs (review R1, PR #3369): a setuid
+    or other-account process (``/usr/bin/top``, ``ps``, ``sudo``) answers
+    ``proc_pid_rusage`` with ``EPERM`` — measured: ``top`` gives errno 1, a gone
+    pid errno 3 — and its memory can never be read this way however long one
+    waits, so it is a credential boundary, not an unknown. Linux: ``smaps_rollup``
+    raising ``PermissionError``. False for every other outcome, including a
+    read that succeeds, so a caller only ever downgrades on a positive answer.
+    """
+    import errno as _errno
+
+    if sys.platform == "darwin":
+        lib = _darwin_libproc()
+        if lib is None:
+            return False
+        try:
+            import ctypes
+
+            buffer = ctypes.create_string_buffer(_RUSAGE_BUFFER_SIZE)
+            ctypes.set_errno(0)
+            if lib.proc_pid_rusage(pid, _RUSAGE_INFO_V2, ctypes.byref(buffer)) == 0:
+                return False
+            return ctypes.get_errno() in (_errno.EPERM, _errno.EACCES)
+        except Exception:  # noqa: BLE001 — an unanswered probe is not a denial
+            return False
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/smaps_rollup", "rb") as handle:
+                handle.read(1)
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return False
+    return False
+
+
 def _darwin_ppid_pgid(pid: int) -> tuple[int, int] | None:
     """``(ppid, pgid)`` of one pid via ``proc_pidinfo(PROC_PIDTBSDINFO)``, or ``None``.
 
@@ -353,6 +392,46 @@ def direct_ppid_pgid(pid: int) -> tuple[int, int] | None:
     return None
 
 
+def listed_ppid_pgid(pid: int, parent: int) -> tuple[int, int] | None:
+    """``(parent, pgid)`` when the kernel lists ``pid`` as a CURRENT child of ``parent``.
+
+    The SECOND parentage source for a stop (QA Q2, PR #3369). The first,
+    :func:`direct_ppid_pgid`, asks about ``pid`` itself, and macOS refuses that
+    (``proc_pidinfo(PROC_PIDTBSDINFO)`` → no answer) for a setuid process such
+    as ``/usr/bin/top`` — so an escaped setuid descendant present at a breach
+    stop was skipped before any signal and survived silently. This asks the
+    other end of the edge instead: ``proc_listpids(PROC_PPID_ONLY, parent)``
+    answers for the parent's children regardless of their credentials
+    (measured: a setsid'd setuid ``top`` is listed under its parent while
+    ``direct_ppid_pgid`` answers ``None``), and ``getpgid`` answers across
+    sessions. Same ownership bar as the first source — membership in that
+    listing IS "pid's current parent is ``parent``" — and still fork-free.
+
+    ``None`` when either half cannot answer or ``pid`` is not listed: the caller
+    must treat that as unverified, never as unchanged.
+
+    Linux scans ``/proc`` once per call. Left that way on purpose (review n1,
+    PR #3372): ``/proc/<pid>/stat`` already answers :func:`direct_ppid_pgid`
+    for setuid pids there, so this fallback is rare on Linux, and only a stop
+    calls it.
+    """
+    if pid <= 1 or parent <= 0:
+        return None
+    if sys.platform == "darwin":
+        listed = _darwin_child_pids(parent)
+    elif sys.platform.startswith("linux"):
+        parents = _linux_parent_map()
+        listed = None if parents is None else [p for p, pp in parents.items() if pp == parent]
+    else:
+        return None
+    if listed is None or pid not in listed:
+        return None
+    try:
+        return parent, os.getpgid(pid)
+    except OSError:
+        return None
+
+
 #: ``proc_listpids``'s selector for "every pid in the process group ``typeinfo``".
 _PROC_PGRP_ONLY = 2
 
@@ -395,6 +474,128 @@ def _darwin_group_pids(pgid: int) -> list[int] | None:
         return [pid for pid in buffer[: written // ctypes.sizeof(ctypes.c_int)] if pid > 0]
     except Exception:  # noqa: BLE001 — any probe failure is just missing data
         return None
+
+
+#: ``proc_listpids``'s selector for "every pid whose parent is ``typeinfo``"
+#: (``<sys/proc_info.h>``: ``#define PROC_PPID_ONLY 6``).
+_PROC_PPID_ONLY = 6
+
+
+def _darwin_child_pids(ppid: int) -> list[int] | None:
+    """The direct children of ``ppid`` via ``proc_listpids(PROC_PPID_ONLY)``.
+
+    COUNT VERSUS BYTES IS THE WHOLE TRAP HERE. ``proc_listpids`` returns BYTES
+    written (xnu ``libsyscall/wrappers/libproc/libproc.c``: it returns
+    ``__proc_info(PROC_INFO_CALL_LISTPIDS, ...)`` unchanged), while the
+    convenience wrapper ``proc_listchildpids`` is that same call followed by
+    ``return numpids / sizeof(int)`` — a PID COUNT. A QA rig (session
+    e8581ec27fa2) called ``proc_listchildpids`` and then divided by
+    ``sizeof(int)`` again: 3 children read as 0, so every descendant went
+    uncounted. This reader calls ``proc_listpids`` directly, so its result is
+    bytes and is converted exactly once, here; nothing in this module calls
+    ``proc_listchildpids``.
+
+    ``None`` on any failure (no libproc, a negative or non-``int``-multiple
+    answer). Unlike ``PROC_PGRP_ONLY``, the kernel answers this selector across
+    sessions (measured: a ``setsid``'d grandchild is listed under its parent),
+    which is why descendant accounting can find what the group listing cannot.
+    """
+    lib = _darwin_libproc()
+    if lib is None or ppid <= 0:
+        return None
+    try:
+        import ctypes
+
+        size = ctypes.sizeof(ctypes.c_int)
+        needed = lib.proc_listpids(_PROC_PPID_ONLY, ppid, None, 0)
+        if needed < 0 or needed % size:
+            return None
+        count = needed // size + _PGRP_LIST_SLACK
+        buffer = (ctypes.c_int * count)()
+        written = lib.proc_listpids(_PROC_PPID_ONLY, ppid, buffer, ctypes.sizeof(buffer))
+        if written < 0 or written % size or written > ctypes.sizeof(buffer):
+            return None
+        return [pid for pid in buffer[: written // size] if pid > 0 and pid != ppid]
+    except Exception:  # noqa: BLE001 — any probe failure is just missing data
+        return None
+
+
+def _linux_parent_map() -> dict[int, int] | None:
+    """``pid -> ppid`` for every process in ONE ``/proc`` scan, or ``None``."""
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    parents: dict[int, int] = {}
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        row = _linux_ppid_pgid(int(entry))
+        if row is not None:
+            parents[int(entry)] = row[0]
+    return parents
+
+
+#: Upper bound on one descendant census, in pids. A runaway fork bomb must not
+#: turn a 250 ms guard tick into an unbounded walk; past this the census answers
+#: ``None`` (unknown), which the caller reports rather than reading as zero.
+_DESCENDANT_CENSUS_LIMIT = 4096
+
+
+def direct_descendant_pids(roots: Iterable[int]) -> dict[int, int] | None:
+    """``{descendant: its parent}`` for every descendant of ``roots``, or ``None``.
+
+    Roots are excluded. The PARENT is returned with each pid because it is the
+    ownership proof a later signal re-checks: a pid whose parent is still a live
+    member of our tree cannot be a recycled stranger.
+
+    WHY THIS EXISTS. The per-command guard meters one process GROUP, and a
+    descendant that calls ``setsid()`` (Electron helpers, a daemonised
+    ``lop serve``, a runtime) leaves that group: ``proc_listpids(PROC_PGRP_ONLY)``
+    no longer lists it, so its memory was charged to nobody. Measured on this
+    host: a 600 MB ``setsid`` grandchild under ``run_bounded --memory-mb 300``
+    ran to completion with status 0. Parentage survives ``setsid`` (only
+    re-parenting after the parent exits breaks it), so the census walks ``ppid``
+    edges, which is the ancestry the group listing cannot see.
+
+    FORK-FREE, for the guard's reason: macOS asks ``proc_listpids(PROC_PPID_ONLY)``
+    per node (:func:`_darwin_child_pids`), Linux scans ``/proc`` once. ``None``
+    means the census could not answer for SOME node — a partial tree is not an
+    answer, because a missing subtree would read as zero memory.
+    """
+    wanted = {pid for pid in roots if pid > 0}
+    kids: Callable[[int], "list[int] | None"]
+    if sys.platform.startswith("linux"):
+        parents = _linux_parent_map()
+        if parents is None:
+            return None
+        children: dict[int, list[int]] = {}
+        for pid, ppid in parents.items():
+            children.setdefault(ppid, []).append(pid)
+        kids = lambda pid: children.get(pid, [])  # noqa: E731 — one /proc scan, many lookups
+    elif sys.platform == "darwin":
+        kids = _darwin_child_pids
+    else:
+        return None
+    found: dict[int, int] = {}
+    frontier = list(wanted)
+    seen = set(wanted)
+    while frontier:
+        parent = frontier.pop()
+        listed = kids(parent)
+        if listed is None:
+            return None
+        for child in listed:
+            # pid 1 is never ours: a child re-parented to launchd/init is listed
+            # under 1, and 1 itself only appears if a caller handed it in.
+            if child in seen or child == 1:
+                continue
+            seen.add(child)
+            found[child] = parent
+            frontier.append(child)
+            if len(found) > _DESCENDANT_CENSUS_LIMIT:
+                return None
+    return found
 
 
 def _linux_group_pids(pgid: int) -> list[int] | None:

@@ -1,0 +1,94 @@
+{
+  "kind": "source inspection only, not runtime or native evidence",
+  "provenance_reference": "record.json:auditor",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "settings_source_sha256": "c6462e6b01cfd9f12610aadf24cb890ca97f3405a38c69b1290ddbadbe9ea724",
+  "excerpts": [
+    {
+      "start_line": 5289,
+      "lines": [
+        "    Setting(",
+        "        key=\"hub.auto_update.agents\",",
+        "        path=(\"hub\", \"auto_update\", \"agents\"),",
+        "        section=\"hub\",",
+        "        label=_t(_hd.agents_label()),",
+        "        kind=Kind.BOOL,",
+        "        default=True,",
+        "        choices=_bool_choices(",
+        "            _t(_hd.agents_on_description()),"
+      ]
+    },
+    {
+      "start_line": 5293,
+      "lines": [
+        "        label=_t(_hd.agents_label()),",
+        "        kind=Kind.BOOL,",
+        "        default=True,",
+        "        choices=_bool_choices(",
+        "            _t(_hd.agents_on_description()),",
+        "            _t(_hd.agents_off_description()),",
+        "        ),",
+        "        help=_t(_hd.agents_help()),",
+        "    ),"
+      ]
+    },
+    {
+      "start_line": 5294,
+      "lines": [
+        "        kind=Kind.BOOL,",
+        "        default=True,",
+        "        choices=_bool_choices(",
+        "            _t(_hd.agents_on_description()),",
+        "            _t(_hd.agents_off_description()),",
+        "        ),",
+        "        help=_t(_hd.agents_help()),",
+        "    ),",
+        "    Setting("
+      ]
+    },
+    {
+      "start_line": 5296,
+      "lines": [
+        "        choices=_bool_choices(",
+        "            _t(_hd.agents_on_description()),",
+        "            _t(_hd.agents_off_description()),",
+        "        ),",
+        "        help=_t(_hd.agents_help()),",
+        "    ),",
+        "    Setting(",
+        "        key=\"hub.auto_update.teams\",",
+        "        path=(\"hub\", \"auto_update\", \"teams\"),"
+      ]
+    }
+  ],
+  "creation_policy": {
+    "file": "local_operator/hub_sync/policies.py",
+    "sha256": "5c8cfb8c54bbed21b1d28766117cab7448caec985bc5fd71d83c335716301520",
+    "start_line": 52,
+    "lines": [
+      "def creation_policy(values: Mapping[str, Any], kind: str) -> LinkPolicy:",
+      "    defaults = _mapping(_hub(values).get(\"auto_update\", {}))",
+      "    if kind not in (\"agent\", \"team\", \"skill\"):",
+      "        raise LinkError(\"invalid-link-policy\", \"hub link kind is unsupported\")",
+      "    # One switch per kind: skills have NO kind-wide shared settings key (adding one",
+      "    # is a settings/i18n catalogue change owned by that lane), so a skill's",
+      "    # creation default follows the SAME ``hub.auto_update.agents`` switch the",
+      "    # runner's ``settings.auto_for('skill')`` ceiling reads. The two cannot",
+      "    # disagree, which is what round-1 QA flagged.",
+      "    default = defaults.get(\"agents\" if kind in (\"agent\", \"skill\") else \"teams\", True)",
+      "    # Preserve an explicitly stored BOOL OFF, not truthiness of arbitrary YAML.",
+      "    # Missing (or a non-bool spelling) means the ON default.",
+      "    return LinkPolicy(subscribe=default if type(default) is bool else True, auto_push=False)",
+      "",
+      "",
+      "def read_policy(values: Mapping[str, Any], identity: LinkIdentity) -> PolicySnapshot:",
+      "    hub = _hub(values)",
+      "    policies = _mapping(hub.get(\"links\", {}))",
+      "    policy = (",
+      "        LinkPolicy.from_json(policies[identity.link_id])",
+      "        if identity.link_id in policies",
+      "        else creation_policy(values, identity.kind)",
+      "    )"
+    ]
+  }
+}

@@ -87,6 +87,10 @@ class ToolDocOp:
     op: str
     blurb: str = ""
     fields: tuple[str, ...] = ()
+    #: Render this row only when ``op`` is in the LIVE schema's ``op`` enum.
+    #: For ops a host prunes per context (the agent tool's Radient Team org
+    #: ops): a static row would advertise a surface the gate hides.
+    gated: bool = False
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,30 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="sync",
                 blurb="Pull the latest for installed roles (merges hub updates with local edits).",
+            ),
+            # ``gated``: rendered only when the live schema carries the op,
+            # i.e. for a Radient Team account (operator constraint).
+            ToolDocOp(
+                op="org_list",
+                blurb=(
+                    "Radient Team only: your organization's shared agents, teams and "
+                    "skills, each marked linked / conflict (same-named unlinked local "
+                    "copy) / absent."
+                ),
+                fields=("org", "kinds", "query"),
+                gated=True,
+            ),
+            ToolDocOp(
+                op="org_pull",
+                blurb=(
+                    "Radient Team only: pull them all (or one: name= id, name or unique "
+                    "prefix) and subscribe; re-runs never duplicate. on_conflict for a "
+                    "same-named unlinked local copy: adopt-link (default: back up, link, "
+                    "content unchanged, never merges) | skip | adopt (hub wins, backed up) "
+                    "| reconcile (model merge); adopt/reconcile need confirm_replace=true."
+                ),
+                fields=("org", "kinds", "name", "on_conflict"),
+                gated=True,
             ),
             ToolDocOp(
                 op="create/update",
@@ -402,7 +430,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="network_clear", blurb="Drop the buffer."),
             ToolDocOp(
                 op="record_start",
-                blurb="Record THIS tab's video to an .mp4 (desktop host only; see notes).",
+                blurb="Record THIS tab's video to an .mp4 (see notes).",
             ),
             ToolDocOp(
                 op="record_stop",
@@ -433,10 +461,12 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "'network_start' then read with 'network_read'. Bodies are opt-in "
             "per exact origin+path and land in a private session file, never in "
             "this transcript.\n"
-            "- 'record_start'/'record_stop' make an MP4 of this tab (AV1: plays "
-            "in QuickTime; not expected in Chrome's <video>); path= is approved before "
-            "capture and never overwritten, timeout_s= caps the length. Desktop "
-            "host only.\n"
+            "- 'record_start'/'record_stop' make an MP4 of this tab (default AV1: "
+            "QuickTime only; quality='high' is sharper H.264, played in Chromium, "
+            "~0.5-0.7 GB more RAM); path= is approved first, never overwritten. "
+            "width=/height= go together (area <= 3840x2160). A default clip over "
+            "64 MiB (32 in a scratchpad) is discarded: 4K ~150 s worst case, 75 s "
+            "there. Desktop host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),
@@ -747,7 +777,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 blurb=(
                     "A bounded page of one conversation. Bodies appear only for "
                     "messages this agent admitted; everything else is metadata with "
-                    "`body: null` (no local body cache). This is also how you read "
+                    "`body: null` (no local body cache). A null body with a "
+                    "`body_state` means you have not been given that message (held, "
+                    "not admitted, or your own post that could not be read back in "
+                    "this read) - it is NOT an empty message; "
+                    "do not infer its content. This is also how you read "
                     "the reply to a DM you opened, using the `conversation_id` the "
                     "`dm` result gave you."
                 ),
@@ -756,7 +790,8 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="channel_thread",
                 blurb=(
                     "One thread, oldest-first: the root with its reply count and a "
-                    "bounded page of replies. Same screening rule as history."
+                    "bounded page of replies. Same screening rule as history, "
+                    "including `body_state` on a null body."
                 ),
             ),
             ToolDocOp(
@@ -799,6 +834,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "- WHICH LANE: `dm`/`channel_post` are visible in Team Bridge and "
             "auditable; `send`/`reply` are the legacy pair inbox, invisible in "
             "the UI. One path per intent — do not answer a DM with `send`.\n"
+            "- IMAGES: no base64 in bodies; `attachments` if hub allows.\n"
             "- WHICH SESSION: any session with this tool may collaborate, but "
             "`take_up`/`ack`/`send`/`reply`, `channels` and `shared_*` belong to "
             "the account's chief-of-staff session. Getting `not_designated` "
@@ -1417,10 +1453,12 @@ def _render(tool: AgentTool, notes: ToolDocNotes | None) -> str:
     description = (tool.description or "").strip()
     if description:
         lines += ["", _PURPOSE_HEADING, "", description]
-    if notes is not None and notes.ops:
-        lines += ["", _OPS_HEADING, ""]
-        lines += [_op_line(op) for op in notes.ops]
     parameters = tool.parameters if isinstance(tool.parameters, dict) else {}
+    if notes is not None and notes.ops:
+        live = ((parameters.get("properties") or {}).get("op") or {}).get("enum") or ()
+        ops = [op for op in notes.ops if not op.gated or op.op in live]
+        lines += ["", _OPS_HEADING, ""]
+        lines += [_op_line(op) for op in ops]
     param_lines: list[str] = []
     _render_properties(parameters, root=parameters, depth=0, out=param_lines)
     if param_lines:

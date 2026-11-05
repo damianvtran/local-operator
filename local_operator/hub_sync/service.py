@@ -1347,10 +1347,35 @@ def _mark_integrated(
         # to a live-revision read that came from the recorded base) IS the
         # verification A2.3 asks for, so the record advances to a vouching one.
         updated = dc_replace(updated, recorded_by="adopt")
-    if c.remote_revision and c.remote_revision != updated.remote_revision:
+    if c.remote_revision:
+        # Even when the revision is unchanged, repair records written by older
+        # runtimes with a mismatched (revision, fields) pair: the unconditional
+        # read selected by ``_trusted_validator`` just supplied the real body.
         # The revision is the ancestry fact this agreement observed, and the
         # fallback expected token a later conditional write uses.
         updated = dc_replace(updated, remote_revision=c.remote_revision)
+        if c.remote is not None:
+            # THE REVISION AND THE FIELDS MOVE TOGETHER (stale-baseline incident,
+            # 2026-11-04). ``remote_revision`` is the validator the next check
+            # sends as If-None-Match, and a 304 answer makes the check use THESE
+            # fields as the hub's document at that revision. Advancing only the
+            # revision left a record claiming "revision X holds the old text":
+            # after a push (which deliberately leaves B alone) and a later L == R
+            # agreement, the next push merged onto the old text under a passing
+            # CAS and republished it. A genuine agreement means the remote just
+            # read IS what is integrated here, so it is the honest B.
+            updated = dc_replace(
+                updated,
+                fields=dict(c.remote),
+                fingerprint=prov.fingerprint_fields(c.kind, c.remote),
+            )
+    # The hub content just integrated here is the honest merge base for the
+    # NEXT push too: without this, a link that pulled the head would still push
+    # against the receipt's older revision and be refused ``stale-base`` once
+    # before the refusal itself refreshed it.
+    rebased = rebased_outbound_receipt(updated.outbound, c, integrated=True)
+    if rebased is not None:
+        updated = dc_replace(updated, outbound=rebased)
     if updated == record:
         return
     try:
@@ -1425,6 +1450,13 @@ def _apply_skill(
         ctx.store().mutate(inner)
 
     def fail(cls: str, message: str, outcome: ItemOutcome = "failed") -> ItemMergeReport:
+        if not dry_run and cls == "merge-refused":
+            from local_operator.hub_sync.push import PushOutcome
+
+            # Refusing an inbound merge must not strand the next outbound push
+            # on older ancestry either. B and every local file stay untouched;
+            # only P/revision move to the head this check just read.
+            rebase_outbound_after_refusal(ctx, c, PushOutcome("needs-review", reason=cls))
         fold(lambda item: st.record_failure(item, cls, message))
         return ItemMergeReport(
             c.kind,
@@ -2949,6 +2981,151 @@ def bundle_upload_hook(
     return upload
 
 
+#: Push refusals after which the outbound receipt is REBASED onto the hub head
+#: the push just read (``rebased_outbound_receipt``): the named stale-base guard,
+#: and a projection the merge engine refused. Deliberately not ``conflict`` (the
+#: head moved DURING the push, so the read is not the head either) nor refusals
+#: unrelated to the merge base (an unacknowledged generalization, a missing
+#: capability), which a refreshed base would not change.
+_REBASE_AFTER_REFUSAL = frozenset({"stale-base", "merge-refused", "bundle-conflict"})
+
+
+def rebased_outbound_receipt(existing: Any, c: Any, *, integrated: bool = False) -> Any:
+    """The outbound receipt moved onto the hub head ``c`` read, or None to keep it.
+
+    THE OPERATOR'S REQUIREMENT (stale-baseline incident, 2026-11-04): after a
+    refused merge or an integration of the hub head, the push's baseline must be
+    the hub's CURRENT revision, never an older accepted document a later merge
+    could resurrect. So P := the remote just read and the revision := its ETag.
+
+    A (the captured local input) is KEPT on purpose, which is what makes this
+    lossless: stage one of the projection re-applies every local edit since A
+    onto the new P, so an unpublished local edit survives, and content only the
+    hub has is never reverted because the local side never touched it. (Setting
+    A := P would make the next push publish the local copy VERBATIM, silently
+    reverting any hub change the local copy lacks.)
+
+    A BUNDLE has no per-file merge: its projection publishes the local tree only
+    when the hub still holds P. Moving P onto a different hub tree after a mere
+    refusal would turn that refusal into an overwrite, so a refused bundle is
+    rebased only when the head holds the SAME tree (a revision-only move).
+    ``integrated`` lifts that: the caller just wrote the head's tree locally, so
+    the head IS the local tree's ancestor.
+    """
+
+    if existing is None or c is None:
+        return None
+    remote = getattr(c, "remote", None)
+    revision = getattr(c, "remote_revision", None)
+    if remote is None or not revision:
+        return None
+    if existing.remote_revision == revision:
+        try:
+            same = prov.fingerprint_snapshot(
+                c.kind, dict(existing.accepted_fields)
+            ) == prov.fingerprint_snapshot(c.kind, dict(remote))
+        except Exception:  # noqa: BLE001 - an unreadable P is rebased onto the read
+            same = False
+        if same:
+            return None
+    if not integrated and ("bundle" in remote or "bundle" in (existing.accepted_fields or {})):
+        try:
+            same_tree = prov.fingerprint_snapshot(
+                c.kind, dict(existing.accepted_fields)
+            ) == prov.fingerprint_snapshot(c.kind, dict(remote))
+        except Exception:  # noqa: BLE001 - an unprovable tree never rebases
+            return None
+        if not same_tree:
+            return None
+    from local_operator.hub_sync.provenance import OutboundReceipt
+
+    return OutboundReceipt(
+        local_fields=existing.local_fields,
+        accepted_fields=dict(remote),
+        input_fingerprint=existing.input_fingerprint,
+        remote_revision=str(revision),
+        operation_id=existing.operation_id,
+    )
+
+
+def rebase_outbound_after_refusal(ctx: HubSyncContext, c: Any, outcome: Any) -> bool:
+    """Persist ``rebased_outbound_receipt`` after a merge-base refusal; True if moved."""
+
+    if str(getattr(outcome, "reason", "") or "") not in _REBASE_AFTER_REFUSAL:
+        return False
+    try:
+        record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
+    except (prov.BaselineError, OSError):
+        return False
+    if record is None:
+        return False
+    rebased = rebased_outbound_receipt(record.outbound, c)
+    if rebased is None:
+        return False
+    try:
+        prov.write_baseline(ctx.config_dir, replace(record, outbound=rebased))
+    except (prov.BaselineError, OSError, LinkError):
+        logger.debug("could not rebase outbound receipt for %s %s", c.kind, c.local_id)
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class PushVerification:
+    """What a post-push re-read of the hub head proved.
+
+    ``verified`` is True when the head serves the document the push committed,
+    False when it serves something else, and None when the head could not be
+    read (an outage proves nothing either way; the caller says so).
+    """
+
+    verified: bool | None
+    head_revision: str | None = None
+    reason: str = ""
+
+
+def verify_skill_push(ctx: HubSyncContext, check: Any, outcome: Any) -> PushVerification:
+    """Re-read the hub head after a ``pushed`` outcome and compare it with the intent.
+
+    WHY (stale-baseline incident, 2026-11-04): the CLI reported ``pushed`` while
+    the hub had accepted an OLDER document as its new head; only reading the raw
+    hub document back revealed it. So the push now verifies on its own:
+    unconditionally (no If-None-Match -- a 304 would answer from the local
+    baseline, which is exactly the copy that was wrong), through the same
+    per-tenant client the check uses, comparing with the one skill-content
+    comparator (``_same_content``: tolerant of the hub's canonical respelling,
+    exact for a bundle tree).
+
+    The comparison target is ``outcome.document`` -- the body the commit SENT --
+    never the server's ``accepted_document``: an idempotent replay answers with
+    the pin's original snapshot, which may be older than the head.
+    """
+
+    intended = getattr(outcome, "document", None)
+    if not isinstance(intended, Mapping):
+        return PushVerification(None, reason="no-intended-document")
+    try:
+        client = ctx.client_for_tenant(check.tenant_id if check.tenant_id else "")
+    except Exception:  # noqa: BLE001 - no client is an unverifiable read, not a failure
+        client = None
+    if client is None:
+        return PushVerification(None, reason="no-credential")
+    try:
+        document = chk._fetch_skill(
+            client, check.hub_id, timeout=chk.REQUEST_TIMEOUT_S, if_none_match=None
+        )
+        from local_operator.hub_sync.adapters import SkillAdapter
+
+        head = SkillAdapter().canonical_fields(document)
+    except Exception as error:  # noqa: BLE001 - the read failed; nothing was proved
+        logger.debug("post-push verification read failed for %s", check.name, exc_info=True)
+        return PushVerification(None, reason=type(error).__name__)
+    head_revision = str(document.get("revision") or "") or None
+    if _same_content(head, intended):
+        return PushVerification(True, head_revision=head_revision)
+    return PushVerification(False, head_revision=head_revision, reason="head-differs")
+
+
 def record_push_outcome(ctx: HubSyncContext, c: Any, outcome: Any) -> None:
     """Persist one push outcome: advance the receipt on success, name a skip.
 
@@ -2982,6 +3159,7 @@ def record_push_outcome(ctx: HubSyncContext, c: Any, outcome: Any) -> None:
 
         ctx.store().mutate(fold)
         return
+    rebase_outbound_after_refusal(ctx, c, outcome)
     if outcome.reason:
         reason = str(outcome.reason)
 
@@ -3491,6 +3669,60 @@ def _resolve_remote_skill(
     return _ResolvedRemoteSkill(source, alias, identity, canonical, revision, document, client)
 
 
+#: The dot-prefixed sibling a bundle adoption moves the operator's folder to
+#: while the hub tree is installed (``install_skill``): ``.adopt-<alias>-<hex>``.
+_ADOPT_ASIDE_PREFIX = ".adopt-"
+
+
+def recover_bundle_adoption_asides(config_dir: Path) -> list[str]:
+    """Settle bundle adoptions a crash interrupted mid-move; returns the aliases touched.
+
+    WHY. A bundle adoption moves the live folder to ``.adopt-<alias>-<hex>``
+    (skill discovery skips dot entries), installs the hub tree, then deletes
+    the aside. The org auto-enrol runs that on a daemon thread, which
+    interpreter exit can stop between the move and either the restore or the
+    delete (agent review R3), leaving the operator's skill invisible. Two
+    states are possible and each has one safe answer:
+
+    - ``<alias>`` is ABSENT: the install never committed, so the aside IS the
+      operator's folder. Move it back.
+    - ``<alias>`` is PRESENT and owned by a hub link: the install committed and
+      the durable ``hub/backups/skill-adopt-*`` snapshot taken BEFORE the move
+      is the restore point, exactly as on the success path. Drop the aside.
+
+    Anything else (an unowned folder reappeared beside an aside) is left
+    untouched for a person. CALLER HOLDS the hub update lease (``exclusive``),
+    the same lease the move runs under, so a live adoption is never mistaken
+    for a crashed one. Never raises.
+    """
+
+    root = Path(config_dir) / "skills"
+    touched: list[str] = []
+    try:
+        entries = sorted(root.iterdir()) if root.is_dir() else []
+    except OSError:
+        return touched
+    for aside in entries:
+        name = aside.name
+        if not name.startswith(_ADOPT_ASIDE_PREFIX) or not aside.is_dir() or aside.is_symlink():
+            continue
+        alias, sep, suffix = name[len(_ADOPT_ASIDE_PREFIX) :].rpartition("-")
+        if not sep or not alias or len(suffix) != 12:
+            continue
+        live = root / alias
+        try:
+            if not live.exists():
+                os.replace(aside, live)
+                touched.append(alias)
+                logger.warning("restored skill %r from an interrupted hub adoption", alias)
+            elif prov.alias_owner(config_dir, "skill", alias) is not None:
+                shutil.rmtree(aside, ignore_errors=True)
+                touched.append(alias)
+        except OSError:
+            logger.warning("could not settle interrupted adoption %s", aside, exc_info=True)
+    return touched
+
+
 def install_skill(
     ctx: HubSyncContext,
     *,
@@ -3508,6 +3740,9 @@ def install_skill(
     dry_run: bool = False,
     form: str | None = None,
     reinstall: bool = False,
+    adoption_receipt: str | None = None,
+    adoption_strategy: Literal["merge", "keep-local", "take-hub"] = "merge",
+    allow_llm: bool = True,
 ) -> dict[str, Any]:
     """Install ONE remote skill as a new local link (UI ``hub.skillPull``).
 
@@ -3599,6 +3834,9 @@ def install_skill(
             raise LinkError(
                 getattr(error, "code", "") or "local-concurrent-edit", str(error)
             ) from None
+        # A bundle adoption a crash stopped mid-move is settled under this same
+        # lease before the alias is inspected (see the helper).
+        recover_bundle_adoption_asides(ctx.config_dir)
 
         # 7b. Already-linked / replay arm BEFORE any write: a deterministic id
         #     that already exists is THIS install's own earlier attempt (or a
@@ -3654,6 +3892,85 @@ def install_skill(
                 }
             )
             return {"reports": [payload], "link": row, "links": snapshot}
+
+        # Adoption is an explicit initial-link transition, not an exception in
+        # the ordinary storage ownership gate. BOTH preview and apply validate
+        # durable ownership before reading text or claiming that installation is
+        # possible; the old early dry-run returned a misleading would-install.
+        owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+        if owner is not None and owner != local_id:
+            raise LinkError(
+                "origin-conflict", "managed alias belongs to another local skill origin"
+            )
+        destination = storage.path(alias)
+        # BUNDLE ADOPTION (take-hub only). A bundle has no per-file merge engine
+        # -- its content is a hash-bound archive, so a merged tree could never
+        # match the published tree hash -- which is why bundles used to stop at
+        # the storage's hard ``alias-occupied`` refusal with no way forward. The
+        # org bulk pull (``hub_org.pull``) needs one, and hub-wins-with-backup
+        # is the only honest adoption for an archive. The occupying folder is
+        # snapshotted to ``hub/backups/skill-adopt-<alias>-<uuid>`` with the
+        # SAME ``durable_snapshot`` the document adoption uses (so one restore
+        # procedure covers both), then moved aside and replaced by the hub's
+        # archive in the ordinary install transaction. Only a folder no hub
+        # origin owns qualifies (``owner is None``); an owned alias is a
+        # reinstall/resume and keeps its own path.
+        bundle_adoption: dict[str, Any] | None = None
+        if bundle is not None and owner is None and destination.exists():
+            if dry_run:
+                return {
+                    "reports": [
+                        {
+                            "kind": "skill",
+                            "local_id": local_id,
+                            "name": alias,
+                            "hub_id": hub_id,
+                            "outcome": "needs-review",
+                            "applied": False,
+                        }
+                    ],
+                    "bundle": _bundle_summary(bundle),
+                    "publisher": _bundle_publisher(resolved.document),
+                    "bundle_adoption": {"strategies": ["take-hub"]},
+                    "confirmation_required": True,
+                    "form": "bundle",
+                    "link": None,
+                    "links": links_snapshot(ctx),
+                    "dry_run": True,
+                }
+            if adoption_strategy != "take-hub" or not confirm:
+                raise LinkError(
+                    "alias-occupied",
+                    f"a skill named {alias!r} already exists on this machine outside the hub; "
+                    "a bundle skill can only be adopted hub-wins (take-hub, with confirmation), "
+                    "which backs your copy up first",
+                )
+            from local_operator.hub_sync.skill_adoption import (
+                AdoptionError,
+                durable_snapshot,
+                read_tree,
+            )
+
+            try:
+                occupying = Path(ctx.config_dir).resolve() / "skills" / alias
+                snapshot = durable_snapshot(ctx.config_dir, alias, read_tree(occupying))
+            except AdoptionError as error:
+                raise LinkError(error.code, str(error)) from None
+            bundle_adoption = {"snapshot": snapshot, "occupying": occupying}
+        if bundle is None and destination.exists():
+            from local_operator.hub_sync.skill_adoption_service import adopt_skill
+
+            return adopt_skill(
+                ctx,
+                resolved,
+                dry_run=dry_run,
+                confirm=confirm,
+                receipt=adoption_receipt,
+                strategy=adoption_strategy,
+                allow_llm=allow_llm,
+                subscribe=subscribe,
+                auto_push=auto_push,
+            )
 
         # 7b-bundle. The bundle preflight runs BEFORE any policy staging or
         #     download: a public first install must name the publisher and the
@@ -3975,6 +4292,19 @@ def install_skill(
                     bundle,
                     bearer=resolved.identity.visibility == "org",
                 )
+                # Bundle adoption: the snapshot above is the durable backup;
+                # the live folder is moved to a dot-prefixed sibling (skill
+                # discovery skips dot entries) so the install sees a free alias,
+                # and moved BACK if the transaction refuses -- a failed adopt
+                # must leave the operator's folder exactly where it was.
+                aside: Path | None = None
+                occupying_path: Path | None = None
+                if bundle_adoption is not None:
+                    occupying_path = Path(bundle_adoption["occupying"])
+                    aside = occupying_path.with_name(
+                        f"{_ADOPT_ASIDE_PREFIX}{alias}-{secrets.token_hex(6)}"
+                    )
+                    os.replace(occupying_path, aside)
                 try:
                     transaction = ManagedBundleStorage(ctx.config_dir).apply(
                         identity,
@@ -3987,8 +4317,21 @@ def install_skill(
                         automatic=False,
                         basis="reinstall" if reinstall else "initial-install",
                     )
+                except BaseException:
+                    if (
+                        aside is not None
+                        and occupying_path is not None
+                        and not occupying_path.exists()
+                    ):
+                        os.replace(aside, occupying_path)
+                        aside = None
+                    raise
                 finally:
                     _discard_bundle_download(archive)
+                if aside is not None:
+                    # The backup lives in hub/backups; the moved-aside live
+                    # copy is redundant once the hub's tree is committed.
+                    shutil.rmtree(aside, ignore_errors=True)
             else:
                 assert local_write is not None
                 transaction = storage.apply(
@@ -4071,7 +4414,11 @@ def install_skill(
         if bundle is not None:
             payload["bundle"] = _bundle_summary(bundle)["bundle"]
             payload["publisher"] = publisher
-        return {"reports": [payload], "link": row, "links": snapshot}
+        response: dict[str, Any] = {"reports": [payload], "link": row, "links": snapshot}
+        if bundle_adoption is not None:
+            # The restore point, named in the answer like a document adoption's.
+            response["snapshot"] = bundle_adoption["snapshot"]
+        return response
 
 
 def subscribe_skill(
@@ -4118,6 +4465,13 @@ def subscribe_skill(
     # Same lease the install/apply paths take: creating the baseline is local
     # state a concurrent tick or install must not interleave with.
     with exclusive(ctx, wait_s=0.0):
+        # Subscription reserves a durable alias too. Another origin remains a
+        # conflict even when its directory is absent or between crash renames.
+        owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+        if owner is not None and owner != local_id:
+            raise LinkError(
+                "origin-conflict", "managed alias belongs to another local skill origin"
+            )
         existing: prov.BaselineRecord | None = None
         for record in prov.iter_baselines(ctx.config_dir):
             if record.kind != "skill" or record.local_id != local_id:
@@ -4132,6 +4486,18 @@ def subscribe_skill(
                 )
             existing = record
             break
+
+        if existing is None or existing.content_state == "absent":
+            from local_operator.hub_sync.skill_adoption_service import _refusal
+            from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+            if ManagedSkillStorage(ctx.config_dir).path(alias).exists():
+                # An authored copy is not ABSENT. Minting an absent baseline
+                # here falsely reports subscription success while every runner
+                # pull later CAS-refuses that same folder. Offer the exact same
+                # reviewed adoption as Download, retaining Subscribe intent;
+                # refuse before any baseline, policy or content mutation.
+                raise _refusal("alias-occupied", "review the occupying local skill first")
 
         if existing is None:
             record = replace(
@@ -5856,6 +6222,12 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
             if value
         }
         if not check.remote_revision or check.remote_revision not in allowed:
+            from local_operator.hub_sync.push import PushOutcome
+
+            # This refusal occurs before dispatch (the reviewed proposal's head
+            # moved). Refresh the outbound base just as a refused CLI/runner
+            # merge does, without modifying any local file or publishing it.
+            rebase_outbound_after_refusal(ctx, check, PushOutcome("refused", reason="stale-base"))
             raise LinkError(
                 "remote-revision-changed", "the hub changed since the preview was reviewed"
             )
@@ -5871,6 +6243,9 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
             remote_latest=check.remote or {},
         )
         if refuse := refuses(projection):
+            from local_operator.hub_sync.push import PushOutcome
+
+            rebase_outbound_after_refusal(ctx, check, PushOutcome("needs-review", reason=refuse))
             raise LinkError(refuse, "the merged result cannot be published")
         if _proposal_fingerprint(dict(projection.fields)) != receipt.get("proposal_fingerprint"):
             raise changed("the proposal differs from the one reviewed")
@@ -5905,6 +6280,7 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
                 bundle_attested=not is_bundle or _capability_bundle(ctx.store().load(), identity),
                 bundle_upload=(bundle_upload_hook(ctx, identity, record) if is_bundle else None),
                 org_skill=identity.visibility == "org",
+                base_revision=outbound.remote_revision or "",
             )
         )
         record_push_outcome(ctx, check, outcome)
