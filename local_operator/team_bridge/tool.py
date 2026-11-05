@@ -168,6 +168,7 @@ from local_operator.harness.types import (
 
 from . import agent_attachments, agent_files, reply_guard, secret_guard
 from .client import ATTACHMENT_MAX_COUNT, TeamBridgeClient
+from .inline_data import bound_inline_data_uris
 from .outbox import Outbox, send_from_outbox
 from .recipient_resolution import (
     ResolutionAuditUnavailable,
@@ -3057,6 +3058,15 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                 )
             else:
                 content = f"bridge {args.get('op')}: {outcome.get('state', 'ok')}"
+            # A body is sender-controlled and may carry an inline
+            # ``data:image/…;base64,…`` URI — legal text that is unreadable and
+            # unbounded in context (the operator's 600 KB repro). Bound it HERE,
+            # once, on the way into model context: every branch above reads a
+            # body (history pages, take_up, a receipt echoing a request), so one
+            # choke point cannot be reopened by a new read shape. ``details``
+            # stays untouched — it is never serialized to providers, and the
+            # wire, the hub row and ``body_hash`` are not ours to rewrite.
+            content = bound_inline_data_uris(content)
             notes = _model_notes(outcome)
             if notes and not peer_receipt:
                 # A peer receipt is already the whole outcome as JSON, warning
