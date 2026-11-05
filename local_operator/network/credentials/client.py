@@ -881,24 +881,6 @@ class MeshCredentialClient:
         denied = None
         try:
             policy = self._policy()
-            identity = (policy.root, policy.network_id, policy.recipient)
-            # Genuine first use, NOT unknown authority. No deny document, no
-            # marker, no memory of ever having validated one for this identity,
-            # and no fence captured for this reply: there is nothing to fence and
-            # no deny to discover, so the owner's reply is adopted exactly as it
-            # was before this store existed. Every other shape falls through —
-            # established-then-missing evidence fails the memory test, partial or
-            # corrupt evidence fails the absence test, and both stay
-            # PolicyUnknown inside transaction() below.
-            if (
-                request_stamp is None
-                and policy.absent()
-                and identity not in self._held_policy_established
-            ):
-                if cache:
-                    self.grants.put(key, session_id, grant)
-                self._remember_grant(key, grant)
-                return grant
             with policy.transaction() as document:
                 if not self._self_membership_active():
                     denied = self._invalidate_membership_scope(key, document)

@@ -63,23 +63,23 @@ class HeldPolicyStore:
         self.path = placement.credentials_dir_for(network_id, self.root) / "held-policy.json"
         self.marker = self.path.with_name("held-policy.initialized")
 
-    def absent(self) -> bool:
-        """Genuine first use: neither the document nor its marker exists.
+    def _present(self, path: Path) -> bool:
+        """Whether this store file exists — and only a genuine ENOENT counts as no.
 
-        Deliberately narrower than "not established". A marker without its
-        document, a document without its marker, unreadable bytes, a bad binding
-        or a duplicate row all stay :class:`PolicyUnknown`: those are evidence
-        this recipient HAD authority and can no longer prove it. Total absence is
-        different in kind — nothing has ever been recorded here, so a reader that
-        only needs deny knowledge has nothing to fence against and no deny to
-        discover, and must not answer "unknown authority".
-
-        Read outside the store's own locks on purpose: the caller uses it to
-        decide whether to open a transaction at all. A race can only make this
-        answer stale, and the loser of that race takes the locked path, which
-        re-reads both files and stays authoritative.
+        ``os.path.exists`` and friends swallow every ``OSError``, so a config
+        directory this process cannot inspect (``EACCES``, ``ENOTDIR``, ``ELOOP``)
+        would read as "nothing recorded here" and genesis would then initialize
+        over deny evidence it simply could not see. Presence is asked with
+        ``lstat`` so the no-follow rule matches :meth:`_read`, and every error
+        other than ``FileNotFoundError`` stays unknown authority.
         """
-        return not os.path.lexists(self.path) and not os.path.lexists(self.marker)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise PolicyUnknown("uninspectable held-policy path") from exc
+        return True
 
     def _read(self, path: Path) -> dict[str, Any]:
         before = path.lstat()
@@ -166,7 +166,7 @@ class HeldPolicyStore:
                     self.path.with_name(".held-policy.lock"), root=self.root
                 ),
             ):
-                exists, established = os.path.lexists(self.path), os.path.lexists(self.marker)
+                exists, established = self._present(self.path), self._present(self.marker)
                 if (
                     not exists
                     and not established
