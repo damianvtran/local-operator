@@ -76,6 +76,14 @@ there is one digest pin to follow.)
   with an alert also file `alert_count_one`: the same alert at a count of one,
   where the count term is singular (`1 conversation needs you`), so no reader of
   this tree only ever sees the plural.
+- **`reserved_not_sent`** names fields that are declared in the allow-lists but
+  that the machine **does not send yet**: `sound_custom` (payload, completion and
+  digest) and `sound_custom_ready` (report block), which ADR 0006's 2026-11-04
+  amendment reserves so the cloud's `extra="forbid"` accepts them before
+  notification-sounds C5 starts sending them. The filed literals leave them out,
+  because they record what the machine sends today, and the suite asserts that
+  the builders emit neither. When C5 lands, remove the entries from this list
+  and add the fields to the literals in the same change.
 - **`same_as`** means *this file does not restate the shape* — it names the file
   whose `required`/`optional`/`forbidden` blocks govern it too. `registry-register-
   rotation.json` uses it for the register response, so there is one home for that

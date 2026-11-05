@@ -1,0 +1,67 @@
+[run_bounded] memory budget 1500 MiB (explicit, capped by inherited); sampled owned child group and escaped descendants
+allowance growth: skipped (no base ref)
+advisory: local_operator/agent_profiles.py: 4 literal(s) against a ceiling of 3
+advisory: local_operator/compaction/snapcompact.py: 12 literal(s) against a ceiling of 10
+advisory: local_operator/disk_cli.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/disk_pressure.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/runner/provider_client.py: 13 literal(s) against a ceiling of 9
+advisory: local_operator/evaluation/team_bridge_moderation/dataset.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/fixture.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/report.py: 32 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/runner.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/screenbench.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness/subagent.py: 7 literal(s) against a ceiling of 4
+advisory: local_operator/harness_import/mapping.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/service.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/sources/claude.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/sources/codex.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/hub_sync/service.py: 4 literal(s) against a ceiling of 1
+advisory: local_operator/librarian/proactive.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/library/metadata.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/library/store.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_cli.py: 81 literal(s) against a ceiling of 39
+advisory: local_operator/memory_guard.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_maintenance.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_triage.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/monitors/delivery.py: 19 literal(s) against a ceiling of 14
+advisory: local_operator/network/cli.py: 255 literal(s) against a ceiling of 228
+advisory: local_operator/network/credentials/finite_share.py: 3 literal(s) against a ceiling of 2
+advisory: local_operator/network/meshupdate.py: 3 literal(s) against a ceiling of 2
+advisory: local_operator/network/readiness.py: 25 literal(s) against a ceiling of 15
+advisory: local_operator/network/relay.py: 32 literal(s) against a ceiling of 31
+advisory: local_operator/network/tool.py: 24 literal(s) against a ceiling of 23
+advisory: local_operator/notifications/bulk.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/notifications/store.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/operator/cli.py: 26 literal(s) against a ceiling of 23
+advisory: local_operator/operator/handlers.py: 82 literal(s) against a ceiling of 69
+advisory: local_operator/operator/pair_handlers.py: 32 literal(s) against a ceiling of 23
+advisory: local_operator/procname.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/providers/auth_cli.py: 23 literal(s) against a ceiling of 20
+advisory: local_operator/saver/provenance.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_imports.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_librarian.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_team_bridge.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/notification_sounds.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session/catalog.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session/delegated_retention.py: 12 literal(s) against a ceiling of 6
+advisory: local_operator/session_factory.py: 16 literal(s) against a ceiling of 15
+advisory: local_operator/sound_cli.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/supervisors.py: 9 literal(s) against a ceiling of 6
+advisory: local_operator/supplements/sweep.py: 6 literal(s) against a ceiling of 5
+advisory: local_operator/supplements/validate.py: 22 literal(s) against a ceiling of 21
+advisory: local_operator/team_bridge/cli.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/connector/cli.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/connector/conversation.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/store.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/tool.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/agent_tool.py: 5 literal(s) against a ceiling of 4
+advisory: local_operator/tools/artifact_data_tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/builtin.py: 134 literal(s) against a ceiling of 118
+advisory: local_operator/tools/confinement.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/skill_tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tui/session_move.py: 4 literal(s) against a ceiling of 3
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+advisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+check.py: ok — 202 file(s) scanned, 2411 literal(s) at or below the baseline, catalogues consistent; 63 advisory finding(s) (report-only until activated)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=47faca69264047bc99d5fe56ae18e1ab completion=/Users/damian/.local-operator/sessions/796c1db4d0d0/scratchpad/run-bounded-runs/47faca69264047bc99d5fe56ae18e1ab.completion.json

@@ -50,6 +50,7 @@ from typing import Any, Literal
 #: ``types.LOCAL_OPS`` and registered here.
 LOCAL_CREDENTIAL_OPS: tuple[str, ...] = (
     "credential_grant",
+    "credential_catalogue",
     "credential_report",
     "credential_placement",
     # The revoke half of the mint-revoke contract (github adapter, F4): the CLI

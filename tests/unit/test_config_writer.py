@@ -181,3 +181,10 @@ def test_invalid_language_and_corrupt_config_do_not_mutate_anything(tmp_path: Pa
     with pytest.raises(settings_io.ConfigUnreadableError):
         settings_io.write_setting(manager, settings_io.BY_KEY["language"], "en")
     assert manager.config_file.read_bytes() == corrupt
+
+
+def test_read_config_values_answers_none_for_a_non_utf8_file(tmp_path: Path) -> None:
+    """A hand-saved Latin-1 byte is "cannot be read", not an exception: the push
+    worker reads this on every emit, and an escape stalled them all (#3405 R1-M1)."""
+    (tmp_path / "config.yml").write_bytes(b"values:\n  note: caf\xe9\n")
+    assert read_config_values(tmp_path) is None

@@ -1,0 +1,238 @@
+{
+  "schema": 1,
+  "namespace": "tui.sound",
+  "scope": "46053ab26a6395d3e1ea501efc3b7018f39ea1b7..27695a49855fc4ddae0450af5e215346ce5b66b5",
+  "source_sha256": "0d23d23b34918c3bdb003afbf6ba6f2694316a7c55214142428185956e4fa578",
+  "context_sha256": "3bc8a3a4afd9c9aefd1e0293861c4b015367e36d203659f4a95cf7a6bac158ee",
+  "draft_source_byte_identical_to_head": true,
+  "draft_context_byte_identical_to_head": true,
+  "translator": {
+    "agent": "notif-sounds-C4-tui",
+    "job": "16bed17d35eb",
+    "session": "e87ab06e319f",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-04",
+    "provenance": "Manager supplied author-draft copy and identity in this session"
+  },
+  "auditor": {
+    "agent": "C4-i18n-audit",
+    "session": "796c1db4d0d0",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-04",
+    "fallback_used": false
+  },
+  "verdict": "passed for corrected artifacts only; terminal semantic audit",
+  "unresolved_blocker_major": 0,
+  "coverage": {
+    "locales": [
+      "es",
+      "fr",
+      "hi",
+      "ru",
+      "ur",
+      "vi",
+      "zh-CN"
+    ],
+    "keys_each": 27,
+    "reviewed_values": 189,
+    "source_keys": [
+      "tui.sound.added",
+      "tui.sound.added_selected",
+      "tui.sound.default",
+      "tui.sound.disabled",
+      "tui.sound.enabled",
+      "tui.sound.id_help",
+      "tui.sound.list_title",
+      "tui.sound.list_yours",
+      "tui.sound.not_found",
+      "tui.sound.off",
+      "tui.sound.on",
+      "tui.sound.preview_failed",
+      "tui.sound.preview_muted",
+      "tui.sound.preview_playing",
+      "tui.sound.preview_silent",
+      "tui.sound.preview_ssh",
+      "tui.sound.preview_system",
+      "tui.sound.read_failed",
+      "tui.sound.removed",
+      "tui.sound.renamed",
+      "tui.sound.save_failed",
+      "tui.sound.selected",
+      "tui.sound.slash",
+      "tui.sound.status",
+      "tui.sound.usage",
+      "tui.sound.volume_range",
+      "tui.sound.volume_set"
+    ],
+    "plural_select_messages": 0
+  },
+  "validations": {
+    "locales": {
+      "es": {
+        "keys": 27,
+        "runtime_rendered": 27,
+        "slash_cells": 49,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "fr": {
+        "keys": 27,
+        "runtime_rendered": 27,
+        "slash_cells": 52,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "hi": {
+        "keys": 27,
+        "runtime_rendered": 27,
+        "slash_cells": 30,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "ru": {
+        "keys": 27,
+        "runtime_rendered": 27,
+        "slash_cells": 53,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "ur": {
+        "keys": 27,
+        "runtime_rendered": 27,
+        "slash_cells": 50,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "vi": {
+        "keys": 27,
+        "runtime_rendered": 27,
+        "slash_cells": 51,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "zh-CN": {
+        "keys": 27,
+        "runtime_rendered": 27,
+        "slash_cells": 42,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      }
+    },
+    "negative_control": {
+      "missing_placeholder": "rejected",
+      "actual_errors": [
+        "fr/tui.sound: tui.sound.selected: arguments () != en's (('name', 'simple'),): en has 1 argument(s), translation has 0"
+      ]
+    },
+    "restored_control": "passed",
+    "fallback": "Nothing played: the volume is 0.",
+    "render_samples": {
+      "name": "QA chime",
+      "id": "qa-chime",
+      "seconds": "1.25",
+      "volume": "70",
+      "state": "on",
+      "file": "/synthetic/qa.wav",
+      "reason": "synthetic error"
+    }
+  },
+  "corrected_key_counts": {
+    "es": 1,
+    "fr": 10,
+    "hi": 1,
+    "ru": 1,
+    "ur": 2,
+    "vi": 0,
+    "zh-CN": 0
+  },
+  "coverage_allowance_removal": {
+    "pairs": 7,
+    "keys": 189
+  },
+  "rendering": {
+    "instrument": "Real OperatorApp.run_test; save_capture; rsvg-convert; all nine PNGs viewed by auditor",
+    "grid": [
+      120,
+      40
+    ],
+    "png_pixels": [
+      960,
+      680
+    ],
+    "paths": "frames/{en,es,fr,hi,ru,ur,vi,zh-CN,pseudo}.{svg,png}",
+    "flows": [
+      "bare /sound status",
+      "/sound volume nope refusal",
+      "/sound preview system no-op",
+      "invalid verb usage",
+      "same id_help copy painted via _system_notice"
+    ],
+    "pseudo": "Synthetic bracketed English help plus six expansion phrases; long-copy stress, not an activated pseudo locale",
+    "limitations": [
+      "Not the live terminal; no native Arabic shaping/bidi certification. Urdu raster visibly degraded as documented.",
+      "Not a /settings page interaction audit; help copied through transcript paint for this linguistic audit.",
+      "No speakers or real audio, no remote/cmux sessions. The preview call is system no-op; null backend as defence in depth.",
+      "No viewport or full application design sign-off; header animation differs between locale captures."
+    ]
+  },
+  "validation_environment": {
+    "snapshot": "git archive of pinned head; sparse excludes historical evidence and unrelated docs/assets",
+    "interpreter": "Existing primary checkout .venv/bin/python; imports resolve to pinned scratch snapshot, catalogue path printed in each render log",
+    "heavy_runs": "Serial --memory-mb 1500, command-status contract; targeted pytest -n 1",
+    "limitations": "No Git metadata in archive: allowance growth comparison skipped by repository checker; integration must rerun on real PR branch. All 7 new allowances only removed."
+  },
+  "incidents": [
+    "Initial full archive exceeded 256 MiB scratch cap; removed only own partial export, replaced with sparse snapshot.",
+    "First render preflight wrote top-level language; warning identified this as ignored. Corrected to values.language and reran all final frames.",
+    "First catalogue probe imported nonexistent private cache name; corrected to _sources and reran all parity/control checks."
+  ],
+  "cleanup": {
+    "checked_groups": [
+      67532,
+      65677,
+      84247,
+      60976,
+      64061,
+      56939,
+      62286,
+      59645,
+      70268
+    ],
+    "remaining_processes": [],
+    "method": "ps -axo pid=,pgid=,comm= after bounded runner SIGTERM of each exact owned group",
+    "claim": "no remaining matching PGIDs at observation; not authoritative Darwin descendant census"
+  },
+  "styles": {
+    "es": "Tú; neutral Spanish; infinitive action summary; sonido / avisos; decimal seconds passed through.",
+    "fr": "Vous; son des notifications; action and failure receipts concise; narrow no-break space before prose colon/question mark.",
+    "hi": "आप polite imperative; ध्वनि and सूचना; पूर्णांक for integer; Latin digits; danda in prose.",
+    "ru": "Lowercase вы / impersonal receipts; звук уведомлений; invariant seconds abbreviation с avoids false plural agreement for decimal seconds; Latin digits.",
+    "ur": "آپ respectful imperative; اطلاع کی آواز, ترتیب محفوظ; Latin digits; logical-order storage without bidi controls; TUI remains best-effort/degraded.",
+    "vi": "Bạn where needed, generally omitted; âm thanh thông báo; cài đặt; invariant units and NFC.",
+    "zh-CN": "你 and dropped pronouns; 通知提示音; simplified characters; literal commands and Latin digits; preserved command-separating whitespace for technical readability."
+  },
+  "style_snapshot_delta_review": {
+    "es": "Pinned-only additions concern cwd, quota/allowance, pull/push and usage/analytics widths, none used in tui.sound",
+    "fr": "Pinned-only relay.chrome width exceptions, none used in tui.sound",
+    "other_locales_and_glossary": "byte-identical to read primary files"
+  },
+  "final_validation": {
+    "generate-check": "127 artifact(s) byte-identical; rc 0",
+    "check": "202 scanned, 2411 literals, 63 advisory; rc 0",
+    "coverage": "1 passed in 5.99s; -n 1; removed 7 pairs / 189 keys"
+  }
+}

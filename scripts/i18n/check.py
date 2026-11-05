@@ -927,6 +927,42 @@ def _resolve_allowance_base(base: str | None) -> str | None:
     return None
 
 
+def check_audit_history(base: str | None = None, *, structural_only: bool = False) -> list[str]:
+    """Normal gate: structure plus actual-base append-only proof, fail closed in CI."""
+    from scripts.i18n import ledger
+
+    try:
+        ledger.load_entries(REPO)
+        if structural_only:
+            if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+                raise ValueError("structural-only audit validation is forbidden in CI")
+            return []
+        # Repo-less checker fixtures with no audit storage exercise other gates.
+        if not (REPO / "i18n/ledger.json").exists() and not (REPO / "i18n/ledger").exists():
+            if _git("rev-parse", "--is-inside-work-tree").returncode != 0 and not os.environ.get(
+                "CI"
+            ):
+                return []
+        ci_sha, _ = _ci_base()
+        if os.environ.get("GITHUB_EVENT_NAME") == "pull_request" and not ci_sha:
+            raise ValueError("actual PR audit base is unavailable")
+        ref = _resolve_allowance_base(ci_sha or base or "origin/main")
+        if ref is None:
+            raise ValueError(
+                "readable audit base required; use --audit-base REF "
+                "(isolated fixtures: --audit-structural-only)"
+            )
+        if ci_sha and base:
+            override = _git("rev-parse", "--verify", f"{base}^{{commit}}")
+            actual = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
+            if override.returncode != 0 or override.stdout != actual.stdout:
+                raise ValueError("--audit-base must name the actual PR base in CI")
+        ledger.validate_base(REPO, ref)
+    except (ValueError, OSError) as exc:
+        return [f"audit history: {exc}"]
+    return []
+
+
 def _english_keys_at_ref(ref: str) -> set[str] | None:
     """Qualified key IDs in ``ref``'s English catalogues, or ``None``.
 
@@ -1148,6 +1184,18 @@ def main(argv: list[str] | None = None) -> int:
         help="fail when i18n/coverage-allowance.json adds entries relative to REF; "
         "defaults to the pull request base in CI, then origin/main locally",
     )
+    parser.add_argument(
+        "--audit-base",
+        metavar="REF",
+        # i18n: ignore developer-only CLI help; i18n tooling owns this while checkout-only
+        help="actual base for append-only audit history validation",
+    )
+    parser.add_argument(
+        "--audit-structural-only",
+        action="store_true",
+        # i18n: ignore developer-only CLI help; i18n tooling owns this while checkout-only
+        help="isolated local fixture validation only; forbidden in CI",
+    )
     args = parser.parse_args(argv)
 
     if args.catalogues_only:
@@ -1222,7 +1270,12 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(line)
         else:
             advisories.append(f"advisory: {line}")
-    problems = check_catalogues() + check_login(REPO) + check_allowance_growth(args.allowance_base)
+    problems = (
+        check_catalogues()
+        + check_login(REPO)
+        + check_allowance_growth(args.allowance_base)
+        + check_audit_history(args.audit_base, structural_only=args.audit_structural_only)
+    )
     for line in advisories + failures + problems:
         print(line)
     if failures or problems:

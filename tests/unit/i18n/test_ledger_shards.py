@@ -2,8 +2,9 @@
 
 This compares the shards against a PINNED description of the pre-migration
 aggregate (per-locale row count + SHA-256 of the locale's ordered rows), not
-against the aggregate file itself — that file is now generated FROM the shards,
-so comparing the two would only prove the generator is deterministic.
+against the aggregate file itself — that historical snapshot was generated FROM
+these shards. Current audit history now extends both snapshots via the shared
+suffix reader; the remaining writer cases deliberately exercise legacy roots.
 
 The pins were captured from ``git show b12173b:i18n/ledger.json`` — the parent
 commit of the sharding change — and cover the FIRST N rows of each shard:
@@ -57,11 +58,13 @@ def test_shards_preserve_the_pre_migration_rows_exactly() -> None:
         assert {row["locale"] for row in rows} == {locale}, locale
 
 
-def test_shards_and_aggregate_yield_identical_shipped_set(i18n_generate) -> None:
+def test_shards_and_aggregate_yield_identical_shipped_set(
+    i18n_generate, tmp_path, monkeypatch
+) -> None:
     """Non-negotiable: aggregate path and shard path ship the same locales.
 
-    The aggregate is a generated mirror, so this pins the two READ PATHS to each
-    other (a mirror that lost a row would change the set); that the rows
+    A current explicit aggregate export pins the legacy and migrated READ PATHS
+    to each other (a lost row could change the set); that the baseline rows
     themselves are the pre-migration ones is
     ``test_shards_preserve_the_pre_migration_rows_exactly`` above.
     """
@@ -69,12 +72,15 @@ def test_shards_and_aggregate_yield_identical_shipped_set(i18n_generate) -> None
     from_shards = i18n_generate._shipped_locales()
     shard_entries = i18n_generate._ledger_entries()
 
-    # Legacy path: hide the shard directory so the aggregate is the source.
-    import unittest.mock as mock
-
-    with mock.patch.object(i18n_generate, "LEDGER_SHARDS", REPO / "i18n" / "nonexistent"):
-        legacy_entries = i18n_generate._ledger_entries()
-        from_aggregate = i18n_generate._shipped_locales()
+    # Export CURRENT history into an isolated aggregate-only legacy root. The
+    # tracked aggregate is an immutable snapshot, not a current-view contract.
+    storage = tmp_path / "i18n"
+    storage.mkdir()
+    (storage / "ledger.json").write_text(i18n_generate._render_aggregate(), encoding="utf-8")
+    monkeypatch.setattr(i18n_generate, "LEDGER", storage / "ledger.json")
+    monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", storage / "ledger")
+    legacy_entries = i18n_generate._ledger_entries()
+    from_aggregate = i18n_generate._shipped_locales()
 
     # Same rows, same shipped set. The mirror groups by locale, so compare
     # per-locale ordered rows rather than raw array order. NO row-count literal:
@@ -167,19 +173,22 @@ def test_supersession_last_wins_across_hashes(i18n_generate, tmp_path: Path, mon
         json.dumps({"wire.exec.demo": "Recu synthetique"}), encoding="utf-8"
     )
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
-    monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "ledger.json")
-    monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "ledger")
+    (tmp_path / "i18n").mkdir(exist_ok=True)
+    monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "i18n" / "ledger.json")
+    monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "i18n" / "ledger")
     current = catalogues.catalogue_sha256("en", "wire.exec")
 
     def row(status: str, sha: str) -> dict[str, Any]:
         return {
+            "translator": {"agent": "fixture-translator", "model": "test"},
+            "auditor": {"agent": "fixture-auditor", "model": "test"},
             "locale": "fr",
             "namespace": "wire.exec",
             "source_sha256": sha,
             "status": status,
         }
 
-    shard_dir = tmp_path / "ledger"
+    shard_dir = tmp_path / "i18n" / "ledger"
     shard_dir.mkdir()
 
     # Stale-passed then fresh-passed: ships (supersession forward).
@@ -246,6 +255,7 @@ def test_stale_aggregate_fails_drift_check(i18n_generate, tmp_path: Path, monkey
     )
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     monkeypatch.setattr(i18n_generate, "REPO", tmp_path)
+    (tmp_path / "i18n").mkdir(exist_ok=True)
     monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "i18n" / "ledger.json")
     monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "i18n" / "ledger")
     # _check also scans the generated dirs for orphans; point them at empty
@@ -256,6 +266,8 @@ def test_stale_aggregate_fails_drift_check(i18n_generate, tmp_path: Path, monkey
     shard_dir.mkdir(parents=True)
     current = catalogues.catalogue_sha256("en", "wire.exec")
     row = {
+        "translator": {"agent": "fixture-translator", "model": "test"},
+        "auditor": {"agent": "fixture-auditor", "model": "test"},
         "locale": "fr",
         "namespace": "wire.exec",
         "source_sha256": current,
@@ -300,6 +312,7 @@ def test_a_row_appended_to_the_aggregate_is_refused_not_dropped(
     )
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     monkeypatch.setattr(i18n_generate, "REPO", tmp_path)
+    (tmp_path / "i18n").mkdir(exist_ok=True)
     monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "i18n" / "ledger.json")
     monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "i18n" / "ledger")
     monkeypatch.setattr(i18n_generate, "KEYS_DIR", tmp_path / "keys")
@@ -308,6 +321,8 @@ def test_a_row_appended_to_the_aggregate_is_refused_not_dropped(
     shard_dir.mkdir(parents=True)
     current = catalogues.catalogue_sha256("en", "wire.exec")
     shard_row = {
+        "translator": {"agent": "fixture-translator", "model": "test"},
+        "auditor": {"agent": "fixture-auditor", "model": "test"},
         "locale": "fr",
         "namespace": "wire.exec",
         "source_sha256": current,
@@ -323,6 +338,8 @@ def test_a_row_appended_to_the_aggregate_is_refused_not_dropped(
 
     # A row present only in the aggregate IS stranded, and main() refuses.
     stray = {
+        "translator": {"agent": "fixture-translator", "model": "test"},
+        "auditor": {"agent": "fixture-auditor", "model": "test"},
         "locale": "fr",
         "namespace": "wire.settings",
         "source_sha256": current,
@@ -381,15 +398,17 @@ SHARD_LOCALES = sorted(p.stem for p in (REPO / "i18n" / "ledger").glob("*.json")
 
 @pytest.mark.parametrize("locale", SHARD_LOCALES)
 def test_shard_round_trips_through_aggregate_mirror(locale: str, i18n_generate) -> None:
-    """Every shard's rows appear verbatim in the regenerated aggregate."""
+    """Every historical shard prefix appears verbatim in CURRENT explicit export."""
     shard = json.loads((REPO / "i18n" / "ledger" / f"{locale}.json").read_text(encoding="utf-8"))
     aggregate = json.loads(i18n_generate._render_aggregate())
     rows = [r for r in aggregate["entries"] if r["locale"] == locale]
-    assert rows == shard["entries"]
+    assert rows[: len(shard["entries"])] == shard["entries"]
 
 
 def _row(locale: str, namespace: str, sha: str, note: str) -> dict[str, Any]:
     return {
+        "translator": {"agent": "fixture-translator", "model": "test"},
+        "auditor": {"agent": "fixture-auditor", "model": "test"},
         "locale": locale,
         "namespace": namespace,
         "source_sha256": sha,
@@ -409,7 +428,7 @@ def _stage_scripts(root: Path) -> None:
     """
     target = root / "scripts" / "i18n"
     target.mkdir(parents=True, exist_ok=True)
-    for name in ("generate.py", "shard_ledger.py", "emit.mjs"):
+    for name in ("generate.py", "shard_ledger.py", "ledger.py", "emit.mjs"):
         shutil.copy2(REPO / "scripts" / "i18n" / name, target / name)
 
 

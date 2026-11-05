@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,21 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    # The historical writer must never mutate a pinned baseline, even under
+    # --force/--fold-stranded. Salvage old branch receipts via a detached import.
+    for storage in {args.ledger.parent, args.out.parent}:
+        if any(
+            path.exists() or path.is_symlink()
+            for path in (storage / "audit-history.json", storage / "audit-history")
+        ):
+            print(
+                "shard_ledger.py: migrated audit storage refuses legacy writes; use "
+                "scripts/i18n/ledger.py import-legacy --source <detached-export> "
+                "--format aggregate --dry-run",
+                file=sys.stderr,
+            )
+            return 2
 
     aggregate = json.loads(args.ledger.read_text(encoding="utf-8"))
     aggregate_rows = [row for row in aggregate.get("entries", []) if isinstance(row, dict)]

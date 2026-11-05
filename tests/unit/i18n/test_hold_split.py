@@ -39,7 +39,7 @@ REPO = Path(__file__).resolve().parents[3]
 def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict[str, Any]]) -> None:
     """Judge ledger freshness on the LATEST row per namespace, and prove the rest superseded.
 
-    WHY NOT EVERY ROW. ``i18n/ledger.json`` is append-only: re-auditing a namespace at
+    WHY NOT EVERY ROW. Effective audit history is append-only: re-auditing a namespace at
     new English bytes appends a row and keeps the old one at its superseded source
     hash, and ``generate.py`` ships by the LAST row per ``(locale, namespace)``. A
     check that demanded every row be fresh would forbid ever re-auditing.
@@ -271,21 +271,25 @@ def test_a_held_locale_is_excluded_even_with_every_row_passed(
             json.dumps({"wire.exec.demo": "Synthetic receipt"}), encoding="utf-8"
         )
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
-    monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "ledger.json")
-    monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "ledger")
+    (tmp_path / "i18n").mkdir(exist_ok=True)
+    monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "i18n" / "ledger.json")
+    monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "i18n" / "ledger")
     en_sha = catalogues.catalogue_sha256("en", "wire.exec")
     i18n_generate.LEDGER.write_text(
         json.dumps(
             {
+                "schema": 1,
                 "entries": [
                     {
+                        "translator": {"agent": "fixture-translator", "model": "test"},
+                        "auditor": {"agent": "fixture-auditor", "model": "test"},
                         "locale": locale,
                         "namespace": "wire.exec",
                         "status": "passed",
                         "source_sha256": en_sha,
                     }
                     for locale in ("fr", "zh-CN")
-                ]
+                ],
             }
         ),
         encoding="utf-8",

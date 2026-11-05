@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.98.0"
+version = "0.99.0"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -288,6 +288,13 @@ local_operator = [
     # recurse — see the note on the mobile/web sources below this list).
     "i18n/catalogues/*/*.json",
     "i18n/data/*.json",
+    # The built-in notification sounds and their catalog (notifications/sound.py
+    # reads both at runtime). 16-bit FLAC, ~0.26 MiB for all ten. The 24-bit
+    # masters and the export script under assets/notification-sounds/ stay
+    # git-only. tests/unit/notifications/test_sound_assets.py checks the
+    # catalog against the files.
+    "notifications/sounds/*.flac",
+    "notifications/sounds/catalog.json",
     # The turn-supplement ("Highlights") prelude: the minified stylesheet and
     # script the document assembler injects into every generated component. Both
     # are read at runtime (``supplements/document.py``), so a wheel without them

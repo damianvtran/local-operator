@@ -1,0 +1,7 @@
+[run_bounded] memory budget 1500 MiB (explicit, capped by inherited); sampled owned child group and escaped descendants
+bringing up nodes...
+bringing up nodes...
+
+.                                                                        [100%]
+1 passed in 5.99s
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=32d6a97b35e54bb5a067f1d06c17cef0 completion=/Users/damian/.local-operator/sessions/796c1db4d0d0/scratchpad/run-bounded-runs/32d6a97b35e54bb5a067f1d06c17cef0.completion.json

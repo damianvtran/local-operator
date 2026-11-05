@@ -4946,6 +4946,30 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    async def conversation_thread_read(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        seq: int,
+        tenant_id: str,
+        expected_account_id: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Advance only the thread cursor, never the conversation cursor.
+
+        Keep the hub's four-key post-state intact: its thread unread count is
+        not the channel total. The captured owner is checked by ``_send`` and
+        stays local, just as on the other guarded thread mutations.
+        """
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}/read",
+            body={"seq": seq, "tenant_id": tenant_id},
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
     async def conversation_notify(
         self,
         conversation_id: str,
@@ -5535,6 +5559,38 @@ class StatusDiscipline:
     @property
     def base_url(self) -> str:
         return self._client.base_url
+
+    def cached_thread_read_features(self) -> dict[str, int]:
+        """Forward the current owner's fresh hub flag without another status read.
+
+        Capability polling is not a status boundary: calling ``check`` here
+        could enroll the default-on bridge or publish identity. Only the normal
+        status reader may populate this receipt. A cold/expired/failed cache or
+        changed login withholds it until that reader proves support again.
+        """
+        self._client._require_destination()
+        row = self._client._pinned_row()
+        raw = row.data if row is not None and isinstance(row.data, Mapping) else {}
+        owner = raw.get("account_id")
+        if not isinstance(owner, str) or not owner:
+            return {}
+        state = self._states.get(owner)
+        if (
+            state is None
+            or state.check.error is not None
+            or state.check.state != STATE_READY
+            or time.monotonic() - state.last_attempt >= self._ttl(state)
+        ):
+            return {}
+        payload = state.check.payload
+        features = payload.get("features") if isinstance(payload, Mapping) else None
+        version = (
+            features.get("team_bridge_thread_reads") if isinstance(features, Mapping) else None
+        )
+        # bool is an int in Python, but is not a protocol version on the wire.
+        if type(version) is int and version >= 1:
+            return {"team_bridge_thread_reads": version}
+        return {}
 
     def _ttl(self, state: _AccountState) -> float:
         return STATUS_ERROR_TTL_S if state.check.error is not None else STATUS_CACHE_TTL_S
