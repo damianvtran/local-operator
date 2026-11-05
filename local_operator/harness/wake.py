@@ -76,6 +76,20 @@ LOAD_GRACE_MS = 2_000  # an overdue wake adopted at resume fires shortly AFTER l
 WAKE_SCHEDULES_CUSTOM_TYPE = "wake_schedules"
 WAKE_PROMPT_MESSAGE_TYPE = "wake_prompt"
 
+#: The accepted time forms, as one sentence fragment, shared by EVERY refusal
+#: that reads a wake time: ``build_wake_schedule``'s invalid-``at`` sentence and
+#: both flag-translation refusals in ``lop wake create``. The CLI rejects an
+#: unreadable ``when``/``until`` BEFORE the validator ever sees the string, so a
+#: second wording there is the one a person at a terminal actually reads — and a
+#: refusal that does not name the accepted forms (nor the local rule that makes
+#: a bare clock ambiguous) teaches nothing about the mistake. One constant, so
+#: the tool, the CLI and the desktop route cannot drift apart.
+WAKE_TIME_FORMS = (
+    "use a delay ('+30m'), a LOCAL clock time ('HH:MM' or 'local:HH:MM', read in this "
+    "machine's zone), or an ISO-8601 timestamp with an offset ('2026-11-05T18:45:00Z') "
+    "for an absolute instant"
+)
+
 #: The scratchpad clause carried by every wake envelope. A wake is the turn with
 #: the LEAST context around it — no user message, no recent tool result naming a
 #: path — so it is the turn where the standing scratchpad rule is least likely to
@@ -445,16 +459,11 @@ def build_wake_schedule(
     elif at_val is not None:
         parsed = parse_wake_at(str(at_val), now_ms)
         if parsed is None:
-            # Names every accepted form AND the rule that makes the clock form
-            # dangerous: an invalid/unstated time used to leave the reader to
-            # guess the zone, which is how a wake meant for 18:45Z landed two
-            # hours late. No fallback anywhere — an unreadable `at` is refused.
+            # No fallback anywhere — an unreadable `at` is refused, and the shared
+            # ``WAKE_TIME_FORMS`` fragment is what makes the refusal name every
+            # accepted form and the local rule the clock form depends on.
             return {
-                "error": (
-                    f"invalid time '{at_val}'; use a delay ('+30m'), a LOCAL clock time "
-                    "('HH:MM' or 'local:HH:MM', read in this machine's zone), or an ISO-8601 "
-                    "timestamp with an offset ('2026-11-05T18:45:00Z') for an absolute instant."
-                ),
+                "error": f"invalid time '{at_val}'; {WAKE_TIME_FORMS}.",
                 "malformed": True,
             }
         next_due_at = parsed

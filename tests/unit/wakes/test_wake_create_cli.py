@@ -498,3 +498,40 @@ def test_a_live_owner_is_refused_with_a_sentence_that_says_what_to_do(
     assert "stale owner marker" in message
     assert "Nothing was written" in message
     assert _persisted_wakes(session) == []
+
+
+def test_an_unreadable_time_names_every_form_and_the_local_rule(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The CLI refuses BEFORE the validator, so ITS sentence must carry the forms.
+
+    A person typing ``wake create <session> "at tomorrow"`` never reaches
+    ``build_wake_schedule``'s refusal, so the older "(try 'in 2m' or 'at 09:30')"
+    taught them nothing about a delay, the explicit ``local:`` spelling, or the
+    local rule that makes a bare clock reading ambiguous. Both refusals — and
+    the tool's — now read the shared ``WAKE_TIME_FORMS`` fragment, which this
+    asserts from both ends so the wordings cannot drift apart.
+    """
+    from local_operator.cli import _wake_create
+    from local_operator.harness.wake import WAKE_TIME_FORMS, build_wake_schedule
+
+    _session(tmp_path, "wakecreate01")
+
+    assert _wake_create(_args(when="at tomorrow")) == 1
+    when_err = capsys.readouterr().err
+    for fragment in ("+30m", "local:HH:MM", "ISO-8601", "offset", "LOCAL"):
+        assert fragment in when_err
+    assert WAKE_TIME_FORMS in when_err
+
+    # The bound's refusal goes through the same translation, so it must say the
+    # same thing: a bad ``--until`` is the same "which kind is this value"
+    # question as a bad ``when``.
+    assert _wake_create(_args(until="tomorrow")) == 1
+    assert WAKE_TIME_FORMS in capsys.readouterr().err
+
+    # And the shared validator carries the identical fragment, so the tool, the
+    # CLI and the desktop arm route cannot describe the accepted forms three
+    # different ways.
+    outcome = build_wake_schedule({"message": "m", "at": "tomorrow"}, [], 1_700_000_000_000)
+    assert "error" in outcome
+    assert WAKE_TIME_FORMS in outcome["error"]

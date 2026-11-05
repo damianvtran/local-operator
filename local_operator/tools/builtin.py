@@ -14663,10 +14663,9 @@ class WakeParams(BaseModel):
     at: str | None = Field(
         default=None,
         description=(
-            "First fire time. 'HH:MM' (or 'local:HH:MM') is this device's LOCAL wall "
-            "clock and means its next occurrence here, not UTC. Name an absolute "
-            "instant with an ISO-8601 timestamp that carries an offset "
-            "('2026-11-05T18:45:00Z'), or a delay from now with '+30m'."
+            "First fire time. 'HH:MM' (or 'local:HH:MM') is this device's LOCAL wall clock "
+            "and means its next occurrence here, not UTC; name an absolute instant with an "
+            "ISO-8601 offset ('2026-11-05T18:45:00Z') or a delay '+30m'."
         ),
     )
     every: str | None = Field(
