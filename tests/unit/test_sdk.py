@@ -1833,7 +1833,10 @@ async def test_sdk4_recovered_frames_use_real_config_and_preserve_raw_cause(
     """
     from local_operator import config
     from local_operator.i18n import messages
-    from local_operator.session_factory import HostingNotConfiguredError, HostingUnknownError
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        HostingUnknownError,
+    )
 
     root = sdk4_boundary.roots.config_dir
     monkeypatch.setattr(config, "ConfigManager", _RealConfigManager)
@@ -1844,9 +1847,7 @@ async def test_sdk4_recovered_frames_use_real_config_and_preserve_raw_cause(
     sdk4_boundary.cause = cause
     spec, _ = _sdk4_spec("attach_hosting_unconfigured")
     clause = (
-        messages.render("wire.errors.hosting.not_configured", {}, locale=language)
-        if owned
-        else raw
+        messages.render("wire.errors.hosting.not_configured", {}, locale=language) if owned else raw
     )
     expected = messages.render(
         "wire.errors.sdk_startup.attach_hosting_unconfigured",
