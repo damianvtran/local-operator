@@ -6222,13 +6222,31 @@ def _mock_bash_sleep(text: str) -> int | None:
     return min(int(match.group(1)), 60)
 
 
+def _mock_ask_kind(text: str) -> str | None:
+    """Which real ``ask`` shape an ``[ask]`` marker selects, if any.
+
+    ``[ask-secret]`` is checked first because its leading ``[ask`` is a prefix
+    of neither complete marker: a substring test for ``[ask]`` does not match
+    it, but ordering the check makes that independence explicit.
+    """
+    if "[ask-secret]" in text:
+        return "secret"
+    if "[ask]" in text:
+        return "choice"
+    return None
+
+
 class MockClient:
     """Deterministic canned stream for ``--hosting test``.
 
     Emits two text deltas + usage + end; when the last user message contains
     ``[tool]`` it emits one tool call (``echo`` with ``{"text": "hi"}``) and
-    stops with ``toolUse`` instead. ``[bash:N]`` calls the REAL ``bash`` tool
-    with ``sleep N`` — the one way to make an assembled runtime genuinely busy
+    stops with ``toolUse`` instead. ``[ask]`` / ``[ask-secret]`` emit the REAL
+    ``ask`` tool with a choice or credential-shaped question, so a surface that
+    needs a genuine pending card can get one with no provider and no secret;
+    dispatch and the ask gate stay production paths. ``[bash:N]`` calls the REAL
+    ``bash`` tool with ``N``-second ``sleep`` — the one way to make an assembled
+    runtime genuinely busy
     for a known duration from outside (``echo`` is not a production tool, so
     ``[tool]`` errors and completes at once); the e2e stage uses it to prove
     a refresh never fires mid-turn. ``[refuse]`` ends the stream as a refusal
@@ -6314,6 +6332,52 @@ class MockClient:
         if wants_tool:
             yield StreamToolCallDelta(index=0, id="call_mock_1", name="echo")
             yield StreamToolCallDelta(index=0, argument_delta=json.dumps({"text": "hi"}))
+            yield StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=5))
+            yield StreamEndEvent(
+                stop_reason="toolUse", usage=Usage(input_tokens=10, output_tokens=5)
+            )
+            return
+        # ``[ask]``/``[ask-secret]``: a REAL ``ask`` tool call from the mock wire.
+        # The desktop UI recovery needs a credentials-free path to a genuine
+        # pending gate; emitting the tool call here (rather than setting a
+        # renderer flag or synthesising an Ask card) keeps normal dispatch,
+        # permission tier, secret storage and the blocking/queued gate in the
+        # production path. Scoped to the newest USER message for the same reason
+        # as ``[bash:N]``: the marker remains in history, and after the tool
+        # result the newest message is the tool row, so the follow-up completes.
+        askable = (
+            last_user is not None and bool(messages) and messages[-1] is last_user
+        )
+        ask_kind = _mock_ask_kind(last_user.text) if askable and last_user is not None else None
+        if ask_kind is not None:
+            question: dict[str, Any] = (
+                {
+                    "id": "mock_choice",
+                    "question": "Which option should the mock choose?",
+                    "options": [
+                        {"label": "First", "description": "The first mock option."},
+                        {"label": "Second", "description": "The second mock option."},
+                    ],
+                    "multi": False,
+                    "recommended": None,
+                    "secret": False,
+                    "persist": False,
+                }
+                if ask_kind == "choice"
+                else {
+                    "id": "mock_secret",
+                    "question": "Paste the mock credential for this session.",
+                    "options": [],
+                    "multi": False,
+                    "recommended": None,
+                    "secret": True,
+                    "persist": False,
+                }
+            )
+            yield StreamToolCallDelta(index=0, id="call_mock_ask", name="ask")
+            yield StreamToolCallDelta(
+                index=0, argument_delta=json.dumps({"questions": [question]})
+            )
             yield StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=5))
             yield StreamEndEvent(
                 stop_reason="toolUse", usage=Usage(input_tokens=10, output_tokens=5)
