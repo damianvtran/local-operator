@@ -1,0 +1,210 @@
+{
+  "locale": "fr",
+  "namespace": "tui.profile_actions",
+  "audit_date": "2026-11-05",
+  "key_count": 11,
+  "auditor": {
+    "agent": "designer / second independent safety i18n auditor",
+    "session": "78d9864ffaac",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host session-state Model: openai/gpt-6.1-sol on resume",
+    "fallback": "Initial anthropic/claude-opus-5-5 attempt hit quota; resumed model inherited openai/gpt-6.1-sol. All completed semantic review here served by openai/gpt-6.1-sol.",
+    "independence": "Distinct agent/session from translator coder 4049c4f3fd43; did not author namespace or consult first auditor judgments. Same served model as author disclosed; independent agent, not independent model vendor."
+  },
+  "input_hashes": {
+    "en": "8179f383fc12faa9fd44fa815c1a61bebe7fa1d07f0283a874a1146216e849e1",
+    "context": "b674415c6f1a6cadb2df0b91fdb78b31b8e6e93b5bf5da5de54e1cc2b14c60a8",
+    "target_locale": "5ad6b3a8b804d965ca26dfb64674c65488b2f12567416258197544ca9a68224e"
+  },
+  "source_audit_revision": "00542c8b657ec7b72482b8fd7bf9932c193d3814",
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": {
+    "command_output": "../audit.log",
+    "guarded_tool_receipts": "../guarded-reads.json",
+    "reproducer": "../recheck.py.txt",
+    "root_report": "../report.md"
+  },
+  "current_report_verdict": "passed",
+  "unresolved_blocker_major": 0,
+  "notes": "Restaurer/restauration is idiomatic rollback language, distinct from denying consent. Vérifier l’état is read-only; n’annulera pas les modifications ultérieures preserves the safety negation. Formal vous-compatible imperatives.",
+  "non_gating_findings": [
+    {
+      "id": "D2",
+      "severity": "NIT",
+      "locale": "fr",
+      "keys": [
+        "tui.profile_actions.stale_reason"
+      ],
+      "evidence": "The character immediately before the single semicolon is U+0020 (measured), not U+202F.",
+      "rule": "i18n/style-guides/fr.md: Punctuation & typography requires U+202F before prose semicolons.",
+      "recommendation": "Use the required narrow no-break space if folding nits into a remediation wave; meaning already correct.",
+      "gate": false
+    }
+  ],
+  "keys": {
+    "tui.profile_actions.available": {
+      "semantic_verdict": "PASS",
+      "assessment": "The action means restore/undo this saved change, not deny consent or cancel an unrelated request. Label offers the action without claiming the action is already complete; actual authorization/enablement remains an engine concern.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [
+          [
+            "shortcut",
+            "simple"
+          ]
+        ],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 17,
+        "label_budget": 52,
+        "budget_pass": true
+      }
+    },
+    "tui.profile_actions.checking": {
+      "semantic_verdict": "PASS",
+      "assessment": "An in-progress check, distinguishable from in-progress mutation; no completion guarantee.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 36,
+        "label_budget": 52,
+        "budget_pass": true
+      }
+    },
+    "tui.profile_actions.reverting": {
+      "semantic_verdict": "PASS",
+      "assessment": "An in-progress restore/undo, not an already-completed result.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 17,
+        "label_budget": 52,
+        "budget_pass": true
+      }
+    },
+    "tui.profile_actions.check_status": {
+      "semantic_verdict": "PASS",
+      "assessment": "A status inspection/check, not retry/reapply/revert; retains the technical shortcut placeholder. Suitable for lost-reply read-only reconciliation.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [
+          [
+            "shortcut",
+            "simple"
+          ]
+        ],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 23,
+        "label_budget": 52,
+        "budget_pass": true
+      }
+    },
+    "tui.profile_actions.reverted": {
+      "semantic_verdict": "PASS",
+      "assessment": "Completed restore/undo, not merely available or requested. French/Hindi specify previous-version restoration, consistent with inverse context.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 32,
+        "label_budget": 52,
+        "budget_pass": true
+      }
+    },
+    "tui.profile_actions.unavailable": {
+      "semantic_verdict": "PASS",
+      "assessment": "Restore action is not available/cannot be used; not a denial of the underlying requested profile change. Read together with unavailable_reason.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 29,
+        "label_budget": 52,
+        "budget_pass": true
+      }
+    },
+    "tui.profile_actions.stale": {
+      "semantic_verdict": "PASS",
+      "assessment": "Profile changed; conveys stale state rather than completion. Compact ru/vi/ur/hi labels omit repeating Revert without losing profile-change meaning in receipt-control context.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 30,
+        "label_budget": 52,
+        "budget_pass": true
+      }
+    },
+    "tui.profile_actions.failed": {
+      "semantic_verdict": "PASS",
+      "assessment": "Restore not completed/incomplete, leaving possible partial/unknown outcome; does not assert that nothing changed.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 26,
+        "label_budget": 52,
+        "budget_pass": true
+      }
+    },
+    "tui.profile_actions.unavailable_reason": {
+      "semantic_verdict": "PASS",
+      "assessment": "Session cannot verify the action. Review the current profile before a new change request; no blind retry, unconditional backup command, or unauthorized-mutation advice.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 116,
+        "label_budget": null,
+        "budget_pass": "wrap/no fixed maxCells"
+      }
+    },
+    "tui.profile_actions.stale_reason": {
+      "semantic_verdict": "PASS",
+      "assessment": "Profile changed after this save. Inspect current version; this action will not undo later changes. Negation and temporal scope retained.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 135,
+        "label_budget": null,
+        "budget_pass": "wrap/no fixed maxCells"
+      }
+    },
+    "tui.profile_actions.failed_reason": {
+      "semantic_verdict": "PASS",
+      "assessment": "Could not complete restore; inspect the current profile before a new change request. No false no-change guarantee or automatic retry.",
+      "mechanical": {
+        "parse": "PASS",
+        "arguments": [],
+        "render": "PASS",
+        "NFC": true,
+        "format_controls": 0,
+        "cells_R": 109,
+        "label_budget": null,
+        "budget_pass": "wrap/no fixed maxCells"
+      }
+    }
+  }
+}

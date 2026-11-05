@@ -111,6 +111,58 @@ def restore_bound_profile(
                 raise DefinitionTransactionConflict("revert did not restore its bound snapshot")
 
 
+def _action_binding(session_id: str, record: _BoundAction) -> dict[str, Any]:
+    return {
+        "action": record.descriptor.model_dump(by_alias=True),
+        "session_id": session_id,
+        "tool_call_id": record.tool_call_id,
+        "target_id": record.target_id,
+        "backup_commitment": record.backup_commitment,
+    }
+
+
+def _prepare_action(root: Path, session_id: str, record: _BoundAction) -> None:
+    from local_operator.definition_transaction import prepare
+
+    prepare(
+        root,
+        transaction_id="revert_" + record.descriptor.action_id,
+        before=record.after,
+        after=record.inverse,
+        binding=_action_binding(session_id, record),
+    )
+
+
+def prepare_signed_revert(root: Path, verified: dict[str, Any]) -> None:
+    """Called only by the authenticated save producer, never by recovery/read."""
+    from local_operator.profile_approval import _proposal
+
+    p = _proposal(verified)
+    if p.before is None:
+        return
+    descriptor = ProfileAction.model_validate(signed_descriptor(verified))
+    payload = {
+        "schema": 1,
+        "kind": p.profile_kind,
+        "name": p.name,
+        "id": p.target_id,
+        "approval_receipt_id": p.receipt_id,
+        "before": p.before,
+        "base_commitment": p.base_commitment,
+        "after_commitment": p.after_commitment,
+    }
+    record = _BoundAction(
+        descriptor,
+        p.tool_call_id,
+        p.target_id,
+        p.before,
+        p.after,
+        root / "sessions" / p.session_id / "profile-backups" / (p.receipt_id + ".json"),
+        commitment(payload),
+    )
+    _prepare_action(root, p.session_id, record)
+
+
 class ProfileActions:
     """One Session's private registrations; no file/transcript loader exists."""
 
@@ -161,6 +213,7 @@ class ProfileActions:
             backup_commitment,
         )
         self._roots[action_id] = Path(root)
+        _prepare_action(Path(root), self.session_id, self._records[action_id])
         return descriptor.model_dump(by_alias=True)
 
     def _recover_signed(self, identity: dict[str, str]) -> None:
@@ -171,7 +224,7 @@ class ProfileActions:
         from local_operator.network import approvals as A
         from local_operator.network.types import MeshRefusal
         from local_operator.network.wire import crockford
-        from local_operator.profile_approval import _proposal, snapshot
+        from local_operator.profile_approval import _proposal
 
         try:
             receipt = identity["receipt_id"]
@@ -203,11 +256,6 @@ class ProfileActions:
             with definition_lock(self._root):
                 if descriptor.action_id in self._records:
                     return  # A concurrent recovery already owns the record.
-                if (
-                    commitment(snapshot(self._root, p.profile_kind, p.target_id))
-                    != p.after_commitment
-                ):
-                    return
                 payload = {
                     "schema": 1,
                     "kind": p.profile_kind,
@@ -238,6 +286,85 @@ class ProfileActions:
         except (MeshRefusal, ValueError, KeyError, OSError, TypeError):
             return
 
+    def _consume(self, action_id: str, record: _BoundAction, *, mutate: bool = True):
+        from local_operator.definition_transaction import transact
+        from local_operator.profile_approval import snapshot, write_image
+
+        root = self._roots[action_id]
+
+        def write(image):
+            if not mutate:
+                raise DefinitionTransactionConflict("receipt could not be applied")
+            write_image(root, record.descriptor.profile_kind, record.target_id, image)
+
+        return transact(
+            root,
+            transaction_id="revert_" + action_id,
+            before=record.after,
+            after=record.inverse,
+            read=lambda: snapshot(root, record.descriptor.profile_kind, record.target_id),
+            write=write,
+            binding=_action_binding(self.session_id, record),
+            one_shot=True,
+        )
+
+    def _settle(self, action_id: str, record: _BoundAction) -> str:
+        import json
+
+        from local_operator.definition_transaction import transact
+        from local_operator.profile_approval import snapshot, write_image
+
+        root = self._roots[action_id]
+        try:
+            raw = json.loads(
+                (root / "profile-transactions" / ("revert_" + action_id + ".json")).read_text()
+            )
+            if (
+                not isinstance(raw, dict)
+                or raw.get("schema") != 1
+                or raw.get("before") != commitment(record.after)
+                or raw.get("after") != commitment(record.inverse)
+                or raw.get("binding") != _action_binding(self.session_id, record)
+            ):
+                return "unavailable"
+            state = raw.get("state")
+            if state == "complete":
+                return "succeeded"
+            if state == "failed":
+                return "failed"
+            if state == "applying":
+                # Only an already-after image can finish uncertain bookkeeping.
+                # A before-looking row could be ABA and must never re-execute.
+                if commitment(
+                    snapshot(root, record.descriptor.profile_kind, record.target_id)
+                ) != commitment(record.inverse):
+                    return "pending"
+                transact(
+                    root,
+                    transaction_id="revert_" + action_id,
+                    before=record.after,
+                    after=record.inverse,
+                    read=lambda: snapshot(root, record.descriptor.profile_kind, record.target_id),
+                    write=lambda image: write_image(
+                        root, record.descriptor.profile_kind, record.target_id, image
+                    ),
+                    binding=_action_binding(self.session_id, record),
+                    one_shot=True,
+                )
+                return "succeeded"
+            if state != "prepared":
+                return "unavailable"
+            if record.state == "pending":
+                return "pending"
+            return (
+                "available"
+                if commitment(snapshot(root, record.descriptor.profile_kind, record.target_id))
+                == commitment(record.after)
+                else "stale"
+            )
+        except (OSError, ValueError, DefinitionTransactionConflict):
+            return "unavailable"
+
     def status(
         self,
         *,
@@ -265,20 +392,8 @@ class ProfileActions:
             or record.tool_call_id != tool_call_id
         ):
             return {"action_id": action_id, "state": "unavailable"}
-        if record.state == "available":
-            from local_operator.profile_approval import snapshot
-
-            try:
-                with definition_lock(self._roots[action_id]):
-                    current = snapshot(self._roots[action_id], profile_kind, record.target_id)
-                    if record.state == "available" and commitment(current) != commitment(
-                        record.after
-                    ):
-                        record.state = "stale"
-            except (OSError, ValueError, DefinitionTransactionConflict):
-                # Status is a minimal read, never an exception detail carrying
-                # malformed/private instructions back across the transport.
-                return {"action_id": action_id, "state": "unavailable"}
+        with definition_lock(self._roots[action_id]):
+            record.state = self._settle(action_id, record)
         return {"action_id": action_id, "state": record.state}
 
     def knows(self, action_id: str) -> bool:
@@ -294,12 +409,14 @@ class ProfileActions:
         with definition_lock(root):
             # Serialized by the same per-root reentrant lock as the actual
             # write, so two simultaneous authenticated gestures apply once.
+            record.state = self._settle(action_id, record)
             if record.state != "available":
                 return {"action_id": action_id, "state": record.state}
             if not approved:
                 record.state = "unavailable"
                 return {"action_id": action_id, "state": record.state}
             record.state = "pending"
+            started = False
             import json
 
             from local_operator.profile_approval import snapshot
@@ -314,14 +431,16 @@ class ProfileActions:
                     != record.backup_commitment
                 ):
                     raise ValueError("the receipt backup changed")
-                restore_bound_profile(
-                    root,
-                    record.descriptor.profile_kind,
-                    record.target_id,
-                    record.after,
-                    record.inverse,
-                )
-                record.state = "succeeded"
+                started = True
+                outcome = self._consume(action_id, record)
+                record.state = "succeeded" if outcome["state"] == "complete" else "failed"
             except (OSError, ValueError, DefinitionTransactionConflict):
-                record.state = "failed"
+                if not started:
+                    # A rejected backup has not touched the profile. Consume
+                    # that terminal rejection too, without executing an inverse.
+                    try:
+                        self._consume(action_id, record, mutate=False)
+                    except (OSError, ValueError, DefinitionTransactionConflict):
+                        pass
+                record.state = self._settle(action_id, record)
             return {"action_id": action_id, "state": record.state}

@@ -778,7 +778,9 @@ def _team_changes(existing: Any, params: TeamParams) -> tuple[tuple[str, ...], s
             heading = "instructions" if is_diff else "instructions (replaced; new text)"
             lines.append(f"{heading}:\n{rendered}")
         elif field in ("members", "overrides"):
-            lines.append(f"{field} (roster and model/effort pins): replaced as given")
+            lines.append(  # i18n: ignore Model-facing definition diff; policy fields stay English
+                f"{field} (roster and model/effort pins): replaced as given"
+            )
         else:
             lines.append(f"{field}: {_format_field(old)} -> {_format_field(new)}")
     return changes, "\n".join(lines)

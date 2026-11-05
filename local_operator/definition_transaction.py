@@ -226,7 +226,7 @@ def prepare(
             raise DefinitionTransactionConflict("transaction belongs to a different approval")
         if previous.get("state") == "prepared":
             return previous
-        if previous.get("state") == "complete":
+        if previous.get("state") in {"complete", "applying", "failed"}:
             raise _consumed_error()
         if read is not None and commitment(read()) != before_token:
             raise DefinitionTransactionConflict("definition changed; nothing was written")
@@ -257,6 +257,7 @@ def transact(
     write: Callable[[Any], None],
     backup: Callable[[Any], None] | None = None,
     binding: dict[str, Any] | None = None,
+    one_shot: bool = False,
 ) -> dict[str, Any]:
     """CAS, backup, journal and mutation under ONE definition boundary.
 
@@ -266,6 +267,9 @@ def transact(
     intervening edit. An already-after image finishes bookkeeping without
     replaying mutation or backup. Ordinary exceptions roll back this operation;
     process death leaves the journal for explicit authenticated reconciliation.
+    ``one_shot`` consumes durably before mutation; known faults are terminal by
+    fresh-image proof, and an uncertain applying record can only finish an
+    already-after image, never retry a before-looking (possibly ABA) row.
     """
     _validate_identity(transaction_id)
     with definition_lock(root):
@@ -291,10 +295,17 @@ def transact(
             # A later edit may deliberately restore the original bytes. That
             # does not revive a consumed operation's permission to write again.
             raise DefinitionTransactionConflict("completed transaction changed; never replay")
-        if previous.get("state") != "prepared":
+        if previous.get("state") != "prepared" and not (
+            one_shot and previous.get("state") == "applying"
+        ):
             raise DefinitionTransactionConflict(
                 "this operation failed and rolled back; prepare it again — never replay it"
             )
+        if one_shot and previous.get("state") == "applying" and current != after_token:
+            # A crash between durable consumption and completion cannot prove
+            # whether a before-looking row is untouched or a legitimate ABA.
+            # Never reinterpret this uncertain operation as a fresh write.
+            raise DefinitionTransactionConflict("consumed operation needs reconciliation")
         if current == after_token:
             result = {**previous, "state": "complete", "reconciled": True}
             _durable_json(path, result)
@@ -305,10 +316,33 @@ def transact(
         record = previous
         if backup is not None:
             backup(before)
+        if one_shot:
+            record["state"] = "applying"
+            _durable_json(path, record)  # Consume BEFORE any authored mutation.
         try:
             write(after)
             if commitment(read()) != after_token:
                 raise DefinitionTransactionConflict("definition write did not match its commitment")
+        except Exception:
+            if one_shot:
+                # Storage adapters may wrap OSError. Classify from fresh bytes,
+                # never the exception's class or its potentially private text.
+                actual = commitment(read())
+                if actual != after_token and actual != before_token:
+                    try:
+                        write(before)
+                    except Exception:
+                        pass  # Readback below is the proof, not a successful call.
+                    actual = commitment(read())
+                if actual == after_token:
+                    record["state"] = "complete"
+                elif actual == before_token:
+                    record["state"] = "failed"
+                else:
+                    raise DefinitionTransactionConflict("write outcome requires reconciliation")
+                _durable_json(path, record)
+                _mark_consumed(key)
+                return record
         except Exception:
             # Every supported writer holds the same lock, so no other writer
             # can land between the failed write and its rollback. Failure to

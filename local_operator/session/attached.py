@@ -3743,6 +3743,20 @@ class AttachedSession:
         except Exception:  # noqa: BLE001 — a lost withdrawal is a cost, not a defect
             logger.debug("desktop watch withdrawal failed", exc_info=True)
 
+    async def profile_action_status(self, **identity: str) -> dict[str, str]:
+        client = self._client
+        if client is None or not client.connected:
+            return {"action_id": identity["action_id"], "state": "unavailable"}
+        return await client.profile_action_status(**identity)
+
+    async def answer_profile_action(self, action_id: str, approved: bool) -> dict[str, str]:
+        client = self._client
+        if client is None or not client.connected:
+            raise ValueError("the action's live session is unavailable")
+        # The same owner-authenticated approval_answer transport, not a made-up
+        # conversational gate or a profile-editor mutation bypass.
+        return await client.profile_revert(action_id, approved=approved)
+
     async def answer_gate(
         self,
         request_id: str,

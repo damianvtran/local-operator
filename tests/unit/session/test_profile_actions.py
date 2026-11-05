@@ -367,3 +367,70 @@ async def test_status_failure_never_discloses_private_instruction_values(stores,
         assert status == {"action_id": action["action_id"], "state": "unavailable"}
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_real_metadata_write_failure_settles_terminal_without_retry(stores, monkeypatch):
+    from local_operator import agents
+
+    session, action, _ = await saved(stores)
+    original = agents._write_text_atomically
+    calls = []
+
+    def fail(path, *args, **kwargs):
+        if path.name == "agent.yml":
+            calls.append(path)
+            raise OSError("synthetic actual atomic metadata failure")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(agents, "_write_text_atomically", fail)
+    try:
+        result = session._profile_actions.activate(
+            action["action_id"], approved=True, remember=False
+        )
+        assert result["state"] == "failed"
+        assert session._profile_actions.status(**identity(action))["state"] == "failed"
+        count = len(calls)
+        assert count == 1
+        assert (
+            session._profile_actions.activate(action["action_id"], approved=True, remember=False)[
+                "state"
+            ]
+            == "failed"
+        )
+        assert len(calls) == count
+        row = stores["account"].get_agent_by_name("reviewer")
+        assert stores["account"].get_agent_system_prompt(row.id) == "Demand tests."
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_actual_queued_receipt_has_one_canonical_diff(stores):
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tools.agent_tool import execute_agent
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    session = _session(stores)
+    try:
+        _start_run(session, CustomMessage(custom_type="wake_prompt", details={}))
+        result = await execute_agent(
+            "queued-diff",
+            {
+                "op": "update",
+                "name": "reviewer",
+                "instructions": SEED_INSTRUCTIONS.replace("Be terse.", "Demand tests."),
+            },
+            None,
+            None,
+            _context(session, stores),
+        )
+        assert result.details["status"] == "queued"
+        card = ToolCard("queued-diff", "agent", {"op": "update", "name": "reviewer"})
+        card.mark_done("\n".join(item.text for item in result.content), details=result.details)
+        card._expanded = True
+        body = card._build_content(110).plain
+        assert body.count("+Demand tests.") == 1
+        assert "Queued" in body and "instructions: +1/-1 lines" in body
+    finally:
+        await session.dispose()

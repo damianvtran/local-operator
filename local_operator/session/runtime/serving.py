@@ -113,7 +113,10 @@ from local_operator.session.approval_policy import (
 # one window and start one toward the literal goal `--stop` in another.
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
-from local_operator.session.runtime.server import AckDetail, SessionHandle
+from local_operator.session.runtime.server import (
+    AckDetail,
+    SessionHandle,
+)
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
 from local_operator.session.runtime.server import document_blocks as _document_blocks
 from local_operator.session.runtime.server import (
@@ -4607,7 +4610,7 @@ class ServingSessionHandle(SessionHandle):
         await reconcile()
 
     @_on_session_loop
-    async def run_headless_prompt(self, text: str) -> bool:
+    async def run_headless_prompt(self, text: str, *, owner_typed: bool = True) -> bool:
         """Submit through the owner queue so live viewers cannot race exec.
 
         Returns whether the turn completed, rather than raising on failure. A
@@ -4620,7 +4623,9 @@ class ServingSessionHandle(SessionHandle):
         """
         self._last_prompt_failure = ""
         try:
-            await self.prompt(text, command_id=str(uuid.uuid4()), wait_complete=True)
+            await self.prompt(
+                text, command_id=str(uuid.uuid4()), wait_complete=True, owner_typed=owner_typed
+            )
             return True
         except RuntimeError:
             logger.debug("headless turn did not complete", exc_info=True)

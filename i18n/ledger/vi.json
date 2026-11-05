@@ -3148,6 +3148,46 @@
       },
       "status": "passed",
       "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the vi style guide. No findings. Arm other only ('# tệp không được hiển thị'); 'tệp' per vi guide; 'xem trước' matches 37 shipped vi keys; no space before ':'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.profile_actions",
+      "source_sha256": "8179f383fc12faa9fd44fa815c1a61bebe7fa1d07f0283a874a1146216e849e1",
+      "translator": {
+        "agent": "coder 4049c4f3fd43",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "qa-tester / primary independent i18n-auditor 36011595d4e0",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent primary full 11-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/vi/profile-actions-primary/record.json (sha256 e94f761b0211b008ac641bcf4214d9b1b78aab50f8a35ce63142200a4ecf8830). Non-gating typography findings [] deferred by manager to avoid a standalone nit cycle; no wording changed. Context-completion verdict supersedes earlier blocked primary records; those are not eligibility evidence. none"
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.profile_actions",
+      "source_sha256": "8179f383fc12faa9fd44fa815c1a61bebe7fa1d07f0283a874a1146216e849e1",
+      "translator": {
+        "agent": "coder 4049c4f3fd43",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "designer / second independent safety i18n auditor 78d9864ffaac",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent secondary full 11-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/vi/profile-actions-secondary/record.json (sha256 62090e709b4daaa3430b46a67d1e3ad672a5a2963ae519f80ac24e99f38004ca). Non-gating typography findings [] deferred by manager to avoid a standalone nit cycle; no wording changed. Initial anthropic/claude-opus-5-5 attempt hit quota; resumed model inherited openai/gpt-6.1-sol. All completed semantic review here served by openai/gpt-6.1-sol."
     }
   ]
 }

@@ -412,3 +412,377 @@ def test_signed_origin_action_reconstructs_only_after_live_verification(root):
         == "succeeded"
     )
     assert P.snapshot(root, "agent", data.target_id) == data.before
+
+
+def test_signed_revert_stays_consumed_after_legitimate_aba_and_restart(root):
+    from local_operator import profile_approval as P
+    from local_operator.profile_actions import ProfileActions
+
+    data = proposal(root)
+    record = P.file_request(root, data)
+    approve(root, record)
+    result = P.apply(record["approval_id"], P.expected(record), root)
+    action = result["profile_action"]
+    query = {
+        key: action[key] for key in ("action_id", "receipt_id", "profile_kind", "profile_name")
+    }
+    query["tool_call_id"] = data.tool_call_id
+    first = ProfileActions(data.session_id, root)
+    assert first.status(**query)["state"] == "available"
+    assert (
+        first.activate(action["action_id"], approved=True, remember=False)["state"] == "succeeded"
+    )
+    P._write(root, data, data.after)  # A later legitimate edit restores B, no journal tampering.
+    restarted = ProfileActions(data.session_id, root)
+    assert restarted.status(**query)["state"] == "succeeded"
+    assert (
+        restarted.activate(action["action_id"], approved=True, remember=False)["state"]
+        == "succeeded"
+    )
+    assert P.snapshot(root, "agent", data.target_id) == data.after
+
+    import subprocess
+    import sys
+
+    script = r"""
+import sys,json
+from pathlib import Path
+from local_operator.operator import trust
+root=Path(sys.argv[1])
+trust.load_anchor=lambda uid=None: trust.AnchorLoad(
+    anchor=None,path=root/'absent',root_owned=False,reason='synthetic',exists=False)
+from local_operator.network.credentials import desktop_approval as D
+D.assurance=lambda:('presence','synthetic')
+from local_operator.profile_actions import ProfileActions
+query=json.loads(sys.argv[3])
+actions=ProfileActions(sys.argv[2],root)
+print(json.dumps([actions.status(**query),actions.activate(query['action_id'],approved=True,remember=False)]))
+"""
+    child = subprocess.run(
+        [sys.executable, "-c", script, str(root), data.session_id, json.dumps(query)],
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    assert child.returncode == 0, child.stderr
+    assert [row["state"] for row in json.loads(child.stdout)] == ["succeeded", "succeeded"]
+    assert P.snapshot(root, "agent", data.target_id) == data.after
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "applying"])
+@pytest.mark.parametrize("consumed", [False, True])
+def test_revert_journal_damage_never_recreates_authority(root, damage, consumed):
+    from local_operator import profile_approval as P
+    from local_operator.profile_actions import ProfileActions
+
+    data = proposal(root)
+    record = P.file_request(root, data)
+    approve(root, record)
+    action = P.apply(record["approval_id"], P.expected(record), root)["profile_action"]
+    if consumed:
+        query = {
+            key: action[key] for key in ("action_id", "receipt_id", "profile_kind", "profile_name")
+        }
+        query["tool_call_id"] = data.tool_call_id
+        owner = ProfileActions(data.session_id, root)
+        owner.status(**query)
+        assert (
+            owner.activate(action["action_id"], approved=True, remember=False)["state"]
+            == "succeeded"
+        )
+        P._write(root, data, data.after)
+    path = root / "profile-transactions" / ("revert_" + action["action_id"] + ".json")
+    if damage == "missing":
+        path.unlink()
+    elif damage == "corrupt":
+        path.write_text("[]")
+    else:
+        value = json.loads(path.read_text())
+        value["state"] = "applying"
+        path.write_text(json.dumps(value))
+    query = {
+        key: action[key] for key in ("action_id", "receipt_id", "profile_kind", "profile_name")
+    }
+    query["tool_call_id"] = data.tool_call_id
+    fresh = ProfileActions(data.session_id, root)
+    assert fresh.status(**query)["state"] in {"unavailable", "pending"}
+    assert fresh.activate(action["action_id"], approved=True, remember=False)["state"] in {
+        "unavailable",
+        "pending",
+    }
+    assert P.snapshot(root, "agent", data.target_id) == data.after
+
+
+def test_postcommit_exception_is_proven_success_not_a_failed_nochange(root, monkeypatch):
+    from local_operator import profile_approval as P
+    from local_operator.profile_actions import ProfileActions
+
+    data = proposal(root)
+    record = P.file_request(root, data)
+    approve(root, record)
+    action = P.apply(record["approval_id"], P.expected(record), root)["profile_action"]
+    query = {
+        key: action[key] for key in ("action_id", "receipt_id", "profile_kind", "profile_name")
+    }
+    query["tool_call_id"] = data.tool_call_id
+    fresh = ProfileActions(data.session_id, root)
+    assert fresh.status(**query)["state"] == "available"
+    original = P.write_image
+
+    def postcommit(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("synthetic exception AFTER actual authored commit")
+
+    monkeypatch.setattr(P, "write_image", postcommit)
+    assert (
+        fresh.activate(action["action_id"], approved=True, remember=False)["state"] == "succeeded"
+    )
+    assert P.snapshot(root, "agent", data.target_id) == data.before
+
+
+def test_interrupted_terminal_bookkeeping_reconciles_without_second_mutation(root, monkeypatch):
+    from local_operator import definition_transaction as T
+    from local_operator import profile_approval as P
+    from local_operator.profile_actions import ProfileActions
+
+    data = proposal(root)
+    record = P.file_request(root, data)
+    approve(root, record)
+    action = P.apply(record["approval_id"], P.expected(record), root)["profile_action"]
+    query = {
+        key: action[key] for key in ("action_id", "receipt_id", "profile_kind", "profile_name")
+    }
+    query["tool_call_id"] = data.tool_call_id
+    fresh = ProfileActions(data.session_id, root)
+    fresh.status(**query)
+    original = T._durable_json
+
+    def interrupted(path, body):
+        if (
+            path.name == "revert_" + action["action_id"] + ".json"
+            and body.get("state") == "complete"
+        ):
+            raise OSError("synthetic lost completion fsync")
+        original(path, body)
+
+    with monkeypatch.context() as m:
+        m.setattr(T, "_durable_json", interrupted)
+        assert (
+            fresh.activate(action["action_id"], approved=True, remember=False)["state"] != "failed"
+        )
+    assert P.snapshot(root, "agent", data.target_id) == data.before
+    restarted = ProfileActions(data.session_id, root)
+    assert restarted.status(**query)["state"] == "succeeded"
+    P._write(root, data, data.after)
+    assert (
+        restarted.activate(action["action_id"], approved=True, remember=False)["state"]
+        == "succeeded"
+    )
+    assert P.snapshot(root, "agent", data.target_id) == data.after
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["agent", "team"])
+@pytest.mark.parametrize("live_delivery", [False, True])
+async def test_offline_signed_continuation_replaces_native_queued_result_once(
+    root, monkeypatch, kind, live_delivery
+):
+    from local_operator import profile_approval as P
+    from local_operator.harness.types import (
+        Message,
+        ModelSpec,
+        ToolCall,
+        ToolContext,
+        ToolExecutionEndEvent,
+    )
+    from local_operator.network import approvals as A
+    from local_operator.profile_scope import scope_agent_registry
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.agent_tool import execute_agent
+
+    proposal(root)
+    directory = root / "sessions" / "synthetic-session"
+    from local_operator.profile_scope import scope_team_registry
+    from local_operator.server.features import static_feature_flags
+    from local_operator.teams import TeamEditFields, TeamRegistry
+    from local_operator.tools.team_tool import execute_team
+
+    assert static_feature_flags()["profile_approvals"] == 1
+    TeamRegistry(root).create_team(
+        TeamEditFields(name="lopdev", manager="reviewer", instructions="Old team.")
+    )
+
+    def new_session():
+        return Session(
+            model=ModelSpec(provider="test", model_id="m", context_window=100000),
+            stream_fn=lambda *args: (_ for _ in ()).throw(AssertionError("NO model turn")),
+            tools=[],
+            transcript=Transcript(directory),
+            system_blocks_provider=lambda: [],
+            agent_registry=scope_agent_registry(AgentRegistry(root, migrate=False), directory),
+            team_registry=scope_team_registry(TeamRegistry(root), directory),
+            owner_prompt_consent=True,
+            yolo=True,
+        )
+
+    original = new_session()
+    args = {
+        "op": "update",
+        "name": "reviewer" if kind == "agent" else "lopdev",
+        "instructions": "Approved offline guidance.",
+    }
+    context = ToolContext(
+        cwd=".",
+        session_dir=str(directory),
+        agent_registry=scope_agent_registry(AgentRegistry(root, migrate=False), directory),
+        team_registry=scope_team_registry(TeamRegistry(root), directory),
+        authorize_durable_write=original._authorize_durable_write,
+    )
+    queued = await (execute_agent if kind == "agent" else execute_team)(
+        "same-real-call", args, None, None, context
+    )
+    assert queued.details["status"] == "queued"
+    # The ordinary harness native persistence boundary, using the ACTUAL call/result.
+    call = Message.assistant(
+        tool_calls=[ToolCall(id=queued.tool_call_id, name=queued.tool_name, arguments=args)]
+    )
+    queued_message = Message.tool_result(queued)
+    await original.transcript.append_messages([call, queued_message])
+    original._context.messages.extend([call, queued_message])
+    if not live_delivery:
+        await original.dispose()
+    resumed = original if live_delivery else new_session()
+    events = []
+    resumed.subscribe(events.append)
+    live = None
+    try:
+        await resumed.seed_history(resumed.transcript.build_llm_history())
+        if live_delivery:
+            from tests.unit.session.runtime import test_approval_authority_seam as seam
+
+            monkeypatch.setattr(seam, "_AttachableSession", lambda: resumed)
+            live = await seam._serve(root, operator_cap=None)
+        record = A._load_raw(queued.details["approval_id"], root)
+        approve(root, record)
+        # A peer-supplied hint, even for an approved but UNEXECUTED request,
+        # cannot manufacture a saved result or write the profile.
+        await resumed.receive_profile_save_result("f" * 64)
+        await resumed.receive_profile_save_result(queued.details["receipt_id"])
+        assert not any(isinstance(event, ToolExecutionEndEvent) for event in events)
+        applied = P.apply(record["approval_id"], P.expected(record), root)
+        from types import SimpleNamespace
+
+        from local_operator.session.runtime.process import _drain_inbox_into
+
+        if live_delivery:
+            import asyncio
+
+            async with asyncio.timeout(5):
+                while not any(isinstance(event, ToolExecutionEndEvent) for event in events):
+                    await asyncio.sleep(0.01)
+        else:
+            assert (
+                await _drain_inbox_into(
+                    SimpleNamespace(
+                        _session=resumed, receive_peer_message=resumed.receive_peer_message
+                    )
+                )
+                == 1
+            )
+        native = [event for event in events if isinstance(event, ToolExecutionEndEvent)]
+        assert len(native) == 1
+        assert native[0].tool_call_id == queued.tool_call_id
+        assert native[0].result.details["receipt_id"] == queued.details["receipt_id"]
+        assert native[0].result.details["profile_action"] == applied["profile_action"]
+        history = Transcript(directory).build_llm_history()
+        tool = [
+            message
+            for message in history
+            if getattr(message, "tool_call_id", None) == queued.tool_call_id
+        ]
+        assert len(tool) == 1
+        assert tool[0].provider_payload["details"]["status"] == "applied"
+        P._publish(root, P._proposal(record), applied)
+        assert await _drain_inbox_into(
+            SimpleNamespace(_session=resumed, receive_peer_message=resumed.receive_peer_message)
+        ) in (0, 1)
+        assert len([event for event in events if isinstance(event, ToolExecutionEndEvent)]) == 1
+        import os
+        import subprocess
+        from pathlib import Path
+
+        evidence = Path(os.environ.get("PROFILE_CONTINUATION_EVIDENCE", root))
+        git_env = dict(
+            os.environ,
+            GIT_CONFIG_SYSTEM="/dev/null",
+            GIT_TERMINAL_PROMPT="0",
+            GIT_ASKPASS="/bin/false",
+        )
+        golden = {
+            "meta": {
+                "source_sha": subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], text=True, env=git_env
+                ).strip(),
+                "uncommitted_source": bool(
+                    subprocess.check_output(
+                        ["git", "status", "--porcelain"], text=True, env=git_env
+                    ).strip()
+                ),
+                "provenance": (
+                    "Actual execute_agent queued result; original Session disposed; "
+                    "signed apply; real inbox consumer emits native event and upserts "
+                    "cold history. No LLM dispatch."
+                ),
+            },
+            "source_session_id": resumed._session_id,
+            "queued_tool_result": queued.model_dump(mode="json"),
+            "applied_tool_result": native[0].result.model_dump(mode="json"),
+            "tool_execution_end_event": native[0].model_dump(mode="json"),
+            "cold_history_message": tool[0].model_dump(mode="json"),
+        }
+        if live_delivery:
+            golden["meta"]["provenance"] = (
+                "Actual publisher -> non-waking peer_message socket -> verified native consumer "
+                "-> fresh cold history. No LLM dispatch."
+            )
+            (evidence / f"profile-continuation-live-{kind}.json").write_text(
+                json.dumps(golden, indent=2)
+            )
+        else:
+            (evidence / f"profile-continuation-golden-{kind}.json").write_text(
+                json.dumps(golden, indent=2)
+            )
+            if kind == "agent":
+                (evidence / "profile-continuation-golden.json").write_text(
+                    json.dumps(golden, indent=2)
+                )
+        assert not resumed._run_owner_texts
+        assert P.snapshot(root, kind, P._proposal(record).target_id) == P._proposal(record).after
+        if not live_delivery:
+            await resumed.transcript.compact_file(min_reclaim_bytes=0)
+            restarted = new_session()
+            after_restart = []
+            restarted.subscribe(after_restart.append)
+            try:
+                await restarted.receive_profile_save_result(queued.details["receipt_id"])
+                assert not any(isinstance(event, ToolExecutionEndEvent) for event in after_restart)
+                replay = Transcript(directory).build_llm_history()
+                assert (
+                    len(
+                        [
+                            m
+                            for m in replay
+                            if getattr(m, "tool_call_id", None) == queued.tool_call_id
+                        ]
+                    )
+                    == 1
+                )
+            finally:
+                await restarted.dispose()
+
+    finally:
+        if live is not None:
+            await live.close(root)
+        else:
+            await resumed.dispose()

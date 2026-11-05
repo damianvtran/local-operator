@@ -483,8 +483,12 @@ def apply(approval_id: str, expected_block: dict[str, Any], root: Path) -> dict[
             "reconciled": bool(result.get("reconciled")),
         }
         if p.before is not None:
-            from local_operator.profile_actions import signed_descriptor
+            from local_operator.profile_actions import (
+                prepare_signed_revert,
+                signed_descriptor,
+            )
 
+            prepare_signed_revert(root, record)
             result["profile_action"] = signed_descriptor(record)
         _publish(root, p, result)
         return result
@@ -526,6 +530,158 @@ def _publish(root: Path, p: ProfileProposal, result: dict[str, Any]) -> None:
             ),
             raise_reader=False,
         )
+        _notify_live(root, p)
+
+
+_live_publications: set[Any] = set()
+
+
+def _notify_live(root: Path, p: ProfileProposal) -> None:
+    """Best-effort existing mailbox transport; the spool is the crash fallback."""
+    import asyncio
+
+    async def deliver():
+        from local_operator.mobile.peer_client import send_peer_message
+        from local_operator.session.runtime.registry import scan
+
+        for record, _ in scan(root):
+            if record.session_id != p.session_id:
+                continue
+            try:
+                await send_peer_message(
+                    record,
+                    text="Profile approval result available.",
+                    mode="mailbox",
+                    wake=False,
+                    sender={"source": "profile_save"},
+                    message_id=p.receipt_id,
+                    custom_type="profile_save_result",
+                    deadline_s=2,
+                )
+            except (RuntimeError, ConnectionError, OSError, TimeoutError):
+                pass  # An absent/busy owner leaves the durable inbox untouched.
+            return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(deliver())
+    else:
+        task = loop.create_task(deliver())
+        _live_publications.add(task)
+        task.add_done_callback(_live_publications.discard)
+
+
+def applied_tool_result(root: Path, receipt_id: str, session_id: str):
+    """Resolve a hint into a native receipt only from the verified completed save.
+
+    Inbox text, mutable result files and peer-provided props grant nothing. The
+    signed proposal and completed exact-bound transaction determine every byte.
+    """
+    from local_operator.harness.types import TextContent, ToolResult
+    from local_operator.network import approvals as A
+    from local_operator.network.wire import crockford
+    from local_operator.profile_actions import signed_descriptor
+    from local_operator.tools.agent_tool import _instruction_diff
+
+    if len(receipt_id) != 64:
+        raise ValueError("unknown profile receipt")
+    request_id = "req_" + crockford(bytes.fromhex(receipt_id[:16]))
+    record = A._find_by_request_id(request_id, root)
+    if record is None or record.get("state") != A.STATE_CONNECTED:
+        raise ValueError("profile save is not complete")
+    verified = A.verify_for_run(record["approval_id"], root=root)
+    p = _proposal(verified)
+    if p.receipt_id != receipt_id or p.session_id != session_id:
+        raise ValueError("profile receipt belongs to another conversation")
+    transaction = json.loads((root / "profile-transactions" / (p.receipt_id + ".json")).read_text())
+    if (
+        transaction.get("state") != "complete"
+        or transaction.get("binding") != _binding(verified)
+        or transaction.get("before") != p.base_commitment
+        or transaction.get("after") != p.after_commitment
+    ):
+        raise ValueError("profile save has no matching completed transaction")
+    before = p.before or {}
+    fields = [
+        key for key in p.after if key not in {"id", "name"} and before.get(key) != p.after[key]
+    ]
+    values = {key: (before.get(key), p.after[key]) for key in fields}
+    if p.profile_kind == "agent":
+        from types import SimpleNamespace
+
+        from local_operator.agent_profiles import profile_from_agent
+
+        def view(image):
+            data = {
+                "id": p.target_id,
+                "name": p.name,
+                "label": "",
+                "description": "",
+                "tags": [],
+                "model": "",
+                "hosting": "",
+                "instructions": "",
+            } | image
+            return profile_from_agent(
+                SimpleNamespace(get_agent_system_prompt=lambda _: data["instructions"]),
+                SimpleNamespace(**data),
+            )
+
+        left, right = view(before), view(p.after)
+        names = {
+            "label": "label",
+            "description": "description",
+            "instructions": "instructions",
+            "model": "model",
+            "effort": "effort",
+            "tools": "tools",
+            "may_delegate": "delegate",
+            "saver": "saver",
+            "action_class": "class",
+        }
+        values = {
+            label: (getattr(left, key), getattr(right, key))
+            for key, label in names.items()
+            if getattr(left, key) != getattr(right, key)
+        }
+        if before.get("categories") != p.after.get("categories"):
+            values["categories"] = (before.get("categories"), p.after.get("categories"))
+        fields = list(values)
+    diff = []
+    for field in fields:
+        if field == "instructions":
+            value, _ = _instruction_diff(
+                str(before.get(field) or ""), str(p.after[field]), fromfile="before", tofile="after"
+            )
+            diff.extend(["instructions:", *value.splitlines()])
+        else:
+            diff.append(f"{field}: {before.get(field)!r} → {p.after[field]!r}")
+    from local_operator.profile_scope import profile_diff_summary
+
+    details = {
+        "status": "applied",
+        "profile_kind": p.profile_kind,
+        "profile_name": p.name,
+        "scope": "global",
+        "receipt_id": p.receipt_id,
+        "fields": fields,
+        "diff": diff,
+        "approval_id": record["approval_id"],
+        "request_digest": record["request_digest"],
+    }
+    if p.before is not None:
+        details["profile_action"] = signed_descriptor(verified)
+    text = f"Saved {p.profile_kind} {p.name!r} in your account after signed approval."
+    summary = profile_diff_summary("\n".join(diff))
+    if summary:
+        text += "\n" + summary
+    return ToolResult(
+        tool_call_id=p.tool_call_id,
+        tool_name=p.profile_kind,
+        content=[TextContent(text=text)],
+        details=details,
+    )
 
 
 class _ProfileOp:

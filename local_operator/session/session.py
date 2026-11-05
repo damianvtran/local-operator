@@ -10607,6 +10607,115 @@ class Session:
         await settle_read_batch(batch, body_error)
         self._peer_inbox_drained = not batch.pending_after_commit
 
+    async def _ack_profile_result_hint(self, receipt_id: str) -> None:
+        from local_operator.session.runtime.inbox import (
+            claim_read_batch_or_defer,
+            settle_read_batch,
+            try_enter_read_batch,
+        )
+
+        batch = try_enter_read_batch(self._transcript.directory)
+        if batch is None:
+            return  # An outer boot/turn drain owns this row.
+        error = None
+        try:
+            if await claim_read_batch_or_defer(batch):
+                for ordinals, line in batch.delivery_rows():
+                    if line.custom_type == "profile_save_result" and line.message_id == receipt_id:
+                        batch.handled.update(ordinals)
+        except BaseException as exc:
+            error = exc
+        await settle_read_batch(batch, error)
+
+    async def receive_profile_save_result(
+        self, receipt_id: str, *, wait_for_boundary: bool = False
+    ) -> None:
+        """Consume a signed continuation as a native result, never owner input.
+
+        A busy turn retains its durable inbox row until a safe boundary. This
+        prevents both provider-list splicing and acknowledging an in-memory-only
+        receipt that a crash would lose.
+        """
+        from local_operator.network.types import MeshRefusal
+        from local_operator.profile_approval import applied_tool_result
+
+        root = Path(self._transcript.directory).parent.parent
+        try:
+            result = applied_tool_result(root, receipt_id, self._session_id)
+        except (MeshRefusal, ValueError, KeyError, OSError):
+            return  # A forged hint cannot become an authentic saved tool card.
+        marker = "profile-applied:" + receipt_id
+
+        def already_delivered():
+            # Compaction folds the overlay into its target and removes the
+            # overlay ID. The native applied row remains the durable identity.
+            return self._transcript.has_entry(marker) or any(
+                row.payload.get("role") == "tool"
+                and row.payload.get("tool_call_id") == result.tool_call_id
+                and ((row.payload.get("provider_payload") or {}).get("details") or {}).get(
+                    "receipt_id"
+                )
+                == receipt_id
+                and ((row.payload.get("provider_payload") or {}).get("details") or {}).get("status")
+                == "applied"
+                for row in self._transcript.entries()
+            )
+
+        if already_delivered():
+            await self._ack_profile_result_hint(receipt_id)
+            return
+        if not wait_for_boundary and (self._is_streaming or self._turn_lock.locked()):
+            raise RuntimeError("profile receipt waits for the current tool boundary")
+        async with self._turn_lock:
+            if already_delivered():
+                return
+            target = next(
+                (
+                    row
+                    for row in self._transcript.entries()
+                    if row.payload.get("role") == "tool"
+                    and row.payload.get("tool_call_id") == result.tool_call_id
+                    and (row.payload.get("provider_payload") or {})
+                    .get("details", {})
+                    .get("receipt_id")
+                    == receipt_id
+                ),
+                None,
+            )
+            message = Message.tool_result(result)
+            if target is not None:
+                message.id = target.id
+                await self._transcript.append_prune(
+                    target.id, "Profile save applied.", replacement=message, entry_id=marker
+                )
+                self._context.messages = [
+                    message if getattr(old, "id", None) == message.id else old
+                    for old in self._context.messages
+                ]
+            else:
+                # The filing runtime can die before its queued result commits.
+                # A native paired receipt remains valid replay without a fake user
+                # row or a second model turn. IDs are the signed original IDs.
+                from local_operator.harness.types import ToolCall
+
+                call = Message.assistant(
+                    tool_calls=[
+                        ToolCall(id=result.tool_call_id, name=result.tool_name, arguments={})
+                    ]
+                )
+                call.id = "profile-call:" + receipt_id
+                message.id = marker
+                await self._transcript.append_messages([call, message])
+                self._context.messages.extend([call, message])
+            await self._emit(
+                ToolExecutionEndEvent(
+                    tool_call_id=result.tool_call_id, tool_name=result.tool_name, result=result
+                )
+            )
+        # Consume only this internal hint; draining unrelated owner/wake rows
+        # here could turn non-waking receipt publication into a model turn.
+        await self._ack_profile_result_hint(receipt_id)
+
     async def _drain_spooled_peer_inbox_rows(self, batch) -> None:
         """Deliver any inbox rows spooled for this session. Once per lifetime.
 
@@ -10656,6 +10765,13 @@ class Session:
         seen_owner_ids: set[str] = set()
         for line in lines:
             try:
+                if getattr(line, "custom_type", "") == "profile_save_result":
+                    await admit_batch_row(
+                        batch,
+                        ordinals[id(line)],
+                        self.receive_profile_save_result(getattr(line, "message_id", "") or ""),
+                    )
+                    continue
                 # The row's own ``wake`` is forwarded, never guessed: a row
                 # spooled by a runtime that was leaving a replaced build
                 # carries what its sender asked for, and ``send --wake`` asked
@@ -10845,6 +10961,13 @@ class Session:
         # Imported in-function for the same reason ``resolve_sender_identity``
         # below is: this module must not grow a module-level dependency on the
         # mobile package.
+        if custom_type == "profile_save_result":
+            # A non-waking verified continuation, never peer/user model input.
+            # The durable spool survives cancellation while a live turn settles.
+            self._spawn_background(
+                self.receive_profile_save_result(message_id or "", wait_for_boundary=True)
+            )
+            return "profile receipt queued for verification"
         from local_operator.mobile.peer_send import valid_peer_message_id
 
         incoming = message_id if valid_peer_message_id(message_id) else None

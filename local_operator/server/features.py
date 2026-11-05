@@ -947,6 +947,8 @@ def static_feature_flags() -> dict[str, Any]:
         # without it keeps the CLI-remedy card (`can_approve_here: False`) and never
         # POSTs a body this backend would not understand.
         "credential_approvals": 1,
+        # Signed profile continuations disclose/apply through the same inbox.
+        "profile_approvals": 1,
         # THE ONE DIAL on the projects surface: `POST
         # /v1/desktop/projects/{key}/request-update`, which asks the linked
         # sessions for a progress update through the same peer-send core the

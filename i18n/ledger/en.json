@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "locale": "en",
+  "entries": [
+    {
+      "locale": "en",
+      "namespace": "tui.profile_actions",
+      "source_sha256": "8179f383fc12faa9fd44fa815c1a61bebe7fa1d07f0283a874a1146216e849e1",
+      "translator": {
+        "agent": "coder 4049c4f3fd43",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "qa-tester / primary independent i18n-auditor 36011595d4e0",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent primary full 11-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/en/profile-actions-primary/record.json (sha256 8f9841e56fce2c2e7eeeef378ae24f8fc68303501a94d1853d2968cbbd51e7de). Non-gating typography findings ['N1'] deferred by manager to avoid a standalone nit cycle; no wording changed. Context-completion verdict supersedes earlier blocked primary records; those are not eligibility evidence. none"
+    },
+    {
+      "locale": "en",
+      "namespace": "tui.profile_actions",
+      "source_sha256": "8179f383fc12faa9fd44fa815c1a61bebe7fa1d07f0283a874a1146216e849e1",
+      "translator": {
+        "agent": "coder 4049c4f3fd43",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "designer / second independent safety i18n auditor 78d9864ffaac",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent secondary full 11-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/en/profile-actions-secondary/record.json (sha256 28f202bb69d4be1ad89c9eaf50ea726f0b50d176d1016133a2f91192f18b0a96). Non-gating typography findings ['D1'] deferred by manager to avoid a standalone nit cycle; no wording changed. Initial anthropic/claude-opus-5-5 attempt hit quota; resumed model inherited openai/gpt-6.1-sol. All completed semantic review here served by openai/gpt-6.1-sol."
+    }
+  ]
+}

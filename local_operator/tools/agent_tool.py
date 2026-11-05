@@ -2023,13 +2023,15 @@ class _AccountSave:
 
 
 def _queued_profile_receipt(tool_call_id: str, tool_name: str, queued: Any) -> ToolResult:
+    from local_operator.profile_scope import profile_diff_summary
+
     return _text(
         tool_call_id,
         tool_name,
         f"Queued {queued.profile_kind} {queued.profile_name!r} for durable approval "
         f"({queued.approval_id}). No profile or backup was changed. "
         "The signed approval continuation applies it; do not retry this tool call."
-        + ("\n" + "\n".join(queued.diff) if queued.diff else ""),
+        + ("\n" + profile_diff_summary("\n".join(queued.diff)) if queued.diff else ""),
         details={
             "status": "queued",
             "fields": list(queued.changes),

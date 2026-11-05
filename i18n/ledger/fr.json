@@ -3033,6 +3033,46 @@
       },
       "status": "passed",
       "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the fr style guide. FINDINGS fixed in these bytes: FR-H1 MINOR withheld.line used a plain U+0020 before ':' -> U+202F espace fine insécable (fr guide punctuation; corpus 499 U+202F vs 15 plain). FR-H2 MINOR reason.missing straight apostrophe -> U+2019 ('le fichier n’existe plus'; corpus 945 ’ vs 47 '). Plural arms one/many/other correct (0 is one: '0 fichier non affiché'; 1e6 '1 000 000 de fichiers non affichés'). Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.profile_actions",
+      "source_sha256": "8179f383fc12faa9fd44fa815c1a61bebe7fa1d07f0283a874a1146216e849e1",
+      "translator": {
+        "agent": "coder 4049c4f3fd43",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "qa-tester / primary independent i18n-auditor 36011595d4e0",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent primary full 11-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/fr/profile-actions-primary/record.json (sha256 778361b00197894304b52219f42c81e89dd096ed195efab976b3c7711a43e132). Non-gating typography findings ['N1'] deferred by manager to avoid a standalone nit cycle; no wording changed. Context-completion verdict supersedes earlier blocked primary records; those are not eligibility evidence. none"
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.profile_actions",
+      "source_sha256": "8179f383fc12faa9fd44fa815c1a61bebe7fa1d07f0283a874a1146216e849e1",
+      "translator": {
+        "agent": "coder 4049c4f3fd43",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "designer / second independent safety i18n auditor 78d9864ffaac",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent secondary full 11-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/fr/profile-actions-secondary/record.json (sha256 8fd51869b1fa2be69a389be6928e85c67b65211b32653f50eff2555630497961). Non-gating typography findings ['D2'] deferred by manager to avoid a standalone nit cycle; no wording changed. Initial anthropic/claude-opus-5-5 attempt hit quota; resumed model inherited openai/gpt-6.1-sol. All completed semantic review here served by openai/gpt-6.1-sol."
     }
   ]
 }

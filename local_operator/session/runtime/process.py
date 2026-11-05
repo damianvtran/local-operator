@@ -4905,8 +4905,18 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
                 batch.handled.update(ordinals[id(line)])
         lines = [line for line in lines if (getattr(line, "message_id", "") or "") not in consumed]
     if requires_engagement:
-        keep = [line for line in lines if getattr(line, "source", "") != SOURCE_USER]
-        lines = [line for line in lines if getattr(line, "source", "") == SOURCE_USER]
+        keep = [
+            line
+            for line in lines
+            if getattr(line, "source", "") != SOURCE_USER
+            and getattr(line, "custom_type", "") != "profile_save_result"
+        ]
+        lines = [
+            line
+            for line in lines
+            if getattr(line, "source", "") == SOURCE_USER
+            or getattr(line, "custom_type", "") == "profile_save_result"
+        ]
         if not lines:
             logger.info(
                 "inbox drain deferred for %s: no durable history yet, so the person has "
@@ -4948,7 +4958,13 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
     for line in lines:
         owner_row = getattr(line, "source", "") == SOURCE_USER
         try:
-            if owner_row:
+            if getattr(line, "custom_type", "") == "profile_save_result":
+                await admit_batch_row(
+                    batch,
+                    ordinals[id(line)],
+                    session.receive_profile_save_result(getattr(line, "message_id", "") or ""),
+                )
+            elif owner_row:
                 await admit_batch_row(
                     batch, ordinals[id(line)], _run_owner_prompt(handle, line, seen=seen_owner_ids)
                 )

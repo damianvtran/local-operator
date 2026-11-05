@@ -8,10 +8,10 @@ import pytest
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.tool_card import ToolCard
 from scripts.visual_capture import save_capture
-from tests.unit.session.test_account_profile_consent import SEED_INSTRUCTIONS
-from tests.unit.session.test_account_profile_consent import (  # noqa: F401
-    stores as consent_stores,
+from tests.unit.session.test_account_profile_consent import (
+    SEED_INSTRUCTIONS,
 )
+from tests.unit.session.test_account_profile_consent import stores as consent_stores  # noqa: F401
 from tests.unit.session.test_profile_actions import saved
 from tests.unit.tui.test_app_pilot import Editor, _await_session, _factory
 
@@ -138,3 +138,143 @@ async def test_live_proof_and_transport_uncertainty_never_enable_a_blind_retry(
                 assert card._profile_action_state == "succeeded"
                 assert stores["account"].get_agent_system_prompt(row.id) == SEED_INSTRUCTIONS
                 assert client.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("columns", [110, 60])
+@pytest.mark.parametrize("profile", [True, False])
+async def test_header_mouse_click_toggles_exactly_once(stores, columns, profile):
+    session, action, _ = await saved(stores)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(columns, 30)) as pilot:
+        await _await_session(app, pilot)
+        card = ToolCard(
+            "trusted-call", "agent" if profile else "bash", {"op": "update", "name": "reviewer"}
+        )
+        card.mark_done(
+            "A populated result body.", details={"profile_action": action} if profile else {}
+        )
+        app._append_block(card)
+        await pilot.pause()
+        assert not card.expanded
+        await pilot.click(card, offset=(18, 0))
+        await pilot.pause()
+        assert card.expanded
+        await pilot.click(card, offset=(18, 0))
+        await pilot.pause()
+        assert not card.expanded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("columns", [110, 60])
+@pytest.mark.parametrize("state", ["unavailable", "stale", "failed", "pending"])
+async def test_disabled_action_states_render_safe_guidance(
+    stores, columns, state, tmp_path, monkeypatch
+):
+    import json
+
+    from local_operator.profile_actions import ProfileActions
+
+    session, action, backup = await saved(stores)
+    if state == "unavailable":
+        session._profile_actions = ProfileActions(session._session_id, stores["account"].config_dir)
+    elif state == "stale":
+        row = stores["account"].get_agent_by_name("reviewer")
+        stores["account"].set_agent_system_prompt(row.id, "Later edit, never undo this.")
+    elif state == "failed":
+        (stores["session_dir"] / "profile-backups" / (backup + ".json")).write_text("{}")
+        assert (
+            session._profile_actions.activate(action["action_id"], approved=True, remember=False)[
+                "state"
+            ]
+            == "failed"
+        )
+    else:
+        path = (
+            stores["account"].config_dir
+            / "profile-transactions"
+            / ("revert_" + action["action_id"] + ".json")
+        )
+        raw = json.loads(path.read_text())
+        raw["state"] = "applying"
+        path.write_text(json.dumps(raw))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(columns, 30)) as pilot:
+        await _await_session(app, pilot)
+        card = ToolCard("trusted-call", "agent", {"op": "update", "name": "reviewer"})
+        card.mark_done("Saved profile receipt.", details={"profile_action": action})
+        app._append_block(card)
+        for _ in range(12):
+            await pilot.pause()
+            if card._profile_action_checked:
+                break
+        assert card._profile_action_state == state
+        if state != "pending":
+            assert "Inspect" in card._content.plain
+        else:
+            assert "Check status" in card._content.plain
+        directory = Path(_EVIDENCE_ROOT or tmp_path) / "profile-action-r3-frames"
+        directory.mkdir(parents=True, exist_ok=True)
+        save_capture(app, directory / f"{state}-{columns}.svg")
+        await pilot.click(card, offset=(7, 1))
+        await pilot.pause()
+        assert not card.expanded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("columns", [110, 60])
+async def test_actual_saved_receipt_body_is_readable_and_header_opens_once(
+    stores, columns, tmp_path
+):
+    import json
+
+    from local_operator.tui import bindings
+
+    session, action, _, result = await saved(stores, receipt=True)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(columns, 30)) as pilot:
+        await _await_session(app, pilot)
+        card = ToolCard(result.tool_call_id, result.tool_name, {"op": "update", "name": "reviewer"})
+        card.mark_done("\n".join(item.text for item in result.content), details=result.details)
+        app._append_block(card)
+        for _ in range(12):
+            await pilot.pause()
+            if card._profile_action_checked:
+                break
+        await pilot.click(card, offset=(18, 0))
+        await pilot.pause()
+        assert card.expanded
+        assert "instructions" in card._content.plain
+        directory = Path(_EVIDENCE_ROOT or tmp_path) / "profile-action-r3-frames"
+        directory.mkdir(parents=True, exist_ok=True)
+        save_capture(app, directory / f"expanded-{columns}.svg")
+        style = bindings.style("tool.row.chip_settled")
+        foreground = style.color.get_truecolor()
+        background = style.bgcolor or card.rich_style.bgcolor
+        assert background is not None
+        background = background.get_truecolor()
+
+        def luminance(rgb):
+            values = [v / 255 for v in rgb]
+            values = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in values]
+            return 0.2126 * values[0] + 0.7152 * values[1] + 0.0722 * values[2]
+
+        a, b = sorted([luminance(foreground), luminance(background)])
+        ratio = (b + 0.05) / (a + 0.05)
+        (directory / f"contrast-{columns}.json").write_text(
+            json.dumps(
+                {
+                    "binding": "tool.row.chip_settled",
+                    "foreground": list(foreground),
+                    "background": list(background),
+                    "contrast_ratio": ratio,
+                    "card_region": list(card.region),
+                    "content_region": list(card.content_region),
+                    "virtual_size": list(card.virtual_size),
+                    "actual_size": list(card.size),
+                    "vertical_scrollbar": card.show_vertical_scrollbar,
+                },
+                indent=2,
+            )
+        )
+        assert ratio >= 4.5

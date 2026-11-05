@@ -529,7 +529,9 @@ from local_operator.tui.widgets.settings_view import (
     SettingsView,
     SettingsViewDismissed,
 )
-from local_operator.tui.widgets.status_line import AGENT_PROFILE_CELLS
+from local_operator.tui.widgets.status_line import (
+    AGENT_PROFILE_CELLS,
+)
 from local_operator.tui.widgets.status_line import (
     FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
 )
@@ -17112,6 +17114,12 @@ class OperatorApp(App[None]):
         try:
             result = await self._read_profile_action_status(card, source)
         except Exception:
+            if source is self._session and card.is_mounted and card._profile_action == expected:
+                card.set_profile_action_state(
+                    "unavailable"
+                    if not card._profile_action_checked
+                    else card._profile_action_state
+                )
             return  # No live proof: never infer availability from saved flags.
         if (
             source is self._session
