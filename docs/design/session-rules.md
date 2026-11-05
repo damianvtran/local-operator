@@ -280,12 +280,17 @@ Verified, with the evidence path named:
 
 1. **That rules beat custom instructions.** On deepseek-flash, 15 draws per arm on real replayed
    failures, `bare_sharpen` broke 19/25 with no rule, 2/20 with custom instructions and 0/15
-   with rules — rules **match** custom instructions, they do not beat them. `merge_authority`
-   improved in no arm (16/25, 10/20, 7/15; Fisher p=0.23). The dilution experiment, which is the
-   only remaining hypothesis that could show an advantage, stopped at 15 of 60 cells after the
-   DeepSeek account ran out of credit. It proves nothing yet.
-2. **A real compaction pass keeping a rule.** The probe had compaction records in the transcript,
+   with rules — rules **match** custom instructions, they do not beat them.
+2. **`merge_authority` is not a valid scenario, and this was found after seeing its results.** Its
+   compliant action is a merge; the replay blocks every tool, so the merge cannot happen and
+   "the Terraform change needs your word" is the accurate reply in every arm. The predicate was
+   therefore measuring blocked tools, not disobedience. It is excluded, and the exclusion is
+   disclosed rather than quietly applied, because an exclusion made after the data weakens the
+   remaining claim. **The evidence base is ONE scenario.**
+3. **The dilution experiment**, the only remaining hypothesis that could show an advantage, stopped
+   at 15 of 60 cells when the DeepSeek account ran out of credit. It proves nothing yet.
+4. **A real compaction pass keeping a rule.** The probe had compaction records in the transcript,
    not a summarisation pass; a pass costs a model call.
-3. **Generalisation.** The violation rate is model-specific: the same scenario broke 19/25 on
+5. **Generalisation.** The violation rate is model-specific: the same scenario broke 19/25 on
    deepseek-flash, 5/10 on gpt-4o-mini, 3/10 on gemini-2.5-flash and 0/10 on gemini for
    `merge_authority`. Any compliance number here is a number about one model.
