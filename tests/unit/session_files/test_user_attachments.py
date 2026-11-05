@@ -33,7 +33,7 @@ from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attachments import store_for_transcript_dir
 from local_operator.session.user_attachments import list_user_attachments
 
-from ._fixtures import SESSION, png, write_journal
+from ._fixtures import SESSION, append_journal, line, png, write_journal
 
 TOKEN = "user-attachments-test-token"
 URL = f"/v1/desktop/sessions/{SESSION}/user-attachments"
@@ -256,6 +256,185 @@ def test_inventory_cache_invalidates_when_journal_changes(root: Path) -> None:
         "old.txt",
         "new.txt",
     ]
+
+
+def _doc(name: str, digest: str) -> dict[str, Any]:
+    return {"type": "document", "filename": name, "mime_type": "text/plain", "attachment": digest}
+
+
+def _filenames(directory: Path) -> list[str]:
+    return [item["filename"] for item in list_user_attachments(directory)["items"]]
+
+
+def test_an_append_resumes_from_the_previous_scan_and_matches_a_full_one(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live journal only grows: the listing after an append reads the appended bytes only.
+
+    Proved by what the resumed read is HANDED (its start offset), not by timing, and by the
+    answer equalling a cold full scan of the same file.
+    """
+    from local_operator.session import user_attachments
+
+    directory = _session(root)
+    first = _user("u1", 1.0, [_doc("a.txt", "0" * 32)])
+    path = write_journal(directory, [first])
+    assert _filenames(directory) == ["a.txt"]
+    consumed = path.stat().st_size
+
+    starts: list[int] = []
+    real = user_attachments._scan_plain
+
+    def spy(*args: Any, **kwargs: Any):
+        starts.append(kwargs["start"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(user_attachments, "_scan_plain", spy)
+    append_journal(directory, [_user("u2", 2.0, [_doc("b.txt", "1" * 32)])])
+    resumed = list_user_attachments(directory)
+
+    assert starts == [consumed]
+    user_attachments._INVENTORY_CACHE.clear()
+    assert resumed == list_user_attachments(directory)
+    assert [item["filename"] for item in resumed["items"]] == ["a.txt", "b.txt"]
+
+
+def test_a_torn_final_line_is_read_whole_once_its_newline_lands(root: Path) -> None:
+    directory = _session(root)
+    path = write_journal(directory, [_user("u1", 1.0, [_doc("a.txt", "0" * 32)])])
+    torn = line(_user("u2", 2.0, [_doc("b.txt", "1" * 32)]))
+    with path.open("ab") as handle:
+        handle.write(torn[:-12])
+    assert _filenames(directory) == ["a.txt"]
+    with path.open("ab") as handle:
+        handle.write(torn[-12:])
+    assert _filenames(directory) == ["a.txt", "b.txt"]
+
+
+def test_a_replaced_journal_is_rescanned_not_resumed(root: Path) -> None:
+    """``compact_file`` rewrites through ``os.replace``: a new inode must never be resumed,
+    even when it is larger than the old scan (the offset would point into other bytes)."""
+    directory = _session(root)
+    write_journal(directory, [_user("u1", 1.0, [_doc("a.txt", "0" * 32)])])
+    assert _filenames(directory) == ["a.txt"]
+    replacement = directory / "transcript.jsonl.tmp"
+    replacement.write_bytes(
+        line(_user("u9", 9.0, [_doc("z.txt", "9" * 32)]))
+        + line(_user("u10", 10.0, [_doc("y.txt", "8" * 32)]))
+    )
+    os.replace(replacement, directory / "transcript.jsonl")
+    assert _filenames(directory) == ["z.txt", "y.txt"]
+
+
+def _cold(directory: Path) -> list[str]:
+    from local_operator.session import user_attachments
+
+    user_attachments._INVENTORY_CACHE.clear()
+    return _filenames(directory)
+
+
+def test_a_same_inode_shrink_then_regrowth_past_the_cached_size_is_rescanned(
+    root: Path,
+) -> None:
+    """QA 4b / review R1-1: inode and size both say "only grew", the bytes below the offset
+    do not. The pinned tail digest must refuse the resume."""
+    directory = _session(root)
+    path = write_journal(directory, [_user("u1", 1.0, [_doc("a.txt", "0" * 32)])])
+    kept = path.stat().st_size
+    append_journal(directory, [_user("u2", 2.0, [_doc("ghost.txt", "1" * 32)])])
+    assert _filenames(directory) == ["a.txt", "ghost.txt"]
+    os.truncate(path, kept)
+    append_journal(
+        directory,
+        [
+            _user("u3", 3.0, [_doc("real-b.txt", "2" * 32)]),
+            _user("u4", 4.0, [_doc("real-c.txt", "3" * 32)]),
+        ],
+    )
+    warm = _filenames(directory)
+    assert warm == ["a.txt", "real-b.txt", "real-c.txt"]
+    assert warm == _cold(directory)
+
+
+@pytest.mark.asyncio
+async def test_the_transcript_writers_append_rollback_never_leaves_a_ghost(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA 4c: the REAL rollback (``Transcript._write_entries``: write, fsync fails,
+    ``os.truncate`` to the previous size on the same inode), listed while the failed bytes
+    are on disk, then a successful append that grows the file past that listing."""
+    from local_operator.harness.types import ImageContent, Message
+    from local_operator.session import transcript as transcript_mod
+    from local_operator.session.transcript import Transcript
+
+    directory = _session(root)
+    transcript = Transcript(directory)
+
+    def picture(row_id: str, seed: int) -> Message:
+        # Distinct bytes per picture so each one is its own digest.
+        return Message(
+            id=row_id,
+            role="user",
+            content=[
+                ImageContent(data=base64.b64encode(png(seed=seed)).decode(), mime_type="image/png")
+            ],
+        )
+
+    def ids() -> list[str]:
+        return [item["message_id"] for item in list_user_attachments(directory)["items"]]
+
+    await transcript.append_message(picture("u1", 1))
+    assert ids() == ["u1"]
+    real_fsync = transcript_mod.os.fsync
+    seen_during_failed_append: list[str] = []
+
+    def fsync_after_a_listing(fd: int) -> None:
+        # The listing runs while the doomed row is on disk - the window the defect needs.
+        seen_during_failed_append.extend(ids())
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(transcript_mod.os, "fsync", fsync_after_a_listing)
+    with pytest.raises(OSError):
+        await transcript.append_message(picture("u2-ghost", 2))
+    monkeypatch.setattr(transcript_mod.os, "fsync", real_fsync)
+    assert seen_during_failed_append == ["u1", "u2-ghost"]
+    await transcript.append_message(picture("u3", 3))
+    await transcript.append_message(picture("u4", 4))
+    warm = ids()
+    assert warm == ["u1", "u3", "u4"]
+    from local_operator.session import user_attachments
+
+    user_attachments._INVENTORY_CACHE.clear()
+    assert warm == ids()
+    transcript.close()
+
+
+def test_a_complete_final_row_without_a_newline_is_listed_but_not_consumed(
+    root: Path,
+) -> None:
+    """Review R1-2: the whole-journal scan listed a parseable unterminated last row; the
+    resume must too, and must read it again (not twice) once its newline lands."""
+    directory = _session(root)
+    path = write_journal(directory, [_user("u1", 1.0, [_doc("a.txt", "0" * 32)])])
+    with path.open("ab") as handle:
+        handle.write(line(_user("u2", 2.0, [_doc("b.txt", "1" * 32)]))[:-1])
+    assert _filenames(directory) == ["a.txt", "b.txt"]
+    with path.open("ab") as handle:
+        handle.write(b"\n")
+    append_journal(directory, [_user("u3", 3.0, [_doc("c.txt", "2" * 32)])])
+    assert _filenames(directory) == ["a.txt", "b.txt", "c.txt"] == _cold(directory)
+
+
+def test_a_vanished_journal_drops_the_cached_entry(root: Path) -> None:
+    """Review R1-3: an entry always describes a file that existed when last read."""
+    from local_operator.session import user_attachments
+
+    directory = _session(root)
+    path = write_journal(directory, [_user("u1", 1.0, [_doc("a.txt", "0" * 32)])])
+    assert _filenames(directory) == ["a.txt"]
+    path.unlink()
+    assert _filenames(directory) == []
+    assert str(directory) not in user_attachments._INVENTORY_CACHE
 
 
 def test_no_journal_is_an_empty_list(root: Path) -> None:

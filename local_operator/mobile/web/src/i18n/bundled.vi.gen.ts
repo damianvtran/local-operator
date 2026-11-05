@@ -239,6 +239,16 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.chrome.spend.title": "Chi ph\u00ed & ng\u1eef c\u1ea3nh",
     },
   },
+  "relay.composer": {
+    "vi": {
+      "relay.composer.action.connecting": "\u0110ang k\u1ebft n\u1ed1i",
+      "relay.composer.action.send": "g\u1eedi",
+      "relay.composer.action.steer": "\u0111\u1ecbnh h\u01b0\u1edbng",
+      "relay.composer.action.stop": "d\u1eebng",
+      "relay.composer.action.stop_agent": "d\u1eebng t\u00e1c nh\u00e2n",
+      "relay.composer.action.stopping": "\u0111ang d\u1eebng",
+    },
+  },
   "relay.health": {
     "vi": {
       "relay.health.dropped_detail": "M\u00e1y t\u00ednh c\u1ee7a b\u1ea1n hi\u1ec7n kh\u00f4ng k\u1ebft n\u1ed1i \u0111\u01b0\u1ee3c v\u1edbi phi\u00ean n\u00e0y v\u00e0 v\u1eabn \u0111ang th\u1eed l\u1ea1i. Cho \u0111\u1ebfn khi k\u1ebft n\u1ed1i \u0111\u01b0\u1ee3c, g\u1eedi tin nh\u1eafn s\u1ebd th\u1ea5t b\u1ea1i ngay v\u00e0 n\u1ed9i dung \u0111\u00e3 g\u00f5 v\u1eabn c\u00f2n trong \u00f4 nh\u1eadp.",

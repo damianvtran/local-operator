@@ -239,6 +239,16 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.chrome.spend.title": "Spend & context",
     },
   },
+  "relay.composer": {
+    "en": {
+      "relay.composer.action.connecting": "Connecting",
+      "relay.composer.action.send": "send",
+      "relay.composer.action.steer": "steer",
+      "relay.composer.action.stop": "stop",
+      "relay.composer.action.stop_agent": "stop the agent",
+      "relay.composer.action.stopping": "stopping",
+    },
+  },
   "relay.health": {
     "en": {
       "relay.health.dropped_detail": "Your computer can't reach this session right now and keeps trying. Until it does, a send fails straight away and your text stays in the message box.",

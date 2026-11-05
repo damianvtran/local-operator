@@ -1,0 +1,8 @@
+{
+  "relay.composer.action.send": "gửi",
+  "relay.composer.action.steer": "định hướng",
+  "relay.composer.action.stop": "dừng",
+  "relay.composer.action.stopping": "đang dừng",
+  "relay.composer.action.connecting": "Đang kết nối",
+  "relay.composer.action.stop_agent": "dừng tác nhân"
+}
