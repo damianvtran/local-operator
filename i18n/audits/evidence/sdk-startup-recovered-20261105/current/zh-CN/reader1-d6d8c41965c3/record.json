@@ -1,0 +1,216 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_startup",
+  "audit_id": "d6d8c419-zhctxdelta1",
+  "mode": "context-delta-confirmation",
+  "audit_date": "2026-11-03",
+  "key_count": 4,
+  "reader_role": "priority reader 1; fresh independent reader; context-delta confirmation only (no re-authoring, no literary re-audit of unaffected strings)",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "d6d8c41965c3",
+    "model": "radient/auto",
+    "requested_route": "radient/auto",
+    "served_underlying_model": "UNKNOWN",
+    "actual_model_source": {
+      "kind": "session header / router label only",
+      "note": "the route label radient/auto is a header value and is NOT proof of the served upstream model; no execution-level served-model or provider record was exposed in this session"
+    },
+    "fallback": "UNKNOWN — no fallback event was exposed; NONE is not claimed",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_prior_reader_sessions": true,
+    "prior_reader_sessions": ["e55f54b6a26e", "6433b7a5b3e9"],
+    "prior_audit_bundle": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103",
+    "other_parallel_reader_report_read": false,
+    "note_on_scope_of_reading": "Prior zh-CN full audits (r1 e55f54b6a26e, second 6433b7a5b3e9) were read for compatibility only, as permitted. The new parallel reader's report was not read."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/zh-CN.json",
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "bytes": 817
+    },
+    "style_guide": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/i18n/style-guides/zh-CN.md",
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "binding": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/binding.json",
+      "note": "authoritative binding; every frozen/probe file above was re-hashed independently and matches the binding byte-for-byte. The binding's context value 82f193fd3c3e... is the correct one; the 82b... string circulated in chat is a typo and was not used."
+    }
+  },
+  "superseded_inputs": {
+    "old_context": {
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/candidates/zh-CN/context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "also_at": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/context.json",
+      "note": "same bytes at both paths; this is the stale context the prior zh-CN audits consumed"
+    }
+  },
+  "hash_equalities": {
+    "en_unchanged_vs_prior_audits": true,
+    "target_unchanged_vs_prior_audits": true,
+    "target_prior_audit_sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+    "style_guide_unchanged_vs_prior_audits": true,
+    "glossary_unchanged_vs_prior_audits": true,
+    "context_changed": true,
+    "en_old_candidate_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+  },
+  "context_delta": {
+    "changed_keys": ["wire.errors.sdk_startup.attach_hosting_unconfigured"],
+    "changed_fields": ["note"],
+    "unchanged": "role/tone of all 4 keys and the notes of attach_runtime_missing, profile_attach_failed, tool_inventory_mismatch are byte-identical old vs new",
+    "old_claim": "error is opaque producer text ... English-only child namespace falls back under RFC §6 per-CARRIED policy; future translated consumers still owe the RFC migration boundary.",
+    "new_claim": "the cause is not always opaque: when it is the product's own not-configured hosting error (exact type and published sentence) the caller substitutes the separately localized cause sentence, so the frame must never contain English cause wording of its own; any other producer's reason stays opaque and verbatim; the frame renders in the resolved locale, never an English pin; per-namespace English fallback remains for locales that do not carry the namespace.",
+    "truth_check": "VERIFIED against the dependency head 0066245ce4f90109933c59e74f1ad21b86d647bd, local_operator/sdk.py: startup_refusal_locale() resolves config language via resolve_language (587-596); startup_cause_text() substitutes the localized wire.errors.hosting.not_configured sentence only when type(error) is HostingNotConfiguredError AND str(error) equals the catalogued English source, otherwise returns str(error) verbatim (603-632); the frame is wired with error=startup_cause_text(error) and rendered via startup_refusal_text (660-666); attach_runtime_missing uses the same frame path (690-694). The old English-only assertion is indeed false at this head, and the new note describes the code.",
+    "false_claim_removed": true,
+    "source_change_by_auditor": "none"
+  },
+  "source_dependency": {
+    "pr": "https://github.com/damianvtran/local-operator/pull/3378",
+    "head": "0066245ce4f90109933c59e74f1ad21b86d647bd",
+    "merged": false,
+    "shipped_claim": false,
+    "note": "EN source and the new context live on an UNMERGED core PR head; nothing in this record claims shipping, activation or release eligibility."
+  },
+  "prior_audits": {
+    "zh-CN-r1": {
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/audit/zh-CN/sdk-startup-zh-CN-r1/record.json",
+      "session": "e55f54b6a26e",
+      "status": "passed",
+      "unresolved_blocker_major_count": 0,
+      "findings": "F1, F2 (2 MINOR, 0 BLOCKER/MAJOR)",
+      "residual_gap_recorded": "opaque {error} embeds English producer text from session_factory.py:816; fix = new owned message + producer change, outside the packet; waived: false"
+    },
+    "zh-CN-second": {
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/audit/zh-CN/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json",
+      "session": "6433b7a5b3e9",
+      "status": "passed",
+      "unresolved_blocker_major_count": 0,
+      "findings": "Z2-1 (MINOR: rendered {error} carried raw English producer sentence)"
+    },
+    "fr_prior": {
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/audit/fr/",
+      "status": "0 unresolved blocker/major per the retained bundle index (not re-audited here; FR is reader 2's task)"
+    }
+  },
+  "prior_findings_disposition": [
+    {
+      "id": "Z2-1",
+      "severity": "MAJOR→n/a (recorded MINOR by prior auditor)",
+      "key": "wire.errors.sdk_startup.attach_runtime_missing",
+      "prior_problem": "rendered {error} was str(HostingNotConfiguredError), i.e. raw English, inside an otherwise zh-CN frame",
+      "disposition": "resolved at the caller, exactly as the prior auditors required (a new owned message plus producer/caller change): PR 3378 head 0066245c routes the owned cause through wire.errors.hosting.not_configured and renders it in the resolved locale, while foreign causes pass through verbatim. No target text change was or is warranted; the target bytes are unchanged (fcff2fac...). Not re-opened.",
+      "note": "the prior record's key attribution reads attach_runtime_missing, while the English-cause risk sits on attach_hosting_unconfigured's {error}; the substance is the same single gap and both frames now share the same corrected path"
+    },
+    {
+      "id": "F1, F2",
+      "severity": "MINOR",
+      "prior_problem": "zh-CN round-1 stream findings in the retained bundle (same English-opaque-cause class; recorded as residual source gap with waived=false)",
+      "disposition": "same closure as Z2-1: owned message + caller substitution at PR 3378 head. Target wording unchanged and still approved."
+    }
+  ],
+  "findings": [
+    {
+      "id": "ZD-1",
+      "severity": "NIT",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "current": "没有正在运行的运行时为{resume}提供服务，且此根目录无法启动一个：{error}为此根目录（其config.yml）配置托管，然后用spawn_session()/deliver()启动该ID，待运行时存在后再附接。",
+      "problem": "运行 appears three times in one sentence (正在运行的运行时 / 启动一个 / 运行时存在), which reads slightly heavy in native zh-CN diagnostics.",
+      "suggested": "没有活跃运行时为{resume}提供服务，且此根目录无法启动一个：…（待运行时存在后再附接）— optional only.",
+      "gate": "does not gate; pre-existing wording on unchanged bytes, already approved by two prior independent readers; changing it would need a new translation wave, which this task forbids"
+    },
+    {
+      "id": "ZD-2",
+      "severity": "NIT",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "current": "…且此根目录无法启动一个：{error}…然后用spawn_session()/deliver()启动该ID…",
+      "problem": "启动 renders both 'start (a runtime)' and 'engage (the id)', so the two different actions in the English text share one verb.",
+      "suggested": "…然后用spawn_session()/deliver()接入该ID… (keeps engage distinct from start and from 附接) — optional only.",
+      "gate": "does not gate; pre-existing wording on unchanged bytes"
+    }
+  ],
+  "mechanical": {
+    "method": "computed in-session with Python stdlib only (json, hashlib, re, difflib, unicodedata); no repo validator, scanner, generator, Node or process was run",
+    "json_valid": true,
+    "key_sets_equal": "en == target == new context == old context (4 keys, no additions/drops)",
+    "placeholders": "identical names and count per key (attach_hosting_unconfigured: resume, error; attach_runtime_missing: resume; profile_attach_failed: profile; tool_inventory_mismatch: spec_tools, policy_tools); placeholder order preserved 4/4",
+    "icu": "no plural/select/other ICU structure in source or target; the four messages carry plain arguments, so no CLDR plural categories are required for zh-CN here (zh-CN's only category, other, is moot when no plural exists)",
+    "markup": "no Rich/HTML tags or backticks in source or target; nothing to preserve",
+    "literals": "config.yml, spawn_session(), deliver(), mode=''own'', spec.tools, ApprovalPolicy.declared(, and ID all present byte-identical in the target; doubled apostrophes are ICU escaping and are retained in the catalogue bytes",
+    "typography": "full-width ，。：（）； used for prose; no ASCII , ; : ! ? in prose (ASCII '.' and \"'\" occur only inside config.yml / spec.tools / mode=''own''); no space inserted between CJK and Latin runs; no NBSP / ideographic space / zero-width chars; no 您, no ！, no 您-式 register; full sentences keep 。, label-form strings carry none",
+    "sidecar_width": "no maxCells or maxChars hint exists in any of the 4 sidecar entries (verified programmatically), so there is no budget to exceed and no invented budget is asserted",
+    "informational_cell_width": {"attach_hosting_unconfigured": {"en": 210, "zh": 170}, "attach_runtime_missing": {"en": 173, "zh": 143}, "profile_attach_failed": {"en": 34, "zh": 23}, "tool_inventory_mismatch": {"en": 123, "zh": 110}, "note": "informational only; not a fit verdict"}
+  },
+  "native_review": {
+    "verdict": "all four strings remain acceptable zh-CN product copy; no wording change is owed by the context delta",
+    "per_key": {
+      "attach_hosting_unconfigured": "both facts (no live runtime; this root cannot start one) and the remedy order preserved; the colon introduces a complete Chinese remedy sentence; the frame carries no English cause wording of its own, so the substituted localized cause and the passed-through foreign cause both read correctly after {error}; config.yml and both function names literal; 该ID is idiomatic developer zh-CN",
+      "attach_runtime_missing": "disposal-then-refusal meaning preserved, mode='own' remedy and engage-then-attach order preserved; no disposal or exception-attribute claim added",
+      "profile_attach_failed": "Could-not + quoted profile preserved; 配置档 matches existing shipped zh-CN usage (tui.authoring, wire.errors.desktop, wire.settings) rather than sdk_spec's 配置档案; no sentence-final 。 on the label form",
+      "tool_inventory_mismatch": "two named inventories and the state-once remedy preserved; no inventory widening implied; the space before {spec_tools} is Latin-to-Latin, not a CJK–Latin gap"
+    },
+    "terminology": "no glossary row applies to 运行时/托管/附接/清单; 会话/工具/审批 wording in the wider sdk family untouched here; 附接 is an SDK-family coinage with no glossary row, used consistently across the four keys and approved by both prior readers — noted, not raised as a finding, since changing it now would be an out-of-scope re-author",
+    "register": "terse diagnostic with remedy, 你-voice with no explicit pronoun, no 请 — matches the zh-CN guide",
+    "native_reader_pass": "fresh reader pass performed on the four strings; findings limited to the two NITs above, no BLOCKER/MAJOR"
+  },
+  "verification_matrix": {
+    "mechanical_placeholder_icu_markup_literals": "PASS (computed here, stdlib only)",
+    "repo_validator_scripts_i18n_check_py": "NOT RUN — forbidden by this task's STRICT SOURCE ONLY rule (no process/Node); recorded, not waived",
+    "generator_check": "NOT RUN — same reason",
+    "native_accuracy_register_glossary": "PASS",
+    "frame_completeness_after_colon_and_technical_tokens": "PASS",
+    "rendered_fit_design": "NOT RUN — no width hints exist and no rendered surface was touched; no whole-frame clearance claimed",
+    "pseudo_localization": "NOT RUN",
+    "rtl_bidi": "NOT APPLICABLE (zh-CN)",
+    "runtime_exception_execution_under_real_zh_config": "NOT RUN — the live SDK refusal path was not executed; only the source contract at PR head was read",
+    "activation_release_eligibility": "NOT CLAIMED"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": ["ZD-1", "ZD-2"],
+    "basis": "context delta verified truthful against the caller code at the dependency head; English source, style guide, glossary and the four zh-CN target bytes are unchanged from the two prior independent audits; prior native judgments preserved; no BLOCKER/MAJOR"
+  },
+  "context_delta_confirmation": {
+    "confirmed": true,
+    "prior_native_judgment_preserved": true,
+    "new_out_of_scope_findings": 0,
+    "remeasured_unaffected_strings": false,
+    "note": "no literary re-audit of unaffected strings was performed; the four strings were re-read for compatibility with the new context only"
+  },
+  "explicit_gaps": [
+    "no mechanical validator execution (task forbids process/Node); placeholder/ICU/markup checks were recomputed in-session instead",
+    "no rendered fit, no pseudo-localization, no runtime execution of the refusal path under a real zh-CN config",
+    "no claim that the whole frame is English-free at runtime for foreign (non-owned) causes: those stay verbatim by contract",
+    "source and context depend on an unmerged PR head (0066245c); nothing here says shipped, activated or release-eligible",
+    "profile_attach_failed was not re-read against sibling namespaces beyond the citations above"
+  ],
+  "retention": {
+    "location": "own session scratch (unique, immutable, not a repo edit)",
+    "intended_canonical_root": "i18n/audits/evidence/zh-CN/wire.errors.sdk_startup/d6d8c419-zhctxdelta1/",
+    "tracked_commit_exists": false,
+    "repo_edits_by_auditor": "none (no translation edits, no ledger row, no PR comments per task)",
+    "prior_bundles_mutated": false
+  },
+  "original_lost_evidence": null,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "audit_notes_not_execution_log": [
+    "This record separates notes from execution: the mechanical section states what was actually computed in-session; the verification matrix states explicitly what was NOT run."
+  ]
+}

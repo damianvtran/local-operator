@@ -1,0 +1,133 @@
+{
+  "kind": "recovery-reference-resolution-not-audit",
+  "results": [
+    {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/i18n/style-guides/zh-CN.md",
+      "expected_sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "translators/zh-CN-7fce46e29bee/zh-CN.style.md"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/i18n/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "translators/es-804764f54d82/glossary.md"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/i18n/style-guides/fr.md",
+      "expected_sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "prior-full/fr/reader1-c44e0f808e48/fr-style.md"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/i18n/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "translators/es-804764f54d82/glossary.md"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+      "expected_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json",
+      "resolution": "MATCH_GIT_OBJECT",
+      "git_object": "0066245ce4f90109933c59e74f1ad21b86d647bd:local_operator/i18n/catalogues/en/wire.errors.hosting.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/local_operator/i18n/catalogues/fr/wire.errors.hosting.json",
+      "expected_sha256": "83432e2af01eff5982e4d7a0fca57ebb2223626b0d5713c136d60bb6bec8aa69",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json",
+      "resolution": "MATCH_GIT_OBJECT",
+      "git_object": "0066245ce4f90109933c59e74f1ad21b86d647bd:local_operator/i18n/catalogues/fr/wire.errors.hosting.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/local_operator/sdk.py",
+      "expected_sha256": "be133837cbc28e50a77213c24759de890e2aae0adf49a8961ec7bcfca65c7621",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json",
+      "resolution": "MATCH_GIT_OBJECT",
+      "git_object": "0066245ce4f90109933c59e74f1ad21b86d647bd:local_operator/sdk.py"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/sdk.py",
+      "expected_sha256": "be133837cbc28e50a77213c24759de890e2aae0adf49a8961ec7bcfca65c7621",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json",
+      "resolution": "MATCH_GIT_OBJECT",
+      "git_object": "0066245ce4f90109933c59e74f1ad21b86d647bd:local_operator/sdk.py"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "translators/es-804764f54d82/en.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "translators/es-804764f54d82/context.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/style-guides/fr.md",
+      "expected_sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "prior-full/fr/reader1-c44e0f808e48/fr-style.md"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "translators/es-804764f54d82/glossary.md"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "translators/es-804764f54d82/en.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "translators/es-804764f54d82/context.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/i18n/style-guides/fr.md",
+      "expected_sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "translators/fr-7b2ba4ed501d/inputs/fr.md"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/i18n/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json",
+      "resolution": "MATCH_RETAINED_BYTES",
+      "retained": "translators/es-804764f54d82/glossary.md"
+    }
+  ]
+}

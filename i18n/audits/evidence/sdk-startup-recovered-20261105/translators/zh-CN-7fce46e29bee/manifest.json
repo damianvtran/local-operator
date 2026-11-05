@@ -1,0 +1,16 @@
+{
+  "context.json": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+  "en.json": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+  "glossary.md": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+  "input-hashes.json": "92cb011c2908632364e46af8549a174c127aba6132c9b78d739bff769af259ff",
+  "locale-presence.json": "737a4b6176cddb9291967875c5b34bb05a95570cb2c573e46d19e65d1376a5a4",
+  "mechanical-validation.json": "30b6b8bf20735b93f886cfe0ceffa8634e5c475cf57f24f43b2254065dcfeb09",
+  "mechanical.log": "767c846a1a28d7c3344e7fa6a337e8c8eeee52656b89474ac4baad2105f68f43",
+  "report.md": "823eb1fad15c367ab20e2616c3250fec7d909bd5c86f4b85a881cdb34a7b4123",
+  "sdk.callers.txt": "5af97ccc5d5d2287b45247bd8c4765d2cc9aa5d1705f5c35ef80e356515d7873",
+  "translator-record.json": "732bd805b74638d74f233625ba7a885e41461127183afbadf80eb1ff56bf8479",
+  "validate.mjs": "912f82cd0adf548e90e916f3544aef9a92828bb41ee11b57b86e22c49abf471d",
+  "wire.errors.sdk_startup.json": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+  "zh-CN.style.md": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+  "manifest.json": "excluded (self)"
+}

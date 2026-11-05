@@ -1,0 +1,95 @@
+{
+  "kind": "actual_execution_results",
+  "command": "env -u XPC_FLAGS ~/local-operator/.venv/bin/python $LOCAL_OPERATOR_SCRATCHPAD/sdk-startup-second-audit.py",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6433b7a5b3e9",
+    "model": "radient/auto",
+    "actual_model_source": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+      "entry_id": "ca73b1a356784a479300812347532a78",
+      "at_ms": 1793725272835,
+      "note": "own completed-turn usage; radient/auto is a router label and the concrete upstream model is not recorded in usage"
+    },
+    "fallback": "no fallback event inferred; router label only, no concrete served model or upstream fallback claimed",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder": true,
+    "second_independent_reader": true,
+    "other_reader_report_read": false
+  },
+  "check_catalogues_isolated": [],
+  "fixture_restored": [],
+  "negative_controls": {
+    "missing_argument": "MessageFormatError: message argument 'resume' was not supplied (have: none)",
+    "malformed_target": [
+      "zh-CN/wire.errors.sdk_startup: wire.errors.sdk_startup.profile_attach_failed: expected ',' or '}' after argument name 'profile' (at offset 15 of '无法附接配置档{profile')"
+    ]
+  },
+  "production_renderer": {
+    "wire.errors.sdk_startup.attach_hosting_unconfigured": "没有正在运行的运行时为'sess-cold-1'提供服务，且此根目录无法启动一个：Hosting platform is not configured.为此根目录（其config.yml）配置托管，然后用spawn_session()/deliver()启动该ID，待运行时存在后再附接。",
+    "wire.errors.sdk_startup.attach_runtime_missing": "没有正在运行的运行时为'sess-cold-2'提供服务；以mode='own'打开它即可在当前进程中运行，或先用spawn_session()/deliver()启动它，待运行时存在后再附接。",
+    "wire.errors.sdk_startup.profile_attach_failed": "无法附接配置档'reviewer-cfg'",
+    "wire.errors.sdk_startup.tool_inventory_mismatch": "spec.tools ('read', 'edit')与ApprovalPolicy.declared(('read',))声明的工具清单不同；本次运行的范围只能声明一次"
+  },
+  "opaque_parameter_passthrough": "没有正在运行的运行时为'id'提供服务，且此根目录无法启动一个：{not_a_param} 100% 'quoted' <tag> \\ 测试为此根目录（其config.yml）配置托管，然后用spawn_session()/deliver()启动该ID，待运行时存在后再附接。",
+  "eligible_locale_zh_CN": "zh-CN",
+  "per_key": [
+    {
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "arguments": [
+        [
+          "resume",
+          "simple"
+        ],
+        [
+          "error",
+          "simple"
+        ]
+      ],
+      "plural_selectors": "not_applicable_no_plural",
+      "bidi_controls": 0,
+      "maxCells": "absent"
+    },
+    {
+      "key": "wire.errors.sdk_startup.attach_runtime_missing",
+      "arguments": [
+        [
+          "resume",
+          "simple"
+        ]
+      ],
+      "plural_selectors": "not_applicable_no_plural",
+      "bidi_controls": 0,
+      "maxCells": "absent"
+    },
+    {
+      "key": "wire.errors.sdk_startup.profile_attach_failed",
+      "arguments": [
+        [
+          "profile",
+          "simple"
+        ]
+      ],
+      "plural_selectors": "not_applicable_no_plural",
+      "bidi_controls": 0,
+      "maxCells": "absent"
+    },
+    {
+      "key": "wire.errors.sdk_startup.tool_inventory_mismatch",
+      "arguments": [
+        [
+          "spec_tools",
+          "simple"
+        ],
+        [
+          "policy_tools",
+          "simple"
+        ]
+      ],
+      "plural_selectors": "not_applicable_no_plural",
+      "bidi_controls": 0,
+      "maxCells": "absent"
+    }
+  ]
+}

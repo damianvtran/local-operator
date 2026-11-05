@@ -1,0 +1,387 @@
+{
+  "kind": "source_inspection_not_execution",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "namespace": "wire.errors.sdk_startup",
+  "producer_count": 4,
+  "producer_key_set_matches_source": true,
+  "producers": [
+    {
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "line": 628,
+      "kwargs": [
+        "resume",
+        "error"
+      ]
+    },
+    {
+      "key": "wire.errors.sdk_startup.attach_runtime_missing",
+      "line": 658,
+      "kwargs": [
+        "resume"
+      ]
+    },
+    {
+      "key": "wire.errors.sdk_startup.profile_attach_failed",
+      "line": 671,
+      "kwargs": [
+        "profile"
+      ]
+    },
+    {
+      "key": "wire.errors.sdk_startup.tool_inventory_mismatch",
+      "line": 691,
+      "kwargs": [
+        "spec_tools",
+        "policy_tools"
+      ]
+    }
+  ],
+  "shared_renderer": "sdk.py::startup_refusal_text resolves the scoped config language and renders via messages.render; it returns a plain str passed to SessionSpecError, so no new exception attributes or args shape.",
+  "exception_contract": "SessionSpecError(ValueError) keeps its historical single-string argument; catalogue translation changes human copy only, not exception type/args/str structure or the profile-failure/disposal lifecycle.",
+  "english_default_note": "The architect assessment records attach_hosting_unconfigured embedding {error}=str(HostingNotConfiguredError), whose producer sentence is English. This packet preserves {error} as opaque data and claims no producer, exception-string or API migration.",
+  "architect_assessment": {
+    "path": "inputs/architect-assessment.md",
+    "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+    "attribution": "Architect session 96042fdf7d41 report; used as retained evidence for the default-English/exception contract, not re-proved here."
+  },
+  "sibling_census_not_semantic_audit": {
+    "es": {
+      "absent_at_pin": true,
+      "missing_keys": 4
+    },
+    "fr": {
+      "absent_at_pin": true,
+      "missing_keys": 4
+    },
+    "zh-CN": {
+      "absent_at_pin": true,
+      "missing_keys": 4
+    },
+    "hi": {
+      "absent_at_pin": false,
+      "key_count": 4,
+      "exact_key_set": true,
+      "nonidentical_to_English": 4,
+      "sha256": "3362b1bc1a45d94c3f8455557cad031ebe2b6475b8d0c4171d465fb65e771c50"
+    },
+    "ru": {
+      "absent_at_pin": false,
+      "key_count": 4,
+      "exact_key_set": true,
+      "nonidentical_to_English": 4,
+      "sha256": "a78344f18145f9016b018d451d0c7d09906a09ff9937ceff36356c297328930f"
+    },
+    "ur": {
+      "absent_at_pin": false,
+      "key_count": 4,
+      "exact_key_set": true,
+      "nonidentical_to_English": 4,
+      "sha256": "b3c5f56714ed21faa9f210c3610ae80936d59f13c0a96df460dab2c7bb618382"
+    },
+    "vi": {
+      "absent_at_pin": false,
+      "key_count": 4,
+      "exact_key_set": true,
+      "nonidentical_to_English": 4,
+      "sha256": "ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd"
+    }
+  },
+  "no_ui_sink_claim": "No claim that these diagnostics reach a desktop/mobile sink; the architect assessment reports none found and this packet did not reproduce that census.",
+  "excerpts": [
+    {
+      "line": 586,
+      "text": ""
+    },
+    {
+      "line": 587,
+      "text": "    def startup_refusal_text(message: \"Msg\") -> str:"
+    },
+    {
+      "line": 588,
+      "text": "        # The SDK still raises a plain, one-argument SessionSpecError: the"
+    },
+    {
+      "line": 589,
+      "text": "        # envelope is an internal rendering boundary, not a new exception API."
+    },
+    {
+      "line": 590,
+      "text": "        # Only refusals pay for locale imports/reads, AFTER public root isolation."
+    },
+    {
+      "line": 591,
+      "text": "        # Reuse this already-scoped manager; None would make the resolver build"
+    },
+    {
+      "line": 592,
+      "text": "        # another manager (and potentially repair config/load credentials)."
+    },
+    {
+      "line": 593,
+      "text": "        from local_operator.i18n.messages import render"
+    },
+    {
+      "line": 594,
+      "text": "        from local_operator.i18n.resolve import DEFAULT_LANGUAGE, resolve_language"
+    },
+    {
+      "line": 595,
+      "text": ""
+    },
+    {
+      "line": 596,
+      "text": "        language = config_manager.get_config().values.get(\"language\")"
+    },
+    {
+      "line": 597,
+      "text": "        locale = resolve_language(language if isinstance(language, str) else DEFAULT_LANGUAGE)"
+    },
+    {
+      "line": 598,
+      "text": "        return render(message.code, message.params, locale=locale)"
+    },
+    {
+      "line": 599,
+      "text": ""
+    },
+    {
+      "line": 600,
+      "text": "    # ``Any`` on purpose: ``create_session``'s declared return is"
+    },
+    {
+      "line": 601,
+      "text": "    # ``SessionProtocol``, and the attachment calls below (``attach_team``,"
+    },
+    {
+      "line": 602,
+      "text": "    # ``attach_agent_profile``, ``set_tool_inventory``) are concrete-Session"
+    },
+    {
+      "line": 603,
+      "text": "    # members the protocol deliberately omits — ``exec_session.apply_startup``"
+    },
+    {
+      "line": 623,
+      "text": "        # cannot be the next step here yet."
+    },
+    {
+      "line": 624,
+      "text": "        from local_operator.i18n.keys import wire_errors_sdk_startup"
+    },
+    {
+      "line": 625,
+      "text": ""
+    },
+    {
+      "line": 626,
+      "text": "        raise SessionSpecError("
+    },
+    {
+      "line": 627,
+      "text": "            startup_refusal_text("
+    },
+    {
+      "line": 628,
+      "text": "                wire_errors_sdk_startup.attach_hosting_unconfigured("
+    },
+    {
+      "line": 629,
+      "text": "                    resume=repr(spec.resume), error=str(error)"
+    },
+    {
+      "line": 630,
+      "text": "                )"
+    },
+    {
+      "line": 631,
+      "text": "            )"
+    },
+    {
+      "line": 632,
+      "text": "        ) from error"
+    },
+    {
+      "line": 633,
+      "text": ""
+    },
+    {
+      "line": 634,
+      "text": "    if spec.radient_saver is not None:"
+    },
+    {
+      "line": 635,
+      "text": "        from local_operator.saver.command import refusal_text, set_saver_choice"
+    },
+    {
+      "line": 636,
+      "text": ""
+    },
+    {
+      "line": 653,
+      "text": "            await session.dispose()"
+    },
+    {
+      "line": 654,
+      "text": "            from local_operator.i18n.keys import wire_errors_sdk_startup"
+    },
+    {
+      "line": 655,
+      "text": ""
+    },
+    {
+      "line": 656,
+      "text": "            raise SessionSpecError("
+    },
+    {
+      "line": 657,
+      "text": "                startup_refusal_text("
+    },
+    {
+      "line": 658,
+      "text": "                    wire_errors_sdk_startup.attach_runtime_missing(resume=repr(spec.resume))"
+    },
+    {
+      "line": 659,
+      "text": "                )"
+    },
+    {
+      "line": 660,
+      "text": "            )"
+    },
+    {
+      "line": 661,
+      "text": "        return session"
+    },
+    {
+      "line": 662,
+      "text": ""
+    },
+    {
+      "line": 663,
+      "text": "    if team is not None:"
+    },
+    {
+      "line": 664,
+      "text": "        session.attach_team(team)"
+    },
+    {
+      "line": 665,
+      "text": "    if spec.profile:"
+    },
+    {
+      "line": 666,
+      "text": "        if not session.attach_agent_profile(spec.profile):"
+    },
+    {
+      "line": 667,
+      "text": "            from local_operator.i18n.keys import wire_errors_sdk_startup"
+    },
+    {
+      "line": 668,
+      "text": ""
+    },
+    {
+      "line": 669,
+      "text": "            raise SessionSpecError("
+    },
+    {
+      "line": 670,
+      "text": "                startup_refusal_text("
+    },
+    {
+      "line": 671,
+      "text": "                    wire_errors_sdk_startup.profile_attach_failed(profile=repr(spec.profile))"
+    },
+    {
+      "line": 672,
+      "text": "                )"
+    },
+    {
+      "line": 673,
+      "text": "            )"
+    },
+    {
+      "line": 674,
+      "text": "    inventory = declared_tool_inventory(session, runner_args)"
+    },
+    {
+      "line": 675,
+      "text": "    if spec.approvals.mode == \"declared\":"
+    },
+    {
+      "line": 676,
+      "text": "        # The policy's own list is the declaration when spec.tools does not"
+    },
+    {
+      "line": 677,
+      "text": "        # name one — the design's example spells the bound as"
+    },
+    {
+      "line": 678,
+      "text": "        # ``approvals=ApprovalPolicy.declared([...])`` and nothing else. If"
+    },
+    {
+      "line": 679,
+      "text": "        # BOTH name a list they must agree: two spellings of one bound are the"
+    },
+    {
+      "line": 686,
+      "text": "        elif tuple(inventory) != policy_tools:"
+    },
+    {
+      "line": 687,
+      "text": "            from local_operator.i18n.keys import wire_errors_sdk_startup"
+    },
+    {
+      "line": 688,
+      "text": ""
+    },
+    {
+      "line": 689,
+      "text": "            raise SessionSpecError("
+    },
+    {
+      "line": 690,
+      "text": "                startup_refusal_text("
+    },
+    {
+      "line": 691,
+      "text": "                    wire_errors_sdk_startup.tool_inventory_mismatch("
+    },
+    {
+      "line": 692,
+      "text": "                        spec_tools=str(tuple(inventory)), policy_tools=str(policy_tools)"
+    },
+    {
+      "line": 693,
+      "text": "                    )"
+    },
+    {
+      "line": 694,
+      "text": "                )"
+    },
+    {
+      "line": 695,
+      "text": "            )"
+    },
+    {
+      "line": 696,
+      "text": "    if inventory is not None:"
+    },
+    {
+      "line": 697,
+      "text": "        session.set_tool_inventory(inventory, unattended=spec.approvals.stands_as_approval)"
+    },
+    {
+      "line": 698,
+      "text": "    if spec.goal is not None:"
+    },
+    {
+      "line": 699,
+      "text": "        session.set_goal(spec.goal)"
+    }
+  ],
+  "locale_contrast": "Unlike the 21 wire.errors.sdk_spec guards, which each request locale=\"en\" explicitly, these four refusals render through sdk.py::startup_refusal_text, which resolves the ALREADY SCOPED config language and calls messages.render(..., locale=locale). So the English bytes are a default-fallback outcome, not a forced-English contract: once a fr catalogue is carried and the resolved locale is fr, the fr formatter is the intended path. This packet claims no runtime rendering of any of the four.",
+  "forced_english_claim": false,
+  "resolved_locale_renderer": true
+}

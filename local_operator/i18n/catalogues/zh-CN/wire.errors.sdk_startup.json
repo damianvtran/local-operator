@@ -1,0 +1,6 @@
+{
+  "wire.errors.sdk_startup.attach_hosting_unconfigured": "没有正在运行的运行时为{resume}提供服务，且此根目录无法启动一个：{error}为此根目录（其config.yml）配置托管，然后用spawn_session()/deliver()启动该ID，待运行时存在后再附接。",
+  "wire.errors.sdk_startup.attach_runtime_missing": "没有正在运行的运行时为{resume}提供服务；以mode=''own''打开它即可在当前进程中运行，或先用spawn_session()/deliver()启动它，待运行时存在后再附接。",
+  "wire.errors.sdk_startup.profile_attach_failed": "无法附接配置档{profile}",
+  "wire.errors.sdk_startup.tool_inventory_mismatch": "spec.tools {spec_tools}与ApprovalPolicy.declared({policy_tools})声明的工具清单不同；本次运行的范围只能声明一次"
+}

@@ -39,6 +39,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator import sdk
+from local_operator.config import ConfigManager as _RealConfigManager
 from local_operator.session.spec import (
     ApprovalPolicy,
     SessionIsolationError,
@@ -1814,3 +1815,50 @@ async def test_sdk4_pre_root_refusals_never_construct_or_read_locale(
 def test_sdk4_import_preserves_lazy_locale_boundary():
     imported = _imported_modules("local_operator.sdk")
     assert not any(name.startswith("local_operator.i18n") for name in imported)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", ["fr", "es", "zh-CN"])
+@pytest.mark.parametrize("owned", [True, False])
+async def test_sdk4_recovered_frames_use_real_config_and_preserve_raw_cause(
+    sdk4_boundary, monkeypatch, language, owned
+):
+    """Retained translations must compose through the real SDK/config boundary.
+
+    The factory remains isolated exactly as in SDK4: no provider/runtime starts.
+    Unlike its marker test, this cell uses shipped frame/cause bytes and a real
+    ConfigManager captured before the fixture replaces that class. An owned
+    cause localizes only in the human frame; opaque foreign causes and raw
+    exception str/args must retain their original bytes.
+    """
+    from local_operator import config
+    from local_operator.i18n import messages
+    from local_operator.session_factory import HostingNotConfiguredError, HostingUnknownError
+
+    root = sdk4_boundary.roots.config_dir
+    monkeypatch.setattr(config, "ConfigManager", _RealConfigManager)
+    manager = _RealConfigManager(config_dir=root)
+    manager.set_config_value("language", language)
+    raw = _SDK4_OWNED_CAUSE if owned else _SDK4_OPAQUE
+    cause = HostingNotConfiguredError(raw) if owned else HostingUnknownError(raw)
+    sdk4_boundary.cause = cause
+    spec, _ = _sdk4_spec("attach_hosting_unconfigured")
+    clause = (
+        messages.render("wire.errors.hosting.not_configured", {}, locale=language)
+        if owned
+        else raw
+    )
+    expected = messages.render(
+        "wire.errors.sdk_startup.attach_hosting_unconfigured",
+        {"resume": repr(spec.resume), "error": clause},
+        locale=language,
+    )
+    before = (root / "config.yml").read_bytes()
+    # The deliberate real-config setup precedes the nonmutation boundary; the
+    # shared producer oracle must compare against this snapshot, not seed EN.
+    sdk4_boundary.config_bytes = before
+    await _sdk4_assert_refusal(sdk4_boundary, "attach_hosting_unconfigured", expected)
+    assert str(cause) == raw and cause.args == (raw,)
+    assert clause in expected
+    assert (raw in expected) is (not owned)
+    assert (root / "config.yml").read_bytes() == before

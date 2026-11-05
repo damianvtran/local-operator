@@ -1,0 +1,10 @@
+PASS: 4/4 keys, English key order, genuine Chinese prose, identical ICU argument sets, preserved identifiers, no bidi, register and punctuation checks, ICU apostrophe escape renders as 'own'
+PASS negative control rejected: missing-key
+PASS negative control rejected: renamed-placeholder
+PASS negative control rejected: wrong-placeholder-type
+PASS negative control rejected: mutated-identifier
+PASS negative control rejected: lost-apostrophe-escape
+PASS negative control rejected: english-copy
+PASS negative control rejected: bidi-injection
+PASS negative control rejected: malformed-icu
+PASS: parser-AST opaque interpolation keeps braces/quotes/percent/tags as data (not production renderer proof)

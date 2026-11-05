@@ -1,0 +1,411 @@
+# Contributing localized product copy
+
+Use this HOWTO for extraction and locale contributions. The contract and decisions
+live in the [accepted i18n RFC](design/i18n.md), especially §§2, 4 and 6; do not
+infer completion from its adoption plan. The model-loadable procedure is
+[`guide://i18n`](../local_operator/guides/i18n/GUIDE.md).
+
+## Ownership and language resolution
+
+The backend owns one `language` setting in `config.yml`. The TUI `/settings`
+language row and a connected client's language setting must write that same
+backend value, not a client-specific override. The resolution chain is:
+
+1. Explicit, normalizable config `language` (default `auto`).
+2. `LOP_LANG` when config is `auto` or does not normalize.
+3. OS language (platform probes in [`resolve.py`](../local_operator/i18n/resolve.py)).
+4. `en`.
+
+The winning candidate is then filtered through the shipped set: an unshipped
+supported candidate renders English, rather than trying the next preference.
+`LOP_I18N=0` forces English. Pre-connection bootstrap copy is the RFC's limited
+client exception; connection makes backend state authoritative. Core live copy
+uses `set_active_locale` and registered refreshers; do not assume all clients
+already implement the live-switch contract.
+
+`SUPPORTED_LOCALES` is recognition vocabulary, **not publication permission**.
+The generated `data/shipped.json` is the production eligibility input. Every
+namespace a non-English locale **carries** needs a passed ledger row with the
+SHA-256 of its current English catalogue. Adding an English-only namespace does
+not unship an otherwise eligible locale. Missing locale namespaces or keys use
+**English source and English formatting/plural rules**: Russian rules applied to
+English fallback would turn 21 into “21 job”. A message missing even in English
+degrades to its code; that is runtime resilience, not permission to omit keys.
+See [`messages.py`](../local_operator/i18n/messages.py) and
+[`text.py`](../local_operator/i18n/text.py). A hold must not be bypassed by dropping
+only its failed namespace/ledger row; shipped eligibility is not a security or
+non-distribution exemption (RFC §6). Blocked/unaudited carried namespaces cannot
+ship or activate: do not relabel hashes, falsify audit status or bypass guards.
+
+### Recognition metadata does not activate a locale
+
+`locale_direction(tag)` in the existing Python locale API normalizes the same
+OS aliases as resolution (`zh_CN`/`zh-Hans` → `zh-CN`, `ur_PK`/`ur_IN` → `ur`).
+Recognized Urdu is `rtl`; other supported locales and unknown tags are `ltr`.
+`GET /v1/capabilities` adds `result.language_direction` for its **resolved,
+shipped** `result.language`, computed from one resolution snapshot. Chinese's
+held preference therefore still advertises `en`/`ltr`; Urdu ships its audited
+core and relay namespaces, so its preference advertises `ur`/`rtl` while the
+namespaces it does not carry render English source. Older clients can ignore the
+additive field. Metadata is still not proof of bidi isolation, shaping or client
+RTL layout, and does not widen the picker or shipped set by itself. Existing
+plural/format tables already cover Chinese (other only) and Urdu (one/other);
+Urdu's Latin digits are the RFC v1 decision even for normalized `ur_IN`.
+
+The generator's explicit `SECURITY_HELD_LOCALES` set is **empty as of
+2026-10-24**: the policy owner released `zh-CN` after the blocking `wire.slash`
+audit was remediated at its current bytes (evidence:
+[`redaction-policy.md`](security/redaction-policy.md) and the `zh24s1` record
+under `i18n/audits/evidence/zh-CN/wire.slash/`), every namespace it carries has
+a current-byte passed ledger row, and `shipped.json` carries eight locales. The
+mechanism stays: a locale listed there is excluded from shipped eligibility
+independently of carried-namespace passes, and omitting its bytes/rows or
+fabricating a passed row cannot publish a partial package. Re-adding a locale
+needs a separately reviewed explicit security disposition, not ordinary
+regeneration. This does not forbid ordinary audited partial coverage for other
+locales, nor constitute a translation/audit waiver.
+### TUI render-only bidi projection (not terminal shaping proof)
+
+`text.tr_record()` adds actual-source provenance to the existing namespace-cached
+resolver; raw `tr()` still returns only its original text. `messages.render_record()`
+provides the same distinction for code-addressed rendering. English fallback is
+English, unknown code/failed render has no source locale, and a sole opaque
+`{error}` passthrough does not acquire Urdu provenance. Envelopes, storage and
+clipboard semantics keep the original raw bytes; no controls enter catalogues.
+
+`tui.i18n_status.display_tr()` is the production paint resolver for the status,
+transcript, command-palette, welcome and settings surfaces. It keeps the TUI's
+LTR layout, wraps Urdu-source lines in RLI/PDI and puts declared technical tokens
+in LRI/PDI, balanced per line. `technical_parameter_spans()` finds every rendered
+occurrence of explicitly named string parameters **after** ICU formatting;
+`technical_literal_spans()` does the same for owner-declared literals authored
+inside the prose (`/update`, `esc`). `TechnicalSpan(start, end, expected)`
+remains available for owner-declared Python string (not UTF-8 byte) offsets.
+`technical_display()` covers standalone commands, paths, IDs and multiline
+code/diff lines. The settings language row documents Urdu as best effort
+requiring terminal bidi and Arabic shaping.
+
+Layout happens on RAW copy. A constant that a row will wrap or truncate is kept
+raw and projected after the final fit (`balance_display_line` restores any
+isolate a Rich single-line ellipsis cut through), so no displayed line can carry
+an unmatched delimiter. `settings_io` registry copy — labels, help, section
+titles and declared choice descriptions — is painted with `source_locale="en"`:
+the registry exposes no per-value provenance, so English fallback must stay
+byte-identical rather than acquiring RLI from the active preference. Synthesised
+BOOL choice labels are TUI-owned catalogue copy and are projected once, at their
+final paint boundary, never stored pre-isolated; their provenance is resolved
+beside them, so an English-only `tui.small` wave cannot acquire RLI from an Urdu
+preference. Surfaces with no per-value provenance (settings registry copy, palette
+labels, session and agent names) paint as English source.
+
+Three boundary rules keep native copy paintable. A token immediately preceded by a
+single ASCII letter is widened to include it when its value starts with a digit
+(`v{version}` → `v9.9.9`), and Urdu/Arabic sentence punctuation (۔ ؟ ،) belongs to
+the prose that follows a token, exactly as `. , ; : ! ?` does. Literal matching is
+token-bounded (`/update` inside `/update-all` is prose). A declared COMMAND may
+carry arguments and therefore spaces (`/network new <name>`, `/model <provider>/<id>`,
+`/login {provider}`); the whole command is one island, because separate word
+islands would be re-ordered against each other in an RTL paragraph. A command
+built from a message PARAMETER is declared as a template
+(`display_tr(..., technical_commands=("/login {provider}",))`): the rendered
+`/login radient` is located as one literal, so the remedy cannot split in two.
+A status glyph
+(`!`, the queued `·`) is prefixed OUTSIDE the projection, so an RTL paragraph
+cannot resolve a left-edge marker to the right edge.
+
+Clipboard copy is a semantic boundary, not a paint one: `get_selection()` strips
+this renderer's isolates (zero-width, so cell offsets are unchanged) before it
+returns text. A locale move repaints mounted blocks through the existing theme
+rebuild sweep, so baked localized furniture follows without a resize.
+
+The plain boundary accepts LF only; Unicode U+2028/U+2029 and external bidi/ANSI
+controls are rejected at Urdu paint rather than sanitized or allowed to close an
+isolate. Inline token hints reject stale slices, partial prefixes/suffixes,
+overlaps, multiline tokens and unpaired technical quotes/braces. Declared tokens
+must balance all `()`, `[]`, `{}` and quote pairs, including internal pairs in
+`fn(arg)`, `--x=[id]`, `--x={id}` and `mode='own'`; backslash escapes and
+ambiguous embedded quotes remain outside this conservative subset. Standalone
+technical blocks instead allow whitespace and unbalanced diff markers.
+
+The adapter does not generate context-sidecar hints, infer technical tokens from
+ASCII or string type, wrap raw `tr()` globally, or reconstruct provenance from
+envelopes/log/receipt strings. Human names and free prose are not automatically
+LTR. Nested localized prose must be composed raw and isolated once at the outer
+paint boundary. Native bidi/shaping and before/after rendered verification remain
+separate QA/design evidence; this source adoption does not claim terminal support.
+No locale activation, translation or audit waiver is implied; production Chinese
+and Urdu eligibility remains governed by the generated shipped set and ledgers.
+
+### Model reply preference is a separate consumer
+
+`preferred_language_line` uses the same chain but the supported set, so a
+supported unshipped language can guide replies while product copy stays English.
+The English instruction is captured **once when the main session stable prefix
+is built and once at subagent spawn**; conversation context may override reply
+language. A setting change affects the **next prefix/session**, not mutation of
+a cached prefix mid-turn. Product-copy refresh is not prompt-prefix refresh.
+
+## Add a string
+
+1. **Classify the text.** Key rendered product copy. Keep technical docs,
+   model-facing prompts/tool descriptions/structural markers, developer logs,
+   commands/flags, identifiers and machine JSON/event tokens English. Preserve
+   machine `code` values; migrate English-parsing consumers to codes before
+   translating their sentences. Wire text uses the additive `{code, params, text}`
+   envelope, so older readers retain `text`.
+2. **Pick one small, owned namespace.** Reuse a nearby extraction's convention;
+   split large areas instead of mixing unrelated screens. A key is immutable
+   `<namespace>.<area>.<element>[.<state>]`, with lower snake_case segments.
+   Example: `tui.status.model.connecting`. Change its value, not its identity,
+   when wording changes. A distinct semantic meaning needs a new key.
+3. **Author English source** in
+   `local_operator/i18n/catalogues/en/<namespace>.json` (flat key → string map).
+   Use named ICU-subset placeholders and whole-message `plural`/`select` forms,
+   not concatenated sentences, positional formatting or hand-rolled plurals.
+   Follow existing keys such as `tui.status.jobs`.
+4. **Add context** in the English-only `<namespace>.context.json`: actual role,
+   tone, `maxCells` where a cell budget exists, and `note` explaining placeholders,
+   states, safety meaning and width constraints. The RFC calls these context notes;
+   current sidecars use `note`, not a made-up mandatory schema. Give translators
+   enough context to avoid guessing. Do not translate sidecars or invent a width cap.
+5. **Regenerate and use typed functions.** From a source checkout with its own
+   interpreter and Node available, run the commands below. Do not hand-edit
+   generated key modules or `data/shipped.json`.
+
+   ```sh
+   .venv/bin/python scripts/i18n/generate.py
+   .venv/bin/python scripts/i18n/generate.py --check
+   .venv/bin/python scripts/i18n/check.py --catalogues-only
+   .venv/bin/python scripts/i18n/check.py
+   ```
+
+   The generator emits Python per-key functions, Intl data and shipped
+   eligibility, plus the relay's **type-only**
+   `local_operator/mobile/web/src/i18n/keys.gen.ts` from the same parsed ICU
+   arguments. It neither bundles all wire copy nor generates every client's
+   artifacts/typechecks. Introduced in `ea0a43d97d`, merged with relay mechanism
+   [#2283](https://github.com/damianvtran/local-operator/pull/2283).
+   For example, this existing source path is executable:
+
+   ```python
+   from local_operator.i18n.keys import tui_status
+   from local_operator.i18n.text import tr
+
+   _t = tr("tui.status")
+   text = _t(tui_status.jobs(count=21))
+   wire = tui_status.model_connecting().envelope(locale="fr")
+   ```
+
+   Resolve at render time. For import-time constants follow the nearby
+   `register_refresh` pattern so a live language change re-materializes copy.
+   Python functions have typed keyword-only parameters; a misspelled function,
+   wrong type, missing required kwarg or unexpected positional argument must fail
+   typechecking. Do not replace them with untyped string-key calls or thousands
+   of per-key overloads.
+6. **Ratchet only your extraction's files.** After removing literals, lower
+   their ceilings with `--update`; it **preserves** the existing `enforced` list.
+   Before the final check, add any newly extracted owned **exact file** (or
+   deliberately narrow owned directory prefix ending in `/`) to
+   `i18n/baseline.json`'s `enforced`. Do not broaden unrelated advisory scopes.
+
+   ```sh
+   .venv/bin/python scripts/i18n/check.py --update path/to/extracted_file.py
+   # Activate the newly extracted owned path in baseline.json's enforced list.
+   .venv/bin/python scripts/i18n/check.py
+   ```
+
+   Prove activation in an isolated fixture: reinsert a hardcoded sink literal
+   and require rc=1; the same literal without activation is advisory/rc=0.
+   A lowered ceiling alone is not blocking enforcement.
+   `--update` only lowers/equalizes ceilings; never use `--init --force` to hide
+   new copy. English changes stale existing carried-namespace ledger hashes:
+   retranslate/re-audit those rows, regenerate, and report any eligibility loss.
+7. **Prove the path and the guard.** Exercise the actual render/response with
+   params, zero/one/many counts and absent namespace/key fallback. Pin English
+   in fixtures that intentionally assert English. Capture before/after rendered
+   states for visual changes (loading/empty/error/populated and narrow widths).
+   Use isolated HOME/config and bounded process groups as [AGENTS.md](../AGENTS.md)
+   requires; do not run probes against live sessions or pay a provider for a
+   documentation/example check.
+
+### TypeScript clients: current relay output, bounded contract
+
+RFC §2.4 specifies a generated `MessageParams` key map, `WithParams` and
+`WithoutParams` key sets, and **two overloads**:
+
+```ts
+export interface Translator {
+  <K extends WithParams>(key: K, params: MessageParams[K]): string;
+  (key: WithoutParams): string;
+}
+```
+
+No-params keys map to `undefined`. The client's implementation must reject all
+four negative cases: unknown key, wrong parameter type, missing required params,
+and params supplied to a no-params key. The RFC spike proved this shape; a single
+conditional-rest signature did not reject missing params. Inspect the target
+client's current generator/check scripts before giving runnable commands. Core
+`scripts/i18n/generate.py` now emits/checks the relay type map for `wire.*` and
+`relay.*`; it provides **no all-client typecheck**. Other clients' generation,
+bootstrap and runtime work must not be reported as finished by running it.
+
+## Add or extend a locale
+
+1. Check [`resolve.py`](../local_operator/i18n/resolve.py), the ledger and the
+   current PR programme. Extending one of the eight supported locales is a
+   catalogue contribution; recognizing a ninth also requires resolver vocabulary,
+   language display name, generated Intl data and client/bootstrap work under a
+   separate reviewed implementation. A catalogue directory alone is not support.
+2. Read [`i18n/glossary.md`](../i18n/glossary.md) and that locale's
+   [`style guide`](../i18n/style-guides/). Prepare native glossary/style decisions:
+   formality, idiomatic product phrasing, preserved product names/flags, common
+   nouns, digits, fit and RTL. Do not translate technical/model-facing docs.
+3. Delegate translation **only to an LLM `i18n-translator`**, then the same
+   English-source hash and complete carried namespace to a **different,
+   independent `i18n-auditor`**. Do not substitute a dictionary/machine-translation
+   service, self-audit, or mechanical parity for native semantic review. Record
+   the **actual agent and model identities**, dates and provider fallbacks, not
+   the model originally requested. High-visibility/safety copy needs a second
+   independent audit; the implementer must not manufacture that approval.
+4. Write locale `<namespace>.json` files with exact key/placeholder parity,
+   native idiom and the required CLDR plural categories. Run the four existing
+   commands above. Have independent native reviewers exercise plural branches,
+   safety meaning, truncation and glossary consistency. Pseudo-localization and
+   rendered long-text checks expose fit defects but do not certify a translation;
+   this core tree has no advertised one-command pseudo-localization workflow.
+5. Supply actual rendered evidence, including fallback and RTL when applicable.
+   The RFC requires web/Electron/mobile full mirroring; its TUI contract keeps
+   LTR layout with per-string bidi isolation and a degraded Urdu stance. Do not claim
+   native RTL completion from a synthetic string or a green parity check.
+6. Append the audit row to your locale's shard,
+   [`i18n/ledger/<locale>.json`](../i18n/ledger/), per `(locale, namespace)`:
+   fresh `source_sha256`, translator/auditor agent+actual model+date, auditor
+   result/unresolved blocker-major count, status and dispositions in `note`. A
+   passed row requires the independent audit to be complete. The ledger is
+   **append-only**: re-auditing at new English bytes appends a row and keeps the
+   earlier one at its superseded hash — never dedupe or rewrite history, because
+   the last row per (locale, namespace) is what ships. `i18n/ledger.json` is a
+   GENERATED compatibility mirror — never hand-edit or append to it;
+   `generate.py --check` fails whenever the two disagree, and `generate.py`
+   refuses to overwrite an aggregate holding a row no shard carries, so a row
+   written to the wrong file cannot be silently lost.
+
+   **Rebasing a branch that appended to the old aggregate** — any locale PR
+   opened before sharding landed — is three steps, in this order:
+
+   ```sh
+   python3 scripts/i18n/shard_ledger.py --fold-stranded   # your rows -> your shard
+   python3 scripts/i18n/generate.py                       # re-render the mirror
+   python3 scripts/i18n/generate.py --check               # confirm
+   ```
+
+   `--fold-stranded` appends the aggregate-only rows to their locale's shard in
+   their original order (so the last row still wins) and is a no-op once nothing
+   is stranded. Never resolve an `i18n/ledger.json` conflict by choosing a side
+   by hand: each side is a partial mirror, and regenerating is the resolution.
+
+   The only other way past that refusal is `generate.py --accept-stranded`,
+   which re-renders the mirror while NAMING the aggregate rows it drops. It
+   exists for an authorised row removal (the ledger is append-only, so removal
+   is a reviewed exception), never for a rebase — and CI never passes it.
+
+   **Where conflicts still happen.** Different locales' shards never conflict,
+   and two appends to EXISTING locales merge cleanly on the locale-grouped
+   mirror too. Two cases still conflict, both on generated files: (a) adding a
+   NEW locale — its block is inserted next to another locale's rows, so a
+   concurrent append there can collide on `i18n/ledger.json`; (b) two branches
+   that both change the shipped set always conflict on
+   `local_operator/i18n/data/shipped.json`. Both are resolved by regeneration,
+   never by merging rows.
+   Generation mechanically checks `status` and hash, **not the truth of auditor
+   provenance**; the independent review/programme gate checks that evidence.
+   Regenerate and check shipped output; never activate or distribute held work
+   by silently weakening a row, rewriting history or selectively removing failures.
+
+## Enforcement: current ratchet versus completion
+
+[`scripts/i18n/check.py`](../scripts/i18n/check.py) scans Python user-copy sinks
+and validates carried catalogue keys, syntax, placeholder parity and plural
+categories. [`i18n/baseline.json`](../i18n/baseline.json) names the **blocking**
+`enforced` files/prefixes; increases and new unbaselined literals there fail
+closed. Findings elsewhere are **advisory and exit 0**. That is partial extraction
+activation, not global no-hardcoded-copy enforcement or a TS/other-client scanner.
+
+Prefer a narrow `# i18n: ignore <reason>` on an exempt call (anywhere within its
+first-to-last-line span). File/directory exemptions in
+[`allowlist.toml`](../i18n/allowlist.toml) are `[path, reason]` pairs, no globs.
+Require the legitimate category, responsible owner and expiry/removal condition
+in the reason/PR record; use an owner role, not personal details. **Today only a
+nonempty reason is mechanically required**; owner/expiry are review obligations,
+not existing TOML fields or an automated expiry gate. Future extraction is not
+an exemption reason.
+
+For each enforcement change prove counterfactual negatives in an isolated
+fixture: add a hardcoded sink literal in blocking scope; misspell a key; supply
+wrong/missing params; corrupt placeholder/plural parity; stale a carried source
+hash; remove an exemption's reason. Each relevant guard must fail, with an
+unmodified control passing. Keep uninvolved advisory areas visibly advisory;
+never inflate a ratchet green into proof the whole programme is complete.
+
+## Dated programme snapshot — 2026-10-12
+
+Installed runtime measured here: **0.70.4**. Source checked at
+`d7e4c1e89146e1c1333ccb5fc016725dc43b608f`: five partial active locales
+**en/fr/es/ru/vi**, eight supported. `generate.py --check` reports **19 artifacts
+byte-identical**; `check.py` reports catalogue consistency with **22 advisory
+findings**. These are a dated baseline, not a perpetual completeness claim.
+
+| Work | Verified state / source |
+|---|---|
+| Hindi core | [#2267](https://github.com/damianvtran/local-operator/pull/2267) OPEN; actual Sonnet 5.5 design **HELD / unperformed**, not approved by fallback-model QA. |
+| Relay | [#2281](https://github.com/damianvtran/local-operator/pull/2281) and stacked [#2283](https://github.com/damianvtran/local-operator/pull/2283) OPEN; dependencies/programme actual-Sonnet design gate **HELD**. Mechanism-only QA is not public activation. |
+| Desktop onboarding | [UI #1002](https://github.com/damianvtran/local-operator-ui/pull/1002) OPEN; actual-Sonnet design **HELD**, component evidence is not full-app/non-English certification. |
+| Chinese | **SECURITY HELD**, no exemption (programme instruction); slash audit **50/51, NOT PASSED**, not PR numbers. [Primary preservation/provenance record](https://github.com/damianvtran/local-operator/pull/2267#issuecomment-6118572784) names the held history and corrected actual auditor models. |
+| Remaining programme | Urdu/native RTL, remaining clients and global enforcement **NOT DONE**. Missing namespaces remain English-source/format fallback. |
+
+Re-read primary PR bodies/comments before changing these statuses. This HOWTO
+performs no native translation/design audit and waives no model/security hold.
+Technical/model-facing docs remain English; future product copy must be keyed.
+Docs-site/marketing mirrors and other client developer-doc pointers need a later
+inventory (RFC §3.6); they are **not edited or claimed synchronized here**.
+
+### Source-current supersession — measured 2026-10-13 UTC
+
+The dated 0.70.4 snapshot above is historical, not the current status. At source
+`641a392040bf4056361228cfc3d3ad978fced3e8`, the generated eligible set is
+**en/fr/es/ru/vi/hi**, still partial, not all eight supported locales or full-surface
+coverage. Fresh primary records show core #2267 merged (`405fabd708`), relay
+#2281/#2283 merged, and UI #1002 merged (`dbcb1a7682`); those formerly open holds
+are not current PR states. Their merges do not complete unrelated namespaces.
+Chinese remains **SECURITY HELD**; Urdu/native RTL, remaining clients and global
+enforcement remain unfinished. A new General-language picker is **requested,
+not shipped**.
+
+Source, publication and installation are separate observations: tag
+`v0.70.11` resolves to `9b340ff34e34622cbbe0990a9b48fe74c7ea7ca1`; at
+2026-10-13 00:10 UTC, the actual PyPI query reported **0.70.10** and the
+0.70.11 version endpoint returned 404. The isolated installed CLI separately
+reported **0.70.10** during this check. Do not infer installation from a tag or
+package index, or imply this docs refresh is part of that already-cut tag: it
+lands in a subsequent window.
+Re-query these measured states before making a release claim.
+
+[`publish.yml`](../.github/workflows/publish.yml) runs
+`python scripts/i18n/generate.py --check` and `python scripts/i18n/check.py`
+**unconditionally** on the actual release/event target before build/publication,
+asserting checked-out HEAD equals the event SHA; source-consuming jobs pin that
+SHA. The release-owner procedure in [AGENTS.md](../AGENTS.md) requires the same
+checks on the exact combined bump merge SHA before tagging. A docs/version-only
+CI classification is not this release proof; never regenerate in the publisher
+or waive a drift/audit failure. See release invariant
+[#2305](https://github.com/damianvtran/local-operator/pull/2305).
+
+**Publication supersession — 2026-10-13 00:29 UTC:** the
+[version-specific PyPI endpoint](https://pypi.org/pypi/local-operator/0.70.11/json)
+now returns HTTP 200 with **three files** for 0.70.11;
+[publisher 38324577202](https://github.com/damianvtran/local-operator/actions/runs/38324577202)
+completed with **all five jobs successful** at the exact tag SHA above. The
+separately rechecked installed CLI remains **0.70.10**. This supersedes only the
+00:10 publication observation, not its history or the installed-version result;
+publication is not installation. The General-language picker remains authorized
+for a next UI feature, **not shipped**.

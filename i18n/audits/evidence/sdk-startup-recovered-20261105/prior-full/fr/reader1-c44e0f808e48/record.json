@@ -1,0 +1,169 @@
+{
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_startup",
+  "audit_id": "frsdkstartup-c44e0f808e48",
+  "audit_date": "2026-11-03",
+  "key_count": 4,
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c44e0f808e48",
+    "instance": "c44e0f808e48",
+    "model": "radient/auto",
+    "model_label": "auto - opaque route; underlying model undisclosed",
+    "served_route": {
+      "provider": "radient",
+      "model_id": "auto",
+      "message_id": "5cf38bee0b434aa780f9a231eaa152b8",
+      "ts": 1793725499.660301
+    },
+    "actual_model_source": {
+      "kind": "own_completed_assistant_usage",
+      "artifact": "served-model-evidence.json",
+      "note": "The session exposes only the opaque auto route; no underlying model or fallback is inferred."
+    },
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder": "eae0961e4e78"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "snapshot": "en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "snapshot": "context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "snapshot": "fr.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d"
+    },
+    "style_guide": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/style-guides/fr.md",
+      "snapshot": "fr-style.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/glossary.md",
+      "snapshot": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "audit.log",
+      "sha256": "2ea1d5e32873c000541200d981d51cab547df62bdf3fcac14d261064de976241"
+    },
+    {
+      "path": "audit.py",
+      "sha256": "ed79d85202140324661a03cf17b23c5ec3d9e07723a09aaf0a1b3a3ea5d6a927"
+    },
+    {
+      "path": "context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    {
+      "path": "en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    {
+      "path": "fr-style.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    {
+      "path": "fr.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d"
+    },
+    {
+      "path": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    {
+      "path": "key-facts.json",
+      "sha256": "62db07083549d33c28916b69c0f2be60c0e145f060dc87cc78941f465c82e91e"
+    },
+    {
+      "path": "receipt.json",
+      "sha256": "5c085fda3d5e6b00db2c597e9d33320b3fc4d4ecf08988eeddf0d6e45af58832"
+    },
+    {
+      "path": "report.md",
+      "sha256": "1a975a25753bd7980190af65ba6d09c3371b9413c8cf599d125d1d5449159ea8"
+    },
+    {
+      "path": "served-model-evidence.json",
+      "sha256": "db4be20df5873848a6f4099b6f8516ac3a0862f1dd3750882b4f8dd9cf9c1b1a"
+    },
+    {
+      "path": "translator-fr-style.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "F1"
+    ]
+  },
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "MINOR",
+      "file": "context",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "current": "The context note treats this child namespace as English-only and defers translated consumers to a future migration.",
+      "problem": "Contradicts the verified locale path: sdk.py:584-598 resolves the configured language and renders the resolved locale. The other three notes in the same sidecar make no such claim, and docs/SDK.md documents the resolution. A later translator could read it as a pin and leave the namespace untranslated.",
+      "suggestion": "Renders in the resolved locale after root isolation (sdk.py::startup_refusal_text); English is the fallback when the catalogue is absent, not a pin. Keep the embedded error as opaque text and preserve its sentence boundary.",
+      "affects_translated_copy": false
+    },
+    {
+      "id": "O1",
+      "severity": "observation",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "note": "The embedded error is followed by a capitalised French sentence, as in English; today's producer ends with a full stop. Never insert punctuation inside the placeholder."
+    },
+    {
+      "id": "O2",
+      "severity": "observation",
+      "file": "docs",
+      "note": "docs/design/backend-originated-strings.md:60 and the docs/SDK.md:220 heading still inventory this namespace as English-only while the body documents locale resolution; coordinator-owned docs consistency."
+    }
+  ],
+  "locale_path_proof": "sdk.py:584-598 startup_refusal_text resolves language then calls messages.render; the same boundary was exercised on an isolated fixture: fr produced French, en produced English, and a missing fr file fell back to English. Source read only; no producer change claimed.",
+  "evidence_types": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "key-facts.json": "actual_parser_and_width_results",
+    "served-model-evidence.json": "own_completed_usage_extract"
+  },
+  "not_run": [
+    "pseudo",
+    "native_RTL",
+    "rendered_UI_or_terminal_fit",
+    "real_configured_root_SDK_guard_execution",
+    "full_suite",
+    "scanner",
+    "build",
+    "install",
+    "ledger_generation",
+    "activation"
+  ],
+  "no_producer_or_exception_contract_change": true,
+  "original_packet_preserved": true,
+  "previous_bundles_preserved": true,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "retention": "Original immutable session-scratch handoff; coordinator owns tracked canonical retention; not claimed on main."
+}

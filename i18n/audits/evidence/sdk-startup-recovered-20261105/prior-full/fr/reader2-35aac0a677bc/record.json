@@ -1,0 +1,224 @@
+{
+  "record_version": 1,
+  "kind": "original_independent_staged_core_namespace_audit",
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_startup",
+  "audit_date": "2026-11-03T17:06:07.189994+00:00",
+  "key_count": 4,
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+  "target_sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "reader": "fr-second",
+    "session": "35aac0a677bc",
+    "model": "radient/auto",
+    "date": "2026-11-03",
+    "result": "passed",
+    "findings": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    },
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder_session": "eae0961e4e78",
+    "coder_identity_source": "Coordinator-provided actual session; coder job 196c3a94b346 is not a session id. No own historical execution claimed.",
+    "actual_model_source": {
+      "kind": "own_completed_payload_usage",
+      "record": "provenance.json",
+      "value": "provider=radient, model=auto",
+      "opaque_label": true,
+      "underlying_model_known": false
+    },
+    "independence_statement": "No part of the source, translation or context was authored or edited here; no other independent reviewer report was read before this verdict."
+  },
+  "producer_semantics": {
+    "sdk_contract": "wire.errors.sdk_startup is NOT sdk_spec: the four producers route through startup_refusal_text(), which resolves the scoped config language and renders with messages.render(..., locale=locale). Translation is intended here; English is only the default/fallback outcome.",
+    "verified_at": "local_operator/sdk.py at pinned commit 0e7cde33ca8008d561e74f4aed774aa5f76ff7d5 (source inspection, not execution)",
+    "producers": {
+      "attach_hosting_unconfigured": "sdk.py:626-633, inside `except HostingNotConfiguredError` when mode == 'attach' (the factory's hosting preflight refused); embeds str(HostingNotConfiguredError) as the opaque {error}",
+      "attach_runtime_missing": "sdk.py:656-660, after dispose() when an attach-mode session unexpectedly owns a runtime (a cold id fell through to an in-process owner)",
+      "profile_attach_failed": "sdk.py:669-673, when session.attach_agent_profile(spec.profile) returns falsy",
+      "tool_inventory_mismatch": "sdk.py:689-695, when approvals.mode == 'declared', spec.tools resolves to an inventory and that tuple differs from ApprovalPolicy.declared(...)"
+    },
+    "default_english_unchanged": true,
+    "real_configured_fr_reaches_target_without_producer_change": true,
+    "rendered_or_executed_here": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+      "retained_path": "catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "byte_identical_to_pinned_blob": true
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+      "retained_path": "catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "byte_identical_to_pinned_blob": true
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "retained_path": "catalogues/fr/wire.errors.sdk_startup.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "absent_at_pinned_commit": true
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "retained_path": "style-fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "retained_path": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "architect_assessment": {
+      "path": "/Users/damian/Documents/LocalOperator/Reports/i18n-sdk-contract-assessment-2026-11-03-3ef6295a5545.md",
+      "retained_path": "architect-assessment.md",
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "use": "named external assessment; not re-proved here"
+    }
+  },
+  "packet_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33",
+  "packet_manifest_sha256": "f92f0b7419d8de77398bcfeb188cd01e9b1e18b4a91161780cdf46afcc26e89d",
+  "packet_manifest_all_12_entries_verified": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "F1"
+    ]
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "MINOR",
+      "keys": [
+        "wire.errors.sdk_startup.attach_hosting_unconfigured",
+        "wire.errors.sdk_startup.attach_runtime_missing"
+      ],
+      "current_text": "… et rattachez-vous dès qu’un runtime existe. (key 1) / … puis rattachez-vous dès qu’un runtime existe. (key 2)",
+      "problem": "Bare reflexive se rattacher lacks its required complement; corpus always supplies one (rattachés à un enregistrement, une vue se rattache à un identifiant). Reads as a calque of intransitive “attach”. Meaning/action survive → MINOR, not MAJOR.",
+      "suggested": "… puis rattachez-vous à la session dès qu’un runtime existe. (both keys)",
+      "blocks_merge": false
+    }
+  ],
+  "out_of_scope_observations": [
+    {
+      "id": "O1",
+      "severity": "none — not a translation finding",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "observation": "The opaque {error} slot carries the producer’s own English sentence (“Hosting platform is not configured.”). The French catalogue preserves it verbatim as required; removing that English requires a producer/display-boundary change (architect assessment recommends display-specific copy omitting raw cause prose), which this catalogue-only contribution does not make.",
+      "operator_goal_impact": "Relevant to “no English anywhere” but pre-existing and separately owned; not introduced by this translation."
+    }
+  ],
+  "audit_notes_not_execution_log": {
+    "native_assessment": "audit-report.md: native assessment per key",
+    "note": "Linguistic reasoning and source/AST inspection are notes, not execution. Actual command stdout is mechanical.json; stderr is mechanical.stderr.log (empty)."
+  },
+  "execution": {
+    "command": "clear inherited CMUX_*; cd ~/local-operator; env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B <audit root>/verify.py",
+    "exit_code": 0,
+    "memory_ceiling_mb": 256,
+    "timeout_seconds": 90,
+    "repo_checker": "scripts.i18n.check.check_catalogues on isolated 4-key fixture",
+    "repo_checker_problems": 0,
+    "negative_controls_rejected": 8,
+    "production_render_exercised": "local_operator.i18n.messages.render/render_record",
+    "plural_select_cldr": "not applicable: none",
+    "rtl": "not applicable to French",
+    "pseudo": "NOT RUN",
+    "native_fit": "NOT RUN",
+    "sdk_guards_or_live_requests": "NOT RUN"
+  },
+  "native_ui_caller_fit": "unproven: no direct current UI sink established; architect assessment reports none; no rendered or live proof here",
+  "note": "fr second reader: 4/4 sdk_startup keys pass; 0 blocker/major; F1 MINOR bare se rattacher. Resolved-locale producer path verified. Native/pseudo/runtime NOT RUN.",
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "retention": {
+    "state": "original bundle retained read-only in session scratch pending coordinator tracked promotion",
+    "canonical_root_suggestion": "i18n/audits/evidence/fr/wire.errors.sdk_startup/fr2-35aac0/",
+    "ledger_written": false,
+    "prior_bundles_untouched": true
+  },
+  "artifacts": [
+    {
+      "path": "architect-assessment.md",
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "bytes": 10289,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "audit-report.md",
+      "sha256": "c6797dd2452f75fc185429ed142fc7f40418f3fb4b394094f1321d3f95dc538d",
+      "bytes": 12299,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "bytes": 1890,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "bytes": 772,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "catalogues/fr/wire.errors.sdk_startup.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "bytes": 933,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "bytes": 13399,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "input-verification.json",
+      "sha256": "4a4fdd7dbc9f7cd44621b39a94c34ccf9d512d6b1015b937d5c5800e3a982347",
+      "bytes": 2373,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "mechanical.json",
+      "sha256": "fb14837c92ca243c721f0079aeb12a9aa84eb909dd07367bb471685aa794af37",
+      "bytes": 7273,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "mechanical.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "provenance.json",
+      "sha256": "2ece6262cf95a7c1141d639351f1328eed705279a0e0e3943bb0437c16deec6f",
+      "bytes": 3470,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "style-fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "bytes": 4196,
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "verify.py",
+      "sha256": "3306219cde8b77463106974c0a2ea70c83bb7934f554888326111073295bc1a6",
+      "bytes": 10611,
+      "provenance_reference": "record.json:auditor"
+    }
+  ]
+}

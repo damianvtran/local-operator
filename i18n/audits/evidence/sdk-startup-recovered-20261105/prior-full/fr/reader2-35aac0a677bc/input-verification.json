@@ -1,0 +1,69 @@
+{
+  "packet": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33",
+  "packet_manifest_sha256": "f92f0b7419d8de77398bcfeb188cd01e9b1e18b4a91161780cdf46afcc26e89d",
+  "all_12_manifest_entries_verified": [
+    {
+      "path": "README.md",
+      "sha256": "20913f5c5a3dc25b02faf273968fa795e3364ac60146d0c96e2ddc4e3b7f0dea",
+      "matches_manifest": true
+    },
+    {
+      "path": "caller-proof.json",
+      "sha256": "cdcb701335d9239182745582767e9acc0ec6fd994114546bee8f7fdf2bff6e6b",
+      "matches_manifest": true
+    },
+    {
+      "path": "inputs/architect-assessment.md",
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "matches_manifest": true
+    },
+    {
+      "path": "inputs/en.context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "matches_manifest": true
+    },
+    {
+      "path": "inputs/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "matches_manifest": true
+    },
+    {
+      "path": "inputs/fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "matches_manifest": true
+    },
+    {
+      "path": "inputs/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "matches_manifest": true
+    },
+    {
+      "path": "provenance.json",
+      "sha256": "b1cb4e92c1b8a0775ebb53eac8328d4bada0ba58395af1c5bc25393da45d3b6d",
+      "matches_manifest": true
+    },
+    {
+      "path": "record.json",
+      "sha256": "eb00a5fd2016f0ff56a910ba843c0e9a857d18d608bcd8eec78f31d123b616f6",
+      "matches_manifest": true
+    },
+    {
+      "path": "validate.mjs",
+      "sha256": "411a794eb7ca4a183a59f961c1cd70a783f9ad5e8f80f03eaadd88bb12444742",
+      "matches_manifest": true
+    },
+    {
+      "path": "validation.log",
+      "sha256": "0b4bc3b426e204eb6da08606b435dea84a34b002e73c6c2e6294160a30da8aa8",
+      "matches_manifest": true
+    },
+    {
+      "path": "wire.errors.sdk_startup.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "matches_manifest": true
+    }
+  ],
+  "source_and_context_byte_identical_to_pinned_commit": true,
+  "pinned_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "french_target_absent_at_pinned_commit": true
+}

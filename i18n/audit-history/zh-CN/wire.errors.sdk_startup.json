@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_startup",
+  "history_sha256": "e88b8ed43201fb86694a5709eb7ec842a209e13a7b3b45c8d21da92f137d3b95",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.sdk_startup",
+      "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "context_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "target_sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "model_kind": "recorded opaque router selector; concrete underlying model UNKNOWN",
+        "underlying_model": "UNKNOWN",
+        "date": null,
+        "session": "7fce46e29bee",
+        "evidence": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/translator-record.json"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": null,
+        "model_status": "UNKNOWN concrete served model; original route/header disclosure retained, not promoted to served-model proof",
+        "date": "2026-11-03",
+        "session": "d6d8c41965c3",
+        "result": "passed",
+        "unresolved_blocker_major_count": 0,
+        "scope": "context-delta-confirmation",
+        "original_provenance": {
+          "agent": "i18n-auditor",
+          "session": "d6d8c41965c3",
+          "model": "radient/auto",
+          "requested_route": "radient/auto",
+          "served_underlying_model": "UNKNOWN",
+          "actual_model_source": {
+            "kind": "session header / router label only",
+            "note": "the route label radient/auto is a header value and is NOT proof of the served upstream model; no execution-level served-model or provider record was exposed in this session"
+          },
+          "fallback": "UNKNOWN — no fallback event was exposed; NONE is not claimed",
+          "independent_from_translator_session": true,
+          "translator_session": "7fce46e29bee",
+          "independent_from_prior_reader_sessions": true,
+          "prior_reader_sessions": [
+            "e55f54b6a26e",
+            "6433b7a5b3e9"
+          ],
+          "prior_audit_bundle": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103",
+          "other_parallel_reader_report_read": false,
+          "note_on_scope_of_reading": "Prior zh-CN full audits (r1 e55f54b6a26e, second 6433b7a5b3e9) were read for compatibility only, as permitted. The new parallel reader's report was not read."
+        },
+        "evidence": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader1-d6d8c41965c3/record.json",
+        "prior_full_evidence": [
+          "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/record.json",
+          "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader2-6433b7a5b3e9/record.json"
+        ]
+      },
+      "status": "passed",
+      "note": "Recovered authentic audit d6d8c419-zhctxdelta1, dated 2026-11-03; no new translation/audit/pass invented. Two prior full audits plus this current-context confirmation; not a new full re-audit. Current exact English/context/target binding retained. Original #3378-unmerged notes remain historical; prerequisite now merged in base 0b70efcc2bbff79020c4ccf2f1fe82b9e52ac7c0. All original advisory findings deferred in i18n/audits/evidence/sdk-startup-recovered-20261105/advisory-dispositions.json without copy changes. Underlying model/fallback UNKNOWN retained; model=null means not proven, not NONE. Evidence: i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader1-d6d8c41965c3/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.sdk_startup",
+      "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "context_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "target_sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "model_kind": "recorded opaque router selector; concrete underlying model UNKNOWN",
+        "underlying_model": "UNKNOWN",
+        "date": null,
+        "session": "7fce46e29bee",
+        "evidence": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/translator-record.json"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": null,
+        "model_status": "UNKNOWN concrete served model; original route/header disclosure retained, not promoted to served-model proof",
+        "date": "2026-11-03",
+        "session": "0feda324e9e3",
+        "result": "passed",
+        "unresolved_blocker_major_count": 0,
+        "scope": "context-delta confirmation + current-parameter integrity (reader 2, priority locale); source-only",
+        "original_provenance": {
+          "agent": "i18n-auditor",
+          "session": "0feda324e9e3",
+          "role": "zh-CN reader 2 (second independent reader for a high-visibility group: startup refusals)",
+          "model": "radient/auto",
+          "requested_route": "Radient Auto",
+          "model_label_kind": "harness header label; not served-model proof",
+          "underlying_served_model": "UNKNOWN",
+          "actual_model_source": "harness session header only; no execution proof of a concrete upstream model was produced in this source-only run",
+          "fallback": "UNKNOWN (not exposed)",
+          "independent_from_translator_session": true,
+          "translator_session": "7fce46e29bee",
+          "independent_from_coder_session": true,
+          "other_reader_report_read": false,
+          "prior_zh_audits_read": [
+            "sdk-startup-inventory-20261103/audit/zh-CN/sdk-startup-zh-CN-r1/record.json",
+            "sdk-startup-inventory-20261103/audit/zh-CN/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+          ]
+        },
+        "evidence": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader2-0feda324e9e3/record.json",
+        "prior_full_evidence": [
+          "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/record.json",
+          "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader2-6433b7a5b3e9/record.json"
+        ]
+      },
+      "status": "passed",
+      "note": "Recovered authentic audit zh-r2-ctx-82f193, dated 2026-11-03; no new translation/audit/pass invented. Two prior full audits plus this current-context confirmation; not a new full re-audit. Current exact English/context/target binding retained. Original #3378-unmerged notes remain historical; prerequisite now merged in base 0b70efcc2bbff79020c4ccf2f1fe82b9e52ac7c0. All original advisory findings deferred in i18n/audits/evidence/sdk-startup-recovered-20261105/advisory-dispositions.json without copy changes. Underlying model/fallback UNKNOWN retained; model=null means not proven, not NONE. Evidence: i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader2-0feda324e9e3/record.json"
+    }
+  ]
+}
