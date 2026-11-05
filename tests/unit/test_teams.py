@@ -1609,7 +1609,14 @@ def test_failed_recovery_aborts_every_registry_operation(
         return real_replace(src, dst, **kwargs)
 
     monkeypatch.setattr(teams_module.os, "replace", deny_restore)
-    with pytest.raises(TeamRegistryRecoveryError, match="fix registry permissions and retry"):
+    # Definition writers inspect published bytes without triggering recovery;
+    # ordinary registry reads retain the existing recover-or-refuse wording.
+    expected = (
+        "unreadable or interrupted; recovery required"
+        if operation in {"update", "delete"}
+        else "fix registry permissions and retry"
+    )
+    with pytest.raises(TeamRegistryRecoveryError, match=expected):
         if operation == "create":
             registry.create_team(TeamEditFields(name="ops"))
         elif operation == "update":

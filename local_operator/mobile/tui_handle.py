@@ -70,6 +70,7 @@ from local_operator.session.runtime.server import (
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 
 if TYPE_CHECKING:
+    from local_operator.profile_actions import ProfileActionReply
     from local_operator.tui.app import OperatorApp
 
 logger = logging.getLogger(__name__)
@@ -1328,7 +1329,23 @@ class TuiSessionHandle(SessionHandle):
         await self.refresh()
         return f"resumed {session_id}"
 
-    async def profile_action_status(self, **identity: str) -> dict[str, str]:
+    async def profile_action_status(
+        self,
+        *,
+        action_id: str,
+        receipt_id: str,
+        profile_kind: str,
+        profile_name: str,
+        tool_call_id: str,
+    ) -> ProfileActionReply:
+        identity = dict(
+            action_id=action_id,
+            receipt_id=receipt_id,
+            profile_kind=profile_kind,
+            profile_name=profile_name,
+            tool_call_id=tool_call_id,
+        )
+
         async def read():
             session = self._session()
             client = getattr(session, "_client", None)
@@ -1340,7 +1357,7 @@ class TuiSessionHandle(SessionHandle):
 
     async def approval_answer(
         self, request_id: str, approved: bool, remember: bool
-    ) -> str | dict[str, str]:
+    ) -> str | ProfileActionReply:
         """Settle the host's real ApprovalPrompt from another front end.
 
         The prompt's ``resolve`` is idempotent and runs on Textual's loop, so

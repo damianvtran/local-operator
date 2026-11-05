@@ -323,40 +323,54 @@ def transact(
             write(after)
             if commitment(read()) != after_token:
                 raise DefinitionTransactionConflict("definition write did not match its commitment")
-        except Exception:
-            if one_shot:
-                # Storage adapters may wrap OSError. Classify from fresh bytes,
-                # never the exception's class or its potentially private text.
-                actual = commitment(read())
-                if actual != after_token and actual != before_token:
-                    try:
-                        write(before)
-                    except Exception:
-                        pass  # Readback below is the proof, not a successful call.
+        except Exception as primary:
+            try:
+                if one_shot:
+                    # Storage adapters may wrap OSError. Classify from fresh bytes,
+                    # never the exception's class or its potentially private text.
                     actual = commitment(read())
-                if actual == after_token:
-                    record["state"] = "complete"
-                elif actual == before_token:
-                    record["state"] = "failed"
+                    if actual != after_token and actual != before_token:
+                        try:
+                            write(before)
+                        except Exception:
+                            pass  # Readback below is the proof, not a successful call.
+                        actual = commitment(read())
+                    if actual == after_token:
+                        record["state"] = "complete"
+                    elif actual == before_token:
+                        record["state"] = "failed"
+                    else:
+                        raise DefinitionTransactionConflict("write outcome requires reconciliation")
+                    _durable_json(path, record)
+                    _mark_consumed(key)
+                    return record
                 else:
-                    raise DefinitionTransactionConflict("write outcome requires reconciliation")
-                _durable_json(path, record)
-                _mark_consumed(key)
-                return record
-            else:
-                # Ordinary saves retain rollback-and-raise semantics. This must
-                # share the handler above: a sibling except Exception would be
-                # unreachable and silently mark partial non-one-shot writes done.
-                # The same lock excludes competing writers during the rollback;
-                # failed recovery leaves prepared bookkeeping, never completion.
-                write(before)
-                if commitment(read()) != before_token:
-                    raise DefinitionTransactionConflict(
-                        "rollback did not restore its commitment; recovery required"
-                    )
-                record["state"] = "rolled_back"
-                _durable_json(path, record)
-                raise
+                    # Ordinary saves retain rollback-and-raise semantics. This must
+                    # share the handler above: a sibling except Exception would be
+                    # unreachable and silently mark partial non-one-shot writes done.
+                    # The same lock excludes competing writers during the rollback;
+                    # failed recovery leaves prepared bookkeeping, never completion.
+                    if commitment(read()) != before_token:
+                        write(before)
+                    if commitment(read()) != before_token:
+                        raise DefinitionTransactionConflict(
+                            "rollback did not restore its commitment; recovery required"
+                        )
+                    record["state"] = "rolled_back"
+                    _durable_json(path, record)
+                    raise
+            except Exception as secondary:
+                # An unreadable published image is UNKNOWN, not a new reason
+                # to recover/restore or claim rollback. Keep the original save
+                # fault outward; normal access owns recovery after the fault ends.
+                if secondary is primary:
+                    raise
+                primary.add_note(
+                    "definition outcome is unconfirmed; recovery required "
+                    f"({type(secondary).__name__})"
+                )
+                raise primary from secondary
+
         record["state"] = "complete"
         _durable_json(path, record)
         _mark_consumed(key)

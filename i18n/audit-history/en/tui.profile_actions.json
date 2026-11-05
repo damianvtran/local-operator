@@ -1,6 +1,8 @@
 {
   "schema": 1,
   "locale": "en",
+  "namespace": "tui.profile_actions",
+  "history_sha256": "8bfc802bb1f3e70f9bf7c8e3aa1b45950dc2434d3bae3522db7934d91a80171e",
   "entries": [
     {
       "locale": "en",

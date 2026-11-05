@@ -298,7 +298,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (account profile save consent): 1441 -> 1486 (+45). The
     # ``revert`` op row and the ``backup_id`` param it needs; ``team`` gains the
     # same pair (1431 -> 1464, +33).
-    "agent": 1486,
+    "agent": 1462,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -745,7 +745,7 @@ MEASURED_TOKENS: dict[str, int] = {
 #: wording as the canonical arm; ``task`` stays 764.
 #: RE-MEASURED (PR #3143): agent 1437 -> 1470, the same +33 ``saver`` param
 #: as the canonical arm; ``task`` stays 764 (Saver is not a launch field).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1515, "task": 764}
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1491, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

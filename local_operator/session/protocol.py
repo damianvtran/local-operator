@@ -758,7 +758,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 149 public members and a POSITIVE
+    than stylistic. This protocol carries 151 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -836,7 +836,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``history_peer_cycle_display_records`` on the viewer contract — the remote
     reader holds an attached facade, so the optional member belongs here and
     not on the owner-side protocol, one member on
-    the queued-ask rung, 149 once the TUI's retirement notice needed
+    the queued-ask rung, 151 once the TUI's retirement notice needed
     ``pending_move_cwd`` — a cwd move restarts the session elsewhere, and the
     facade is the only side holding the destination at that instant), so
     recompute it

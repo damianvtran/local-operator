@@ -6759,7 +6759,7 @@ class ServingSessionHandle(SessionHandle):
     @_on_session_loop
     async def receive_profile_save_result(self, receipt_id: str) -> str:
         """A hint confers no provenance: reverify the signed local result first."""
-        await self._session.receive_profile_save_result(receipt_id)
+        self._session.queue_profile_save_result(receipt_id)
         return "profile receipt queued for verification"
 
     @_on_session_loop

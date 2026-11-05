@@ -4927,6 +4927,7 @@ class Session:
         self._tg_stack: contextlib.AsyncExitStack | None = None
         self._task_group: asyncio.TaskGroup | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._profile_result_waiters: dict[str, asyncio.Task[Any]] = {}
         self._signal: AbortSignal | None = None
         self._is_streaming = False
         #: Bang-mode receipts that completed while a turn or manual compaction
@@ -10640,6 +10641,29 @@ class Session:
             error = exc
         await settle_read_batch(batch, error)
 
+    def queue_profile_save_result(self, receipt_id: str) -> None:
+        """Own a deduplicated continuation, independent of a socket's deadline.
+
+        The durable spool remains the restart authority until verified native
+        publication acknowledges it. Disposal cancels the owned waiter, not that
+        spool; neither this hint nor its ACK is a model/owner/wake input.
+        """
+        previous = self._profile_result_waiters.get(receipt_id)
+        if previous is not None and not previous.done():
+            return
+        task = self._spawn_background(
+            self.receive_profile_save_result(receipt_id, wait_for_boundary=True)
+        )
+        if task is None:
+            return
+        self._profile_result_waiters[receipt_id] = task
+
+        def finished(done: asyncio.Task[Any]) -> None:
+            if self._profile_result_waiters.get(receipt_id) is done:
+                self._profile_result_waiters.pop(receipt_id, None)
+
+        task.add_done_callback(finished)
+
     async def receive_profile_save_result(
         self, receipt_id: str, *, wait_for_boundary: bool = False
     ) -> None:
@@ -10681,6 +10705,7 @@ class Session:
             raise RuntimeError("profile receipt waits for the current tool boundary")
         async with self._turn_lock:
             if already_delivered():
+                await self._ack_profile_result_hint(receipt_id)
                 return
             target = next(
                 (
@@ -10977,9 +11002,7 @@ class Session:
         if custom_type == "profile_save_result":
             # A non-waking verified continuation, never peer/user model input.
             # The durable spool survives cancellation while a live turn settles.
-            self._spawn_background(
-                self.receive_profile_save_result(message_id or "", wait_for_boundary=True)
-            )
+            self.queue_profile_save_result(message_id or "")
             return PeerReceiveDetail("profile receipt queued for verification", {})
         from local_operator.mobile.peer_send import valid_peer_message_id
 

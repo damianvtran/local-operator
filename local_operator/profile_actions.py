@@ -30,6 +30,7 @@ from local_operator.definition_transaction import (
     commitment,
     definition_lock,
 )
+from local_operator.types import TeamRegistryRecoveryError
 
 ProfileActionState = Literal["available", "pending", "succeeded", "stale", "failed", "unavailable"]
 
@@ -343,6 +344,7 @@ class ProfileActions:
         from local_operator.profile_approval import snapshot, write_image
 
         root = self._roots[action_id]
+        state = None
         try:
             raw = json.loads(
                 (root / "profile-transactions" / ("revert_" + action_id + ".json")).read_text()
@@ -390,7 +392,11 @@ class ProfileActions:
                 == commitment(record.after)
                 else "stale"
             )
-        except (OSError, ValueError, DefinitionTransactionConflict):
+        except (TeamRegistryRecoveryError, OSError):
+            # A consumed inverse cannot be rearmed from a before-looking row.
+            # Unknown published bytes are not a dead owner or terminal failure.
+            return "pending" if state == "applying" else "unavailable"
+        except (ValueError, DefinitionTransactionConflict):
             return "unavailable"
 
     def status(
@@ -450,7 +456,13 @@ class ProfileActions:
             from local_operator.profile_approval import snapshot
 
             try:
-                current = snapshot(root, record.descriptor.profile_kind, record.target_id)
+                try:
+                    current = snapshot(root, record.descriptor.profile_kind, record.target_id)
+                except (TeamRegistryRecoveryError, OSError):
+                    # No gesture has begun a mutation. Do not consume this as
+                    # an invalid-backup denial merely because storage is unreadable.
+                    record.state = "unavailable"
+                    return {"action_id": action_id, "state": record.state}
                 if commitment(current) != commitment(record.after):
                     record.state = "stale"
                     return {"action_id": action_id, "state": record.state}
@@ -460,15 +472,27 @@ class ProfileActions:
                 ):
                     raise ValueError("the receipt backup changed")
                 started = True
-                outcome = self._consume(action_id, record)
+                try:
+                    outcome = self._consume(action_id, record)
+                except Exception:
+                    # Storage adapters can wrap OSError in plain Exception.
+                    # This catch is confined to the inverse's write boundary:
+                    # only its bound durable journal/readback may classify it.
+                    record.state = self._settle(action_id, record)
+                    return {"action_id": action_id, "state": record.state}
                 record.state = "succeeded" if outcome["state"] == "complete" else "failed"
-            except (OSError, ValueError, DefinitionTransactionConflict):
+            except (TeamRegistryRecoveryError, OSError, ValueError, DefinitionTransactionConflict):
                 if not started:
                     # A rejected backup has not touched the profile. Consume
                     # that terminal rejection too, without executing an inverse.
                     try:
                         self._consume(action_id, record, mutate=False)
-                    except (OSError, ValueError, DefinitionTransactionConflict):
+                    except (
+                        TeamRegistryRecoveryError,
+                        OSError,
+                        ValueError,
+                        DefinitionTransactionConflict,
+                    ):
                         pass
                 record.state = self._settle(action_id, record)
             return {"action_id": action_id, "state": record.state}
