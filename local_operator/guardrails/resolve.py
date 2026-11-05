@@ -1740,7 +1740,17 @@ class _Walker:
                 path = os.path.normpath(oldpwd) if oldpwd.startswith("/") else None
             else:
                 path, _unknown = _absolute(w.text, st.cwd)
-        if path is None or not os.path.isdir(path):
+        try:
+            searchable = (
+                path is not None
+                and os.path.isdir(path)
+                and os.access(path, os.X_OK, effective_ids=os.access in os.supports_effective_ids)
+            )
+        except OSError:
+            searchable = False
+        # Existence alone is not success: a mode-000 directory may pass isdir
+        # while the shell cannot search it. Prefer effective IDs where supported.
+        if not searchable:
             # A failed cd preserves the shell's old cwd/OLDPWD. We cannot
             # assume success (or recover it after an unmodelled popd), so
             # invalidate BOTH instead of letting cd - revive a stale path.

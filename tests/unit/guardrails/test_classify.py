@@ -1086,3 +1086,63 @@ def test_ci_r2_real_bash_cwd_only_control(home: Path, shape: str) -> None:
 def test_ci_r2_child_directory_uncertainty_stays_isolated(home: Path, child: str) -> None:
     command = f"cd ~/.local-operator; cd /tmp; {child}; cd -; rm -rf ."
     assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize("relative", [False, True], ids=["absolute", "relative"])
+def test_ci_r2_denied_cd_does_not_revive_stale_directory(home: Path, relative: bool) -> None:
+    import os
+    import subprocess
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root does not provide a meaningful mode-000 search denial")
+    denied = home / "denied"
+    denied.mkdir(mode=0o700)
+    denied.chmod(0)
+    try:
+        access_kwargs = {"effective_ids": True} if os.access in os.supports_effective_ids else {}
+        if os.access(denied, os.X_OK, **access_kwargs):
+            pytest.skip("platform does not enforce directory-search denial for this fixture")
+        prefix = 'cd "$HOME/repo"; cd ../denied' if relative else 'cd /tmp; cd "$HOME/denied"'
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+        env.pop("XPC_FLAGS", None)
+        env.pop("OLDPWD", None)
+        env["HOME"] = str(home)
+        # Actual cwd oracle only: never execute the deletion fixture below.
+        result = subprocess.run(
+            ["/bin/bash", "-c", f"{prefix}; cd -; pwd -P"],
+            cwd=home / ".local-operator",
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=True,
+        )
+        assert "cd:" in result.stderr, result
+        assert (
+            Path(result.stdout.splitlines()[-1]).resolve() == (home / ".local-operator").resolve()
+        )
+        assert (
+            _classify(home, f"{prefix}; cd -; rm -rf sessions", cwd=home / ".local-operator").risk
+            >= Risk.HIGH
+        )
+    finally:
+        denied.chmod(0o700)
+
+
+def test_ci_r2_directory_access_error_invalidates_state(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    target = home / "search-check-error"
+    target.mkdir()
+    real_access = os.access
+
+    def access(path, mode, **kwargs):
+        if os.fspath(path) == str(target):
+            raise OSError("directory search check failed")
+        return real_access(path, mode, **kwargs)
+
+    monkeypatch.setattr(os, "access", access)
+    command = f"cd /tmp; cd '{target}'; cd -; rm -rf sessions"
+    assert _classify(home, command, cwd=home / ".local-operator").risk >= Risk.HIGH
