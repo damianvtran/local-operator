@@ -5953,9 +5953,11 @@ class ServingSessionHandle(SessionHandle):
                 provider,
                 self._config_dir,
                 deadline=resolution_deadline,
-                # A pair this process can already resolve needs no owner
-                # metadata. Asking anyway is what aborted a switch onto an
-                # explicit local override while the owner was asleep.
+                # Caller-supplied "this pair already resolves locally", which
+                # preparation honours by returning before any owner RPC. It is
+                # inert for this provider today (warm_model_info answers None for
+                # it), so the explicit-override half stays deferred until a host
+                # can observe a store-instance override.
                 local_ready=warm_info is not None,
             )
             if warm_info is not None:

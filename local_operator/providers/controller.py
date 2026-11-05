@@ -3354,11 +3354,11 @@ class ProviderController:
         The same receipt question :meth:`initial_catalogue` asks for its row
         source, without that frame's override/account-scope branches — those
         decide WHICH rows it paints, not whether an owner share exists. A
-        validated receipt for
-        this config root) so the desktop ``scope=usable`` filter and the
-        authoring catalogue cannot disagree about an owner-approved model. Local
-        credentials are deliberately not consulted: their ids are already in
-        :meth:`usable_providers`, and a local login always outranks the share.
+        validated receipt for this config root is the answer, so the desktop
+        ``scope=usable`` filter and the authoring catalogue cannot disagree about
+        an owner-approved model. Local credentials are deliberately not
+        consulted: their ids are already in :meth:`usable_providers`, and a
+        local login always outranks the share.
         """
         from local_operator.providers import shared_catalogue
 

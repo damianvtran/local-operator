@@ -725,6 +725,80 @@ async def test_a_prepared_selection_skips_the_owner_when_the_caller_knows_it(bor
 
 
 @pytest.mark.asyncio
+async def test_a_device_with_its_own_key_keeps_its_rows(borrower, monkeypatch):
+    """The pending-owner branch must not paint EMPTY over a user's own login.
+
+    ``approved()`` answers "is a share pending" — it must keep every exclusion
+    ``source()`` applies to LOCAL authority, or a device that holds its own
+    OpenAI key and an approved placement gets ``models = []``: the "no models are
+    signed in yet" symptom inverted, which is the bug this PR exists to remove.
+    """
+    from local_operator.providers import shared_catalogue
+
+    mesh, plain, controller, state = borrower
+    await controller.shared_catalogue("openai")
+    assert shared_catalogue.source(mesh.b.root) is not None
+    before = controller.initial_catalogue()
+    assert {row.model_id for row in before if row.provider == "openai"} == {"gpt-fixture-sol"}
+    # An environment key is a local credential at the ordering rung, but this
+    # rig must not depend on the operator machine's real environment: patch
+    # the resolver the metadata reader consults, not the process.
+    monkeypatch.setattr(
+        "local_operator.providers.registry.resolve_env_key",
+        lambda provider: ("fixture-own-key" if provider == "openai" else None),
+    )
+    try:
+        # Own credential: the share is not this device's authority…
+        assert shared_catalogue.source(mesh.b.root) is None
+        assert shared_catalogue.approved(mesh.b.root) is False
+        # …and the frame paints the user's own rows, never an empty list.
+        own = controller.initial_catalogue()
+        own_ids = {row.model_id for row in own if row.provider == "openai"}
+        assert own_ids, "own-credential device must keep its own openai rows"
+        assert "gpt-fixture-sol" not in own_ids
+    finally:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_a_session_scoped_share_is_not_a_pending_machine_share(borrower):
+    """Only a device-scoped share may blank the frame while its receipt is absent."""
+    from local_operator.network.credentials import placement
+    from local_operator.providers import shared_catalogue
+
+    mesh, plain, controller, state = borrower
+    with placement.mutate(mesh.network_id, self_device=mesh.owner, root=mesh.a.root) as doc:
+        doc.revoke("openai", mesh.borrower, by=mesh.owner)
+        doc.grant("openai", mesh.borrower, by=mesh.owner, scope="session")
+    transport.helpers._pull(mesh)
+    assert shared_catalogue.source(mesh.b.root) is None
+    assert shared_catalogue.approved(mesh.b.root) is False
+    rows = {row.model_id for row in controller.initial_catalogue() if row.provider == "openai"}
+    assert "gpt-fixture-sol" not in rows
+
+
+@pytest.mark.asyncio
+async def test_a_raw_refresh_failure_answers_through_the_peer_contract(borrower, monkeypatch):
+    """MINOR: OSError/ValueError out of ``refresh`` must not escape raw either."""
+    import asyncio
+
+    from local_operator.mobile.peer_model import validate_peer_selection
+    from local_operator.model.configure import ModelSelectionRefused
+    from local_operator.providers import shared_catalogue
+
+    mesh, plain, controller, state = borrower
+
+    def boom(*args, **kwargs):
+        raise OSError("store unreadable")
+
+    monkeypatch.setattr(shared_catalogue, "refresh", boom)
+    with pytest.raises(ModelSelectionRefused) as refused:
+        await asyncio.to_thread(validate_peer_selection, "openai", "gpt-fixture-sol")
+    assert refused.value.code == "owner_offline"
+    assert "catalogue metadata unavailable" in str(refused.value)
+
+
+@pytest.mark.asyncio
 async def test_approved_share_survives_a_latch_for_the_pending_frame(borrower):
     """MINOR-1: the frame's "pending owner" question is not ``source()``.
 

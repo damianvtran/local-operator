@@ -28,10 +28,19 @@ _locks_guard = threading.Lock()
 _locks: dict[str, threading.Lock] = {}
 
 
-def source(
+def _share(
     root: Path | None = None, *, strict: bool = False
 ) -> tuple[MeshCredentialClient, int, int] | None:
-    """Current local namespace/permission only; never resolve a bearer or dial."""
+    """Structural eligibility of the approved owner share; latch aside.
+
+    Every rung that decides whether THIS device may consume the share lives
+    here — native login, env/stored key, borrowability, local-only ownership,
+    holder presence, device scope and network/owner/member liveness — so
+    :func:`source` and :func:`approved` cannot drift apart. It does NOT include
+    the lifecycle/receipt authority gate: that belongs to :func:`source` alone,
+    because a frame asking "is a share pending" must not be answered by a
+    receipt question while a reader offering model ids must.
+    """
     try:
         # Machine-wide discovery must not outrank a native login, legacy key or
         # environment key. Read metadata only; never resolve/refresh a bearer.
@@ -49,12 +58,6 @@ def source(
             return None
         client = MeshCredentialClient.for_this_device(root)
         if client is None or not client.should_borrow("openai"):
-            return None
-        # A pending or overflowed lifecycle baseline means this device cannot
-        # prove the share still reflects current permission. Discovery must not
-        # advertise stale positive authority from a receipt that predates it.
-        state = lifecycle.LifecycleStore(client.network_id, root)
-        if state.restriction_pending() or state.load().needs_baseline:
             return None
         from local_operator.network.credentials.sync import MARK_LOCAL_ONLY, SyncState
 
@@ -88,27 +91,39 @@ def source(
         return None
 
 
+def source(
+    root: Path | None = None, *, strict: bool = False
+) -> tuple[MeshCredentialClient, int, int] | None:
+    """May this device consume the share NOW; never resolve a bearer or dial.
+
+    Structural eligibility plus the lifecycle gate: a pending or overflowed
+    baseline means this device cannot prove the share still reflects current
+    permission, so no reader may advertise stale positive authority from a
+    receipt that predates it.
+    """
+    found = _share(root, strict=strict)
+    if found is None:
+        return None
+    client, _epoch, _revision = found
+    state = lifecycle.LifecycleStore(client.network_id, root)
+    if state.restriction_pending() or state.load().needs_baseline:
+        return None
+    return found
+
+
 def approved(root: Path | None = None) -> bool:
     """Whether an approved owner share EXISTS, receipt or latch aside.
 
-    Deliberately narrower than :func:`source`: it answers the structural
-    question only (a borrowable entry with a holder) and ignores the receipt,
-    the lifecycle latch and the local-authority rungs, because its one caller
-    paints an empty catalogue while a share is pending. Using ``source`` there
-    fell through to the bundled static listing whenever the latch hid a
-    receipt — rows that branch was written to suppress. It grants nothing: no
-    receipt, no offered id, no authority.
+    The same structural question as :func:`source` MINUS the lifecycle gate: its
+    one caller paints an empty catalogue while a share is pending, and asking
+    :func:`source` there fell through to the bundled static listing whenever a
+    latch hid the receipt — rows that branch exists to suppress. Every other
+    exclusion is kept, so a device with its OWN credential, a session-scoped or
+    derived share, or a dead trust/owner edge still answers False and the frame
+    keeps painting the user's own rows. It grants nothing: no receipt, no offered
+    id, no authority.
     """
-    try:
-        client = MeshCredentialClient.for_this_device(root)
-        if client is None or not client.should_borrow("openai"):
-            return False
-        entry = client.entry("openai")
-        return entry is not None and entry.holder(client.self_device) is not None
-    except (OSError, ValueError):
-        return False
-    except Exception:  # noqa: BLE001 - a frame-only answer never raises
-        return False
+    return _share(root) is not None
 
 
 def _path(client: MeshCredentialClient, root: Path | None, cache_dir: Path | None) -> Path:
@@ -316,16 +331,24 @@ def prepare_selection_sync(
 ) -> None:
     """Worker-only twin for existing synchronous/off-loop birth validators.
 
-    ``local_ready`` is the caller's answer to "this pair already resolves
-    locally" — a warm catalogue entry, a native login, an explicit override. A
-    host that can answer it must: the override tiers live on a store INSTANCE
-    that a serving session or a peer switch does not hold, so without that
-    answer an operator's own key spends an owner RPC and the switch aborts
-    whenever the owner device is asleep. It is never a bypass: the caller's
-    own validation still runs afterwards.
+    ``local_ready`` is a caller-supplied answer to "this pair already resolves
+    locally", which preparation honours by returning before any owner RPC. No
+    host can compute it today for this provider: the override tiers live on a
+    store INSTANCE that a serving session or a peer switch does not hold, and
+    the warm path answers None for the catalogue provider. It is a seam, not a
+    behaviour change, and it is never a bypass — the caller's own validation
+    still runs afterwards.
     """
     provider = provider.strip().lower()
     if provider != "openai" or local_ready or source(root, strict=True) is None:
         return
-    if refresh(root, fresh=True) is None:
-        raise MeshRefusal("owner_offline", "catalogue metadata unavailable")
+    try:
+        if refresh(root, fresh=True) is None:
+            raise MeshRefusal("owner_offline", "catalogue metadata unavailable")
+    except MeshRefusal:
+        raise
+    except (OSError, ValueError) as error:
+        # The contract this function states is ONE refusal type. A damaged or
+        # unreadable store raised raw OSError/ValueError out of ``refresh``,
+        # which both hosts answer as a generic error string with no code.
+        raise MeshRefusal("owner_offline", "catalogue metadata unavailable") from error
