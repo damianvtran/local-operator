@@ -653,17 +653,34 @@ def _team_bridge_consumer_defaults() -> dict[str, object]:
     turns a drifted literal into a red test rather than a page that advertises
     a state the feature will not honour — the rule every consumer block above
     follows. Only the REGISTERED rows appear here: ``onboarding`` is internal
-    state (no row), and the allowlist's defaults are server truth surfaced as
-    data by ``team_bridge.client.allowlist_view``, not config.
+    state (no row), the allowlist's defaults are server truth surfaced as data
+    by ``team_bridge.client.allowlist_view``, not config, and
+    ``hold_alert_after_minutes``/``hold_release`` are read keys with no row.
+    The four ``team_bridge.screening.*`` ceilings are here because a page that
+    showed a ceiling the receiver does not read would be exactly this drift.
     """
 
     from local_operator.team_bridge.settings import (
         DEFAULT_TEAM_BRIDGE_ENABLED,
+        DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR,
+        DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
+        DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR,
+        DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR,
         DEFAULT_TEAM_BRIDGE_SESSION,
     )
 
     return {
         "team_bridge.enabled": DEFAULT_TEAM_BRIDGE_ENABLED,
+        "team_bridge.screening.ambient_budget_per_hour": (
+            DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR
+        ),
+        "team_bridge.screening.budget_per_hour": DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
+        "team_bridge.screening.sender_budget_per_hour": (
+            DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR
+        ),
+        "team_bridge.screening.unaddressed_budget_per_hour": (
+            DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR
+        ),
         "team_bridge.session": DEFAULT_TEAM_BRIDGE_SESSION,
     }
 

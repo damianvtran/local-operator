@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -37,6 +38,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
+from local_operator.team_bridge.settings import (
+    DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR,
+    DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
+    DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR,
+    DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR,
+    SCREENING_SUBTREE,
+    ScreeningBudget,
+)
 from local_operator.team_bridge.types import (
     ACK_TARGETS,
     SCREENING_CATEGORIES,
@@ -48,6 +57,8 @@ from local_operator.team_bridge.types import (
     ScreeningReceipt,
     TeamBridgeTypeError,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "ACK_PENDING",
@@ -1761,11 +1772,123 @@ BODY_TERMINAL_CODES = (
 )
 
 
+#: Resolved ``team_bridge.screening.*`` ceilings, keyed by the config file's
+#: ``(path, mtime_ns, size)`` — the guardrail rule cache's pattern
+#: (``guardrails/rules.py``), for the same reason: the connector constructs a
+#: ``Store`` many times in one turn (~15 sites), and a YAML load per construction
+#: would put config parsing on the receiver's hot path to answer a question whose
+#: answer changes only when the file does.
+#:
+#: AN EDIT NEEDS NO RESTART AND NO CODE CHANGE: the next construction stats the
+#: file, the key changes and the ceilings are re-read, which is exactly what
+#: ``/settings`` and ``lop config edit`` promise. The stat key cannot see an edit
+#: that leaves BOTH size and ``mtime_ns`` identical (a same-length rewrite inside
+#: the filesystem's timestamp granularity); that edit is honoured at the next
+#: write to the file, and the settings writer moves both.
+_SCREENING_BUDGET_CACHE: dict[tuple[str, int, int], ScreeningBudget] = {}
+_SCREENING_BUDGET_CACHE_MAX = 32
+
+
+def screening_budget_from_config(config_dir: Path) -> ScreeningBudget:
+    """The LIVE rolling-hour screening ceilings this ``config_dir`` configures.
+
+    WHY THE READ LIVES HERE and the parsing in ``team_bridge.settings``: that
+    module is stdlib-only BY CONTRACT (the ``/settings`` registry stays off its
+    import path, so tests import it cheaply) and ``ConfigManager`` is not stdlib.
+    The per-field rules stay in one place (:meth:`ScreeningBudget.from_values`);
+    this function decides where the subtree is read from and whether the set may
+    be adopted at all.
+
+    A READ OF A SETTING DOES NOT CREATE THE STORE IT READS — the rule
+    ``network.store.read_config`` already records for this shape of read:
+    ``ConfigManager.__init__`` mkdirs the config root and creates ``config.yml``
+    when it is absent (right for a WRITER, wrong for reading one subtree), so the
+    short-circuit below returns the shipped ceilings instead. It is not an
+    approximation: a document with no ``team_bridge.screening`` block answers the
+    same ceilings, so the answer is identical and nothing is materialised.
+
+    ALL FOUR OR NONE (operator decision, this change). A budget is adopted only
+    when the WHOLE set is valid; one contradicted cross-field rule falls back to
+    ALL FOUR shipped defaults and logs ONE warning naming the key to change.
+    Honouring half a configured set would put the receiver in a state no line of
+    the config describes — the operator's own account ceiling silently fenced by
+    a stale sibling — and clamping would be worse still: it would leave the file
+    saying something the receiver is not doing, so the next reader would trust a
+    number that is not in force.
+
+    NEVER RAISES — a receiver that stopped on a mistyped number would stop
+    screening altogether, strictly worse than screening at the shipped budget.
+    An unreadable document therefore degrades to the shipped ceilings too.
+    """
+
+    from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+
+    # Normalised ONCE, here: ``Store`` is typed ``Path`` but takes whatever the
+    # caller passes, and ``ConfigManager`` refuses anything that is not a Path —
+    # its TypeError would otherwise land in the ``except`` below and silently
+    # answer the shipped ceilings from a config that says otherwise.
+    directory = Path(config_dir)
+    path = directory / CONFIG_FILE_NAME
+    try:
+        info = path.stat()
+    except OSError:
+        # No config file at all (a first run, an isolated test folder): the
+        # shipped ceilings. Deliberately NOT cached — the stat is cheap and the
+        # file may appear on the very next call.
+        return ScreeningBudget()
+    key = (str(path), info.st_mtime_ns, info.st_size)
+    cached = _SCREENING_BUDGET_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        # The SUBTREE, not the document: a caller cannot hand this reader a
+        # shape it never sees and silently get defaults.
+        raw = ConfigManager(directory).get_nested_value(SCREENING_SUBTREE, {})
+        budget = ScreeningBudget.from_values(raw)
+    except Exception:  # noqa: BLE001 - the contract above is "never raises"
+        budget = ScreeningBudget()
+    else:
+        violated = budget.violations()
+        if violated:
+            # ONE line, naming the key(s) to change and the rule each breaks: the
+            # receiver keeps running at the shipped ceilings, and the operator has
+            # the file and the reason in one place. Cached with the key, so the
+            # warning is logged once per VERSION of the file rather than on every
+            # one of the many constructions in a turn.
+            shipped = ScreeningBudget()
+            logger.warning(
+                "team_bridge.screening: ignoring the configured screening ceilings "
+                "(%s); using the shipped %d/%d/%d/%d until it is fixed",
+                "; ".join(f"{leaf}: needs {rule}" for leaf, rule in violated),
+                shipped.account,
+                shipped.ambient,
+                shipped.unaddressed,
+                shipped.sender,
+            )
+            budget = shipped
+    if len(_SCREENING_BUDGET_CACHE) >= _SCREENING_BUDGET_CACHE_MAX:
+        _SCREENING_BUDGET_CACHE.clear()
+    _SCREENING_BUDGET_CACHE[key] = budget
+    return budget
+
+
 class Store:
     """Transactional metadata access. Construct per operation, not long-lived."""
 
-    def __init__(self, config_dir: Path) -> None:
+    def __init__(
+        self, config_dir: Path, *, screening_budget: ScreeningBudget | None = None
+    ) -> None:
         self._path = state_db_path(config_dir)
+        # The LIVE ceilings, resolved once per construction. ``screening_budget``
+        # is for a caller that already holds them (a test that wants a small,
+        # fast window; a caller that reads config once for several stores); every
+        # other construction gets the cached config read. The class attributes
+        # below are the SHIPPED defaults, never the live value.
+        self.screening_budget = (
+            screening_budget
+            if screening_budget is not None
+            else screening_budget_from_config(config_dir)
+        )
 
     @property
     def config_dir(self) -> Path:
@@ -4495,32 +4618,44 @@ class Store:
 
     # -- H3 screening: budget ledger, receipts, policy, holds, breaker -----
 
-    #: The frozen §8 budget, PER INDEPENDENT BUCKET: 40 logical screenings
-    #: and (separately, conservatively) 40 actual inference HTTP dispatches,
-    #: per rolling hour per Radient ACCOUNT, aggregated across every
+    #: The ACCOUNT ceiling, PER INDEPENDENT BUCKET: logical screenings and
+    #: (separately, conservatively) actual inference HTTP dispatches, per rolling
+    #: hour per Radient ACCOUNT, aggregated across every
     #: tenant/endpoint/credential/generation namespace for that account in
     #: the hub. Two buckets because one isolated logical screening can reach
     #: up to three wire attempts (auth re-resolve + fast-mode resend), and
     #: the physical cap must count those even when the logical one allows it.
-    SCREENING_BUDGET_PER_HOUR = 40
+    #:
+    #: THE FOUR CONSTANTS HERE ARE THE **SHIPPED DEFAULTS**, NOT THE LIVE
+    #: CEILING. The live ceilings are ``self.screening_budget`` (a
+    #: :class:`ScreeningBudget`), resolved per ``Store`` construction from
+    #: ``team_bridge.screening.*`` by :func:`screening_budget_from_config` — so
+    #: an operator raises or lowers the budget in config, in the running
+    #: receiver, with no restart and no release. The numbers themselves live in
+    #: ``team_bridge/settings.py`` beside the measurement that moved them,
+    #: because the ``/settings`` registry cannot import this module and a second
+    #: literal here would let the page advertise a ceiling the receiver never
+    #: honours. EVERY budget read site asks ``self.screening_budget``; none asks
+    #: the class.
+    SCREENING_BUDGET_PER_HOUR = DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR
 
     #: THE UNIT IS ONE SCREENING CALL, NOT ONE MESSAGE (2026-11-03). Agent
     #: replies are no longer capped by the hub (agent-server #294 removed its
-    #: wake caps), so a busy room can deliver far more than 40 messages an
-    #: hour. The connector therefore screens a coalesced wake's messages in ONE
-    #: model call (``screening.screen_batch_async``) and that call is charged
-    #: as ONE unit, however many messages it covers. Every message still gets
-    #: its own logical row (its own body hash, proof, receipt and write-once
-    #: commit); the rows of one call share a ``batch_id`` and the windows below
-    #: count DISTINCT ``COALESCE(batch_id, attempt_id)``. A row without a
-    #: batch id (every single-message screen, every pre-upgrade row) is its own
-    #: unit, which is exactly the old per-message count.
+    #: wake caps), so a busy room can deliver far more messages an hour than a
+    #: small budget's worth of calls. The connector therefore screens a coalesced
+    #: wake's messages in ONE model call (``screening.screen_batch_async``) and
+    #: that call is charged as ONE unit, however many messages it covers. Every
+    #: message still gets its own logical row (its own body hash, proof, receipt
+    #: and write-once commit); the rows of one call share a ``batch_id`` and the
+    #: windows below count DISTINCT ``COALESCE(batch_id, attempt_id)``. A row
+    #: without a batch id (every single-message screen, every pre-upgrade row) is
+    #: its own unit, which is exactly the old per-message count.
     #:
-    #: PRIORITY INSIDE THE SAME 40 (agent-server #294 security review, S-1).
-    #: With the hub's caps gone this budget is the real ceiling, and a flood of
-    #: agent chatter in one room would otherwise spend it all and leave the
-    #: owner's own DM to their agent unscreened for up to an hour. Each call
-    #: has a TIER, the highest of its messages':
+    #: PRIORITY INSIDE THE SAME ACCOUNT CEILING (agent-server #294 security
+    #: review, S-1). With the hub's caps gone this budget is the real ceiling,
+    #: and a flood of agent chatter in one room would otherwise spend it all and
+    #: leave the owner's own DM to their agent unscreened for up to an hour. Each
+    #: call has a TIER, the highest of its messages':
     #:
     #: * ``SCREENING_TIER_HUMAN_ADDRESSED`` (3) — a PERSON's DM or mention of
     #:   this agent, which includes the owner's own DM to their agent;
@@ -4529,46 +4664,58 @@ class Store:
     #: * ``SCREENING_TIER_HUMAN`` (1) — a person's line in a shared room;
     #: * ``SCREENING_TIER_AMBIENT`` (0) — agent chatter in a shared room.
     #:
-    #: Ambient calls may use at most 30 of the 40 units an hour. Tiers 0-2
-    #: together may use at most 35, so the last 5 are reachable ONLY by a
-    #: person addressing this agent. WHY THE RESERVE IS KEYED ON SENDER KIND
+    #: Ambient calls may use at most three quarters of the account ceiling.
+    #: Tiers 0-2 together may use all but the last eighth, so that last slice is
+    #: reachable ONLY by a person addressing this agent. (The shipped ratios are
+    #: the old 30-of-40 and 35-of-40 ones, now 300-of-400 and 350-of-400 — see
+    #: ``team_bridge/settings.py``; the CONFIGURED numbers can differ, the nesting
+    #: cannot.) WHY THE RESERVE IS KEYED ON SENDER KIND
     #: (#3400 security round 1, S-4): the hub lets an agent mention any member
     #: (up to 50 per message), and #294 removed the wake caps that bounded it,
     #: so "addressed" alone is something any agent in the room can claim on
-    #: every post. Measured on that attack: 40 mentioning posts spent the
-    #: whole 40 and the owner's DM waited the hour. No split of a fixed 40
-    #: survives N colluding senders, so the last units are reserved for the
+    #: every post. Measured on that attack: mentioning posts spent the
+    #: whole budget and the owner's DM waited the hour. No split of a FIXED
+    #: total survives N colluding senders, so the last units are reserved for the
     #: sender CLASS the hub states (``sender_kind``), which an agent cannot
     #: claim. That class is the hub's PERSON route, not proof a human typed
     #: it (#3400 round 2, S-8): any human member of the room, or a script with
-    #: their token, can spend the last 5; there is no per-sender bound until
-    #: the hub sends ``sender_account_id`` (S-5). WHY NESTED rather than
-    #: flat: measured on the 1 human + 6 agents flood
-    #: (scripts/bench_batch_screening.py), a flat 30/10 split let the
-    #: human's own room lines spend the whole reserve and a minute-30 DM was
-    #: never screened that hour. The 40 itself is fixed — moderation spend is
-    #: not loosened — so every reserve is carved out of it, never added to it.
-    #: Why 30 for ambient: one unit covers a whole coalesced batch (up to 20
-    #: messages), so 30 still drain a busy room's backlog as units refill; 5
-    #: units cover a person's DMs and mentions in an hour with room to spare.
+    #: their token, can spend the person reserve; the per-sender ceiling below is
+    #: what bounds them once the hub sends ``sender_account_id`` (S-5). WHY
+    #: NESTED rather than flat: measured on the 1 human + 6 agents flood
+    #: (scripts/bench_batch_screening.py), a flat split of a quarter of the total
+    #: as the person reserve let the human's own room lines spend the whole
+    #: reserve and a minute-30 DM was never screened that hour. Every reserve is
+    #: CARVED OUT of the account ceiling, never added to it — a configured set
+    #: that contradicts that nesting (unaddressed above account, ambient above
+    #: unaddressed, sender above account) is REFUSED by the writer and IGNORED
+    #: wholesale by this reader in favour of the shipped ceilings, so a hand edit
+    #: can never make the tiers sum past the total and never gets half honoured.
+    #: Why ambient gets three quarters: one unit covers a whole coalesced batch
+    #: (up to 20 messages), so that share drains a busy room's backlog as units
+    #: refill, while the remaining slice still covers a person's DMs and mentions
+    #: in an hour with room to spare.
     SCREENING_TIER_AMBIENT = 0
     SCREENING_TIER_HUMAN = 1
     SCREENING_TIER_ADDRESSED = 2
     SCREENING_TIER_HUMAN_ADDRESSED = 3
-    SCREENING_AMBIENT_BUDGET_PER_HOUR = 30
+    SCREENING_AMBIENT_BUDGET_PER_HOUR = DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR
     #: Tiers 0-2 together: everything but a person addressing this agent.
-    SCREENING_UNADDRESSED_BUDGET_PER_HOUR = 35
+    SCREENING_UNADDRESSED_BUDGET_PER_HOUR = (
+        DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR
+    )
 
-    #: Per VERIFIED sender, inside the account's 40 (the decision recorded on
+    #: Per VERIFIED sender, inside the account ceiling (the decision recorded on
     #: #3199; first drafted on the unmerged ``fix/3199-sender-budget``). A unit
     #: is charged to every verified sender whose message rides in it, so one
-    #: sender cannot spend more than half the account's hour however their
-    #: messages are batched. "Verified" means the identity came from the hub
+    #: sender cannot spend more than its own share of the account's hour however
+    #: their messages are batched — HALF the account ceiling by default, the same
+    #: share the constant carried when the ceiling was 40. "Verified" means the
+    #: identity came from the hub
     #: (the pair lane's stored participant; a conversation body read that
     #: carries ``sender_account_id``) — a sender can never strip it, so an
     #: unknown-provenance call forms no bucket of its own and is bounded by the
     #: account and ambient ceilings alone.
-    SCREENING_SENDER_BUDGET_PER_HOUR = 20
+    SCREENING_SENDER_BUDGET_PER_HOUR = DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR
 
     #: Floor for an account turn lease: the screening wall deadline is 45 s,
     #: so a lease SHORTER than this could expire under a live dispatch and
@@ -4593,9 +4740,9 @@ class Store:
         ADDITIVE AND NULLABLE, so no schema stamp moves (the rule of
         :meth:`_ensure_hold_failure_class_column`): an older binary sharing the
         file never names them, and a pre-upgrade row reads NULL — its own unit,
-        counted at the ADDRESSED tier (so it still counts against the 40 and
-        can never let a lower tier past its own fence) and charged to no
-        sender.
+        counted at the ADDRESSED tier (so it still counts against the account
+        ceiling and can never let a lower tier past its own fence) and charged
+        to no sender.
         Not in ``_V3_COLUMNS``: a ledger without them is not damaged.
         """
 
@@ -4627,15 +4774,15 @@ class Store:
         """
 
         tiers = [int(row["tier"]) for row in self._spent_units(conn, scope, kind, now)]
-        if len(tiers) >= self.SCREENING_BUDGET_PER_HOUR:
+        if len(tiers) >= self.screening_budget.account:
             raise StoreRefused("budget_exhausted", f"{kind} units/hour/account exhausted")
         if tier <= self.SCREENING_TIER_AMBIENT:
             ambient = sum(1 for spent in tiers if spent <= self.SCREENING_TIER_AMBIENT)
-            if ambient >= self.SCREENING_AMBIENT_BUDGET_PER_HOUR:
+            if ambient >= self.screening_budget.ambient:
                 raise StoreRefused("ambient_exhausted", f"{kind} ambient units/hour exhausted")
         if tier <= self.SCREENING_TIER_ADDRESSED:
             unaddressed = sum(1 for spent in tiers if spent <= self.SCREENING_TIER_ADDRESSED)
-            if unaddressed >= self.SCREENING_UNADDRESSED_BUDGET_PER_HOUR:
+            if unaddressed >= self.screening_budget.unaddressed:
                 raise StoreRefused(
                     "unaddressed_exhausted", f"{kind} unaddressed units/hour exhausted"
                 )
@@ -4645,7 +4792,7 @@ class Store:
                 "WHERE account_scope = ? AND kind = ? AND at > ? AND sender_account_id = ?",
                 (scope, kind, now - 3600.0, sender),
             ).fetchone()[0]
-            if int(spent) >= self.SCREENING_SENDER_BUDGET_PER_HOUR:
+            if int(spent) >= self.screening_budget.sender:
                 # The sender id never leaves this refusal's caller: it is the
                 # hub's own handle, and the code is all a hold records.
                 raise StoreRefused("sender_exhausted", f"{kind} sender units/hour exhausted")
@@ -4780,10 +4927,10 @@ class Store:
         if not units:
             return None
         pool = list(units)
-        if len(units) < self.SCREENING_BUDGET_PER_HOUR:
+        if len(units) < self.screening_budget.account:
             for ceiling_tier, ceiling in (
-                (self.SCREENING_TIER_AMBIENT, self.SCREENING_AMBIENT_BUDGET_PER_HOUR),
-                (self.SCREENING_TIER_ADDRESSED, self.SCREENING_UNADDRESSED_BUDGET_PER_HOUR),
+                (self.SCREENING_TIER_AMBIENT, self.screening_budget.ambient),
+                (self.SCREENING_TIER_ADDRESSED, self.screening_budget.unaddressed),
             ):
                 lower = [row for row in units if int(row["tier"]) <= ceiling_tier]
                 if tier <= ceiling_tier and len(lower) >= ceiling:
@@ -4929,9 +5076,9 @@ class Store:
 
         ``tier`` / ``sender_account_id`` place the unit in its pool and charge
         it to a verified sender (see the budget constants). The defaults —
-        the top tier (fenced only by the 40), no sender — are what a DIRECT
-        caller that predates the split gets, so none of them is fenced by a
-        pool it never knew about. The screening pipeline never relies on
+        the top tier (fenced only by the account ceiling), no sender — are what
+        a DIRECT caller that predates the split gets, so none of them is fenced
+        by a pool it never knew about. The screening pipeline never relies on
         them: it always passes the item's tier (``screening_allocation``),
         whose own no-hint default is agent-addressed, never the top tier.
 
@@ -6023,7 +6170,7 @@ class Store:
                 "WHERE account_scope = ? AND kind = 'http' AND at > ?",
                 (scope, now - 3600.0),
             ).fetchone()[0]
-            if int(spent) >= self.SCREENING_BUDGET_PER_HOUR:
+            if int(spent) >= self.screening_budget.account:
                 raise StoreRefused("budget_exhausted", "http attempts/hour/account exhausted")
             conn.execute(
                 "INSERT INTO screening_attempts "

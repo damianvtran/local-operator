@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from local_operator.team_bridge import screening
+from local_operator.team_bridge.settings import ScreeningBudget
 from local_operator.team_bridge.client import (
     SCREENING_TEMPLATE_V1_SHA256,
     SCREENING_VERSION_V1,
@@ -131,8 +132,21 @@ def _fixture_models_are_evaluated(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _setup(tmp_path: Path, owner: OwnerSnapshot | None = None) -> tuple[Store, OwnerSnapshot]:
-    store = Store(tmp_path)
+def _setup(
+    tmp_path: Path,
+    owner: OwnerSnapshot | None = None,
+    *,
+    screening_budget: "ScreeningBudget | None" = None,
+) -> tuple[Store, OwnerSnapshot]:
+    """An enrolled store; ``screening_budget`` pins the ceilings for a budget test.
+
+    The shipped ceiling is 400 units an hour, so a test that fills the window
+    PASSES AN EXPLICIT SMALL SET rather than reserving 400 rows to say the same
+    thing. ``Store`` reads the live ceilings from config, and an explicit set
+    here keeps the test about the rule instead of the number.
+    """
+
+    store = Store(tmp_path, screening_budget=screening_budget)
     owner = owner or _owner()
     store.commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-1"))
     return store, owner
@@ -816,14 +830,16 @@ def test_policy_epoch_fences_commit(tmp_path) -> None:
 
 
 def test_budget_boundaries_aggregation_and_kinds(tmp_path) -> None:
-    store, owner = _setup(tmp_path)
-    for _ in range(40):
+    # Three units: the smallest window that still shows "one more is refused".
+    ceiling = ScreeningBudget(account=3, ambient=3, unaddressed=3, sender=3)
+    store, owner = _setup(tmp_path, screening_budget=ceiling)
+    for _ in range(ceiling.account):
         store.reserve_screening_attempt(owner, message_id="m", fingerprint="f")
     with pytest.raises(StoreRefused) as refusal:
         store.reserve_screening_attempt(owner, message_id="m", fingerprint="f")
     assert refusal.value.code == "budget_exhausted"
     # The HTTP bucket is separate and independently bounded.
-    for _ in range(40):
+    for _ in range(ceiling.account):
         store.reserve_http_attempt(owner, message_id="m")
     with pytest.raises(StoreRefused):
         store.reserve_http_attempt(owner, message_id="m")
@@ -856,6 +872,12 @@ def test_early_holds_are_durable(tmp_path) -> None:
     cases = ("no-default", "template-mismatch", "budget-exhausted")
     for kind in cases:
         path = tmp_path / f"early-{kind}"
+        # The SHIPPED ceiling, spent through the store the pipeline itself
+        # builds: ``_run`` constructs its own ``Store(path)`` from config, so
+        # an explicit ``screening_budget`` here would fence this store and not
+        # the one under test. A configured small set works too (see
+        # ``test_batch_screening._small_budget``); one exhausted window is
+        # cheap either way.
         store, owner = _setup(path)
         policy = Policy()
         if kind == "no-default":
@@ -863,7 +885,7 @@ def test_early_holds_are_durable(tmp_path) -> None:
         elif kind == "template-mismatch":
             policy.template_sha256 = "0" * 64
         else:
-            for _ in range(40):
+            for _ in range(Store.SCREENING_BUDGET_PER_HOUR):
                 store.reserve_screening_attempt(owner, message_id="m", fingerprint="f")
         result = _run(owner, path, Runner(), policy=policy)
         assert result.disposition == "hold", kind

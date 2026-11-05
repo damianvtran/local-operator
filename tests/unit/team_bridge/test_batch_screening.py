@@ -13,7 +13,9 @@ What these pin (PR #3400, 2026-11-03):
 * a wake bigger than the model's budget is split by count and bytes;
 * the budget is charged ONE unit per call, not per message, with the ambient
   reserve, the person-addressed reserve (keyed on SENDER KIND, S-4) and the
-  per-verified-sender ceiling inside the account's 40;
+  per-verified-sender ceiling inside the account ceiling (the budget tests run at
+  a small explicit set; the shipped 400/300/350/200 is pinned once, in
+  ``test_screening_budget_policy.py``);
 * exhaustion holds with a refill-time retry and notifies once per episode. (A
   reader's ``body: null`` is explained by main's ``body_state``, PR #3328.)
 """
@@ -31,6 +33,7 @@ from typing import Any
 import pytest
 
 from local_operator.team_bridge import screening
+from local_operator.team_bridge.settings import ScreeningBudget
 from local_operator.team_bridge.store import Store, StoreRefused, state_db_path
 from tests.unit.team_bridge.test_screening import (  # noqa: F401 - autouse fixture
     Policy,
@@ -97,6 +100,52 @@ def _batch(owner, tmp_path, runner, items):
             owner, items, config_dir=tmp_path, policy=Policy(), runner=runner
         )
     )
+
+
+#: A small, VALID set at the shipped ratios: ambient = 3/4 of the account (the
+#: 30-of-40 rule), the person reserve = the last 1/8 (the 5-of-40 rule), sender =
+#: 1/2 of the account (the 20-of-40 rule). The tests below fill the whole window
+#: ON PURPOSE, and the shipped ceilings are 400/300/350/200 units an hour, so
+#: reserving 400 units to state what 8 states costs a hundredth of the runtime
+#: for exactly the same assertions. 400-row behaviour is still pinned once, by
+#: ``test_screening_budget_policy.py::test_the_shipped_ceiling_trips_at_400_units``.
+SMALL_BUDGET = ScreeningBudget(account=8, ambient=6, unaddressed=7, sender=4)
+
+
+def _small_budget(config_dir: Path) -> ScreeningBudget:
+    """Write :data:`SMALL_BUDGET` into ``config_dir``; return it for assertions.
+
+    Through ``config.yml`` rather than a ``Store(screening_budget=...)`` argument
+    so the connector-driven tests stay on their production path: the ``Store``
+    those tests build for themselves honours the same file, which is also what
+    proves a settings edit reaches the receiver without a code change.
+    """
+
+    _write_budget(config_dir, SMALL_BUDGET)
+    return SMALL_BUDGET
+
+
+def _write_budget(config_dir: Path, budget: "ScreeningBudget") -> None:
+    """Store one valid ceiling set through the real settings writer.
+
+    One write at a time, each producing a VALID set, because validation runs on
+    every write against the values already stored: the chatter ceiling must come
+    down before the unaddressed ceiling drops under its shipped default, and the
+    account ceiling must go last, since every other ceiling has to fit inside it.
+    """
+
+    from local_operator.config import ConfigManager
+    from local_operator.settings_io import SETTINGS, write_setting
+
+    manager = ConfigManager(config_dir)
+    rows = {setting.key: setting for setting in SETTINGS}
+    for key, value in (
+        ("team_bridge.screening.ambient_budget_per_hour", budget.ambient),
+        ("team_bridge.screening.sender_budget_per_hour", budget.sender),
+        ("team_bridge.screening.unaddressed_budget_per_hour", budget.unaddressed),
+        ("team_bridge.screening.budget_per_hour", budget.account),
+    ):
+        write_setting(manager, rows[key], value)
 
 
 def _units(tmp_path: Path) -> int:
@@ -340,30 +389,32 @@ def test_cached_messages_drop_out_and_are_not_charged(tmp_path: Path) -> None:
 
 
 def test_budget_counts_one_unit_per_call_not_per_message(tmp_path: Path) -> None:
+    budget = _small_budget(tmp_path)
     store, owner = _setup(tmp_path)
-    for _ in range(Store.SCREENING_BUDGET_PER_HOUR):
+    for _ in range(budget.account):
         store.reserve_screening_batch(
             owner,
             [{"message_id": f"bmsg_{i}", "fingerprint": "f"} for i in range(20)],
             tier=Store.SCREENING_TIER_HUMAN_ADDRESSED,
         )
-    # 40 calls x 20 messages = 800 rows, 40 units: the 41st call is refused.
+    # 8 calls x 20 messages = 160 rows, 8 units: the 9th call is refused.
     with pytest.raises(StoreRefused) as refused:
         store.reserve_screening_batch(
             owner, [{"message_id": "bmsg_x"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
         )
     assert refused.value.code == "budget_exhausted"
-    assert _units(tmp_path) == Store.SCREENING_BUDGET_PER_HOUR
+    assert _units(tmp_path) == budget.account
 
 
 def test_ambient_chatter_leaves_the_reserve_for_humans_and_addressed(tmp_path: Path) -> None:
+    budget = _small_budget(tmp_path)
     store, owner = _setup(tmp_path)
-    for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
+    for i in range(budget.ambient):
         store.reserve_screening_batch(owner, [{"message_id": f"bmsg_{i}"}], tier=0)
     with pytest.raises(StoreRefused) as refused:
         store.reserve_screening_batch(owner, [{"message_id": "bmsg_amb"}], tier=0)
     assert refused.value.code == "ambient_exhausted"
-    reserve = Store.SCREENING_BUDGET_PER_HOUR - Store.SCREENING_AMBIENT_BUDGET_PER_HOUR
+    reserve = budget.account - budget.ambient
     for i in range(reserve):
         store.reserve_screening_batch(
             owner, [{"message_id": f"bmsg_dm{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
@@ -376,20 +427,21 @@ def test_ambient_chatter_leaves_the_reserve_for_humans_and_addressed(tmp_path: P
 
 
 def test_a_persons_room_lines_cannot_spend_the_addressed_only_units(tmp_path: Path) -> None:
-    """Measured failure of a flat 30/10 split: the human's own room lines spent
-    the whole reserve and a later DM waited the hour. The last units are
-    reachable only by a DM or a mention."""
+    """Measured failure of a flat split: the human's own room lines spent the
+    whole reserve and a later DM waited the hour. The last units are reachable
+    only by a DM or a mention."""
 
+    budget = _small_budget(tmp_path)
     store, owner = _setup(tmp_path)
-    for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
+    for i in range(budget.ambient):
         store.reserve_screening_batch(owner, [{"message_id": f"bmsg_a{i}"}], tier=0)
-    room = Store.SCREENING_UNADDRESSED_BUDGET_PER_HOUR - Store.SCREENING_AMBIENT_BUDGET_PER_HOUR
+    room = budget.unaddressed - budget.ambient
     for i in range(room):
         store.reserve_screening_batch(owner, [{"message_id": f"bmsg_h{i}"}], tier=1)
     with pytest.raises(StoreRefused) as refused:
         store.reserve_screening_batch(owner, [{"message_id": "bmsg_h_more"}], tier=1)
     assert refused.value.code == "unaddressed_exhausted"
-    addressed = Store.SCREENING_BUDGET_PER_HOUR - Store.SCREENING_UNADDRESSED_BUDGET_PER_HOUR
+    addressed = budget.account - budget.unaddressed
     for i in range(addressed):
         store.reserve_screening_batch(
             owner, [{"message_id": f"bmsg_dm{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
@@ -398,19 +450,22 @@ def test_a_persons_room_lines_cannot_spend_the_addressed_only_units(tmp_path: Pa
 
 def test_an_agent_mentioning_the_recipient_cannot_spend_the_last_five(tmp_path: Path) -> None:
     """S-4, the attack: an agent that @-mentions the recipient in every post
-    is agent-ADDRESSED, fenced at 35; the owner's own DM still screens."""
+    is agent-ADDRESSED, fenced at the unaddressed ceiling; the owner's own DM
+    still screens. The ceiling is the small test set, whose reserve is still the
+    last eighth of the account."""
 
+    budget = _small_budget(tmp_path)
     store, owner = _setup(tmp_path)
     accepted = 0
     with pytest.raises(StoreRefused) as refused:
-        for i in range(Store.SCREENING_BUDGET_PER_HOUR):
+        for i in range(budget.account):
             store.reserve_screening_batch(
                 owner, [{"message_id": f"bmsg_at{i}"}], tier=Store.SCREENING_TIER_ADDRESSED
             )
             accepted += 1
-    assert accepted == Store.SCREENING_UNADDRESSED_BUDGET_PER_HOUR
+    assert accepted == budget.unaddressed
     assert refused.value.code == "unaddressed_exhausted"
-    for i in range(Store.SCREENING_BUDGET_PER_HOUR - Store.SCREENING_UNADDRESSED_BUDGET_PER_HOUR):
+    for i in range(budget.account - budget.unaddressed):
         store.reserve_screening_batch(
             owner, [{"message_id": f"bmsg_owner{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
         )
@@ -426,8 +481,9 @@ def test_an_unknown_tier_hint_never_reaches_the_persons_reserve() -> None:
 
 
 def test_one_verified_sender_cannot_spend_more_than_its_share(tmp_path: Path) -> None:
+    budget = _small_budget(tmp_path)
     store, owner = _setup(tmp_path)
-    for i in range(Store.SCREENING_SENDER_BUDGET_PER_HOUR):
+    for i in range(budget.sender):
         store.reserve_screening_batch(
             owner, [{"message_id": f"bmsg_{i}", "sender_account_id": "acc_loud"}], tier=3
         )
@@ -444,8 +500,9 @@ def test_one_verified_sender_cannot_spend_more_than_its_share(tmp_path: Path) ->
 
 
 def test_exhaustion_holds_with_a_refill_retry_and_notifies_once(tmp_path: Path) -> None:
+    budget = _small_budget(tmp_path)
     store, owner = _setup(tmp_path)
-    for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
+    for i in range(budget.ambient):
         store.reserve_screening_batch(owner, [{"message_id": f"bmsg_s{i}"}], tier=0)
     ambient = [dict(item, allocation={"tier": 0}) for item in _items("a", "b")]
     runner = BatchRunner(lambda _p: _triples(("m1", "deliver"), ("m2", "deliver")))
@@ -482,8 +539,9 @@ def test_exhaustion_holds_with_a_refill_retry_and_notifies_once(tmp_path: Path) 
 
 
 def test_held_message_is_screened_once_the_budget_refills(tmp_path: Path) -> None:
+    budget = _small_budget(tmp_path)
     store, owner = _setup(tmp_path)
-    for i in range(Store.SCREENING_BUDGET_PER_HOUR):
+    for i in range(budget.account):
         store.reserve_screening_batch(owner, [{"message_id": f"bmsg_s{i}"}], tier=3)
     runner = BatchRunner(lambda _p: _triples(("m1", "deliver"), ("m2", "deliver")))
     held = _batch(owner, tmp_path, runner, _items("a", "b"))
@@ -504,8 +562,9 @@ def test_held_message_is_screened_once_the_budget_refills(tmp_path: Path) -> Non
 def test_pre_upgrade_ledger_rows_still_count(tmp_path: Path) -> None:
     """A row without the new columns is its own unit (never free spend)."""
 
+    budget = _small_budget(tmp_path)
     store, owner = _setup(tmp_path)
-    for _ in range(Store.SCREENING_BUDGET_PER_HOUR):
+    for _ in range(budget.account):
         store.reserve_screening_attempt(
             owner, message_id=None, tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
         )
@@ -673,8 +732,9 @@ def test_a_one_line_per_pass_flood_cannot_starve_the_owners_dm(
     """QA Q-1 / M1 / S-3: every single screen carries its tier.
 
     Agent chatter arriving ONE line per pass (so nothing batches) used to be
-    charged as addressed and spent all 40; the owner's DM then waited the
-    hour. Now the chatter stops at the ambient 30 and the DM screens at once.
+    charged as addressed and spent the whole account window; the owner's DM
+    then waited the hour. Now the chatter stops at the ambient ceiling and the
+    DM screens at once.
     """
 
     from tests.unit.team_bridge import test_wake_every_message as rig
@@ -685,22 +745,24 @@ def test_a_one_line_per_pass_flood_cannot_starve_the_owners_dm(
     config_dir = tmp_path / "a"
     config_dir.mkdir()
     rig._enroll(config_dir, owner, "sess_a")
+    # AFTER _enroll: it rewrites config.yml with the enabled switch.
+    budget = _small_budget(config_dir)
     hub = rig.Hub(members=("bep_a",), caps=False)
     rig._rig(monkeypatch, hub, {"a": config_dir})
     runner = BatchRunner(lambda p: deliver_everything(p, default_model="")[0])
     real_screening(monkeypatch, runner)
 
-    for n in range(Store.SCREENING_BUDGET_PER_HOUR):
+    for n in range(budget.account):
         hub.post(f"bep_{'bcdef'[n % 5]}", f"agent chatter {n}")
         rig._iterate(owner, config_dir)
         clock.now += 3.0
-    assert len(runner.calls) == Store.SCREENING_AMBIENT_BUDGET_PER_HOUR
+    assert len(runner.calls) == budget.ambient
     store = Store(config_dir)
     assert store.hold_count_readonly(owner, "budget_exhausted") >= 1
 
     dm = hub.post(None, "can you check the deploy?", kind="dm")
     rig._iterate(owner, config_dir)
-    assert len(runner.calls) == Store.SCREENING_AMBIENT_BUDGET_PER_HOUR + 1
+    assert len(runner.calls) == budget.ambient + 1
     receipt = store.receipt_for_message(owner, dm.id)
     assert receipt is not None and receipt["verdict"] == "allow"
 
@@ -780,13 +842,25 @@ def test_held_retries_serve_a_persons_dm_before_an_ambient_backlog(tmp_path: Pat
 # --------------------- round 2: no_batch is sticky across re-codes ---------------------
 
 
-def _edge_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vendor) -> Any:
+def _edge_rig(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    vendor,
+    *,
+    budget: ScreeningBudget = SMALL_BUDGET,
+) -> Any:
     """The real connector + core with the ambient pool spent to its ceiling.
 
-    The 30 ambient units are pre-spent one minute apart, so they refill ONE
-    at a time: the budget edge both round-2 reviewers measured, where a void
-    batch's single re-screens are refused and used to be re-coded
-    ``budget_exhausted`` (batchable) and re-batched with their trigger.
+    The ambient units are pre-spent one minute apart, so they refill ONE at a
+    time: the budget edge both round-2 reviewers measured, where a void batch's
+    single re-screens are refused and used to be re-coded ``budget_exhausted``
+    (batchable) and re-batched with their trigger.
+
+    ``budget`` defaults to the small test set (one refill a minute, exactly as
+    the shipped ceiling behaves, at an eighth of the rows). A scenario that
+    depends on the SHIPPED headroom between the ambient pool and the account
+    ceiling says so by passing ``ScreeningBudget()``: that headroom is what the
+    retry ladder spends, so shrinking it changes the scenario, not the cost.
     """
 
     from tests.unit.team_bridge import test_wake_every_message as rig
@@ -797,16 +871,18 @@ def _edge_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vendor) -> Any:
     config_dir = tmp_path / "a"
     config_dir.mkdir()
     rig._enroll(config_dir, owner, "sess_a")
+    # AFTER _enroll: it rewrites config.yml with the enabled switch.
+    _write_budget(config_dir, budget)
     hub = rig.Hub(members=("bep_a",), caps=False)
     rig._rig(monkeypatch, hub, {"a": config_dir})
     runner = BatchRunner(vendor)
     real_screening(monkeypatch, runner)
     store = Store(config_dir)
     start = clock.now
-    for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
+    for i in range(budget.ambient):
         clock.now = start + 60.0 * i
         store.reserve_screening_batch(owner, [{"message_id": f"bmsg_fill{i}"}], tier=0)
-    clock.now = start + 60.0 * Store.SCREENING_AMBIENT_BUDGET_PER_HOUR
+    clock.now = start + 60.0 * budget.ambient
     return SimpleNamespace(
         rig=rig,
         clock=clock,
@@ -889,7 +965,10 @@ def test_thirty_fillers_then_a_trigger_cannot_freeze_benign_lines(
     trigger beside benign lines; the benign lines are admitted over refills."""
 
     trigger = "TRIGGER: hold me only in company"
-    env = _edge_rig(tmp_path, monkeypatch, _hold_trigger_vendor(trigger))
+    # The SHIPPED set: this scenario measures the shipped ceiling's refill ladder
+    # (30 ambient units refilling one a minute under a 40-unit account), which is
+    # 30 reservations, not 400.
+    env = _edge_rig(tmp_path, monkeypatch, _hold_trigger_vendor(trigger), budget=ScreeningBudget())
     env.clock.now = env.start + 3600.0 + 1.0
     benign = [env.hub.post(f"bep_{n}", f"benign line {n}") for n in "bd"]
     env.hub.post("bep_c", trigger)
@@ -925,10 +1004,11 @@ def test_the_episode_ends_only_when_every_endpoint_of_the_account_drained(
     from local_operator.team_bridge.store import OwnerReceipt
     from tests.unit.team_bridge.test_screening import _owner
 
+    budget = _small_budget(tmp_path)
     store, first = _setup(tmp_path)
     second = _owner(tenant="tnt_2", endpoint="bep_2")
     store.commit_enrollment(second, OwnerReceipt("bridge_consent_v1", "ref-2"))
-    for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
+    for i in range(budget.ambient):
         store.reserve_screening_batch(first, [{"message_id": f"bmsg_f{i}"}], tier=0)
     with pytest.raises(StoreRefused):
         store.reserve_screening_batch(second, [{"message_id": "bmsg_x"}], tier=0)

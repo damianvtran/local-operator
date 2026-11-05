@@ -197,12 +197,64 @@ HOLD_ALERT_MAX_MINUTES = 10080
 #: OFF, because a release path must never open on a value nobody wrote.
 DEFAULT_HOLD_RELEASE = False
 
+#: ``team_bridge.screening.*`` — the rolling-hour ceilings on SCREENING SPEND,
+#: now CONFIGURABLE. They were fixed class constants on ``Store`` (40/30/35/20,
+#: "the frozen §8 budget"); these are the 10x replacements and the shipped
+#: defaults of four ``/settings`` rows.
+#:
+#: WHY THEY MOVED — MEASURED IN BUDGET UNITS, NOT ROWS. The cap counts DISTINCT
+#: ``COALESCE(batch_id, attempt_id)`` per kind, so a RAW ROW count double-counts
+#: one screen (a logical row plus an http row, plus shared batch rows). Measured
+#: against the live store (``~/.local-operator/team_bridge/state.sqlite3``,
+#: read-only, 2026-11-05) in that unit: peak LOGICAL units in one hour = 40 —
+#: exactly the old ceiling, reached in four separate hours (2026-10-31 05Z, 07Z,
+#: 10Z and 2026-11-05 18Z), with peak HTTP units also 40; the last 24 hours spent
+#: 248 logical units against a 40/hour cap. A ceiling that ordinary use touches
+#: exactly, in four different hours, is binding — the room spent the hour and the
+#: owner's own DM then waited for a refill.
+#:
+#: HONESTLY: part of that spend was REPEAT screening, not unique demand. 416
+#: distinct messages produced 1,044 logical units (2.5 screens per message), 41
+#: messages were screened more than twice, 191 logical attempts belong to
+#: messages that never got a receipt, and one message was screened 155 times
+#: over 54 hours. So the old number was too low for real demand AND was being
+#: spent on retries; the raise fixes the first, and the repeat behaviour is worth
+#: its own look rather than being hidden by a constant that hid it before.
+#:
+#: THE TIER RELATIONSHIPS ARE PRESERVED EXACTLY, not rescaled one at a time:
+#: ambient 300 of 400 is the old three quarters (30 of 40); unaddressed 350 is
+#: the old 35 (everything but a person addressing this agent); sender 200 is
+#: half the account ceiling, the old 20-of-40 share, so one sender still cannot
+#: monopolise the window however its messages batch. Every reserve is CARVED
+#: OUT of the account ceiling, never added to it.
+#:
+#: A BIGGER CEILING IS NOT A WEAKER SAFETY STORY. The two bounds on a runaway
+#: are untouched by these numbers and read none of them: the screening breaker
+#: opens on provider FAILURE (its own threshold), and the owner is notified
+#: ONCE PER EXHAUSTION EPISODE at whatever the ceiling is. What these keys bound
+#: is spend — and an operator who wants it lower can now say so in config, in
+#: the running receiver, instead of waiting for a release.
+DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR = 400
+DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR = 300
+DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR = 350
+DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR = 200
+
 ENABLED_PATH = ("team_bridge", "enabled")
 ONBOARDING_PATH = ("team_bridge", "onboarding")
 DEFAULT_ENROLLMENT_PATH = ("team_bridge", "default_enrollment")
 SESSION_PATH = ("team_bridge", "session")
 HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
+#: The SUBTREE the four screening ceilings live under. Readers take this tuple,
+#: so no consumer re-spells "where screening lives" and drifts from the writer.
+SCREENING_SUBTREE = ("team_bridge", "screening")
+#: Leaf names inside :data:`SCREENING_SUBTREE`; :class:`ScreeningBudget` reads
+#: exactly these, and the registry's own ``path`` literals spell them (it cannot
+#: import this module — see the module docstring).
+SCREENING_BUDGET_LEAF = "budget_per_hour"
+SCREENING_AMBIENT_BUDGET_LEAF = "ambient_budget_per_hour"
+SCREENING_UNADDRESSED_BUDGET_LEAF = "unaddressed_budget_per_hour"
+SCREENING_SENDER_BUDGET_LEAF = "sender_budget_per_hour"
 
 
 #: Distinguishes "the key is absent" (the shipped default) from "the key is
@@ -256,6 +308,17 @@ def _session(value: Any) -> str:
     return DEFAULT_TEAM_BRIDGE_SESSION
 
 
+def _screening_ceiling(value: Any, default: int) -> int:
+    """A usable ceiling: a real positive int, else the shipped default.
+
+    See :class:`ScreeningBudget` for the whole rule and why nothing here raises.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value if value >= 1 else default
+
+
 def _hold_alert_after_minutes(value: Any) -> int:
     """Whole minutes in 0..10080, else the default.
 
@@ -269,6 +332,114 @@ def _hold_alert_after_minutes(value: Any) -> int:
     if not 0 <= value <= HOLD_ALERT_MAX_MINUTES:
         return DEFAULT_HOLD_ALERT_AFTER_MINUTES
     return value
+
+
+@dataclass(frozen=True)
+class ScreeningBudget:
+    """The four rolling-hour screening ceilings, as configured or as shipped.
+
+    ``account`` bounds every unit of screening spend. ``ambient`` bounds agent
+    chatter in a shared room (tier 0). ``unaddressed`` bounds everything that is
+    not a PERSON addressing this agent (tiers 0-2), so the units above it are
+    reachable only by the owner's — or another person's — DM or mention.
+    ``sender`` bounds ONE verified sender inside the account's window.
+
+    THE INVARIANT is a NESTING, and it is checked, never clamped: an unaddressed
+    ceiling above the account ceiling, a chatter ceiling above the unaddressed
+    one, or a per-sender ceiling above the account one is a CONTRADICTION
+    between two numbers a person wrote, and silently reshaping one of them would
+    leave the file saying something the receiver is not doing. So:
+
+    * :meth:`from_values` reads each field with its own rule (below) and
+      :meth:`violations` reports the cross-field contradictions;
+    * the WRITE path refuses a write that would create one (``settings_io
+      .validate``), naming the rule while the user is still looking at the
+      command that caused it;
+    * the READ path (a hand-edited YAML, an older config) adopts the budget
+      only when the WHOLE set is valid — one violated rule falls back to all
+      four shipped defaults with one warning — so half a configured set is never
+      honoured (``store.screening_budget_from_config``).
+
+    PER-FIELD RULE (the module's ordinary convention for a present-but-unusable
+    value): a value that is missing, not an ``int``, or below 1 reads the SHIPPED
+    default for THAT field only. ``bool`` is excluded by name: it is an ``int``
+    to Python, so ``true`` would otherwise read as the tightest possible ceiling
+    (1) from a value nobody meant as a number.
+
+    NO UPPER CLAMP anywhere: the registry bounds an EDIT at 100_000; a hand edit
+    above it is the operator's own spend decision.
+    """
+
+    account: int = DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR
+    ambient: int = DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR
+    unaddressed: int = DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR
+    sender: int = DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR
+
+    def __post_init__(self) -> None:
+        # The per-field rule applies to EVERY construction path, not only
+        # ``from_values``: a caller that builds one from arithmetic must not be
+        # able to hand the store a non-int. The CROSS-field rules are NOT
+        # enforced here — they are reported by ``violations()`` so the two
+        # boundaries can refuse (write) or fall back wholesale (read) with a
+        # message instead of quietly rewriting a number.
+        object.__setattr__(
+            self,
+            "account",
+            _screening_ceiling(self.account, DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR),
+        )
+        object.__setattr__(
+            self,
+            "ambient",
+            _screening_ceiling(self.ambient, DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR),
+        )
+        object.__setattr__(
+            self,
+            "unaddressed",
+            _screening_ceiling(
+                self.unaddressed, DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR
+            ),
+        )
+        object.__setattr__(
+            self,
+            "sender",
+            _screening_ceiling(self.sender, DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR),
+        )
+
+    def violations(self) -> tuple[tuple[str, str], ...]:
+        """``(leaf, rule)`` per contradicted cross-field rule; empty when valid.
+
+        The leaf is the key a person has to change, so the read path's one
+        warning and the write path's refusal can both name it.
+        """
+
+        found: list[tuple[str, str]] = []
+        if self.unaddressed > self.account:
+            found.append((SCREENING_UNADDRESSED_BUDGET_LEAF, "unaddressed <= account"))
+        if self.ambient > self.unaddressed:
+            found.append((SCREENING_AMBIENT_BUDGET_LEAF, "ambient <= unaddressed"))
+        if self.sender > self.account:
+            found.append((SCREENING_SENDER_BUDGET_LEAF, "sender <= account"))
+        return tuple(found)
+
+    @classmethod
+    def from_values(cls, values: Any) -> "ScreeningBudget":
+        """The ``team_bridge.screening`` subtree, per-field defaulted.
+
+        Takes the SUBTREE — what
+        ``ConfigManager.get_nested_value(SCREENING_SUBTREE, {})`` returns — not
+        the whole document, so a caller cannot pass a shape this reader never
+        sees and silently get the shipped ceilings. Anything that is not a
+        mapping (a hand-edited ``screening: off``) reads as the shipped ones.
+        CROSS-FIELD validity is the caller's to check: :meth:`violations`.
+        """
+
+        node = values if isinstance(values, Mapping) else {}
+        return cls(
+            account=node.get(SCREENING_BUDGET_LEAF, _MISSING),
+            ambient=node.get(SCREENING_AMBIENT_BUDGET_LEAF, _MISSING),
+            unaddressed=node.get(SCREENING_UNADDRESSED_BUDGET_LEAF, _MISSING),
+            sender=node.get(SCREENING_SENDER_BUDGET_LEAF, _MISSING),
+        )
 
 
 @dataclass(frozen=True)

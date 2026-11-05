@@ -6088,15 +6088,36 @@ SETTINGS: tuple[Setting, ...] = (
     # ``team_bridge.enabled`` reads OFF rather than crashing or consenting on a
     # bad value.
     #
-    # TWO ROWS, DELIBERATELY. ``team_bridge.onboarding`` is internal UI
-    # bookkeeping (the one-time dialog's shown-flag) and is NOT registered: a
-    # public row would dress session-format state as a knob. Screening is not
-    # registered AND not a key: it is the admission gate (§8, §13.9), an
-    # invariant no write may disable (the status route's receipt states it; a
-    # test pins that no registered setting can turn it off). The allowlist's
-    # default state and cues are server truth (§9), surfaced as data by
+    # SIX ROWS, AND WHAT IS DELIBERATELY NOT ONE OF THEM.
+    # ``team_bridge.onboarding`` is internal UI bookkeeping (the one-time
+    # dialog's shown-flag) and is NOT registered: a public row would dress
+    # session-format state as a knob. ``hold_alert_after_minutes`` and
+    # ``hold_release`` are read keys with no row (their constants, and why, are
+    # in ``team_bridge/settings.py``). The allowlist's default state and cues
+    # are server truth (§9), surfaced as data by
     # ``team_bridge.client.allowlist_view`` — never restated here, where an edit
     # would drift from the server silently.
+    #
+    # SCREENING IS STILL NOT A SWITCH, AND THESE FOUR ROWS DO NOT MAKE IT ONE.
+    # The admission gate itself (§8, §13.9) stays an invariant no write may
+    # disable. What the ``screening.*`` rows carry are the SPEND CEILINGS around
+    # it: every one is ``Kind.INT`` with ``minimum=1``, so there is no zero,
+    # negative or "off" value for a writer to put there, and
+    # ``test_no_setting_can_disable_the_admission_gate`` pins both that and the
+    # exact key set, so a future row draws attention instead of passing quietly.
+    # They are NESTED under one ``screening.`` subtree because the receiver reads
+    # the subtree as a single tuple (``ScreeningBudget.from_values``); flat keys
+    # would need a second reader to agree with the first about the same numbers.
+    #
+    # WHY THEY ARE ROWS AT ALL, when the budget used to be a frozen constant:
+    # measured in the ledger's own unit (DISTINCT ``COALESCE(batch_id,
+    # attempt_id)``, not raw rows), the old 40/hour account ceiling was reached
+    # EXACTLY in four separate hours, and the last 24 hours spent 248 units
+    # against it — binding in ordinary use, so the numbers had to move, and
+    # making them config keys is what stops the NEXT adjustment from being a
+    # release. The full measurement is beside the constants in
+    # ``team_bridge/settings.py``; ``_team_bridge_consumer_defaults()`` pins that
+    # the literals here cannot drift from them.
     Setting(
         key="team_bridge.enabled",
         path=("team_bridge", "enabled"),
@@ -6136,6 +6157,67 @@ SETTINGS: tuple[Setting, ...] = (
         # badge-only and `_sync_designation` already maps it to SQL NULL.
         empty_unsets=False,
         help=_t(_ws.team_bridge_session_help()),
+    ),
+    Setting(
+        key="team_bridge.screening.budget_per_hour",
+        path=("team_bridge", "screening", "budget_per_hour"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_screening_budget_per_hour_label()),
+        kind=Kind.INT,
+        # The 10x of the old frozen 40; see DEFAULT_TEAM_BRIDGE_SCREENING_*
+        # in ``team_bridge/settings.py`` for the measurement that moved it.
+        # ``minimum=1``: a zero ceiling would be an off switch, which the
+        # admission-gate guard forbids.
+        default=400,
+        help=_t(_ws.team_bridge_screening_budget_per_hour_help()),
+        minimum=1,
+        maximum=100_000,
+        unit="screenings",
+    ),
+    Setting(
+        key="team_bridge.screening.ambient_budget_per_hour",
+        path=("team_bridge", "screening", "ambient_budget_per_hour"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_screening_ambient_budget_per_hour_label()),
+        kind=Kind.INT,
+        # Three quarters of the account ceiling, the shipped relationship. The
+        # receiver refuses a write that puts it above ``unaddressed`` and ignores
+        # a hand-edited set that does, so an edit here can never widen the
+        # account's hour.
+        default=300,
+        help=_t(_ws.team_bridge_screening_ambient_budget_per_hour_help()),
+        minimum=1,
+        maximum=100_000,
+        unit="screenings",
+    ),
+    Setting(
+        key="team_bridge.screening.unaddressed_budget_per_hour",
+        path=("team_bridge", "screening", "unaddressed_budget_per_hour"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_screening_unaddressed_budget_per_hour_label()),
+        kind=Kind.INT,
+        # Everything but a person addressing this agent: the units ABOVE it are
+        # the person reserve, reachable only by a DM or mention from a person.
+        default=350,
+        help=_t(_ws.team_bridge_screening_unaddressed_budget_per_hour_help()),
+        minimum=1,
+        maximum=100_000,
+        unit="screenings",
+    ),
+    Setting(
+        key="team_bridge.screening.sender_budget_per_hour",
+        path=("team_bridge", "screening", "sender_budget_per_hour"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_screening_sender_budget_per_hour_label()),
+        kind=Kind.INT,
+        # Half the account ceiling: one sender cannot monopolise the window
+        # however its messages batch. Checked against the account ceiling (both
+        # here and by the receiver), so it is a share, never an addition.
+        default=200,
+        help=_t(_ws.team_bridge_screening_sender_budget_per_hour_help()),
+        minimum=1,
+        maximum=100_000,
+        unit="screenings",
     ),
     # -- asks ------------------------------------------------------------------
     # How long a LAPSED (timed-out, unanswered) ask stays shown, measured from
@@ -6452,6 +6534,72 @@ def coerce(setting: Setting, text: str) -> Any:
     return text
 
 
+#: The four ``team_bridge.screening.*`` ceilings are ONE SET, so a write to any
+#: of them is judged against its SIBLINGS: the tiers are carve-outs of the
+#: account ceiling (the receiver reserves units for people by lowering what the
+#: bottom tiers may spend), and a set where a slice is bigger than the total it
+#: comes out of is a contradiction between two numbers a person wrote.
+#:
+#: WHY THE WRITE SIDE REFUSES RATHER THAN CLAMPS (operator decision on this
+#: change): a silent clamp stores a number the page then displays forever while
+#: the runtime uses another one — the "config and behaviour disagree, with
+#: nothing on screen admitting it" failure :func:`validate` exists to prevent.
+#: The receiver's own reader applies the same rules to a hand-edited file, and
+#: does it ALL-OR-NOTHING (one contradiction ⇒ all four shipped defaults plus a
+#: warning), so the two boundaries agree on what a valid set is without sharing
+#: a module: this registry may not import ``team_bridge.settings`` (see the
+#: team-bridge block below) and the invariant itself is small enough to state
+#: twice honestly instead of building a framework around it.
+_SCREENING_BUDGET_KEY_FIELD: dict[str, str] = {
+    "team_bridge.screening.budget_per_hour": "account",
+    "team_bridge.screening.ambient_budget_per_hour": "ambient",
+    "team_bridge.screening.unaddressed_budget_per_hour": "unaddressed",
+    "team_bridge.screening.sender_budget_per_hour": "sender",
+}
+
+#: ``(field, ceiling it is carved out of, the rule in a user's words)``.
+_SCREENING_BUDGET_RULES: tuple[tuple[str, str, str], ...] = (
+    ("unaddressed", "account", "the unaddressed ceiling cannot be above the screening ceiling"),
+    ("ambient", "unaddressed", "the agent chatter ceiling cannot be above the unaddressed ceiling"),
+    ("sender", "account", "the per-sender ceiling cannot be above the screening ceiling"),
+)
+
+
+def _screening_budget_problem(
+    setting: Setting, value: Any, values: Mapping[str, Any]
+) -> str | None:
+    """Why writing ``value`` would leave the screening ceilings contradicted.
+
+    ``None`` for every setting that is not one of the four, and for a write the
+    sibling rules cannot judge (a non-integer or a cleared value): the INT arm
+    of :func:`validate` owns those messages, and this check must not pre-empt a
+    better one with a set-level sentence.
+    """
+
+    field = _SCREENING_BUDGET_KEY_FIELD.get(setting.key)
+    if field is None:
+        return None
+    rows = {row.key: row for row in SETTINGS if row.key in _SCREENING_BUDGET_KEY_FIELD}
+    proposed: dict[str, int] = {}
+    for key, row_field in _SCREENING_BUDGET_KEY_FIELD.items():
+        row = rows.get(key)
+        if row is None:
+            # A row left the registry in another change: nothing to compare, and
+            # refusing on a missing sibling would block a write for a reason the
+            # user cannot act on.
+            return None
+        raw = value if key == setting.key else _walk(values, row.path)
+        if raw is _MISSING:
+            raw = row.default
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+            return None
+        proposed[row_field] = raw
+    for field_name, ceiling_field, rule in _SCREENING_BUDGET_RULES:
+        if proposed[field_name] > proposed[ceiling_field]:
+            return f"{rule}: {proposed[field_name]} is above {proposed[ceiling_field]}"
+    return None
+
+
 def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = None) -> str | None:
     """``None`` when ``value`` may be stored, else the reason it may not.
 
@@ -6463,12 +6611,20 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
 
     ``values`` is the current config snapshot, needed only by the checks that
     are about a value's relationship to its SIBLINGS rather than to its own
-    schema — today just the hotkey group, where two actions sharing one key
-    leaves one silently unreachable. Optional because most settings are
+    schema — the hotkey group, where two actions sharing one key leaves one
+    silently unreachable, and the four ``team_bridge.screening.*`` ceilings,
+    where a tier's carve-out above the total it is carved from would describe a
+    distribution that cannot exist. Optional because most settings are
     self-contained and the unit hosts validate without a config; when it is
-    omitted the group check is skipped, and :func:`write_setting` always
-    supplies it, so no write can reach disk unchecked.
+    omitted those checks are skipped, and :func:`write_setting` always supplies
+    it, so no write can reach disk unchecked.
     """
+    if values is not None:
+        # FIRST: a set-level contradiction must hear ITS sentence, not a bounds
+        # message about one number that is individually fine.
+        problem = _screening_budget_problem(setting, value, values)
+        if problem is not None:
+            return problem
     if setting.validate_value is not None:
         try:
             setting.validate_value(value)

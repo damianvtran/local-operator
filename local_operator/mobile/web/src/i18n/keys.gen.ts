@@ -1590,6 +1590,14 @@ export type MessageParams = {
   "wire.settings.team_bridge.title": undefined;
   "wire.settings.team_bridge_enabled.help": undefined;
   "wire.settings.team_bridge_enabled.label": undefined;
+  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": undefined;
+  "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": undefined;
+  "wire.settings.team_bridge_screening_budget_per_hour.help": undefined;
+  "wire.settings.team_bridge_screening_budget_per_hour.label": undefined;
+  "wire.settings.team_bridge_screening_sender_budget_per_hour.help": undefined;
+  "wire.settings.team_bridge_screening_sender_budget_per_hour.label": undefined;
+  "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": undefined;
+  "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": undefined;
   "wire.settings.team_bridge_session.help": undefined;
   "wire.settings.team_bridge_session.label": undefined;
   "wire.settings.tool_approval_mode.choice.ask.description": undefined;
