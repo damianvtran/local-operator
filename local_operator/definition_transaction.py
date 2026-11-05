@@ -30,6 +30,42 @@ _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCAL = threading.local()
 
+#: Identities consumed IN THIS PROCESS, after the runtime server's
+#: ``_live_challenges`` pattern: a leaked one-shot token is cleared on use, and
+#: the store is pruned on access rather than by a timer. The journal on disk is
+#: same-uid editable, so a rollback to ``prepared`` would otherwise re-apply an
+#: operation that already landed here. Process-local and bounded ON PURPOSE: it
+#: is a defence-in-depth guard for the threat model the architect recorded (an
+#: ordinary session runs an unconfined shell), never a cross-process boundary.
+_CONSUMED: dict[str, float] = {}
+_CONSUMED_LOCK = threading.Lock()
+_CONSUMED_TTL_S = 24 * 3600.0
+
+
+def _consumed_key(root: Path, transaction_id: str) -> str:
+    return str(Path(root).resolve()) + "|" + str(transaction_id)
+
+
+def _consumed_error() -> "DefinitionTransactionConflict":
+    return DefinitionTransactionConflict(
+        "this operation was already applied in this process; never replay it — "
+        "ask the person for the change again"
+    )
+
+
+def _raise_if_consumed(key: str) -> None:
+    with _CONSUMED_LOCK:
+        moment = time.monotonic()
+        for stale in [name for name, seen in _CONSUMED.items() if moment - seen > _CONSUMED_TTL_S]:
+            _CONSUMED.pop(stale, None)
+        if key in _CONSUMED:
+            raise _consumed_error()
+
+
+def _mark_consumed(key: str) -> None:
+    with _CONSUMED_LOCK:
+        _CONSUMED[key] = time.monotonic()
+
 
 class DefinitionTransactionConflict(DefinitionRevisionMismatch):
     """The definition moved or a journal needs explicit recovery."""
@@ -146,6 +182,67 @@ def _durable_json(path: Path, value: Any) -> None:
         temp.unlink(missing_ok=True)
 
 
+def prepare(
+    root: Path,
+    *,
+    transaction_id: str,
+    before: Any,
+    after: Any,
+    read: Callable[[], Any] | None = None,
+) -> dict[str, Any]:
+    """Write (or confirm) the UNCONSUMED record a later apply is checked against.
+
+    Splitting preparation out is what makes ABSENCE unreadable as authority: a
+    journal that is missing at apply time means this operation was never
+    prepared here, so :func:`transact` refuses instead of treating a deleted
+    crash record as a fresh grant. Idempotent for an identical unconsumed
+    record; ``rolled_back`` may be prepared again only when the definition still
+    matches the recorded ``before`` commitment, because that is the state the
+    rollback restored.
+    """
+    _validate_identity(transaction_id)
+    with definition_lock(root):
+        path = Path(root) / "profile-transactions" / (transaction_id + ".json")
+        key = _consumed_key(root, transaction_id)
+        _raise_if_consumed(key)
+        before_token, after_token = commitment(before), commitment(after)
+        if not path.exists():
+            if read is not None and commitment(read()) != before_token:
+                raise DefinitionTransactionConflict("definition changed; nothing was written")
+            record = {
+                "schema": 1,
+                "before": before_token,
+                "after": after_token,
+                "state": "prepared",
+            }
+            _durable_json(path, record)
+            return record
+        previous = json.loads(path.read_text(encoding="utf-8"))
+        if previous.get("before") != before_token or previous.get("after") != after_token:
+            raise DefinitionTransactionConflict("transaction identity has different images")
+        if previous.get("state") == "prepared":
+            return previous
+        if previous.get("state") == "complete":
+            raise _consumed_error()
+        if read is not None and commitment(read()) != before_token:
+            raise DefinitionTransactionConflict("definition changed; nothing was written")
+        previous["state"] = "prepared"
+        _durable_json(path, previous)
+        return previous
+
+
+def _validate_identity(transaction_id: str) -> None:
+    if (
+        not transaction_id
+        or len(transaction_id) > 128
+        or any(
+            char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+            for char in transaction_id
+        )
+    ):
+        raise ValueError("invalid definition transaction identity")
+
+
 def transact(
     root: Path,
     *,
@@ -165,36 +262,40 @@ def transact(
     replaying mutation or backup. Ordinary exceptions roll back this operation;
     process death leaves the journal for explicit authenticated reconciliation.
     """
-    if (
-        not transaction_id
-        or len(transaction_id) > 128
-        or any(
-            char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-            for char in transaction_id
-        )
-    ):
-        raise ValueError("invalid definition transaction identity")
+    _validate_identity(transaction_id)
     with definition_lock(root):
         path = Path(root) / "profile-transactions" / (transaction_id + ".json")
+        key = _consumed_key(root, transaction_id)
+        _raise_if_consumed(key)
         before_token, after_token = commitment(before), commitment(after)
-        previous = None
-        if path.exists():
-            previous = json.loads(path.read_text(encoding="utf-8"))
-            if previous.get("before") != before_token or previous.get("after") != after_token:
-                raise DefinitionTransactionConflict("transaction identity has different images")
+        # AN ABSENT JOURNAL IS NOT AUTHORISATION (architect review e9c4b99d):
+        # deleting this same-uid file used to convert a crash record into a
+        # silent fresh apply. Only ``prepare`` creates the record acted on here.
+        if not path.exists():
+            raise DefinitionTransactionConflict(
+                "no prepared transaction for this operation; nothing was written — "
+                "ask the person for the change again"
+            )
+        previous = json.loads(path.read_text(encoding="utf-8"))
+        if previous.get("before") != before_token or previous.get("after") != after_token:
+            raise DefinitionTransactionConflict("transaction identity has different images")
         current = commitment(read())
-        if previous is not None and current == after_token:
-            result = {**previous, "state": "complete", "reconciled": True}
-            _durable_json(path, result)
-            return result
-        if previous is not None and previous.get("state") == "complete":
+        if previous.get("state") == "complete":
             # A later edit may deliberately restore the original bytes. That
             # does not revive a consumed operation's permission to write again.
             raise DefinitionTransactionConflict("completed transaction changed; never replay")
+        if previous.get("state") != "prepared":
+            raise DefinitionTransactionConflict(
+                "this operation failed and rolled back; prepare it again — never replay it"
+            )
+        if current == after_token:
+            result = {**previous, "state": "complete", "reconciled": True}
+            _durable_json(path, result)
+            _mark_consumed(key)
+            return result
         if current != before_token:
             raise DefinitionTransactionConflict("definition changed; nothing was written")
-        record = {"schema": 1, "before": before_token, "after": after_token, "state": "prepared"}
-        _durable_json(path, record)
+        record = previous
         if backup is not None:
             backup(before)
         try:
@@ -215,6 +316,7 @@ def transact(
             raise
         record["state"] = "complete"
         _durable_json(path, record)
+        _mark_consumed(key)
         return record
 
 
@@ -254,6 +356,7 @@ def atomic_edit(
     read: Callable[[], Any],
     restore: Callable[[Any], None],
     backup: Callable[[Any], None] | None = None,
+    transaction_id: str | None = None,
 ) -> Iterator[None]:
     """Exception-atomic legacy edit; signed continuations use ``transact``.
 
@@ -272,7 +375,28 @@ def atomic_edit(
         if key in active:
             raise DefinitionTransactionConflict("nested definition transaction is not supported")
         active[key] = owner
-        path = Path(root) / "profile-transactions" / ("edit-" + uuid.uuid4().hex + ".json")
+        edit_id = transaction_id or ("edit-" + uuid.uuid4().hex)
+        _validate_identity(edit_id)
+        consume_key = _consumed_key(root, edit_id)
+        _raise_if_consumed(consume_key)
+        path = Path(root) / "profile-transactions" / (edit_id + ".json")
+        if transaction_id is not None and path.exists():
+            # A NAMED edit is ONE operation, so a journal already on disk is that
+            # operation's own earlier attempt: either it landed (complete), it was
+            # restored (rolled_back), or it died mid-write (prepared, outcome
+            # unknown). Only the restored case may run again; an unknown outcome
+            # needs a fresh decision from the person, never a replay.
+            seen = json.loads(path.read_text(encoding="utf-8"))
+            if seen.get("state") == "rolled_back" and commitment(before) == seen.get("before"):
+                path.unlink()
+            elif seen.get("state") == "complete":
+                raise _consumed_error()
+            else:
+                raise DefinitionTransactionConflict(
+                    "an earlier attempt at this exact change was interrupted before it "
+                    "finished, so its outcome is unknown; nothing was written — ask the "
+                    "person for the change again"
+                )
         record = {
             "schema": 1,
             "state": "prepared",
@@ -298,6 +422,7 @@ def atomic_edit(
                 raise
             record.update(state="complete", after=commitment(read()))
             _durable_json(path, record)
+            _mark_consumed(consume_key)
         finally:
             active.pop(key, None)
 

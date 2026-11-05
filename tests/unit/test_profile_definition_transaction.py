@@ -8,6 +8,8 @@ that window without relying on timing or real operator stores.
 
 from __future__ import annotations
 
+import asyncio
+
 from local_operator.agents import AgentRegistry
 from local_operator.hub_sync.definition import (
     DefinitionRevisionMismatch,
@@ -141,6 +143,7 @@ def test_signed_transaction_reconcile_stale_and_duplicate(tmp_path):
 
     from local_operator.definition_transaction import (
         DefinitionTransactionConflict,
+        prepare,
         transact,
     )
 
@@ -162,13 +165,21 @@ def test_signed_transaction_reconcile_stale_and_duplicate(tmp_path):
         write=write,
         backup=backups.append,
     )
+    # PREPARING IS A SEPARATE ACT now: the grant writes the unconsumed record and
+    # the apply only executes one that already exists. A missing journal is a
+    # refusal, never a fresh authorisation.
+    prepare(tmp_path, transaction_id="signed-test", before="before", after="after")
     result = transact(tmp_path, **kwargs)
     assert result["state"] == "complete"
     assert writes == ["after"] and backups == ["before"]
-    result = transact(tmp_path, **kwargs)
-    assert result["reconciled"] and writes == ["after"] and backups == ["before"]
+    # This second call used to answer ``reconciled``. That re-authorised an
+    # operation which had already been consumed, which is the replay this
+    # change closes, so it now refuses and touches nothing.
+    with pytest.raises(DefinitionTransactionConflict, match="never replay"):
+        transact(tmp_path, **kwargs)
+    assert writes == ["after"] and backups == ["before"]
     state["value"] = "competing"
-    with pytest.raises(DefinitionTransactionConflict, match="changed"):
+    with pytest.raises(DefinitionTransactionConflict):
         transact(tmp_path, **kwargs)
     assert state["value"] == "competing"
 
@@ -186,7 +197,7 @@ def test_reusable_profile_state_save_does_not_restore_stale_prompt(tmp_path):
 def test_interrupted_after_image_finishes_bookkeeping_without_second_write(tmp_path):
     import pytest
 
-    from local_operator.definition_transaction import transact
+    from local_operator.definition_transaction import prepare, transact
 
     state, writes = {"value": "before"}, []
 
@@ -202,6 +213,7 @@ def test_interrupted_after_image_finishes_bookkeeping_without_second_write(tmp_p
         read=lambda: state["value"],
         write=write,
     )
+    prepare(tmp_path, transaction_id="restart-test", before="before", after="after")
     with pytest.raises(KeyboardInterrupt):
         transact(tmp_path, **args)
     result = transact(tmp_path, **args)
@@ -272,6 +284,7 @@ def test_completed_transaction_never_replays_after_later_restore(tmp_path):
 
     from local_operator.definition_transaction import (
         DefinitionTransactionConflict,
+        prepare,
         transact,
     )
 
@@ -288,8 +301,183 @@ def test_completed_transaction_never_replays_after_later_restore(tmp_path):
         read=lambda: state["value"],
         write=write,
     )
+    prepare(tmp_path, transaction_id="consumed-test", before="before", after="after")
     transact(tmp_path, **args)
     state["value"] = "before"  # a later supported edit deliberately restores it
     with pytest.raises(DefinitionTransactionConflict, match="never replay"):
         transact(tmp_path, **args)
     assert writes == ["after"] and state["value"] == "before"
+
+
+def test_a_missing_journal_is_never_a_fresh_authorisation(tmp_path):
+    """The regression this hardening exists for: deleting the crash record.
+
+    A same-uid shell can remove ``profile-transactions/<id>.json``. Before this
+    rule the next apply read that absence as "nothing has run yet" and wrote the
+    change again; now only a ``prepared`` record can be applied at all.
+    """
+    import json as jsonlib
+
+    import pytest
+
+    from local_operator.definition_transaction import (
+        DefinitionTransactionConflict,
+        prepare,
+        transact,
+    )
+
+    state = {"value": "before"}
+
+    def write(value):
+        state["value"] = value
+
+    args = dict(
+        transaction_id="deleted-journal",
+        before="before",
+        after="after",
+        read=lambda: state["value"],
+        write=write,
+    )
+    with pytest.raises(DefinitionTransactionConflict, match="no prepared transaction"):
+        transact(tmp_path, **args)
+    assert state["value"] == "before"
+    prepare(tmp_path, transaction_id="deleted-journal", before="before", after="after")
+    transact(tmp_path, **args)
+    assert state["value"] == "after"
+    state["value"] = "before"  # a later, legitimate edit restores the bytes
+    journal = tmp_path / "profile-transactions" / "deleted-journal.json"
+    assert jsonlib.loads(journal.read_text())["state"] == "complete"
+    journal.unlink()
+    # THIS process still holds the consumed identity, so it refuses first.
+    with pytest.raises(DefinitionTransactionConflict, match="already applied in this process"):
+        transact(tmp_path, **args)
+    # A restart starts with an empty in-process set, so this is the rule that has
+    # to hold on its own: the deleted record must not read as a fresh grant.
+    from local_operator import definition_transaction
+
+    definition_transaction._CONSUMED.clear()
+    with pytest.raises(DefinitionTransactionConflict, match="no prepared transaction"):
+        transact(tmp_path, **args)
+    assert state["value"] == "before"
+
+
+def test_in_process_consumption_blocks_an_edited_back_record(tmp_path):
+    """One process applies an operation once, whatever its editable journal says."""
+    import json as jsonlib
+
+    import pytest
+
+    from local_operator.definition_transaction import (
+        DefinitionTransactionConflict,
+        prepare,
+        transact,
+    )
+
+    state = {"value": "before"}
+
+    def write(value):
+        state["value"] = value
+
+    args = dict(
+        transaction_id="consumed-in-process",
+        before="before",
+        after="after",
+        read=lambda: state["value"],
+        write=write,
+    )
+    prepare(tmp_path, transaction_id="consumed-in-process", before="before", after="after")
+    transact(tmp_path, **args)
+    journal = tmp_path / "profile-transactions" / "consumed-in-process.json"
+    record = jsonlib.loads(journal.read_text())
+    record["state"] = "prepared"  # the same-uid rollback the advisory recorded
+    journal.write_text(jsonlib.dumps(record))
+    state["value"] = "before"
+    with pytest.raises(DefinitionTransactionConflict, match="already applied in this process"):
+        transact(tmp_path, **args)
+    assert state["value"] == "before"
+
+
+def test_a_named_edit_refuses_an_earlier_interrupted_attempt(tmp_path):
+    """A save's own journal makes a dead attempt need a new decision, not a retry."""
+    import json as jsonlib
+    from contextlib import ExitStack
+
+    import pytest
+
+    from local_operator.definition_transaction import (
+        DefinitionTransactionConflict,
+        atomic_edit,
+        commitment,
+    )
+
+    state = {"value": "before"}
+    directory = tmp_path / "profile-transactions"
+    directory.mkdir(parents=True)
+    (directory / "save-abc.json").write_text(
+        jsonlib.dumps(
+            {
+                "schema": 1,
+                "state": "prepared",
+                "before": commitment("before"),
+                "before_image": "before",
+                "after": None,
+            }
+        )
+    )
+    with pytest.raises(DefinitionTransactionConflict, match="interrupted"):
+        with ExitStack() as stack:
+            stack.enter_context(
+                atomic_edit(
+                    tmp_path,
+                    owner=object(),
+                    read=lambda: state["value"],
+                    restore=lambda image: state.update(value=image),
+                    transaction_id="save-abc",
+                )
+            )
+            state["value"] = "after"
+    assert state["value"] == "before"
+
+
+def test_the_interrupted_save_surface_asks_the_person_again(tmp_path):
+    """The tool says "ask the person", never "retry" (the remedy is a new grant)."""
+    from local_operator.definition_transaction import DefinitionTransactionConflict
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import agent_tool
+
+    context = ToolContext(
+        cwd=".",
+        session_dir=str(tmp_path / "session-empty"),
+        agent_registry=object(),
+        authorize_durable_write=_granted,
+    )
+
+    def refuse(*args, **kwargs):
+        raise DefinitionTransactionConflict(
+            "an earlier attempt at this exact change was interrupted"
+        )
+
+    monkeypatch_target = agent_tool.write_profile
+    agent_tool.write_profile = refuse
+    try:
+        result = asyncio.run(
+            agent_tool._op_write(
+                context,
+                "tc",
+                agent_tool.AgentParams(op="update", name="reviewer", instructions="After."),
+                creating=False,
+            )
+        )
+    finally:
+        agent_tool.write_profile = monkeypatch_target
+    assert result.is_error
+    text = result.content[0].text
+    assert "ask the user to ask for this change again" in text.lower()
+    assert "retry" not in text.lower()
+    # Journals live in the config root; this session has no backup folder, so the
+    # aged-out case is named as such instead of reading as tampering.
+    assert agent_tool._backups_present(context) is False
+
+
+async def _granted(intent):  # pragma: no cover — the write never reaches the seam
+    return "owner-prompt:surface-test"

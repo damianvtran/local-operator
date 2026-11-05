@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,6 +88,7 @@ from local_operator.agent_profiles import (
     seed_origin,
     seed_tags,
 )
+from local_operator.definition_transaction import DefinitionTransactionConflict
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -1530,12 +1532,20 @@ def write_profile(
         target = row_scope(registry, existing) if existing is not None else scope
         adapter = scope_store(registry, target)
         store = getattr(adapter, "_store", adapter)
+        # THE CHANGE'S OWN IDENTITY names the journal, so a retry of THIS save
+        # cannot become a second write and a dead attempt cannot be replayed as
+        # a fresh grant. It is derived from the host's authorization string,
+        # which is per-grant and never anything a model can choose.
+        save_identity = hashlib.sha256(
+            f"save|{authorized_by or ''}|{name}|{target}".encode("utf-8")
+        ).hexdigest()[:32]
         with atomic_edit(
             Path(store.config_dir),
             owner=store,
             read=lambda: agent_image(store, name),
             restore=lambda image: restore_agent_image(store, name, image),
             backup=(lambda image: before_write()) if before_write is not None else None,
+            transaction_id="save-" + save_identity,
         ):
             return _write_profile_locked(
                 registry,
@@ -2065,6 +2075,22 @@ def _take_backup(
     return None
 
 
+def _backups_present(context: ToolContext | None) -> bool:
+    """Whether this session still has a backup folder to revert from.
+
+    Retention collects session directories independently of the config-root
+    journals a save is keyed on, so the two can legitimately disagree; the
+    refusal says which one is gone rather than calling an aged-out folder a
+    conflict.
+    """
+    from local_operator.profile_scope import PROFILE_BACKUPS_DIRNAME
+
+    session_dir = getattr(context, "session_dir", None) if context is not None else None
+    if not session_dir:
+        return False
+    return Path(session_dir, PROFILE_BACKUPS_DIRNAME).is_dir()
+
+
 def _require_backup(context: Any, registry: Any, existing: Any, plan: Any, origin: Any) -> None:
     refusal = _take_backup(context, registry, existing, plan, origin)
     if refusal is not None:
@@ -2356,6 +2382,23 @@ async def _op_write(
         )
     except ValueError as error:
         return _error(tool_call_id, "agent", str(error))
+    except DefinitionTransactionConflict as error:
+        # A granted change whose own record is missing, interrupted or already
+        # applied. The remedy is a NEW decision from the person, never a retry:
+        # a retry would replay an operation whose outcome is not proven.
+        remedy = (
+            "Nothing was written. Ask the user to ask for this change again"
+            " (their own message naming the profile is the authorization)."
+        )
+        if account_save is not None and not _backups_present(context):
+            # Journals live in the config root while backups live in the session
+            # directory, which retention may already have collected. Say so, so
+            # a legitimately aged-out backup is not reported as a conflict.
+            remedy += (
+                " This conversation's backup folder is no longer on disk, so that record "
+                "cannot be reverted; approve the change again from scratch."
+            )
+        return _error(tool_call_id, "agent", str(error) + " " + remedy)
     except DefinitionRevisionMismatch:
         return _error(
             tool_call_id,
