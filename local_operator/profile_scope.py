@@ -166,16 +166,19 @@ def _write_section(owner: Any) -> Iterator[None]:
     measured contention this lock exists for (two subagents creating one name) is
     a sub-millisecond critical section, so a 10 s wait is already pathological.
     """
-    lock = owner.write_lock
-    if not lock.acquire(timeout=WRITE_LOCK_TIMEOUT_S):
-        raise TimeoutError(
-            "timed out waiting for the role write lock, so nothing was written; "
-            "another write is still running — retry in a moment"
-        )
-    try:
-        yield
-    finally:
-        lock.release()
+    from local_operator.definition_transaction import definition_lock
+
+    # Global definition boundary first, then composite/local registry locks:
+    # reversing that order lets a profile transaction deadlock with a sibling
+    # composite writer waiting for the same cross-process boundary.
+    with definition_lock(Path(owner.config_dir), timeout=WRITE_LOCK_TIMEOUT_S):
+        lock = owner.write_lock
+        if not lock.acquire(timeout=WRITE_LOCK_TIMEOUT_S):
+            raise TimeoutError("timed out waiting for the role write lock; retry later")
+        try:
+            yield
+        finally:
+            lock.release()
 
 
 def shadow_refusal(kind: str, name: str, *, existing_scope: Scope) -> str:

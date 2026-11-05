@@ -79,6 +79,10 @@ from pydantic import (
 # agents and live there; the team-side compositions (``display_form``'s
 # exact-match arm, ``enrichment_label``) stay here because their frozen cases
 # differ from the agent side's ONE refinement (the casefold derived match).
+from local_operator.definition_transaction import (
+    definition_writer,
+    team_definition_writer,
+)
 from local_operator.display_labels import LABEL_MAX_CHARS, bounded_form
 from local_operator.display_labels import default_label as _default_label
 from local_operator.display_labels import normalize_label as _normalize_label
@@ -2066,33 +2070,56 @@ class TeamRegistry:
         one non-blocking attempt, which is what a caller on the UI event loop
         must use — see :data:`_READ_RECOVERY_UI_WAIT_S`.
         """
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.config_dir / ".teams.lock", os.O_CREAT | os.O_RDWR | O_BINARY, 0o600)
-        acquired = False
-        budget = _TEAM_LOCK_TIMEOUT_S if wait is None else max(0.0, wait)
-        deadline = time.monotonic() + budget
-        try:
-            while not acquired:
-                acquired = _try_lock_exclusive(fd)
-                if acquired:
-                    break
-                if time.monotonic() >= deadline:
-                    raise TeamRegistryLockTimeout(
-                        "Timed out waiting for the teams registry lock; "
-                        "retry after the other lop process finishes"
-                    )
-                time.sleep(_TEAM_LOCK_RETRY_S)
-            # R5-2 recovery: a writer that died between ``target -> backup`` and
-            # ``staged -> target`` leaves the row only in the hidden backup.
-            # Every locked mutation/load passes here first, so the next
-            # compliant process restores it before touching the registry.
-            self._recover_interrupted_swap_locked()
-            yield
-        finally:
-            if acquired:
-                _unlock(fd)
-            os.close(fd)
+        # Shared boundary first, including mutating recovery reads. Enter it
+        # here rather than through a second generator wrapper: recovery errors
+        # retain the original bounded traceback and their chained IO cause.
+        from contextlib import ExitStack
 
+        from local_operator.definition_transaction import (
+            DefinitionTransactionConflict,
+            definition_lock,
+        )
+
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(
+                    definition_lock(
+                        self.config_dir,
+                        timeout=_TEAM_LOCK_TIMEOUT_S if wait is None else max(0.0, wait),
+                    )
+                )
+            except DefinitionTransactionConflict as exc:
+                raise TeamRegistryLockTimeout(
+                    "team definition writer is busy; retry later"
+                ) from exc
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.config_dir / ".teams.lock", os.O_CREAT | os.O_RDWR | O_BINARY, 0o600)
+            acquired = False
+            budget = _TEAM_LOCK_TIMEOUT_S if wait is None else max(0.0, wait)
+            deadline = time.monotonic() + budget
+            try:
+                while not acquired:
+                    acquired = _try_lock_exclusive(fd)
+                    if acquired:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TeamRegistryLockTimeout(
+                            "Timed out waiting for the teams registry lock; "
+                            "retry after the other lop process finishes"
+                        )
+                    time.sleep(_TEAM_LOCK_RETRY_S)
+                # R5-2 recovery: a writer that died between ``target -> backup`` and
+                # ``staged -> target`` leaves the row only in the hidden backup.
+                # Every locked mutation/load passes here first, so the next
+                # compliant process restores it before touching the registry.
+                self._recover_interrupted_swap_locked()
+                yield
+            finally:
+                if acquired:
+                    _unlock(fd)
+                os.close(fd)
+
+    @definition_writer
     def create_team(self, fields: TeamEditFields) -> Team:
         name = validate_team_name(fields.name or "")
         # Shape validation is snapshot-free, so it runs before the lock; the
@@ -2128,6 +2155,8 @@ class TeamRegistry:
             )
             return self._save_team_locked(team, briefs_authoritative=True)
 
+    @definition_writer
+    @team_definition_writer
     def update_team(
         self,
         team_id: str,
@@ -2222,6 +2251,8 @@ class TeamRegistry:
                 candidate.model_suggestion = fields.model_suggestion
             return self._save_team_locked(candidate, briefs_authoritative=True)
 
+    @definition_writer
+    @team_definition_writer
     def save_team(self, team: Team) -> Team:
         """Write ``team`` to disk and adopt it as this registry's current row.
 
@@ -2462,6 +2493,8 @@ class TeamRegistry:
                     "fix registry permissions and retry"
                 ) from exc
 
+    @definition_writer
+    @team_definition_writer
     def delete_team(self, team_id: str) -> None:
         team_id = validate_team_id(team_id)
         with self._persistence_lock():
@@ -2480,6 +2513,7 @@ class TeamRegistry:
             self._teams.pop(team_id)
             self._briefs_loaded.discard(team_id)
 
+    @definition_writer
     def import_hub_team(
         self, document: Mapping[str, Any], *, auth_store: Any | None = None
     ) -> HubTeamImport:

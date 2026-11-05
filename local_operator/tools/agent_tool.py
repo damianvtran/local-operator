@@ -1491,6 +1491,74 @@ def write_profile(
     expected_definition_revision: str | None = None,
     context: ToolContext | None = None,
     consent_checked: bool = False,
+    before_write: Callable[[], None] | None = None,
+) -> tuple[str, str, str]:
+    """Keep CAS, metadata, instructions and backup within one authored edit.
+
+    The raw registry writers share this cross-process boundary. Journaling and
+    rollback prevent a prompt-write fault from silently leaving new metadata
+    beside old instructions; no provider/approval kind is enabled by this API.
+    """
+    from local_operator.definition_transaction import (
+        agent_image,
+        atomic_edit,
+        definition_lock,
+        restore_agent_image,
+    )
+    from local_operator.profile_scope import row_scope, scope_store
+
+    if registry is None:
+        raise ValueError("no agent registry attached to this session; cannot save roles.")
+    with definition_lock(Path(registry.config_dir)):
+        # Composite reads can be interval-cached. Refresh both owners before
+        # choosing the row/store and before CAS or a backup callback runs.
+        for store in (
+            getattr(registry, "global_registry", registry),
+            getattr(registry, "session_registry", None),
+        ):
+            if store is not None:
+                store._refresh_agents_metadata()
+        name = str(params.name or "").strip()
+        existing = registry.get_agent_by_name(name)
+        if expected_definition_revision is not None:
+            from local_operator.hub_sync.definition import definition_revision
+
+            if existing is None or expected_definition_revision != definition_revision(
+                "agent", str(existing.id), registry.definition_revision_fields(str(existing.id))
+            ):
+                raise DefinitionRevisionMismatch("the definition changed since it was read")
+        target = row_scope(registry, existing) if existing is not None else scope
+        adapter = scope_store(registry, target)
+        store = getattr(adapter, "_store", adapter)
+        with atomic_edit(
+            Path(store.config_dir),
+            owner=store,
+            read=lambda: agent_image(store, name),
+            restore=lambda image: restore_agent_image(store, name, image),
+            backup=(lambda image: before_write()) if before_write is not None else None,
+        ):
+            return _write_profile_locked(
+                registry,
+                params,
+                creating=creating,
+                scope=scope,
+                authorized_by=authorized_by,
+                expected_definition_revision=expected_definition_revision,
+                context=context,
+                consent_checked=consent_checked,
+            )
+
+
+def _write_profile_locked(
+    registry: Any,
+    params: AgentParams,
+    *,
+    creating: bool,
+    scope: "Scope",
+    authorized_by: str | None = None,
+    expected_definition_revision: str | None = None,
+    context: ToolContext | None = None,
+    consent_checked: bool = False,
 ) -> tuple[str, str, str]:
     """Shared tool/HTTP mutation; preserve omitted policy fields and provenance.
 
@@ -1997,6 +2065,12 @@ def _take_backup(
     return None
 
 
+def _require_backup(context: Any, registry: Any, existing: Any, plan: Any, origin: Any) -> None:
+    refusal = _take_backup(context, registry, existing, plan, origin)
+    if refusal is not None:
+        raise DefinitionRevisionMismatch(refusal)
+
+
 def _account_save_receipt(
     context: ToolContext | None,
     registry: Any,
@@ -2259,13 +2333,6 @@ async def _op_write(
         authorized_by, reason = await durable_write_decision(context, intent)
         if authorized_by is None:
             return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
-        if existing is not None:
-            # THE BACKUP IS TAKEN AT THE APPROVED REVISION, and the write below
-            # is CAS-bound to that same revision, so the backup is exactly the
-            # row the save replaced (or the save does not happen at all).
-            refusal = _take_backup(context, registry, existing, account_save, authorized_by)
-            if refusal is not None:
-                return _error(tool_call_id, "agent", refusal)
     try:
         name, kind, action_class = write_profile(
             registry,
@@ -2275,6 +2342,11 @@ async def _op_write(
             authorized_by=authorized_by,
             expected_definition_revision=(
                 account_save.base_revision if account_save is not None else None
+            ),
+            before_write=(
+                (lambda: _require_backup(context, registry, existing, account_save, authorized_by))
+                if account_save is not None and existing is not None
+                else None
             ),
             context=context,
             # The tool layer already ran the decision: it either got an origin or
