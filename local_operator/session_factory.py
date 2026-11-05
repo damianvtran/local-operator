@@ -1957,6 +1957,11 @@ class _KnowledgeHooks:
     #: ``paused`` during the session. WRITTEN BY THE SESSION
     #: (``_refresh_tool_roster``); ``None`` means the trigger never fires.
     team_bridge_available: Callable[[], bool] | None = None
+    #: Whether the org Agent Hub guide survived its ``requires: radient-team``
+    #: predicate at session build (the cached Radient Team gate). False — the
+    #: default, and the answer for anyone signed out or outside a team-plan
+    #: org — means the org-hub trigger never fires.
+    org_hub_available: bool = False
     #: The classification seam (docs/design/classification-layer.md §7): an
     #: object exposing ``async recommend_resources(request) -> Recommendation``.
     #: ONE method — the seam used to publish ``notice(recommendation)`` as well, and
@@ -2233,6 +2238,7 @@ async def _setup_knowledge(
     hooks = _KnowledgeHooks(skill_config_dir=config_dir)
     try:
         from local_operator.guides import discover_guides
+        from local_operator.guides.discovery import guides_available
         from local_operator.skills.api import (
             SkillIndex,
             default_backend_from_env,
@@ -2258,7 +2264,13 @@ async def _setup_knowledge(
             hooks.skill_roots, boundary=world_root, config_dir=config_dir
         )
         warnings_out.extend(discovery_warnings)
-        guides = discover_guides()
+        # Gated guides (``requires:`` frontmatter, e.g. the org Agent Hub's
+        # ``radient-team``) are dropped HERE, before the name map, the index and
+        # the resolver exist, so an ineligible session has no trace of them.
+        guides = guides_available(discover_guides(), config_dir)
+        # The same cached answer gates the org-hub recommendation trigger:
+        # read once per session build, never per message.
+        hooks.org_hub_available = "org-hub" in {guide.name for guide in guides}
         hooks.skills_by_name = {skill.name: skill for skill in skills}
         hooks.guides_by_name = {guide.name: guide for guide in guides}
         resources = sorted(
@@ -3485,6 +3497,42 @@ def _team_bridge_recommendation(
     )
 
 
+#: Org-catalogue intent: "our/the team's/org's/company's/shared" + agents,
+#: skills or teams; "pull the latest"; "update (all|our|my) skills/agents/
+#: teams". Deliberately NARROW — possessive org nouns, not bare "agents" — so
+#: "how do agents work" or "update the README" stay quiet. Only consulted for a
+#: Radient Team member (``hooks.org_hub_available``), so a false positive costs
+#: one advisory line to someone who can use it, never an up-sell.
+_ORG_HUB_INTENT = re.compile(
+    r"(?i)(?:\b(?:our|team'?s|org'?s|organi[sz]ation'?s|company'?s|shared)\s+"
+    r"(?:(?:latest|new|own)\s+)?(?:agents?|skills?|teams?)\b"
+    r"|\bpull\s+(?:the\s+|our\s+)?latest\b"
+    r"|\bupdate\s+(?:all\s+|our\s+|my\s+|the\s+)?(?:skills|agents|teams)\b)"
+)
+
+_ORG_HUB_RULE = "Your organization's shared agents, teams and skills: list, pull, stay subscribed."
+
+
+def _org_hub_recommendation(query: str, hooks: _KnowledgeHooks) -> _ClassificationCandidate | None:
+    """Recommend ``guide://org-hub`` when a Radient Team member asks for org items.
+
+    WHY: agents asked to "get our team's skills" or "pull the latest" did not
+    find the organization's private Agent Hub at all. Modelled on
+    :func:`_code_requests_recommendation`: deterministic, one line, sharing the
+    advisory block's dedupe and ``maxRecommendations`` cap.
+
+    GATE FIRST, network-free: ``hooks.org_hub_available`` is the session-build
+    reading of the cached Radient Team eligibility. Signed out or outside a
+    team-plan org it is False and this returns ``None`` before matching — the
+    operator's constraint is that the private hub is never advertised there.
+    """
+    if not hooks.org_hub_available:
+        return None
+    if _ORG_HUB_INTENT.search(query[:2048]) is None:
+        return None
+    return _ClassificationCandidate("guide", "org-hub", _ORG_HUB_RULE, "guide://org-hub")
+
+
 def _classification_block(
     hooks: _KnowledgeHooks,
     recommendation: Any,
@@ -3795,6 +3843,9 @@ async def _select_knowledge_block(
         answers.append(_DeterministicRecommendation(resources=(deterministic_memory,)))
     if deterministic_code_requests is not None:
         answers.append(_DeterministicRecommendation(resources=(deterministic_code_requests,)))
+    deterministic_org_hub = _org_hub_recommendation(query, hooks) if query else None
+    if deterministic_org_hub is not None:
+        answers.append(_DeterministicRecommendation(resources=(deterministic_org_hub,)))
     # Teammate coordination on a bridge-capable session: steer to ONE channel
     # (Team Bridge) before the model fans the same ask across Slack/email/send.
     deterministic_team_bridge = _team_bridge_recommendation(query, hooks) if query else None

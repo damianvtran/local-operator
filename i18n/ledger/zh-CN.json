@@ -2817,6 +2817,153 @@
     },
     {
       "locale": "zh-CN",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "161fcdd703a3f56ed7bb3cce259bc7c6304a6261a574723a9111119873220a73",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org_help at source hash 161fcdd703a3, translator commit 6640a8654e6 (PR #3432): all 12 keys read against en and its .context.json, i18n/glossary.md and the zh-CN style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_org",
+      "source_sha256": "6b4de92a6212ae666f2ea7eeb0780444912794f9f655ed7900a80efec0da367c",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org at source hash 6b4de92a6212, translator commit 6640a8654e6 (PR #3432): all 10 keys read against en and its .context.json, i18n/glossary.md and the zh-CN style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 1 minor. Minor: plan reads '待pull：N项，M个未链接的本地副本' — the colon puts the unlinked copies under 'to pull', where en has two parallel clauses; e.g. '{count}项待pull，{conflicts}个未链接的本地副本'. Not blocking. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "0bdfc33f99ab017628b83102a06a2c2b7f532d7cb8c9a3d9025dc238ca94178b",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of wire.settings.hub_org at source hash 0bdfc33f99ab, translator commit 6640a8654e6 (PR #3432): all 6 keys read against en and its .context.json, i18n/glossary.md and the zh-CN style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 1 minor. Minor: 'item' is 内容 here (label/on.description/description) but 项 in cli.hub_org; natural in settings prose, recorded as drift. Not blocking. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_org",
+      "source_sha256": "43c6618cbabee696fd8aa127101e34310cd46062edfbedbe436137952ad335b3",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org at source hash 43c6618cbabe, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the zh-CN style guide: new ineligible_signed_out, unknown_org, plan_empty plus reordered plan; unchanged keys of the 13-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. nit: \"你尚未登录\" could drop 你 per the style guide (sibling wire.radient_saver uses 未登录). Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "4b3beb7be13e05c6ebddc06335ca7f41b8a8936dda2aa6e782ac864b2c344a43",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org_help at source hash 4b3beb7be13e, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the zh-CN style guide: changed org_flag; unchanged keys of the 12-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "2a93ea9fa38cbd59e2532ae3bad48da76d765cda029237cff19fa0f2215d30d4",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of wire.settings.hub_org at source hash 2a93ea9fa38c, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the zh-CN style guide: changed auto_enrol.help; unchanged keys of the 6-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_org",
+      "source_sha256": "003f6b6cfee6fccf297580f278c05ebec31ff71a90e52cdbaef1684c33a03145",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "d457d2a2880c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "7d67f6d7d504",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the zh-CN style guide; translation \"{org}（组织）\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
       "namespace": "relay.composer",
       "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
       "translator": {
