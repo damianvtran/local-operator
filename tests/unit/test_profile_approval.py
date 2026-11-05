@@ -390,3 +390,25 @@ def test_refiling_a_denial_or_deleted_journal_never_resets_it(root):
         P.file_request(root, shifted)
     assert A._load_raw(record["approval_id"], root) == before
     assert P.snapshot(root, "agent", data.target_id) == data.before
+
+
+def test_signed_origin_action_reconstructs_only_after_live_verification(root):
+    from local_operator import profile_approval as P
+    from local_operator.profile_actions import ProfileActions
+
+    data = proposal(root)
+    record = P.file_request(root, data)
+    approve(root, record)
+    result = P.apply(record["approval_id"], P.expected(record), root)
+    descriptor = result["profile_action"]
+    query = {
+        key: descriptor[key] for key in ("action_id", "receipt_id", "profile_kind", "profile_name")
+    }
+    query["tool_call_id"] = data.tool_call_id
+    fresh = ProfileActions(data.session_id, root)
+    assert fresh.status(**query)["state"] == "available"
+    assert (
+        fresh.activate(descriptor["action_id"], approved=True, remember=False)["state"]
+        == "succeeded"
+    )
+    assert P.snapshot(root, "agent", data.target_id) == data.before

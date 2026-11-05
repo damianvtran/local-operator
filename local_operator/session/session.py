@@ -3603,6 +3603,11 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        from local_operator.profile_actions import ProfileActions
+
+        self._profile_actions = ProfileActions(
+            self._session_id, getattr(agent_registry, "config_dir", None)
+        )
         # Tool contexts are rebuilt per turn; presence belongs to the Session
         # so both transition updates and the serving heartbeat read one fact.
         self._waiting_on = 0
@@ -21072,6 +21077,7 @@ class Session:
             # the session because this context is rebuilt every turn; ``None``
             # is a refusal, never a permission (see the constructor field).
             authorize_durable_write=self._authorize_durable_write,
+            register_profile_action=self._profile_actions.register,
             ask_user=self._ask_user,
             # THE QUEUED-ASK DOOR (design §2.1). ``None`` on the blocking path
             # (the flag is off, or no host installed an ask surface), which is

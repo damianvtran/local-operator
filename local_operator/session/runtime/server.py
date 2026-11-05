@@ -2229,7 +2229,11 @@ class SessionHandle(Protocol):
     async def slash(self, command: str, args: str) -> str: ...
     async def new_conversation(self) -> str: ...
     async def resume_session(self, session_id: str) -> str: ...
-    async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str: ...
+    async def profile_action_status(self, **identity: str) -> dict[str, str]: ...
+
+    async def approval_answer(
+        self, request_id: str, approved: bool, remember: bool
+    ) -> str | dict[str, str]: ...
     async def ask_answer(  # noqa: E301
         self, request_id: str, value: str, question_index: int | None = None
     ) -> str: ...
@@ -8562,6 +8566,19 @@ class RuntimeServer:
             return await h.new_conversation()
         if op == "resume_session":
             return await h.resume_session(str(frame.get("session_id", "")))
+        if op == "profile_action_status":
+            return await h.profile_action_status(
+                **{
+                    key: frame[key]
+                    for key in (
+                        "action_id",
+                        "receipt_id",
+                        "profile_kind",
+                        "profile_name",
+                        "tool_call_id",
+                    )
+                }
+            )
         if op == "approval_answer":
             return await h.approval_answer(
                 frame["request_id"],

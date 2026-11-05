@@ -317,16 +317,28 @@ def expected(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _write(root: Path, p: ProfileProposal, image: dict[str, Any] | None) -> None:
+    write_image(root, p.profile_kind, p.target_id, image)
+
+
+def write_image(
+    root: Path,
+    profile_kind: str,
+    target_id: str,
+    image: dict[str, Any] | None,
+    *,
+    registry: Any = None,
+) -> None:
+    """Shared authored-only write; callers own authority, identity, CAS and lock."""
     # Caller holds the transaction boundary and has reverified authority. This
     # writes only authored columns; conversation state/avatar/credentials stay.
-    if p.profile_kind == "agent":
+    if profile_kind == "agent":
         from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
 
-        r = AgentRegistry(root, migrate=False)
-        current = snapshot(root, "agent", p.target_id)
+        r = registry if registry is not None else AgentRegistry(root, migrate=False)
+        current = snapshot(root, "agent", target_id)
         if image is None:
             if current is not None:
-                r.delete_agent(p.target_id)
+                r.delete_agent(target_id)
             return
         fields = {key: None for key in AgentEditFields.model_fields}
         fields.update(
@@ -335,25 +347,25 @@ def _write(root: Path, p: ProfileProposal, image: dict[str, Any] | None) -> None
         if current is None:
             # Preallocated identity is signed; create_agent's random id cannot
             # replace it. Preserve its ordinary defaults via AgentData schema.
-            row = AgentData.model_validate(dict(image, id=p.target_id))
+            row = AgentData.model_validate(dict(image, id=target_id))
             r.save_agent(row)
         else:
-            r.update_agent(p.target_id, AgentEditFields(**fields))
-        r.set_agent_system_prompt(p.target_id, image["instructions"])
+            r.update_agent(target_id, AgentEditFields(**fields))
+        r.set_agent_system_prompt(target_id, image["instructions"])
     else:
         from local_operator.teams import Team, TeamEditFields, TeamRegistry
 
-        r = TeamRegistry(root)
-        current = snapshot(root, "team", p.target_id)
+        r = registry if registry is not None else TeamRegistry(root)
+        current = snapshot(root, "team", target_id)
         if image is None:
             if current is not None:
-                r.delete_team(p.target_id)
+                r.delete_team(target_id)
             return
         if current is None:
             r.save_team(Team.model_validate(image))
         else:
             fields = {key: value for key, value in image.items() if key != "id"}
-            r.update_team(p.target_id, TeamEditFields(**fields))
+            r.update_team(target_id, TeamEditFields(**fields))
 
 
 def _backup(root: Path, p: ProfileProposal, before: Any) -> None:
@@ -470,6 +482,10 @@ def apply(approval_id: str, expected_block: dict[str, Any], root: Path) -> dict[
             "backup_id": p.receipt_id if p.before else None,
             "reconciled": bool(result.get("reconciled")),
         }
+        if p.before is not None:
+            from local_operator.profile_actions import signed_descriptor
+
+            result["profile_action"] = signed_descriptor(record)
         _publish(root, p, result)
         return result
     except Exception as exc:

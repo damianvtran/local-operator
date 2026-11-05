@@ -2569,6 +2569,30 @@ class AttachClient:
             "rehome_if_current", expected=expected, provider=provider, model_id=model_id
         )
 
+    def _profile_action_detail(self, reply: dict[str, Any], action_id: str) -> dict[str, str]:
+        self._raise_for_reply_error(reply)
+        detail = reply.get("detail")
+        if (
+            not isinstance(detail, dict)
+            or detail.get("action_id") != action_id
+            or detail.get("state")
+            not in {"available", "pending", "succeeded", "stale", "failed", "unavailable"}
+        ):
+            raise ValueError("the live owner could not verify this receipt action")
+        return {"action_id": detail["action_id"], "state": detail["state"]}
+
+    async def profile_action_status(self, **identity: str) -> dict[str, str]:
+        # Ordinary _request stringifies ack.detail for legacy prose callers.
+        # Preserve the structured owner proof, never parse a Python repr.
+        reply = await self._request_frame("profile_action_status", **identity)
+        return self._profile_action_detail(reply, identity["action_id"])
+
+    async def profile_revert(self, action_id: str, *, approved: bool = True) -> dict[str, str]:
+        reply = await self._request_frame(
+            "approval_answer", request_id=action_id, approved=approved, remember=False
+        )
+        return self._profile_action_detail(reply, action_id)
+
     async def approval_answer(
         self, request_id: str, approved: bool, *, deadline_s: float = ACK_TIMEOUT_S
     ) -> str:

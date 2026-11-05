@@ -17083,6 +17083,88 @@ class OperatorApp(App[None]):
 
         return queued_ask_engine_live(self._session)
 
+    async def _read_profile_action_status(self, card, source):
+        action = card._profile_action
+        if action is None:
+            return {"state": "unavailable"}
+        identity = {
+            key: getattr(action, key)
+            for key in ("action_id", "receipt_id", "profile_kind", "profile_name")
+        }
+        identity["tool_call_id"] = card.tool_call_id
+        client = getattr(source, "_client", None)
+        if client is not None:
+            return await client.profile_action_status(**identity)
+        return source._profile_actions.status(**identity)
+
+    def on_tool_card_profile_action_check(self, event) -> None:
+        event.stop()
+        self.run_worker(
+            self._refresh_profile_action(event.card, self._session),
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _refresh_profile_action(self, card, source) -> None:
+        expected = card._profile_action
+        if expected is None:
+            return
+        try:
+            result = await self._read_profile_action_status(card, source)
+        except Exception:
+            return  # No live proof: never infer availability from saved flags.
+        if (
+            source is self._session
+            and card.is_mounted
+            and card._profile_action == expected
+            and result.get("action_id") == expected.action_id
+        ):
+            card._profile_action_source = source
+            card._profile_action_live = expected if result.get("state") == "available" else None
+            card.set_profile_action_state(result.get("state", "unavailable"))
+
+    def on_tool_card_profile_revert_requested(self, event) -> None:
+        event.stop()
+        card = event.card
+        source = card._profile_action_source
+        if (
+            source is None
+            or source is not self._session
+            or event.action != card._profile_action
+            or event.action != card._profile_action_live
+        ):
+            card._profile_activation_inflight = False
+            card.set_profile_action_state("unavailable")
+            return
+        # Network ACKs must not park Textual's message pump/composer. The card
+        # latched pending before posting, so this worker cannot double-submit.
+        self.run_worker(
+            self._activate_profile_action(card, source, event.action),
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _activate_profile_action(self, card, source, action) -> None:
+        try:
+            client = getattr(source, "_client", None)
+            if client is not None:
+                await client.profile_revert(action.action_id)
+            else:
+                await asyncio.to_thread(
+                    source._profile_actions.activate,
+                    action.action_id,
+                    approved=True,
+                    remember=False,
+                )
+        except Exception:
+            pass  # A dropped reply may follow a completed mutation: reconcile.
+        finally:
+            card._profile_activation_inflight = False
+            if card.is_mounted and card._profile_action_state == "pending":
+                card._refresh_row()
+        if card._profile_action == action:
+            await self._refresh_profile_action(card, source)
+
     def _drop_tool_card(self, card: ToolCard) -> None:
         """Remove a tool card's row from the transcript (the ask gate's drop).
 

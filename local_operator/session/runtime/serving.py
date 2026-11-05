@@ -6754,7 +6754,17 @@ class ServingSessionHandle(SessionHandle):
         raise ValueError("pick the session from the session list instead")
 
     @_on_session_loop
-    async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
+    async def profile_action_status(self, **identity: str) -> dict[str, str]:
+        return self._session._profile_actions.status(**identity)
+
+    @_on_session_loop
+    async def approval_answer(
+        self, request_id: str, approved: bool, remember: bool
+    ) -> str | dict[str, str]:
+        if request_id.startswith("prv_") and hasattr(self._session, "_profile_actions"):
+            return self._session._profile_actions.activate(
+                request_id, approved=approved, remember=remember
+            )
         await self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 

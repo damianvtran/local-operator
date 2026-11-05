@@ -542,6 +542,7 @@ async def _op_write(
     #: against (the write is CAS-bound to it) and the backup taken at it.
     base_revision: str | None = None
     backup_id: str | None = None
+    backup_payload: dict[str, Any] = {}
     changes: tuple[str, ...] = ()
     summary = ""
     if not creating and existing is None:
@@ -632,6 +633,7 @@ async def _op_write(
                     "base_revision": base_revision,
                     "authorized_by": authorized_by,
                 },
+                on_saved=backup_payload.update,
             )
     try:
         if creating:
@@ -683,7 +685,9 @@ async def _op_write(
     }
     receipt = ""
     if authorized_by:
-        receipt = _team_receipt(context, team, changes, summary, backup_id, details)
+        receipt = _team_receipt(
+            context, team, changes, summary, backup_id, details, tool_call_id, backup_payload
+        )
     return _text(
         tool_call_id,
         "team",
@@ -804,6 +808,8 @@ def _team_receipt(
     summary: str,
     backup_id: str | None,
     details: dict[str, Any],
+    tool_call_id: str = "",
+    backup_payload: dict[str, Any] | None = None,
 ) -> str:
     """The account-save receipt: fields, diff, backup and the exact revert call."""
     revision = team_revision(team)
@@ -815,6 +821,29 @@ def _team_receipt(
         return changed
     update_profile_backup(getattr(context, "session_dir", None), backup_id, saved_revision=revision)
     details["revert"] = {"op": "revert", "backup_id": backup_id}
+    register = getattr(context, "register_profile_action", None)
+    if register is not None and backup_payload:
+        from pathlib import Path
+
+        from local_operator.definition_transaction import commitment
+        from local_operator.profile_approval import TeamImage
+
+        before = {key: backup_payload["row"][key] for key in TeamImage.model_fields}
+        after = {key: team.model_dump(mode="json")[key] for key in TeamImage.model_fields}
+        root = Path(getattr(context, "team_registry").config_dir)
+        details["profile_action"] = register(
+            root=root,
+            profile_kind="team",
+            profile_name=team.name,
+            target_id=str(team.id),
+            tool_call_id=tool_call_id,
+            receipt_id=backup_id,
+            before=before,
+            after=after,
+            backup_path=Path(context.session_dir) / "profile-backups" / (backup_id + ".json"),
+            backup_commitment=commitment(dict(backup_payload, saved_revision=revision)),
+        )
+
     return f"{changed}\nRevert with team(op='revert', backup_id='{backup_id}')."
 
 
@@ -899,19 +928,17 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         return _queued_profile_receipt(tool_call_id, "team", authorized_by)
     if authorized_by is None:
         return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
+    from pathlib import Path
+
+    from local_operator.profile_actions import restore_bound_profile
+
     try:
-        registry.update_team(
+        restore_bound_profile(
+            Path(registry.config_dir),
+            "team",
             str(current.id),
-            TeamEditFields(
-                description=row.description,
-                manager=row.manager,
-                members=list(row.members),
-                label=row.label or "",
-                aliases=list(row.aliases),
-                instructions=row.instructions,
-                project=row.project,
-            ),
-            precondition=_revision_precondition(str(saved)),
+            {key: current.model_dump(mode="json")[key] for key in TeamImage.model_fields},
+            {key: row.model_dump(mode="json")[key] for key in TeamImage.model_fields},
         )
     except DefinitionRevisionMismatch:
         return _error(

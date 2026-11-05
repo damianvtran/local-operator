@@ -1494,6 +1494,7 @@ def write_profile(
     context: ToolContext | None = None,
     consent_checked: bool = False,
     before_write: Callable[[], None] | None = None,
+    after_write: Callable[[], None] | None = None,
 ) -> tuple[str, str, str]:
     """Keep CAS, metadata, instructions and backup within one authored edit.
 
@@ -1557,7 +1558,7 @@ def write_profile(
             backup=(lambda image: before_write()) if before_write is not None else None,
             transaction_id="save-" + save_identity if save_identity else None,
         ):
-            return _write_profile_locked(
+            result = _write_profile_locked(
                 registry,
                 params,
                 creating=creating,
@@ -1567,6 +1568,9 @@ def write_profile(
                 context=context,
                 consent_checked=consent_checked,
             )
+            if after_write is not None:
+                after_write()
+            return result
 
 
 def _write_profile_locked(
@@ -2013,6 +2017,9 @@ class _AccountSave:
     base_revision: str | None
     before: dict[str, Any]
     backup_id: str | None = None
+    backup_payload: dict[str, Any] | None = None
+    after_image: dict[str, Any] | None = None
+    post_revision: str | None = None
 
 
 def _queued_profile_receipt(tool_call_id: str, tool_name: str, queued: Any) -> ToolResult:
@@ -2154,9 +2161,23 @@ def _take_backup(
         "authorized_by": authorized_by,
     }
     session_dir = getattr(context, "session_dir", None) if context is not None else None
-    backup_id = save_profile_backup(session_dir, payload)
+    backup_id = save_profile_backup(
+        session_dir, payload, on_saved=lambda body: setattr(plan, "backup_payload", body)
+    )
     plan.backup_id = backup_id
     return None
+
+
+def _capture_saved_profile(registry: Any, plan: _AccountSave) -> None:
+    """Called under the shared write lock, before a later writer can land."""
+    from local_operator.hub_sync.definition import definition_revision
+    from local_operator.profile_approval import snapshot
+
+    if plan.agent_id is not None:
+        plan.after_image = snapshot(Path(registry.config_dir), "agent", plan.agent_id)
+        plan.post_revision = definition_revision(
+            "agent", plan.agent_id, registry.definition_revision_fields(plan.agent_id)
+        )
 
 
 def _backups_present(context: ToolContext | None) -> bool:
@@ -2187,6 +2208,7 @@ def _account_save_receipt(
     name: str,
     plan: _AccountSave,
     details: dict[str, Any],
+    tool_call_id: str = "",
 ) -> str:
     """Fill the receipt card's details and return the text's revert sentence.
 
@@ -2199,10 +2221,10 @@ def _account_save_receipt(
 
     details["fields"] = list(plan.changes)
     details["diff"] = plan.summary.splitlines()
-    revision: str | None = None
+    revision: str | None = plan.post_revision
     try:
         row = registry.get_agent_by_name(name)
-        if row is not None:
+        if row is not None and revision is None:
             revision = definition_revision(
                 "agent", str(row.id), registry.definition_revision_fields(str(row.id))
             )
@@ -2215,6 +2237,29 @@ def _account_save_receipt(
     session_dir = getattr(context, "session_dir", None) if context is not None else None
     update_profile_backup(session_dir, plan.backup_id, saved_revision=revision)
     details["revert"] = {"op": "revert", "backup_id": plan.backup_id}
+    register = getattr(context, "register_profile_action", None)
+    if register is not None and plan.backup_payload is not None and plan.after_image is not None:
+        from local_operator.definition_transaction import commitment
+        from local_operator.profile_approval import AgentImage
+
+        raw = plan.backup_payload["row"]
+        inverse = {key: raw[key] for key in AgentImage.model_fields if key != "instructions"}
+        inverse["instructions"] = plan.backup_payload["instructions"]
+        body = dict(plan.backup_payload, saved_revision=revision)
+        descriptor = register(
+            root=Path(registry.config_dir),
+            profile_kind="agent",
+            profile_name=name,
+            target_id=str(raw["id"]),
+            tool_call_id=tool_call_id,
+            receipt_id=plan.backup_id,
+            before=inverse,
+            after=plan.after_image,
+            backup_path=Path(session_dir) / "profile-backups" / (plan.backup_id + ".json"),
+            backup_commitment=commitment(body),
+        )
+        details["profile_action"] = descriptor
+
     return (
         "\n"
         + profile_diff_summary(plan.summary)
@@ -2231,7 +2276,6 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
     asking "revert the reviewer" is the owner-prompt path because it names the
     profile; anything else is the approval card.
     """
-    from local_operator.agents import AgentEditFields
     from local_operator.hub_sync.definition import definition_revision
     from local_operator.profile_scope import (
         durable_write_decision,
@@ -2332,42 +2376,13 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
     if authorized_by is None:
         return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
 
-    def check(current: Any) -> None:
-        if (
-            definition_revision(
-                "agent", str(current.id), registry.definition_revision_fields(str(current.id))
-            )
-            != saved
-        ):
-            raise DefinitionRevisionMismatch("the definition changed since the save")
+    # Both the typed receipt gesture and this already-authorized tool path use
+    # the same exact inverse/CAS transaction, not a second metadata/prompt write.
+    from local_operator.profile_actions import restore_bound_profile
 
-    # Only the fields ``write_profile`` writes are restored (label, description,
-    # tags carrying effort/tools/delegate/class/provenance, categories, the
-    # instructions); every other column was never touched by the save.
     try:
-        registry.update_agent(
-            agent_id,
-            AgentEditFields(
-                name=None,
-                label=str(row.get("label") or ""),
-                description=row.get("description"),
-                tags=list(row.get("tags") or []),
-                categories=list(row.get("categories") or []),
-                security_prompt=None,
-                hosting=None,
-                model=None,
-                last_message=None,
-                temperature=None,
-                top_p=None,
-                top_k=None,
-                max_tokens=None,
-                stop=None,
-                frequency_penalty=None,
-                presence_penalty=None,
-                seed=None,
-                current_working_directory=None,
-            ),
-            precondition=check,
+        restore_bound_profile(
+            Path(registry.config_dir), "agent", agent_id, before_image, after_image
         )
     except DefinitionRevisionMismatch:
         return _error(
@@ -2375,7 +2390,6 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
             "agent",
             f"{name!r} was edited after that save; nothing was written.",
         )
-    registry.set_agent_system_prompt(agent_id, str(record.get("instructions") or ""))
     return _text(
         tool_call_id,
         "agent",
@@ -2483,6 +2497,11 @@ async def _op_write(
                 if account_save is not None and existing is not None
                 else None
             ),
+            after_write=(
+                (lambda: _capture_saved_profile(registry, account_save))
+                if account_save is not None and existing is not None
+                else None
+            ),
             context=context,
             # The tool layer already ran the decision: it either got an origin or
             # the host has no conversation store, where an omitted scope is the
@@ -2552,7 +2571,9 @@ async def _op_write(
     }
     receipt = ""
     if account_save is not None and authorized_by:
-        receipt = _account_save_receipt(context, registry, name, account_save, details)
+        receipt = _account_save_receipt(
+            context, registry, name, account_save, details, tool_call_id
+        )
     return _text(
         tool_call_id,
         "agent",

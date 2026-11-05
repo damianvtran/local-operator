@@ -384,7 +384,9 @@ def owner_text_names_profile(text: str, names: Iterable[str]) -> bool:
 PROFILE_BACKUPS_DIRNAME = "profile-backups"
 
 
-def save_profile_backup(session_dir: str | None, payload: dict[str, Any]) -> str | None:
+def save_profile_backup(
+    session_dir: str | None, payload: dict[str, Any], *, on_saved: Any = None
+) -> str | None:
     """Persist ``payload`` (the prior row) and return its backup id.
 
     ``None`` when this session has no directory (an SDK host without a
@@ -411,6 +413,8 @@ def save_profile_backup(session_dir: str | None, payload: dict[str, Any]) -> str
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+    if on_saved is not None:
+        on_saved(body)
     return backup_id
 
 

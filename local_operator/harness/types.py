@@ -2277,6 +2277,10 @@ class ToolContext(BaseModel):
     #
     # Off the tool wire, like every other host-owned presence field here: a
     # callback is a capability, never payload a provider may see.
+    # Host-only receipt registration; never populated from model/transcript data.
+    register_profile_action: Callable[..., dict[str, Any]] | None = Field(
+        default=None, exclude=True
+    )
     authorize_durable_write: (
         Callable[[DurableWriteIntent], Awaitable[str | QueuedProfileWrite | None]] | None
     ) = Field(default=None, exclude=True, repr=False)

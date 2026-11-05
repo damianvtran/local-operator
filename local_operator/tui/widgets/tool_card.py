@@ -97,6 +97,7 @@ from typing import Any
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
+from textual.message import Message
 from textual.timer import Timer
 
 from local_operator.ansi import strip_control_sequences
@@ -1557,6 +1558,60 @@ class ToolCard(ExpandableActionBlock):
     action and Up/Down walk the ledger from there.
     """
 
+    class ProfileActionCheck(Message):
+        def __init__(self, card):
+            self.card = card
+            super().__init__()
+
+    class ProfileRevertRequested(Message):
+        def __init__(self, card):
+            self.card = card
+            self.action = card._profile_action
+            super().__init__()
+
+    def set_profile_action_state(self, state: str) -> None:
+        if state not in {"available", "pending", "succeeded", "stale", "failed", "unavailable"}:
+            state = "unavailable"
+        if state == "available" and self._profile_activation_inflight:
+            state = "pending"
+        self._profile_action_state = state
+        self._refresh_row()
+
+    def _request_profile_revert(self) -> None:
+        if self._profile_action is None:
+            return
+        if self._profile_action_state == "pending":
+            if self._profile_activation_inflight:
+                return
+            self.post_message(self.ProfileActionCheck(self))
+        elif self._profile_action_state == "available":
+            # Latch BEFORE posting: two presses in the same input batch cannot
+            # dispatch two requests. Transport loss stays pending until a live
+            # status read reconciles it; it is never a failure/automatic retry.
+            self._profile_activation_inflight = True
+            self.set_profile_action_state("pending")
+            self.post_message(self.ProfileRevertRequested(self))
+
+    def on_click(self, event) -> None:
+        if (
+            self._profile_action is not None
+            and event.button == 1
+            and event.style.meta.get("profile_revert")
+        ):
+            event.stop()
+            event.prevent_default()
+            self._request_profile_revert()
+            return
+        super().on_click(event)
+
+    def on_key(self, event) -> None:
+        if self._profile_action is not None and self.has_focus and event.key.lower() == "r":
+            event.stop()
+            event.prevent_default()
+            self._request_profile_revert()
+            return
+        super().on_key(event)
+
     #: Shared by every expandable action row; naming it here lets the base
     #: toggle expansion without knowing this subclass's CSS selector.
     EXPANDED_CLASS = "tool-expanded"
@@ -1582,6 +1637,11 @@ class ToolCard(ExpandableActionBlock):
         #: converted to an AGE once (:func:`monotonic_from_epoch`) and every
         #: tick after that is taken from here.
         self._clock = clock
+        self._profile_action = None
+        self._profile_action_state = "unavailable"
+        self._profile_activation_inflight = False
+        self._profile_action_source = None
+        self._profile_action_live = None
         self.tool_call_id = tool_call_id
         self.internal_work_job_id: str | None = None
         self.internal_work_job_ids: tuple[str, ...] = ()
@@ -2588,6 +2648,8 @@ class ToolCard(ExpandableActionBlock):
         event, or a replayed batch) is constructed running and mounted after,
         and ``__init__`` has no message pump to schedule against.
         """
+        if self._profile_action is not None:
+            self.post_message(self.ProfileActionCheck(self))
         if self._state in ("running", "composing"):
             self._start_clock()
 
@@ -3180,6 +3242,23 @@ class ToolCard(ExpandableActionBlock):
         # the fetch presentation without re-inspecting details every repaint.
         self._is_fetch_card = bool(fetch_output)
         self._output = search_output or fetch_output or self._clean_output(result_text)
+        from local_operator.profile_actions import ProfileAction
+
+        raw = details.get("profile_action") if isinstance(details, Mapping) else None
+        try:
+            action = ProfileAction.model_validate(dict(raw)) if isinstance(raw, Mapping) else None
+        except ValueError:
+            action = None
+        self.set_class(action is not None, "profile-action-card")
+        if action != self._profile_action:
+            self._profile_action = action
+            self._profile_action_state = "unavailable"
+            self._profile_action_source = None
+            self._profile_action_live = None
+        # Persisted descriptors/verified flags are display data, not live proof.
+        if action is not None and self.is_mounted:
+            self.post_message(self.ProfileActionCheck(self))
+
         diff = details.get("diff") if isinstance(details, Mapping) else None
         # Canonical follower details are immutable sequences, not concrete
         # lists. They still carry the same unified diff as the live executor.
@@ -3452,6 +3531,26 @@ class ToolCard(ExpandableActionBlock):
                 width = FALLBACK_WIDTH
                 detached = True
         content = self._build_content(width)
+        if self._profile_action is not None:
+            state = self._profile_action_state
+            label = "[ Revert (R) ]" if state == "available" else f"[ Revert · {state} ]"
+            if state == "pending":
+                label = (
+                    "[ Reverting... ]"
+                    if self._profile_activation_inflight
+                    else "[ Check status (R) ]"
+                )
+            if state == "succeeded":
+                label = "[ Reverted ]"
+            content.append("\n    ")
+            content.append(
+                label,
+                Style(
+                    meta={"profile_revert": self._profile_action.action_id},
+                    bold=state == "available",
+                    underline=state == "available",
+                ),
+            )
         self._row_count = max(1, len(content.plain.splitlines()))
         if detached:
             return

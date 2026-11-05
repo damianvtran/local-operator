@@ -1328,13 +1328,40 @@ class TuiSessionHandle(SessionHandle):
         await self.refresh()
         return f"resumed {session_id}"
 
-    async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
+    async def profile_action_status(self, **identity: str) -> dict[str, str]:
+        async def read():
+            session = self._session()
+            client = getattr(session, "_client", None)
+            if client is not None:
+                return await client.profile_action_status(**identity)
+            return session._profile_actions.status(**identity)
+
+        return await self._on_app(read)
+
+    async def approval_answer(
+        self, request_id: str, approved: bool, remember: bool
+    ) -> str | dict[str, str]:
         """Settle the host's real ApprovalPrompt from another front end.
 
         The prompt's ``resolve`` is idempotent and runs on Textual's loop, so
         terminal, phone and follower answers share one arbitration point. A
         stale request id is rejected rather than applied to the next prompt.
         """
+
+        if request_id.startswith("prv_"):
+            if remember:
+                raise ValueError("receipt actions never enable session approval")
+
+            async def activate():
+                session = self._session()
+                client = getattr(session, "_client", None)
+                if client is not None:
+                    return await client.profile_revert(request_id, approved=approved)
+                return await asyncio.to_thread(
+                    session._profile_actions.activate, request_id, approved=approved, remember=False
+                )
+
+            return await self._on_app(activate)
 
         def settle() -> bool:
             prompt = self._app._approval
