@@ -2114,6 +2114,8 @@ def test_packaging_is_a_separate_question_from_unit() -> None:
     mixed = scope.classify(["local_operator/mobile/web/src/app.tsx", "i18n/ledger.json"])
     assert mixed["packaging"] is True, "an i18n catalogue edit skipped the wheel rebuild"
     assert mixed["i18n"] is True, "an i18n catalogue edit skipped the i18n job"
+    for audit_path in ("i18n/audit-history.json", "i18n/audit-history/fr/wire.settings.json"):
+        assert scope.classify([audit_path])["i18n"] is True
 
     # Everything else -- manifest, an unenumerated path, a package file -- arms it.
     for paths in (

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "storage": "ordered-suffix-v1",
+  "baseline": {
+    "i18n/ledger.json": "6f44a31df2f1611e7d2bc55e32c07729dd8f6ffe241c17dbc60f5a072f9844af",
+    "i18n/ledger/es.json": "3eaea23d462d87b976bd08d14a6b6a629829a7429c73b45c4f4af9d91e6595dc",
+    "i18n/ledger/fr.json": "aa57390a97063deb2ad8d1badb2aa2283ea8e1d0e5d639f0c3b55cff463bd470",
+    "i18n/ledger/hi.json": "ab148efe894e355d0e56da81a84eecf54455e59fb5b3bb4fba2cc2dfa5e1e127",
+    "i18n/ledger/ru.json": "a28e96f397983d5a9691efe8e8f31c835003f676b22a4d9007f3697f895f7750",
+    "i18n/ledger/ur.json": "3bdb8055e096e22ba36b4574af2e6ed33235eef8f363bae91be5c4fe5796a0e7",
+    "i18n/ledger/vi.json": "1738b299b20f6cf5e798242b48fb3997eb253e2b1a157b9bb95b8befe14e73fe",
+    "i18n/ledger/zh-CN.json": "1313598c9bc55f323a29ee7e6dc02e144aa94e6e3e5eef3aa8c8152548633525"
+  }
+}
