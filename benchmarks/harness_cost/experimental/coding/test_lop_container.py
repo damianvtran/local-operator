@@ -328,6 +328,37 @@ class EgressTests(unittest.TestCase):
 
 
 class ProbeTests(unittest.TestCase):
+    def test_public_provenance_exact_pair_and_fail_closed(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
+            public = Path(tmp) / "interp.py"
+            public.write_bytes(b"public fixture")
+            sha = hashlib.sha256(public.read_bytes()).hexdigest()
+            manifest = {"version": 1, "task_payload_sha256": "a" * 64,
+                        "image_digest": "sha256:" + "b" * 64,
+                        "public_files": [{"path": str(public), "sha256": sha}],
+                        "solution_digests": [], "gold_digests": [sha],
+                        "policy_sha256": "d" * 64}
+            kwargs = {"root": tmp, "manifest": manifest, "task_payload_sha256": "a" * 64,
+                      "image_digest": "sha256:" + "b" * 64}
+            result = gold_probe.isolation({sha}, **kwargs)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["matched_paths"], [str(public)])
+            self.assertEqual(result["public_matches"], [{"path": str(public), "sha256": sha}])
+            wrong = Path(tmp) / "renamed"
+            wrong.write_bytes(public.read_bytes())
+            self.assertFalse(gold_probe.isolation({sha}, **kwargs)["ok"])
+            wrong.unlink()
+            for content in (b"hidden shadow_test", b"solution sentinel"):
+                hidden = Path(tmp) / "hidden"
+                hidden.write_bytes(content)
+                hidden_sha = hashlib.sha256(content).hexdigest()
+                manifest["gold_digests"] = [sha, hidden_sha]
+                self.assertFalse(gold_probe.isolation({sha, hidden_sha}, **kwargs)["ok"])
+                manifest["gold_digests"] = [sha]
+                hidden.unlink()
+            manifest["task_payload_sha256"] = "c" * 64
+            self.assertFalse(gold_probe.isolation({sha}, **kwargs)["ok"])
+
     def test_isolation_finds_planted_bytes_by_hash(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
             planted = Path(tmp) / "deep" / "copy.sh"
@@ -490,7 +521,7 @@ class BenchVerifierTests(unittest.TestCase):
 
     def _verify(self, isolation_ok=True, survivors=()):
         quiet = {"check": "quiescence", "ok": not survivors, "survivors": list(survivors)}
-        iso = {"check": "gold-isolation", "ok": isolation_ok}
+        iso = {"check": "gold-isolation", "ok": isolation_ok, "manifest_sha256": "d" * 64}
         module, env, calls = _load_verifier([json.dumps(iso), json.dumps(quiet)])
         tmp = tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD"))
         self.addCleanup(tmp.cleanup)
@@ -498,7 +529,8 @@ class BenchVerifierTests(unittest.TestCase):
         verifier = module.BenchVerifier(env, paths)
         with patch.object(module, "connect_uplink", return_value="cid"), patch.object(
             module, "compose_project", return_value="proj"
-        ), patch.dict(os.environ, {"BENCH_GOLD_DIGESTS": "a" * 64}):
+        ), patch.object(module, "provenance_args", return_value=["--public-provenance", "fixture"]), patch.dict(os.environ, {"BENCH_GOLD_DIGESTS": "a" * 64,
+                                     "BENCH_PUBLIC_PROVENANCE_SHA256": "d" * 64}):
             try:
                 result = asyncio.run(verifier.verify())
             except RuntimeError as exc:
@@ -692,10 +724,10 @@ class DriverContainerTests(unittest.TestCase):
                     with patch.object(driver, "block_paid_coding"), \
                             patch.object(driver, "_run_gated_trial", side_effect=trial):
                         if outcome is None:
-                            driver.run_trial(args, "codex-best", task)
+                            driver.run_trial(args, "codex-best", task, provenance={})
                         else:
                             with self.assertRaises(type(outcome)):
-                                driver.run_trial(args, "codex-best", task)
+                                driver.run_trial(args, "codex-best", task, provenance={})
                     self.assertEqual(seen, ["coding__codex-best__abcd1234__r0"])
                     if prior is None:
                         self.assertFalse(current.exists())
@@ -714,7 +746,7 @@ class DriverContainerTests(unittest.TestCase):
             )
             with patch.object(driver, "block_paid_coding"), \
                     patch.object(driver, "_run_gated_trial", return_value=None):
-                driver.run_trial(args, "omp", {"task8": "abcd1234", "name": "t"})
+                driver.run_trial(args, "omp", {"task8": "abcd1234", "name": "t"}, provenance={})
             self.assertEqual(current.read_bytes(), b"coding__codex-best__older__r0")
 
     def _health_server(self, body):

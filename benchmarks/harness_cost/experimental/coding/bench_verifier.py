@@ -40,8 +40,10 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import shlex
 
 from egress import GATE_PYTHON, SUPPORT, UPLINK_NETWORK, run_docker
+from gold_probe import provenance_args
 
 PROBE = f"{GATE_PYTHON} {SUPPORT}/gold_probe.py"
 SURVIVOR_FLAG = "agent-processes-survived-into-grading"
@@ -57,7 +59,8 @@ def gold_digests() -> list[str]:
 
 def _parse(stdout: str | None) -> dict[str, object]:
     try:
-        return json.loads((stdout or "").strip().splitlines()[-1])
+        parsed = json.loads((stdout or "").strip().splitlines()[-1])
+        return parsed if isinstance(parsed, dict) else {"ok": False}
     except (IndexError, ValueError):
         return {"ok": False, "unparsed": (stdout or "")[-500:]}
 
@@ -92,7 +95,8 @@ class BenchVerifier(_verifier_base()):  # type: ignore[misc]
     async def verify(self):  # noqa: D102 -- see module docstring
         record: dict[str, object] = {}
         run = self.environment.exec
-        isolation = await run(f"{PROBE} isolation {' '.join(gold_digests())}", user="root")
+        isolation = await run(f"{PROBE} isolation " + shlex.join(
+            [*gold_digests(), *provenance_args()]), user="root")
         record["isolation_after_agent"] = _parse(isolation.stdout)
         quiet = _parse((await run(f"{PROBE} quiescence", user="root")).stdout)
         record["quiescence"] = quiet
@@ -101,7 +105,12 @@ class BenchVerifier(_verifier_base()):  # type: ignore[misc]
         record["flags"] = [SURVIVOR_FLAG] if record["survivors"] else []
         if "survivors" not in quiet:
             record["flags"].append("quiescence-probe-unparsed")
-        record["graded"] = record["isolation_after_agent"].get("ok") is True
+        record["graded"] = (
+            isolation.return_code == 0
+            and record["isolation_after_agent"].get("ok") is True
+            and record["isolation_after_agent"].get("manifest_sha256")
+            == os.environ.get("BENCH_PUBLIC_PROVENANCE_SHA256")
+        )
         out = self.trial_paths.verifier_dir / "bench-isolation.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(record, indent=1) + "\n")

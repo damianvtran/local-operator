@@ -4,10 +4,10 @@ WHY (review-rigor POPULATION-SCREENING-DRAFT "Minimal owner QA"): Harbor's
 shared-container order is source-supported, not runtime-proven. Before the
 first model request this probe proves the agent cannot see the task's hidden
 inputs: ``/solution`` and ``/tests`` are absent, ``/logs/verifier`` is empty,
-and no readable file anywhere in the container has the bytes of any host-side
-``solution/`` or ``tests/`` file (the host passes only their SHA-256 digests,
-never their content). After the agent phase and BEFORE Harbor uploads tests, it
-records quiescence: every process still alive besides the container's keep-alive
+and no readable file has hidden solution/test bytes. Exact public COPY
+path/hash pairs from the reviewed, task/image-bound manifest are classified
+separately; raw strict matches are retained (hashes only, never content). After
+the agent phase and BEFORE Harbor uploads tests, it records quiescence: every process still alive besides the container's keep-alive
 init and this probe, as pid, SHA-256 of its command line and its listening TCP
 ports. That is a disclosed check, never a remedy: services such as
 nginx-request-logging's nginx or kv-store-grpc's server are what the tests
@@ -40,6 +40,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import socket
 import sys
 from pathlib import Path
@@ -52,8 +53,64 @@ SKIP = ("/proc", "/sys", "/dev", "/opt/bench", "/opt/bench-support", "/run/bench
 MAX_FILES = 400_000
 
 
-def isolation(digests: set[str], root: str = "/") -> dict[str, object]:
+def provenance_args() -> list[str]:
+    """Both host boundaries pass the identical frozen manifest, not container env."""
+    names = ("BENCH_PUBLIC_PROVENANCE", "BENCH_PUBLIC_PROVENANCE_SHA256",
+             "BENCH_TASK_PAYLOAD_SHA256", "BENCH_IMAGE_DIGEST")
+    values = [os.environ.get(name, "") for name in names]
+    if not all(values):
+        raise ValueError("missing public provenance manifest/binding")
+    return ["--public-provenance", *values]
+
+
+def _public_pairs(manifest, task_payload_sha256, image_digest, digests):
+    """Malformed/stale provenance cannot turn a strict match into public input."""
+    def is_sha(value):
+        return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+    if (not isinstance(manifest, dict) or manifest.get("version") != 1
+            or not is_sha(task_payload_sha256)
+            or manifest.get("task_payload_sha256") != task_payload_sha256
+            or not isinstance(image_digest, str) or not image_digest.startswith("sha256:")
+            or not is_sha(image_digest[7:]) or manifest.get("image_digest") != image_digest
+            or not is_sha(manifest.get("policy_sha256"))
+            or not isinstance(manifest.get("solution_digests"), list)
+            or not isinstance(manifest.get("gold_digests"), list)
+            or not all(is_sha(d) for d in manifest["gold_digests"])
+            or set(manifest["gold_digests"]) != digests or not digests
+            or not all(is_sha(d) and d in digests for d in manifest["solution_digests"])
+            or not isinstance(manifest.get("public_files"), list)):
+        raise ValueError("malformed or stale public provenance")
+    pairs = set()
+    paths = set()
+    for entry in manifest["public_files"]:
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+            raise ValueError("malformed public pair")
+        path, sha = entry["path"], entry["sha256"]
+        if (not isinstance(path, str) or not path.startswith("/")
+                or str(Path(path)) != path or ".." in Path(path).parts
+                or path in paths or not is_sha(sha)
+                or any(path == p or path.startswith(p + "/")
+                       for p in (*SKIP, "/solution", "/tests", "/logs/verifier"))):
+            raise ValueError("invalid public path/digest")
+        paths.add(path)
+        pairs.add((path, sha))
+    return pairs
+
+
+def isolation(digests: set[str], root: str = "/", *, manifest=None,
+              task_payload_sha256=None, image_digest=None) -> dict[str, object]:
     found: list[str] = []
+    raw_matches = []
+    error = None
+    try:
+        public_pairs = _public_pairs(manifest, task_payload_sha256, image_digest, digests)
+    except (ValueError, TypeError) as exc:
+        public_pairs, error = set(), str(exc)
+    # A public/solution collision is disclosed, never silently authorized.
+    solutions = set(manifest.get("solution_digests", [])) if not error else set()
+    overlap = sorted({sha for _, sha in public_pairs} & solutions)
+    public_matches, rejected = [], []
     scanned = 0
     truncated = False
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -71,8 +128,15 @@ def isolation(digests: set[str], root: str = "/") -> dict[str, object]:
                     truncated = True
                     break
                 with open(path, "rb") as fh:
-                    if hashlib.file_digest(fh, "sha256").hexdigest() in digests:
+                    sha = hashlib.file_digest(fh, "sha256").hexdigest()
+                    if sha in digests:
                         found.append(path)
+                        match = {"path": path, "sha256": sha}
+                        raw_matches.append(match)
+                        if (path, sha) in public_pairs and sha not in solutions:
+                            public_matches.append(match)
+                        else:
+                            rejected.append(match)
             except OSError:
                 continue
         if truncated:
@@ -81,7 +145,9 @@ def isolation(digests: set[str], root: str = "/") -> dict[str, object]:
         "/logs/verifier"
     ).is_dir() else []
     ok = (
-        not found
+        not rejected
+        and error is None
+        and not overlap
         and not truncated
         and not Path("/solution").exists()
         and not Path("/tests").exists()
@@ -90,9 +156,18 @@ def isolation(digests: set[str], root: str = "/") -> dict[str, object]:
     return {
         "check": "gold-isolation",
         "ok": ok,
+        "strict_ok": not found and not truncated and not Path("/solution").exists()
+        and not Path("/tests").exists() and not verifier_logs,
         "scanned_files": scanned,
         "truncated": truncated,
         "matched_paths": found,
+        "raw_matches": raw_matches,
+        "public_matches": public_matches,
+        "rejected_matches": rejected,
+        "solution_public_overlap": overlap,
+        "provenance_error": error,
+        "manifest_sha256": hashlib.sha256(json.dumps(
+            manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "solution_present": Path("/solution").exists(),
         "tests_present": Path("/tests").exists(),
         "verifier_log_entries": verifier_logs,
@@ -220,7 +295,20 @@ def egress(gate_ports: list[int], canary_port: int, gate: str = "bench-gate",
 
 def main(argv: list[str]) -> int:
     if argv[:1] == ["isolation"]:
-        result = isolation(set(argv[1:]))
+        args = argv[1:]
+        manifest, payload, image = None, None, None
+        if "--public-provenance" in args:
+            index = args.index("--public-provenance")
+            try:
+                raw, expected, payload, image = args[index + 1:]
+                if hashlib.sha256(raw.encode()).hexdigest() != expected:
+                    raise ValueError("manifest hash mismatch")
+                manifest = json.loads(raw)
+            except (ValueError, TypeError):
+                manifest = None
+            args = args[:index]
+        result = isolation(set(args), manifest=manifest,
+                           task_payload_sha256=payload, image_digest=image)
     elif argv[:1] == ["quiescence"]:
         result = quiescence()
     elif (argv[:2] == ["egress", "--canary"] and len(argv) > 3

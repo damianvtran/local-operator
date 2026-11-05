@@ -41,6 +41,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Protocol, TypeVar, runtime_checkable
 
+from gold_probe import provenance_args
+
 
 @runtime_checkable
 class _InstalledAgent(Protocol):
@@ -147,7 +149,7 @@ async def _preinference_checks(agent, environment) -> None:
         )
     results = {}
     for check, args in (
-        ("isolation", digests.split(",")),
+        ("isolation", [*digests.split(","), *provenance_args()]),
         ("egress", ["--canary", canary, *ports.split(",")]),
     ):
         result = await environment.exec(
@@ -155,7 +157,14 @@ async def _preinference_checks(agent, environment) -> None:
             user="root",
         )
         results[check] = (result.stdout or "").strip().splitlines()[-1:]
-        if result.return_code != 0:
+        try:
+            parsed = json.loads(results[check][0])
+        except (ValueError, IndexError):
+            parsed = {}
+        if (result.return_code != 0 or not isinstance(parsed, dict)
+                or parsed.get("ok") is not True
+                or (check == "isolation" and parsed.get("manifest_sha256")
+                    != os.environ.get("BENCH_PUBLIC_PROVENANCE_SHA256"))):
             _write_preinference(agent, results)
             raise RuntimeError(f"pre-inference {check} check failed")
     _write_preinference(agent, results)

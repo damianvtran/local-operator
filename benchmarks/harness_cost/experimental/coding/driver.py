@@ -94,6 +94,7 @@ CONTAINER_CLOSURE = (
     "egress.py",
     "gate_relay.py",
     "gold_probe.py",
+    "public-provenance.json",
     "lop_launch.py",
     "package-egress-allowlist.json",
     "public-roots.pem",
@@ -199,6 +200,41 @@ def gold_digests(task_dir):
     if not digests:
         raise ValueError("task has no solution/tests files to guard")
     return digests
+
+
+def public_provenance(task_dir, image_digest):
+    """Freeze host-reviewed COPY pairs, never discoveries from a live image.
+
+    Only the checked-in exact inventory can relax a strict gold match. Task
+    payload and image changes require renewed review, not a learned baseline.
+    """
+    task_dir = Path(task_dir)
+    files = {str(p.relative_to(task_dir)): digest(p)
+             for p in sorted(task_dir.rglob("*")) if p.is_file()}
+    if any(not p.resolve().is_relative_to(task_dir.resolve())
+           for p in task_dir.rglob("*") if p.is_file()):
+        raise ValueError("escaping task payload symlink")
+    payload = hashlib.sha256(json.dumps(
+        files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    policy_path = HERE / "public-provenance.json"
+    policy = json.loads(policy_path.read_text())
+    approved = policy["tasks"].get(task_dir.name)
+    public = []
+    if approved is not None:
+        if (approved["task_payload_sha256"] != payload
+                or approved["image_digest"] != image_digest
+                or approved["dockerfile_sha256"] != files.get("environment/Dockerfile")):
+            raise ValueError("stale public provenance; task/image requires review")
+        for entry in approved["public_files"]:
+            if files.get(entry["source"]) != entry["sha256"]:
+                raise ValueError("stale public COPY input")
+            public.append({"path": entry["path"], "sha256": entry["sha256"]})
+    solutions = sorted({digest(p) for p in (task_dir / "solution").rglob("*")
+                        if p.is_file()})
+    return {"version": 1, "task_payload_sha256": payload,
+            "image_digest": image_digest, "policy_sha256": digest(policy_path),
+            "public_files": public, "solution_digests": solutions,
+            "gold_digests": gold_digests(task_dir)}
 
 
 @contextmanager
@@ -618,8 +654,10 @@ def wire_rows(log, run_id):
     return rows
 
 
-def run_trial(args, harness, task):
+def run_trial(args, harness, task, provenance=None):
     block_paid_coding(args)
+    if provenance is None:
+        provenance = public_provenance(args.task_root / task["name"], task["image_digest"])
     run_id = f"coding__{harness}__{task['task8']}__r{args.rep}"
     job = args.output / "jobs" / run_id
     if job.exists() or (args.request_log.exists() and wire_rows(args.request_log, run_id)):
@@ -642,7 +680,7 @@ def run_trial(args, harness, task):
                 raise ValueError("egress canary collides with a gate port")
             with codex_current_run(args, harness, run_id):
                 return _run_gated_trial(
-                    args, harness, task, run_id, job, cls, version, plan, edge, canary
+                    args, harness, task, run_id, job, cls, version, plan, edge, canary, provenance
                 )
     finally:
         stop_edge(edge)
@@ -694,7 +732,8 @@ def stop_edge(edge):
     stop(proc)
 
 
-def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge, canary):
+def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge, canary,
+                     provenance):
     import egress
 
     support = args.output / "support" / run_id
@@ -801,7 +840,14 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
     }
     # Harbor-process-only inputs for the pre-inference and verifier checks:
     # hashes and port numbers, never task bytes or credentials.
+    provenance_json = json.dumps(provenance, sort_keys=True, separators=(",", ":"))
+    provenance_sha = hashlib.sha256(provenance_json.encode()).hexdigest()
+    (args.output / (run_id + ".public-provenance.json")).write_text(provenance_json + "\n")
     env.update(
+        BENCH_PUBLIC_PROVENANCE=provenance_json,
+        BENCH_PUBLIC_PROVENANCE_SHA256=provenance_sha,
+        BENCH_TASK_PAYLOAD_SHA256=provenance["task_payload_sha256"],
+        BENCH_IMAGE_DIGEST=task["image_digest"],
         PYTHONPATH=str(HERE),
         CODING_MODEL=args.model,
         BENCH_GOLD_DIGESTS=",".join(gold_digests(args.task_root / task["name"])),
@@ -839,6 +885,8 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
         "cost_usd": sum(float(r["usage"]["cost"]) for r in rows),
         "requests": len(rows),
         "verified": bool(rows) and reward is not None and not disk_stop and code == 0,
+        "public_provenance_sha256": provenance_sha,
+        "public_provenance_policy_sha256": provenance["policy_sha256"],
         "package_egress": package_egress_summary(
             [egress_log / "connections.jsonl"]
             + ([args.output / "edge" / run_id / "package-egress.jsonl"] if edge else [])
@@ -908,6 +956,9 @@ def main():
             for task in tasks:
                 check_space(args.disk_volume, task["hub_tag_full_size_bytes"])
                 image = task["image"].split(":")[0] + "@" + task["image_digest"]
+                # Bind the original task before the existing temporary image-pin
+                # rewrite; hashing that rewrite would make valid provenance stale.
+                provenance = public_provenance(args.task_root / task["name"], task["image_digest"])
                 config = args.task_root / task["name"] / "task.toml"
                 original = config.read_text()
                 source_image = tomllib.loads(original)["environment"]["docker_image"]
@@ -928,7 +979,7 @@ def main():
                     config.write_text(replacement)
                     for harness in harnesses:
                         check_space(args.disk_volume, 0)
-                        run_trial(args, harness, task)
+                        run_trial(args, harness, task, provenance)
                 finally:
                     config.write_text(original)
                     # Only this lane's exact image, never global prune.

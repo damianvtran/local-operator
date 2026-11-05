@@ -97,12 +97,12 @@
       "sha256": "e11b39d2c3665a8b248b23a7aa52343e1fb38694dae9058d190a58544481725a"
     },
     "coding/adapters.py": {
-      "bytes": 19085,
-      "sha256": "2a5a2165eb01b37ced4b5aa3e31613f1bf26077268091aedac1657f964d47961"
+      "bytes": 19507,
+      "sha256": "f1ce59ff5b3dc0dc6e5207248d793604257b8cece8097255bec2e2fa259e3de9"
     },
     "coding/bench_verifier.py": {
-      "bytes": 5208,
-      "sha256": "b2ba9cd482d350af165fcf65fb370cb438240bc8dba9022620e1832e645eb16d"
+      "bytes": 5572,
+      "sha256": "81c7143af132b21f9827400f9fd19ec49b26e0d95d67478c0d713820bcf581d9"
     },
     "coding/codex-model-catalog.json": {
       "bytes": 23154,
@@ -113,8 +113,8 @@
       "sha256": "1adf87f9009d1d7a366f7b2ff5bda6894d0e859c0dc7314bec518342a39210df"
     },
     "coding/driver.py": {
-      "bytes": 39149,
-      "sha256": "0401d1c6f0b2fb77f34dc2e84262352a826a3117f160b90c56cb2eb5504ceb0e"
+      "bytes": 42070,
+      "sha256": "094dd16beb08873461586ecaefd66341f8f112aed976a8c4f5c369788fcd1c7e"
     },
     "coding/egress.py": {
       "bytes": 13650,
@@ -125,8 +125,8 @@
       "sha256": "318ccf6c9618eff6f69914f6572b026a30856311b8aeb3d82022af3149288262"
     },
     "coding/gold_probe.py": {
-      "bytes": 9561,
-      "sha256": "369157ee83c1cb0f552277aea7944b19ef6ff8e8131b59d28b4605b0dae82d09"
+      "bytes": 14092,
+      "sha256": "ab603bcbce4001e540b902d8e13ef73da7bdf0fd58ef20d3a50d734da22230ba"
     },
     "coding/lop_launch.py": {
       "bytes": 9379,
@@ -139,6 +139,10 @@
     "coding/package-egress-allowlist.json": {
       "bytes": 1416,
       "sha256": "34a2088db869a2b0ad91e8a9ebad2226138653f35659a59f7942e1b57ab180b0"
+    },
+    "coding/public-provenance.json": {
+      "bytes": 8107,
+      "sha256": "28c385be0bac87e19d02acf4d22634c679990b03ff2873ebc7b174efa613e1cf"
     },
     "coding/public-roots.pem": {
       "bytes": 240216,
@@ -161,12 +165,16 @@
       "sha256": "5bf759f765c33ddaad7c707f3223243b7a6d6591d4a9bb59e924f14eb6b62009"
     },
     "coding/test_lop_container.py": {
-      "bytes": 42627,
-      "sha256": "b63055346b32c4f13a3ad59554a84528d4371e287189c6e294bc87c5c40ff1e4"
+      "bytes": 44731,
+      "sha256": "ab6d9336b51dbf0ba85e44ed800c35289ffe97a4086890ace293a73321aabf59"
     },
     "coding/test_package_egress.py": {
       "bytes": 18839,
       "sha256": "b3bb7691e299912210c04ecd3a7b83d750b06cef07d54fac32db20aa0ff9f8cc"
+    },
+    "coding/test_public_provenance.py": {
+      "bytes": 10319,
+      "sha256": "1f2fa40bfbdd5f15d1d0846fe621873c321be89a58e955cbb3c4b5fcf2432543"
     },
     "evaluate.py": {
       "bytes": 7630,

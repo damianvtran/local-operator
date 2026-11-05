@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "tasks": {
+    "schemelike-metacircular-eval": {
+      "task_payload_sha256": "f7337d07c44192c03e40da41dfbdf6fb8f777105af8d464f918157d8861b79cb",
+      "image_digest": "sha256:b485be38bf80d56c1a4cd9da95bbf7ec129dc03f6786b86c0525518a96f6d1db",
+      "dockerfile_sha256": "9b3df76222e16aad360fbd34cb0f71a0be8986052c065b10b92c0cdf417b25c7",
+      "reviewed_copy_inputs": [
+        "COPY tests/interp.py /app",
+        "COPY tests/test /app/test"
+      ],
+      "public_files": [
+        {
+          "source": "environment/tests/interp.py",
+          "path": "/app/interp.py",
+          "sha256": "efb8b5cdcf78b73afcf39d59600a1f355ca89b7bac9854bb01f110cc77bea2c1"
+        },
+        {
+          "source": "environment/tests/test/01-factorial.scm",
+          "path": "/app/test/01-factorial.scm",
+          "sha256": "2623000a742c63d50ae1851854826247caee129c7d1613be6c7131d21f26a6ad"
+        },
+        {
+          "source": "environment/tests/test/02-fibonacci.scm",
+          "path": "/app/test/02-fibonacci.scm",
+          "sha256": "db769cef446d5da9e9b1abccdf9ca644e239938095a98c21551aee25255a57d4"
+        },
+        {
+          "source": "environment/tests/test/03-list-operations.scm",
+          "path": "/app/test/03-list-operations.scm",
+          "sha256": "1a14b4100dedef30010fed62ea9fd295add1b0facb2e8e6e27c8d8eb3d90111b"
+        },
+        {
+          "source": "environment/tests/test/04-higher-order.scm",
+          "path": "/app/test/04-higher-order.scm",
+          "sha256": "59cd17bbffad641a37729b17c5bf9178b8bae7289fe89cc7135eb0bfec2b4fd6"
+        },
+        {
+          "source": "environment/tests/test/05-simple-io.scm",
+          "path": "/app/test/05-simple-io.scm",
+          "sha256": "3deeb3275df1b771449ebaebfcb9a934f375415e138c5e9f3685516c69a1f7a0"
+        },
+        {
+          "source": "environment/tests/test/06-interactive-io.scm",
+          "path": "/app/test/06-interactive-io.scm",
+          "sha256": "aa3cae79b79dca90ac9d61a1babf64d6a5bb6559798c7727c11be02d8ddfd216"
+        },
+        {
+          "source": "environment/tests/test/08-progn-sequencing.scm",
+          "path": "/app/test/08-progn-sequencing.scm",
+          "sha256": "4c0a4d980cf4223d1d17715d58adbe27dc120eced257a0d9f42de952c094bc5b"
+        },
+        {
+          "source": "environment/tests/test/09-mutual-recursion.scm",
+          "path": "/app/test/09-mutual-recursion.scm",
+          "sha256": "939e18f4bd25b5ab0e2a4a767bf7eb6b0d8fb3530d28bf236f06cf27f2d90ee8"
+        },
+        {
+          "source": "environment/tests/test/10-advanced-features.scm",
+          "path": "/app/test/10-advanced-features.scm",
+          "sha256": "c4cc5fb412df363875768c6a1e645255f6bc8f9ddf988d1ec2f4a266cedb8ec7"
+        },
+        {
+          "source": "environment/tests/test/README.md",
+          "path": "/app/test/README.md",
+          "sha256": "1f2174c7f12721f9f1898cda190c2886fb3ef9d35fd085f315da5814657104ae"
+        },
+        {
+          "source": "environment/tests/test/accumulator_patterns.scm",
+          "path": "/app/test/accumulator_patterns.scm",
+          "sha256": "50d246e00577d1f3ab3f0462c2b9618ea63680c33fcca12369cd1707b010cb5f"
+        },
+        {
+          "source": "environment/tests/test/binary_tree.scm",
+          "path": "/app/test/binary_tree.scm",
+          "sha256": "c95f59ccac1ea4a9c846afddc993aa40ac081c0f9e6731544530109b269b67ae"
+        },
+        {
+          "source": "environment/tests/test/calculator.scm",
+          "path": "/app/test/calculator.scm",
+          "sha256": "a09213ec8a2ec52486b9346c420ddb7c537576ef71b1cc5c6ec61d13d9139f61"
+        },
+        {
+          "source": "environment/tests/test/church_numerals.scm",
+          "path": "/app/test/church_numerals.scm",
+          "sha256": "f37d858f32a9c5ba8868d094018c92516acadf0ea4e55b7c36f14320cb0c69a6"
+        },
+        {
+          "source": "environment/tests/test/closures.scm",
+          "path": "/app/test/closures.scm",
+          "sha256": "3ecfc35289479288876e20bf7f55e5b8eda84acd35937e89e3d062308a99aeff"
+        },
+        {
+          "source": "environment/tests/test/continuation_passing.scm",
+          "path": "/app/test/continuation_passing.scm",
+          "sha256": "01049581e582f7d35ef40ef68e1827d012da619beea57c1c74675a5f245318d7"
+        },
+        {
+          "source": "environment/tests/test/currying.scm",
+          "path": "/app/test/currying.scm",
+          "sha256": "2844d54eee9a94af05a11b4aae06d6e7823d193f17235c8f90bf98926cbca75d"
+        },
+        {
+          "source": "environment/tests/test/filter_operations.scm",
+          "path": "/app/test/filter_operations.scm",
+          "sha256": "f6bc75f6da9ece96c0616e3570e4df59d0f2eb4655375d3a46b0349c86cc5dd8"
+        },
+        {
+          "source": "environment/tests/test/fold_operations.scm",
+          "path": "/app/test/fold_operations.scm",
+          "sha256": "05aab492ad914baecd19cf454ed587e7a031e94b8990500eb1c869c15da6fc0b"
+        },
+        {
+          "source": "environment/tests/test/function_composition.scm",
+          "path": "/app/test/function_composition.scm",
+          "sha256": "9b56dc78823e7d35adb213744c0f8e95684074d6a12bb98c8c05755788be5b06"
+        },
+        {
+          "source": "environment/tests/test/lazy_evaluation.scm",
+          "path": "/app/test/lazy_evaluation.scm",
+          "sha256": "ea5912a53a35b65bf2bee9483dca90814b8baf52ae3ae50c2d4589f794dca54d"
+        },
+        {
+          "source": "environment/tests/test/list_operations.scm",
+          "path": "/app/test/list_operations.scm",
+          "sha256": "d7e70621afbbb787cf646e2089bccfbd3681fbb2e70325f3e50f56ccd30dbd9d"
+        },
+        {
+          "source": "environment/tests/test/map_operations.scm",
+          "path": "/app/test/map_operations.scm",
+          "sha256": "0cebddb3d4a50e4b6f6bfc0e8c12762d3f42609030aef077d8ab4bedda4718d9"
+        },
+        {
+          "source": "environment/tests/test/memoization.scm",
+          "path": "/app/test/memoization.scm",
+          "sha256": "cf8202df22407dbba72ca7f660d8ab7cd4ca962b215c36cc491d5c1a474c160b"
+        },
+        {
+          "source": "environment/tests/test/mutual_recursion.scm",
+          "path": "/app/test/mutual_recursion.scm",
+          "sha256": "a3dc23a96ec1cf05b0be4a4f0b6d3da9e2bad1aa3f7a83c7566f71f980a67fe2"
+        },
+        {
+          "source": "environment/tests/test/nested_defines.scm",
+          "path": "/app/test/nested_defines.scm",
+          "sha256": "21faa0ccaf744cb8c9d283bbfd0c36e195c803c85f511e70a99267c0a85b6216"
+        },
+        {
+          "source": "environment/tests/test/oeis_sequences.scm",
+          "path": "/app/test/oeis_sequences.scm",
+          "sha256": "d1f77161b367176b3dfab55a34466e511c602c7ae359e05f5a715627b93dca6a"
+        },
+        {
+          "source": "environment/tests/test/oeis_sequences2.scm",
+          "path": "/app/test/oeis_sequences2.scm",
+          "sha256": "5679ef0f99743114d8c06edcdcde1fea9474b71aeb57c2069f1ee33df1970bce"
+        },
+        {
+          "source": "environment/tests/test/oeis_sequences3.scm",
+          "path": "/app/test/oeis_sequences3.scm",
+          "sha256": "5dc8b44158b2648a6e9766f6bcdf21553a07bf487d79e64ebb418511ef3b8186"
+        },
+        {
+          "source": "environment/tests/test/recursive_structures.scm",
+          "path": "/app/test/recursive_structures.scm",
+          "sha256": "67838ff5bac26ea359139720adec1d5700176147b0062065c7def9715e8a2aeb"
+        },
+        {
+          "source": "environment/tests/test/test_read.scm",
+          "path": "/app/test/test_read.scm",
+          "sha256": "5b9ee381c3cf45b2fc8c2e7b490857fb67f1ac78653b586d7f2848daf6853809"
+        },
+        {
+          "source": "environment/tests/test/variadic_functions.scm",
+          "path": "/app/test/variadic_functions.scm",
+          "sha256": "c9b847c50840c6977904e5033a07f6108cc3a54012b02d916e79025fb43e0f6e"
+        },
+        {
+          "source": "environment/tests/test/y_combinator.scm",
+          "path": "/app/test/y_combinator.scm",
+          "sha256": "971144dcb2b04aaa3b34d9279459bd7d2e8256c585d17809465848c2589d36d8"
+        }
+      ]
+    }
+  }
+}
