@@ -1,0 +1,28 @@
+Pinned ref 0e7cde33ca8008d561e74f4aed774aa5f76ff7d5
+local_operator/mobile/daemon.py:6403:         from local_operator.paths import config_dir
+local_operator/mobile/daemon.py:6404: 
+local_operator/mobile/daemon.py:6405:         patch = None
+local_operator/mobile/daemon.py:6406:         if request.method == "PATCH":
+local_operator/mobile/daemon.py:6407:             try:
+local_operator/mobile/daemon.py:6408:                 patch = await request.json()
+local_operator/mobile/daemon.py:6409:             except (ValueError, UnicodeDecodeError):
+local_operator/mobile/daemon.py:6410:                 from local_operator.i18n.keys import wire_settings_account_policy as _ap
+local_operator/mobile/daemon.py:6411: 
+local_operator/mobile/daemon.py:6412:                 return JSONResponse(
+local_operator/mobile/daemon.py:6413:                     {
+local_operator/mobile/daemon.py:6414:                         "code": "invalid_setting",
+local_operator/mobile/daemon.py:6415:                         "error": _ap.error_invalid_json().envelope()["text"],
+local_operator/mobile/daemon.py:6416:                     },
+local_operator/mobile/daemon.py:6417:                     status_code=422,
+local_operator/mobile/daemon.py:6418:                 )
+local_operator/mobile/daemon.py:6419:         try:
+local_operator/mobile/daemon.py:6420:             payload = await asyncio.to_thread(
+local_operator/mobile/daemon.py:6421:                 policy_payload, config_dir(), patch, write=request.method == "PATCH"
+local_operator/mobile/daemon.py:6422:             )
+local_operator/mobile/daemon.py:6423:         except AccountRoutingError as exc:
+local_operator/mobile/daemon.py:6424:             return JSONResponse(
+local_operator/mobile/daemon.py:6425:                 {"code": exc.code, "error": str(exc)},
+local_operator/mobile/daemon.py:6426:                 status_code=exc.status,
+local_operator/mobile/daemon.py:6427:                 headers={"Cache-Control": "no-store"},
+local_operator/mobile/daemon.py:6428:             )
+local_operator/mobile/daemon.py:6429:         return JSONResponse(payload, headers={"Cache-Control": "no-store"})

@@ -1,0 +1,48 @@
+Pinned ref 0e7cde33ca8008d561e74f4aed774aa5f76ff7d5
+local_operator/mobile/account_routing.py:25:         self.status = status
+local_operator/mobile/account_routing.py:26: 
+local_operator/mobile/account_routing.py:27: 
+local_operator/mobile/account_routing.py:28: def policy_payload(root: Path, patch: Any = None, *, write: bool = False) -> dict[str, Any]:
+local_operator/mobile/account_routing.py:29:     """Read or patch the one non-security setting through the existing facade."""
+local_operator/mobile/account_routing.py:30:     setting = settings_io.resolve_key(POLICY_KEY)
+local_operator/mobile/account_routing.py:31:     if setting is None:
+local_operator/mobile/account_routing.py:32:         raise AccountRoutingError(
+local_operator/mobile/account_routing.py:33:             "account_routing_unavailable", _ap.error_unavailable().envelope()["text"], 404
+local_operator/mobile/account_routing.py:34:         )
+local_operator/mobile/account_routing.py:35:     try:
+local_operator/mobile/account_routing.py:36:         settings_io.require_readable_config_path(root / CONFIG_FILE_NAME)
+local_operator/mobile/account_routing.py:37:         manager = ConfigManager(root)
+local_operator/mobile/account_routing.py:38:         settings_io._require_readable_config(manager)
+local_operator/mobile/account_routing.py:39:         if write:
+local_operator/mobile/account_routing.py:40:             if not isinstance(patch, dict) or set(patch) != {"value"}:
+local_operator/mobile/account_routing.py:41:                 raise AccountRoutingError(
+local_operator/mobile/account_routing.py:42:                     "invalid_setting", _ap.error_invalid_shape().envelope()["text"], 422
+local_operator/mobile/account_routing.py:43:                 )
+local_operator/mobile/account_routing.py:44:             # Interactive authenticated user action: retain the same attribution
+local_operator/mobile/account_routing.py:45:             # as TUI/desktop HTTP, not the agent-only settings_control seam.
+local_operator/mobile/account_routing.py:46:             settings_io.write_setting(manager, setting, patch["value"])
+local_operator/mobile/account_routing.py:47:         value = settings_io.read_setting(manager, setting)
+local_operator/mobile/account_routing.py:48:     except settings_io.ConfigUnreadableError as exc:
+local_operator/mobile/account_routing.py:49:         raise AccountRoutingError("config_unreadable", str(exc), 409) from exc
+local_operator/mobile/account_routing.py:50:     except ValueError as exc:
+local_operator/mobile/account_routing.py:51:         raise AccountRoutingError("invalid_setting", str(exc), 422) from exc
+local_operator/mobile/account_routing.py:52:     except OSError as exc:
+local_operator/mobile/account_routing.py:53:         raise AccountRoutingError(
+local_operator/mobile/account_routing.py:54:             "setting_write_failed", _ap.error_write_failed().envelope()["text"], 503
+local_operator/mobile/account_routing.py:55:         ) from exc
+local_operator/mobile/account_routing.py:56:     return {
+local_operator/mobile/account_routing.py:57:         "capability": CAPABILITY,
+local_operator/mobile/account_routing.py:58:         "setting": {
+local_operator/mobile/account_routing.py:59:             "key": setting.key,
+local_operator/mobile/account_routing.py:60:             "label": setting.label,
+local_operator/mobile/account_routing.py:61:             "help": setting.help,
+local_operator/mobile/account_routing.py:62:             "kind": setting.kind.value,
+local_operator/mobile/account_routing.py:63:             "value": value,
+local_operator/mobile/account_routing.py:64:             "default": setting.default,
+local_operator/mobile/account_routing.py:65:             "is_default": settings_io.is_default(manager, setting),
+local_operator/mobile/account_routing.py:66:             "choices": [
+local_operator/mobile/account_routing.py:67:                 {"value": choice.value, "label": choice.label, "description": choice.description}
+local_operator/mobile/account_routing.py:68:                 for choice in setting.resolved_choices
+local_operator/mobile/account_routing.py:69:             ],
+local_operator/mobile/account_routing.py:70:         },
+local_operator/mobile/account_routing.py:71:     }

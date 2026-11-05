@@ -1,0 +1,32 @@
+[
+  {
+    "key": "wire.settings.account_policy.label",
+    "text": "politique de choix du compte",
+    "cells": 28,
+    "maxCells": 29
+  },
+  {
+    "key": "wire.settings.account_policy.reset_soonest.label",
+    "text": "Prochaine réinitialisation",
+    "cells": 26,
+    "maxCells": 29
+  },
+  {
+    "key": "wire.settings.account_policy.headroom.label",
+    "text": "Quota disponible maximal",
+    "cells": 24,
+    "maxCells": 29
+  },
+  {
+    "key": "wire.settings.account_policy.fair.label",
+    "text": "Répartition équitable",
+    "cells": 21,
+    "maxCells": 29
+  },
+  {
+    "key": "wire.settings.account_policy.legacy.label",
+    "text": "ancien choix selon l’usage",
+    "cells": 26,
+    "maxCells": 29
+  }
+]

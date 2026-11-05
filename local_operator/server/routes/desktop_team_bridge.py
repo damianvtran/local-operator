@@ -2232,16 +2232,36 @@ async def remove_conversation_member(
     request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """Remove a human member (owner only; the server owns succession)."""
+    """Remove one human or one account/endpoint pair; authority stays on the hub.
+
+    Endpoint selection must never degrade to human removal. Unlike the legacy
+    human wire, this new mutation requires the captured owner and explicit
+    tenant, so a stale roster action cannot run under a changed login.
+    """
     _require_conversation_id(conversation_id)
     _require_account_id(account_id)
-    _refuse_write_scope(request)
+    accepted = frozenset({"expected_account_id", "tenant_id", "endpoint_id"})
+    if set(request.query_params) - accepted:
+        _raise_read("invalid_request")
+    for key in request.query_params:
+        values = request.query_params.getlist(key)
+        if len(values) != 1 or not values[0].strip():
+            _raise_read("invalid_request")
+    endpoint_id = request.query_params.get("endpoint_id")
+    selector: dict[str, Any] = {}
+    if endpoint_id is not None:
+        if _ENDPOINT_ID.fullmatch(endpoint_id) is None:
+            _raise_read("invalid_request")
+        owner = _required_owner_query(request, accepted)
+        selector["endpoint_id"] = endpoint_id
+    else:
+        owner = _conversation_owner_query(request)
 
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(
             client.conversation_remove_member(
-                conversation_id, account_id, **_conversation_owner_query(request).model_dump()
+                conversation_id, account_id, **owner.model_dump(), **selector
             )
         )
     )

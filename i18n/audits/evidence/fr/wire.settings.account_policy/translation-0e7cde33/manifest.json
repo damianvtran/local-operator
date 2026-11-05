@@ -1,0 +1,71 @@
+{
+  "kind": "scratch_translation_packet_manifest_not_audit_receipt",
+  "root": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "789a6cf627f1d6fee4777a60bd6974a3feaa38439e52b6afaba00aaac6ae278f",
+      "bytes": 2747
+    },
+    {
+      "path": "caller-proof.json",
+      "sha256": "f424fd9f4ed9ff693efc6c384190acbccff7a16a9d2a63a96c7e71e43b65dbf5",
+      "bytes": 7259
+    },
+    {
+      "path": "inputs/en.context.json",
+      "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254",
+      "bytes": 4829
+    },
+    {
+      "path": "inputs/en.json",
+      "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "bytes": 1968
+    },
+    {
+      "path": "inputs/fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "bytes": 4196
+    },
+    {
+      "path": "inputs/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "bytes": 13399
+    },
+    {
+      "path": "provenance.json",
+      "sha256": "8854caeeacc1662d48276ebef0dd5610e1cc89cf0298d5f58022066d9607578f",
+      "bytes": 1950
+    },
+    {
+      "path": "record.json",
+      "sha256": "1f5d0497cc65ed8efc9555fd7de9454e761b925a1dddd22af6907db0d816a853",
+      "bytes": 7972
+    },
+    {
+      "path": "validate.mjs",
+      "sha256": "65f812fe4916adc6d3120d4bbe9b348f0b95b4c06dc758f64ef2f7a87c8714b2",
+      "bytes": 2921
+    },
+    {
+      "path": "validation.log",
+      "sha256": "f51eaa7694855b6952c486708bd77d6062947abbc8c9676be03776f2e8b7333f",
+      "bytes": 570
+    },
+    {
+      "path": "widths.json",
+      "sha256": "3c2fa66e58130a194b34eb1cc51637575aaed061cc3889771dca96b49a1b7011",
+      "bytes": 718
+    },
+    {
+      "path": "widths.log",
+      "sha256": "dca33a0bc9179cfd939431adf42e308a0717ad2a10e546862524345fa48bb611",
+      "bytes": 549
+    },
+    {
+      "path": "wire.settings.account_policy.json",
+      "sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744",
+      "bytes": 2584
+    }
+  ]
+}

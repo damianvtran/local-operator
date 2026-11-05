@@ -1,0 +1,55 @@
+{"gate": "generator", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "scripts/i18n/generate.py", "--check"], "outer_pid": 73386, "outer_pgid": 73386, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+generate.py --check: 123 artifact(s) byte-identical
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=92840ef0b39a4a0382fcce8c9d9272a4 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/92840ef0b39a4a0382fcce8c9d9272a4.completion.json
+
+{"gate": "catalogues", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "scripts/i18n/check.py", "--catalogues-only"], "outer_pid": 73627, "outer_pgid": 73627, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+check.py: catalogue checks: 0 problem(s)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=85f9c803868b4ebb910ade4b968133d6 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/85f9c803868b4ebb910ade4b968133d6.completion.json
+
+{"gate": "affected-pytest", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "-m", "pytest", "tests/unit/i18n/test_language_manifest.py", "tests/unit/i18n/test_ledger_shards.py", "tests/unit/i18n/test_generate.py", "tests/unit/i18n/test_eligibility.py", "-q", "-n0"], "outer_pid": 73768, "outer_pgid": 73768, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+........................................................................ [ 77%]
+.....................                                                    [100%]
+93 passed in 17.49s
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=85c474c17f7b42ad8b439b092095b2db completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/85c474c17f7b42ad8b439b092095b2db.completion.json
+
+{"gate": "registry-proof", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/account-policy-proof.py"], "outer_pid": 75100, "outer_pgid": 75100, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+{
+  "source": "/Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/__init__.py",
+  "results": [
+    {
+      "locale": "fr",
+      "keys": 14,
+      "source_locale": "fr",
+      "label": "politique de choix du compte",
+      "target_sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744",
+      "choice_ids": [
+        "reset-soonest",
+        "headroom",
+        "fair"
+      ],
+      "unknown_fallback": "account selection policy"
+    },
+    {
+      "locale": "zh-CN",
+      "keys": 14,
+      "source_locale": "zh-CN",
+      "label": "账户选择策略",
+      "target_sha256": "d9157b646961a96dc5fb2c234ff9ccbaa2faac5d162d134d0dbff6cbbef5f5f1",
+      "choice_ids": [
+        "reset-soonest",
+        "headroom",
+        "fair"
+      ],
+      "unknown_fallback": "account selection policy"
+    }
+  ],
+  "locale_restored": true,
+  "scope": "Production registry refresh and explicit-locale generated envelopes only; no HTTP/native/pseudo/RTL execution"
+}
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=0b40b30bd9414d0d9c9ccfecaec5653f completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/0b40b30bd9414d0d9c9ccfecaec5653f.completion.json
+
