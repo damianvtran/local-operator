@@ -447,6 +447,8 @@ def test_the_sweep_logs_every_post_merge_cancellation(monkeypatch, capsys):
     reads = []
 
     def fake_gh(path: str, *, method: str = "GET"):
+        if "/jobs?" in path:
+            return {"total_count": 0, "jobs": []}
         return {"status": "queued"} if method == "GET" else None
 
     def fake_tags(repo: str):
@@ -507,6 +509,8 @@ def _cancel_stub(status: int):
     def fake(path: str, *, method: str = "GET"):
         if method == "POST":
             raise reaper.ApiError(detail, status)
+        if "/jobs?" in path:
+            return {"total_count": 0, "jobs": []}
         return {"status": "queued"}
 
     return fake
@@ -689,6 +693,8 @@ def test_a_409_for_a_COMPLETED_run_is_not_labelled_a_ghost(monkeypatch, capsys):
     def fake(path, *, method="GET"):
         if method == "POST":
             raise reaper.ApiError("Cannot cancel a workflow run that is completed.", 409)
+        if "/jobs?" in path:
+            return {"total_count": 0, "jobs": []}
         return {"status": "queued"}
 
     monkeypatch.setattr(reaper, "gh_api", fake)
@@ -746,6 +752,8 @@ def test_the_sweep_cancels_ci_but_not_a_release_gate_on_the_same_commit(monkeypa
         if method == "POST":
             cancelled.append(path)
             return None
+        if "/jobs?" in path:
+            return {"total_count": 0, "jobs": []}
         return {"status": "queued"}
 
     monkeypatch.setattr(reaper, "queued_runs", lambda repo: [ci, gate])
@@ -770,6 +778,103 @@ def test_a_sweep_with_only_a_release_gate_on_main_never_reads_the_tag_list(monke
     assert reaper.main() == 0
     capsys.readouterr()
     assert reads == []
+
+
+def _sweep_with_jobs(monkeypatch, pages):
+    """Drive the real cancellation path; the API boundary cannot write to GitHub."""
+    calls = []
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: [_run()])
+    monkeypatch.setattr(reaper, "branch_tip", lambda repo, branch: "b" * 40)
+    monkeypatch.setattr(reaper.sys, "argv", ["reaper", "--repo", "synthetic/account"])
+
+    def fake(path, *, method="GET"):
+        calls.append((method, path))
+        if "/jobs?" in path:
+            page = int(path.rsplit("page=", 1)[1])
+            response = pages[page - 1]
+            if isinstance(response, Exception):
+                raise response
+            if isinstance(response, dict) and isinstance(response.get("jobs"), list):
+                response = dict(response)
+                response["jobs"] = [
+                    (
+                        dict(job, id=job.get("id", page * 1000 + index))
+                        if isinstance(job, dict)
+                        else job
+                    )
+                    for index, job in enumerate(response["jobs"])
+                ]
+            return response
+        if "/jobs?" in path:
+            return {"total_count": 0, "jobs": []}
+        return {"status": "queued"} if method == "GET" else None
+
+    monkeypatch.setattr(reaper, "gh_api", fake)
+    assert reaper.main() == 0
+    return calls
+
+
+def test_queued_run_with_captured_running_job_is_kept(monkeypatch, capsys):
+    # Nov 5 run 42067886772 was queued while this lint job was executing.
+    # A queued workflow is not evidence that its individual jobs never started.
+    job = {
+        "id": 127389254510,
+        "name": "lint",
+        "status": "in_progress",
+        "runner_id": 1000360258,
+        "started_at": "2026-11-05T16:57:37Z",
+    }
+    calls = _sweep_with_jobs(monkeypatch, [{"total_count": 1, "jobs": [job]}])
+    assert not any(method == "POST" for method, _ in calls)
+    assert "KEEP" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        {"status": "queued", "runner_id": 42},
+        {"status": "completed", "conclusion": "success", "runner_id": 42},
+        {"status": "queued", "steps": [{"status": "in_progress"}]},
+        {"status": "completed", "conclusion": "success"},
+    ],
+)
+def test_any_job_execution_evidence_protects_the_run(monkeypatch, job):
+    calls = _sweep_with_jobs(monkeypatch, [{"total_count": 1, "jobs": [job]}])
+    assert not any(method == "POST" for method, _ in calls)
+
+
+def test_placeholder_started_at_is_not_execution(monkeypatch):
+    job = {"status": "queued", "runner_id": 0, "started_at": _old(1), "steps": []}
+    calls = _sweep_with_jobs(monkeypatch, [{"total_count": 1, "jobs": [job]}])
+    assert any(method == "POST" for method, _ in calls)
+    assert any("filter=latest" in path for _, path in calls)
+
+
+def test_later_page_execution_protects_the_run(monkeypatch):
+    pending = {"status": "queued", "runner_id": 0, "steps": []}
+    pages = [
+        {"total_count": 101, "jobs": [pending] * 100},
+        {"total_count": 101, "jobs": [{"status": "in_progress", "runner_id": 42}]},
+    ]
+    calls = _sweep_with_jobs(monkeypatch, pages)
+    assert any(path.endswith("page=2") for _, path in calls)
+    assert not any(method == "POST" for method, _ in calls)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        {},
+        {"total_count": 2, "jobs": []},
+        {"total_count": 1, "jobs": [None]},
+        {"total_count": 1, "jobs": [{"status": "unknown"}]},
+        reaper.ApiError("HTTP 502", 502),
+    ],
+)
+def test_unreadable_or_incomplete_jobs_keep_the_run(monkeypatch, response):
+    calls = _sweep_with_jobs(monkeypatch, [response])
+    assert not any(method == "POST" for method, _ in calls)
 
 
 def test_a_tag_listing_at_the_page_cap_raises_instead_of_returning_a_partial_set(monkeypatch):
