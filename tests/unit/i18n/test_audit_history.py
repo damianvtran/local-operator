@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -606,3 +607,249 @@ def test_missing_marker_and_stale_baseline_refuse_before_generator_writes(tmp_pa
         assert generate.main(args) == 2
     assert not called
     assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+
+
+@pytest.mark.parametrize(
+    "first_action,second_action",
+    [("append", "append"), ("append", "import-legacy"), ("import-legacy", "append")],
+)
+def test_process_mutations_never_acknowledge_lost_receipts(tmp_path, first_action, second_action):
+    """Hold only A before replacement; B must refuse, never wait at a two-party barrier."""
+    from scripts.i18n import ledger
+
+    rows = legacy(tmp_path)
+    ledger.migrate(tmp_path, apply=True)
+    expected = ledger.history_sha256(rows)
+    worker = tmp_path / "worker.py"
+    worker.write_text("""
+import sys,time
+from pathlib import Path
+from scripts.i18n import ledger
+root=Path(sys.argv[1]); label=sys.argv[2]; action=sys.argv[3]
+if label == 'a':
+    original=ledger._write_suffix
+    def held_replace(*args):
+        (root/'ready').write_text('ready')
+        deadline=time.monotonic()+15
+        while not (root/'release').exists():
+            if time.monotonic()>deadline: raise RuntimeError('parent failed to release A')
+            time.sleep(.01)
+        return original(*args)
+    ledger._write_suffix=held_replace
+args=['--root',str(root),action]
+if action=='append':
+    args += ['--receipt',str(root/(label+'-receipt.json'))]
+    args += ['--expected-history-sha',sys.argv[4]]
+else: args += ['--source',str(root/(label+'-source.json')),'--format','aggregate']
+sys.exit(ledger.main(args+['--apply']))
+""")
+    for label in ("a", "b"):
+        row = receipt(note=f"writer-{label}")
+        write_json(tmp_path / f"{label}-receipt.json", row)
+        write_json(tmp_path / f"{label}-source.json", {"schema": 1, "entries": rows + [row]})
+    environment = {**isolated_env(tmp_path), "PYTHONPATH": str(SCRIPT.parents[2])}
+    processes = []
+    try:
+        first = subprocess.Popen(
+            [sys.executable, str(worker), str(tmp_path), "a", first_action, expected],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        processes.append(first)
+        deadline = time.monotonic() + 15
+        while not (tmp_path / "ready").exists():
+            assert first.poll() is None, first.communicate()
+            assert time.monotonic() < deadline, "A never reached replacement boundary"
+            time.sleep(0.01)
+        second = subprocess.Popen(
+            [sys.executable, str(worker), str(tmp_path), "b", second_action, expected],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        processes.append(second)
+        second_output = second.communicate(timeout=15)
+    finally:
+        (tmp_path / "release").write_text("release")
+        for process in processes:
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+    first_output = first.communicate()
+    notes = [row["note"] for row in ledger.load_entries(tmp_path)]
+    print(
+        "PROCESS MUTATIONS",
+        first_action,
+        second_action,
+        "exits",
+        first.returncode,
+        second.returncode,
+        "notes",
+        notes,
+        "second",
+        second_output,
+    )
+    assert first.returncode == 0, first_output
+    assert second.returncode == 2 and (
+        "busy" in second_output[1] or "stale" in second_output[1]
+    ), second_output
+    assert notes == ["first", "writer-a"]
+    # Once A's transaction is finished, the old expected digest is rechecked,
+    # not accepted from a read that preceded ownership of the exclusion.
+    if second_action == "append":
+        result = cli(
+            tmp_path,
+            "append",
+            "--receipt",
+            str(tmp_path / "b-receipt.json"),
+            "--expected-history-sha",
+            expected,
+            "--apply",
+        )
+        assert result.returncode == 2 and "stale" in result.stderr
+
+
+@pytest.mark.parametrize("original,replacement", [(True, 1), (1, 1.0)])
+def test_json_typed_prefix_import_refuses_without_writes(tmp_path, original, replacement):
+    from scripts.i18n import ledger
+
+    rows = legacy(tmp_path)
+    ledger.migrate(tmp_path, apply=True)
+    earlier = receipt(note="suffix")
+    earlier["second_audit"] = {"passed": original}
+    ledger.append(tmp_path, earlier, expected_history_sha=ledger.history_sha256(rows), apply=True)
+    changed = {**earlier, "second_audit": {"passed": replacement}}
+    source = tmp_path / "detached.json"
+    write_json(source, {"schema": 1, "entries": [*rows, changed, receipt(note="new")]})
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    result = cli(
+        tmp_path, "import-legacy", "--source", str(source), "--format", "aggregate", "--apply"
+    )
+    print("TYPED IMPORT", repr(original), repr(replacement), result.returncode, result.stderr)
+    assert result.returncode == 2 and "non-prefix" in result.stderr
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+    # Exact canonical prefixes still append, and an older exact source no-ops.
+    write_json(source, {"schema": 1, "entries": [*rows, earlier, receipt(note="new")]})
+    exact = cli(
+        tmp_path, "import-legacy", "--source", str(source), "--format", "aggregate", "--apply"
+    )
+    assert exact.returncode == 0 and len(json.loads(exact.stdout)["paths"]) == 1
+    write_json(source, {"schema": 1, "entries": rows})
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    older = cli(
+        tmp_path, "import-legacy", "--source", str(source), "--format", "aggregate", "--apply"
+    )
+    assert older.returncode == 0 and json.loads(older.stdout) == {"paths": []}
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+
+
+@pytest.mark.parametrize("original,replacement", [(True, 1), (1, 1.0)])
+def test_json_typed_committed_history_rewrite_refuses(tmp_path, original, replacement):
+    from scripts.i18n import ledger
+
+    git_fixture(tmp_path)
+    earlier = receipt(note="suffix")
+    earlier["extension"] = {"value": original}
+    ledger.append(
+        tmp_path, earlier, expected_history_sha=ledger.history_sha256([receipt()]), apply=True
+    )
+    base = commit(tmp_path, "typed history")
+    path = tmp_path / "i18n/audit-history/fr/wire.test.json"
+    payload = json.loads(path.read_text())
+    payload["entries"][0]["extension"]["value"] = replacement
+    payload["history_sha256"] = ledger.history_sha256([receipt(), *payload["entries"]])
+    write_json(path, payload)
+    result = cli(tmp_path, "validate", "--base", base)
+    print("TYPED BASE", repr(original), repr(replacement), result.returncode, result.stderr)
+    assert result.returncode == 2 and "append-only" in result.stderr
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_json_typed_legacy_authority_mismatch_refuses(tmp_path, strict):
+    from scripts.i18n import ledger
+
+    baseline = receipt()
+    baseline["extension"] = {"value": True}
+    legacy(tmp_path, [baseline])
+    changed = {**baseline, "extension": {"value": 1}}
+    write_json(tmp_path / "i18n/ledger.json", {"schema": 1, "entries": [changed]})
+    with pytest.raises(ValueError, match="stranded"):
+        if strict:
+            ledger.migrate(tmp_path, apply=True)
+        else:
+            ledger.load_entries(tmp_path)
+    assert not (tmp_path / "i18n/audit-history.json").exists()
+
+
+@pytest.mark.parametrize("alias", ["symlink", "hardlink", "directory"])
+def test_mutation_lock_refuses_unsafe_targets_before_storage_writes(tmp_path, alias):
+    from scripts.i18n import ledger
+
+    legacy(tmp_path)
+    target = tmp_path / "do-not-touch"
+    target.write_bytes(b"untouched")
+    lock = tmp_path / ".audit-history-write.lock"
+    if alias == "symlink":
+        lock.symlink_to(target)
+    elif alias == "hardlink":
+        os.link(target, lock)
+    else:
+        lock.mkdir()
+    with pytest.raises((ValueError, OSError), match="lock"):
+        ledger.migrate(tmp_path, apply=True)
+    assert target.read_bytes() == b"untouched"
+    assert not (tmp_path / "i18n/audit-history.json").exists()
+
+
+def test_mutation_lock_inode_persists_outside_tracked_history(tmp_path, monkeypatch):
+    from scripts.i18n import ledger
+
+    git_fixture(tmp_path)
+    lock = tmp_path / ".git/audit-history-write.lock"
+    assert lock.is_file()
+    identity = (lock.stat().st_dev, lock.stat().st_ino)
+    # Ambient Git discovery must not send another caller of the SAME root to a
+    # different coordination inode (or fall back because Git is off its PATH).
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "unrelated-git-dir"))
+    ledger.append(
+        tmp_path,
+        receipt(note="append"),
+        expected_history_sha=ledger.history_sha256([receipt()]),
+        apply=True,
+    )
+    source = tmp_path / "detached.json"
+    write_json(
+        source,
+        {"schema": 1, "entries": [receipt(), receipt(note="append"), receipt(note="import")]},
+    )
+    ledger.import_legacy(tmp_path, source, "aggregate", apply=True)
+    ledger.migrate(tmp_path, apply=True)
+    assert (lock.stat().st_dev, lock.stat().st_ino) == identity
+    assert not git(tmp_path, "ls-files", "--", "*lock*").stdout.strip()
+    assert not (tmp_path / ".audit-history-write.lock").exists()
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_nonfinite_extension_json_refuses_before_receipt_writes(tmp_path, literal):
+    from scripts.i18n import ledger
+
+    legacy(tmp_path)
+    ledger.migrate(tmp_path, apply=True)
+    row = receipt(note="nonfinite")
+    row["extension"] = "VALUE"
+    source = tmp_path / "detached.json"
+    source.write_text(
+        json.dumps({"schema": 1, "entries": [receipt(), row]}).replace('"VALUE"', literal)
+    )
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    result = cli(
+        tmp_path, "import-legacy", "--source", str(source), "--format", "aggregate", "--apply"
+    )
+    assert result.returncode == 2
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+    assert not (tmp_path / "i18n/audit-history").exists()

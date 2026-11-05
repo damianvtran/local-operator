@@ -10,14 +10,18 @@ All APIs take an explicit checkout root, including isolated fixture roots.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +38,18 @@ Key = tuple[str, str]
 def _canonical(value: Any) -> str:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+
+
+def _same_history(left: list[Row], right: list[Row]) -> bool:
+    # Python equality collapses true/1/1.0. Audit identity must match the exact
+    # canonical JSON domain used by the integrity digest, including extensions.
+    return _canonical(left) == _canonical(right)
+
+
+def _same_groups(left: dict[Key, list[Row]], right: dict[Key, list[Row]]) -> bool:
+    return left.keys() == right.keys() and all(
+        _same_history(history, right[key]) for key, history in left.items()
     )
 
 
@@ -175,10 +191,10 @@ def _legacy(
         # receipts nor per-key reordering can be silently selected away.
         aggregate_groups, shard_groups = _group(aggregate_rows), _group(rows)
         agrees = (
-            aggregate_groups == shard_groups
+            _same_groups(aggregate_groups, shard_groups)
             if require_agreement
             else all(
-                shard_groups.get(key, [])[: len(history)] == history
+                _same_history(shard_groups.get(key, [])[: len(history)], history)
                 for key, history in aggregate_groups.items()
             )
         )
@@ -291,24 +307,118 @@ def _atomic(path: Path, payload: Any, root: Path) -> None:
             os.unlink(temporary)
 
 
+def _mutation_lock_path(root: Path) -> Path:
+    # Coordination is checkout-local, never an audit receipt/shared index edit.
+    # Git's per-worktree metadata keeps the durable lock out of tracked files;
+    # detached non-Git fixture/export roots use an untracked local sidecar.
+    # Read the checkout's explicit metadata pointer, not Git's ambient
+    # GIT_DIR/HOME/PATH discovery: those must never split one store's lock.
+    metadata = root / ".git"
+    _safe(metadata, root)
+    if metadata.is_dir():
+        return metadata / "audit-history-write.lock"
+    if metadata.is_file():
+        pointer = metadata.read_text(encoding="utf-8").strip()
+        if not pointer.startswith("gitdir: "):
+            raise ValueError("invalid checkout metadata for audit mutation lock")
+        directory = Path(pointer[len("gitdir: ") :])
+        if not directory.is_absolute():
+            directory = root / directory
+        if not directory.is_dir():
+            raise ValueError("missing checkout metadata for audit mutation lock")
+        return directory / "audit-history-write.lock"
+    return root / ".audit-history-write.lock"
+
+
+@contextmanager
+def _mutation(root: Path, *, apply: bool) -> Iterator[None]:
+    """Serialize fresh read/check/replace across ALL cooperating local writers.
+
+    Match config_writer's nonblocking flock/msvcrt primitive without importing
+    runtime configuration into this standalone checkout tool. Atomic rename is
+    not compare-and-swap. Keep the sidecar inode forever: unlink-on-release lets
+    contenders lock different inodes and both acknowledge a lost update.
+    """
+    if not apply:
+        yield
+        return
+    _safe(root / "i18n", root)
+    path = _mutation_lock_path(root)
+    _safe(path, path.parent)
+    flags = (
+        os.O_CREAT
+        | os.O_RDWR
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise ValueError(f"unsafe audit mutation lock {path}: {exc}") from exc
+    acquired = False
+    try:
+        opened = os.fstat(fd)
+        named = path.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise ValueError(f"unsafe audit mutation lock target: {path}")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                if opened.st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK):
+                raise ValueError("audit storage mutation is busy; retry shortly") from exc
+            raise
+        acquired = True
+        yield
+    finally:
+        try:
+            if acquired:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def migrate(root: Path, *, apply: bool = False) -> dict[str, Any]:
-    rows = load_entries(root)
-    if migrated(root):
-        return {"state": "already migrated", "receipts": len(rows), "keys": len(_group(rows))}
-    _, inventory = _legacy(root, require_agreement=True)
-    if AGGREGATE not in inventory:
-        raise ValueError("migration requires the legacy aggregate snapshot")
-    marker = {"schema": 1, "storage": "ordered-suffix-v1", "baseline": inventory}
-    report = {
-        "state": "apply" if apply else "dry-run",
-        "receipts": len(rows),
-        "keys": len(_group(rows)),
-        "marker": marker,
-    }
-    if apply:
-        # The only migration write is the marker, atomically published LAST.
-        _atomic(root / MARKER, marker, root)
-    return report
+    with _mutation(root, apply=apply):
+        rows = load_entries(root)
+        if migrated(root):
+            return {"state": "already migrated", "receipts": len(rows), "keys": len(_group(rows))}
+        _, inventory = _legacy(root, require_agreement=True)
+        if AGGREGATE not in inventory:
+            raise ValueError("migration requires the legacy aggregate snapshot")
+        marker = {"schema": 1, "storage": "ordered-suffix-v1", "baseline": inventory}
+        report = {
+            "state": "apply" if apply else "dry-run",
+            "receipts": len(rows),
+            "keys": len(_group(rows)),
+            "marker": marker,
+        }
+        if apply:
+            # The only migration write is the marker, atomically published LAST.
+            _atomic(root / MARKER, marker, root)
+        return report
 
 
 def _write_suffix(root: Path, key: Key, effective: list[Row], baseline: list[Row]) -> str:
@@ -328,84 +438,86 @@ def _write_suffix(root: Path, key: Key, effective: list[Row], baseline: list[Row
 
 
 def append(root: Path, row: Row, *, expected_history_sha: str, apply: bool = False) -> str:
-    current = _group(load_entries(root))
-    if not migrated(root):
-        raise ValueError("append requires migration marker; run migrate --apply")
-    _rows({"schema": 1, "entries": [row]})
-    key = (row["locale"], row["namespace"])
-    history = current.get(key, [])
-    if history_sha256(history) != expected_history_sha:
-        raise ValueError(f"stale expected history for {key[0]}/{key[1]}")
-    _unique(history + [row])
-    baseline = _group(_legacy(root)[0]).get(key, [])
-    if apply:
-        return _write_suffix(root, key, history + [row], baseline)
-    return f"{HISTORY}/{key[0]}/{key[1]}.json"
+    with _mutation(root, apply=apply):
+        current = _group(load_entries(root))
+        if not migrated(root):
+            raise ValueError("append requires migration marker; run migrate --apply")
+        _rows({"schema": 1, "entries": [row]})
+        key = (row["locale"], row["namespace"])
+        history = current.get(key, [])
+        if history_sha256(history) != expected_history_sha:
+            raise ValueError(f"stale expected history for {key[0]}/{key[1]}")
+        _unique(history + [row])
+        baseline = _group(_legacy(root)[0]).get(key, [])
+        if apply:
+            return _write_suffix(root, key, history + [row], baseline)
+        return f"{HISTORY}/{key[0]}/{key[1]}.json"
 
 
 def import_legacy(root: Path, source: Path, format: str, *, apply: bool = False) -> list[str]:
-    current = _group(load_entries(root))
-    if not migrated(root):
-        raise ValueError("import-legacy requires migration marker")
-    source = source.absolute()
-    # Never treat a changed destination snapshot as detached source authority.
-    protected = [root / AGGREGATE, root / MARKER, root / SHARDS, root / HISTORY]
-    if any(
-        source.resolve() == p.resolve() or p.resolve() in source.resolve().parents
-        for p in protected
-    ):
-        raise ValueError("import-legacy requires an explicit detached source")
-    source_root = (
-        source
-        if source.is_dir()
-        else (
-            source.parent.parent
-            if source.name == "ledger.json" and source.parent.name == "i18n"
-            else None
+    with _mutation(root, apply=apply):
+        current = _group(load_entries(root))
+        if not migrated(root):
+            raise ValueError("import-legacy requires migration marker")
+        source = source.absolute()
+        # Never treat a changed destination snapshot as detached source authority.
+        protected = [root / AGGREGATE, root / MARKER, root / SHARDS, root / HISTORY]
+        if any(
+            source.resolve() == p.resolve() or p.resolve() in source.resolve().parents
+            for p in protected
+        ):
+            raise ValueError("import-legacy requires an explicit detached source")
+        source_root = (
+            source
+            if source.is_dir()
+            else (
+                source.parent.parent
+                if source.name == "ledger.json" and source.parent.name == "i18n"
+                else None
+            )
         )
-    )
-    if source_root is not None:
-        if migrated(source_root) or _suffix_paths(source_root):
-            raise ValueError(
-                "import source has mixed/new authority; export current history explicitly"
-            )
-        if (source_root / AGGREGATE).exists() and _shard_paths(source_root):
-            _legacy(source_root, require_agreement=True)
-    if format == "aggregate":
-        source_file = source / AGGREGATE if source.is_dir() else source
-        incoming = _rows(_read(source_file, source_file.parent))
-    else:
-        incoming = []
-        for path in _shard_paths(source):
-            incoming.extend(_rows(_read(path, source), locale=path.stem))
-        if not incoming:
-            raise ValueError("source has no locale-shard receipts")
-        # Explicit format chooses authority, but disagreement still requires
-        # reconciliation: never turn that selection into a row-loss escape.
-        if (source / AGGREGATE).exists():
-            _legacy(source)
-    planned: list[tuple[Key, list[Row]]] = []
-    for key, history in sorted(_group(incoming).items()):
-        existing = current.get(key, [])
-        shared = min(len(existing), len(history))
-        if existing[:shared] != history[:shared]:
-            raise ValueError(
-                f"non-prefix competing history: {key[0]}/{key[1]} "
-                f"(current {history_sha256(existing)}, source {history_sha256(history)})"
-            )
-        if len(history) > len(existing):
-            planned.append((key, history))
-    baseline = _group(_legacy(root)[0])
-    result = []
-    for key, history in planned:
-        if apply:
-            result.append(_write_suffix(root, key, history, baseline.get(key, [])))
+        if source_root is not None:
+            if migrated(source_root) or _suffix_paths(source_root):
+                raise ValueError(
+                    "import source has mixed/new authority; export current history explicitly"
+                )
+            if (source_root / AGGREGATE).exists() and _shard_paths(source_root):
+                _legacy(source_root, require_agreement=True)
+        if format == "aggregate":
+            source_file = source / AGGREGATE if source.is_dir() else source
+            incoming = _rows(_read(source_file, source_file.parent))
         else:
-            result.append(
-                # i18n: ignore machine path; i18n tooling owns this while checkout-only
-                f"{HISTORY}/{key[0]}/{key[1]}.json",
-            )
-    return result
+            incoming = []
+            for path in _shard_paths(source):
+                incoming.extend(_rows(_read(path, source), locale=path.stem))
+            if not incoming:
+                raise ValueError("source has no locale-shard receipts")
+            # Explicit format chooses authority, but disagreement still requires
+            # reconciliation: never turn that selection into a row-loss escape.
+            if (source / AGGREGATE).exists():
+                _legacy(source)
+        planned: list[tuple[Key, list[Row]]] = []
+        for key, history in sorted(_group(incoming).items()):
+            existing = current.get(key, [])
+            shared = min(len(existing), len(history))
+            if not _same_history(existing[:shared], history[:shared]):
+                raise ValueError(
+                    f"non-prefix competing history: {key[0]}/{key[1]} "
+                    f"(current {history_sha256(existing)}, source {history_sha256(history)})"
+                )
+            if len(history) > len(existing):
+                planned.append((key, history))
+        baseline = _group(_legacy(root)[0])
+        result = []
+        for key, history in planned:
+            if apply:
+                result.append(_write_suffix(root, key, history, baseline.get(key, [])))
+            else:
+                result.append(
+                    # i18n: ignore machine path; i18n tooling owns this while checkout-only
+                    f"{HISTORY}/{key[0]}/{key[1]}.json",
+                )
+        return result
 
 
 def validate_base(root: Path, ref: str) -> None:
@@ -455,12 +567,12 @@ def validate_base(root: Path, ref: str) -> None:
         elif migrated(root):
             # A one-time migration may pin a newer actual base only after full
             # lossless reconstruction; it cannot bless edits hidden in snapshots.
-            if _group(_legacy(root)[0]) != old:
+            if not _same_groups(_group(_legacy(root)[0]), old):
                 raise ValueError("first migration baseline differs from actual audit base history")
             if _legacy(base)[1] != _legacy(root)[1]:
                 raise ValueError("first migration must preserve actual-base snapshot bytes")
         for key, history in old.items():
-            if new.get(key, [])[: len(history)] != history:
+            if not _same_history(new.get(key, [])[: len(history)], history):
                 raise ValueError(f"audit history is not append-only: {key[0]}/{key[1]}")
 
 
