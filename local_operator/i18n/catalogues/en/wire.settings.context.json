@@ -195,5 +195,60 @@
     "tone": "plain, precise",
     "maxCells": 58,
     "note": "The unit is seconds; 5-3600 is the accepted range and must stay as digits."
+  },
+  "wire.settings.guardrails.description": {
+    "note": "One line under the section heading. 'Dangerous' means destructive, e.g. deleting important files. No ICU arguments.",
+    "role": "Settings section description",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.guardrails.title": {
+    "maxCells": 29,
+    "note": "Section heading on the settings page. No ICU arguments.",
+    "role": "Settings section title",
+    "tone": "concise"
+  },
+  "wire.settings.guardrails_critical_override.help": {
+    "note": "Explains a safety override. Must keep both facts: OFF refuses critical deletions outright; ON sends them to an automatic safety check (never lets them through unchecked). 'From this machine's settings' = the settings page or CLI in the same process; a file edit (including by the agent) does not count. No ICU arguments.",
+    "role": "Settings row help for the guardrails section in the TUI and connected settings UI",
+    "tone": "concise, neutral, safety-relevant"
+  },
+  "wire.settings.guardrails_critical_override.label": {
+    "maxCells": 29,
+    "note": "Label fits the 29-cell label budget. No ICU arguments.",
+    "role": "Settings row label",
+    "tone": "concise"
+  },
+  "wire.settings.guardrails_enabled.help": {
+    "note": "User guardrail rules are markdown files the user writes; the built-in dangerous-delete check is not switchable. 'dangerous-delete' is a rule identifier and stays untranslated. No ICU arguments.",
+    "role": "Settings row help",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.guardrails_enabled.label": {
+    "maxCells": 29,
+    "note": "Label fits the 29-cell label budget. No ICU arguments.",
+    "role": "Settings row label",
+    "tone": "concise"
+  },
+  "wire.settings.guardrails_judge_timeout_s.help": {
+    "note": "The safety check is an automatic model review of a risky tool call. Fail-closed: no answer means blocked. No ICU arguments.",
+    "role": "Settings row help",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.guardrails_judge_timeout_s.label": {
+    "maxCells": 29,
+    "note": "Label fits the 29-cell label budget; '(s)' is seconds. No ICU arguments.",
+    "role": "Settings row label",
+    "tone": "concise"
+  },
+  "wire.settings.guardrails_rules_dir.help": {
+    "note": "'*.md' is a literal file pattern and stays untranslated. No ICU arguments.",
+    "role": "Settings row help",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.guardrails_rules_dir.label": {
+    "maxCells": 29,
+    "note": "Label fits the 29-cell label budget. No ICU arguments.",
+    "role": "Settings row label",
+    "tone": "concise"
   }
 }

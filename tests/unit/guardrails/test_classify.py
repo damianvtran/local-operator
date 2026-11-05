@@ -1018,3 +1018,13 @@ def test_r9_m4_lex_is_linear_in_open_frames() -> None:
 def test_r10_split_unquoted_substitution_keeps_shell_heredoc(home: Path, separator: str) -> None:
     command = f"x=$(echo hi{separator}bash <<EOF\n{_INCIDENT_BODY}\nEOF\n)"
     assert _classify(home, command).risk is Risk.CRITICAL
+
+
+def test_ci_cd_dash_tracks_known_previous_directory(home: Path) -> None:
+    command = "cd ~/workspace/a; cd ~/workspace/b; cd -; echo REAL > dash.md"
+    assert _classify(home, command).risk is Risk.LOW
+
+
+def test_ci_cd_dash_still_protects_previous_state_directory(home: Path) -> None:
+    command = "cd ~/.local-operator; cd /tmp; cd -; rm -rf ."
+    assert _classify(home, command).risk is Risk.CRITICAL

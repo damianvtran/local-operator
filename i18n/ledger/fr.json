@@ -3272,6 +3272,72 @@
         "findings": 1,
         "note": "0 blocker/0 major/1 minor fixed: critical_override.help dangling participle 'Activé, les suppressions…' → 'S’il est activé, les suppressions…' (same fix the first audit made in es). Nit kept: label omits article to fit 29 cells. Other two keys PASS. Corrected bytes sha256 6339b44f00d0. Same model family as translator and first auditor (claude-opus-5-5) — disclosed."
       }
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "9b75f7801d6de7b895d021dfc5261cc1c4951cf756269335a464fa4e2581ee36",
+      "translator": {
+        "agent": "coder (i18n-translator brief; local-operator subagent bfac07c3d927)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; local-operator subagent b0b53842a648/a97e38b65a18)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Mechanical extraction compatibility carry: existing wire.settings values unchanged; 10 wire.settings.guardrails* slots copied byte-identically from the independently audited wire.guardrails catalogue in this locale. No new translation or linguistic audit claimed. Parent translator/auditor provenance above is carried unchanged; the copied slots carry both guardrails audits below. See docs/guardrails-settings-extraction.md and the all-locale equality regression test. Previous settings source 4cb113ca6fc28e2cb2a6b24d3aa1a7ece1a6dca7292bcf19cb359998af44080d; guardrails source 2ab2689fe217cdee757173027e0ecb93c3ca75c9a9806047fe6a055b118ed664; previous target settings 23c79fb4cf4ea23d1db0630855ac5ab73fe363ac41a3409e6160eef2ed50dba8; guardrails target 6339b44f00d014ec35e65fe66a178e36ace452898954f7cd302f799f704881ea.",
+      "extraction_copy_audits": {
+        "guardrails": {
+          "locale": "fr",
+          "namespace": "wire.guardrails",
+          "source_sha256": "2ab2689fe217cdee757173027e0ecb93c3ca75c9a9806047fe6a055b118ed664",
+          "translator": {
+            "agent": "coder (lopdev, PR #3440 implementer)",
+            "session": "a13d3cd32111",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-04"
+          },
+          "auditor": {
+            "agent": "i18n-auditor (lopdev task subagent i18n-audit)",
+            "session": "03d9d36d99c8",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-04",
+            "result": "passed",
+            "findings": 0
+          },
+          "status": "passed",
+          "note": "Independent audit of the PR #3440 coder draft against en at 2ab2689fe217 (b10c4017bb3; rules_dir.help changed in that commit). Target bytes sha256 6339b44f00d0 (second-audit corrections applied). 10/10 keys, parity, no ICU arguments, '*.md' and 'dangerous-delete' byte-identical, label maxCells 29 met (rich cell_len), no manual bidi controls. 2 key(s) corrected by the auditor, all resolved in these bytes: judge_timeout_s.label: minor: unrecorded abbreviation 'vérif.'; aligns with shipped fr 'Délai d’exécution (ms)' label form; rules_dir.help: MAJOR(stale): draft rendered superseded English ('Empty uses the rules folder…'); setting is now additive. second independent audit complete (see second_audit); same model family as translator (claude-opus-5-5) — disclosed. Audit record: PR #3440 thread.",
+          "second_audit": {
+            "status": "passed",
+            "agent": "i18n-auditor (lopdev task subagent, second independent audit)",
+            "session": "c3a461e17031",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-04",
+            "scope": "critical_override.label, critical_override.help, rules_dir.help at en source 2ab2689fe217",
+            "findings": 1,
+            "note": "0 blocker/0 major/1 minor fixed: critical_override.help dangling participle 'Activé, les suppressions…' → 'S’il est activé, les suppressions…' (same fix the first audit made in es). Nit kept: label omits article to fit 29 cells. Other two keys PASS. Corrected bytes sha256 6339b44f00d0. Same model family as translator and first auditor (claude-opus-5-5) — disclosed."
+          }
+        },
+        "mapping": {
+          "wire.settings.guardrails.title": "wire.guardrails.section.title",
+          "wire.settings.guardrails.description": "wire.guardrails.section.description",
+          "wire.settings.guardrails_enabled.label": "wire.guardrails.enabled.label",
+          "wire.settings.guardrails_enabled.help": "wire.guardrails.enabled.help",
+          "wire.settings.guardrails_critical_override.label": "wire.guardrails.critical_override.label",
+          "wire.settings.guardrails_critical_override.help": "wire.guardrails.critical_override.help",
+          "wire.settings.guardrails_judge_timeout_s.label": "wire.guardrails.judge_timeout_s.label",
+          "wire.settings.guardrails_judge_timeout_s.help": "wire.guardrails.judge_timeout_s.help",
+          "wire.settings.guardrails_rules_dir.label": "wire.guardrails.rules_dir.label",
+          "wire.settings.guardrails_rules_dir.help": "wire.guardrails.rules_dir.help"
+        }
+      }
     }
   ]
 }

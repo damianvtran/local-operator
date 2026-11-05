@@ -1724,14 +1724,25 @@ class _Walker:
     def _cd(self, args: list[Expanded]) -> None:
         st = self.state
         operands = [w for w in args if not (w.text.startswith("-") and len(w.text) > 1)]
+        previous = st.cwd
         if not operands or (operands[0].vanished and not operands[0].opaque):
-            st.cwd = st.home
-            return
-        w = operands[0]
-        if w.opaque or w.pattern is not None or w.text == "-":
-            st.cwd = None
-            return
-        path, _unknown = _absolute(w.text, st.cwd)
+            path = st.home
+        else:
+            w = operands[0]
+            if w.opaque or w.pattern is not None:
+                path = None
+            elif w.text == "-":
+                # Bash updates OLDPWD after each cd, including cd -. Track it
+                # in the existing env snapshot so subshells/pipelines cannot
+                # leak it. An untracked/relative value still fails closed.
+                oldpwd = st.env.get("OLDPWD", "")
+                path = os.path.normpath(oldpwd) if oldpwd.startswith("/") else None
+            else:
+                path, _unknown = _absolute(w.text, st.cwd)
+        if previous is None:
+            st.env.pop("OLDPWD", None)
+        else:
+            st.env["OLDPWD"] = previous
         st.cwd = path
 
     def _for(self, words: list[Expanded]) -> None:

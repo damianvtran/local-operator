@@ -1085,6 +1085,16 @@ export type MessageParams = {
   "wire.settings.fork_mode.choice.window.label": undefined;
   "wire.settings.fork_mode.help": undefined;
   "wire.settings.fork_mode.label": undefined;
+  "wire.settings.guardrails.description": undefined;
+  "wire.settings.guardrails.title": undefined;
+  "wire.settings.guardrails_critical_override.help": undefined;
+  "wire.settings.guardrails_critical_override.label": undefined;
+  "wire.settings.guardrails_enabled.help": undefined;
+  "wire.settings.guardrails_enabled.label": undefined;
+  "wire.settings.guardrails_judge_timeout_s.help": undefined;
+  "wire.settings.guardrails_judge_timeout_s.label": undefined;
+  "wire.settings.guardrails_rules_dir.help": undefined;
+  "wire.settings.guardrails_rules_dir.label": undefined;
   "wire.settings.hooks.description": undefined;
   "wire.settings.hooks.title": undefined;
   "wire.settings.hooks_forward_claude.help": undefined;
