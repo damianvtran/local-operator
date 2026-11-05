@@ -3,10 +3,12 @@
 The map is safe to serve to any local client because it carries no credentials
 and no configuration values — with exactly one deliberate exception: the
 RESOLVED ``language`` tag (a shipped-locale string, not a raw config value;
-RFC §2.5). Everything else is a build fact.
+RFC §2.5). Authenticated desktop callers additionally receive the current
+owner's fresh, cached hub thread-read capability. This is observed support,
+not a build fact; public callers receive only the ordinary runtime map.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 
 from local_operator.i18n.resolve import locale_direction, resolve_language
 from local_operator.server.desktop import desktop_posture
@@ -17,7 +19,7 @@ router = APIRouter(tags=["Capabilities"])
 
 
 @router.get("/v1/capabilities", response_model=CRUDResponse)
-async def capabilities():
+async def capabilities(request: Request):
     # The map itself lives in `local_operator.server.features.feature_flags` --
     # off this route because the mobile daemon imports it too, and the deferred
     # `references` import (with the startup-cost reasoning the guard in
@@ -26,6 +28,33 @@ async def capabilities():
     # Resolve once: a live config edit between two reads must not pair one
     # locale's copy with another's direction. Held preferences remain en/ltr.
     language = resolve_language()
+    features = feature_flags()
+    if request.headers.get("authorization"):
+        # The public build negotiation stays public. Account-scoped hub facts
+        # are added only for an authorized desktop caller, using the existing
+        # status cache: polling capabilities must never enroll or publish.
+        from local_operator.server.desktop import require_desktop
+        from local_operator.team_bridge.client import (
+            BridgeRefusal,
+            BridgeSignInRequired,
+            get_status_discipline,
+        )
+
+        try:
+            require_desktop(request)
+        except HTTPException:
+            pass  # Public negotiation still works; no account facts are added.
+        else:
+            config_manager = getattr(request.app.state, "config_manager", None)
+            if config_manager is not None:
+                try:
+                    features.update(
+                        get_status_discipline(
+                            config_manager.config_dir
+                        ).cached_thread_read_features()
+                    )
+                except (BridgeRefusal, BridgeSignInRequired):
+                    pass  # Unknown/signed-out is absence, never invented support.
     return CRUDResponse(
         status=200,
         message="Backend capabilities retrieved.",
@@ -40,9 +69,9 @@ async def capabilities():
             # its routes had already opened — see `server/desktop.py`.
             "desktop_available": desktop_posture().enabled,
             "desktop_auth": "bearer",
-            # These version the HTTP subsystems, not renderer completion or
-            # third-party authorization. No aggregate "full parity" claim.
-            "features": feature_flags(),
+            # Runtime subsystem versions plus the guarded, observed hub flag
+            # above; no renderer-completion or aggregate "full parity" claim.
+            "features": features,
             # The language this backend RESOLVES to (RFC §2.5): config
             # `language` -> LOP_LANG -> OS -> en, normalised and filtered to
             # shipped locales. Resolved per call so a config edit reaches the
