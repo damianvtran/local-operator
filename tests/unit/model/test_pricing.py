@@ -11,7 +11,7 @@ own listing quotes none — so there are two separate guards here.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 import pytest
@@ -662,6 +662,147 @@ def test_unpriced_folded_receipts_keep_each_request_tier(counts: tuple[int, int]
     before = sum(cost_for_usage("openai", model, usage) for usage in usages)
     after = sum(cost_for_usage("openai", model, usage) for usage in _folded_components(usages))
     assert after == pytest.approx(before)
+
+
+@pytest.mark.parametrize("tier", ["default", "fast", "unknown"])
+def test_service_tier_survives_usage_roundtrip(tier: Literal["default", "fast", "unknown"]) -> None:
+    usage = Usage(openai_service_tier=tier)
+    assert usage.model_copy(deep=True).openai_service_tier == tier
+    assert Usage.model_validate(usage.model_dump()).openai_service_tier == tier
+    assert "openai_service_tier" not in Usage().model_dump()
+
+
+@pytest.mark.parametrize("tier", ["fast", "unknown"])
+def test_reported_usd_wins_over_service_tier(tier: Literal["fast", "unknown"]) -> None:
+    model = _priced(id="gpt-6-astra", input_price=10, output_price=50)
+    usage = Usage(
+        input_tokens=300_000,
+        output_tokens=10_000,
+        cache_write_tokens=100,
+        usd_cost=0.123,
+        openai_service_tier=tier,
+    )
+    assert cost_for_usage("openai", model, usage) == pytest.approx(0.123)
+    assert cost_for_usage("openrouter", model, usage) == pytest.approx(0.123)
+
+
+@pytest.mark.parametrize("provider", ["openai", "openai-device", "openai-api-key"])
+@pytest.mark.parametrize("long_context", [False, True])
+def test_fast_tier_pricing_respects_alias_and_long_context(
+    provider: str, long_context: bool
+) -> None:
+    model = _priced(id="gpt-6-astra", input_price=10, output_price=50, cache_reads_price=1)
+    usage = Usage(
+        input_tokens=300_000,
+        output_tokens=10_000,
+        cache_read_tokens=250_000,
+        openai_long_context=long_context,
+        openai_service_tier="fast",
+    )
+    assert cost_for_usage(provider, model, usage) == pytest.approx(4.5 if long_context else 2.5)
+
+
+def test_unknown_tier_zero_counts_remain_unpriced_on_rebuild() -> None:
+    from local_operator.session.spend import has_reported_tokens
+
+    assert has_reported_tokens(
+        {"openai_service_tier": "unknown", "input_tokens": 0, "output_tokens": 0}
+    )
+    assert not has_reported_tokens({"input_tokens": 0, "output_tokens": 0})
+
+
+@pytest.mark.parametrize(
+    ("model_id", "input_rate", "output_rate", "expected"),
+    [("gpt-5.5", 5.0, 30.0, 2.0), ("gpt-5.4", 2.5, 15.0, 0.8)],
+)
+def test_published_older_fast_rates_are_not_assumed_double(
+    model_id: str, input_rate: float, output_rate: float, expected: float
+) -> None:
+    model = _priced(id=model_id, input_price=input_rate, output_price=output_rate)
+    short = Usage(input_tokens=100_000, output_tokens=10_000, openai_service_tier="fast")
+    assert cost_for_usage("openai", model, short) == pytest.approx(expected)
+    # The Fast table gives no long-context tariff for these models; using the
+    # standard long-context uplift would invent a price.
+    long = short.model_copy(update={"input_tokens": 300_000, "openai_long_context": True})
+    with pytest.raises(ValueError):
+        cost_for_usage("openai", model, long)
+
+
+@pytest.mark.parametrize("tier", ["default", "fast"])
+def test_fast_cache_write_without_ttl_is_unpriceable(tier: Literal["default", "fast"]) -> None:
+    # Both Standard and Fast list different 30-minute and 12-hour write
+    # tariffs. A total without duration cannot safely select either one.
+    model = _priced(id="gpt-6-astra", input_price=10, output_price=50, cache_writes_price=12.5)
+    usage = Usage(
+        input_tokens=1000, output_tokens=1, cache_write_tokens=100, openai_service_tier=tier
+    )
+    with pytest.raises(ValueError):
+        cost_for_usage("openai", model, usage)
+
+
+def test_fast_subscription_remains_catalogue_equivalent() -> None:
+    from local_operator.session.spend import inference_billing_labels
+
+    assert inference_billing_labels("openai-device", None, credential_kind="oauth") == (
+        "subscription_api_equivalent",
+        "catalogue",
+    )
+
+
+@pytest.mark.parametrize(
+    ("tier", "expected"),
+    [("unknown", (0, False)), ("default", (1_500_000, True)), ("fast", (3_000_000, True))],
+)
+def test_unknown_fast_tier_is_not_reported_as_known(
+    tier: Literal["unknown", "default", "fast"],
+    expected: tuple[int, bool],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.analytics.model import CallSnapshot, price_snapshot
+    from local_operator.model import configure
+    from local_operator.session.spend import price_call
+
+    model = _priced(id="gpt-6-astra", input_price=10, output_price=50)
+    monkeypatch.setattr(configure, "resolve_model_info", lambda *_: model)
+    usage = Usage(input_tokens=100_000, output_tokens=10_000, openai_service_tier=tier)
+    snap = CallSnapshot(
+        ts_ms=1,
+        session_id="synthetic",
+        provider="openai",
+        model_id="gpt-6-astra",
+        input_tokens=100_000,
+        output_tokens=10_000,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        reasoning_tokens=0,
+        context_tokens=100_000,
+        openai_service_tier=tier,
+    )
+    assert price_call("openai", "gpt-6-astra", usage) == expected
+    assert price_snapshot(snap) == expected
+
+
+def test_service_tier_survives_both_accounting_folds() -> None:
+    from local_operator.harness.jobs import _merge_accounting_component
+    from local_operator.session.frontend_state import _folded_components
+
+    model = _priced(id="gpt-6-astra", input_price=10, output_price=50)
+    calls = [
+        Usage(
+            provider="openai",
+            model_id="gpt-6-astra",
+            input_tokens=100_000,
+            output_tokens=10_000,
+            openai_service_tier=tier,
+        )
+        for tier in ("default", "fast")
+    ]
+    grouped = {}
+    for call in calls:
+        _merge_accounting_component(grouped, call)
+    for folded in (_folded_components(calls), list(grouped.values())):
+        assert len(folded) == 2
+        assert sum(cost_for_usage("openai", model, call) for call in folded) == pytest.approx(4.5)
 
 
 def test_crowded_diagnostic_tail_yields_without_changing_accounting(monkeypatch) -> None:

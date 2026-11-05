@@ -240,6 +240,19 @@ def bind_native_context(
                 for key in ("reasoning_content", "reasoning")
                 if isinstance((value := item.get(key)), str) and value
             )
+        if protocol == "anthropic-messages" and native is not None:
+            # Anthropic reads replayed thinking as input. It is absent from the
+            # visible estimate, including on cold/restored or edited histories.
+            # Count literal thinking; redacted data is opaque, so encoded size
+            # is a conservative local estimate, never an output-token counter.
+            reasoning += sum(
+                max(1, len(value) // 4)
+                for item in native
+                for key in ("thinking", "data")
+                if item.get("type") in ("thinking", "redacted_thinking")
+                and isinstance((value := item.get(key)), str)
+                and value
+            )
         if (
             protocol == "openai-responses"
             and native is not None
@@ -263,7 +276,14 @@ def bind_native_context(
                 protocol,
                 endpoint,
                 scope,
-                request.messages[last_user].id if last_user >= 0 else None,
+                # Responses discards earlier-turn thinking; Anthropic keeps
+                # its signed history across user turns, so a new user must NOT
+                # reset calibration (or its provider-measured cache-TTL hint).
+                (
+                    request.messages[last_user].id
+                    if last_user >= 0 and protocol != "anthropic-messages"
+                    else None
+                ),
             ),
             messages=tuple((key, valid) for key, valid in zip(base.messages, validity)),
             tokens=base.tokens + reasoning,

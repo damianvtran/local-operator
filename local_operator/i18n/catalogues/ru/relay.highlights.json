@@ -1,0 +1,7 @@
+{
+  "relay.highlights.withheld.line": "{count, plural, one {# файл не показан} few {# файла не показаны} many {# файлов не показано} other {# файла не показано}}: {reasons}",
+  "relay.highlights.withheld.reason.outside": "вне разрешённых папок",
+  "relay.highlights.withheld.reason.sensitive": "конфиденциальный файл",
+  "relay.highlights.withheld.reason.missing": "файл больше не существует",
+  "relay.highlights.withheld.reason.too_large": "слишком большой для предпросмотра"
+}

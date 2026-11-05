@@ -239,6 +239,16 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.chrome.spend.title": "Gasto y contexto",
     },
   },
+  "relay.composer": {
+    "es": {
+      "relay.composer.action.connecting": "Conectando",
+      "relay.composer.action.send": "enviar",
+      "relay.composer.action.steer": "guiar",
+      "relay.composer.action.stop": "detener",
+      "relay.composer.action.stop_agent": "detener al agente",
+      "relay.composer.action.stopping": "deteniendo",
+    },
+  },
   "relay.health": {
     "es": {
       "relay.health.dropped_detail": "Tu m\u00e1quina no logra comunicarse con esta sesi\u00f3n ahora mismo y sigue intent\u00e1ndolo. Hasta que lo consiga, cualquier env\u00edo falla de inmediato y lo que escribiste se queda en el campo de texto.",
@@ -249,6 +259,15 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.health.quiet_detail": "Esta sesi\u00f3n dej\u00f3 de responder en tu m\u00e1quina \u2014 puede que est\u00e9 ocupada o atascada. Un mensaje puede aparecer como fallido y aun as\u00ed llegar cuando la sesi\u00f3n se ponga al d\u00eda. Reintentar no lo enviar\u00e1 dos veces.",
       "relay.health.reconnecting": "Reconectando",
       "relay.health.reconnecting_detail": "Este tel\u00e9fono perdi\u00f3 la conexi\u00f3n con tu m\u00e1quina y sigue intentando reconectarse. Puede que la sesi\u00f3n siga ejecut\u00e1ndose all\u00ed; un env\u00edo puede fallar hasta que vuelva la conexi\u00f3n.",
+    },
+  },
+  "relay.highlights": {
+    "es": {
+      "relay.highlights.withheld.line": "{count, plural, one {# archivo no mostrado} many {# de archivos no mostrados} other {# archivos no mostrados}}: {reasons}",
+      "relay.highlights.withheld.reason.missing": "el archivo ya no existe",
+      "relay.highlights.withheld.reason.outside": "fuera de las ubicaciones permitidas",
+      "relay.highlights.withheld.reason.sensitive": "archivo confidencial",
+      "relay.highlights.withheld.reason.too_large": "demasiado grande para la vista previa",
     },
   },
   "relay.library": {

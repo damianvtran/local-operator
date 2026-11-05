@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "audit_id": "rg6a1",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "es",
+  "namespace": "wire.tool_rows.bridge.skipped",
+  "audit_date": "2026-11-04",
+  "source_audit_revision": "287c53e0a267f85119c26f3eaa1f4245794fef1d",
+  "source_audit_revision_note": "PR #3417 head 287c53e plus this audit's catalogue remediation, committed together with this record",
+  "current_bytes_match_audited_hashes": true,
+  "key_count": {
+    "en": 3,
+    "target": 3
+  },
+  "verdict": "passed",
+  "result": "clean-with-findings",
+  "auditor": {
+    "agent": "i18n-auditor (radientdev team)",
+    "session": "3dcc5dbc44d0",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "Session runtime header: Model: anthropic/claude-opus-5-5",
+    "fallback_used": false,
+    "independent_from_translator_session": true,
+    "independence": "Separate agent/session from the implementer-translator (62d5b457bcf6) and from the retranslating subagent (c9f77e05a801). Same model family (claude-opus-5-5) as both translators — disclosed; no cross-model second pass. The auditor did not draft any value; it commissioned retranslation of flagged keys and audited the result."
+  },
+  "translator": {
+    "agent": "coder (PR #3417 implementer)",
+    "session": "62d5b457bcf6",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-04",
+    "source": "PR #3417 body: implementer authored all seven locales, no provider fallback"
+  },
+  "retranslator": {
+    "agent": "i18n-translator (task subagent of this auditor)",
+    "session": "c9f77e05a801",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-04",
+    "source": "subagent reply translator_model field; keys: , verb.dm"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.tool_rows.bridge.skipped.json",
+      "sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.tool_rows.bridge.skipped.context.json",
+      "sha256": "c726ec8a9c1d0f5a9bc8d77096c24b16dc78ed6a9622ecb2edfaf44e2875ca51"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.tool_rows.bridge.skipped.json",
+      "sha256": "b8fd20c52703571e96f66caff60527609d82a4e2ea5bc070bdb5686d7a998056"
+    }
+  },
+  "guidance": {
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/es.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "audit.log",
+      "sha256": "1e69bd8cda9a5b61dc2cb48e020d16ea19f70f8935254bba162a6a6086571cae"
+    },
+    {
+      "path": "report.md",
+      "sha256": "56ab8d8b82d259d9bea4c6d6fb633999970cb4dc08980043701ee4c082508142"
+    },
+    {
+      "path": "recheck.py.txt",
+      "sha256": "34577965921703dfb1cd74419842b9101687efaefbe538a76c20bd94fc486307"
+    }
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "actual_output": true
+  },
+  "audit_notes_not_execution_log": "report.md reasoning, glossary/style-guide reads and cross-catalogue term comparison are notes; only audit.log is command output.",
+  "findings": [
+    {
+      "id": "ES-RG6-1",
+      "severity": "MAJOR",
+      "key": "wire.tool_rows.bridge.skipped.verb.dm",
+      "current_text": "Mensaje omitido a",
+      "proposed_text": "Envío omitido a",
+      "reason": "«omitir» takes no «a» for a recipient: composed «Mensaje omitido a Maya» is a calque. The «a» needs a sending noun (audited «Mensaje enviado a»). «Envío» parallels «Publicación omitida en» and keeps «omitir» from the expanded sentence.",
+      "disposition": "fixed in this audit's commit (retranslated by i18n-translator c9f77e05a801)"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ES-RG6-1"
+    ],
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 0
+  },
+  "limitations": [
+    "LLM linguistic audit, not a native-speaker attestation.",
+    "No terminal bidi/shaping or rendered-frame claim.",
+    "Same model family as translators; no cross-model second pass."
+  ]
+}

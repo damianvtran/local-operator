@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -84,13 +85,30 @@ async def test_phone_spawn_does_not_inherit_another_supervisors_marker(
     monkeypatch.setattr(procname, "spawn_identity", lambda *a, **kw: (sys.executable, None))
     environments: list[dict[str, str]] = []
 
-    async def intercept_spawn(*args: Any, **kwargs: Any) -> None:
-        environments.append(dict(kwargs["env"]))
+    # Synchronous and keyword-for-keyword ``macos_disclaim.spawn_disclaimed``'s
+    # signature, so a call the real helper would reject fails here too.
+    def intercept_spawn(
+        argv: Sequence[str],
+        *,
+        executable: str | None = None,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        stdin: Any = None,
+        stdout: Any = None,
+        stderr: Any = None,
+        pass_fds: Sequence[int] = (),
+        close_fds: bool = True,
+    ) -> Any:
+        assert env is not None
+        environments.append(dict(env))
         raise _BoundaryReached
 
-    # Intercept the actual subprocess boundary, not stamp_child_env: no child,
+    # Intercept the actual spawn boundary, not stamp_child_env: no child,
     # provider call, service-manager command or listener discovery can occur.
-    monkeypatch.setattr(daemon.asyncio, "create_subprocess_exec", intercept_spawn)
+    # The phone spawn goes through ``spawn_disclaimed`` since #3366 (no longer
+    # ``asyncio.create_subprocess_exec``), so the boundary is intercepted there,
+    # before its macOS posix_spawn path or its ``ps``-based chain recording runs.
+    monkeypatch.setattr(daemon, "spawn_disclaimed", intercept_spawn)
     phone = daemon.MobileDaemon(password="synthetic-password")
     with pytest.raises(_BoundaryReached):
         await phone._spawn_session(str(tmp_path), None, None, "synthetic-phone-session")

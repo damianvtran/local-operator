@@ -329,6 +329,27 @@ def _pgid_outcome(pid):
 # stalled clock. Exhausting it is an incomplete attempt (stricter), never a pass.
 _LINUX_CENSUS_RELISTS = 8
 
+# Full census->census->sample cycles one `refresh` may run before refusing.
+# CI run 41748872018 (job 126359450123) refused a HEALTHY fast-forking command
+# with exit 126 "census member sample unreadable": censuses
+# [[2425,2443,2444,2445,2446],[2425,2444,2445,2446]], and 2444 -- present in
+# BOTH -- died before its sample (ENOENT). That shape cannot be amnestied (a
+# member seen in census 2 could have forked a live child before dying), so the
+# fix re-runs the proof instead of relaxing it. INVARIANT: a verdict rests on
+# exactly one cycle's evidence; earlier cycles only decide whether another
+# starts. The loop never carries evidence across cycles -- censuses, samples,
+# failures and departures are all rebuilt -- and a retry is attempted only when
+# `_rerunnable` holds and another cycle fits the deadline. Three cycles keep
+# the cost bounded; a trigger persisting through all of them still refuses.
+#
+# A SECOND RETRY TRIGGER shares the same cap: a corpse-only cycle (every member
+# exited at sample time) takes a post-sample CENSUS 3 (`_late_members`), and if
+# that census shows a new pid -- or a member that is no longer the exited
+# process sampled -- the cycle is discarded exactly like the ENOENT shape above.
+# One 3-cycle budget covers both triggers together, and still no evidence is
+# carried across cycles.
+_SAMPLE_CYCLES = 3
+
 
 def strict_linux(
     pgid,
@@ -674,6 +695,22 @@ def bounded_samples(pids, deadline, clock=time.monotonic, *, diagnostics=None):
     return result
 
 
+def _exited(sample):
+    """Whether ``sample`` is a process that can no longer fork: a single-threaded corpse.
+
+    A ``Z`` state is not enough on Linux. When a thread-group leader's MAIN thread
+    exits while other threads live, the leader lingers as a zombie until the group
+    empties (kernel/exit.c:1505 and ``delay_group_leader`` in
+    include/linux/sched/signal.h:776), ``/proc/<pid>/stat`` reports the LEADER's
+    state (fs/proc/array.c:491) -- so ``Z`` -- and its surviving threads can still
+    fork into our group. ``num_threads`` (field 20, fs/proc/array.c:609) tells the
+    two apart. ``threads is None`` (platforms without a count) keeps the old
+    meaning; the Linux reader omits a row with an unparseable count instead of
+    producing ``None`` there.
+    """
+    return sample.zombie and not (sample.threads is not None and sample.threads > 1)
+
+
 def kernel_identity(pid):
     pair = resources.direct_ppid_pgid(pid)
     if pair is None or not hasattr(os, "getsid"):
@@ -718,7 +755,14 @@ def _observed(before, after):
     rows = {}
     for stage, samples in (("before", before or {}), ("after", after or {})):
         for pid, sample in samples.items():
-            rows.setdefault(str(pid), {})[stage] = {"birth": sample.birth, "zombie": sample.zombie}
+            row = {"birth": sample.birth, "zombie": sample.zombie}
+            # Only a multi-threaded count is recorded (security S3): it is the one
+            # value that explains why a `zombie: true` member counted as LIVE (see
+            # `_exited`), and omitting the ordinary case keeps every other row --
+            # and the record's size -- exactly as before.
+            if sample.threads is not None and sample.threads > 1:
+                row["threads"] = sample.threads
+            rows.setdefault(str(pid), {})[stage] = row
     return rows
 
 
@@ -1288,7 +1332,13 @@ class OwnedGroup:
         # `proof: []` on every successful run.
         # A new refusal (including irreversible revocation) must not relabel
         # an earlier attempt's sample diagnostics as evidence gathered now.
-        for stale in ("sample_failure", "unresolved", "census_failure", "vanished"):
+        for stale in (
+            "sample_failure",
+            "unresolved",
+            "census_failure",
+            "vanished",
+            "sample_retries",
+        ):
             self.probe.pop(stale, None)
         if self._revoked:
             self.last = Verdict(
@@ -1346,82 +1396,171 @@ class OwnedGroup:
                     # terminal report may rest on the weaker one, and on nothing else.
                     return self._terminal_absence(deadline)
                 raise Unknown("leader witness unreadable")
-            try:
-                first = self._members(deadline)
-                second = self._members(deadline)
-            except Exception:
-                # Re-read the witness exactly once: if it has become a readable
-                # foreign birth in the meantime, the loss still wins over the
-                # unreadable census.
-                late, _ = self._leader_witness(deadline)
-                if late == "reaped":
-                    raise PinLost("reservation lost during a failed census") from None
-                raise
-            members = sorted(set(first) | set(second))
-            self.probe["members"] = list(members)
-            if not members:
-                # EMPTY-COMPLETE, bracketed on both sides: a retained matching
-                # witness before AND after, or no absence may be claimed.
-                if witness is not None and witness.zombie:
-                    after_state, _ = self._leader_witness(deadline)
-                    if after_state == "reaped":
-                        raise PinLost("reservation lost during the empty proof")
-                    if after_state != "held":
-                        raise Unknown("witness unreadable during the empty proof")
-                    self.probe["anchor"] = "leader-reservation"
-                    self.last = Verdict(
-                        "OBSERVED_EMPTY", "retained corpse and complete no-live-member census"
-                    )
-                    self._terminal_result = self.last
-                    return self.last
-                raise Unknown("live leader absent from a complete census: contradictory")
-            samples = self._samples(set(members) | {self.leader}, deadline)
-            # SNAPSHOT NOW (security review C11): `_samples` resets
-            # `_sample_failures` on every call and `_leader_witness` calls it, so
-            # any later witness read would erase this attempt's member evidence
-            # -- or, after a refactor, substitute the leader's.
-            failures = {row["pid"]: row for row in self._sample_failures}
-            self.probe["observed"] = _observed(samples, None)
-            # UNRESOLVED MEMBER SAMPLES ARE REFUSED BEFORE ANY EMPTINESS VERDICT.
-            # A missing map entry cannot prove departure, so certifying "no live
-            # members" while one member is unresolved would be false cleanup through
-            # a second door.
-            absent = [pid for pid in members if pid not in samples]
-            departed, unresolved = self._departed(absent, first, second, failures)
-            if departed and not unresolved:
-                kept = [pid for pid in members if pid not in departed]
-                if not kept:
-                    # Never let a pruned set reach an emptiness verdict: the
-                    # empty-census branch above is bracketed by its own witness
-                    # reads and was not designed for "everything left". The
-                    # refusal keeps the unpruned members as its residuals.
-                    raise Unknown("every census member departed: no member to prove")
-                # Pruned BEFORE `live`, so identities, Verdict members and
-                # residuals all describe the members that remain.
-                members = kept
-                self.probe["vanished"] = [departed[pid] for pid in sorted(departed)]
-                absent = []
-            if absent:
-                self.probe["unresolved"] = absent
-                # These are observations from the existing reads, not a new
-                # authority predicate. ENOENT ALONE is not amnesty for a PID seen
-                # by either complete census -- `/proc` visibility is not the
-                # kernel's process table (hidepid, setuid). The one exception is
-                # `_departed`'s conjunction, and it applies only when EVERY
-                # absent member qualifies; otherwise this refusal is unchanged.
-                self.probe["sample_failure"] = {
-                    "phase": "terminal-member-sample" if terminal else "member-sample",
-                    "witness": state,
-                    "censuses": [first[:16], second[:16]],
-                    "census_counts": [len(first), len(second)],
-                    "unresolved_count": len(absent),
-                    "unresolved": [
-                        failures.get(pid, {"pid": pid, "reason": "unavailable", "errno": None})
-                        for pid in absent[:16]
-                    ],
-                }
-                raise Unknown("census member sample unreadable")
-            live = [pid for pid in members if not samples[pid].zombie]
+            # ONE VERDICT, ONE CYCLE'S EVIDENCE (see `_SAMPLE_CYCLES`). Every name
+            # the proof below reads -- the censuses, members, samples, failures and
+            # departures -- is rebuilt inside the cycle that decides; an earlier
+            # cycle only decides whether another one starts.
+            for cycle in range(_SAMPLE_CYCLES):
+                started = self.clock()
+                members = []
+                samples = {}
+                # A cycle that refuses before re-publishing these (its census
+                # raises or is incomplete, its sample overruns) must not show a
+                # DISCARDED cycle's members/observations beside its refusal; the
+                # `sample_retries` rows are the only record of earlier cycles.
+                # `vanished` too (review R1/S1): the late-member door below is the
+                # first way to discard a cycle AFTER it pruned departures, and those
+                # departures authorised nothing the deciding cycle proved.
+                for stale in ("members", "observed", "vanished"):
+                    self.probe.pop(stale, None)
+                try:
+                    first = self._members(deadline)
+                    second = self._members(deadline)
+                except Exception:
+                    # Re-read the witness exactly once: if it has become a readable
+                    # foreign birth in the meantime, the loss still wins over the
+                    # unreadable census.
+                    late, _ = self._leader_witness(deadline)
+                    if late == "reaped":
+                        raise PinLost("reservation lost during a failed census") from None
+                    raise
+                members = sorted(set(first) | set(second))
+                self.probe["members"] = list(members)
+                if not members:
+                    # EMPTY-COMPLETE, bracketed on both sides: a retained matching
+                    # witness before AND after, or no absence may be claimed.
+                    if witness is not None and witness.zombie:
+                        after_state, _ = self._leader_witness(deadline)
+                        if after_state == "reaped":
+                            raise PinLost("reservation lost during the empty proof")
+                        if after_state != "held":
+                            raise Unknown("witness unreadable during the empty proof")
+                        self.probe["anchor"] = "leader-reservation"
+                        self.last = Verdict(
+                            "OBSERVED_EMPTY", "retained corpse and complete no-live-member census"
+                        )
+                        self._terminal_result = self.last
+                        return self.last
+                    raise Unknown("live leader absent from a complete census: contradictory")
+                samples = self._samples(set(members) | {self.leader}, deadline)
+                # SNAPSHOT NOW (security review C11): `_samples` resets
+                # `_sample_failures` on every call and `_leader_witness` calls it, so
+                # any later witness read would erase this attempt's member evidence
+                # -- or, after a refactor, substitute the leader's.
+                failures = {row["pid"]: row for row in self._sample_failures}
+                self.probe["observed"] = _observed(samples, None)
+                # UNRESOLVED MEMBER SAMPLES ARE REFUSED BEFORE ANY EMPTINESS VERDICT.
+                # A missing map entry cannot prove departure, so certifying "no live
+                # members" while one member is unresolved would be false cleanup through
+                # a second door.
+                absent = [pid for pid in members if pid not in samples]
+                departed, unresolved = self._departed(absent, first, second, failures)
+                if departed and not unresolved:
+                    kept = [pid for pid in members if pid not in departed]
+                    if not kept:
+                        # Never let a pruned set reach an emptiness verdict: the
+                        # empty-census branch above is bracketed by its own witness
+                        # reads and was not designed for "everything left". The
+                        # refusal keeps the unpruned members as its residuals.
+                        raise Unknown("every census member departed: no member to prove")
+                    # Pruned BEFORE `live`, so identities, Verdict members and
+                    # residuals all describe the members that remain.
+                    members = kept
+                    self.probe["vanished"] = [departed[pid] for pid in sorted(departed)]
+                    absent = []
+                if absent:
+                    # THE RE-RUN DOOR (see `_SAMPLE_CYCLES`). It never removes a
+                    # member: it discards this whole cycle and starts a fresh one,
+                    # and only when one more cycle -- at the pace this one ran --
+                    # still fits inside the deadline with room to spare.
+                    now = self.clock()
+                    if (
+                        cycle < _SAMPLE_CYCLES - 1
+                        and now + 2 * (now - started) < deadline
+                        and self._rerunnable(unresolved, second, failures)
+                    ):
+                        self.probe.setdefault("sample_retries", []).append(
+                            {
+                                "cycle": cycle,
+                                "rerun": unresolved[:16],
+                                "rerun_count": len(unresolved),
+                                "censuses": [first[:16], second[:16]],
+                            }
+                        )
+                        continue
+                    self.probe["unresolved"] = absent
+                    # These are observations from the existing reads, not a new
+                    # authority predicate. ENOENT ALONE is not amnesty for a PID seen
+                    # by either complete census -- `/proc` visibility is not the
+                    # kernel's process table (hidepid, setuid). The one exception is
+                    # `_departed`'s conjunction, and it applies only when EVERY
+                    # absent member qualifies; otherwise this refusal is unchanged.
+                    self.probe["sample_failure"] = {
+                        "phase": "terminal-member-sample" if terminal else "member-sample",
+                        "witness": state,
+                        "censuses": [first[:16], second[:16]],
+                        "census_counts": [len(first), len(second)],
+                        "unresolved_count": len(absent),
+                        "unresolved": [
+                            failures.get(pid, {"pid": pid, "reason": "unavailable", "errno": None})
+                            for pid in absent[:16]
+                        ],
+                        # The cycles already discarded, so CI stderr shows what was tried
+                        # before this refusal (empty when none was eligible).
+                        "sample_retries": list(self.probe.get("sample_retries", [])),
+                    }
+                    raise Unknown("census member sample unreadable")
+                live = [pid for pid in members if not _exited(samples[pid])]
+                if not live:
+                    # CENSUS 3, the zombie late-fork guard. Censuses 1 and 2 both
+                    # PRECEDE the sample, so a member can fork a child after census
+                    # 2 and then die: at sample time every member reads exited, and
+                    # the live child was seen by neither census. Measured on main
+                    # before this guard: OBSERVED_EMPTY with members (10, 21) while
+                    # pid 30 ran -- false cleanup. Only a census taken AFTER the
+                    # sample can see that child, so a corpse-only verdict waits for
+                    # one; a live-member cycle needs none (its members are
+                    # signalled and re-proved anyway).
+                    third, late = self._late_members(members, samples, deadline)
+                    if late:
+                        now = self.clock()
+                        if cycle < _SAMPLE_CYCLES - 1 and now + 2 * (now - started) < deadline:
+                            self.probe.setdefault("sample_retries", []).append(
+                                {
+                                    "cycle": cycle,
+                                    "late": late[:16],
+                                    "late_count": len(late),
+                                    "censuses": [first[:16], second[:16], third[:16]],
+                                }
+                            )
+                            continue
+                        self.probe["sample_failure"] = {
+                            "phase": "post-sample-census",
+                            "witness": state,
+                            "censuses": [first[:16], second[:16], third[:16]],
+                            "census_counts": [len(first), len(second), len(third)],
+                            "late": late[:16],
+                            "late_count": len(late),
+                            "sample_retries": list(self.probe.get("sample_retries", [])),
+                        }
+                        # Loss outranks the unproven refusal (security S2), as in
+                        # `_late_members`' own failure path: a leader that re-reads
+                        # as a foreign birth is a pin lost, and the capability must
+                        # be revoked. Anything short of `reaped` -- including an
+                        # unreadable witness -- stays the fail-closed `Unknown`.
+                        lost, _ = self._leader_witness(deadline)
+                        if lost == "reaped":
+                            raise PinLost("reservation lost after the corpse-only sample")
+                        raise Unknown("group changed after the corpse-only sample")
+                # This cycle produced a complete, resolved sample: it alone is the
+                # evidence the proof below rests on.
+                break
+            else:
+                # Unreachable: the last cycle may not `continue` (both retry doors
+                # require `cycle < _SAMPLE_CYCLES - 1`), so it breaks or raises.
+                # Spelled out FAIL-CLOSED rather than pre-binding `live = []`,
+                # which would default an exhausted loop to the corpse-only verdict.
+                raise Unknown("sample cycles exhausted without a decided cycle")
             if not live:
                 # Corpse-only: allowed ONLY under a retained matching witness, and a
                 # witness that has become a READABLE FOREIGN BIRTH is loss, not an
@@ -1486,6 +1625,53 @@ class OwnedGroup:
             # already paid for supply the birth for a member that was never enrolled.
             self.probe["residuals"] = _identities(self.receipts, samples, members)
         return self.last
+
+    def _late_members(self, members, samples, deadline):
+        """Census 3 for a corpse-only cycle: return ``(third, late)``.
+
+        ``late`` empty means the corpse-only sample still describes the group.
+        Anything else is a pid the sample did not certify as exited:
+
+        * a pid in ``third`` that censuses 1 and 2 never listed -- a child forked
+          after census 2 (the measured hole);
+        * a member whose re-sample is missing, no longer exited, or carries a
+          missing or different birth -- the pid now hosts something else (PID
+          reuse can put a live late child at a member's number, so a census that
+          is a subset of ``members`` proves nothing on its own).
+
+        A member ABSENT from ``third`` is fine: it was sampled exited and has
+        since been reaped. The leader is excluded from the re-sample because
+        ``_leader_witness`` owns its identity and runs after this anyway.
+
+        The census uses the same strict ``_members`` reader as censuses 1 and 2;
+        a failure re-reads the witness once so a reaped pin still reports as
+        loss rather than as an unreadable census.
+        """
+        try:
+            third = self._members(deadline)
+        except Exception:
+            lost, _ = self._leader_witness(deadline)
+            if lost == "reaped":
+                raise PinLost("reservation lost during the post-sample census") from None
+            raise
+        sampled = set(members)
+        late = [pid for pid in third if pid not in sampled]
+        if late:
+            return third, late
+        rest = [pid for pid in third if pid != self.leader]
+        if not rest:
+            return third, []
+        again = self._samples(rest, deadline)
+        for pid in rest:
+            row = again.get(pid)
+            if (
+                row is None
+                or not _exited(row)
+                or row.birth is None
+                or row.birth != samples[pid].birth
+            ):
+                late.append(pid)
+        return third, late
 
     def _departed(self, absent, first, second, failures):
         """Split unsampled members into ``(departed, unresolved)``.
@@ -1565,6 +1751,67 @@ class OwnedGroup:
                 pass
             unresolved.append(pid)
         return departed, unresolved
+
+    def _rerunnable(self, unresolved, second, failures):
+        """Whether this cycle's unresolved members justify discarding it and re-running.
+
+        WHY THIS EXISTS BESIDE `_departed`. `_departed` deliberately refuses a
+        member that is in BOTH censuses and then reads ENOENT: dropping it would
+        let a member fork a live child after census 2 and then be amnestied (the
+        late-fork hole). But that is also exactly what a healthy fast-forking
+        command looks like when a child exits between census 2 and its sample
+        (run 41748872018, job 126359450123: censuses
+        ``[[2425,2443,2444,2445,2446],[2425,2444,2445,2446]]``, 2444 ENOENT).
+        Neither amnesty nor refusal is right for that shape; a fresh cycle is,
+        because any child forked before the death is in the next census.
+
+        This predicate ONLY decides whether another full census->census->sample
+        cycle starts. It never removes a member and never feeds evidence into the
+        next cycle, so it may be looser than `_departed` only in admitting the
+        in-both shape; every other conjunct is the same one `_departed` uses.
+        The census-2 and non-empty conjuncts never decide today -- `_departed`
+        runs first and either prunes a census-1-only pid or leaves it unresolved
+        for a reason re-checked here, and `unresolved` is non-empty whenever
+        `absent` is -- so they are a defence-in-depth net for a later reordering,
+        not dead code:
+
+        - ``unresolved`` is non-empty and EVERY pid in it qualifies (one
+          unexplained member is a refusal, not a retry);
+        - the pid is in census 2 (the in-census-1-only shape is `_departed`'s);
+        - it is neither the leader nor the pgid;
+        - this cycle's diagnostic says ``read-error``/ENOENT;
+        - ``getpgid`` raises ProcessLookupError (the kernel agrees it is gone);
+        - `/proc/self` names our pid (C10), and the native sampler is in use
+          (an injected sampler carries no per-PID errno).
+        """
+        if not unresolved or self.samples is not None:
+            return False
+        probe = self._departure or os.getpgid
+        try:
+            own = (self._proc_self or (lambda: os.readlink("/proc/self")))()
+        except Exception:  # noqa: BLE001 - an unreadable namespace grants nothing
+            return False
+        if own != str(os.getpid()):
+            return False
+        seen_second = set(second)
+        for pid in unresolved:
+            row = failures.get(pid)
+            if (
+                pid in (self.leader, self.pgid)
+                or pid not in seen_second
+                or row is None
+                or row.get("reason") != "read-error"
+                or row.get("errno") != errno.ENOENT
+            ):
+                return False
+            try:
+                probe(pid)
+            except ProcessLookupError:
+                continue
+            except Exception:  # noqa: BLE001 - anything but ESRCH is not departure
+                return False
+            return False
+        return True
 
     def signal(self, signum, *, deadline):
         result = self.refresh(deadline=deadline)

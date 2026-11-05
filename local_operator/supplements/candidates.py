@@ -63,7 +63,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from itertools import islice
-from typing import Final, Iterable, Sequence
+from typing import Final, Iterable, Mapping, Sequence
 
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.supplements import denylist
@@ -79,6 +79,12 @@ MAX_CONSIDERED: Final = 64
 #: Pre-filter wall target (memo §2.3). A budget the tests measure, not an enforced deadline.
 PREFILTER_TARGET_MS: Final = 5.0
 
+#: An explicit pin: a path the agent named in the ``deliver`` argument of ``bash``/``eval``.
+#: The strongest evidence there is ("show this"), so it outranks a ``write``, and it is
+#: ALWAYS featured (``decision.decide`` never offers it to a vendor). The privacy gates --
+#: roots, the denylist, operator deny-prefixes -- still apply; a refused pin is disclosed in
+#: the row's ``withheld`` list instead of vanishing.
+TIER_PIN: Final = 0
 TIER_WRITE: Final = 1
 TIER_COMMAND: Final = 2
 TIER_PROSE: Final = 3
@@ -187,6 +193,12 @@ class Candidate:
     #: still offered (see the module docstring); journaled additively as
     #: ``SupplementFile.linked_in_answer`` so a surface MAY fold it against its own link.
     linked_in_answer: bool = False
+    #: Named in a ``deliver`` pin (``TIER_PIN``); journaled as ``pinned: true``.
+    pinned: bool = False
+    #: Found ONLY by a directory sweep: nothing in the turn named it. Such a file is offered
+    #: to the decision like any candidate but is never auto-promoted (review R1-1): written
+    #: audio becomes a player only when named or featured, never because it was nearby.
+    swept: bool = False
 
     @property
     def deliverable(self) -> bool:
@@ -197,6 +209,12 @@ class Candidate:
         """The row's ``why`` string (memo §2.4 example ``written by write``)."""
         if self.tool == "edit":
             return "updated by edit"
+        if self.pinned:
+            return f"pinned by {self.tool}"
+        if self.tool == "sweep":
+            return "written this turn"
+        if self.tool == "answer":
+            return "named in the answer, made this session"
         if self.tier == TIER_PROSE:
             return "named in the answer"
         return f"written by {self.tool}"
@@ -215,6 +233,15 @@ class Prefilter:
     rejected: dict[str, int] = field(default_factory=dict)
     #: Content is private local promotion input, never part of decision options.
     prepared: tuple[tuple[Candidate, str], ...] = ()
+    #: ``(basename, reason)`` for a PINNED or answer-named deliverable the gates refused, in
+    #: turn order, one entry per name. ``reason`` is one of :data:`WITHHELD_REASONS`. Names
+    #: only, never paths: the row travels to peers (memo S-R14). Incidental files a sweep or
+    #: a command found and the gates refused are NOT listed -- only what the agent or the
+    #: answer told the operator to expect, so the notice never becomes noise.
+    withheld: tuple[tuple[str, str], ...] = ()
+    #: Unnamed sweep hits held back by :data:`SWEEP_MAX_FILES` (QA round 1, Q1). Counted
+    #: into the row's ``files_more`` so the cut is disclosed, never silent.
+    sweep_more: int = 0
 
 
 def kind_of(name: str) -> str:
@@ -239,7 +266,10 @@ _PYTHON_WORD: Final = re.compile(r"^(?:python[\d.]*|pypy\d*|ipython\d*)$")
 #: The shell's separator and redirect punctuation, as ``shlex`` merges adjacent runs of it.
 _PUNCT_PIECES: Final = re.compile(r"&>>|&>|>>|>&|>|<<|<|;;|;|&&|\|\||\||&|\(|\)|\n")
 _SEPARATORS: Final = frozenset({";;", ";", "&&", "||", "|", "&", "\n"})
-_COPY_COMMANDS: Final = frozenset({"cp", "mv", "install"})
+_COPY_COMMANDS: Final = frozenset({"cp", "mv", "install", "rsync", "ln"})
+#: The copy commands whose ``-t DIR`` is GNU's target-directory form. ``rsync -t`` means
+#: "preserve times", so refusing on it there would drop every ``rsync -avt`` destination.
+_TARGET_DIRECTORY_COMMANDS: Final = frozenset({"cp", "mv", "install", "ln"})
 #: A python write whose TARGET is not a string literal (``open(p, 'w')``, ``df.to_csv(path)``,
 #: ``Path(x).write_text(..)`` on a variable): the one case no literal names, so the only case
 #: the touched-directory sweep exists for. Literal targets are removed (``_EVAL_WRITES``)
@@ -626,7 +656,7 @@ def _in_dir(raw: str, cwd: str | None) -> str | None:
     return os.path.join(cwd, raw) if cwd else raw
 
 
-def bash_effects(command: str) -> BashEffects:
+def bash_effects(command: str, *, env: Mapping[str, str] | None = None) -> BashEffects:
     """Output paths named by one shell command (tier 2), ``cd``-aware. Tolerant: bad lexing -> none.
 
     Walks the command statement by statement tracking the working directory (``cd a && cmd``,
@@ -649,7 +679,14 @@ def bash_effects(command: str) -> BashEffects:
     sweep_dirs: list[str] = []
     cwd: str | None = ""
     # ``HOME`` is the one inherited name: ``~`` already stands for it in every emitted path.
+    # ``env`` adds names the HARNESS exported and therefore knows exactly -- in practice
+    # ``LOCAL_OPERATOR_SCRATCHPAD``, which the system prompt tells every agent to write
+    # under, so ``cd $LOCAL_OPERATOR_SCRATCHPAD/x && cp a.mp3 picks/`` resolves instead of
+    # making every later relative name unknowable. Only absolute values are accepted.
     names: dict[str, str] = {"HOME": "~"}
+    for key, value in (env or {}).items():
+        if value and os.path.isabs(value) and not _SPLIT_OR_GLOB.search(value):
+            names[key] = value
     functions: set[str] = set()
     stack: list[tuple[str | None, dict[str, str]]] = []
     segment: list[str] = []
@@ -801,7 +838,7 @@ def bash_effects(command: str) -> BashEffects:
         elif command_word in _COPY_COMMANDS and len(operands) >= 3:
             # GNU target-directory forms move the destination before the sources. Until
             # their option grammar is supported, refuse rather than feature a source.
-            if any(
+            if command_word in _TARGET_DIRECTORY_COMMANDS and any(
                 w in {"-t", "--target-directory"}
                 or w.startswith("--target-directory=")
                 or (w.startswith("-t") and len(w) > 2)
@@ -811,6 +848,12 @@ def bash_effects(command: str) -> BashEffects:
             destination = operands[-1]
             if not destination.endswith("/"):  # a directory is not itself an output
                 emit(destination, found)
+            elif cwd is not None and "$" not in destination and "*" not in destination:
+                # A DIRECTORY destination is where the sources landed; a globbed source
+                # (``cp *.mp3 picks/``) names no file, so the bounded sweep finds them there.
+                landed = _in_dir(destination.rstrip("/") or "/", cwd)
+                if landed:
+                    sweep_dirs.append(landed)
             for source in operands[1:-1]:
                 if "*" not in source and "$" not in source:
                     emit(destination.rstrip("/") + "/" + os.path.basename(source), found)
@@ -929,13 +972,24 @@ class Mention:
     tool: str
     intent: str
     order: int
+    #: Found by a directory sweep, not named by any command, write or answer.
+    swept: bool = False
 
 
-def _harvest(items: Sequence[TurnItem]) -> tuple[list[Mention], list[tuple[str, str, int]]]:
-    """Every door-1 and door-2 mention, plus the ``(dir, intent, order)`` sweep candidates.
+def _harvest(
+    items: Sequence[TurnItem], *, env: Mapping[str, str] | None = None
+) -> tuple[list[Mention], list[tuple[str, str, int]]]:
+    """Every door-0/1/2 mention, plus the ``(dir, intent, order)`` sweep candidates.
 
     A call whose tool RESULT errored wrote nothing, so it is not evidence: results are
-    matched back to calls by ``tool_call_id``.
+    matched back to calls by ``tool_call_id`` -- except its ``deliver`` pins, which are kept
+    so a refused or missing pin is still DISCLOSED (``withheld``) rather than vanishing.
+
+    Sweep candidates are the directories a command wrote a variable path into, plus a copy
+    command's DIRECTORY destination (``cp *.mp3 ../picks/``: the glob names no file, the
+    directory is where they landed). A directory a command merely NAMED an output in is
+    not swept -- ``echo x > a.md`` must not list ``a.md``'s neighbours (pinned by
+    ``test_a_command_with_only_named_outputs_does_not_arm_the_sweep``).
     """
     failed = {item.tool_call_id for item in items if item.role == "tool" and item.is_error}
     harvested: list[Mention] = []
@@ -946,11 +1000,15 @@ def _harvest(items: Sequence[TurnItem]) -> tuple[list[Mention], list[tuple[str, 
             continue
         for call in item.tool_calls:
             order += 1
+            intent = sanitize_prompt_line(call.args.get("i", ""), limit=_INTENT_MAX_CHARS)
+            if call.name in {"bash", "eval"}:
+                harvested.extend(
+                    Mention(p, TIER_PIN, call.name, intent, order) for p in call.deliver
+                )
             if call.id in failed:
                 continue
-            intent = sanitize_prompt_line(call.args.get("i", ""), limit=_INTENT_MAX_CHARS)
             if call.name == "bash":
-                effects = bash_effects(call.args.get("command", ""))
+                effects = bash_effects(call.args.get("command", ""), env=env)
                 harvested.extend(
                     Mention(p, TIER_COMMAND, "bash", intent, order) for p in effects.outputs
                 )
@@ -985,7 +1043,7 @@ SWEEP_MAX_FILES: Final = 8
 SWEEP_SLACK_S: Final = 2.0
 
 
-def _sweep(directory: str, since: float) -> list[str]:
+def _sweep(directory: str, since: float, floor: float = 0.0) -> list[str]:
     """Regular, visible files of a deliverable kind in ``directory`` modified since ``since``.
 
     Non-recursive and bounded (:data:`SWEEP_MAX_ENTRIES` entries read). Dotfiles are skipped
@@ -1004,12 +1062,97 @@ def _sweep(directory: str, since: float) -> list[str]:
                     modified = entry.stat(follow_symlinks=False).st_mtime
                 except OSError:
                     continue
-                if modified >= since - SWEEP_SLACK_S:
+                if modified >= max(since - SWEEP_SLACK_S, floor):
                     found.append((modified, entry.name))
     except (OSError, ValueError):
         return []
     found.sort(reverse=True)
-    return [name for _modified, name in found[:SWEEP_MAX_FILES]]
+    # UNCAPPED here (entries are bounded above): the caller caps only the hits nothing
+    # named, so an answer-named file is never cut by the file bound (QA round 1, Q1).
+    return [name for _modified, name in found]
+
+
+#: Bounds of the session-scratchpad sweep (contract "Written-file diff"): the scratchpad is
+#: where the system prompt sends an agent's work, so a deliverable written there through a
+#: variable path (``out=os.path.join(pad, ...)``) is found by walking it. Recursive but
+#: bounded on every axis so a scratchpad holding a cloned repo costs the same as an empty one.
+SCRATCH_SWEEP_MAX_DEPTH: Final = 3
+SCRATCH_SWEEP_MAX_ENTRIES: Final = 500
+
+
+def _sweep_tree(root: str, since: float, floor: float = 0.0) -> list[str]:
+    """Deliverable files under ``root`` (depth <= 3, <= 500 entries) modified since ``since``.
+
+    Absolute paths, newest first, every hit within the entry/depth bounds (the caller caps
+    the unnamed ones at :data:`SWEEP_MAX_FILES`). Dot entries and the
+    generated trees (``node_modules``, ``.venv``...) are never descended: they are the
+    scratchpad's bulk and never a deliverable.
+    """
+    found: list[tuple[float, str]] = []
+    budget = SCRATCH_SWEEP_MAX_ENTRIES
+    queue: list[tuple[str, int]] = [(root, 0)]
+    while queue and budget > 0:
+        directory, depth = queue.pop(0)
+        try:
+            with os.scandir(directory) as entries:
+                for entry in islice(entries, budget):
+                    budget -= 1
+                    if entry.name.startswith("."):
+                        continue
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if depth + 1 < SCRATCH_SWEEP_MAX_DEPTH and (
+                                entry.name not in _EXCLUDED_COMPONENTS
+                            ):
+                                queue.append((entry.path, depth + 1))
+                            continue
+                        if kind_of(entry.name) not in _DELIVERABLE_KINDS:
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        modified = entry.stat(follow_symlinks=False).st_mtime
+                    except OSError:
+                        continue
+                    if modified >= max(since - SWEEP_SLACK_S, floor):
+                        found.append((modified, entry.path))
+        except (OSError, ValueError):
+            continue
+    found.sort(reverse=True)
+    return [path for _modified, path in found]
+
+
+#: The write tool's (and an agent's prose) spelling of the session scratchpad.
+_SCRATCH_SCHEME: Final = "scratchpad://"
+
+
+def _resolve_scheme(raw: str, scratchpad: str) -> str:
+    """``scratchpad://x`` -> ``<scratchpad>/x``; anything else unchanged.
+
+    Without a known scratchpad the scheme stays, which the admission loop then rejects as
+    ``missing`` -- never guessed onto the cwd.
+    """
+    if scratchpad and raw.startswith(_SCRATCH_SCHEME):
+        return os.path.join(scratchpad, raw[len(_SCRATCH_SCHEME) :].lstrip("/"))
+    return raw
+
+
+#: Bare names in the answer (``01-two-note-chime.mp3`` in a code span) are resolved only
+#: against directories the turn is KNOWN to have written into -- never searched for.
+_BARE_NAME: Final = re.compile(r"^[\w.\-+@%]+\.[A-Za-z0-9]{1,8}$")
+
+#: Withheld-reason vocabulary (``SupplementWithheld.reason``), mapped from rejection reasons.
+WITHHELD_REASONS: Final = ("outside", "sensitive", "missing", "too-large")
+_WITHHELD_BY_REJECT: Final[dict[str, str]] = {
+    "outside-roots": "outside",
+    "resolves-outside-roots": "outside",
+    "scratch": "outside",
+    "deny-prefix": "outside",
+    "generated-tree": "outside",
+    "excluded-suffix": "outside",
+    "sensitive": "sensitive",
+    "missing": "missing",
+    "not-regular": "missing",
+}
 
 
 def _spellings(raw: str, absolute: str, display: str, home: str) -> set[str]:
@@ -1073,7 +1216,9 @@ def _scratch_roots() -> list[str]:
     return roots
 
 
-def _excluded(absolute: str, resolved: str, deny: Sequence[str], cwd: str) -> str:
+def _excluded(
+    absolute: str, resolved: str, deny: Sequence[str], cwd: str, scratchpad: str = ""
+) -> str:
     """The exclusion reason for a path, or ``""``. Deliverables only (memo §2.3).
 
     The temp-dir exclusion yields to the session cwd: a project that LIVES under a temp root
@@ -1081,10 +1226,12 @@ def _excluded(absolute: str, resolved: str, deny: Sequence[str], cwd: str) -> st
     its files are not scratch. The scratchpad and the config dir are denied absolutely, by
     the denylist, whatever the cwd.
     """
+    # The session's OWN scratchpad yields like the cwd does: a relocated config dir (a test
+    # sandbox, ``LOCAL_OPERATOR_CONFIG_DIR=/tmp/x``) puts it under a temp root, and the
+    # scratchpad is where the system prompt sends deliverables.
+    own = _root_forms(cwd) + (_root_forms(scratchpad) if scratchpad else [])
     for form in {absolute, resolved}:
-        if not _under_any(form, _root_forms(cwd)) and any(
-            _under(form, root) for root in _scratch_roots()
-        ):
+        if not _under_any(form, own) and any(_under(form, root) for root in _scratch_roots()):
             return "scratch"
         parts = form.split(os.sep)[:-1]
         if any(part in _EXCLUDED_COMPONENTS for part in parts):
@@ -1139,6 +1286,9 @@ def prefilter(
     want_files: bool = True,
     want_graphics: bool = True,
     since: float = 0.0,
+    sweep_floor: float = 0.0,
+    session_since: float = 0.0,
+    scratchpad: str = "",
 ) -> Prefilter:
     """Run the whole deterministic pre-filter over the logical turn.
 
@@ -1151,6 +1301,24 @@ def prefilter(
     sweep (:func:`_sweep`). ``0`` -- the default, and what a provenance that never recorded
     a start carries -- DISABLES the sweep: without a start every file in the directory would
     look "written this turn", which is the over-matching failure, so absent means off.
+
+    ``scratchpad`` is THIS session's ``scratchpad://`` root (``""`` = none). It is the one
+    place inside the config dir a deliverable may come from
+    (:func:`~local_operator.supplements.denylist.is_sensitive_for_supplements`), the value of
+    ``$LOCAL_OPERATOR_SCRATCHPAD`` in a command, the target of ``scratchpad://`` and, with
+    ``since``, a bounded recursive sweep root (:func:`_sweep_tree`).
+
+    ``sweep_floor`` is when the PREVIOUS turn was known finished (``0`` = unknown); the
+    caller keeps it ``<= since``. The sweep's 2 s slack exists for coarse mtimes, but with
+    turns under 2 s apart it re-listed the previous turn's files (QA round 1, Q2); a file
+    last modified before the previous turn finished is that turn's, so the bound is
+    ``max(since - slack, sweep_floor)``.
+
+    ``session_since`` is the SESSION's start (``created_at``). A path the answer names --
+    in a code span, a link or bare prose -- is admitted as touched (tier 2) when it exists and
+    was modified at or after it: "I made these earlier, here they are" is how a picks turn
+    reads, and the turn-start gate alone made the whole answer's file list invisible.
+    ``0`` keeps the old behaviour (a named path is tier 3 only).
     """
     started = time.perf_counter()
     home = os.path.abspath(home or os.path.expanduser("~"))
@@ -1158,10 +1326,33 @@ def prefilter(
     cwd_roots = _root_forms(cwd)
     home_roots = _root_forms(home)
     deny = _normalise_deny(deny_prefixes, cwd)
+    scratchpad = os.path.abspath(os.path.expanduser(scratchpad)) if scratchpad else ""
+    if scratchpad:
+        # The session's own scratchpad is an allowed ROOT in its own right, beside the cwd
+        # and home: a relocated config dir (``LOCAL_OPERATOR_CONFIG_DIR`` outside ``~``)
+        # would otherwise put every scratchpad deliverable "outside" both.
+        home_roots = home_roots + _root_forms(scratchpad)
     rejected: dict[str, int] = {}
+    withheld: dict[str, str] = {}
+    #: The mention being admitted is one the operator was TOLD about (a pin, or a path the
+    #: answer names): its refusal is disclosed. Set per mention in the loop below.
+    disclosed = False
+    current_name = ""
+    current_path = ""
+    current_pin = False
 
-    def reject(reason: str) -> None:
+    def reject(reason: str, *, withheld_as: str = "") -> None:
         rejected[reason] = rejected.get(reason, 0) + 1
+        mapped = withheld_as or _WITHHELD_BY_REJECT.get(reason)
+        if not (disclosed and mapped and current_name) or current_name in withheld:
+            return
+        # A pin is disclosed whatever happened to it (the agent asked for it by name). A
+        # path the ANSWER names is disclosed only when it exists: prose routinely names
+        # files hypothetically (``write it to report.pdf``), and "file no longer exists"
+        # under every such answer would be noise, not a notice.
+        if not current_pin and not (current_path and os.path.lexists(current_path)):
+            return
+        withheld[current_name] = mapped
 
     candidates: dict[str, Candidate] = {}
     prepared_content: dict[str, tuple[str, str]] = {}
@@ -1183,19 +1374,78 @@ def prefilter(
                     if call.prepared_html and call.name == "write" and len(prepared_content) < 3:
                         prepared_content[identity] = (absolute, call.prepared_html)
     prepared: list[tuple[Candidate, str]] = []
+    sweep_more = 0
     if want_files or prepared_content:
-        mentions, sweep_dirs = _harvest(items)
+        env = {"LOCAL_OPERATOR_SCRATCHPAD": scratchpad} if scratchpad else None
+        mentions, sweep_dirs = _harvest(items, env=env)
+        #: Directories the turn is known to have written into; a bare name in the answer
+        #: resolves only against these (and the scratchpad), never by searching. Includes
+        #: the parent of every named deliverable output (resolution only -- never swept).
+        landed: list[str] = []
+        for mention in mentions:
+            if (
+                mention.tier in (TIER_WRITE, TIER_COMMAND)
+                and kind_of(mention.raw) in _DELIVERABLE_KINDS
+            ):
+                parent = os.path.dirname(_resolve_scheme(mention.raw, scratchpad))
+                parent = _expand_home(parent, home) if parent else cwd
+                parent = os.path.normpath(
+                    parent if os.path.isabs(parent) else os.path.join(cwd, parent)
+                )
+                if parent not in landed:
+                    landed.append(parent)
+        # What the answer names, by base name: a sweep hit the answer names is a deliverable
+        # the operator was told about, so it bypasses the unnamed-hit cap below and its
+        # directory becomes a place a bare name in the answer resolves.
+        visible = _answer_spans(answer_text)
+        named_bases = {os.path.basename(span) for span in visible} | {
+            os.path.basename(match.group("path")) for match in _PROSE_PATH.finditer(answer_text)
+        }
+        swept_hits: list[Mention] = []
         if since > 0:
+            seen_dirs: set[str] = set()
             for directory, intent, order in sweep_dirs:
                 base = _expand_home(directory, home) if directory else cwd
                 base = os.path.normpath(base if os.path.isabs(base) else os.path.join(cwd, base))
+                if base in seen_dirs:
+                    continue
+                seen_dirs.add(base)
                 if not (_under_any(base, cwd_roots) or _under_any(base, home_roots)):
                     reject("outside-roots")
                     continue
-                mentions.extend(
-                    Mention(os.path.join(base, name), TIER_COMMAND, "bash", intent, order)
-                    for name in _sweep(base, since)
+                if base not in landed:
+                    landed.append(base)
+                swept_hits.extend(
+                    Mention(os.path.join(base, name), TIER_COMMAND, "bash", intent, order, True)
+                    for name in _sweep(base, since, sweep_floor)
                 )
+            if scratchpad:
+                # Order 0 ranks a sweep hit BELOW every named output (a later order wins a
+                # tie), so it never displaces the path and intent a command spelled out.
+                swept_hits.extend(
+                    Mention(path, TIER_COMMAND, "sweep", "", 0, True)
+                    for path in _sweep_tree(scratchpad, since, sweep_floor)
+                )
+        unnamed_kept = 0
+        seen_hits: set[str] = set()
+        for hit in swept_hits:
+            if hit.raw in seen_hits:
+                continue
+            seen_hits.add(hit.raw)
+            parent = os.path.dirname(hit.raw)
+            if os.path.basename(hit.raw) in named_bases:
+                # Named by the answer: never capped, NOT "swept" (the answer named it), and
+                # its directory resolves the answer's other bare names.
+                if parent not in landed:
+                    landed.append(parent)
+                mentions.append(replace(hit, swept=False))
+            elif unnamed_kept < SWEEP_MAX_FILES:
+                unnamed_kept += 1
+                mentions.append(hit)
+            else:
+                sweep_more += 1
+        if scratchpad:
+            landed.append(scratchpad)
         # Links participate in admission too; a tier-3 mention of a file the answer already
         # shows is deduped below, a tier-1/2 deliverable is kept and flagged. Metadata
         # discovery must never turn read source files into products.
@@ -1218,7 +1468,23 @@ def prefilter(
                     )
                 )
                 mentions.append(Mention(raw, TIER_PROSE, "answer", "", 10_000))
-        visible = _answer_spans(answer_text)
+        for span in sorted(visible):
+            if span.startswith(_SCRATCH_SCHEME) and kind_of(span) in _DELIVERABLE_KINDS:
+                mentions.append(Mention(span, TIER_PROSE, "answer", "", 10_000))
+                continue
+            if "/" in span or not _BARE_NAME.match(span):
+                continue
+            if kind_of(span) not in _DELIVERABLE_KINDS:
+                continue
+            for base in landed:
+                if os.path.isfile(os.path.join(base, span)):
+                    mentions.append(
+                        Mention(os.path.join(base, span), TIER_PROSE, "answer", "", 10_000)
+                    )
+                    break
+        # Pins first: they are always featured, so a turn that sweeps 64 files must not
+        # crowd one out of ``MAX_CONSIDERED``. Stable, so everything else keeps turn order.
+        mentions.sort(key=lambda m: m.tier != TIER_PIN)
         for mention in mentions[: MAX_CONSIDERED * 4]:
             raw, tier, tool, intent, order = (
                 mention.raw,
@@ -1229,12 +1495,18 @@ def prefilter(
             )
             if len(candidates) >= MAX_CONSIDERED:
                 break
+            raw = _resolve_scheme(raw.strip(), scratchpad)
+            current_pin = tier == TIER_PIN
+            disclosed = current_pin or (tier == TIER_PROSE and kind_of(raw) in _DELIVERABLE_KINDS)
+            current_name = os.path.basename(raw.rstrip("/"))
+            current_path = ""
             expanded = _expand_home(raw.strip(), home)
             if not expanded:
                 continue
             absolute = os.path.normpath(
                 expanded if os.path.isabs(expanded) else os.path.join(cwd, expanded)
             )
+            current_path = absolute
             if not (_under_any(absolute, cwd_roots) or _under_any(absolute, home_roots)):
                 reject("outside-roots")
                 continue
@@ -1250,14 +1522,33 @@ def prefilter(
             if not (_under_any(resolved, cwd_roots) or _under_any(resolved, home_roots)):
                 reject("resolves-outside-roots")
                 continue
-            reason = _excluded(absolute, resolved, deny, cwd)
+            reason = _excluded(absolute, resolved, deny, cwd, scratchpad)
             if reason:
                 reject(reason)
                 continue
-            # SENSITIVE is checked before the candidate can be listed, sent or previewed.
-            if denylist.is_sensitive(absolute, cwd=cwd):
-                reject("sensitive")
+            # SENSITIVE is checked before the candidate can be listed, sent or previewed. The
+            # supplements variant lifts the config-dir/scratchpad ROOT rules for THIS session's
+            # own scratchpad only; every credential rule still applies there.
+            rule = denylist.is_sensitive_for_supplements(
+                absolute, cwd=cwd, session_scratchpad=scratchpad or None
+            )
+            if rule:
+                # The config dir (another session's store, the secret store's directory) is
+                # a LOCATION refusal to the operator; a credential-shaped name is "sensitive".
+                # The counter keeps its one ``sensitive`` spelling (the absorption line and
+                # its tests read it); only the operator-facing reason distinguishes them.
+                location = rule in (denylist.RULE_CONFIG_DIR, denylist.RULE_SCRATCHPAD)
+                reject("sensitive", withheld_as="outside" if location else "")
                 continue
+            pinned = tier == TIER_PIN
+            if (
+                tier == TIER_PROSE
+                and session_since > 0
+                and info.st_mtime >= session_since - SWEEP_SLACK_S
+                and kind_of(absolute) in _DELIVERABLE_KINDS
+            ):
+                # Named by the answer and made this session: write evidence (see docstring).
+                tier, tool = TIER_COMMAND, "answer"
             display = _display_path(absolute, cwd, home)
             captured = prepared_content.get(os.path.realpath(absolute))
             held = candidates.get(absolute)
@@ -1273,14 +1564,18 @@ def prefilter(
                 # Dedup stays for what the turn only MENTIONED (tier 3) and for non-deliverable
                 # kinds (a linked script). A tier 1/2 deliverable is kept, flagged below.
                 if held is not None and held.tier <= TIER_COMMAND:
-                    candidates[absolute] = replace(held, linked_in_answer=True)
+                    # The answer links it, so it is named whatever door found it first.
+                    candidates[absolute] = replace(held, linked_in_answer=True, swept=False)
                     continue
                 if tier == TIER_PROSE or kind not in _DELIVERABLE_KINDS:
                     reject("already-visible")
                     continue
             if held is not None and (held.tier, -held.order) <= (tier, -order):
                 if linked_name and not held.linked_in_answer:
-                    candidates[absolute] = replace(held, linked_in_answer=True)
+                    held = candidates[absolute] = replace(held, linked_in_answer=True)
+                if held.swept and not mention.swept:
+                    # A sweep found it first, but the turn also NAMED it: it is named.
+                    candidates[absolute] = replace(held, swept=False)
                 continue
             candidates[absolute] = Candidate(
                 path=display,
@@ -1294,7 +1589,12 @@ def prefilter(
                 order=order,
                 intent=intent,
                 linked_in_answer=linked_name or (held is not None and held.linked_in_answer),
+                pinned=pinned or (held is not None and held.pinned),
+                swept=mention.swept and (held is None or held.swept),
             )
+            # An earlier refusal under the same name (a pin spelled wrong, then the answer's
+            # right path) is not a withheld file: the operator sees it.
+            withheld.pop(os.path.basename(absolute), None)
     prepared = [
         (candidate, captured[1])
         for candidate in candidates.values()
@@ -1310,8 +1610,10 @@ def prefilter(
     return Prefilter(
         candidates=ordered,
         evidence=evidence,
-        skipped=None if (ordered or evidence.structured or prepared) else "prefilter",
+        skipped=(None if (ordered or evidence.structured or prepared or withheld) else "prefilter"),
         elapsed_ms=(time.perf_counter() - started) * 1000.0,
         rejected=rejected,
         prepared=tuple(prepared),
+        withheld=tuple(withheld.items()) if want_files else (),
+        sweep_more=sweep_more if want_files else 0,
     )

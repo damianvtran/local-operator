@@ -989,6 +989,19 @@ def _require_attachment_id(attachment_id: str) -> None:
         raise ValueError("attachment id is not a minted batt_ id")
 
 
+def _attachment_write_params(
+    tenant_id: str | None, actor_endpoint_id: str | None
+) -> dict[str, str] | None:
+    """Query for an attachment upload/delete; ``None`` when there is nothing to say."""
+
+    params: dict[str, str] = {}
+    if tenant_id:
+        params["tenant_id"] = tenant_id
+    if actor_endpoint_id:
+        params["actor_endpoint_id"] = actor_endpoint_id
+    return params or None
+
+
 def _sniff_image(data: bytes) -> str | None:
     """The image type ``data`` actually is, by magic bytes, or ``None``.
 
@@ -1041,6 +1054,15 @@ def attachments_capability(payload: Any) -> dict[str, Any] | None:
     the unknown field. A present block must say ``enabled: true`` and list at
     least one type this client can handle; anything malformed reads as off
     rather than as a guess at the hub's limits.
+
+    ``agent_upload`` (agent-server PR #283) says the hub also lets an AGENT
+    endpoint stage images (``POST …/attachments?actor_endpoint_id=``). The hub
+    emits it ``omitempty`` and only once endpoint-scoped staging is enabled
+    fleet-wide, so the key is carried through ONLY when it is the literal
+    ``True``: absent, ``false``, ``"true"`` or ``1`` all read as off and add no
+    key, which keeps every existing consumer's normalized block (the desktop
+    status route re-serves this dict to the renderer) byte-identical on a hub
+    that does not advertise it.
     """
 
     if not isinstance(payload, Mapping):
@@ -1059,6 +1081,8 @@ def attachments_capability(payload: Any) -> dict[str, Any] | None:
         value = block.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             out[key] = value
+    if block.get("agent_upload") is True:
+        out["agent_upload"] = True
     return out
 
 
@@ -1213,6 +1237,74 @@ def files_capability(payload: Any) -> dict[str, Any] | None:
     return out
 
 
+#: An EDGE refusal: the request never reached agent-server (2026-11-04). The
+#: AWS WAF in front of ``api.radienthq.com`` (radient-infra
+#: ``pulumi/radient_infra/waf.py``, managed rule ``GenericLFI_Body``) answers a
+#: body that looks like a file-inclusion probe — a ``../`` or ``~/.aws/…`` path —
+#: with a plain ``403`` HTML page, no JSON. That used to decode as the generic
+#: ``bridge_error`` "Radient refused the request (HTTP 403)", so the agent read a
+#: firewall block as the hub's judgement and retried the same body. The hub's
+#: OWN 403s are always a coded JSON object, so a 403 that is not one (or is
+#: served as HTML) is the edge's. Scoped to 403 on purpose: an HTML 502/503 is a
+#: gateway failure, not a block, and an uncoded 404 is the outdated-hub signal
+#: (see ``owned_agent_invitations``) and must stay ``bridge_error``.
+EDGE_BLOCKED_CODE = "edge_blocked"
+#:
+#: WHAT THE SENTENCE MUST NOT SAY (security review S-1). It never tells the agent
+#: what tripped the firewall or to retry without it: in the incident class the
+#: block fires BECAUSE the message quoted a credentials file, so for a credential
+#: the local guard missed, the firewall is the last barrier, and "remove the path
+#: and try again" is instructions for getting round it. Nor does it spell a
+#: trigger (a parent-directory or home-directory path): an agent that relays this
+#: sentence into a post would trip the same rule (review n1). The decision goes
+#: back to the human. A test pins both.
+EDGE_BLOCKED_SENTENCE = (  # i18n: ignore model-facing refusal sentence, like the §6.5 class
+    "The edge firewall in front of Radient blocked this request before it reached "
+    "Radient, so nothing was posted or changed. Do not resend a credential, a file's "
+    "contents, or the same text in any form. If this was ordinary text, tell your "
+    "user what you tried to send and let them decide."
+)
+
+#: An edge header value is untrusted text that lands in a log and a tool
+#: result: one bounded token of a conservative alphabet, or nothing. Whatever
+#: the edge (or an intermediary) puts there still reaches the model, up to 64
+#: characters of that alphabet — accepted (review N-2): it is the response's,
+#: never the request's, so it can disclose nothing the caller sent, and it is
+#: the evidence of WHICH layer refused.
+_EDGE_HEADER_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ./;=+_-]{0,63}")
+
+
+def _is_html(response: httpx.Response) -> bool:
+    return "text/html" in response.headers.get("content-type", "").lower()
+
+
+def _edge_header(response: httpx.Response, name: str) -> str:
+    value = " ".join(response.headers.get(name, "").split())
+    return value if _EDGE_HEADER_VALUE.fullmatch(value) else ""
+
+
+def _edge_blocked(response: httpx.Response) -> BridgeRefusal:
+    """The refusal for a non-JSON 403: the edge's block, with its evidence.
+
+    ``details`` keeps the response's ``content-type`` and ``server`` header
+    VALUES — which edge answered, and how — so the next report can name the
+    layer without anyone reproducing it. The BODY never travels: it is the
+    edge's page, not an answer, and it may echo the request back.
+    """
+
+    details: dict[str, Any] = {}
+    for header, key in (("content-type", "content_type"), ("server", "server")):
+        value = _edge_header(response, header)
+        if value:
+            details[key] = value
+    return BridgeRefusal(
+        EDGE_BLOCKED_CODE,
+        EDGE_BLOCKED_SENTENCE,
+        http_status=response.status_code,
+        details=details,
+    )
+
+
 def _refusal(response: httpx.Response) -> BridgeRefusal:
     """Map one non-2xx answer onto :class:`BridgeRefusal` (§6.5).
 
@@ -1230,6 +1322,8 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
             body = parsed
     except (ValueError, UnicodeDecodeError):
         body = None
+    if status == 403 and (body is None or _is_html(response)):
+        return _edge_blocked(response)
     code = body.get("code") if body else None
     message = body.get("error") if body else None
     details = body.get("details") if body else None
@@ -3978,6 +4072,11 @@ class TeamBridgeClient:
     ) -> dict[str, Any]:
         """Stage one image for a later send: ``{attachment: {id, mime, ...}}``.
 
+        ``actor_endpoint_id`` stages the image AS that agent endpoint (the hub
+        refuses it unless it advertises ``attachments.agent_upload``, and binds
+        the staged row to that exact endpoint). The query key is omitted when
+        unset so a human upload stays byte-identical to the pre-agent wire.
+
         The size bound refuses before any I/O. Type is deliberately NOT checked
         here: the hub sniffs the bytes and answers ``415``/``422`` itself, and a
         second local opinion would only be a way for the two to disagree.
@@ -4017,7 +4116,7 @@ class TeamBridgeClient:
                 "The attachment is larger than allowed.",  # i18n: ignore, no code
                 http_status=413,
             )
-        params = {"tenant_id": tenant_id} if tenant_id else None
+        params = _attachment_write_params(tenant_id, actor_endpoint_id)
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/attachments",
@@ -4093,13 +4192,19 @@ class TeamBridgeClient:
         attachment_id: str,
         *,
         tenant_id: str | None = None,
+        actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """Discard one STAGED upload (idempotent on the hub; bound ones stay)."""
+        """Discard one STAGED upload (idempotent on the hub; bound ones stay).
+
+        An agent-staged row is owned by its endpoint, so deleting it needs the
+        same ``actor_endpoint_id`` it was uploaded with; the human form cannot
+        see it.
+        """
 
         _require_attachment_id(attachment_id)
-        params = {"tenant_id": tenant_id} if tenant_id else None
+        params = _attachment_write_params(tenant_id, actor_endpoint_id)
         response = await self._authorized(
             "DELETE",
             f"/messaging/conversations/{conversation_id}/attachments/{attachment_id}",
@@ -5246,6 +5351,47 @@ def selected_tenant_id(payload: Any) -> str | None:
         return None
     tenant_id = selected.get("tenant_id")
     return tenant_id if isinstance(tenant_id, str) and tenant_id else None
+
+
+def trial_ended_tenant(payload: Any) -> dict[str, str] | None:
+    """The organization whose no-card Team trial ENDED, when nothing is eligible.
+
+    Why this exists (teams-trial QA round 1, Q5): after a trial ends the hub
+    answers the org's row with ``eligible:false`` and, for an owner or a member
+    the end disabled, no endpoint — so :func:`select_tenant` selects nothing,
+    the surface reads A with ``tenant_id: null``, and the renderer could not
+    reach its paused band (it fell through to the trial on-ramp instead). The
+    hub now marks such a row POSITIVELY with ``trial_ended_at`` (agent-server
+    #296), which is exactly the positive evidence R9 asked for before any
+    surface may speak of an ended plan; ``eligible:false`` alone still proves
+    nothing and still reads nothing here.
+
+    Constraints: this NEVER changes the §3.2 selection or the A–G letter (those
+    stay the backend-policy reading every consumer shares); it is a separate,
+    additive marker. It answers only when no row is eligible — an eligible
+    organization is this machine's subject and an older ended trial elsewhere
+    is not news. When a row IS selected (state F, a retained endpoint) the
+    answer is that row's marker or nothing — never another org's, because
+    ``tenant_id`` already names the selected org and the status contract is
+    shared by consumers that would otherwise read two different organizations
+    off one payload (agent review round 2, R2-1). Only when nothing is selected
+    does it fall through to the first marked row in the server's own order. An older hub
+    without the field yields ``None`` and the surface keeps today's reading.
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    tenants = [t for t in (payload.get("tenants") or []) if isinstance(t, Mapping)]
+    if any(bool(t.get("eligible")) for t in tenants):
+        return None
+    selected = select_tenant(payload)
+    ordered = [selected] if selected is not None else tenants
+    for tenant in ordered:
+        tenant_id = tenant.get("tenant_id")
+        ended_at = tenant.get("trial_ended_at")
+        if isinstance(tenant_id, str) and tenant_id and isinstance(ended_at, str) and ended_at:
+            return {"tenant_id": tenant_id, "trial_ended_at": ended_at}
+    return None
 
 
 def _surface_state(check: StatusCheck) -> str | None:

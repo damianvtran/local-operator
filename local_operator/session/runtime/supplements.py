@@ -61,12 +61,12 @@ worst outcome of this feature is "no callout".
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Final, Literal, Mapping, Sequence, cast
 
 from local_operator.supplements import generator, policy, sweep
-from local_operator.supplements.candidates import prefilter
+from local_operator.supplements.candidates import TIER_COMMAND, Candidate, prefilter
 from local_operator.supplements.contract import (
     SUPERSEDED_ERROR,
     SUPPLEMENT_CUSTOM_TYPE,
@@ -88,6 +88,44 @@ from local_operator.supplements.trigger import final_answer, refusal, turn_sound
 from local_operator.supplements.validate import Component
 
 logger = logging.getLogger(__name__)
+
+#: Written audio is copied into the AttachmentStore so the existing players can stream it.
+#: 25 MB (contract) keeps a long recording from bloating the store; above it the file stays
+#: a plain callout the operator can still open.
+FILE_SOUND_MAX_BYTES: Final = 25 * 1024 * 1024
+#: Written sounds per row. Bounded like files are (a sweep keeps at most 8 per directory);
+#: the excess stays in the file pool, where ``files_more`` discloses it.
+FILE_SOUNDS_MAX: Final = 50
+#: Suffix -> MIME for written audio, matching ``candidates._KIND_BY_EXT``'s audio set.
+_AUDIO_MIME: Final[dict[str, str]] = {
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".flac": "audio/flac",
+    ".ogg": "audio/ogg",
+}
+
+
+def _duration_hint(raw: bytes, name: str) -> float:
+    """Best-effort seconds for a written sound; ``0.0`` when unknown.
+
+    Readers treat ``duration_s`` as a hint (the player reads the real length from the
+    media), and no audio-metadata dependency ships, so only WAV -- whose header the stdlib
+    reads -- gets a number. An ``ffprobe`` subprocess per file would cost more than the hint
+    is worth on a path that runs after every turn.
+    """
+    if not name.lower().endswith(".wav"):
+        return 0.0
+    import io
+    import wave
+
+    try:
+        with wave.open(io.BytesIO(raw)) as handle:
+            rate = handle.getframerate()
+            return round(handle.getnframes() / rate, 3) if rate else 0.0
+    except (wave.Error, EOFError, ValueError):
+        return 0.0
+
 
 #: ``Session.classification_seam`` returns the shared ``ClassificationService`` (or ``None``
 #: when the layer is off); resolved PER CALL, the monitor gate's convention, so a seam a test
@@ -179,6 +217,7 @@ class _JobInputs:
     user_text: str
     answer_text: str
     sounds: tuple[SupplementSound, ...] = ()
+    withheld: tuple[tuple[str, str], ...] = ()
     instruction: str = ""
     version: int = 1
     #: The job's newest row, as the write path published it after its append landed (a plain
@@ -227,6 +266,9 @@ class SupplementRunner:
         #: it like the job task.
         self._sweep_task: asyncio.Task[None] | None = None
         self._open_row: Mapping[str, Any] | None = None
+        #: Wall time the previous job began -- after that turn settled (``_job`` waits for
+        #: it), so a file older than this belongs to an earlier turn. The sweep floor.
+        self._previous_job_at = 0.0
         #: Jobs this runtime is running right now: the runtime's half of the reader rule
         #: (``contract.reader_disposition(job_live=...)``).
         self._live_jobs: set[str] = set()
@@ -530,6 +572,12 @@ class SupplementRunner:
         want_files = settings.files
         want_graphics = settings.graphics and GENERATOR_AVAILABLE
         started = time.perf_counter()
+        scratchpad, session_since = await asyncio.to_thread(self._scratch_facts)
+        turn_start = float(getattr(provenance, "started_at", 0.0) or 0.0)
+        # Never above this turn's start: a delayed previous job must not hide this turn's
+        # own early writes.
+        sweep_floor = min(self._previous_job_at, turn_start)
+        self._previous_job_at = time.time()
         pre = await asyncio.to_thread(
             prefilter,
             provenance.items,
@@ -538,8 +586,29 @@ class SupplementRunner:
             deny_prefixes=settings.deny_prefixes,
             want_files=want_files,
             want_graphics=want_graphics,
-            since=float(getattr(provenance, "started_at", 0.0) or 0.0),
+            since=turn_start,
+            sweep_floor=sweep_floor,
+            session_since=session_since,
+            scratchpad=scratchpad,
         )
+        withheld = pre.withheld
+        # NAMED written audio (pinned, a recognised write/cp/redirect, or named by the
+        # answer) leaves the file pool BEFORE the decision: like generated audio it is a
+        # player in ``sounds[]``, never offered to the classifier, never duplicated in
+        # ``files[]``. Audio a sweep merely FOUND stays in the pool: the decision weighs it
+        # like any file, and only what it features becomes a player (review R1-1 -- twelve
+        # staged ``chunk_NN.wav`` must not become twelve players nobody asked for).
+        remaining, written_audio = await asyncio.to_thread(
+            self._file_sounds, [c for c in pre.candidates if not c.swept]
+        )
+        if written_audio:
+            moved = {c.absolute for c in pre.candidates if not c.swept} - {
+                c.absolute for c in remaining
+            }
+            pre = replace(
+                pre, candidates=tuple(c for c in pre.candidates if c.absolute not in moved)
+            )
+            sounds = [*sounds, *written_audio]
         logger.debug(
             "supplements: prefilter candidates=%d structured=%s skipped=%s rejected=%s "
             "elapsed_ms=%.2f",
@@ -549,7 +618,7 @@ class SupplementRunner:
             pre.rejected,
             pre.elapsed_ms,
         )
-        if pre.skipped and not sounds:
+        if pre.skipped and not sounds and not withheld:
             return
         components: list[Component] = []
         prepared_detail: list[str] = []
@@ -575,6 +644,18 @@ class SupplementRunner:
             want_graphics=want_graphics,
             max_featured=settings.max_featured,
         )
+        if pre.sweep_more:
+            decision = replace(decision, more_unlisted=pre.sweep_more)
+        # Swept audio the decision FEATURED is now a deliverable: give it the player.
+        featured_swept = [c for c in decision.featured if c.swept and c.kind == "audio"]
+        if featured_swept:
+            kept_featured, promoted = await asyncio.to_thread(self._file_sounds, featured_swept)
+            if promoted:
+                gone = {c.absolute for c in featured_swept} - {c.absolute for c in kept_featured}
+                decision = replace(
+                    decision, featured=tuple(c for c in decision.featured if c.absolute not in gone)
+                )
+                sounds = [*sounds, *promoted]
         logger.debug(
             "supplements: decision vendor=%s featured=%d more=%d graphics=%s total_ms=%.1f",
             decision.vendor,
@@ -594,7 +675,12 @@ class SupplementRunner:
                     vendor="prepared",
                 )
             await self._write(
-                answer.id, decision, components=components, detail=prepared_detail, sounds=sounds
+                answer.id,
+                decision,
+                components=components,
+                detail=prepared_detail,
+                sounds=sounds,
+                withheld=withheld,
             )
             return
         if decision.graphics and want_graphics:
@@ -609,9 +695,12 @@ class SupplementRunner:
                 answer.text,
                 settings,
                 sounds=sounds,
+                # Only when present: the keyword is additive, and a turn with nothing
+                # withheld keeps the exact call shape the render seam always had.
+                **({"withheld": withheld} if withheld else {}),
             )
             return
-        await self._write(answer.id, decision, sounds=sounds)
+        await self._write(answer.id, decision, sounds=sounds, withheld=withheld)
 
     async def _write(
         self,
@@ -621,6 +710,7 @@ class SupplementRunner:
         components: Sequence[Component] = (),
         detail: Sequence[str] = (),
         sounds: Sequence[SupplementSound] = (),
+        withheld: Sequence[tuple[str, str]] = (),
     ) -> None:
         """Journal the decision. A decision with nothing to show writes NOTHING.
 
@@ -628,7 +718,15 @@ class SupplementRunner:
         costing a journal line per turn the vendor declined; the spam-rate measurement reads
         the DEBUG line and the golden set, not the journal.
         """
-        if decision.empty and not decision.more and not components and not sounds:
+        if (
+            decision.empty
+            and not decision.more
+            and not components
+            and not sounds
+            # A withheld-only row IS written: it is the notice that a pinned or answer-named
+            # file was refused, and skipping it would make that refusal silent.
+            and not withheld
+        ):
             return
         job = new_job_id()
         stored = await self._store(components)
@@ -649,6 +747,7 @@ class SupplementRunner:
                         state="done",
                         decision=decision,
                         sounds=sounds,
+                        withheld=withheld,
                     )
                 )
                 if stored:
@@ -683,6 +782,7 @@ class SupplementRunner:
         settings: policy.SupplementSettings,
         *,
         sounds: Sequence[SupplementSound] = (),
+        withheld: Sequence[tuple[str, str]] = (),
     ) -> None:
         """Schedule the fork for a graphics "yes" (memo §2.5).
 
@@ -698,6 +798,7 @@ class SupplementRunner:
             user_text=user_text,
             answer_text=answer_text,
             sounds=tuple(sounds),
+            withheld=tuple(withheld),
         )
         self._remember(inputs)
         previous = self._task
@@ -783,6 +884,7 @@ class SupplementRunner:
                     state="decided",
                     decision=inputs.decision,
                     sounds=inputs.sounds,
+                    withheld=inputs.withheld,
                 )
             )
 
@@ -1047,6 +1149,85 @@ class SupplementRunner:
             return fallback
         return sanitize_prompt_line(safe, limit=limit) or fallback
 
+    def _scratch_facts(self) -> tuple[str, float]:
+        """This session's scratchpad root and its birth time, or ``("", 0.0)``.
+
+        Both come from the session's OWN directory, the way the session derives them
+        (``Session._scratchpad_dir``; ``creation.session_created_at`` reads
+        ``created_at.json``): never from ``$LOCAL_OPERATOR_SCRATCHPAD`` in this process,
+        which names whichever session LAUNCHED the runtime, not the one whose turn this is.
+        An agent directory or a test double has no scratchpad: the carve-out is then off and
+        the prefilter behaves exactly as before.
+        """
+        probe = getattr(self._session, "_scratchpad_dir", None)
+        try:
+            scratchpad = probe() if callable(probe) else None
+        except Exception:  # noqa: BLE001 -- a probe failure is "no scratchpad", never a lost turn
+            scratchpad = None
+        if not isinstance(scratchpad, str) or not scratchpad:
+            return "", 0.0
+        from local_operator.session.creation import session_created_at
+
+        try:
+            born = float(session_created_at(Path(scratchpad).parent))
+        except Exception:  # noqa: BLE001 -- unknown birth = the answer-named rule stays off
+            born = 0.0
+        return scratchpad, born
+
+    def _file_sounds(
+        self, candidates: Sequence[Candidate]
+    ) -> tuple[tuple[Candidate, ...], list[SupplementSound]]:
+        """Split written audio out of ``candidates`` into stored ``sounds[]`` entries.
+
+        Only audio with WRITE evidence (a pin, a write, a command's output, or an
+        answer-named file made this session -- tier <= ``TIER_COMMAND``); a file merely
+        named in prose stays a callout. The caller passes only NAMED candidates, plus the
+        swept ones the decision featured -- never an unnamed sweep hit directly. Each is
+        copied into the content-addressed AttachmentStore exactly as a generated sound
+        is, so the row carries a digest and every player (desktop, relay, mobile) plays
+        it unchanged. A file over
+        :data:`FILE_SOUND_MAX_BYTES`, an unreadable one, or one past
+        :data:`FILE_SOUNDS_MAX` stays a plain file callout: never dropped.
+        """
+        from local_operator.session.attachments import AttachmentStore
+
+        store: AttachmentStore | None = None
+        kept: list[Candidate] = []
+        sounds: list[SupplementSound] = []
+        for candidate in candidates:
+            if (
+                candidate.kind != "audio"
+                or candidate.tier > TIER_COMMAND
+                or candidate.size_bytes > FILE_SOUND_MAX_BYTES
+                or len(sounds) >= FILE_SOUNDS_MAX
+            ):
+                kept.append(candidate)
+                continue
+            mime = _AUDIO_MIME.get(Path(candidate.name).suffix.lower(), "audio/mpeg")
+            try:
+                raw = Path(candidate.absolute).read_bytes()
+            except OSError:
+                kept.append(candidate)
+                continue
+            if store is None:
+                store = AttachmentStore()
+            ref = store.put_bytes(raw, mime)
+            if ref is None:
+                kept.append(candidate)
+                continue
+            sound = SupplementSound(
+                attachment=ref.digest,
+                mime=mime,
+                title=self._metadata_text(Path(candidate.name).stem, fallback="Audio", limit=160),
+                duration_s=_duration_hint(raw, candidate.name),
+                origin="file",
+                path=candidate.path,
+            )
+            if candidate.pinned:
+                sound["pinned"] = True
+            sounds.append(sound)
+        return tuple(kept), sounds
+
     async def _store(self, components: Sequence[Component]) -> list[dict[str, Any]]:
         """Store each accepted component as a blob and build the row's ``components[]``.
 
@@ -1133,6 +1314,14 @@ class SupplementRunner:
                 # until a cold open read the journal.
                 sounds_more=(
                     int(details.get("sounds_more") or 0) if state in ("decided", "done") else 0
+                ),
+                withheld=(
+                    [dict(item) for item in (details.get("withheld") or [])]
+                    if state in ("decided", "done")
+                    else []
+                ),
+                withheld_more=(
+                    int(details.get("withheld_more") or 0) if state in ("decided", "done") else 0
                 ),
                 model=str(details.get("model", "") or ""),
                 model_source=str(details.get("model_source", "") or ""),

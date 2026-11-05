@@ -1,0 +1,7 @@
+{
+  "relay.highlights.withheld.line": "{count, plural, one {# archivo no mostrado} many {# de archivos no mostrados} other {# archivos no mostrados}}: {reasons}",
+  "relay.highlights.withheld.reason.outside": "fuera de las ubicaciones permitidas",
+  "relay.highlights.withheld.reason.sensitive": "archivo confidencial",
+  "relay.highlights.withheld.reason.missing": "el archivo ya no existe",
+  "relay.highlights.withheld.reason.too_large": "demasiado grande para la vista previa"
+}
