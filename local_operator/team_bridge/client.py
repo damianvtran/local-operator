@@ -1237,6 +1237,25 @@ def files_capability(payload: Any) -> dict[str, Any] | None:
     return out
 
 
+def agent_files_capability(payload: Any) -> dict[str, Any] | None:
+    """Agent file ingress is a separate, strict-v1 grant, never a human fallback.
+
+    An enabled human file lane or image-agent grant does not authorize publishing
+    arbitrary bytes as an endpoint. Unknown versions and truthy non-booleans stay
+    dark; recipient read authority is deliberately not implied by this grant.
+    """
+    capability = files_capability(payload)
+    block = payload.get("files") if isinstance(payload, Mapping) else None
+    if (
+        capability is None
+        or not isinstance(block, Mapping)
+        or type(block.get("version")) is not int
+        or block.get("agent_upload") is not True
+    ):
+        return None
+    return {**capability, "agent_upload": True}
+
+
 #: An EDGE refusal: the request never reached agent-server (2026-11-04). The
 #: AWS WAF in front of ``api.radienthq.com`` (radient-infra
 #: ``pulumi/radient_infra/waf.py``, managed rule ``GenericLFI_Body``) answers a
@@ -1959,10 +1978,21 @@ class TeamBridgeClient:
 
     # -- operations ---------------------------------------------------------
 
-    async def status(self, *, access: OAuthAccess | None = None) -> dict[str, Any]:
-        """The one cheap eligibility read (§5.1). Callers go through the discipline."""
+    async def status(
+        self,
+        *,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        """Eligibility, optionally fenced to the owner commissioning a file send."""
 
-        return await self._send("GET", "/messaging/status", access=access)
+        extra: dict[str, Any] = {}
+        if expected_account_id is not None:
+            extra["expected_account_id"] = expected_account_id
+        if pre_http_guard is not None:
+            extra["pre_http_guard"] = pre_http_guard
+        return await self._send("GET", "/messaging/status", access=access, **extra)
 
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         """The caller's endpoint + consent record + policies (§6.1)."""
@@ -4069,13 +4099,14 @@ class TeamBridgeClient:
         expected_account_id: str | None = None,
         mode: Literal["image", "file"] = "image",
         name: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
-        """Stage one image for a later send: ``{attachment: {id, mime, ...}}``.
+        """Stage an image or exact-byte generic file for a later bind.
 
-        ``actor_endpoint_id`` stages the image AS that agent endpoint (the hub
-        refuses it unless it advertises ``attachments.agent_upload``, and binds
-        the staged row to that exact endpoint). The query key is omitted when
-        unset so a human upload stays byte-identical to the pre-agent wire.
+        ``actor_endpoint_id`` stages AS that exact endpoint. Callers negotiate
+        ``attachments.agent_upload`` for images, strict ``files.agent_upload``
+        for files; neither grant implies receiving-agent original-byte access.
+        Omit the actor only for a human upload, whose wire stays unchanged.
 
         The size bound refuses before any I/O. Type is deliberately NOT checked
         here: the hub sniffs the bytes and answers ``415``/``422`` itself, and a
@@ -4087,18 +4118,24 @@ class TeamBridgeClient:
         # image upload below stays byte-identical, and ``name`` is a file-only
         # field: an image never carries one.
         if mode == "file":
-            # Agents may not stage files (the hub refuses ``agent_actor``, and
-            # no screening path exists), and ``_upload_file`` has no actor
-            # query: an agent-addressed file call must fail loudly rather than
-            # stage the bytes as the HUMAN (review F1). Spelled like #3335's
-            # agent-image parameter so the two signatures merge as one.
-            if actor_endpoint_id is not None:
-                raise ValueError("an agent endpoint cannot upload files")
+            # An explicitly supplied but empty/malformed actor must not become
+            # the absent selector (the human lane) in the shared query builder.
+            if actor_endpoint_id is not None and (
+                not isinstance(actor_endpoint_id, str)
+                or not actor_endpoint_id
+                or actor_endpoint_id != actor_endpoint_id.strip()
+            ):
+                raise ValueError("an agent file actor must be a non-empty unpadded endpoint id")
+            # The separate strict-v1 agent grant is checked by the tool before
+            # reading/staging. Preserve its endpoint on this existing transport:
+            # dropping it would silently publish the bytes as the human owner.
             return await self._upload_file(
                 conversation_id,
                 data,
                 name=name,
                 tenant_id=tenant_id,
+                actor_endpoint_id=actor_endpoint_id,
+                pre_http_guard=pre_http_guard,
                 access=access,
                 expected_account_id=expected_account_id,
             )
@@ -4117,6 +4154,9 @@ class TeamBridgeClient:
                 http_status=413,
             )
         params = _attachment_write_params(tenant_id, actor_endpoint_id)
+        extra: dict[str, Any] = {}
+        if pre_http_guard is not None:
+            extra["pre_http_guard"] = pre_http_guard
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/attachments",
@@ -4124,6 +4164,7 @@ class TeamBridgeClient:
             content=bytes(data),
             access=access,
             expected_account_id=expected_account_id,
+            **extra,
         )
 
     async def _upload_file(
@@ -4133,6 +4174,8 @@ class TeamBridgeClient:
         *,
         name: str | None,
         tenant_id: str | None,
+        actor_endpoint_id: str | None,
+        pre_http_guard: Callable[[], None] | None,
         access: OAuthAccess | None,
         expected_account_id: str | None,
     ) -> dict[str, Any]:
@@ -4172,13 +4215,14 @@ class TeamBridgeClient:
         # An empty name is "no name", exactly as the hub reads an absent header.
         if name:
             headers["X-Bridge-File-Name"] = encode_file_name(name)
-        params = {"tenant_id": tenant_id} if tenant_id else None
+        params = _attachment_write_params(tenant_id, actor_endpoint_id)
         response = await self._authorized(
             "POST",
             f"/messaging/conversations/{conversation_id}/attachments",
             params=params,
             content=bytes(data),
             extra_headers=headers,
+            pre_http_guard=pre_http_guard,
             access=access,
             expected_account_id=expected_account_id,
         )
@@ -4195,6 +4239,7 @@ class TeamBridgeClient:
         actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Discard one STAGED upload (idempotent on the hub; bound ones stay).
 
@@ -4205,12 +4250,16 @@ class TeamBridgeClient:
 
         _require_attachment_id(attachment_id)
         params = _attachment_write_params(tenant_id, actor_endpoint_id)
+        extra: dict[str, Any] = {}
+        if pre_http_guard is not None:
+            extra["pre_http_guard"] = pre_http_guard
         response = await self._authorized(
             "DELETE",
             f"/messaging/conversations/{conversation_id}/attachments/{attachment_id}",
             params=params,
             access=access,
             expected_account_id=expected_account_id,
+            **extra,
         )
         if response.status_code >= 400:
             raise _refusal(response)
