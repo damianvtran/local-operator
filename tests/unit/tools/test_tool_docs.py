@@ -481,7 +481,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # 931 -> 975 (media artifact naming): the new ``filename`` stem field's
     # teaching description renders in the parameter table. The sanitising and
     # collision rules live in the image guide, so the wire keeps one sentence.
-    "generate_image": 975,
+    # 975 -> 984 (2026-11-05, image-intent routing lane): the source fields now
+    # say "not a path" and the note names BOTH digest origins, so a model that
+    # only reads `tool://generate_image` cannot pass a file path where a digest
+    # belongs. The wire pair got CHEAPER in the same pass (description 160 ->
+    # 157, schema 2,270 -> 2,259 chars) so this doc's growth is paid for on the
+    # always-loaded arm, which is why ``bench_context_budget.py`` was re-measured
+    # to a PASS at 97,038 chars / 34,906 billed (29 headroom) rather than raised.
+    "generate_image": 984,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_sound_effect``
     # doc — the two rungs and the no-OpenAI rule, the REQUIRED duration and
     # what it costs, the estimate rules and the honest cancel paragraphs.

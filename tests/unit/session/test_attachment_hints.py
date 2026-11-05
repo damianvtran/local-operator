@@ -27,7 +27,11 @@ import pytest
 
 from local_operator.compaction.marker import COMPACTION_MARKER_TYPE
 from local_operator.harness.types import ImageContent, Message, TextContent
-from local_operator.session.attachment_hints import _reachable, with_attachment_hints
+from local_operator.session.attachment_hints import (
+    _IMAGE_EDIT_GUIDANCE,
+    _reachable,
+    with_attachment_hints,
+)
 from local_operator.session.attachments import AttachmentStore
 from local_operator.tools.confinement import ToolConfinement
 
@@ -67,7 +71,9 @@ def test_note_names_the_store_file_with_mime_size_and_digest():
     assert note.text == (
         "[image attachment stored on disk — read or edit the file directly; "
         "no filesystem search is needed:\n"
-        f"- {store.path_for(PNG_DIGEST)} (image/png, {len(PNG_BYTES)} bytes; digest {PNG_DIGEST})]"
+        f"- {store.path_for(PNG_DIGEST)} (image/png, {len(PNG_BYTES)} bytes; digest {PNG_DIGEST})"
+        + _IMAGE_EDIT_GUIDANCE
+        + "]"
     )
     # The path in the note is the file the bytes actually live in.
     assert store.path_for(PNG_DIGEST).read_bytes() == PNG_BYTES
@@ -97,7 +103,8 @@ def test_multiple_images_are_listed_in_message_order():
         "no filesystem search is needed:\n"
     )
     lines = note.text.splitlines()[1:]
-    assert len(lines) == 2
+    assert len(lines) == 3
+    assert lines[2] == _IMAGE_EDIT_GUIDANCE.strip() + "]"
     assert lines[0].startswith(f"- {store.path_for(PNG_DIGEST)} (image/png,")
     assert lines[1].startswith(
         f"- {store.path_for(hashlib.sha256(PNG_BYTES + b'second').hexdigest()[:32])} "
