@@ -3056,6 +3056,25 @@
     },
     {
       "locale": "es",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "es",
       "namespace": "cli.team_bridge",
       "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
       "translator": {
@@ -6106,6 +6125,25 @@
       },
       "status": "passed",
       "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the fr style guide. FINDINGS fixed in these bytes: FR-H1 MINOR withheld.line used a plain U+0020 before ':' -> U+202F espace fine insécable (fr guide punctuation; corpus 499 U+202F vs 15 plain). FR-H2 MINOR reason.missing straight apostrophe -> U+2019 ('le fichier n’existe plus'; corpus 945 ’ vs 47 '). Plural arms one/many/other correct (0 is one: '0 fichier non affiché'; 1e6 '1 000 000 de fichiers non affichés'). Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     },
     {
       "locale": "fr",
@@ -9214,6 +9252,25 @@
       },
       "status": "passed",
       "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the hi style guide. No findings. Arms one/other with 0 as one ('0 फ़ाइल नहीं दिखाई गई'), feminine plural agreement 'दिखाई गईं'; फ़ाइल settled loan; 'पूर्वावलोकन' matches 34 shipped hi keys. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     },
     {
       "locale": "hi",
@@ -12364,6 +12421,25 @@
     },
     {
       "locale": "ru",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "ru",
       "namespace": "cli.team_bridge",
       "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
       "translator": {
@@ -15269,6 +15345,25 @@
       },
       "status": "passed",
       "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the ur style guide. No findings. Arms one/other ('# فائل نہیں دکھائی گئی' / '# فائلیں نہیں دکھائی گئیں', feminine agreement correct); فائل settled loan; 'پیش نظارہ' matches shipped ur keys; no Cf/bidi controls (isolation is the render layer's job per ur guide). Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     },
     {
       "locale": "ur",
@@ -18440,6 +18535,25 @@
     },
     {
       "locale": "vi",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "vi",
       "namespace": "cli.team_bridge",
       "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
       "translator": {
@@ -21271,6 +21385,25 @@
       },
       "status": "passed",
       "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the zh-CN style guide. FINDING fixed in these bytes: ZH-H1 MINOR reason.too_large '文件过大，无法预览' carried a full-width comma inside a fragment that is itself joined into a reason list, so two joined reasons read as three -> '文件过大无法预览'. Arm other only, '# 个文件未显示' with full-width '：'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     },
     {
       "locale": "zh-CN",

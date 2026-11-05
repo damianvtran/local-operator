@@ -213,6 +213,12 @@ export type MessageParams = {
   "relay.chrome.session.tray.tasks": { "done": number; "total": number };
   "relay.chrome.snackbar.dismiss": undefined;
   "relay.chrome.spend.title": undefined;
+  "relay.composer.action.connecting": undefined;
+  "relay.composer.action.send": undefined;
+  "relay.composer.action.steer": undefined;
+  "relay.composer.action.stop": undefined;
+  "relay.composer.action.stop_agent": undefined;
+  "relay.composer.action.stopping": undefined;
   "relay.health.dropped_detail": undefined;
   "relay.health.ended_detail": undefined;
   "relay.health.ended_send_failed": undefined;

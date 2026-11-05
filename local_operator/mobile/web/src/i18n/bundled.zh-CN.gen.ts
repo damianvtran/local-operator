@@ -239,6 +239,16 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.chrome.spend.title": "\u8d39\u7528\u4e0e\u4e0a\u4e0b\u6587",
     },
   },
+  "relay.composer": {
+    "zh-CN": {
+      "relay.composer.action.connecting": "\u6b63\u5728\u8fde\u63a5",
+      "relay.composer.action.send": "\u53d1\u9001",
+      "relay.composer.action.steer": "\u5f15\u5bfc",
+      "relay.composer.action.stop": "\u505c\u6b62",
+      "relay.composer.action.stop_agent": "\u505c\u6b62\u667a\u80fd\u4f53",
+      "relay.composer.action.stopping": "\u6b63\u5728\u505c\u6b62",
+    },
+  },
   "relay.health": {
     "zh-CN": {
       "relay.health.dropped_detail": "\u7535\u8111\u76ee\u524d\u65e0\u6cd5\u8fde\u63a5\u5230\u6b64\u4f1a\u8bdd\uff0c\u6b63\u5728\u4e0d\u65ad\u91cd\u8bd5\u3002\u8fde\u4e0a\u4e4b\u524d\uff0c\u53d1\u9001\u4f1a\u7acb\u5373\u5931\u8d25\uff0c\u5df2\u8f93\u5165\u7684\u6587\u5b57\u4f1a\u4fdd\u7559\u5728\u8f93\u5165\u6846\u4e2d\u3002",
