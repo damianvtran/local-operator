@@ -381,7 +381,14 @@ async def test_evaluation_prices_only_complete_compat_usage(
 
     # This checks the adapter and the static table, never discovery or a live API.
     monkeypatch.setattr(configure, "refresh_model_info_background", lambda *_: None)
-    body = _sse([{"choices": [], "usage": raw}])
+    # Isolate token presence from service-tier uncertainty: the finish and
+    # trailer both state the authoritative default tier.
+    body = _sse(
+        [
+            {"choices": [{"delta": {}, "finish_reason": "stop"}], "service_tier": "default"},
+            {"choices": [], "usage": raw, "service_tier": "default"},
+        ]
+    )
     transport = httpx.MockTransport(
         lambda request: httpx.Response(
             200, content=body, headers={"content-type": "text/event-stream"}
@@ -399,6 +406,61 @@ async def test_evaluation_prices_only_complete_compat_usage(
     assert cost_known is known
     assert usage.model_copy(deep=True)._token_counts_reported is usage._token_counts_reported
     assert "_token_counts_reported" not in usage.model_dump()
+
+
+@pytest.mark.parametrize(
+    ("finish_tier", "trailer_tier", "known", "micros"),
+    [
+        ("priority", "default", False, 0),
+        ("default", "priority", False, 0),
+        ("priority", None, True, 3_000_000),
+        (None, "default", True, 1_500_000),
+        (None, "priority", True, 3_000_000),
+        (None, None, False, 0),
+    ],
+)
+async def test_evaluation_chat_uses_terminal_service_tier(
+    finish_tier: str | None,
+    trailer_tier: str | None,
+    known: bool,
+    micros: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.evaluation.runner.provider_client import _usage_from
+    from local_operator.model import configure
+
+    monkeypatch.setattr(configure, "refresh_model_info_background", lambda *_: None)
+    finish: dict[str, Any] = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+    trailer: dict[str, Any] = {
+        "choices": [],
+        "usage": {"prompt_tokens": 100_000, "completion_tokens": 10_000},
+    }
+    if finish_tier is not None:
+        finish["service_tier"] = finish_tier
+    if trailer_tier is not None:
+        trailer["service_tier"] = trailer_tier
+    body = _sse(
+        [{"choices": [{"delta": {"content": "ok"}}], "service_tier": "priority"}, finish, trailer]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        spec = _spec(provider="openai").model_copy(
+            update={"model_id": "gpt-6-astra", "supports_responses_api": False}
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=spec, messages=[Message.user("hi")]), "synthetic")
+        )
+    usage = next(event.usage for event in events if isinstance(event, StreamUsageEvent))
+    _, actual, cost_known = _usage_from(
+        usage, requested_provider="openai", requested_model_id="gpt-6-astra"
+    )
+    assert cost_known is known
+    assert actual == micros
 
 
 async def test_openai_compat_prefers_standard_cache_detail_over_alias() -> None:
@@ -6296,17 +6358,17 @@ def test_client_for_spec_routes_preferences_only_to_openrouter_routed_specs() ->
 
 
 @pytest.mark.parametrize(
-    "base,provider,model,count,expected",
+    "base,provider,model,count,expected,tier",
     [
-        ("https://api.openai.com/v1", "openai", "gpt-6-astra", 300_000, True),
-        ("https://api.openai.com/v1", "openai-api-key", "gpt-6-astra", 272_000, False),
-        ("https://gateway.example/v1", "openai", "gpt-6-astra", 300_000, False),
-        ("https://api.openai.com/v1", "openai", "gpt-6-astra-mini", 300_000, False),
-        ("https://api.openai.com/v1", "openrouter", "gpt-6-astra", 300_000, False),
+        ("https://api.openai.com/v1", "openai", "gpt-6-astra", 300_000, True, "unknown"),
+        ("https://api.openai.com/v1", "openai-api-key", "gpt-6-astra", 272_000, False, "unknown"),
+        ("https://gateway.example/v1", "openai", "gpt-6-astra", 300_000, False, None),
+        ("https://api.openai.com/v1", "openai", "gpt-6-astra-mini", 300_000, False, "unknown"),
+        ("https://api.openai.com/v1", "openrouter", "gpt-6-astra", 300_000, False, None),
     ],
 )
 async def test_compat_stream_stamps_only_qualified_real_endpoint(
-    base, provider, model, count, expected
+    base, provider, model, count, expected, tier
 ) -> None:
     body = _sse([{"choices": [], "usage": {"prompt_tokens": count, "completion_tokens": 1}}])
     transport = httpx.MockTransport(
@@ -6323,6 +6385,7 @@ async def test_compat_stream_stamps_only_qualified_real_endpoint(
         events = await _collect(client.stream(request, "synthetic"))
     usage = next(event.usage for event in events if isinstance(event, StreamUsageEvent))
     assert usage.openai_long_context is expected
+    assert usage.openai_service_tier == tier
     assert ("openai_long_context" in usage.model_dump()) is expected
 
 
@@ -6341,7 +6404,15 @@ async def test_evaluation_prices_only_complete_responses_usage(
     from local_operator.model import configure
 
     monkeypatch.setattr(configure, "refresh_model_info_background", lambda *_: None)
-    body = _sse([{"type": "response.completed", "response": {"output": [], "usage": raw}}])
+    # This matrix isolates token-count presence; the terminal tier is known.
+    body = _sse(
+        [
+            {
+                "type": "response.completed",
+                "response": {"output": [], "usage": raw, "service_tier": "default"},
+            }
+        ]
+    )
     transport = httpx.MockTransport(
         lambda request: httpx.Response(
             200, content=body, headers={"content-type": "text/event-stream"}
@@ -6359,6 +6430,129 @@ async def test_evaluation_prices_only_complete_responses_usage(
     _, _, cost_known = _usage_from(
         usage, requested_provider="openai", requested_model_id="gpt-6-astra"
     )
+    assert cost_known is known
+
+
+@pytest.mark.parametrize(
+    ("tier", "known", "micros"),
+    [
+        (None, False, 0),
+        ("default", True, 1_500_000),
+        ("priority", True, 3_000_000),
+        ("ultrafast", False, 0),
+    ],
+)
+async def test_evaluation_responses_uses_terminal_service_tier(
+    tier: str | None, known: bool, micros: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.evaluation.runner.provider_client import _usage_from
+    from local_operator.model import configure
+
+    monkeypatch.setattr(configure, "refresh_model_info_background", lambda *_: None)
+    response: dict[str, Any] = {
+        "output": [],
+        "usage": {"input_tokens": 100_000, "output_tokens": 10_000},
+    }
+    if tier is not None:
+        response["service_tier"] = tier
+    body = _sse(
+        [
+            {"type": "response.created", "response": {"service_tier": "priority"}},
+            {"type": "response.completed", "response": response},
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        spec = _spec(provider="openai").model_copy(
+            update={"model_id": "gpt-6-astra", "supports_responses_api": True}
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=spec, messages=[Message.user("hi")]), "synthetic")
+        )
+    usage = next(event.usage for event in events if isinstance(event, StreamUsageEvent))
+    _, actual, cost_known = _usage_from(
+        usage, requested_provider="openai", requested_model_id="gpt-6-astra"
+    )
+    assert cost_known is known
+    assert actual == micros
+
+
+@pytest.mark.parametrize("model_id", ["gpt-7-synthetic", "gpt-4.1", "gpt-4o", "o3"])
+async def test_future_openai_response_tier_is_not_silently_legacy(model_id: str) -> None:
+    # Project-level Fast also applies to documented older models; neither
+    # those nor future models may silently infer an absent terminal tier.
+    body = _sse(
+        [
+            {
+                "type": "response.completed",
+                "response": {"output": [], "usage": {"input_tokens": 1, "output_tokens": 1}},
+            }
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        spec = _spec(provider="openai").model_copy(
+            update={"model_id": model_id, "supports_responses_api": True}
+        )
+        events = await _collect(
+            client.stream(ChatRequest(model=spec, messages=[Message.user("hi")]), "synthetic")
+        )
+    usage = next(event.usage for event in events if isinstance(event, StreamUsageEvent))
+    assert usage.openai_service_tier == "unknown"
+
+
+@pytest.mark.parametrize(("input_tokens", "known"), [(271_999, True), (272_000, False)])
+async def test_old_fast_tier_unquoted_boundary_is_unknown(
+    input_tokens: int, known: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.evaluation.runner.provider_client import _usage_from
+    from local_operator.model import configure
+    from local_operator.model.registry import ModelInfo
+
+    model = ModelInfo(
+        id="gpt-5.5",
+        name="synthetic",
+        description="synthetic",
+        input_price=5,
+        output_price=30,
+        cache_reads_price=0.5,
+    )
+    monkeypatch.setattr(configure, "resolve_model_info_paint", lambda *_: (model, True))
+    body = _sse(
+        [
+            {
+                "type": "response.completed",
+                "response": {
+                    "output": [],
+                    "service_tier": "priority",
+                    "usage": {"input_tokens": input_tokens, "output_tokens": 0},
+                },
+            }
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        spec = _spec("openai", "gpt-5.5").model_copy(update={"supports_responses_api": True})
+        events = await _collect(
+            client.stream(ChatRequest(model=spec, messages=[Message.user("hi")]), "synthetic")
+        )
+    usage = next(event.usage for event in events if isinstance(event, StreamUsageEvent))
+    _, _, cost_known = _usage_from(usage, requested_provider="openai", requested_model_id="gpt-5.5")
     assert cost_known is known
 
 

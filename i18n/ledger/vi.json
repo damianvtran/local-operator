@@ -3069,6 +3069,88 @@
     },
     {
       "locale": "vi",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. Auditor fixed 1 minor/nit (see record); 0 unresolved blocker/major. Target SHA-256 1005d04c04e7d7ab296adadd9e84e5d289c149801fe583bd21a94101da78f5f1. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). Auditor fixed 1 finding (see record); 0 unresolved blocker/major. Target SHA-256 ef5df2ec85967727273dc28df98681cbbac7162c432e712b412caac6dabc9314. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.highlights",
+      "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (relay.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the vi style guide. No findings. Arm other only ('# tệp không được hiển thị'); 'tệp' per vi guide; 'xem trước' matches 37 shipped vi keys; no space before ':'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.highlights",
+      "source_sha256": "cc19a5f6e319d21b5be6230957644e6182c5e760dbda1df88e2f79fe620c36af",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the vi style guide. No findings. Arm other only ('# tệp không được hiển thị'); 'tệp' per vi guide; 'xem trước' matches 37 shipped vi keys; no space before ':'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
       "namespace": "cli.team_bridge",
       "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
       "translator": {

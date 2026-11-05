@@ -1,5 +1,5 @@
 {
- "_comment": "Per-file test durations in seconds, used ONLY as relative weights to balance the CI shards. Regenerate with scripts/gen_test_durations.py; see scripts/shard_tests.py for why a file missing from this manifest still runs. Relay cwd-move weight added from run 41336683897, junit-e2e-ubuntu-latest-0.xml: three passing cases total 14.958s; existing weights and fallback unchanged. test_signal_drain_evidence_e2e.py weight 4.5 is a LOCAL measurement (7 passed; setup 4.12 + calls ~0.17 + teardowns, --durations=0 on macOS), not a CI junit sum: it spawns no runtime and exists so the fallback weight is not charged to it.",
+ "_comment": "Per-file test durations in seconds, used ONLY as relative weights to balance the CI shards. Regenerate with scripts/gen_test_durations.py; see scripts/shard_tests.py for why a file missing from this manifest still runs. Relay cwd-move weight added from run 41336683897, junit-e2e-ubuntu-latest-0.xml: three passing cases total 14.958s; existing weights and fallback unchanged. test_signal_drain_evidence_e2e.py weight 4.5 is a LOCAL measurement (7 passed; setup 4.12 + calls ~0.17 + teardowns, --durations=0 on macOS), not a CI junit sum: it spawns no runtime and exists so the fallback weight is not charged to it. Desktop Radient team-trial weight added from run 41829915943, junit-e2e-ubuntu-latest-1.xml: thirteen passing cases total 5.874s; existing weights and fallback unchanged.",
  "durations": {
   "tests/e2e/test_ask_tool_e2e.py": 2.925,
   "tests/e2e/test_browser_ownership.py": 1.0,
@@ -16,6 +16,7 @@
   "tests/e2e/test_desktop_mcp_oauth.py": 1.428,
   "tests/e2e/test_desktop_radient.py": 2.749,
   "tests/e2e/test_desktop_radient_statuses.py": 10.409,
+  "tests/e2e/test_desktop_radient_team_trial.py": 5.874,
   "tests/e2e/test_desktop_sessions.py": 9.371,
   "tests/e2e/test_desktop_spawn.py": 1.742,
   "tests/e2e/test_exec_startup_e2e.py": 49.924,

@@ -251,6 +251,15 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.health.reconnecting_detail": "Este tel\u00e9fono perdi\u00f3 la conexi\u00f3n con tu m\u00e1quina y sigue intentando reconectarse. Puede que la sesi\u00f3n siga ejecut\u00e1ndose all\u00ed; un env\u00edo puede fallar hasta que vuelva la conexi\u00f3n.",
     },
   },
+  "relay.highlights": {
+    "es": {
+      "relay.highlights.withheld.line": "{count, plural, one {# archivo no mostrado} many {# de archivos no mostrados} other {# archivos no mostrados}}: {reasons}",
+      "relay.highlights.withheld.reason.missing": "el archivo ya no existe",
+      "relay.highlights.withheld.reason.outside": "fuera de las ubicaciones permitidas",
+      "relay.highlights.withheld.reason.sensitive": "archivo confidencial",
+      "relay.highlights.withheld.reason.too_large": "demasiado grande para la vista previa",
+    },
+  },
   "relay.library": {
     "es": {
       "relay.library.count": "{count, plural, one {# recurso} many {# de recursos} other {# recursos}}",

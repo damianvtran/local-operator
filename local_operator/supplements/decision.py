@@ -59,6 +59,8 @@ NONE_OPTION: Final = "none"
 #: ``SupplementDecision.vendor`` when no vendor answered the files question and the no-vendor
 #: heuristic chose; ``"none"`` when no question was asked at all.
 HEURISTIC_VENDOR: Final = "heuristic"
+#: ``vendor`` when only ``deliver`` pins were featured and nothing was asked.
+PIN_VENDOR: Final = "pin"
 
 #: A non-top option joins the featured set only above this floor AND above half the top
 #: probability (memo §2.3).
@@ -125,6 +127,10 @@ class Decision:
     graphics_p: float = 0.0
     #: The answering vendor, :data:`HEURISTIC_VENDOR`, or ``"none"`` (nothing was asked).
     vendor: str = "none"
+    #: Qualifying files counted but not listed: unnamed sweep hits past the sweep's file
+    #: bound (``Prefilter.sweep_more``). Added to the row's ``files_more`` so the cut is
+    #: disclosed, never silent.
+    more_unlisted: int = 0
 
     @property
     def empty(self) -> bool:
@@ -514,7 +520,13 @@ def heuristic_files(candidates: Sequence[Candidate]) -> list[Candidate]:
     the cost is bounded by ``max_featured`` and by the pre-filter's own exclusions. Tier 3
     (merely NAMED in the answer) and source-code kinds stay out: no write evidence.
     """
-    chosen = [c for c in candidates if c.tier <= 2 and c.deliverable]
+    # Unnamed SWEPT audio is left to a vendor: with no one to judge it, staged clips
+    # (TTS chunks, stems) would otherwise become players nobody asked for (review R1-1).
+    chosen = [
+        c
+        for c in candidates
+        if c.tier <= 2 and c.deliverable and not (c.swept and c.kind == "audio")
+    ]
     chosen.sort(key=lambda c: (c.tier, -c.order, c.path))
     return chosen
 
@@ -550,6 +562,11 @@ async def decide(
     "yes" nothing can act on is waste, and C1a ships no generator. The structured-signal
     overrule is applied here, so a model "yes" over no evidence is a "no".
     """
+    # Pins bypass the decision entirely (contract: "always featured"): the agent said
+    # "show this", which no classifier may overrule, and a pinned path is never sent to a
+    # vendor as an option. They take the featured slots first; overflow goes to ``more``.
+    pins = [c for c in candidates if c.pinned] if want_files else []
+    candidates = [c for c in candidates if not c.pinned]
     literals = _egress_literals(candidates)
     options = option_ids(candidates) if want_files else {}
     ask_files = bool(options)
@@ -603,6 +620,12 @@ async def decide(
     else:
         more = ()
 
+    if pins:
+        cap = max(1, max_featured)
+        merged = pins + [c for c in featured if not c.pinned] + list(more)
+        featured, more = merged[:cap], tuple(merged[cap:])
+        if vendor == "none":
+            vendor = PIN_VENDOR
     graphics_p, graphics = apply_graphics(graphics_answer, evidence)
     if graphics_answer is not None and vendor == "none":
         vendor = str(getattr(service, "vendor_name", None) or "unknown")

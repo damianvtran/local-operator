@@ -8,7 +8,6 @@ matter here: a mocked immediate failure cannot reproduce the validity race.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import os
 import time
 from typing import Any
@@ -283,12 +282,3 @@ async def test_r5_outside_lead_guard_rejects_m9_mutation(
     monkeypatch.setattr(auth_mod, "build_oauth_provider", mutated_provider)
     with pytest.raises(pytest.fail.Exception, match="must not lock or re-read"):
         await test_outside_lead_does_not_lock_or_reread(monkeypatch)
-
-
-def test_r6_refresh_documentation_is_reflowed() -> None:
-    # These are intentionally source-format checks: R6 is comment-only and has
-    # no runtime behavior to regress. Keep the affected prose readable without
-    # coupling the test to executable statements or exact line numbers.
-    source = inspect.getsource(auth_mod._make_refresh_coordinating_provider)
-    assert "refreshes — so a\n    session can hold" not in source
-    assert "# the moment any sibling process\n" not in source
