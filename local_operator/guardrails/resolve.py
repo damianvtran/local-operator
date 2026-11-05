@@ -244,8 +244,15 @@ def _ansi_c_end(text: str, i: int) -> int:
     return -1
 
 
-def scan(segment: str) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
-    """Split one segment into raw words and ``(operator, target)`` redirections."""
+def scan(
+    segment: str, *, heredoc: bool = False
+) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
+    """Split a segment, or tokenize expansion-active heredoc data.
+
+    Heredoc data has literal quotes/operators/comments but the SAME dollar,
+    backtick and escape rules below. Reuse those readers, not another shell
+    scanner that could disagree about private-variable references (R19-1).
+    """
     words: list[_RawWord] = []
     redirects: list[tuple[str, _RawWord]] = []
     cur: _RawWord | None = None
@@ -266,6 +273,12 @@ def scan(segment: str) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
 
     while i < n:
         ch = segment[i]
+        if heredoc and ch not in "$\\`":
+            if cur is None:
+                cur = _RawWord()
+            cur.add("sq", ch)
+            i += 1
+            continue
         if ch.isspace():
             finish()
             i += 1
@@ -354,7 +367,7 @@ def scan(segment: str) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
                 cur.add("sq", segment[i + 1])
             i += 2
             continue
-        if ch == "$" and segment[i + 1 : i + 2] == "'":
+        if not heredoc and ch == "$" and segment[i + 1 : i + 2] == "'":
             # ANSI-C quoting: decoded, then literal (R5).
             end = _ansi_c_end(segment, i + 2)
             if end == -1:
@@ -364,7 +377,7 @@ def scan(segment: str) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
                 cur.add("sq", _decode_ansi_c(segment[i + 2 : end]))
                 i = end + 1
             continue
-        if ch == "$" and segment[i + 1 : i + 2] == '"':
+        if not heredoc and ch == "$" and segment[i + 1 : i + 2] == '"':
             # Locale translation ``$"…"`` behaves as a double-quoted string.
             i += 1
             continue
@@ -596,10 +609,50 @@ def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: i
         if not value:
             out.empty.append(f"${{{name}{op}…}} expanded empty")
         return value
-    # ``${#X}``, ``${X%…}``, ``${X/…}``, ``${X:+…}``, ``$1``, ``$@``…: runtime values.
+    # Unsupported operations remain unknown, but they still read their base
+    # parameter. Never evaluate a private value to implement the operation.
+    # A known indirect NAME can be followed without inventing Bash evaluation.
+    base = inner.lstrip("#!")
+    name = _NAME_RE.match(base)
+    private = False
+    if name is not None:
+        value = env.get(name.group(), "")
+        if inner.startswith("!") and _NAME_RE.fullmatch(value):
+            value = env.get(value, "")
+        private = CREDENTIAL_MARK in value or _private_reads(
+            base[name.end() :], env, home, depth + 1
+        )
     out.opaque = True
     out.opaque_contained = False
-    return OPAQUE_MARK
+    return CREDENTIAL_MARK if private else OPAQUE_MARK
+
+
+def _private_reads(body: str, env: Mapping[str, str], home: str, depth: int) -> bool:
+    """Explicit expansion dependencies, not arbitrary program-output dataflow.
+
+    R19-1: a substitution's output stays opaque, but a parsed private read must
+    survive on that VALUE. The existing lexer owns comments/body attribution;
+    the existing tokenizer owns quotes/escapes. Literal heredoc data and quoted
+    symbols are not reads. Nothing here walks or taints an unrelated target.
+    """
+    if "$" not in body and "`" not in body:
+        return False
+    parsed = lex(body)
+    for (segment, _piped, _op), bodies in zip(parsed.segments, parsed.bodies):
+        words, redirects = scan(segment)
+        active = words + [raw for op, raw in redirects if op not in ("<<", "<<-")]
+        if any(CREDENTIAL_MARK in expand_one(w.parts, env, home, depth).text for w in active):
+            return True
+        delimiters = [raw for op, raw in redirects if op in ("<<", "<<-")]
+        for delimiter, data in zip(delimiters, bodies):
+            if any(part.kind != "bare" for part in delimiter.parts):
+                continue
+            data_words, _ = scan(data, heredoc=True)
+            if any(
+                CREDENTIAL_MARK in expand_one(w.parts, env, home, depth).text for w in data_words
+            ):
+                return True
+    return False
 
 
 def expand_one(
@@ -628,8 +681,9 @@ def expand_one(
             out.opaque_contained = out.opaque_contained and _contained_body(body)
             if _is_mktemp(body):
                 out.temp = True
-            text_parts.append(OPAQUE_MARK)
-            pattern_parts.append(OPAQUE_MARK)
+            marker = CREDENTIAL_MARK if _private_reads(body, env, home, depth + 1) else OPAQUE_MARK
+            text_parts.append(marker)
+            pattern_parts.append(marker)
             continue
         if part.kind == "sq":
             text_parts.append(part.text)

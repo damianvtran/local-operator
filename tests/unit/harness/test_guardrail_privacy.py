@@ -28,6 +28,147 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+# R19-1: the reviewer's bounded matrix, never executed as shell payloads.
+# Private output dependencies must survive unsupported transforms, while
+# quoted data and opaque output with no explicit private read stay judgeable.
+PROVENANCE_CASES = [
+    ("default", 'rm -rf "/tmp/${OPENAI_API_KEY:-fallback}"', True, "HIGH", 0, True),
+    ("pattern", 'rm -rf "/tmp/${OPENAI_API_KEY%unused}"', True, "HIGH", 0, True),
+    ("substring", 'rm -rf "/tmp/${OPENAI_API_KEY:0:4}"', True, "HIGH", 0, True),
+    ("replace", 'rm -rf "/tmp/${OPENAI_API_KEY/a/b}"', True, "HIGH", 0, True),
+    ("length", 'rm -rf "/tmp/${#OPENAI_API_KEY}"', True, "HIGH", 0, True),
+    ("known-indirect", 'rm -rf "/tmp/${!KEY_NAME}"', True, "HIGH", 0, True),
+    ("alias-subshell", 'A="${OPENAI_API_KEY%unused}"; (rm -rf "/tmp/$A")', True, "HIGH", 0, True),
+    (
+        "alias-pipeline",
+        'A="${OPENAI_API_KEY%unused}"; printf x | xargs rm -rf "/tmp/$A"',
+        True,
+        "CRITICAL",
+        0,
+        True,
+    ),
+    ("printf-substitution", 'rm -rf "/tmp/$(printf %s "$OPENAI_API_KEY")"', True, "HIGH", 0, True),
+    (
+        "cat-unquoted-heredoc",
+        'rm -rf "/tmp/$(cat <<EOF\n$OPENAI_API_KEY\nEOF\n)"',
+        True,
+        "HIGH",
+        0,
+        True,
+    ),
+    (
+        "cat-quoted-heredoc",
+        "rm -rf \"/tmp/$(cat <<'EOF'\n$OPENAI_API_KEY\nEOF\n)\"",
+        False,
+        "HIGH",
+        1,
+        False,
+    ),
+    ("quoted-literal-target", "rm -f '/tmp/$OPENAI_API_KEY'", False, "LOW", 0, False),
+    (
+        "quoted-data-comment",
+        "# $OPENAI_API_KEY comment\nprintf '%s' '$OPENAI_API_KEY'; "
+        'rm -f "$LOCAL_OPERATOR_SCRATCHPAD/file.tmp"',
+        False,
+        "LOW",
+        0,
+        False,
+    ),
+    (
+        "nonpath-private-arg",
+        'printf %s "$OPENAI_API_KEY"; rm -f "$LOCAL_OPERATOR_SCRATCHPAD/file.tmp"',
+        False,
+        "LOW",
+        0,
+        False,
+    ),
+    (
+        "opaque-no-private-reference",
+        'rm -rf "/tmp/$(some-unsupported-program)"',
+        False,
+        "HIGH",
+        1,
+        False,
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case,command,private,risk,judge_count,blocked",
+    PROVENANCE_CASES,
+    ids=[row[0] for row in PROVENANCE_CASES],
+)
+async def test_r19_value_provenance_matrix(
+    home, monkeypatch, case, command, private, risk, judge_count, blocked
+):
+    from local_operator.guardrails.classify import classify_bash
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.builtin import bash_guard_environment
+
+    monkeypatch.setenv("OPENAI_API_KEY", CANARY)
+    monkeypatch.setenv("KEY_NAME", "OPENAI_API_KEY")
+    context = ToolContext(
+        cwd=str(home),
+        session_id="own",
+        scratchpad_dir=str(home / ".local-operator/sessions/own/scratchpad"),
+    )
+    env, scratchpad = bash_guard_environment(context)
+    verdict = classify_bash(
+        command,
+        cwd=context.cwd,
+        env=env,
+        scratchpad=scratchpad,
+        session_id="own",
+    )
+    calls = []
+
+    async def allow(*args):
+        calls.append(args)
+        return "ALLOW"
+
+    result, executed = await _run(home, command, judge=allow)
+    observed = {
+        "risk": verdict.risk.name,
+        "private": any(row.target.credential_derived for row in verdict.targets),
+        "judge": len(calls),
+        "spy": len(executed),
+        "blocked": result.is_error,
+    }
+    assert observed == {
+        "risk": risk,
+        "private": private,
+        "judge": judge_count,
+        "spy": 0 if blocked else 1,
+        "blocked": blocked,
+    }
+    assert CANARY not in str(calls) and CANARY not in _text(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command,private",
+    [
+        ('rm -rf "/tmp/$(cat <<EOF\nit\'s $OPENAI_API_KEY\nEOF\n)"', True),
+        ('rm -rf "/tmp/$(cat <<EOF\n# $OPENAI_API_KEY\nEOF\n)"', True),
+        ('rm -rf "/tmp/$(cat <<EOF\n\\$OPENAI_API_KEY\nEOF\n)"', False),
+        ('rm -rf "/tmp/$(printf ok; # $OPENAI_API_KEY\n)"', False),
+    ],
+)
+async def test_r19_expansion_active_data_respects_ownership(home, monkeypatch, command, private):
+    monkeypatch.setenv("OPENAI_API_KEY", CANARY)
+    calls = []
+
+    async def allow(*args):
+        calls.append(args)
+        return "ALLOW"
+
+    result, executed = await _run(home, command, judge=allow)
+    assert result.is_error is private
+    assert len(calls) == (0 if private else 1)
+    assert len(executed) == (0 if private else 1)
+
+
 CANARY = "synthetic-guard-privacy-canary-47f2d9"
 COMMAND = 'rm -rf "$HOME/$OPENAI_API_KEY"'
 
