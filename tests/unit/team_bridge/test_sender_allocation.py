@@ -60,7 +60,7 @@ def _provider(
                 ).encode()
             )
 
-        def log_message(self, *_args):
+        def log_message(self, format, *args):
             pass
 
     real_transport = httpx.AsyncHTTPTransport
@@ -360,6 +360,7 @@ def test_pair_allocation_uses_stored_participant_not_display_sender(tmp_path):
     item["sender"]["account_id"] = "display-spoof"
     envelope, refusal = validate_envelope(owner, item)
     assert refusal is None
+    assert envelope is not None
     assert (envelope.sender_account, envelope.sender_kind) == ("stored-sender", "agent")
 
 
