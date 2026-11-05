@@ -1,0 +1,9 @@
+{
+  "cli.skills_push.stale_base": "ہب اب {head} پر ہے، جو اس لنک کے push کی بنیادی ریویژن {base} سے آگے ہے، اس لیے کچھ شائع نہیں کیا گیا: پرانی بنیادی ریویژن سے merge کرنے پر وہ متن دوبارہ شائع ہو سکتا ہے جسے ہب اس دوران بدل چکا ہے۔",
+  "cli.skills_push.stale_base_next": "اگلا محفوظ قدم: push کی بنیادی ریویژن اب ہب کی تازہ ترین ریویژن {head} کی طرف اشارہ کرتی ہے۔ `lop skills sync --name {name} --check` سے ہب کی تبدیلیاں دیکھیں، پھر `lop skills push {name}` دوبارہ چلائیں؛ آپ کی مقامی ترامیم ہب کی موجودہ دستاویز پر دوبارہ لاگو کی جائیں گی۔",
+  "cli.skills_push.stale_base_bundle_next": "اگلا محفوظ قدم: `lop skills sync --name {name}` سے ہب کی فائلوں کا درخت اپنی نقل میں لائیں، اپنی تبدیلی دوبارہ لاگو کریں، پھر `lop skills push {name}` دوبارہ چلائیں۔",
+  "cli.skills_push.merge_refused_next": "اگلا محفوظ قدم: push کی بنیادی ریویژن اب ہب کی تازہ ترین ریویژن{head} کی طرف اشارہ کرتی ہے۔ ہب کی تبدیلیاں اپنی نقل میں لانے کے لیے `lop skills sync --name {name}` چلائیں (بتائے گئے تمام تنازعات حل کریں)، اپنی ترمیم کھو گئی ہو تو دوبارہ لاگو کریں، پھر `lop skills push {name}` چلائیں۔ ہب کے متن پر پرانا ورژن نہ لکھیں۔",
+  "cli.skills_push.verified": "تصدیق ہو گئی: ہب کی تازہ ترین ریویژن {revision} میں بالکل وہی دستاویز موجود ہے جو اس push نے بھیجی تھی۔",
+  "cli.skills_push.verify_mismatch": "انتباہ: ہب کی تازہ ترین ریویژن {revision} اس push کی بھیجی ہوئی دستاویز سے مطابقت نہیں رکھتی؛ ہب میں اب مختلف مواد ہو سکتا ہے۔ دوبارہ push کرنے سے پہلے `lop skills sync --name {name} --check` سے اسے جانچیں۔",
+  "cli.skills_push.verify_unavailable": "تصدیق نہیں ہوئی: push کے بعد ہب کو دوبارہ نہیں پڑھا جا سکا ({reason})۔ `lop skills sync --name {name} --check` سے اسے جانچیں۔"
+}

@@ -3221,6 +3221,27 @@
       "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     },
     {
+      "locale": "es",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and es style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. ES-1 MINOR fixed: stale_base configured-link noun enlace -> vínculo, as mandated by es style guide Locale calls; hyperlink wording is not applicable. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 2c257d33a13d6c9ee68ae53921ef7f70823cc17b0b61167b5263089eea735af7."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -6417,6 +6438,27 @@
       },
       "status": "passed",
       "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and fr style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 1c9525860e5e9e62719a1e24a3b4a497ecfc3aedeedba3ba85126f8fbd11c248."
     },
     {
       "locale": "hi",
@@ -9670,6 +9712,48 @@
       },
       "status": "passed",
       "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and hi style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 92638c1d8d6a6fc9ab3adf8580e27919fca27b8a2c82057e293d99524a07f2d7."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. HI-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 765b4ed52c2b9ee12704e69ebf9c0c6df75010a2c59aeb5bb0013f0df17c5ca8."
     },
     {
       "locale": "ru",
@@ -12964,6 +13048,48 @@
       "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     },
     {
+      "locale": "ru",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and ru style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 5eb590271032e34c145db12ffc1a49b7345245493e23a88eb3dd91e26ec92bbb."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. RU-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 c80f4bb3dcb8d438130177a24ec6b1c5171b734e91819ef58a1f3724e418fccd."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -16015,6 +16141,48 @@
       },
       "status": "passed",
       "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and ur style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 4b54bd7e13ad821987098e30b0787e416f5fce2113a9e612ad0438d279d89e23."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. UR-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 30c041dbea945934f091c424d6186162300f3ea190b59f453dc8ed5eafb94536."
     },
     {
       "locale": "vi",
@@ -19330,6 +19498,27 @@
       "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     },
     {
+      "locale": "vi",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and vi style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 ac05e4ee230572f9cf6cf4622b14f136ff8db62c509bc38937d0bbd9ea6fd8b2."
+    },
+    {
       "locale": "zh-CN",
       "namespace": "cli.agents_help",
       "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
@@ -22307,6 +22496,48 @@
       },
       "status": "passed",
       "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and zh-CN style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 6bb8e99a3857c81e1bf76ca7cf462e9f50f204a3d691e78afc17bf939ebbdc65."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. ZH-CN-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 16757d2069cf0ce4693a0ccea0133e0e3d3a76b4ca61777b2a06081390d87732."
     }
   ]
 }
