@@ -347,3 +347,253 @@ def test_inactive_namespace_evicts_all_slots_until_fresh_owner(mesh, monkeypatch
         "SAFETY inactive_denied=True reactivated_old_slots_refused=True "
         "sibling_fenced=True local_safe_preserved=True fresh_owner_then_hold=True"
     )
+
+
+@pytest.mark.parametrize("damage", ["malformed", "unreadable", "missing", "incarnation"])
+def test_established_deny_store_unknown_never_holds(mesh, damage):
+    import json
+
+    c, _ = seed(mesh)
+    policy = c._policy()
+    raw = policy.path.read_bytes()
+    h._stop_owner(mesh)
+    try:
+        if damage == "malformed":
+            policy.path.write_text("not-json")
+        elif damage == "unreadable":
+            policy.path.chmod(0)
+        elif damage == "missing":
+            policy.path.unlink()
+        else:
+            doc = json.loads(raw)
+            doc["incarnation"] = "a" * 32
+            policy.path.write_text(json.dumps(doc))
+        result = c.request_grant_sync(KEY, session_id="sess-A")
+        assert isinstance(result, BrokerError)
+        assert result.code == "consent_unverifiable"
+        assert c.grants.peek(KEY, "sess-A") is None
+    finally:
+        if policy.path.exists():
+            policy.path.chmod(0o600)
+        policy.path.write_bytes(raw)
+        policy.path.chmod(0o600)
+
+
+def test_leg_two_late_positive_cannot_clear_new_deny(mesh, monkeypatch):
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from local_operator.network.credentials.state import PlacementState
+
+    c, _ = seed(mesh)
+    original = MeshCredentialClient._detail_from_owner
+    injected = False
+
+    def late(self, reply, key, label, **kwargs):
+        nonlocal injected
+        if not injected and reply.get("detail", {}).get("kind") == "grant":
+            injected = True
+            other = PlacementState.load(mesh.network_id, mesh.b.root)
+            other.observe(KEY, "consent_withdrawn", owner_device=mesh.owner)
+            other.save()
+        return original(self, reply, key, label, **kwargs)
+
+    monkeypatch.setattr(MeshCredentialClient, "_detail_from_owner", late)
+    result = c.request_grant_sync(KEY, session_id="sess-late")
+    assert injected and isinstance(result, BrokerError)
+    assert c.grants.peek(KEY, "sess-late") is None
+
+
+@pytest.mark.parametrize("same_key", [False, True])
+def test_deny_store_physical_writers_and_fresh_reader(tmp_path, same_key):
+    import json
+    import subprocess
+    import sys
+    import time
+
+    from local_operator.network.credentials.held_policy import HeldPolicyStore
+
+    policy = HeldPolicyStore("n_process", "d_recipient", tmp_path)
+    with policy.transaction(initialize=True):
+        pass
+    # Each PHYSICAL interpreter reads BEFORE either write; transactions must
+    # reread under thread+flock locks rather than write those stale snapshots.
+    bootstrap = """import socket,sys,time,pathlib,json
+socket.socket.connect=lambda *a,**k: (_ for _ in ()).throw(RuntimeError('no network'))
+socket.getaddrinfo=lambda *a,**k: (_ for _ in ()).throw(RuntimeError('no DNS'))
+from local_operator.network.credentials.held_policy import HeldPolicyStore
+p=HeldPolicyStore('n_process','d_recipient',pathlib.Path(sys.argv[1]))
+"""
+    writer = bootstrap + """
+with p.transaction():pass
+pathlib.Path(sys.argv[2]).write_text('ready')
+end=time.monotonic()+8
+while not pathlib.Path(sys.argv[3]).exists():
+ if time.monotonic()>end:raise RuntimeError('barrier timeout')
+ time.sleep(.01)
+with p.transaction() as d:p.deny(d,'d_owner',sys.argv[4],'consent_withdrawn')
+"""
+    go = tmp_path / "go"
+    processes = []
+    try:
+        for index, key in enumerate(["key-A", "key-A" if same_key else "key-B"]):
+            ready = tmp_path / f"ready-{index}"
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", writer, str(tmp_path), str(ready), str(go), key]
+                )
+            )
+        end = time.monotonic() + 8
+        while not all((tmp_path / f"ready-{i}").exists() for i in range(2)):
+            assert time.monotonic() < end, "physical writer bootstrap did not finish"
+            time.sleep(0.01)
+        go.write_text("go")
+        assert all(proc.wait(timeout=10) == 0 for proc in processes)
+        # A THIRD fresh interpreter must observe BOTH increments, not parent
+        # memory or a copied JSON expectation. No grant material enters stdout.
+        reader = bootstrap + """
+with p.transaction() as d:print(json.dumps({r['key']:r['generation'] for r in d['entries']}))
+"""
+        out = subprocess.check_output([sys.executable, "-c", reader, str(tmp_path)], text=True)
+        generations = json.loads(out)
+        assert generations == ({"key-A": 2} if same_key else {"key-A": 1, "key-B": 1})
+        print("PHYSICAL_FRESH_READER", json.dumps(generations, sort_keys=True))
+    finally:
+        for proc in processes:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=5)
+
+
+def test_deny_store_thread_writers_and_namespace_binding(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from local_operator.network.credentials.held_policy import (
+        HeldPolicyStore,
+        PolicyUnknown,
+    )
+
+    policy = HeldPolicyStore("n_threads", "d_self", tmp_path)
+    with policy.transaction(initialize=True):
+        pass
+
+    def write(index):
+        with policy.transaction() as doc:
+            policy.deny(doc, "d_owner", "key-A", "consent_withdrawn")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(write, range(2)))
+    with policy.transaction() as doc:
+        assert policy.stamp(doc, "d_owner", "key-A").key_generation == 2
+        assert policy.stamp(doc, "other-owner", "key-A").key_generation == 0
+        assert policy.stamp(doc, "d_owner", "other-key").key_generation == 0
+    with pytest.raises(PolicyUnknown):
+        with HeldPolicyStore("n_threads", "other-recipient", tmp_path).transaction():
+            pass
+
+
+@pytest.mark.parametrize("other_key", [False, True])
+def test_stale_diagnostic_save_cannot_erase_durable_deny(mesh, monkeypatch, other_key):
+    from contextlib import contextmanager
+
+    from local_operator.network import store
+    from local_operator.network.credentials.state import PlacementState
+
+    c, _ = seed(mesh)
+    stale = PlacementState.load(mesh.network_id, mesh.b.root)
+    stale.observe("other-key" if other_key else KEY, "owner_offline", owner_device=mesh.owner)
+    original = store._write_lock
+    armed = True
+
+    @contextmanager
+    def barrier(path):
+        nonlocal armed
+        if path == stale.path and armed:
+            armed = False
+            fresh = PlacementState.load(mesh.network_id, mesh.b.root)
+            fresh.observe(KEY, "consent_withdrawn", owner_device=mesh.owner)
+            fresh.observe("other-key", "consent_withdrawn", owner_device="other-owner")
+            fresh.save()
+        with original(path):
+            yield
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_write_lock", barrier)
+        stale.save()
+    assert not armed
+    with c._policy().transaction() as document:
+        assert c._policy().code(document, mesh.owner, KEY) == "consent_withdrawn"
+        assert c._policy().code(document, "other-owner", "other-key") == "consent_withdrawn"
+    h._stop_owner(mesh)
+    assert isinstance(c.request_grant_sync(KEY, session_id="sess-A"), BrokerError)
+
+
+def test_leg_one_late_positive_and_fresh_owner_recovery(mesh, monkeypatch):
+    from local_operator.network.credentials.state import PlacementState
+
+    c, _ = seed(mesh)
+    original = c._from_reply
+    injected = False
+
+    def late(reply, *args, **kwargs):
+        nonlocal injected
+        if not injected and reply.get("detail", {}).get("kind") == "grant":
+            injected = True
+            fresh = PlacementState.load(mesh.network_id, mesh.b.root)
+            fresh.observe(KEY, "consent_withdrawn", owner_device=mesh.owner)
+            fresh.save()
+        return original(reply, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(c, "_from_reply", late)
+        result = c.request_grant_sync(KEY, session_id="late")
+    assert injected and isinstance(result, BrokerError)
+    assert c.grants.peek(KEY, "late") is None
+    recovered = c.request_grant_sync(KEY, session_id="fresh")
+    assert isinstance(recovered, Grant) and not recovered.held_offline
+    h._stop_owner(mesh)
+    held = c.request_grant_sync(KEY, session_id="fresh")
+    assert isinstance(held, Grant) and held.held_offline
+    assert held.grant_expires_at_ms == recovered.grant_expires_at_ms
+    assert isinstance(c.request_grant_sync(KEY, session_id="sess-A"), BrokerError)
+
+
+def test_final_membership_checkpoint_fences_other_client_memory(mesh, monkeypatch):
+    import time
+
+    from local_operator.network import store
+
+    c, _ = seed(mesh)
+    sibling = h._client(mesh)
+    assert isinstance(sibling.request_grant_sync(KEY, session_id="sibling"), Grant)
+    h._stop_owner(mesh)
+    original = c._self_membership_active
+    reads = 0
+
+    def membership():
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            with store.mutate(mesh.network_id, mesh.b.root) as record:
+                member = record.self_member()
+                assert member is not None
+                member.removed_at = time.time()
+                store.save(record, mesh.b.root)
+        return original()
+
+    monkeypatch.setattr(c, "_self_membership_active", membership)
+    # Enter the held selector directly so only ITS two checkpoints count;
+    # request dispatch has its own earlier membership read and is not this race.
+    result = c._held_or(
+        BrokerError(code="owner_offline", key=KEY), KEY, "sess-A", force_refresh=False
+    )
+    assert reads == 2 and isinstance(result, BrokerError)
+    assert result.code == "not_a_holder"
+    with c._policy().transaction() as document:
+        assert document["network_generation"] == 1
+    with store.mutate(mesh.network_id, mesh.b.root) as record:
+        member = record.self_member()
+        assert member is not None
+        member.removed_at = 0
+        store.save(record, mesh.b.root)
+    result = sibling.request_grant_sync(KEY, session_id="sibling")
+    assert isinstance(result, BrokerError)
+    assert sibling.grants.peek(KEY, "sibling") is None

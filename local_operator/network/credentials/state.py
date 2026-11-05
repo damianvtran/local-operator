@@ -210,6 +210,41 @@ class PlacementState:
         stated. The owner's number is recorded separately, absent when none was
         sent, and is the only one a countdown may ever show.
         """
+        # Diagnostics may still be saved by old/stale instances. Restrictive
+        # evidence lives separately and is committed before this best-effort row.
+        if status not in {
+            "active",
+            "owner_offline",
+            "owner_unreachable",
+            "internal",
+            "rate_limited",
+            "quota_blocked",
+            "unsupported",
+        }:
+            from local_operator.network import store
+            from local_operator.network.credentials.held_policy import HeldPolicyStore
+
+            try:
+                record = store.load(self.network_id, self.root)
+                member = record.self_member()
+                recipient = member.device_id if member is not None else ""
+            except (FileNotFoundError, ValueError):
+                recipient = ""
+            if recipient:
+                policy = HeldPolicyStore(self.network_id, recipient, self.root)
+                if policy.path.exists() or policy.marker.exists():
+                    with policy.transaction() as document:
+                        owner = owner_device
+                        if not owner:
+                            from local_operator.network.credentials.placement import (
+                                PlacementDocument,
+                            )
+
+                            entry = PlacementDocument.load(
+                                self.network_id, self.root, self_device=recipient
+                            ).entry(key)
+                            owner = entry.owner_device if entry else ""
+                        policy.deny(document, owner, key, status)
         fence = self._held_fence_fields(key)
         if status not in {
             "active",
