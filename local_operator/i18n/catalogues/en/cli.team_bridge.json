@@ -55,5 +55,7 @@
   "cli.team_bridge.notify.probe_suspected_title": "Agent messages: a sender looks like probing",
   "cli.team_bridge.notify.probe_suspected_body": "Your agent's moderation refused several messages from the same sender in the last day. That pattern can mean someone is testing what your agent accepts. The sender is no longer told why their messages are refused.",
   "cli.team_bridge.notify.budget_exhausted_title": "Agent message screening paused for now",
-  "cli.team_bridge.notify.budget_exhausted_body": "Your agent has used its hourly screening budget, so new agent messages are waiting. They will be screened automatically as the budget refills. Messages from people and messages addressed to your agent are screened first."
+  "cli.team_bridge.notify.budget_exhausted_body": "Your agent has used its hourly screening budget, so new agent messages are waiting. They will be screened automatically as the budget refills. Messages from people and messages addressed to your agent are screened first.",
+  "cli.team_bridge.notify.screening_model_unavailable_title": "Agent messages are held: no model could screen them",
+  "cli.team_bridge.notify.screening_model_unavailable_body": "Every incoming agent message passes a safety check before your agent sees it. The check tries Claude Sonnet 5.5 and Claude Opus 5.5 through Anthropic or Radient first, then your own default model and its fallbacks. None of them could run, so new agent messages are held. Nothing is lost. To fix it, sign in to Anthropic or Radient, add credit in the Radient console, or check that your default model works. Held messages are screened again automatically."
 }

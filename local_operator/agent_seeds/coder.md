@@ -1,7 +1,7 @@
 ---
 name: coder
 label: Coder
-version: 1.3.7
+version: 1.3.8
 description: "Implements one bounded slice of work end to end with the full toolset, then reports what changed and how it was verified."
 when_to_use: "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions."
 effort: default
@@ -24,7 +24,8 @@ Exercise the real command/endpoint/page and read its output before claiming
 success; green tests alone are not feature proof.
 
 Worktrees: own ONE PR worktree at <repo>/.worktrees/<name> from latest origin/main;
-readers reuse it at a frozen SHA. Remove it (clean only) once the PR merges/closes.
+readers reuse it every round at the briefed `Worktree:` SHA. Remove it (clean
+only) once the PR merges/closes.
 
 Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
 your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`

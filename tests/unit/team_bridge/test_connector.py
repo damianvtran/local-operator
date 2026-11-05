@@ -41,6 +41,33 @@ from local_operator.team_bridge.types import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fixture_models_are_evaluated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admit this file's FIXTURE models to the screening allowlist.
+
+    These tests pin the connector's screening plumbing on stand-in models; which model MAY screen is
+    policy, pinned against the real closed table in
+    ``test_screening_model_allowlist.py``. Without this every fixture default
+    (``openai/gpt-5.4`` ...) would fail closed before the mechanism under test
+    ran.
+    """
+
+    from local_operator.team_bridge import model_boundary
+
+    fixtures = (("openai", "gpt-5.4"), ("openai", "gpt-5.4-mini"))
+    monkeypatch.setattr(
+        model_boundary,
+        "SCREENING_EVALUATED_MODELS",
+        fixtures + model_boundary.SCREENING_EVALUATED_MODELS,
+    )
+    # Every fixture provider is "signed in": the chain walks credentialed pairs.
+    monkeypatch.setattr(
+        model_boundary,
+        "_credentialed_providers",
+        lambda _config_dir: {provider for provider, _model in fixtures},
+    )
+
+
 def _access(owner: Any) -> SimpleNamespace:
     """The authenticated access double the producer fence PINS (TB-14).
 
@@ -1893,7 +1920,18 @@ async def message(owner, message_id, *, config_dir, access, client=None):
     return SimpleNamespace(message_id=message_id)
 
 async def fetch(owner, message_id, *, config_dir, access, auth_store):
-    return {"message": {"id": message_id}}
+    import hashlib
+    # Recovery now validates the envelope before consulting an unsent receipt.
+    # This stop-signal rig must reach screen(), not hold on malformed input.
+    body = "stop-signal fixture"
+    return {
+        "message": {
+            "id": message_id, "type": "note", "body": {"text": body},
+            "body_hash": hashlib.sha256(body.encode()).hexdigest(),
+        },
+        "sender": {"account_id": "acc_sender"},
+        "thread": {"tenant_id": owner.tenant_id},
+    }
 
 async def screen(owner, item, *, config_dir, auth_store, settings=None):
     marker.write_text("in-spine")  # the claim is held from here on
@@ -2932,7 +2970,7 @@ def _run_recovery_cell(
 
     # -- while the device is down (a compound change applies each part) ----
     for part in change.split("+"):
-        owner = _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path)
+        owner = _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path, monkeypatch)
 
     out: dict[str, Any] = {}
     drive(owner)
@@ -2955,7 +2993,9 @@ def _run_recovery_cell(
     return out
 
 
-def _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path) -> OwnerSnapshot:
+def _apply_matrix_change(
+    part, store, owner, status, hub, sender, tmp_path, monkeypatch
+) -> OwnerSnapshot:
     """One change while the device is down; returns the (possibly new) owner."""
 
     if part == "none":
@@ -2964,7 +3004,15 @@ def _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path) -> O
         sender["name"] = "Org Member (renamed)"
         return owner
     if part == "model":
-        _matrix_config(tmp_path, "gpt-5.4-mini")  # a ``lop`` update moved the default
+        # A ``lop`` update moved the SCREENING model: the chat default no longer
+        # picks it, so the change is the allowlist's first entry.
+        from local_operator.team_bridge import model_boundary as boundary_mod
+
+        monkeypatch.setattr(
+            boundary_mod,
+            "SCREENING_EVALUATED_MODELS",
+            (("openai", "gpt-5.4-mini"),) + boundary_mod.SCREENING_EVALUATED_MODELS,
+        )
         return owner
     if part == "relogin":
         owner = OwnerSnapshot(
@@ -3145,7 +3193,13 @@ def test_recovery_matrix_request_across_a_policy_republish(tmp_path, monkeypatch
     assert recorded is not None and recorded["state"] == "confirmed"
     request_calls = len(model_calls)
 
-    _matrix_config(tmp_path, "gpt-5.4-mini")  # an update changes the default model
+    # An update changes the SCREENING model. The chat default no longer picks
+    # it (the screener is the allowlist walked in order), so the change is the
+    # table's first entry, which is what republishes the policy.
+    table = boundary_mod.SCREENING_EVALUATED_MODELS
+    monkeypatch.setattr(
+        boundary_mod, "SCREENING_EVALUATED_MODELS", (("openai", "gpt-5.4-mini"),) + table
+    )
     publish_by_screening("bmsg_8")
     for _ in range(4):
         _iterate(owner, tmp_path, access)
@@ -3153,7 +3207,7 @@ def test_recovery_matrix_request_across_a_policy_republish(tmp_path, monkeypatch
     refused = len(record["delivered"])
     held = store.screening_hold(owner, "bmsg_1")
 
-    _matrix_config(tmp_path, "gpt-5.4")  # rolled back
+    monkeypatch.setattr(boundary_mod, "SCREENING_EVALUATED_MODELS", table)  # rolled back
     publish_by_screening("bmsg_9")
     for _ in range(4):
         _iterate(owner, tmp_path, access)
