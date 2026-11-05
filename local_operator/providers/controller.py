@@ -3392,7 +3392,18 @@ class ProviderController:
             local_controller = (
                 self if local is self.auth_store else ProviderController(local, self.config_dir)
             )
-            engaged = local_controller._engaged_providers()
+            try:
+                engaged = local_controller._engaged_providers()
+            except Exception:  # noqa: BLE001 - cannot prove "not local"
+                # This is a PRECEDENCE pre-check, not the authority itself: it
+                # asks whether a local credential already owns the provider so
+                # a machine share never outranks it. A store that cannot
+                # enumerate (a stand-in controller, a damaged store) leaves the
+                # answer unknown, and unknown must read exactly like "locally
+                # engaged": leave the share unconsulted rather than raise out
+                # of a listing route. `usable_providers` keeps its narrow
+                # contract of raising on genuine programming errors.
+                return None
             if engaged is None or provider in engaged:
                 return None
         try:
