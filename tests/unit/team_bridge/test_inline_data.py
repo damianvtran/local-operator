@@ -472,21 +472,6 @@ def test_escaped_newlines_are_a_second_layer() -> None:
     json.loads(bounded)
 
 
-def test_a_long_media_type_and_many_parameters_are_matched() -> None:
-    """The NIT: caps widened so these shapes cannot hide a 700 KB blob.
-
-    They remain a stated residual — RFC 2397's parameter list is unbounded, so
-    some cap has to exist or the scan is quadratic again.
-    """
-
-    long_mime = "application/" + "x" * 200
-    many_params = "".join(f";p{i}=v" for i in range(12))
-    for header in (f"data:{long_mime};base64,", f"data:image/png{many_params};base64,"):
-        bounded = bound_inline_data_uris(f"x {header}{_BIG_PAYLOAD} y")
-        assert "withheld" in bounded, header[:40]
-        _assert_no_payload(bounded)
-
-
 def test_payload_walker_passes_an_unaffected_page_through_by_identity() -> None:
     """Copy-on-write: the common case allocates nothing and keeps the object."""
 
@@ -505,3 +490,106 @@ def test_payload_walker_bounds_a_body_it_does_have_to_change() -> None:
     assert "withheld" in text
     # The untouched sibling is still the same object.
     assert bound_inline_data_payload(page)["messages"] is not page["messages"]
+
+
+# ---------------------------------------------------------------------------
+# QA round 3. Every case here is a header or payload SHAPE that made the old
+# header-grammar matcher fail OPEN — the payload shipped unmarked, which is the
+# one failure mode this module exists to prevent. The matcher no longer reads
+# the header at all (it locates the literal `;base64,` and scans the alphabet
+# forward), so these can only fail if that stops being true.
+# ---------------------------------------------------------------------------
+
+
+def _assert_withheld(body: str, *, label: str) -> str:
+    """No `;base64,` content survives, and a receipt is present and honest."""
+
+    bounded = bound_inline_data_uris(body)
+    assert bounded != body, f"{label}: unchanged — the blob shipped"
+    assert "base64," not in bounded, f"{label}: payload survived"
+    assert "[inline data withheld:" in bounded, f"{label}: no receipt"
+    _assert_no_payload(bounded)
+    return bounded
+
+
+def test_q1_a_300_char_parameter_does_not_fail_open() -> None:
+    """Q-1: a long parameter used to exceed the cap and skip the whole URI."""
+
+    bounded = _assert_withheld(
+        f"x data:image/png;name={'a' * 300};base64,{_BIG_PAYLOAD} y",
+        label="300-char parameter",
+    )
+    assert "image/png" in bounded
+
+
+def test_q1_a_300_char_media_type_does_not_fail_open() -> None:
+    """Q-1: an over-long media type is decoration, never a gate."""
+
+    _assert_withheld(
+        f"x data:{'a' * 300};base64,{_BIG_PAYLOAD} y", label="300-char media type"
+    )
+
+
+def test_q1_twenty_parameters_do_not_fail_open() -> None:
+    """Q-1: a parameter COUNT past the old cap must not skip the URI either."""
+
+    params = "".join(f";p{i}=v" for i in range(20))
+    _assert_withheld(f"x data:image/png{params};base64,{_BIG_PAYLOAD} y", label="20 params")
+
+
+def test_q2_a_line_break_directly_after_the_marker_does_not_fail_open() -> None:
+    """Q-2: whitespace after `;base64,` used to read as an empty payload.
+
+    The empty-payload rule exists so a genuine MENTION (`data:…;base64,<payload>`
+    in prose) is left alone. Whitespace after the marker is not a mention, it is
+    a wrapped payload starting on the next line — so the scanner skips it first.
+    """
+
+    for gap in ("\r\n", "\n", "\n   ", " \t"):
+        wrapped = "\n".join(_BIG_PAYLOAD[i : i + 76] for i in range(0, len(_BIG_PAYLOAD), 76))
+        bounded = _assert_withheld(
+            f"x data:image/png;base64,{gap}{wrapped}\nend", label=f"marker then {gap!r}"
+        )
+        # Cut at the final short wrap line, so the size is a floor and says so.
+        assert "at least" in bounded
+
+
+def test_q3_a_forty_column_wrap_is_consumed_as_one_blob() -> None:
+    """Q-3: a narrow wrap used to stop after the first 40-char line."""
+
+    wrapped = "\n".join(_BIG_PAYLOAD[i : i + 40] for i in range(0, len(_BIG_PAYLOAD), 40))
+    bounded = _assert_withheld(f"x data:image/png;base64,{wrapped}\nend", label="40-col wrap")
+
+    assert "at least" in bounded
+    # ONE receipt carrying the whole payload, not one per line.
+    assert bounded.count("[inline data withheld:") == 1
+    reported = re.search(r"at least (\d+) bytes decoded", bounded)
+    assert reported is not None, bounded
+    expected = len(base64.b64decode(_BIG_PAYLOAD))
+    assert expected - 60 <= int(reported.group(1)) <= expected
+
+
+def test_the_fold_floor_keeps_a_short_word_but_eats_a_long_run() -> None:
+    """The folding tradeoff, asserted in BOTH directions.
+
+    A short word after a blob is prose and must survive; a run of 16+ base64
+    characters after a line break is indistinguishable from a wrapped line, so it
+    is consumed. Stating the second half as a test is the point: it is a known,
+    accepted over-delete, not a surprise to be rediscovered in review.
+    """
+
+    kept = bound_inline_data_uris(f"data:image/png;base64,{_BIG_PAYLOAD}\nthanks")
+    assert kept.endswith("thanks"), kept[-40:]
+
+    eaten = bound_inline_data_uris(f"data:image/png;base64,{_BIG_PAYLOAD}\ninternationalized")
+    assert "internationalized" not in eaten
+    _assert_no_payload(kept)
+
+
+def test_q4_the_receipt_never_echoes_a_media_type_at_blob_length() -> None:
+    """Q-4: the echoed type must stay under the 64-char blob-detector run."""
+
+    bounded = bound_inline_data_uris(f"data:application/{'x' * 400};base64,{_BIG_PAYLOAD}")
+    receipt = re.search(r"\[inline data withheld: ([^,]*), [^\]]*\]", bounded)
+    assert receipt is not None, bounded
+    assert len(receipt.group(1)) < 64, receipt.group(1)

@@ -23,28 +23,38 @@ they were withheld, not shown them — so the decoded size is derived
 arithmetically from the base64 length. Decoding a sender-controlled payload
 would be the one part of this that could be made expensive or hostile.
 
-WHY THE COST IS LINEAR, AND WHY THAT IS THE WHOLE DESIGN. The input is
-attacker-sized, so the work must not be super-linear: a body is delivered
-synchronously on an ``async`` tool path, and a scan that stalls the event loop
-is a worse defect than the blob it was meant to remove. Two rules buy that,
-and both are load-bearing:
+THE SHAPE, AND WHY IT IS THIS SHAPE. Rounds 1–3 of review found the same class
+of defect three times: a matcher that tried to UNDERSTAND the header could be
+defeated by a header shape it did not anticipate (an unbounded quantifier that
+went quadratic; a MIME-wrapped, URL-safe or uppercase spelling that kept the
+whole blob; then a long parameter list, an over-long media type, and a CRLF
+right after the marker, each of which left the payload unmarked because the
+header grammar refused to match and the code read "no match" as "no URI").
 
-* **Every quantifier in :data:`_HEADER` is bounded.** An unbounded ``+`` inside
-  a group that can fail (``[^;,\\s]+`` before a required ``;base64,``) retries
-  from every start position and is quadratic in the body — measured at 3.5 s
-  for a 25 KB body and ~1.5 h at 1 MiB. A real media type and its parameters
-  are short, so the caps (:data:`_MAX_MIME_CHARS`, :data:`_MAX_PARAM_CHARS`,
-  :data:`_MAX_PARAMS`) cost nothing a real URI needs and make each attempt
-  O(1) instead of O(rest-of-body).
-* **The payload is consumed by a forward scanner, not by the regex.** One
-  ``while`` pass (:func:`_consume_payload`) with a monotonic cursor cannot
-  backtrack, so the payload grammar — which includes line folding — cannot
-  reintroduce the cost the header caps just removed.
+The lesson is that failing OPEN is unacceptable and validating a header is not
+this function's job, so there is no header grammar left to fail. The scanner
+now:
 
-The result is ~2 passes over the text and no truncation: NOTHING is dropped
-from a body that carries no data URI, however long it is (a page that merely
-mentions ``metadata:`` is returned identical, by identity), which is why there
-is no scan window here any more.
+1. finds the LITERAL ``;base64,`` token, case-insensitively;
+2. walks back a bounded distance for the ``data:`` that introduces it (the
+   media type is decoration for the receipt, never a gate);
+3. skips whitespace and line breaks after the marker;
+4. consumes a base64 run with a monotonic alphabet scan — ``A-Z a-z 0-9 + / =
+   - _`` plus folding whitespace — until a character outside that alphabet.
+
+Nothing in that sequence can be defeated by parameter count, parameter length,
+media-type length, whitespace before or after the marker, or casing: those
+inputs change what the RECEIPT says, never whether the payload is withheld.
+
+WHY THE COST IS LINEAR. The input is attacker-sized and delivered synchronously
+on an ``async`` tool path, so a scan that stalls the event loop is a worse
+defect than the blob it removes. Every step above only ever moves a cursor
+forward over a region it then skips: a marker match costs O(1), the backward
+``data:`` search is amortised over the gap since the previously consumed run,
+and the payload walk never revisits a character. Total work is therefore linear
+in the body, which is also why nothing is truncated — a body with no data URI is
+returned as the SAME object at any length, including one that merely mentions
+``metadata:``.
 """
 
 from __future__ import annotations
@@ -63,38 +73,20 @@ __all__ = [
 #: omitted type, which defaults to ``text/plain``).
 _DEFAULT_MIME = "text/plain"
 
-#: Header caps. These exist for COST, not for validation (see the module
-#: docstring): they turn a quadratic retry into a constant one. They are set
-#: generously — well past any media type or parameter list a real payload uses —
-#: and pair with the atomic groups in :data:`_HEADER` so the widened bound costs
-#: nothing per attempt. They are still a RESIDUAL, stated rather than hidden:
-#: RFC 2397's ``*( ";" parameter )`` is unbounded, so a header longer than these
-#: caps (a >255-char media type, or a >16-parameter list) is NOT matched and its
-#: payload is not withheld. That is a deliberate trade — an unbounded header is
-#: exactly what made the scan quadratic — and it is bounded in turn by the class
-#: of URI a sender can plausibly construct.
-_MAX_MIME_CHARS = 255
-_MAX_PARAM_CHARS = 255
-_MAX_PARAMS = 16
-
-#: One inline data URI HEADER — everything up to and including ``;base64,``.
-#: Case-insensitive because RFC 2397/5234 ABNF literals are, and browsers parse
-#: ``DATA:image/png;BASE64,`` exactly like the lowercase spelling.
-#:
-#: The parameter group requires ``name=value`` so the literal ``;base64`` cannot
-#: be absorbed into it and then backtracked out of. The payload is deliberately
-#: NOT part of this pattern; :func:`_consume_payload` reads it.
-_HEADER = re.compile(
-    rf"data:(?>(?P<mime>[^;,\s]{{0,{_MAX_MIME_CHARS}}}))?"
-    rf"(?P<params>(?>;(?>[^;,\s=]{{0,{_MAX_PARAM_CHARS}}})="
-    rf"(?>[^;,\s]{{0,{_MAX_PARAM_CHARS}}})){{0,{_MAX_PARAMS}}})"
-    r";[ \t]*base64[ \t]*,",
-    re.IGNORECASE,
-)
+#: The one token that starts a base64 data URI's payload. Deliberately a literal
+#: rather than a parsed header: see the module docstring. ``[ \t]*`` inside it is
+#: bounded and only tolerates spacing around the literal.
+_BASE64_MARKER = re.compile(r";[ \t]*base64[ \t]*,", re.IGNORECASE)
 
 #: Cheap pre-test so the no-op path (the overwhelmingly common one) allocates
 #: nothing: a lowercased copy of a 2 MB body would be a 2 MB allocation per call.
 _ANY_DATA = re.compile(r"data:", re.IGNORECASE)
+
+#: How far back from ``;base64,`` the introducing ``data:`` may sit. Generous for
+#: any plausible header (a media type plus many parameters) and bounded so the
+#: backward search cannot walk a whole body; past it the marker is treated as a
+#: mention in prose, not a URI.
+_MAX_HEADER_BACK = 8192
 
 #: Payload alphabet. Both standard and URL-safe base64, plus padding: a sender
 #: may paste either spelling, and ``-_`` is what URL-safe encoders emit.
@@ -103,21 +95,28 @@ _PAYLOAD_CHARS = frozenset(string.ascii_letters + string.digits + "+/-_=")
 #: Whitespace that can separate folded lines of ONE payload.
 _FOLD_WS = " \t\r\n"
 
-#: A fold is resumed only when the continuation line carries at least this
-#: many payload characters. Wrapped encoders emit 64- or 76-column lines
-#: (``base64``, ``textwrap``, MIME), all above this; a short run followed by a
-#: newline is the END of the blob. Resuming there would swallow the first word
-#: of the prose after it (``…base64,AAAA\nthanks``), and over-deleting a
-#: sender's own words is a worse failure than leaving a fragment: a final
-#: wrap line under this width is therefore LEFT in place, which bounds what can
-#: survive to under 60 characters — under the 64-char blob threshold, and three
-#: orders of magnitude below the 700 KB this exists to remove.
-_FOLD_MIN_LINE = 60
+#: A fold is resumed only when the continuation line carries at least this many
+#: payload characters. 16 is chosen low on purpose so a NARROW wrap (40 columns,
+#: or a terminal-width paste) still continues — a high floor silently stopped at
+#: the first line of a 40-column blob and left the rest behind with a receipt
+#: claiming a wrong exact size.
+#:
+#: THE TRADEOFF, stated because there is no way to remove it: a payload followed
+#: by a newline and a word of 16+ base64-alphabet characters will swallow that
+#: word (``…base64,AAAA\ninternationalization``). A shorter word — ``thanks``, a
+#: closing fence, a sentence — is prose and survives. Over-deleting a sender's
+#: own words is a real cost, and the floor is the only lever: it is set at the
+#: point where wrapped lines outnumber the prose words it could eat, and the
+#: final fragment of a wrap narrower than this is left in place and reported as
+#: ``at least`` rather than silently miscounted.
+_FOLD_MIN_LINE = 16
 
-#: How much of the sender-chosen media type the marker echoes. The header cap
-#: (:data:`_MAX_MIME_CHARS`) exists for COST, not for display: echoing all of it
-#: would put up to 255 characters of sender text into model content.
-_MAX_MARKER_MIME_CHARS = 64
+#: How much of the sender-chosen media type the marker echoes. This is
+#: SENDER-CHOSEN text going into model content, so it is bounded for display, not
+#: just for cost — and clamped BELOW the 64-character run length a blob detector
+#: (including this repo's own tests) uses, so the receipt itself is never mistaken
+#: for the thing it replaced.
+_MAX_MARKER_MIME_CHARS = 40
 
 #: Placeholder for one replaced URI. Names the type, the decoded size and that
 #: the bytes are gone — no base64, no hash, no filename (the hub never gives an
@@ -150,13 +149,7 @@ def _decoded_size(payload: str) -> int:
 
 
 def inline_data_marker(mime: str, size: int, *, at_least: bool = False) -> str:
-    """The short structured placeholder that stands in for one withheld URI.
-
-    ``mime`` is clamped: it is SENDER-CHOSEN text, and the header cap alone would
-    let 255 characters of it into model content verbatim. A real media type is
-    far shorter, so the clamp costs nothing a caller wants and keeps the marker
-    the short structured thing the rest of this module promises.
-    """
+    """The short structured placeholder that stands in for one withheld URI."""
 
     template = _MARKER_AT_LEAST if at_least else _MARKER
     shown = (mime or _DEFAULT_MIME).strip()[: _MAX_MARKER_MIME_CHARS]
@@ -169,10 +162,13 @@ def _fold_resume(text: str, index: int) -> int | None:
     TWO FORMS, because the same fold reaches this module in two states. While a
     body is still a plain Python string the separator is a REAL newline; once
     ``json.dumps`` has serialised it the newline becomes the two characters
-    ``\\`` ``n``. Accepting both is the defensive half of the R-2 fix: the primary
-    fix bounds the string BEFORE serialisation (:func:`bound_inline_data_payload`),
-    and this keeps the serialised path correct too, so a future change to how a
-    page is built cannot silently reopen the hole that shipped the whole blob.
+    ``\\`` ``n``. Accepting both is the defensive half of the serialisation fix:
+    the primary fix bounds the string BEFORE serialisation
+    (:func:`bound_inline_data_payload`), and this keeps the serialised path
+    correct too, so a future change to how a page is built cannot silently
+    reopen the hole that shipped a whole blob.
+
+    The cursor only moves forward over separators, so this cannot backtrack.
     """
 
     length = len(text)
@@ -193,18 +189,28 @@ def _fold_resume(text: str, index: int) -> int | None:
     return i if seen else None
 
 
+def _skip_fold_ws(text: str, index: int) -> int:
+    """``index`` moved past any fold separator; ``index`` itself when there is none."""
+
+    return _fold_resume(text, index) or index
+
+
 def _consume_payload(text: str, start: int) -> tuple[str, int, bool]:
     """``(whitespace-free payload, end index, tail_left)``; one forward pass.
 
-    WHY A HAND-WRITTEN SCANNER. Base64 payloads are legally folded across lines
-    (MIME wrapping, ``textwrap``), so the grammar is "alphabet chars, optionally
-    separated by a newline". Expressing that as a nested quantifier is the
-    textbook catastrophic-backtracking shape, and this input is sender-chosen.
-    A cursor that only ever moves forward cannot backtrack, so the cost is the
-    length of the payload and nothing else.
+    ``start`` must already be past the whitespace that follows ``;base64,`` —
+    so a payload that begins on the next line (a CRLF straight after the marker,
+    which used to make the whole URI look like a mention) is consumed normally.
 
-    The cursor always advances or returns, so callers may treat this as
-    monotonic and never rescan a region.
+    A base64 run is "alphabet characters, optionally separated by line breaks"
+    because wrapping is what real encoders emit. Expressing that as a regex is
+    the textbook catastrophic-backtracking shape, so it is a cursor walk here:
+    the cursor only ever advances, and the cost is the length of the payload.
+
+    ``tail_left`` is True when a continuation was declined AFTER the wrap was
+    already established — that short run is the wrap's own final line, so the
+    reported size is a floor. With no fold at all it is prose and the payload is
+    whole, so the size is exact.
     """
 
     length = len(text)
@@ -220,27 +226,49 @@ def _consume_payload(text: str, start: int) -> tuple[str, int, bool]:
         index = end
         # A fold is only a fold if the line it would continue was a full line of
         # payload; otherwise this separator ends the blob (see _FOLD_MIN_LINE).
-        resume = (
-            _fold_resume(text, index) if (index - line_start) >= _FOLD_MIN_LINE else None
-        )
-        if resume is not None:
-            next_end = resume
-            while next_end < length and text[next_end] in _PAYLOAD_CHARS:
-                next_end += 1
-            # The NEXT line must also be a full-width line. That is what tells a
-            # wrap apart from a single blob followed by a short word: prose is
-            # never 60+ unbroken base64 characters.
-            if (next_end - resume) >= _FOLD_MIN_LINE:
-                line_start = resume
-                index = resume
-                folded = True
-                continue
+        if (index - line_start) < _FOLD_MIN_LINE:
+            break
+        resume = _fold_resume(text, index)
+        if resume is None:
+            break
+        next_end = resume
+        while next_end < length and text[next_end] in _PAYLOAD_CHARS:
+            next_end += 1
+        # The NEXT line must also reach the floor. That is what tells a wrap
+        # apart from a single blob followed by a short word: prose is never a run
+        # this long of unbroken base64 characters.
+        if (next_end - resume) >= _FOLD_MIN_LINE:
+            line_start = resume
+            index = resume
+            folded = True
+            continue
         break
-    # ``tail_left`` only when a SHORT continuation was declined AFTER the wrap
-    # was already established: that short run is the wrap's final line, so the
-    # size above is a floor. With no fold it is prose, and the payload is whole.
     tail_left = folded and _fold_resume(text, index) is not None
     return "".join(pieces), index, tail_left
+
+
+def _header_mime(text: str, ceiling: int) -> str:
+    """The media type introducing the marker that ends at ``ceiling``.
+
+    Decoration ONLY — the caller has already decided to withhold the payload
+    before this runs. Walking back to ``data:`` is bounded by
+    :data:`_MAX_HEADER_BACK` and by the caller's cursor, so a header of any
+    length or parameter count cannot turn a decided withhold into a skip.
+    """
+
+    floor = max(0, ceiling - _MAX_HEADER_BACK)
+    at = text.rfind("data:", floor, ceiling)
+    if at < 0:
+        # Case-insensitive fallback: rfind on a slice keeps the cost local, and
+        # this only runs for the (rare) headers not spelled in lower case.
+        window = text[floor:ceiling]
+        lowered = window.lower()
+        offset = lowered.rfind("data:")
+        if offset < 0:
+            return _DEFAULT_MIME
+        at = floor + offset
+    header = text[at + len("data:") : ceiling]
+    return header.split(";", 1)[0].strip()[: _MAX_MARKER_MIME_CHARS]
 
 
 def bound_inline_data_uris(text: str) -> str:
@@ -252,30 +280,32 @@ def bound_inline_data_uris(text: str) -> str:
     the tests because a body mentioning ``metadata:`` contains the substring
     ``data:`` and used to be truncated for it.
 
-    Cost is linear in ``len(text)``: a bounded-quantifier header search plus one
-    monotonic payload scan per URI (see the module docstring). Nothing here can
-    be made super-linear by a sender, which is what makes it safe to call
-    synchronously from the ``async`` tool path.
+    Cost is linear in ``len(text)``: a literal-marker search, an amortised
+    bounded backward hop for the media type, and one monotonic payload scan per
+    URI (see the module docstring).
     """
 
     if _ANY_DATA.search(text) is None:
         return text
     pieces: list[str] = []
     cursor = 0
-    for header in _HEADER.finditer(text):
-        if header.start() < cursor:
+    for marker in _BASE64_MARKER.finditer(text):
+        if marker.start() < cursor:
             # Inside a payload a previous iteration already replaced.
             continue
-        payload, end, tail_left = _consume_payload(text, header.end())
+        mime = _header_mime(text, marker.start())
+        payload_start = _skip_fold_ws(text, marker.end())
+        payload, end, tail_left = _consume_payload(text, payload_start)
         if not payload:
-            # A header with no payload is a mention of a data URI, not a blob to
+            # A marker with no payload is a mention of a data URI, not a blob to
             # withhold: replacing it would turn readable text into a false claim
             # that bytes were dropped.
             continue
-        pieces.append(text[cursor : header.start()])
+        uri_start = _uri_start(text, cursor, marker.start())
+        pieces.append(text[cursor:uri_start])
         pieces.append(
             inline_data_marker(
-                (header.group("mime") or _DEFAULT_MIME).strip(),
+                mime,
                 _decoded_size(payload),
                 at_least=tail_left or len(payload) % 4 != 0,
             )
@@ -285,6 +315,23 @@ def bound_inline_data_uris(text: str) -> str:
         return text
     pieces.append(text[cursor:])
     return "".join(pieces)
+
+
+def _uri_start(text: str, cursor: int, ceiling: int) -> int:
+    """Where the ``data:`` introducing the marker at ``ceiling`` begins.
+
+    Bounded by ``cursor`` and :data:`_MAX_HEADER_BACK`. Falls back to ``ceiling``
+    (replace the marker only) when no ``data:`` precedes it, which keeps a
+    bare ``;base64,`` mention in prose from eating the words before it.
+    """
+
+    floor = max(cursor, ceiling - _MAX_HEADER_BACK)
+    at = text.rfind("data:", floor, ceiling)
+    if at >= 0:
+        return at
+    window = text[floor:ceiling]
+    offset = window.lower().rfind("data:")
+    return floor + offset if offset >= 0 else ceiling
 
 
 def bound_inline_data_payload(value: Any) -> Any:
