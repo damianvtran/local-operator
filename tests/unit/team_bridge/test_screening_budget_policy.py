@@ -400,7 +400,7 @@ def test_a_hand_edited_valid_set_is_adopted_wholesale(tmp_path: Path) -> None:
     # A STRING config dir reads the same set: ``Store`` is typed ``Path`` but the
     # reader must not answer the shipped ceilings because a caller passed str —
     # that used to land in its never-raises guard and look like "no config".
-    assert screening_budget_from_config(str(tmp_path)) == edited
+    assert screening_budget_from_config(str(tmp_path)) == edited  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
