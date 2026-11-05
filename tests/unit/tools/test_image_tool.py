@@ -99,11 +99,11 @@ def test_the_builder_gates_on_reachability(monkeypatch: pytest.MonkeyPatch) -> N
     assert tool.label == "Generate image"
     assert tool.approval_tier == "write"
     assert tool.interruptible is True
-    # The wire description is pinned whole (media wave-2, design D9): 160
-    # chars, and its FIRST sentence is what the classification roster may
-    # quote. The provider list left the wire for the guide; the pins moved
-    # with the deliberate rewrite.
-    assert len(tool.description) == 160
+    # Keep the wire description bounded while making the guide a prerequisite;
+    # the first sentence remains the classifier roster's stable capability.
+    # Provider detail stays in the on-demand guide, not the always-paid schema.
+    assert len(tool.description) <= 180
+    assert "Read `guide://image-generation` before use" in tool.description
     first = tool.description.split(". ", 1)[0] + "."
     assert len(first) == 91
     assert tool.describe_approval is not None

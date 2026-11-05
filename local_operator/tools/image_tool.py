@@ -94,7 +94,7 @@ logger = logging.getLogger(__name__)
 #: providers live in ``guide://image-generation``, which costs no schema.
 _DESCRIPTION = (
     "Generate or edit an image via the configured provider; the result is attached for the user. "
-    "Docs: `tool://generate_image`; playbook: `guide://image-generation`."
+    "Read `guide://image-generation` before use. Docs: `tool://generate_image`."
 )
 
 #: The six FAL-shaped size values (design §2.2/§9): accepted by Radient's
@@ -135,7 +135,9 @@ class GenerateImageParams(BaseModel):
     )
     source_attachment: str | None = Field(
         default=None,
-        description="Session image digest to edit (from a result caption).",
+        description=(
+            "Image digest to edit, from an attachment note or result caption; not a file path."
+        ),
     )
     source_image_paths: list[str] | None = Field(
         default=None,
@@ -143,7 +145,9 @@ class GenerateImageParams(BaseModel):
     )
     source_attachments: list[str] | None = Field(
         default=None,
-        description="Session image digests to edit, in order.",
+        description=(
+            "Image digests from attachment notes or result captions, in order; not file paths."
+        ),
     )
     strength: float | None = Field(
         default=None,

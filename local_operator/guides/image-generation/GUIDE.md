@@ -185,9 +185,17 @@ Nano Banana 2 edit ≈$0.08 and Nano Banana Pro edit ≈$0.15 per image;
 premium: FLUX.2 max edit. On every provider, pin `model` to choose
 specifically.
 
-Digests come from results. An image pasted straight into the chat has no
-digest you can cite yet — reference a local file with `source_image_path`
-(or `source_image_paths`) when the bytes exist on disk.
+Use the digests in generation results **or the stored-attachment note beside
+an image pasted into chat** with `source_attachment` / `source_attachments`.
+The note identifies the original bytes and their order; preserve every reference
+the user asks to combine. A local file can instead use `source_image_path`
+(or `source_image_paths`). Never substitute a text-only generation for an edit.
+
+A request for a version of an attached image can imply an edit without saying
+“generate” or “edit”, including a short follow-up in another language. Reason
+from the request and recent context: use this workflow for creative changes,
+not automatically for image analysis, OCR, download/save requests, or explicit
+deterministic pixel operations. Those tasks do not authorize paid generation.
 
 ## Cancelling and restarting
 
