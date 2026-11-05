@@ -47,6 +47,7 @@ from local_operator.web_fetch.failure import (
 )
 from local_operator.web_fetch.models import (
     DEFAULT_WEB_FETCH_CONFIG,
+    FetchBytes,
     FetchResult,
     WebFetchSettings,
 )
@@ -216,6 +217,32 @@ class FetchError(Exception):
         self.failure = failure
         self.attempts = attempts
         self.profiles = list(profiles)
+
+
+class PolicyRefusal(FetchError):
+    """A refusal raised by :func:`validate_public_url` — the guard working.
+
+    Subclasses :class:`FetchError` so every existing catcher, every message and
+    every retry decision stays exactly as it was. What it adds is a machine
+    code: a caller that must turn a refusal into a stable outcome (a link
+    preview reports ``local-or-private`` for an intranet host and
+    ``unsupported-scheme`` for ``file:``) would otherwise have to string-match
+    an English sentence — and those messages are user-facing prose that is free
+    to change.
+
+    ``reason`` is a small closed vocabulary, deliberately not the exception's own
+    prose: ``scheme`` (not http/https), ``host`` (no host to judge), ``private``
+    (resolves to a loopback/private/reserved address).
+
+    Raised for the initial URL AND for every redirect hop, because
+    :func:`validate_public_url` is the single address check the redirect loop
+    calls — a public URL that 302s to the metadata endpoint is refused at the
+    hop, and that refusal arrives here with ``reason="private"``.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def coerce_fetch_settings(raw: object) -> WebFetchSettings:
@@ -440,10 +467,12 @@ def validate_public_url(url: str, *, allow_private: bool) -> str | None:
     """
     parsed = urlparse(url)
     if parsed.scheme.lower() not in ("http", "https"):
-        raise FetchError(f"refusing {url!r}: only http:// and https:// are allowed")
+        raise PolicyRefusal(
+            f"refusing {url!r}: only http:// and https:// are allowed", reason="scheme"
+        )
     hostname = parsed.hostname
     if not hostname:
-        raise FetchError(f"refusing {url!r}: no host in URL")
+        raise PolicyRefusal(f"refusing {url!r}: no host in URL", reason="host")
     if allow_private:
         # The escape hatch turns off IP judgement entirely, so there is nothing
         # to pin to and no rebinding threat model to defend (the operator opted
@@ -457,9 +486,10 @@ def validate_public_url(url: str, *, allow_private: bool) -> str | None:
         except ValueError:
             continue
         if _ip_is_forbidden(ip):
-            raise FetchError(
+            raise PolicyRefusal(
                 f"refusing {url!r}: host resolves to a private/loopback/reserved "
-                f"address ({ip_str}). Set web_fetch.allow_private to fetch local targets."
+                f"address ({ip_str}). Set web_fetch.allow_private to fetch local targets.",
+                reason="private",
             )
         if vetted is None:
             vetted = ip_str
@@ -722,6 +752,70 @@ class WebFetchService:
         owner = self.io or WebReadIO()
         try:
             return await self._fetch_owned(owner, normalized, ceiling, timeout, raw)
+        finally:
+            if self.io is None:
+                await owner.aclose()
+
+    async def fetch_bytes(
+        self,
+        url: str,
+        *,
+        max_bytes: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> FetchBytes:
+        """Fetch one URL and hand back the RAW body plus the final hop's headers.
+
+        This is the SAME engine as :meth:`fetch` — one ``_follow`` loop, so one
+        SSRF policy: every hop is re-validated by :func:`validate_public_url`
+        before we connect, every attempt is pinned to the vetted address, and
+        the retry/escalation budget is the same object. What differs is only the
+        last step: ``fetch`` renders the body to text (decoding it as UTF-8 with
+        replacement) while this returns the bytes and lets the caller decide.
+        A byte-level caller exists because both of its use cases are destroyed
+        by that decode: a page declaring a non-UTF-8 charset would arrive
+        mojibake'd, and a raster image would arrive unrecoverable.
+
+        Enrichment is deliberately NOT attempted. ``fetch`` tries ``.md`` twins
+        and content negotiation to save context on docs sites; a caller asking
+        for bytes wants the resource it named, not a substitute rendition, and a
+        preview must not describe a sibling document.
+
+        The whole call — every hop, every retry, the one escalation, and each
+        DNS lookup — shares ONE deadline, exactly as :meth:`fetch` does, so
+        ``timeout_seconds`` is a ceiling for the call and not for a request.
+        Raises :class:`FetchError` for policy refusals (a
+        :class:`PolicyRefusal` for the address/scheme guard), redirect-limit
+        breaches and transport failures, the same way :meth:`fetch` does.
+        """
+        normalized = normalize_url(url)
+        ceiling = max(max_bytes if max_bytes is not None else self.settings.max_bytes, 1)
+        timeout = timeout_seconds if timeout_seconds is not None else self.settings.timeout_seconds
+
+        owner = self.io or WebReadIO()
+        try:
+            budget = _Budget(
+                deadline=_now() + timeout,
+                total=timeout,
+                max_attempts=self.settings.max_attempts,
+                escalation_available=self.settings.blocked_retry,
+            )
+            final_url, status, headers, body, complete = await self._follow(
+                owner,
+                normalized,
+                ceiling,
+                budget,
+                _Telemetry(),
+                max_attempts=budget.max_attempts,
+                allow_escalation=True,
+            )
+            return FetchBytes(
+                url=normalized,
+                final_url=final_url,
+                status=status,
+                headers=headers,
+                body=body,
+                complete=complete,
+            )
         finally:
             if self.io is None:
                 await owner.aclose()

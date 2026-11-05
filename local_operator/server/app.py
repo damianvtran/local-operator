@@ -55,6 +55,7 @@ from local_operator.server.routes import (
     desktop_librarian,
     desktop_library,
     desktop_lifecycle,
+    desktop_link_preview,
     desktop_mcp,
     desktop_mesh,
     desktop_monitors,
@@ -964,6 +965,13 @@ app.include_router(desktop_tunnel_setup.router)
 # nothing registered above: no sibling declares a `/v1/desktop/team-bridge...`
 # path or a single-segment `/v1/desktop/{...}` template that could swallow it.
 app.include_router(desktop_team_bridge.router)
+# The Team Bridge link-preview surface: `/v1/desktop/team-bridge/link-preview/
+# {resolve,artifact/{id}}`. Registered after the bridge module for the reason
+# every block here gives -- FastAPI matches in declaration order -- and its two
+# templates collide with nothing registered above: every sibling under
+# `/v1/desktop/team-bridge/` names a LITERAL first segment, so nothing there can
+# swallow `link-preview`.
+app.include_router(desktop_link_preview.router)
 # `/v1/desktop/quota-notice`, the pre-emptive no-quota notice (design:
 # "pre-emptive no-quota notice"). A single-segment literal path with nothing
 # registered above it that could swallow it, and its own module rather than a
