@@ -58,6 +58,7 @@ from local_operator.team_bridge.client import (
     SCREENING_TEMPLATES,
     SCREENING_VERSION_V1,
     SCREENING_VERSION_V3,
+    SCREENING_VERSION_V4,
     screening_template_sha256,
 )
 from local_operator.team_bridge.store import Store, StoreRefused
@@ -169,7 +170,17 @@ _MAX_REASON_CHARS = 200
 _NONCE_BYTES = 16
 _VERDICT_LINE = re.compile(r"^VERDICT: (deliver|hold|bounce)$")
 _REASON_LINE = re.compile(r"^REASON: (\S.*)$")
-_PLACEHOLDER = re.compile(r"\{\{(nonce|body|sender|organization|type|attachments)\}\}")
+#: The template's closed placeholder set. ``files`` is v4's slot (the file listing plus
+#: the text that follows it). The names are listed literally, not matched generically, so
+#: an unknown placeholder in a future template stays literal text — which the screener
+#: would read as content someone controls. The renderer asserts none survives.
+_PLACEHOLDER = re.compile(
+    r"\{\{(nonce|body|sender|organization|type|attachments|files)\}\}"
+)
+#: Any other ``{{name}}`` in a template is a slot nothing fills.
+_UNKNOWN_PLACEHOLDER = re.compile(
+    r"\{\{(?!(?:nonce|body|sender|organization|type|attachments|files)\}\})[a-z_]+\}\}"
+)
 #: The hub's per-message image bound; a carrier claiming more is malformed.
 _ATTACHMENTS_MAX = 4
 _ATTACHMENT_MIMES = ("image/png", "image/jpeg")
@@ -385,6 +396,38 @@ class ScreeningAttachments:
 
 
 @dataclass(frozen=True)
+class ScreeningFiles:
+    """A message's generic-file set as the v4 screen must see it.
+
+    ``files_hash`` is the hub's NAME-FREE commitment (``BridgeFilesAdmissionHashV1``)
+    recomputed by the connector from the descriptors the hub showed. It joins the
+    envelope digest, so a text-only verdict can never be reused as a file grant and one
+    file set's verdict never covers another.
+
+    The LISTING is a PRIVATE carrier and deliberately not a field: for a text file it
+    contains that file's first bytes (the hub's ``{{files}}`` slot contract — "for a
+    TEXT-class file its first bytes follow that line"), which are submission data. It
+    reaches the one screening dispatch and nothing else — no receipt, no card, no log —
+    exactly as the body text and the image payloads are kept.
+    """
+
+    files_hash: str
+
+    def private_listing(self) -> str:
+        """The rendered ``{{files}}`` slot text, for the single dispatch."""
+
+        return self._private_listing  # type: ignore[attr-defined]
+
+
+def screening_files(files_hash: str, listing: str) -> ScreeningFiles:
+    """Build a :class:`ScreeningFiles` with its listing on the private carrier."""
+
+    files = ScreeningFiles(files_hash=files_hash)
+    object.__setattr__(files, "_private_listing", listing)
+    return files
+
+
+@dataclass(frozen=True)
 class Envelope:
     """Validated, bounded admission input derived from the fetched item.
 
@@ -409,11 +452,20 @@ class Envelope:
     #: envelope. Public (a hash, not content); the images themselves ride the
     #: private carrier read by :meth:`private_images`.
     attachments_hash: str | None = None
+    #: The generic-file set's NAME-FREE commitment, or ``None`` when the item carried
+    #: no files. Public (a hash the hub publishes), and bound into the admission digest
+    #: so a verdict reached without these files cannot be reused as a file grant.
+    files_hash: str | None = None
 
     def private_images(self) -> ScreeningAttachments | None:
         """The image set for the single dispatch, or ``None`` (text-only)."""
 
         return getattr(self, "_private_images", None)
+
+    def private_files(self) -> ScreeningFiles | None:
+        """The file set for the single dispatch, or ``None`` (no files)."""
+
+        return getattr(self, "_private_files", None)
 
     def private_body(self) -> str:
         """The raw body: a PRIVATE carrier, never a dataclass field (H3-Q7).
@@ -587,6 +639,20 @@ def validate_envelope(
             return None, "envelope_malformed"
         attachments = raw_attachments
 
+    # Generic files: like images, ONLY the typed carrier the connector builds after it
+    # recomputed the hub's name-free commitment from the descriptors it was shown. A raw
+    # mapping/list is a caller asserting a file set it never verified, and refuses.
+    files: ScreeningFiles | None = None
+    if "files" in item:
+        raw_files = item.get("files")
+        if (
+            not isinstance(raw_files, ScreeningFiles)
+            or not _SHA256_HEX.fullmatch(raw_files.files_hash)
+            or not raw_files.private_listing()
+        ):
+            return None, "envelope_malformed"
+        files = raw_files
+
     digest_payload = json.dumps(
         {
             "sender": sender_account,
@@ -609,6 +675,12 @@ def validate_envelope(
                 if attachments is not None
                 else {}
             ),
+            # The file set's NAME-FREE commitment, present only on a file envelope: the
+            # digest then covers WHICH files the screener saw, so the same body screened
+            # without them can never reuse that verdict as a file grant. The listing
+            # itself is not hashed here — ``files_hash`` already covers every byte of
+            # every file through the hub's own commitment.
+            **({"files_hash": files.files_hash} if files is not None else {}),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -624,11 +696,14 @@ def validate_envelope(
         delivery_state=delivery_state,
         envelope_digest=hashlib.sha256(digest_payload.encode("utf-8")).hexdigest(),
         attachments_hash=attachments.attachments_hash if attachments is not None else None,
+        files_hash=files.files_hash if files is not None else None,
     )
     # Private carrier: never a field, so repr/asdict/JSON stay content-free.
     object.__setattr__(envelope, "_private_body", body_text)
     if attachments is not None:
         object.__setattr__(envelope, "_private_images", attachments)
+    if files is not None:
+        object.__setattr__(envelope, "_private_files", files)
     return envelope, None
 
 
@@ -641,6 +716,7 @@ def render_prompt(
     nonce: str | None = None,
     version: str = SCREENING_VERSION_V1,
     attachments: str | None = None,
+    files: str | None = None,
 ) -> RenderedPrompt:
     """Single-pass substitution over an EMBEDDED template — the ONLY renderer.
 
@@ -655,10 +731,16 @@ def render_prompt(
     The template's three nonce occurrences are asserted, so a future template
     edit cannot silently change the delimiter contract.
 
-    ``attachments`` is the v3 listing line and is required EXACTLY when the
-    selected template has the ``{{attachments}}`` slot: an image envelope can
-    never render through a template that does not tell the screener images
-    follow, and a text-only template never silently drops a listing.
+    ``attachments`` is the attachment-slot listing (v3's image line, or the image part of
+    a v4 render) and is required EXACTLY when the selected template has the
+    ``{{attachments}}`` slot: an image envelope can never render through a template that
+    does not tell the screener images follow, and a text-only template never silently
+    drops a listing.
+
+    ``files`` is the v4 ``{{files}}`` slot — the file listing plus the text that follows
+    it — and follows the same rule against its own slot, so a file envelope cannot
+    render under v3 (where the hub would refuse the grant) and a file-free message never
+    renders under v4 (where the slot would be empty and the screener told files follow).
     """
 
     template = SCREENING_TEMPLATES.get(version)
@@ -676,6 +758,7 @@ def render_prompt(
         msg_type=msg_type,
         nonce=nonce,
         attachments=attachments,
+        files=files,
     )
 
 
@@ -689,6 +772,7 @@ def _render_with_template(
     msg_type: str,
     nonce: str | None,
     attachments: str | None,
+    files: str | None = None,
 ) -> RenderedPrompt:
     """The substitution and nonce rules behind :func:`render_prompt`.
 
@@ -707,9 +791,30 @@ def _render_with_template(
     """
 
     token = nonce if nonce is not None else secrets.token_hex(_NONCE_BYTES)
+    # A TEMPLATE slot with no supplied value would be spliced into the prompt verbatim and
+    # read by the screener as prose — v4's ``{{files}}`` slot shipped unfilled when the
+    # placeholder name list did not know it, and nothing complained. Check the TEMPLATE,
+    # never the rendered text: substituted values are inserted verbatim by design, so a
+    # body legitimately containing ``{{attachments}}`` must not fail a render.
+    unexpected = set(_PLACEHOLDER.findall(template)) - {
+        "nonce",
+        "body",
+        "sender",
+        "organization",
+        "type",
+        *(("attachments",) if attachments is not None else ()),
+        *(("files",) if files is not None else ()),
+    }
+    if unexpected:
+        raise ValueError("embedded template slot without a supplied value")
+    if _UNKNOWN_PLACEHOLDER.search(template) is not None:
+        raise ValueError("embedded template carries an unknown placeholder")
     has_slot = "{{attachments}}" in template
     if has_slot != (attachments is not None):
         raise ValueError("attachments listing and template slot must match")
+    has_files_slot = "{{files}}" in template
+    if has_files_slot != (files is not None):
+        raise ValueError("files listing and template slot must match")
     values = {
         "sender": sender,
         "organization": organization,
@@ -720,6 +825,10 @@ def _render_with_template(
         if template.count("{{attachments}}") != 1:
             raise ValueError("embedded template delimiter contract changed")
         values["attachments"] = attachments
+    if files is not None:
+        if template.count("{{files}}") != 1:
+            raise ValueError("embedded template delimiter contract changed")
+        values["files"] = files
     for name, value in values.items():
         if token in value:
             # A forged nonce literal inside untrusted data would let the
@@ -1634,6 +1743,7 @@ async def _screen_spend(
     # 10. Fresh nonce render. A polluted token or a changed delimiter
     #     contract refuses; regeneration is bounded (H3 hostile-input control).
     images = envelope.private_images()
+    files = envelope.private_files()
     rendered: RenderedPrompt | None = None
     for _ in range(8):
         try:
@@ -1643,14 +1753,32 @@ async def _screen_spend(
                 organization=envelope.organization,
                 msg_type=envelope.type_label,
                 nonce=nonce,
-                # An image envelope ALWAYS renders under v3 — the only
-                # embedded template whose wrapper tells the screener that
-                # the images which follow are submission data. The served
-                # policy (v1/v2) still governs the text-only path and the
-                # local policy/receipt binding; the image set is bound by
-                # the envelope digest instead (see validate_envelope).
-                version=SCREENING_VERSION_V3 if images is not None else snapshot.screening_version,
-                attachments=images.listing() if images is not None else None,
+                # A FILE envelope ALWAYS renders under v4 — the only embedded template
+                # whose wrapper tells the screener that the file text which follows is
+                # submission data, and the only one the hub accepts a files_hash under.
+                # An image-only envelope still renders under v3. The served policy
+                # (v1/v2) governs the text-only path and the local policy/receipt
+                # binding; the attachment sets are bound by the envelope digest instead
+                # (see validate_envelope).
+                version=(
+                    SCREENING_VERSION_V4
+                    if files is not None
+                    else SCREENING_VERSION_V3
+                    if images is not None
+                    else snapshot.screening_version
+                ),
+                attachments=(
+                    images.listing()
+                    if images is not None
+                    # v4 keeps v3's image slot beside the file slot, so a mixed message
+                    # renders ONE prompt under ONE template (one admission row); with no
+                    # images the slot still has to be filled, or the template's own
+                    # "line one lists the files and images" would be a false statement.
+                    else ""
+                    if files is not None
+                    else None
+                ),
+                files=files.private_listing() if files is not None else None,
             )
             break
         except ValueError:
@@ -1838,7 +1966,11 @@ async def _screen_spend(
         turn=turn,
         screened_bytes=rendered.screened_bytes,
         rendered_version=(
-            SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
+            SCREENING_VERSION_V4
+            if files is not None
+            else SCREENING_VERSION_V3
+            if images is not None
+            else snapshot.screening_version
         ),
         rendered_template_sha256=rendered.template_sha256,
         prompt_template_sha256=rendered.template_sha256,

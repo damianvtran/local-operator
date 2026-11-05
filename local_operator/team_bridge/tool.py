@@ -2609,10 +2609,17 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         else:
             restored = set()
         images = await _history_images(runtime, channel_id, result, endpoint_id, restored)
+        # Generic files ride the SAME read: the descriptors come from the page the hub
+        # just returned, and the bytes are fetched here (see _history_files). They join
+        # the tool result as their own untrusted blocks rather than inside the page, so
+        # the JSON page a model parses stays byte-identical to what the hub served.
+        files = await _history_files(runtime, channel_id, result, endpoint_id)
         return {
             "ok": True,
             "state": "ok",
-            "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            "content": _with_files(
+                f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}", files
+            ),
             _IMAGES_KEY: images,
         }
 
@@ -2658,10 +2665,15 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         images = await _history_images(
             runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
         )
+        files = await _history_files(
+            runtime, channel_id, {"messages": thread_rows}, endpoint_id
+        )
         return {
             "ok": True,
             "state": "ok",
-            "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            "content": _with_files(
+                f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}", files
+            ),
             _IMAGES_KEY: images,
         }
 
@@ -2672,6 +2684,19 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         f"unknown bridge op {params.op!r}",
         code="invalid_request",
     )
+
+
+def _with_files(content: str, blocks: list[str]) -> str:
+    """Append each message's file blocks to a read's model-facing content.
+
+    Every block carries its OWN untrusted clause (see ``_file_provenance``), so the
+    clause leads both the page and the file text rather than only the first of them —
+    the ordering the bridge's model boundary depends on.
+    """
+
+    if not blocks:
+        return content
+    return "\n\n".join([content, *blocks])
 
 
 def _screener_sees_images(runtime: BridgeRuntime) -> bool:
@@ -2918,6 +2943,214 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
             row["body_state"] = {"state": "unavailable"}
         else:
             row["body_state"] = {"state": "not_admitted"}
+
+
+def _strip_display_names(page: Any) -> None:
+    """Erase any ``display_name`` from a file descriptor before a model can read it.
+
+    The hub's agent projection already clears it (``withFiles``'s ``withName``), and this
+    is the receiving side's own belt: a filename is uploader content an agent is never
+    shown, and the file commitment is name-free precisely because of that. Defensive
+    rather than load-bearing — but a future projection must not leak one into context
+    silently, and removing it here costs nothing.
+    """
+
+    if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+        return
+    for message in page["messages"]:
+        if not isinstance(message, dict):
+            continue
+        raw = message.get("files")
+        if not isinstance(raw, list):
+            continue
+        for entry in raw:
+            if isinstance(entry, dict):
+                entry.pop("display_name", None)
+
+
+async def _history_files(
+    runtime: BridgeRuntime,
+    channel_id: str,
+    page: Any,
+    endpoint_id: str,
+) -> list[str]:
+    """Per message carrying GENERIC FILES: one untrusted caption, then the text.
+
+    WHY A FRESH CONTEXT FETCH. The hub lists file descriptors to an agent only after an
+    ``allow`` bound to the message's ``files_hash``, and serves ``purpose=context`` bytes
+    under that same predicate. These bytes are fetched HERE, at read time, every time:
+    never cached in the team-bridge store, sqlite, disk or a log, and never reused from
+    the connector's screening fetch (a different, private carrier).
+
+    WHAT REACHES THE MODEL. TEXT-class files only, at most
+    :data:`FILE_READ_MAX_FILES` files per read, 64 KiB per file and 128 KiB in total,
+    each under its descriptor (id, class, size) and its exact coverage. A non-text class
+    is stated and never fetched: the hub refuses those bytes to an agent, and this
+    runtime must not imply it read something it did not. Every caption leads with the
+    bridge untrusted clause, because file content is sender-controlled data exactly like
+    a body.
+    """
+
+    from .agent_file_reads import (
+        FILE_READ_MAX_BYTES_PER_FILE,
+        FILE_READ_MAX_BYTES_TOTAL,
+        FILE_READ_MAX_FILES,
+        FileRejected,
+        context_caption,
+        digest_file,
+        fetch_plan,
+        files_admission_hash,
+        parse_file_descriptors,
+    )
+
+    if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+        return []
+    _strip_display_names(page)
+    blocks: list[str] = []
+    budget = FILE_READ_MAX_BYTES_TOTAL
+    remaining = FILE_READ_MAX_FILES
+    for message in page["messages"]:
+        if not isinstance(message, dict) or not isinstance(message.get("id"), str):
+            continue
+        descriptors = parse_file_descriptors(message.get("files"))
+        count = message.get("file_count")
+        count = count if isinstance(count, int) and not isinstance(count, bool) else 0
+        if descriptors is None:
+            blocks.append(
+                _file_provenance(
+                    channel_id,
+                    message,
+                    [f"[{count or 'some'} file(s) withheld: could not be verified]"],
+                    [],
+                )
+            )
+            continue
+        if not descriptors:
+            if count > 0:
+                blocks.append(
+                    _file_provenance(
+                        channel_id,
+                        message,
+                        [f"[{count} file(s) withheld: not admitted by screening]"],
+                        [],
+                    )
+                )
+            continue
+        # The hub's own commitment, recomputed from the descriptors it just showed. A
+        # mismatch means these are not the rows the message committed to, so nothing is
+        # fetched and the agent is told exactly that (fail closed: descriptors only).
+        served = message.get("files_hash")
+        verified = False
+        if isinstance(served, str) and served:
+            try:
+                verified = files_admission_hash(descriptors) == served
+            except FileRejected:
+                verified = False
+        if not verified:
+            blocks.append(
+                _file_provenance(
+                    channel_id,
+                    message,
+                    context_caption(
+                        [],
+                        descriptors,
+                        source=(
+                            "file set NOT verified against the hub's commitment: "
+                            "no bytes were read"
+                        ),
+                    ).splitlines(),
+                    [],
+                )
+            )
+            continue
+        wanted, rest = fetch_plan(descriptors, max_files=remaining)
+        texts = []
+        unread = list(rest)
+        for descriptor in wanted:
+            if min(descriptor.size, FILE_READ_MAX_BYTES_PER_FILE) > budget:
+                # Bound every buffer BEFORE the request: the read's total is a hard
+                # ceiling, and a file that would cross it is stated as unread rather than
+                # fetched and then shortened (which would spend hub traffic and a model's
+                # context on bytes nothing will show).
+                unread.append(descriptor)
+                continue
+            try:
+                data = await _fetch_context_file(
+                    runtime, channel_id, message, endpoint_id, descriptor
+                )
+                item = digest_file(descriptor, data)
+            except FileRejected:
+                unread.append(descriptor)
+                continue
+            except Exception:  # noqa: BLE001 — a refusal is a line, never a crash
+                unread.append(descriptor)
+                continue
+            if item.shown_bytes > budget:
+                # Bound every buffer: the read's total is a hard ceiling, and a file that
+                # would cross it is stated as unread rather than silently shortened.
+                unread.append(descriptor)
+                continue
+            budget -= item.shown_bytes
+            remaining -= 1
+            texts.append(item)
+        caption = context_caption(
+            texts,
+            unread,
+            source=f"files for message {message.get('id')} in {channel_id}:",
+        )
+        blocks.append(_file_provenance(channel_id, message, caption.splitlines(), texts))
+    return blocks
+
+
+async def _fetch_context_file(
+    runtime: BridgeRuntime,
+    channel_id: str,
+    message: dict[str, Any],
+    endpoint_id: str,
+    descriptor: Any,
+) -> bytes:
+    """One text file's bytes under THIS endpoint's admission, through the shared route."""
+
+    from .agent_file_reads import FILE_SERVED_MIME
+
+    data, mime = await runtime.client.fetch_attachment(
+        channel_id,
+        str(message["id"]),
+        descriptor.id,
+        tenant_id=runtime.tenant_id,
+        endpoint_id=endpoint_id,
+        purpose="context",
+        served_types=(FILE_SERVED_MIME,),
+    )
+    if mime != FILE_SERVED_MIME:
+        raise ValueError("served type is not a generic file")
+    return data
+
+
+def _file_provenance(
+    channel_id: str, message: dict[str, Any], lines: list[str], texts: list[Any]
+) -> str:
+    """The caption and bodies for one message's files: untrusted clause first.
+
+    The clause leads because a file's text is sender-controlled data exactly like a body.
+    Provenance follows (which message, which channel, who sent it), then the descriptor
+    lines, then each file's content under its own ``--- file N ---`` marker so a model can
+    see where one file ends and the next begins.
+    """
+
+    raw_sender = message.get("sender")
+    sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
+    label = str(sender.get("display_label") or "member").replace("\n", " ")[:200]
+    kind = str(sender.get("kind") or "unknown")[:16]
+    head = (
+        f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+        f"Files from message {message.get('id')} in {channel_id} "
+        f"(seq {message.get('seq')}) from {label} ({kind}):"
+    )
+    body = "\n".join([head, *lines])
+    for index, item in enumerate(texts, start=1):
+        body += f"\n\n--- file {index}: {item.descriptor.id} ---\n{item.text}"
+    return body
 
 
 async def _history_images(
