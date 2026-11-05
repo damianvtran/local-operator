@@ -2821,7 +2821,7 @@ class ProviderController:
                     models = shared_catalogue.rows(receipt)
                     if usable is not None:
                         usable = usable | {definition.id}
-                elif shared_catalogue.source(self.config_dir) is not None:
+                elif shared_catalogue.approved(self.config_dir):
                     # An approved owner with no current receipt is pending, not
                     # a local login invitation or a public-API static catalogue.
                     models = []
@@ -3351,7 +3351,10 @@ class ProviderController:
     def shared_catalogue_provider(self) -> str | None:
         """The provider whose CURRENT approved machine share supplies rows.
 
-        Mirrors :meth:`initial_catalogue`'s eligibility (a validated receipt for
+        The same receipt question :meth:`initial_catalogue` asks for its row
+        source, without that frame's override/account-scope branches — those
+        decide WHICH rows it paints, not whether an owner share exists. A
+        validated receipt for
         this config root) so the desktop ``scope=usable`` filter and the
         authoring catalogue cannot disagree about an owner-approved model. Local
         credentials are deliberately not consulted: their ids are already in

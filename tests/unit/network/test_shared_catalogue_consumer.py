@@ -638,25 +638,116 @@ async def test_preparation_reads_the_explicit_session_root(borrower, tmp_path, m
 
 
 @pytest.mark.asyncio
-async def test_peer_selection_prepares_owner_metadata_before_validating(borrower):
-    """The peer entrypoint keeps its refusal, but no longer refuses cold."""
+async def test_peer_selection_accepts_an_owner_native_id_on_a_borrow_only_device(borrower):
+    """Q3: the pair the picker offers must also be selectable over the wire.
+
+    The target holds NO local openai row — the mesh borrow is a delegate rung on
+    ``MeshAwareAuthStore``, which the plain store this validator builds is not —
+    so usability has to be answered by the same receipt question the picker
+    asks. The cold case is the interesting one: preparation must warm the
+    catalogue, then usability, then the offered-id check.
+    """
+    import asyncio
+
+    from local_operator.mobile.peer_model import validate_peer_selection
+    from local_operator.model.discovery import offered_model_ids
+
+    mesh, plain, controller, state = borrower
+    cold = offered_model_ids("openai")
+    assert cold is not None
+    assert "gpt-fixture-sol" not in cold
+    assert plain.list_credentials("openai") == []
+    spec = await asyncio.to_thread(validate_peer_selection, "openai", "gpt-fixture-sol")
+    assert (spec.provider, spec.model_id) == ("openai", "gpt-fixture-sol")
+    assert state["gets"] == 1
+    warmed = offered_model_ids("openai")
+    assert warmed is not None
+    assert "gpt-fixture-sol" in warmed
+
+
+@pytest.mark.asyncio
+async def test_peer_selection_still_refuses_an_unoffered_id(borrower):
+    """No widening: a borrow-only target accepts only ids the owner offers."""
     import asyncio
 
     from local_operator.mobile.peer_model import validate_peer_selection
     from local_operator.model.configure import ModelSelectionRefused
-    from local_operator.model.discovery import offered_model_ids
 
     mesh, plain, controller, state = borrower
-    assert offered_model_ids("openai") is not None
-    assert "gpt-fixture-sol" not in offered_model_ids("openai")
+    with pytest.raises(ModelSelectionRefused) as refused:
+        await asyncio.to_thread(validate_peer_selection, "openai", "gpt-not-a-real-model")
+    assert "not a model openai serves" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_peer_selection_translates_an_owner_transport_refusal(borrower, monkeypatch):
+    """The new defect: a sleeping owner must answer through THIS module.
+
+    ``prepare_selection_sync`` dials the owner and can raise ``MeshRefusal``,
+    which is not a ``ModelSelectionRefused``; both hosts catch only the latter,
+    so an escaping refusal became a bare error string with no code. Every
+    sentence a sender reads is composed here, so the transport refusal is
+    translated instead of leaked.
+    """
+    import asyncio
+
+    from local_operator.mobile.peer_model import validate_peer_selection
+    from local_operator.model.configure import ModelSelectionRefused
+    from local_operator.providers import shared_catalogue
+
+    mesh, plain, controller, state = borrower
+    assert shared_catalogue.source(mesh.b.root) is not None
+    monkeypatch.setattr(shared_catalogue, "refresh", lambda *a, **k: None)
     with pytest.raises(ModelSelectionRefused) as refused:
         await asyncio.to_thread(validate_peer_selection, "openai", "gpt-fixture-sol")
-    # Its own validation is unchanged: a target with no local credential still
-    # refuses. Preparation now precedes it, so the cold catalogue is not the
-    # reason and the owner-native id is enumerable afterwards.
-    assert refused.value.code == "provider_unusable"
-    assert state["gets"] == 1
-    assert "gpt-fixture-sol" in (offered_model_ids("openai") or set())
+    assert refused.value.code == "owner_offline"
+    assert "catalogue metadata unavailable" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_a_prepared_selection_skips_the_owner_when_the_caller_knows_it(borrower):
+    """A locally resolvable selection must not wait on the owner at all.
+
+    The override tiers live on a store instance that a serving session or a peer
+    switch does not hold, so the caller's own answer is the only one those hosts
+    can offer; preparation must honour it instead of spending an owner RPC and
+    aborting when the owner device sleeps.
+    """
+    from local_operator.providers import shared_catalogue
+
+    mesh, plain, controller, state = borrower
+    before = state["gets"]
+    shared_catalogue.prepare_selection_sync("openai", mesh.b.root, local_ready=True)
+    assert state["gets"] == before
+    assert shared_catalogue.cached(mesh.b.root) is None
+    shared_catalogue.prepare_selection_sync("openai", mesh.b.root)
+    assert state["gets"] == before + 1
+
+
+@pytest.mark.asyncio
+async def test_approved_share_survives_a_latch_for_the_pending_frame(borrower):
+    """MINOR-1: the frame's "pending owner" question is not ``source()``.
+
+    ``source()`` fail-closes under a lifecycle latch, so using it to decide
+    "paint nothing while the share is pending" fell through to the bundled
+    static catalogue. ``approved()`` answers the structural question only and
+    grants no receipt, id or authority.
+    """
+    from local_operator.network.credentials import lifecycle
+    from local_operator.providers import shared_catalogue
+
+    mesh, plain, controller, state = borrower
+    marker = lifecycle.LifecycleStore(mesh.network_id, mesh.b.root).path.with_name(
+        lifecycle.LIFECYCLE_OVERFLOW_FILENAME
+    )
+    marker.write_bytes(b"")
+    try:
+        assert shared_catalogue.source(mesh.b.root) is None
+        assert shared_catalogue.approved(mesh.b.root) is True
+        assert shared_catalogue.cached(mesh.b.root) is None
+    finally:
+        marker.unlink()
+    assert shared_catalogue.source(mesh.b.root) is not None
 
 
 @pytest.mark.asyncio

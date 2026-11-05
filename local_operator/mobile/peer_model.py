@@ -55,7 +55,17 @@ def provider_usable_here(provider: str) -> bool:
     from local_operator.providers.controller import ProviderController
 
     with closing(AuthStore()) as store:
-        return ProviderController(store, config_dir()).is_usable(provider)
+        controller = ProviderController(store, config_dir())
+        if controller.is_usable(provider):
+            return True
+        # A borrow-only device holds NO row for the provider: the borrow is a
+        # delegate rung on MeshAwareAuthStore, which this plain store is not,
+        # so ``is_usable`` reads "unusable" on exactly the device the approved
+        # share exists for. That share IS this device's usable authority for
+        # the catalogue provider, so ask the same receipt question the picker
+        # asks; only "openai" is ever answered, and the pair is still gated by
+        # the offered-id check below.
+        return provider == "openai" and controller.shared_catalogue_provider() is not None
 
 
 def validate_peer_selection(provider: str, model_id: str) -> "ModelSpec":
@@ -90,7 +100,17 @@ def validate_peer_selection(provider: str, model_id: str) -> "ModelSpec":
     from local_operator.paths import config_dir
     from local_operator.providers.shared_catalogue import prepare_selection_sync
 
-    prepare_selection_sync(provider, config_dir())
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        prepare_selection_sync(provider, config_dir())
+    except MeshRefusal as refusal:
+        # The preparation dials the owner device, which may be asleep. Both
+        # hosts catch only ModelSelectionRefused, so an escaping MeshRefusal
+        # was answered by the runtime's generic handler as a bare error string
+        # with no code. Every sentence a sender reads is composed in THIS
+        # module, so translate the transport refusal instead of leaking it.
+        raise ModelSelectionRefused(refusal.code, str(refusal)) from refusal
     return validate_model_selection(provider, model_id, usable=usable)
 
 

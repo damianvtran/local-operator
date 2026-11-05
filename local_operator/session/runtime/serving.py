@@ -5948,8 +5948,16 @@ class ServingSessionHandle(SessionHandle):
             # The SESSION's config root, never the ambient one: a session resumed
             # under an explicit root carries its own native login/overrides, and
             # reading the ambient store would miss them and reach the owner.
-            await prepare_selection(provider, self._config_dir, deadline=resolution_deadline)
             warm_info = warm_model_info(provider, model_id)
+            await prepare_selection(
+                provider,
+                self._config_dir,
+                deadline=resolution_deadline,
+                # A pair this process can already resolve needs no owner
+                # metadata. Asking anyway is what aborted a switch onto an
+                # explicit local override while the owner was asleep.
+                local_ready=warm_info is not None,
+            )
             if warm_info is not None:
                 spec = build_model_spec(provider, model_id, info=warm_info)
             else:

@@ -88,6 +88,29 @@ def source(
         return None
 
 
+def approved(root: Path | None = None) -> bool:
+    """Whether an approved owner share EXISTS, receipt or latch aside.
+
+    Deliberately narrower than :func:`source`: it answers the structural
+    question only (a borrowable entry with a holder) and ignores the receipt,
+    the lifecycle latch and the local-authority rungs, because its one caller
+    paints an empty catalogue while a share is pending. Using ``source`` there
+    fell through to the bundled static listing whenever the latch hid a
+    receipt — rows that branch was written to suppress. It grants nothing: no
+    receipt, no offered id, no authority.
+    """
+    try:
+        client = MeshCredentialClient.for_this_device(root)
+        if client is None or not client.should_borrow("openai"):
+            return False
+        entry = client.entry("openai")
+        return entry is not None and entry.holder(client.self_device) is not None
+    except (OSError, ValueError):
+        return False
+    except Exception:  # noqa: BLE001 - a frame-only answer never raises
+        return False
+
+
 def _path(client: MeshCredentialClient, root: Path | None, cache_dir: Path | None) -> Path:
     namespace = f"{client.network_id}:{client.owner_of('openai')}:openai:catalogue"
     tag = hashlib.sha256(namespace.encode()).hexdigest()
@@ -118,8 +141,8 @@ def _current(document: dict[str, Any], client: MeshCredentialClient, root: Path 
             or opaque != document["account_scope"]
         ):
             continue
-        state = observed.observation_states.get((owner, key, scope))
-        if state is not None and state != lifecycle.STATE_AVAILABLE:
+        scope_state = observed.observation_states.get((owner, key, scope))
+        if scope_state is not None and scope_state != lifecycle.STATE_AVAILABLE:
             return False
         if revisions > (document["login_chain_revision"], document["material_generation"]):
             return False
@@ -261,7 +284,11 @@ def rows(document: dict[str, Any]) -> list[Any]:
 
 
 async def prepare_selection(
-    provider: str, root: Path | None = None, *, deadline: float | None = None
+    provider: str,
+    root: Path | None = None,
+    *,
+    deadline: float | None = None,
+    local_ready: bool = False,
 ) -> None:
     """Refresh only at an explicit model mutation, off the owner event loop.
 
@@ -276,15 +303,29 @@ async def prepare_selection(
 
     timeout = 6.1 if deadline is None else max(0.001, min(6.1, deadline - time.monotonic()))
     try:
-        await asyncio.wait_for(asyncio.to_thread(prepare_selection_sync, provider, root), timeout)
+        await asyncio.wait_for(
+            asyncio.to_thread(prepare_selection_sync, provider, root, local_ready=local_ready),
+            timeout,
+        )
     except TimeoutError as error:
         raise MeshRefusal("owner_offline", "catalogue metadata unavailable") from error
 
 
-def prepare_selection_sync(provider: str, root: Path | None = None) -> None:
-    """Worker-only twin for existing synchronous/off-loop birth validators."""
+def prepare_selection_sync(
+    provider: str, root: Path | None = None, *, local_ready: bool = False
+) -> None:
+    """Worker-only twin for existing synchronous/off-loop birth validators.
+
+    ``local_ready`` is the caller's answer to "this pair already resolves
+    locally" — a warm catalogue entry, a native login, an explicit override. A
+    host that can answer it must: the override tiers live on a store INSTANCE
+    that a serving session or a peer switch does not hold, so without that
+    answer an operator's own key spends an owner RPC and the switch aborts
+    whenever the owner device is asleep. It is never a bypass: the caller's
+    own validation still runs afterwards.
+    """
     provider = provider.strip().lower()
-    if provider != "openai" or source(root, strict=True) is None:
+    if provider != "openai" or local_ready or source(root, strict=True) is None:
         return
     if refresh(root, fresh=True) is None:
         raise MeshRefusal("owner_offline", "catalogue metadata unavailable")
