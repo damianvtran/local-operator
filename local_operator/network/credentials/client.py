@@ -257,6 +257,10 @@ class MeshCredentialClient:
         self._relay = relay
         self.deadline_s = deadline_s
         self.grants = GrantCache()
+        # A validated store remains established even after every cached lease is
+        # evicted. This is deny-only knowledge, scoped to canonical identity,
+        # never permission or a claim about another process's unobserved history.
+        self._held_policy_established: set[tuple[Path, str, str]] = set()
         self._state_lock = threading.Lock()
         #: The sync engine used by the CLI's direct fallback. Built lazily; the
         #: runtime never reaches it (it asks its own relay, leg 1).
@@ -799,7 +803,13 @@ class MeshCredentialClient:
 
         try:
             policy = self._policy()
-            with policy.transaction(initialize=True) as document:
+            identity = (policy.root, policy.network_id, policy.recipient)
+            # Evaluate genesis eligibility UNDER the store's shared locks: a
+            # concurrent capture may have validated this identity while we wait.
+            with policy.transaction(
+                initialize=lambda: identity not in self._held_policy_established
+            ) as document:
+                self._held_policy_established.add(identity)
                 if document["membership_denied"] and self._self_membership_active():
                     # This only permits a later loss to advance its deny counter;
                     # it NEVER restamps an old grant or resets that counter.

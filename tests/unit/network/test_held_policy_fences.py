@@ -597,3 +597,66 @@ def test_final_membership_checkpoint_fences_other_client_memory(mesh, monkeypatc
     result = sibling.request_grant_sync(KEY, session_id="sibling")
     assert isinstance(result, BrokerError)
     assert sibling.grants.peek(KEY, "sibling") is None
+
+
+def test_known_store_cannot_reinitialize_after_both_files_disappear(mesh):
+    import dataclasses
+
+    c, grants = seed(mesh)
+    policy = c._policy()
+    with policy.transaction() as document:
+        incarnation = document["incarnation"]
+    identity = (policy.root, policy.network_id, policy.recipient)
+    assert identity in c._held_policy_established
+    # An unrelated locally owned context must not be erased by this failure.
+    original = c.grants.peek(KEY, "sess-A")
+    assert original is not None
+    local = dataclasses.replace(
+        original,
+        credential_ref=dataclasses.replace(original.credential_ref, owner_device=mesh.borrower),
+    )
+    c.grants.put("local-safe", "local-context", local)
+    h._stop_owner(mesh)
+    policy.path.unlink()
+    policy.marker.unlink()
+    for attempt in range(2):
+        outcome = c.request_grant_sync(KEY, session_id="sess-A")
+        assert isinstance(outcome, BrokerError)
+        assert not policy.path.exists() and not policy.marker.exists()
+        assert c.grants.peek(KEY, "sess-A") is None
+        assert c.grants.peek("local-safe", "local-context") is local
+        assert identity in c._held_policy_established
+    assert incarnation  # No replacement incarnation was written, even after eviction.
+
+
+@pytest.mark.parametrize("changed", ["root", "network", "recipient"])
+def test_established_memory_is_identity_scoped(mesh, tmp_path, monkeypatch, changed):
+    from local_operator.network.credentials.held_policy import HeldPolicyStore
+
+    c, _ = seed(mesh)
+    old = c._policy()
+    # Leave the known identity absent. Only disposable fixture metadata is removed.
+    old.path.unlink()
+    old.marker.unlink()
+    other = HeldPolicyStore(
+        "n_other" if changed == "network" else old.network_id,
+        "d_other" if changed == "recipient" else old.recipient,
+        tmp_path if changed == "root" else old.root,
+    )
+    monkeypatch.setattr(c, "_policy", lambda: other)
+    stamp = c._capture_request(KEY)
+    assert stamp is not None
+    assert other.path.exists() and other.marker.exists()
+    assert (other.root, other.network_id, other.recipient) in c._held_policy_established
+    # This checks metadata genesis isolation only: it neither receives an owner
+    # response nor asserts that this synthetic identity may borrow a credential.
+
+
+def test_fresh_reader_respects_available_initialized_marker(mesh):
+    c, _ = seed(mesh)
+    policy = c._policy()
+    policy.path.unlink()
+    fresh = h._client(mesh)
+    assert not fresh._held_policy_established
+    assert fresh._capture_request(KEY) is None
+    assert policy.marker.exists() and not policy.path.exists()

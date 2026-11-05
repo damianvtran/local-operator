@@ -17,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from local_operator.network import store
 from local_operator.network.credentials import placement
@@ -138,7 +138,9 @@ class HeldPolicyStore:
             raise PolicyUnknown("held-policy write unconfirmed")
 
     @contextmanager
-    def transaction(self, *, initialize: bool = False) -> Iterator[dict[str, Any]]:
+    def transaction(
+        self, *, initialize: bool | Callable[[], bool] = False
+    ) -> Iterator[dict[str, Any]]:
         try:
             with (
                 store._write_lock(self.path),
@@ -147,7 +149,11 @@ class HeldPolicyStore:
                 ),
             ):
                 exists, established = os.path.lexists(self.path), os.path.lexists(self.marker)
-                if not exists and not established and initialize:
+                if (
+                    not exists
+                    and not established
+                    and (initialize() if callable(initialize) else initialize)
+                ):
                     doc = {
                         "schema": 1,
                         "network_id": self.network_id,
