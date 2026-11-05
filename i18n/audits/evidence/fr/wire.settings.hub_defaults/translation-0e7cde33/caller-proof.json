@@ -1,0 +1,382 @@
+{
+  "kind": "source_inspection_not_runtime_execution",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "namespace": "wire.settings.hub_defaults",
+  "french_absence": {
+    "command": "git cat-file -e <ref>:<fr namespace>",
+    "exit_code": 128,
+    "stderr": "fatal: path 'local_operator/i18n/catalogues/fr/wire.settings.hub_defaults.json' does not exist in '0e7cde33ca8008d561e74f4aed774aa5f76ff7d5'"
+  },
+  "other_locale_census": [
+    {
+      "locale": "es",
+      "path": "local_operator/i18n/catalogues/es/wire.settings.hub_defaults.json",
+      "sha256": "0816c139dda2caf2055e7b395a4bd0563c7c145a9508e9f0dc8bc757cfe01753",
+      "key_count": 9,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 9
+    },
+    {
+      "locale": "hi",
+      "path": "local_operator/i18n/catalogues/hi/wire.settings.hub_defaults.json",
+      "sha256": "95b2a56770ca17a68ddbffc3eeabf24cba51e390dba866f9087e1a2bd2528610",
+      "key_count": 9,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 9
+    },
+    {
+      "locale": "ru",
+      "path": "local_operator/i18n/catalogues/ru/wire.settings.hub_defaults.json",
+      "sha256": "52ef90c99136322e5050cb0620c5c13d3fff912b87aa8bfbc80d0a5c924f0976",
+      "key_count": 9,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 9
+    },
+    {
+      "locale": "ur",
+      "path": "local_operator/i18n/catalogues/ur/wire.settings.hub_defaults.json",
+      "sha256": "f6a6e2762e7f273c2304a35c7b3518ffc77bad4dd444e121e42c178e0caced5a",
+      "key_count": 9,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 9
+    },
+    {
+      "locale": "vi",
+      "path": "local_operator/i18n/catalogues/vi/wire.settings.hub_defaults.json",
+      "sha256": "cba9a71ad740ab9cb7ac0a53dcc99051258e35305cb98c0aab8f397c6a2dc780",
+      "key_count": 9,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 9
+    },
+    {
+      "locale": "zh-CN",
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.settings.hub_defaults.json",
+      "sha256": "b547b9730d78a81e840746de723e8a44597a3dcb175cd7e0200a143bb4972c13",
+      "key_count": 9,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 9
+    }
+  ],
+  "callers": [
+    {
+      "path": "local_operator/settings_io.py",
+      "sha256": "c6462e6b01cfd9f12610aadf24cb890ca97f3405a38c69b1290ddbadbe9ea724",
+      "excerpts": [
+        {
+          "line": 119,
+          "text": "#: (QA round 1, Q1) while buying nothing the namespace split did not already buy."
+        },
+        {
+          "line": 120,
+          "text": "_CHILD_SETTINGS_NAMESPACES = ("
+        },
+        {
+          "line": 121,
+          "text": "    \"wire.settings.account_policy\","
+        },
+        {
+          "line": 122,
+          "text": "    \"wire.settings.hub_defaults\","
+        },
+        {
+          "line": 123,
+          "text": "    \"wire.aida_cadence\","
+        },
+        {
+          "line": 124,
+          "text": "    \"wire.host_speed\","
+        },
+        {
+          "line": 125,
+          "text": "    \"wire.console\","
+        },
+        {
+          "line": 126,
+          "text": "    \"wire.memory\","
+        },
+        {
+          "line": 5287,
+          "text": "    # string, which looks up a literal top-level key and would read nothing."
+        },
+        {
+          "line": 5288,
+          "text": "    # Help strings are budgeted to <=72 cells (the detail line at 100 columns)."
+        },
+        {
+          "line": 5289,
+          "text": "    Setting("
+        },
+        {
+          "line": 5290,
+          "text": "        key=\"hub.auto_update.agents\","
+        },
+        {
+          "line": 5291,
+          "text": "        path=(\"hub\", \"auto_update\", \"agents\"),"
+        },
+        {
+          "line": 5292,
+          "text": "        section=\"hub\","
+        },
+        {
+          "line": 5293,
+          "text": "        label=_t(_hd.agents_label()),"
+        },
+        {
+          "line": 5294,
+          "text": "        kind=Kind.BOOL,"
+        },
+        {
+          "line": 5295,
+          "text": "        default=True,"
+        },
+        {
+          "line": 5296,
+          "text": "        choices=_bool_choices("
+        },
+        {
+          "line": 5297,
+          "text": "            _t(_hd.agents_on_description()),"
+        },
+        {
+          "line": 5298,
+          "text": "            _t(_hd.agents_off_description()),"
+        },
+        {
+          "line": 5299,
+          "text": "        ),"
+        },
+        {
+          "line": 5300,
+          "text": "        help=_t(_hd.agents_help()),"
+        },
+        {
+          "line": 5301,
+          "text": "    ),"
+        },
+        {
+          "line": 5302,
+          "text": "    Setting("
+        },
+        {
+          "line": 5303,
+          "text": "        key=\"hub.auto_update.teams\","
+        },
+        {
+          "line": 5304,
+          "text": "        path=(\"hub\", \"auto_update\", \"teams\"),"
+        },
+        {
+          "line": 5305,
+          "text": "        section=\"hub\","
+        },
+        {
+          "line": 5306,
+          "text": "        label=_t(_ws.hub_auto_update_teams_label()),"
+        },
+        {
+          "line": 5307,
+          "text": "        kind=Kind.BOOL,"
+        },
+        {
+          "line": 5308,
+          "text": "        default=True,"
+        },
+        {
+          "line": 5309,
+          "text": "        choices=_bool_choices("
+        },
+        {
+          "line": 5310,
+          "text": "            _t(_ws.hub_auto_update_teams_choice_true_description()),"
+        },
+        {
+          "line": 5311,
+          "text": "            _t(_ws.hub_auto_update_teams_choice_false_description()),"
+        },
+        {
+          "line": 5312,
+          "text": "        ),"
+        },
+        {
+          "line": 5313,
+          "text": "        help=_t(_ws.hub_auto_update_teams_help()),"
+        },
+        {
+          "line": 5314,
+          "text": "    ),"
+        },
+        {
+          "line": 5315,
+          "text": "    Setting("
+        },
+        {
+          "line": 5316,
+          "text": "        key=\"hub.check_interval_min\","
+        },
+        {
+          "line": 5317,
+          "text": "        path=(\"hub\", \"check_interval_min\"),"
+        }
+      ]
+    },
+    {
+      "path": "local_operator/i18n/catalogues.py",
+      "sha256": "506614a09f75cf6ccd58643975bbc012a059b92a85638d2c6b6a85aeb986edd5",
+      "excerpts": [
+        {
+          "line": 87,
+          "text": "        \"settings registry labels/help, consumed as plain strings by the \""
+        },
+        {
+          "line": 88,
+          "text": "        \"settings surface; no desktop envelope identity uses this namespace\""
+        },
+        {
+          "line": 89,
+          "text": "    ),"
+        },
+        {
+          "line": 90,
+          "text": "    \"wire.settings.hub_defaults\": ("
+        },
+        {
+          "line": 91,
+          "text": "        \"hub settings keys rendered in-process by settings_io._t as plain strings\""
+        },
+        {
+          "line": 92,
+          "text": "    ),"
+        },
+        {
+          "line": 93,
+          "text": "    \"wire.console\": \"console section title/description and row labels rendered by settings_io._t\","
+        },
+        {
+          "line": 94,
+          "text": "    \"wire.memory\": \"memory section rows rendered by settings_io._t as plain label/help strings\","
+        }
+      ]
+    },
+    {
+      "path": "local_operator/hub_sync/policies.py",
+      "sha256": "5c8cfb8c54bbed21b1d28766117cab7448caec985bc5fd71d83c335716301520",
+      "excerpts": [
+        {
+          "line": 49,
+          "text": "    return value"
+        },
+        {
+          "line": 50,
+          "text": ""
+        },
+        {
+          "line": 51,
+          "text": ""
+        },
+        {
+          "line": 52,
+          "text": "def creation_policy(values: Mapping[str, Any], kind: str) -> LinkPolicy:"
+        },
+        {
+          "line": 53,
+          "text": "    defaults = _mapping(_hub(values).get(\"auto_update\", {}))"
+        },
+        {
+          "line": 54,
+          "text": "    if kind not in (\"agent\", \"team\", \"skill\"):"
+        },
+        {
+          "line": 55,
+          "text": "        raise LinkError(\"invalid-link-policy\", \"hub link kind is unsupported\")"
+        },
+        {
+          "line": 56,
+          "text": "    # One switch per kind: skills have NO kind-wide shared settings key (adding one"
+        },
+        {
+          "line": 57,
+          "text": "    # is a settings/i18n catalogue change owned by that lane), so a skill's"
+        },
+        {
+          "line": 58,
+          "text": "    # creation default follows the SAME ``hub.auto_update.agents`` switch the"
+        },
+        {
+          "line": 59,
+          "text": "    # runner's ``settings.auto_for('skill')`` ceiling reads. The two cannot"
+        },
+        {
+          "line": 60,
+          "text": "    # disagree, which is what round-1 QA flagged."
+        },
+        {
+          "line": 61,
+          "text": "    default = defaults.get(\"agents\" if kind in (\"agent\", \"skill\") else \"teams\", True)"
+        },
+        {
+          "line": 62,
+          "text": "    # Preserve an explicitly stored BOOL OFF, not truthiness of arbitrary YAML."
+        },
+        {
+          "line": 63,
+          "text": "    # Missing (or a non-bool spelling) means the ON default."
+        },
+        {
+          "line": 64,
+          "text": "    return LinkPolicy(subscribe=default if type(default) is bool else True, auto_push=False)"
+        },
+        {
+          "line": 65,
+          "text": ""
+        },
+        {
+          "line": 66,
+          "text": ""
+        },
+        {
+          "line": 67,
+          "text": "def read_policy(values: Mapping[str, Any], identity: LinkIdentity) -> PolicySnapshot:"
+        },
+        {
+          "line": 68,
+          "text": "    hub = _hub(values)"
+        },
+        {
+          "line": 96,
+          "text": "        current = read_policy(values, identity)"
+        },
+        {
+          "line": 97,
+          "text": "        if identity.link_id not in _mapping(_hub(values).get(\"links\", {})):"
+        },
+        {
+          "line": 98,
+          "text": "            if legacy_subscribe_hint is not None:"
+        },
+        {
+          "line": 99,
+          "text": "                policy = LinkPolicy(subscribe=legacy_subscribe_hint, auto_push=False)"
+        },
+        {
+          "line": 100,
+          "text": "                grant = current.public_egress_grant"
+        },
+        {
+          "line": 101,
+          "text": "                current = PolicySnapshot(policy, policy.revision(identity, grant), grant)"
+        },
+        {
+          "line": 102,
+          "text": "            settings_io._store("
+        },
+        {
+          "line": 103,
+          "text": "                manager, (\"hub\", \"links\", identity.link_id), current.policy.to_json()"
+        }
+      ]
+    }
+  ],
+  "parser_contract": "No English sentence parsing found on the inspected registry path: labels/help/descriptions are _t-rendered strings; configuration paths, types, booleans, numeric bounds and IDs are separate. This is source proof, not whole-repository absence proof.",
+  "coverage_caveat": "At pinned settings_io.py only four _hd.agents_* functions have direct call sites. Team rows still use _ws.hub_auto_update_teams_* from wire.settings; no direct caller was found for the four hub_defaults.teams.* keys or model_default.note. All nine requested keys are translated, but this packet alone cannot claim changes to those five rendered surfaces."
+}

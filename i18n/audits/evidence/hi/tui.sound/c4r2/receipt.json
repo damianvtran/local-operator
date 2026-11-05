@@ -1,0 +1,23 @@
+{
+  "translator": {
+    "agent": "i18n-translator-r2",
+    "session": "1d36d618f249",
+    "job": "1ddc1da8273c",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-04",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "C4-i18n-delta / independent i18n-auditor",
+    "session": "304e031dccf4",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-04",
+    "result": "passed",
+    "findings": 0,
+    "fallback_used": false
+  },
+  "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+  "target_sha256": "d1aa4a10f5c27766e326a56034c3a172de947ee143c9ac5c6b5124422e618e80",
+  "status": "passed",
+  "fallback_used": false
+}

@@ -1,0 +1,66 @@
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+{
+  "source": "/Users/damian/local-operator/.worktrees/fr-hub-defaults/local_operator/__init__.py",
+  "namespace": "wire.settings.hub_defaults",
+  "configured_language": "en",
+  "active_locale_after_boot": "en",
+  "http_status": 200,
+  "translated_keys": 9,
+  "registry": {
+    "french_fields": [],
+    "english_leaks": [
+      {
+        "key": "wire.settings.hub_defaults.agents.help",
+        "field": "hub.auto_update.agents:help"
+      },
+      {
+        "key": "wire.settings.hub_defaults.agents.label",
+        "field": "hub.auto_update.agents:label"
+      },
+      {
+        "key": "wire.settings.hub_defaults.agents.off.description",
+        "field": "hub.auto_update.agents:choice:False:description"
+      },
+      {
+        "key": "wire.settings.hub_defaults.agents.on.description",
+        "field": "hub.auto_update.agents:choice:True:description"
+      }
+    ],
+    "not_exposed": [
+      "wire.settings.hub_defaults.model_default.note",
+      "wire.settings.hub_defaults.teams.help",
+      "wire.settings.hub_defaults.teams.label",
+      "wire.settings.hub_defaults.teams.off.description",
+      "wire.settings.hub_defaults.teams.on.description"
+    ]
+  },
+  "http": {
+    "french_fields": [],
+    "english_leaks": [
+      {
+        "key": "wire.settings.hub_defaults.agents.help",
+        "field": "hub.auto_update.agents"
+      },
+      {
+        "key": "wire.settings.hub_defaults.agents.label",
+        "field": "hub.auto_update.agents"
+      },
+      {
+        "key": "wire.settings.hub_defaults.agents.off.description",
+        "field": "hub.auto_update.agents:choice:False"
+      },
+      {
+        "key": "wire.settings.hub_defaults.agents.on.description",
+        "field": "hub.auto_update.agents:choice:True"
+      }
+    ],
+    "not_exposed": [
+      "wire.settings.hub_defaults.model_default.note",
+      "wire.settings.hub_defaults.teams.help",
+      "wire.settings.hub_defaults.teams.label",
+      "wire.settings.hub_defaults.teams.off.description",
+      "wire.settings.hub_defaults.teams.on.description"
+    ]
+  }
+}
+[run_bounded] contract=command-status rc=1 cause=child-exit cleanup=unknown invocation_id=af9c5ede0e4b4be786ac21f96d2941be completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/fr-hub-proof/run-bounded-runs/af9c5ede0e4b4be786ac21f96d2941be.completion.json

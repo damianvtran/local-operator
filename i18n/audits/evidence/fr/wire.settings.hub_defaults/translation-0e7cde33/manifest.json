@@ -1,0 +1,72 @@
+{
+  "kind": "namespace_translation_packet_manifest_not_audit",
+  "namespace": "wire.settings.hub_defaults",
+  "root": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-hub-defaults-0e7cde33",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "bc65649f5779de07b97178b8b5965f837977fc230c64f398b9a8ead4e58235aa",
+      "bytes": 2433
+    },
+    {
+      "path": "caller-proof.json",
+      "sha256": "e04019b0d0d4145c606ec5bac20893ce6d0ab3cd6ef6e424a5289e776af247c4",
+      "bytes": 11734
+    },
+    {
+      "path": "inputs/en.context.json",
+      "sha256": "a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba",
+      "bytes": 6161
+    },
+    {
+      "path": "inputs/en.json",
+      "sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "bytes": 895
+    },
+    {
+      "path": "inputs/fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "bytes": 4196
+    },
+    {
+      "path": "inputs/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "bytes": 13399
+    },
+    {
+      "path": "provenance.json",
+      "sha256": "62278f4ac31eaa52c153b1e9169223b757be4fcd20541e593b318578b6a5edbc",
+      "bytes": 1920
+    },
+    {
+      "path": "record.json",
+      "sha256": "974cd5e82b3f50acd4ac9909e732a525658e31c2214c6bc4ab46b86f6a2cdbda",
+      "bytes": 6314
+    },
+    {
+      "path": "validate.mjs",
+      "sha256": "687fb11a20c8b41507a9e442ea08130f939405498ade2d9efc77fb3858adbfd4",
+      "bytes": 1836
+    },
+    {
+      "path": "validation.log",
+      "sha256": "c873ce3f8252e13f32d1a3600b66e15b329725eb5cce1d01b096ea55c8491525",
+      "bytes": 359
+    },
+    {
+      "path": "widths.json",
+      "sha256": "6e9262e8916d7475b566d373e917c03829f5c5ecf0243ecc3440b1bb2c964849",
+      "bytes": 198
+    },
+    {
+      "path": "widths.log",
+      "sha256": "d3372bfd46e57673def1a7c0cb0bbaa8a12febef0d325770bad65b970231ddf4",
+      "bytes": 200
+    },
+    {
+      "path": "wire.settings.hub_defaults.json",
+      "sha256": "9733a2653109b4e5b30964d0bbc9fb5974fe799bb086ce8d21354517d1936940",
+      "bytes": 1086
+    }
+  ]
+}

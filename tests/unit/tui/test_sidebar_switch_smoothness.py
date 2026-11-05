@@ -1158,6 +1158,16 @@ async def test_the_revealed_frame_is_already_the_settled_frame(
     first frame carries — against the state after the app has gone quiet.
     """
     monkeypatch.setattr("local_operator.tui.app.RESUME_PAGE_MESSAGES", 8)
+    # This cell tests multi-page reserve GEOMETRY, not the wall-clock escape.
+    # Production deliberately reveals an incomplete reserve after 200 ms (see
+    # `_prefill_resume_before_reveal`), then fills it asynchronously; the spent-
+    # budget cell below requires that fallback. On a loaded CI worker the same
+    # valid escape made this unconditional reserve assertion fail at either
+    # width (scroll_y=47, goal=62). Remove elapsed time as a variable here while
+    # retaining the page cap and every first-reveal/final-state assertion.
+    # Infinity cannot permit an unbounded fill: MAX_PAGES and pending-head
+    # exhaustion still bound it. A single-page implementation must still fail.
+    monkeypatch.setattr("local_operator.tui.app.RESUME_PREFILL_BUDGET_S", float("inf"))
     home = SidebarRemote("home-session")
     target = _conversation("settled-session", 60)
 

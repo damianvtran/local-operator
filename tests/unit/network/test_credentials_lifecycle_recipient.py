@@ -434,6 +434,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         "credential-broker-v1": "net_broker",
         wire.CREDENTIAL_LIFECYCLE_V1: "net_broker",
         wire.CREDENTIAL_PLACEMENT_PUSH_V1: "net_broker",
+        # Catalogue is a metadata kind on the installed broker, not a pure
+        # handshake feature or a second unregistered peer operation.
+        wire.CREDENTIAL_CATALOGUE_METADATA_V1: "net_broker",
         "peer-readiness-v1": "net_readiness",
         "mcp-defs-v1": "net_mcp_defs",
         "memory-sync-v1": "net_memory",
@@ -978,3 +981,23 @@ def test_process_to_disk_handoff_cannot_report_unrestricted_gap(rig, monkeypatch
 
     monkeypatch.setattr(life, "restriction_overflowed", disk_read_then_handoff)
     assert life.restriction_pending()
+
+
+def test_catalogue_metadata_negotiation_does_not_claim_legacy_support():
+    from types import SimpleNamespace
+
+    from local_operator.network import wire
+    from local_operator.network.credentials import catalogue
+
+    current = list(wire.LINK_CAPABILITIES)
+    legacy = [cap for cap in current if cap != wire.CREDENTIAL_CATALOGUE_METADATA_V1]
+    negotiated = wire.negotiate_capabilities(current, legacy)
+    assert "credential-broker-v1" in negotiated
+    assert wire.CREDENTIAL_CATALOGUE_METADATA_V1 not in negotiated
+    assert not catalogue.negotiated(
+        SimpleNamespace(local_capabilities=current, capabilities=legacy)
+    )
+    assert not catalogue.negotiated(
+        SimpleNamespace(local_capabilities=legacy, capabilities=current)
+    )
+    assert catalogue.negotiated(SimpleNamespace(local_capabilities=current, capabilities=current))

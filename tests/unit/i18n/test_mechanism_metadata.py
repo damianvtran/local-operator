@@ -123,7 +123,9 @@ async def test_capabilities_resolves_once_for_consistent_direction(monkeypatch) 
         return "ur" if len(calls) == 1 else "en"
 
     monkeypatch.setattr(capabilities, "resolve_language", changing_language)
-    response = await capabilities.capabilities()
+    from starlette.requests import Request
+
+    response = await capabilities.capabilities(Request({"type": "http", "headers": []}))
     result = response.result
     assert result is not None
     assert result["language"] == "ur"

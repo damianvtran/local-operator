@@ -1,0 +1,65 @@
+{
+  "es": {
+    "tui.sound.id_help": "Suena al llegar con las flechas. Añade los tuyos con /sound add; ¿oyes dos sonidos? /sound doctor. `system` mantiene el sonido propio de tu terminal.",
+    "tui.sound.list_title": "Sonidos de notificaciones",
+    "tui.sound.list_yours": "Tuyos",
+    "tui.sound.usage": "Usa /sound list, preview [id], use <id>, volume <0-100>, on, off, add <file> [name] [--select], rename <id> <name>, remove <id> o doctor.",
+    "tui.sound.list_hint": "/sound use <id> elige · /sound preview <id> suena",
+    "tui.sound.list_yours_hint": "/sound rename <id> <name> · /sound remove <id>",
+    "tui.sound.section_description": "El sonido que acompaña a una notificación de escritorio, como máximo una vez cada 1.5 segundos. Recorre la lista con las flechas para oír cada uno o usa /sound."
+  },
+  "fr": {
+    "tui.sound.id_help": "Le son est joué au passage avec les flèches. Ajoutez les vôtres avec /sound add ; deux sons à la fois ? /sound doctor. `system` garde le son propre à votre terminal.",
+    "tui.sound.list_title": "Sons des notifications",
+    "tui.sound.list_yours": "Les vôtres",
+    "tui.sound.usage": "Utilisez /sound list, preview [id], use <id>, volume <0-100>, on, off, add <file> [name] [--select], rename <id> <name>, remove <id> ou doctor.",
+    "tui.sound.list_hint": "/sound use <id> choisit · /sound preview <id> joue",
+    "tui.sound.list_yours_hint": "/sound rename <id> <name> · /sound remove <id>",
+    "tui.sound.section_description": "Le son joué avec une notification de bureau, au plus une fois toutes les 1.5 secondes. Parcourez la liste avec les flèches pour écouter chaque son, ou utilisez /sound."
+  },
+  "hi": {
+    "tui.sound.id_help": "तीर कुंजियों से जिस ध्वनि पर जाएँ, वही बजती है। अपनी ध्वनियाँ /sound add से जोड़ें; दो ध्वनियाँ सुनाई दे रही हैं? /sound doctor चलाएँ। `system` आपके टर्मिनल की अपनी ध्वनि रखता है।",
+    "tui.sound.list_title": "सूचना की ध्वनियाँ",
+    "tui.sound.list_yours": "आपकी",
+    "tui.sound.usage": "/sound list, preview [id], use <id>, volume <0-100>, on, off, add <file> [name] [--select], rename <id> <name>, remove <id> या doctor इस्तेमाल करें।",
+    "tui.sound.list_hint": "/sound use <id> चुनें · /sound preview <id> सुनें",
+    "tui.sound.list_yours_hint": "/sound rename <id> <name> · /sound remove <id>",
+    "tui.sound.section_description": "डेस्कटॉप सूचना के साथ बजने वाली ध्वनि, हर 1.5 सेकंड में अधिकतम एक बार। हर ध्वनि सुनने के लिए तीर कुंजियों से सूची में जाएँ या /sound इस्तेमाल करें।"
+  },
+  "ru": {
+    "tui.sound.id_help": "Звук играет при переходе к нему стрелками. Добавьте свои через /sound add; слышите два звука? /sound doctor. `system` сохраняет собственный звук терминала.",
+    "tui.sound.list_title": "Звуки уведомлений",
+    "tui.sound.list_yours": "Ваши",
+    "tui.sound.usage": "Используйте /sound list, preview [id], use <id>, volume <0-100>, on, off, add <file> [name] [--select], rename <id> <name>, remove <id> или doctor.",
+    "tui.sound.list_hint": "/sound use <id> выбор · /sound preview <id> звук",
+    "tui.sound.list_yours_hint": "/sound rename <id> <name> · /sound remove <id>",
+    "tui.sound.section_description": "Звук при уведомлении на рабочем столе, не чаще одного раза в 1.5 секунды. Переходите по списку стрелками, чтобы прослушать каждый звук, или используйте /sound."
+  },
+  "ur": {
+    "tui.sound.id_help": "تیر کی کلیدوں سے جس آواز پر جائیں، وہی بجتی ہے۔ اپنی آوازیں /sound add سے شامل کریں؛ دو آوازیں سنائی دے رہی ہیں؟ /sound doctor چلائیں۔ `system` آپ کے ٹرمینل کی اپنی آواز برقرار رکھتا ہے۔",
+    "tui.sound.list_title": "اطلاع کی آوازیں",
+    "tui.sound.list_yours": "آپ کی",
+    "tui.sound.usage": "/sound list, preview [id], use <id>, volume <0-100>, on, off, add <file> [name] [--select], rename <id> <name>, remove <id> یا doctor استعمال کریں۔",
+    "tui.sound.list_hint": "/sound use <id> چنیں · /sound preview <id> سنیں",
+    "tui.sound.list_yours_hint": "/sound rename <id> <name> · /sound remove <id>",
+    "tui.sound.section_description": "ڈیسک ٹاپ اطلاع کے ساتھ بجنے والی آواز، ہر 1.5 سیکنڈ میں زیادہ سے زیادہ ایک بار۔ ہر آواز سننے کے لیے تیر کی کلیدوں سے فہرست میں جائیں یا /sound استعمال کریں۔"
+  },
+  "vi": {
+    "tui.sound.id_help": "Âm thanh phát khi dùng phím mũi tên chuyển đến nó. Thêm âm thanh của bạn bằng /sound add; nghe thấy hai âm thanh? /sound doctor. `system` giữ âm thanh riêng của terminal.",
+    "tui.sound.list_title": "Âm thanh thông báo",
+    "tui.sound.list_yours": "Của bạn",
+    "tui.sound.usage": "Dùng /sound list, preview [id], use <id>, volume <0-100>, on, off, add <file> [name] [--select], rename <id> <name>, remove <id> hoặc doctor.",
+    "tui.sound.list_hint": "/sound use <id> chọn · /sound preview <id> phát",
+    "tui.sound.list_yours_hint": "/sound rename <id> <name> · /sound remove <id>",
+    "tui.sound.section_description": "Âm thanh phát cùng thông báo trên màn hình, tối đa một lần mỗi 1.5 giây. Dùng phím mũi tên duyệt danh sách để nghe từng âm thanh, hoặc dùng /sound."
+  },
+  "zh-CN": {
+    "tui.sound.id_help": "方向键移到哪个声音上就播放哪个。用/sound add添加你自己的声音；听到两个声音？/sound doctor。`system`保留终端自带的声音。",
+    "tui.sound.list_title": "通知提示音",
+    "tui.sound.list_yours": "你的声音",
+    "tui.sound.usage": "可用/sound list、preview [id]、use <id>、volume <0-100>、on、off、add <file> [name] [--select]、rename <id> <name>、remove <id>或doctor。",
+    "tui.sound.list_hint": "/sound use <id>选择 · /sound preview <id>试听",
+    "tui.sound.list_yours_hint": "/sound rename <id> <name> · /sound remove <id>",
+    "tui.sound.section_description": "随桌面通知播放的声音，每1.5秒最多播放一次。用方向键浏览列表即可逐个试听，也可用/sound。"
+  }
+}

@@ -1,0 +1,3 @@
+PASS wire.settings.hub_defaults.agents.help: 72/72 cells
+PASS wire.settings.hub_defaults.teams.help: 70/72 cells
+PASS: 2 declared width budgets checked with rich.cells.cell_len; rendered fit NOT RUN.
