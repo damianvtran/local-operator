@@ -90,6 +90,15 @@ _AMBIENT_VARS = (
     # `isolate_environment` below so the escape is closed for every test at once
     # rather than by each test remembering.
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
+    # Notification sounds (notifications/sound.py, play.py). The mute switch is
+    # scrubbed so an inherited value cannot decide a test, and then RE-ARMED for
+    # every test by the `_PROCESS_DESKTOP_GATES` loop in `isolate_environment`
+    # (after this scrub), so the suite still never reaches the speakers. The
+    # backend selector names a real-machine resource (`null` vs the default
+    # audio device) and is scrubbed so a developer's shell cannot steer which
+    # one a player child opens; sound tests pass it explicitly.
+    "LOCAL_OPERATOR_NO_SOUND",
+    "LOCAL_OPERATOR_SOUND_BACKEND",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
     # The DESCRIPTOR channel for the same bearer (``server/desktop.TOKEN_FD_ENV``,
     # #3039): a number naming an inherited pipe the daemon reads its bearer from at
@@ -602,6 +611,11 @@ _AMBIENT_VARS = (
 _PROCESS_DESKTOP_GATES: tuple[tuple[str, str], ...] = (
     ("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1"),
     ("LOCAL_OPERATOR_NO_DESKTOP_LAUNCH", "1"),
+    # The speakers are the operator's just as the desktop is: a test that clears
+    # the notification switch to exercise a banner leg must still never play a
+    # notification sound (`notifications/sound.py`). A sound test opts in with
+    # `LOCAL_OPERATOR_SOUND_BACKEND=null`, which needs no speakers.
+    ("LOCAL_OPERATOR_NO_SOUND", "1"),
     # The runtime standby (``session/runtime/standby.py``) is an interpreter the
     # warming console FORKS and holds a private descriptor to: it is a child of
     # that host, publishes nothing until it is adopted, and exits the instant the

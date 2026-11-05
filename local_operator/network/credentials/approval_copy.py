@@ -75,6 +75,18 @@ _REASONS: dict[str, str] = {
     "approval_denied": "This card was denied.",
     "approval_already_connected": "This card was already used.",
     "consent_recipient_inactive": "The device is no longer an active member of the network.",
+    "catalogue_invalid": (
+        "The model catalogue request or response was invalid; no model metadata was accepted."
+    ),
+    "catalogue_unavailable": "The credential-owning device's model catalogue could not be read.",
+    "catalogue_unsupported": (
+        "This model catalogue request is not supported by the participating devices."
+    ),
+    "identity_mismatch": (
+        "The request named a different sending device from the one it arrived from; "
+        "access was refused."
+    ),
+    "owner_offline": "The credential-owning device could not be reached.",
 }
 
 _UNKNOWN_REASON = "The change was refused."
@@ -217,8 +229,35 @@ def reason_for(code: str) -> str:
     return _REASONS.get(code, _UNKNOWN_REASON)
 
 
+# These transport/protocol codes share the credential vocabulary, but are not
+# evidence that a spent approval card can run again. Keep RETRYABLE_CODES and
+# its apply authority unchanged; explain the repair before the existing card rule.
+_CATALOGUE_REPAIRS = {
+    "catalogue_invalid": (
+        "Check the catalogue request and the participating devices' protocol compatibility; "
+        "do not bypass validation."
+    ),
+    "catalogue_unavailable": (
+        "Check the model listing on the credential-owning device "
+        "and request it again when available."
+    ),
+    "catalogue_unsupported": (
+        "Use a supported catalogue. If this device's relay or the credential-owning device "
+        "lacks catalogue sharing, update that device."
+    ),
+    "identity_mismatch": (
+        "Check the sending device's identity and connection; do not retry as a different device "
+        "or bypass the identity check."
+    ),
+    "owner_offline": "Reconnect the credential-owning device before requesting access again.",
+}
+
+
 def remedy(code: str) -> str:
     """The next step after refusal ``code``, without terminal syntax (desktop-safe)."""
+    repair = _CATALOGUE_REPAIRS.get(code)
+    if repair is not None:
+        return repair + " " + NEW_REQUEST_NEEDED
     return TRY_AGAIN if retryable(code) else NEW_REQUEST_NEEDED
 
 

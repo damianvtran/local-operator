@@ -1,0 +1,271 @@
+{
+  "wire.notification_sound.cli.add.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.add.keep_loudness.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.add.name.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.add.select.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.add.source.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.doctor.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.list.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.preview.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.preview.id.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.preview.volume.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.remove.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.remove.id.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.rename.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.rename.id.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.cli.rename.name.help": {
+    "role": "argparse help line for the `lop sound` command or one of its arguments",
+    "tone": "concise, imperative",
+    "note": "Backticked text is a command and stays verbatim. `lop` is the product command."
+  },
+  "wire.notification_sound.description": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers."
+  },
+  "wire.notification_sound.enabled.choice.false.description": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers."
+  },
+  "wire.notification_sound.enabled.choice.true.description": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers."
+  },
+  "wire.notification_sound.enabled.help": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers."
+  },
+  "wire.notification_sound.enabled.label": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers.",
+    "maxCells": 28
+  },
+  "wire.notification_sound.error.attachment_missing": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.builtin_readonly": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.limit_reached": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.name_empty": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.name_long": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.not_found": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.silent": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.store_failed": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.too_large": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.too_long": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.undecodable": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.unsupported_codec": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.error.unsupported_format": {
+    "role": "refusal shown when adding, renaming or removing a custom notification sound (CLI and desktop Settings)",
+    "tone": "plain, says what to do next",
+    "note": "{file} is the user's file name and {id} a sound id: both verbatim. Backticked text is a command and stays verbatim."
+  },
+  "wire.notification_sound.id.choice.system.description": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers."
+  },
+  "wire.notification_sound.id.help": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers."
+  },
+  "wire.notification_sound.id.label": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers.",
+    "maxCells": 28
+  },
+  "wire.notification_sound.removed.selection_reset": {
+    "role": "confirmation after the currently selected custom sound was deleted",
+    "tone": "plain, reassuring",
+    "note": "{default} is the display name of the default built-in sound, already translated."
+  },
+  "wire.notification_sound.sound.airy_whistle": {
+    "role": "Display name of a built-in notification sound, shown in sound pickers beside its id",
+    "tone": "short descriptive name, sentence case",
+    "maxCells": 24,
+    "note": "Names a short UI chime by how it sounds. Translate the image, not word-for-word; keep it two or three words."
+  },
+  "wire.notification_sound.sound.bubble_chord": {
+    "role": "Display name of a built-in notification sound, shown in sound pickers beside its id",
+    "tone": "short descriptive name, sentence case",
+    "maxCells": 24,
+    "note": "Names a short UI chime by how it sounds. Translate the image, not word-for-word; keep it two or three words."
+  },
+  "wire.notification_sound.sound.bubble_pulse": {
+    "role": "Display name of a built-in notification sound, shown in sound pickers beside its id",
+    "tone": "short descriptive name, sentence case",
+    "maxCells": 24,
+    "note": "Names a short UI chime by how it sounds. Translate the image, not word-for-word; keep it two or three words."
+  },
+  "wire.notification_sound.sound.felt_marimba": {
+    "role": "Display name of a built-in notification sound, shown in sound pickers beside its id",
+    "tone": "short descriptive name, sentence case",
+    "maxCells": 24,
+    "note": "Names a short UI chime by how it sounds. Translate the image, not word-for-word; keep it two or three words."
+  },
+  "wire.notification_sound.sound.hum_swell": {
+    "role": "Display name of a built-in notification sound, shown in sound pickers beside its id",
+    "tone": "short descriptive name, sentence case",
+    "maxCells": 24,
+    "note": "Names a short UI chime by how it sounds. Translate the image, not word-for-word; keep it two or three words."
+  },
+  "wire.notification_sound.sound.signal_handshake": {
+    "role": "Display name of a built-in notification sound, shown in sound pickers beside its id",
+    "tone": "short descriptive name, sentence case",
+    "maxCells": 24,
+    "note": "Names a short UI chime by how it sounds. Translate the image, not word-for-word; keep it two or three words."
+  },
+  "wire.notification_sound.sound.soft_pulse": {
+    "role": "Display name of a built-in notification sound, shown in sound pickers beside its id",
+    "tone": "short descriptive name, sentence case",
+    "maxCells": 24,
+    "note": "Names a short UI chime by how it sounds. Translate the image, not word-for-word; keep it two or three words."
+  },
+  "wire.notification_sound.sound.tape_warble": {
+    "role": "Display name of a built-in notification sound, shown in sound pickers beside its id",
+    "tone": "short descriptive name, sentence case",
+    "maxCells": 24,
+    "note": "Names a short UI chime by how it sounds. Translate the image, not word-for-word; keep it two or three words."
+  },
+  "wire.notification_sound.sound.task_complete": {
+    "role": "Display name of a built-in notification sound, shown in sound pickers beside its id",
+    "tone": "short descriptive name, sentence case",
+    "maxCells": 24,
+    "note": "Names a short UI chime by how it sounds. Translate the image, not word-for-word; keep it two or three words."
+  },
+  "wire.notification_sound.sound.two_note_chime": {
+    "role": "Display name of a built-in notification sound, shown in sound pickers beside its id",
+    "tone": "short descriptive name, sentence case",
+    "maxCells": 24,
+    "note": "Names a short UI chime by how it sounds. Translate the image, not word-for-word; keep it two or three words."
+  },
+  "wire.notification_sound.title": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers.",
+    "maxCells": 28
+  },
+  "wire.notification_sound.volume.help": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers."
+  },
+  "wire.notification_sound.volume.label": {
+    "role": "Notification sound settings section, row label, help or choice description in TUI /settings, `lop config` and the desktop settings page",
+    "tone": "concise, neutral, calm",
+    "note": "Choice descriptions are lowercase fragments shown beside on/off or a sound id. `system` and backticked commands stay verbatim. 1.5 seconds and 0–100 are literal numbers.",
+    "maxCells": 28
+  }
+}

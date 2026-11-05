@@ -432,6 +432,13 @@ def _web_tool_offered(session: Session, name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+def _notification_sound() -> Any:
+    """What the next notification's sound reads, from ``config_dir()`` at call time."""
+    from local_operator.notifications import sound
+
+    return sound.configured()
+
+
 def _librarian_policy(watcher: Any):
     """The engine's resolved policy, read from the watcher's own directory."""
     from local_operator.librarian import proactive
@@ -454,6 +461,17 @@ def _librarian_name(watcher: Any) -> str:
 #: attribute to observe) read the watcher's snapshot — the mapping those
 #: consumers are being pointed at.
 LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
+    # -- notification sound: re-read from config.yml on every notification -----
+    # Not a session attribute: `notifications.sound.configured()` (which
+    # `resolve()` builds the plan from) reads `config_dir()`'s config.yml per
+    # notification, which is why the section is LIVE. Each probe writes a
+    # non-default value and observes the stored reading the next banner uses.
+    "notifications.sound.enabled": (False, lambda s, w: _notification_sound().enabled),
+    "notifications.sound.id": ("felt-marimba", lambda s, w: _notification_sound().sound_id),
+    "notifications.sound.volume": (
+        40,
+        lambda s, w: int(_notification_sound().effective_volume),
+    ),
     # -- scratchpad: re-read from config on every pad-addressed call -----------
     # Not a session attribute: `scratchpad_budget_bytes()` resolves
     # `session.scratchpad.max_bytes` through `config_dir()` at call time, which

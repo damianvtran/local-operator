@@ -203,7 +203,12 @@ def test_the_two_mesh_keys_are_advertised(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", DESKTOP_TOKEN)
     # ``cast`` rather than a subscript on the union the endpoint returns: the answer's
     # shape is pinned by the response model, and pyright reads ``result`` as optional.
-    answer = cast(dict[str, Any], asyncio.run(capabilities_endpoint()).result)
+    from starlette.requests import Request
+
+    answer = cast(
+        dict[str, Any],
+        asyncio.run(capabilities_endpoint(Request({"type": "http", "headers": []}))).result,
+    )
     features = cast(dict[str, Any], answer["features"])
     assert features["peers"] == 1
     assert features["session_transfer"] == 1

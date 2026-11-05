@@ -4871,7 +4871,9 @@ class AuthStore:
             account_created_at=row.created_at if row is not None else 0,
         )
 
-    async def get_catalogue_access(self, provider: str) -> OAuthAccess | None:
+    async def get_catalogue_access(
+        self, provider: str, *, eligible_credential_ids: Collection[int] | None = None
+    ) -> OAuthAccess | None:
         """A credential for READING a provider catalogue, not routing inference.
 
         Inference selection deliberately excludes quota-depleted accounts. Model
@@ -4886,15 +4888,29 @@ class AuthStore:
         provider-declared dead grant is never sent. Successful token rotation is
         still persisted because discarding a single-use refresh token would break
         the account, not protect it.
+
+        ``eligible_credential_ids`` is a restrictive owner-row allowlist for
+        metadata-only mesh catalogue reads. It is applied before any refresh and
+        disables ambient/unscoped fallback tiers; None preserves local behavior.
+        It must never be used to return a bearer to a remote catalogue requester.
         """
         provider = self._storage_id(provider)
+        # A mesh catalogue is read with already-approved OWNER row identities.
+        # Filter before refresh, not after bearer selection: a denied login must
+        # never incur an IdP request. Ambient keys cannot satisfy a row-scoped
+        # request. None retains the ordinary local catalogue cascade unchanged.
+        eligible = (
+            frozenset(eligible_credential_ids) if eligible_credential_ids is not None else None
+        )
         override = self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
-        if override:
+        if override and eligible is None:
             return OAuthAccess(access_token=override, credential_id=0, kind="api_key")
 
         key_fn = self._oauth_key_fn(provider)
         oauth_rows = [
-            row for row in self.list_credentials(provider) if row.credential_type == "oauth"
+            row
+            for row in self.list_credentials(provider)
+            if row.credential_type == "oauth" and (eligible is None or row.id in eligible)
         ]
         for row in oauth_rows:
             try:
@@ -4922,7 +4938,9 @@ class AuthStore:
         # applies inference blocks, which are unrelated to catalogue authorization.
         for source in ("login", None):
             for row in self.list_credentials(provider):
-                if row.credential_type != "api_key":
+                if row.credential_type != "api_key" or (
+                    eligible is not None and row.id not in eligible
+                ):
                     continue
                 if (source == "login") != (row.data.get("source") == "login"):
                     continue
@@ -4934,11 +4952,13 @@ class AuthStore:
                         kind="api_key",
                         account_created_at=row.created_at,
                     )
-            if source == "login":
+            if source == "login" and eligible is None:
                 env_key = self._env_api_key(provider)
                 if env_key:
                     return OAuthAccess(access_token=env_key, credential_id=0, kind="api_key")
 
+        if eligible is not None:
+            return None
         resolver = self._fallback_resolvers.get(provider)
         fallback = resolver(provider) if resolver is not None else None
         if fallback:
