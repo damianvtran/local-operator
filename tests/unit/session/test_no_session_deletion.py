@@ -487,6 +487,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "list.remove on the in-memory _listeners callback registry; no filesystem path",
     ),
     (
+        # `/sound remove <id>` (C4): `custom_sounds.remove` is the custom-sound
+        # store's own entry point, already classified above. It takes an id the
+        # store validates by regex and resolves to a FILE under
+        # <config>/sounds/custom (resolved containment), never a session path.
+        "local_operator/tui/app.py::OperatorApp._sound_store_op",
+        "<path>.remove",
+        "custom_sounds.remove(sound_id): the sound store's id-validated FILE delete under "
+        "<config>/sounds/custom; no session path, no caller path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
         "<path>.remove",
         "Textual TranscriptView.remove unmounts a widget; no filesystem path",

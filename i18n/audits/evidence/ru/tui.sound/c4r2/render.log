@@ -1,0 +1,4 @@
+[run_bounded] memory budget 1500 MiB (explicit); sampled owned child group and escaped descendants
+operator authority: the anchor's private half is a 0600 FILE, so any process running as this user can sign for the operator — loosening is authorised but NOT presence-gated on this host
+{"locale": "ru", "screen": [60, 80], "null_backend": true, "speakers": false, "description_context": "transcript notice (not actual settings section)"}
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=dcabb26ef0c440f299a3b54d9b2ce330 completion=/Users/damian/.local-operator/sessions/304e031dccf4/scratchpad/c4-i18n-audit-r2/homes/render-parent/config/run-bounded-runs/dcabb26ef0c440f299a3b54d9b2ce330.completion.json

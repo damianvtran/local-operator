@@ -850,7 +850,22 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
         # sits with `/radient` in the session-controls block, which is earlier
         # than the page commands, and every `s` match here is a flat 900 prefix
         # score, so the tiebreak is registry index.
-        ("s", ["saver", "settings", "schedule", "sidebar", "search", "session", "stop", "skills"]),
+        # `sound` (notification sounds, #3433) is a genuine `s` prefix match and
+        # registered after `skills`, so registry order puts it last.
+        (
+            "s",
+            [
+                "saver",
+                "settings",
+                "schedule",
+                "sidebar",
+                "search",
+                "session",
+                "stop",
+                "skills",
+                "sound",
+            ],
+        ),
         # Every one of these is a flat 900 prefix match (verified, not assumed:
         # `score_command_text_match("/c", …)` returns 900 for all six), so
         # `match_commands` sorts them on `(-score, registry_index)` and the

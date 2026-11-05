@@ -1,0 +1,592 @@
+{
+  "schema": 1,
+  "source_head": "bd9ad6f041ca863a892f963177d0b17741d14266",
+  "scope": "27695a49855f..bd9ad6f041ca",
+  "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+  "translator": {
+    "agent": "i18n-translator-r2",
+    "session": "1d36d618f249",
+    "job": "1ddc1da8273c",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-04",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "C4-i18n-delta / independent i18n-auditor",
+    "session": "304e031dccf4",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-04",
+    "result": "passed",
+    "findings": 0,
+    "fallback_used": false
+  },
+  "coverage": {
+    "locales": 7,
+    "catalogue_keys_per_locale": 29,
+    "delta_keys_per_locale": 7,
+    "carried_keys_per_locale": 22,
+    "allowance_pairs_removed": 7,
+    "allowance_keys_removed": 203
+  },
+  "validators": [
+    {
+      "name": "generate",
+      "command": [
+        "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+        "scripts/run_bounded.py",
+        "--contract=command-status",
+        "--timeout",
+        "600",
+        "--memory-mb",
+        "1500",
+        "--",
+        "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+        "scripts/i18n/generate.py"
+      ],
+      "cwd": "/Users/damian/local-operator/.worktrees/c4-i18n-r2",
+      "exit_code": 0,
+      "contract": "command-status",
+      "cleanup": "unknown (Darwin runner cannot certify)"
+    },
+    {
+      "name": "generate-check",
+      "command": [
+        "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+        "scripts/run_bounded.py",
+        "--contract=command-status",
+        "--timeout",
+        "600",
+        "--memory-mb",
+        "1500",
+        "--",
+        "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+        "scripts/i18n/generate.py",
+        "--check"
+      ],
+      "cwd": "/Users/damian/local-operator/.worktrees/c4-i18n-r2",
+      "exit_code": 0,
+      "contract": "command-status",
+      "cleanup": "unknown (Darwin runner cannot certify)"
+    },
+    {
+      "name": "coverage-test",
+      "command": [
+        "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+        "scripts/run_bounded.py",
+        "--contract=command-status",
+        "--timeout",
+        "1800",
+        "--memory-mb",
+        "1500",
+        "--",
+        "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+        "-m",
+        "pytest",
+        "tests/unit/i18n/test_language_manifest.py",
+        "-n",
+        "1",
+        "-q"
+      ],
+      "cwd": "/Users/damian/local-operator/.worktrees/c4-i18n-r2",
+      "exit_code": 0,
+      "contract": "command-status",
+      "cleanup": "unknown (Darwin runner cannot certify)"
+    },
+    {
+      "name": "catalogue-probe",
+      "command": [
+        "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+        "scripts/run_bounded.py",
+        "--contract=command-status",
+        "--timeout",
+        "1800",
+        "--memory-mb",
+        "1500",
+        "--",
+        "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+        "/Users/damian/.local-operator/sessions/304e031dccf4/scratchpad/c4-i18n-audit-r2/catalogue_probe.py"
+      ],
+      "cwd": "/Users/damian/local-operator/.worktrees/c4-i18n-r2",
+      "exit_code": 0,
+      "contract": "command-status",
+      "cleanup": "unknown (Darwin runner cannot certify)"
+    },
+    {
+      "name": "check",
+      "command": [
+        ".venv/bin/python",
+        "scripts/run_bounded.py",
+        "--contract=command-status",
+        "--timeout",
+        "1800",
+        "--memory-mb",
+        "1500",
+        "--",
+        ".venv/bin/python",
+        "scripts/i18n/check.py",
+        "--allowance-base",
+        "27695a49855f"
+      ],
+      "exit_code": 0,
+      "contract": "command-status",
+      "cleanup": "unknown",
+      "base": "previous reviewed head 27695a49855f",
+      "notes": "Default origin/main comparison first hit the 600s bound, not a checker defect. Scoped full checker passed against review delta base; scanner and catalogue checks still full."
+    }
+  ],
+  "catalogue_probe": {
+    "locales": {
+      "es": {
+        "keys": 29,
+        "bounded_cells": {
+          "tui.sound.list_title": 25,
+          "tui.sound.list_yours": 5,
+          "tui.sound.list_hint": 49,
+          "tui.sound.list_yours_hint": 46
+        },
+        "id_help_cells": 149,
+        "carried_values_byte_identical": 22,
+        "runtime_rendered": 29,
+        "slash_cells": 49,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "fr": {
+        "keys": 29,
+        "bounded_cells": {
+          "tui.sound.list_title": 22,
+          "tui.sound.list_yours": 10,
+          "tui.sound.list_hint": 50,
+          "tui.sound.list_yours_hint": 46
+        },
+        "id_help_cells": 165,
+        "carried_values_byte_identical": 22,
+        "runtime_rendered": 29,
+        "slash_cells": 52,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "hi": {
+        "keys": 29,
+        "bounded_cells": {
+          "tui.sound.list_title": 10,
+          "tui.sound.list_yours": 3,
+          "tui.sound.list_hint": 43,
+          "tui.sound.list_yours_hint": 46
+        },
+        "id_help_cells": 132,
+        "carried_values_byte_identical": 22,
+        "runtime_rendered": 29,
+        "slash_cells": 30,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "ru": {
+        "keys": 29,
+        "bounded_cells": {
+          "tui.sound.list_title": 17,
+          "tui.sound.list_yours": 4,
+          "tui.sound.list_hint": 50,
+          "tui.sound.list_yours_hint": 46
+        },
+        "id_help_cells": 155,
+        "carried_values_byte_identical": 22,
+        "runtime_rendered": 29,
+        "slash_cells": 53,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "ur": {
+        "keys": 29,
+        "bounded_cells": {
+          "tui.sound.list_title": 15,
+          "tui.sound.list_yours": 5,
+          "tui.sound.list_hint": 47,
+          "tui.sound.list_yours_hint": 46
+        },
+        "id_help_cells": 186,
+        "carried_values_byte_identical": 22,
+        "runtime_rendered": 29,
+        "slash_cells": 50,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "vi": {
+        "keys": 29,
+        "bounded_cells": {
+          "tui.sound.list_title": 18,
+          "tui.sound.list_yours": 7,
+          "tui.sound.list_hint": 47,
+          "tui.sound.list_yours_hint": 46
+        },
+        "id_help_cells": 170,
+        "carried_values_byte_identical": 22,
+        "runtime_rendered": 29,
+        "slash_cells": 51,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      },
+      "zh-CN": {
+        "keys": 29,
+        "bounded_cells": {
+          "tui.sound.list_title": 10,
+          "tui.sound.list_yours": 8,
+          "tui.sound.list_hint": 45,
+          "tui.sound.list_yours_hint": 46
+        },
+        "id_help_cells": 119,
+        "carried_values_byte_identical": 22,
+        "runtime_rendered": 29,
+        "slash_cells": 42,
+        "placeholder_and_technical_parity": "passed",
+        "bidi_storage": "logical, no controls",
+        "nfc": "passed",
+        "plural_messages": 0
+      }
+    },
+    "negative_control": {
+      "missing_placeholder": "rejected",
+      "actual_errors": [
+        "fr/tui.sound: tui.sound.selected: arguments () != en's (('name', 'simple'),): en has 1 argument(s), translation has 0"
+      ]
+    },
+    "restored_control": "passed",
+    "fallback": "Nothing played: the volume is 0.",
+    "render_samples": {
+      "name": "QA chime",
+      "id": "qa-chime",
+      "seconds": "1.25",
+      "volume": "70",
+      "state": "on",
+      "file": "/synthetic/qa.wav",
+      "reason": "synthetic error"
+    }
+  },
+  "render": {
+    "en": {
+      "all_text_rows_stable": true,
+      "grid": [
+        60,
+        80
+      ],
+      "native_pixels": [
+        480.0,
+        1360.0
+      ],
+      "screen": {
+        "class": "TranscriptScreen",
+        "size": [
+          58,
+          78
+        ],
+        "virtual_size": [
+          58,
+          78
+        ],
+        "region": [
+          0,
+          0,
+          60,
+          80
+        ],
+        "scrollbar": [
+          false,
+          false
+        ]
+      },
+      "css_path": [
+        "local_operator.tcss"
+      ],
+      "custom_hint_rows": [
+        "/sound rename <id> <name> · /sound remove <id>\n"
+      ]
+    },
+    "es": {
+      "all_text_rows_stable": true,
+      "grid": [
+        60,
+        80
+      ],
+      "native_pixels": [
+        480.0,
+        1360.0
+      ],
+      "screen": {
+        "class": "TranscriptScreen",
+        "size": [
+          58,
+          78
+        ],
+        "virtual_size": [
+          58,
+          78
+        ],
+        "region": [
+          0,
+          0,
+          60,
+          80
+        ],
+        "scrollbar": [
+          false,
+          false
+        ]
+      },
+      "css_path": [
+        "local_operator.tcss"
+      ],
+      "custom_hint_rows": [
+        "/sound rename <id> <name> · /sound remove <id>\n"
+      ]
+    },
+    "fr": {
+      "all_text_rows_stable": true,
+      "grid": [
+        60,
+        80
+      ],
+      "native_pixels": [
+        480.0,
+        1360.0
+      ],
+      "screen": {
+        "class": "TranscriptScreen",
+        "size": [
+          58,
+          78
+        ],
+        "virtual_size": [
+          58,
+          78
+        ],
+        "region": [
+          0,
+          0,
+          60,
+          80
+        ],
+        "scrollbar": [
+          false,
+          false
+        ]
+      },
+      "css_path": [
+        "local_operator.tcss"
+      ],
+      "custom_hint_rows": [
+        "/sound rename <id> <name> · /sound remove <id>\n"
+      ]
+    },
+    "hi": {
+      "all_text_rows_stable": true,
+      "grid": [
+        60,
+        80
+      ],
+      "native_pixels": [
+        480.0,
+        1360.0
+      ],
+      "screen": {
+        "class": "TranscriptScreen",
+        "size": [
+          58,
+          78
+        ],
+        "virtual_size": [
+          58,
+          78
+        ],
+        "region": [
+          0,
+          0,
+          60,
+          80
+        ],
+        "scrollbar": [
+          false,
+          false
+        ]
+      },
+      "css_path": [
+        "local_operator.tcss"
+      ],
+      "custom_hint_rows": [
+        "/sound rename <id> <name> · /sound remove <id>\n"
+      ]
+    },
+    "ru": {
+      "all_text_rows_stable": true,
+      "grid": [
+        60,
+        80
+      ],
+      "native_pixels": [
+        480.0,
+        1360.0
+      ],
+      "screen": {
+        "class": "TranscriptScreen",
+        "size": [
+          58,
+          78
+        ],
+        "virtual_size": [
+          58,
+          78
+        ],
+        "region": [
+          0,
+          0,
+          60,
+          80
+        ],
+        "scrollbar": [
+          false,
+          false
+        ]
+      },
+      "css_path": [
+        "local_operator.tcss"
+      ],
+      "custom_hint_rows": [
+        "/sound rename <id> <name> · /sound remove <id>\n"
+      ]
+    },
+    "ur": {
+      "all_text_rows_stable": true,
+      "grid": [
+        60,
+        80
+      ],
+      "native_pixels": [
+        480.0,
+        1360.0
+      ],
+      "screen": {
+        "class": "TranscriptScreen",
+        "size": [
+          58,
+          78
+        ],
+        "virtual_size": [
+          58,
+          78
+        ],
+        "region": [
+          0,
+          0,
+          60,
+          80
+        ],
+        "scrollbar": [
+          false,
+          false
+        ]
+      },
+      "css_path": [
+        "local_operator.tcss"
+      ],
+      "custom_hint_rows": [
+        "/sound rename <id> <name> · /sound remove <id>\n"
+      ]
+    },
+    "vi": {
+      "all_text_rows_stable": true,
+      "grid": [
+        60,
+        80
+      ],
+      "native_pixels": [
+        480.0,
+        1360.0
+      ],
+      "screen": {
+        "class": "TranscriptScreen",
+        "size": [
+          58,
+          78
+        ],
+        "virtual_size": [
+          58,
+          78
+        ],
+        "region": [
+          0,
+          0,
+          60,
+          80
+        ],
+        "scrollbar": [
+          false,
+          false
+        ]
+      },
+      "css_path": [
+        "local_operator.tcss"
+      ],
+      "custom_hint_rows": [
+        "/sound rename <id> <name> · /sound remove <id>\n"
+      ]
+    },
+    "zh-CN": {
+      "all_text_rows_stable": true,
+      "grid": [
+        60,
+        80
+      ],
+      "native_pixels": [
+        480.0,
+        1360.0
+      ],
+      "screen": {
+        "class": "TranscriptScreen",
+        "size": [
+          58,
+          78
+        ],
+        "virtual_size": [
+          58,
+          78
+        ],
+        "region": [
+          0,
+          0,
+          60,
+          80
+        ],
+        "scrollbar": [
+          false,
+          false
+        ]
+      },
+      "css_path": [
+        "local_operator.tcss"
+      ],
+      "custom_hint_rows": [
+        "/sound rename <id> <name> · /sound remove <id>\n"
+      ]
+    }
+  },
+  "render_inspection": "Final seven-locale PNG sheets viewed independently; headings and both hints fit. Urdu degraded shaping disclosed. 8/8 consecutive text-row pairs identical after startup wait.",
+  "scope_limits": [
+    "Only artifact approval, not already integrated PR head",
+    "Full checker allowance base is previous reviewed head, not moving origin/main",
+    "No live terminal/full RTL/native audio/native-speaker certification",
+    "Settings-only help/description painted as transcript notices, not settings-interaction approval"
+  ],
+  "status": "passed",
+  "unresolved_blocker_major": 0
+}
