@@ -1012,3 +1012,9 @@ def test_r9_m4_lex_is_linear_in_open_frames() -> None:
     lex(text)
     # Generous bound: the O(n * depth) scan measured 1.4 s here.
     assert time.perf_counter() - start < 0.5
+
+
+@pytest.mark.parametrize("separator", ["; ", " && ", "\n"])
+def test_r10_split_unquoted_substitution_keeps_shell_heredoc(home: Path, separator: str) -> None:
+    command = f"x=$(echo hi{separator}bash <<EOF\n{_INCIDENT_BODY}\nEOF\n)"
+    assert _classify(home, command).risk is Risk.CRITICAL

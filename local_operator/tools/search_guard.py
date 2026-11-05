@@ -311,9 +311,9 @@ def lex(command: str) -> Lexed:
     owned: dict[int, list[str]] = defaultdict(list)
     buf: list[str] = []
     stack = _FrameStack()
-    # (delimiter, owning segment index, opened inside a substitution) for
-    # openers awaiting the next newline.
-    pending: list[tuple[str, int, bool]] = []
+    # (delimiter, owning segment index, inside substitution, retain ownership)
+    # for openers awaiting the next newline.
+    pending: list[tuple[str, int, bool, bool]] = []
     piped = False
     word_start = True
     unterminated_heredoc = False
@@ -421,7 +421,7 @@ def lex(command: str) -> Lexed:
         if ch == "<" and command.startswith("<<", i) and not stack.arith:
             m = _HEREDOC_RE.match(command, i)
             if m is not None:
-                pending.append((m.group(2), len(segments), stack.subs > 0))
+                pending.append((m.group(2), len(segments), stack.subs > 0, not quoted()))
                 buf.append(command[i : m.end()])
                 i = m.end()
                 word_start = False
@@ -430,9 +430,9 @@ def lex(command: str) -> Lexed:
             # Bodies start after this newline, one per opener, in order.
             pos = i + 1
             resume = i
-            captured: list[tuple[str, int, bool]] = []
+            captured: list[tuple[str, int, bool, bool]] = []
             ok = True
-            for delim, owner, in_sub in pending:
+            for delim, owner, in_sub, retain_owned in pending:
                 lines: list[str] = []
                 found = False
                 while pos <= n:
@@ -450,10 +450,10 @@ def lex(command: str) -> Lexed:
                 if not found:
                     ok = False
                     break
-                captured.append(("\n".join(lines), owner, in_sub))
+                captured.append(("\n".join(lines), owner, in_sub, retain_owned))
             pending = []
             if ok:
-                if any(in_sub for _b, _o, in_sub in captured):
+                if any(in_sub for _b, _o, in_sub, _r in captured):
                     # R9-1: an opener inside ``$(…)``/backticks belongs to the
                     # command INSIDE the substitution (``x="$(bash <<EOF …)"``),
                     # not to the outer segment. Keep the body text inline so
@@ -465,8 +465,11 @@ def lex(command: str) -> Lexed:
                     buf.append(command[i:resume])
                 else:
                     buf.append(" ")
-                for body, owner, in_sub in captured:
-                    if not in_sub:
+                for body, owner, in_sub, retain_owned in captured:
+                    # R10: an unquoted substitution can split before its shell
+                    # stage; that piece has no opening substitution to recurse
+                    # into. Retain its owned body as well as the inline text.
+                    if not in_sub or retain_owned:
                         owned[owner].append(body)
                 # Otherwise resume AT the newline ending the last delimiter
                 # line, so it still ends the segment.
