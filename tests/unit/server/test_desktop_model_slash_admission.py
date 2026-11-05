@@ -326,10 +326,18 @@ async def test_model_slash_lost_socket_ack_keeps_busy_disposition(desktop, tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("record_path", ["row", "facts"])
+@pytest.mark.parametrize("record_path", ["row", "facts", "locate_cold", "locate_replace"])
 @pytest.mark.parametrize(
     ("native", "expected"),
-    [(["openai"], 200), ([], 409), (None, 409), (["anthropic"], 409)],
+    [
+        (["openai"], 200),
+        ([], 409),
+        (None, 409),
+        (["anthropic"], 409),
+        ("absent", 409),
+        ({"openai": True}, 409),
+        ("legacy", 409),
+    ],
 )
 async def test_owner_inventory_survives_peer_projection_before_model_slash(
     desktop, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_path, native, expected
@@ -362,7 +370,7 @@ async def test_owner_inventory_survives_peer_projection_before_model_slash(
         control_port=0,
         version="owner-distinct-build",
         source_ref="owner-distinct-ref",
-        native_provider_ids=native,
+        native_provider_ids=native if isinstance(native, list) else None,
         control_key="owner-private-never-export",
     )
     root = tmp_path / "owner"
@@ -370,9 +378,28 @@ async def test_owner_inventory_survives_peer_projection_before_model_slash(
     server = relay.RelayServer(
         root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
     )
-    monkeypatch.setattr(registry, "scan", lambda _root: [(owner_record, "live")])
+    original_scan = registry.scan
+    monkeypatch.setattr(
+        registry,
+        "scan",
+        lambda _root, **kwargs: (
+            original_scan(_root, **kwargs) if kwargs.get("dirname") else [(owner_record, "live")]
+        ),
+    )
     wire = next(row for row in server.local_session_rows() if row["session_id"] == SESSION)
     assert "owner-private-never-export" not in json.dumps(wire)
+    expected_native = native if isinstance(native, list) else None
+    expected_version, expected_ref = owner_record.version, owner_record.source_ref
+    if native == "absent":
+        for key in ("version", "source_ref", "native_provider_ids"):
+            wire.pop(key)
+        expected_version = expected_ref = ""
+    elif isinstance(native, dict):
+        wire.update(version=123, source_ref={}, native_provider_ids=native)
+        expected_version = expected_ref = ""
+    elif native == "legacy":
+        wire.update(version="", source_ref="", native_provider_ids=None)
+        expected_version = expected_ref = ""
     row = projection.PeerRow.from_json(wire, device_id="synthetic-owner-device")
     # Federated catalogue serialization is another real consumer boundary.
     row = projection.PeerRow.from_json(row.to_row_json(), device_id=row.device_id)
@@ -381,6 +408,37 @@ async def test_owner_inventory_survives_peer_projection_before_model_slash(
         if record_path == "row"
         else projection.RemoteSessionFacts.from_row(row).record()
     )
+    if record_path.startswith("locate"):
+        # The production cold-open/bind path refreshes facts over the local relay
+        # socket. Direct row-to-record projection cannot catch stale seed carry.
+        seed = projection.RemoteSessionFacts(
+            session_id=SESSION,
+            device_id=row.device_id,
+            version="cached-owner" if record_path == "locate_replace" else "",
+            source_ref="cached-ref" if record_path == "locate_replace" else "",
+            native_provider_ids=("openai",) if record_path == "locate_replace" else None,
+        )
+        monkeypatch.setattr(
+            server,
+            "_ctl_peer_facts",
+            lambda _frame: {
+                "owned": True,
+                "published": True,
+                "pid": owner_record.pid,
+                "record": wire,
+            },
+        )
+        server.bind_control()
+        server.start()
+        try:
+            remote = projection.RemoteOwner(
+                config_dir=tmp_path / "facade", session_id=SESSION, facts=seed, root=root
+            )
+            record, pid = await asyncio.to_thread(remote.locate)
+            assert record is not None
+            assert pid == owner_record.pid
+        finally:
+            server.stop()
     facade._runtime_record = record
     frames = []
     settled = asyncio.Event()
@@ -420,9 +478,9 @@ async def test_owner_inventory_survives_peer_projection_before_model_slash(
         facade._client = transport
         response = await _model(client, "openai/gpt-6.1-sol medium")
         assert response.status_code == expected, response.text
-        assert record.version == owner_record.version
-        assert record.source_ref == owner_record.source_ref
-        assert record.native_provider_ids == native
+        assert record.version == expected_version
+        assert record.source_ref == expected_ref
+        assert record.native_provider_ids == expected_native
         assert record.control_key == ""
         if expected == 200:
             assert len(frames) == 1

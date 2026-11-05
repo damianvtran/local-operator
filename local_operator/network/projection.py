@@ -1191,9 +1191,10 @@ class RemoteOwner:
 def _refresh_facts(facts: RemoteSessionFacts, row: dict[str, Any]) -> RemoteSessionFacts:
     """The peer's live answer, folded into the facts a client was built from.
 
-    ``replace`` rather than a hand-listed construction: every field the row does
-    not carry has to survive the refresh, and a listed copy is a field silently
-    dropped the next time one is added.
+    ``replace`` preserves client addressing and descriptive seed fields. Runtime
+    admission evidence is different: each reply replaces the prior owner's build
+    and provider claims, including an absent/invalid claim. Retaining a previous
+    runtime's positive inventory would authorize a switch its successor cannot serve.
     """
     # A KEY THAT IS PRESENT IS THE PEER'S CLAIM, whatever it holds; a key that is ABSENT is
     # not a claim at all. The old ``row.get("pid") or facts.pid or 0`` collapsed the two, so
@@ -1202,8 +1203,14 @@ def _refresh_facts(facts: RemoteSessionFacts, row: dict[str, Any]) -> RemoteSess
     # may look live now.
     row_pid = row.get("pid", _ABSENT)
     row_protocol = row.get("protocol", _ABSENT)
+    # Share the catalogue's validation, but never its seed fallback: an older or
+    # replacement owner omitting support evidence withdraws the cached claim.
+    current = PeerRow.from_json(row, device_id=facts.device_id)
     return replace(
         facts,
+        version=current.version,
+        source_ref=current.source_ref,
+        native_provider_ids=current.native_provider_ids,
         # ABSENT IS NOT UNREADABLE (the distinction the old ``or`` chain lost): a row that
         # does not restate ``pid`` leaves the value this client was built with, while a row
         # that restates it with something that cannot be read CLEARS it — an unreadable pid
