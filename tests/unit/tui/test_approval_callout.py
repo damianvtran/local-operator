@@ -854,3 +854,105 @@ async def test_saved_callout_copy_never_clips_at_40_cells() -> None:
                 )
                 text = ApprovalPrompt("bash", "run: one", policy=policy)._state_text(width)
                 assert cell_len(text) <= width, (status, mode, width, text)
+
+
+@pytest.mark.asyncio
+async def test_account_profile_card_keeps_diff_lines_and_cannot_enable_auto(config_dir):
+    from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        pending = asyncio.ensure_future(
+            _gate(session)(
+                ACCOUNT_PROFILE_GATE,
+                "Save agent 'reviewer' in your account (update).\nChanges: instructions.\n"
+                "instructions:\n-Be terse.\n+Demand tests.",
+            )
+        )
+        card = await _card(pilot, app)
+        text = "\n".join(_lines(card))
+        assert "Allow all" not in text and "Set auto" not in text
+        assert [option.label for option in card.question.options] == ["Allow", "Deny"]
+        lines = card._question_lines(100, reveal=True)
+        assert "-Be terse." in lines and "+Demand tests." in lines
+        await pilot.press("A")
+        await pilot.pause()
+        assert not pending.done() and not app._approve_all
+        await pilot.press("n")
+        assert await asyncio.wait_for(pending, 3) is False
+
+
+@pytest.mark.asyncio
+async def test_queued_profile_gate_cannot_inherit_allow_all(config_dir):
+    from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        first = asyncio.ensure_future(_gate(session)("bash", "run: harmless"))
+        await _card(pilot, app)
+        second = asyncio.ensure_future(_gate(session)(ACCOUNT_PROFILE_GATE, "Change reviewer"))
+        await pilot.pause()
+        await pilot.press("A")
+        assert await asyncio.wait_for(first, 3)
+        for _ in range(10):
+            await pilot.pause()
+            if app._approval is not None and app._approval.tool_name == ACCOUNT_PROFILE_GATE:
+                break
+        assert not second.done()
+        assert app._approval is not None and app._approval.tool_name == ACCOUNT_PROFILE_GATE
+        await pilot.press("n")
+        assert await asyncio.wait_for(second, 3) is False
+
+
+def test_approve_all_still_owes_profile_gate_card():
+    from types import SimpleNamespace
+
+    from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+
+    app = SimpleNamespace(_ask_screen=None, _approval=None)
+    source = SimpleNamespace(
+        session=SimpleNamespace(
+            pending_gate=SimpleNamespace(kind="approval", title=ACCOUNT_PROFILE_GATE)
+        ),
+        draft=SimpleNamespace(approve_all=True),
+    )
+    assert not OperatorApp._sidebar_gate_card_ready(app, source)
+    source.session.pending_gate.title = "bash"
+    assert OperatorApp._sidebar_gate_card_ready(app, source)
+
+
+def test_approve_all_does_not_skip_prearming_profile_card():
+    from types import SimpleNamespace
+
+    from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+
+    mounted = []
+    source = SimpleNamespace(
+        session=SimpleNamespace(
+            pending_gate=SimpleNamespace(
+                kind="approval", title=ACCOUNT_PROFILE_GATE, detail="Change reviewer"
+            )
+        ),
+        draft=SimpleNamespace(approve_all=True),
+        display_only=False,
+        gate_view_generation=0,
+        turn=SimpleNamespace(epoch=0),
+    )
+    app = SimpleNamespace(
+        _approval=None,
+        _ask_screen=None,
+        _mounted_prompt_cards=lambda: (),
+        _source_approvals_are_denied=lambda *args: False,
+        _sidebar_gate_identity=lambda source: "gate",
+        _build_approval_prompt=lambda *args, **kwargs: "profile-card",
+        _mount_prompt=mounted.append,
+        _settle_dock_rows_before_reveal=lambda: None,
+    )
+    app._interaction = source
+    source.session.owns_runtime = False
+    OperatorApp._prearm_known_gate(app, source)
+    assert mounted == ["profile-card"]

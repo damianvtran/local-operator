@@ -96,6 +96,7 @@ from local_operator.harness.approval import (
     LOOSENING_REFUSED_NOTICE,
     REARM_KEPT_BY_AUTO_NOTICE,
     loosening_is_authorised,
+    never_auto_approved,
 )
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
@@ -9081,7 +9082,14 @@ class OperatorApp(App[None]):
                 # opposite question.
                 return False
             return self._ask_screen is None and self._approval is None
-        if gate.kind == "approval" and bool(source.draft.approve_all) and not require_card:
+        if (
+            gate.kind == "approval"
+            and bool(source.draft.approve_all)
+            and not require_card
+            # An account profile save is never auto-approved, so approve-all
+            # does not discharge it: the card is still owed to a person.
+            and not never_auto_approved(str(getattr(gate, "title", "") or ""))
+        ):
             return True
         card = self._ask_screen if gate.kind == "ask" else self._approval
         return bool(
@@ -28019,8 +28027,6 @@ class OperatorApp(App[None]):
             return False
         # Approve-all never covers an account profile save (see
         # ``harness.approval.never_auto_approved``): that card always shows.
-        from local_operator.harness.approval import never_auto_approved
-
         if bool(source.draft.approve_all) and not never_auto_approved(tool_name):
             return True
         # ADOPT THE CARD THE REVEAL ALREADY MOUNTED FOR THIS GATE, if there is
@@ -28060,7 +28066,7 @@ class OperatorApp(App[None]):
             # denied on waking by a latch that has nothing to do with it.
             if job_id is None and self._source_approvals_are_denied(source, epoch):
                 return False
-            if bool(source.draft.approve_all):
+            if bool(source.draft.approve_all) and not never_auto_approved(tool_name):
                 return True
         # The prompt is a transcript block, and the subagent page hides the
         # transcript — mounted behind it the question was invisible while
@@ -30597,7 +30603,9 @@ class OperatorApp(App[None]):
         pending = getattr(source.session, "pending_gate", None)
         if pending is None or getattr(pending, "kind", None) != "approval":
             return
-        if bool(source.draft.approve_all):
+        if bool(source.draft.approve_all) and not never_auto_approved(
+            str(getattr(pending, "title", "") or "")
+        ):
             return
         if self._source_approvals_are_denied(source, source.turn.epoch):
             return

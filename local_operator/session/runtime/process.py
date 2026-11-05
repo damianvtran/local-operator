@@ -5112,6 +5112,8 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
         fields["wait_for_turn"] = False
     if "harness_injected" in parameters:
         fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
+    if "owner_typed" in parameters and (getattr(line, "sender", None) or {}).get("remote_origin"):
+        fields["owner_typed"] = False
     try:
         if command_id:
             await run(line.text, command_id=command_id, **fields)
@@ -5149,6 +5151,10 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
         steer_fields: dict[str, Any] = {}
         if "harness_injected" in inspect.signature(steer).parameters:
             steer_fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
+        if "owner_typed" in inspect.signature(steer).parameters and (
+            getattr(line, "sender", None) or {}
+        ).get("remote_origin"):
+            steer_fields["owner_typed"] = False
         logger.info(
             "spooled prompt %s arrived mid-turn; joining the turn in flight",
             command_id or "<no id>",

@@ -37,6 +37,7 @@ from local_operator.profile_scope import (
     durable_write_decision,
     durable_write_refusal,
     load_profile_backup,
+    profile_diff_summary,
     save_profile_backup,
     team_revision,
     update_profile_backup,
@@ -713,7 +714,7 @@ def _team_changes(existing: Any, params: TeamParams) -> tuple[tuple[str, ...], s
     from local_operator.tools.agent_tool import _format_field, _instruction_diff
 
     changes = tuple(
-        field for field in _TEAM_SAVE_FIELDS if getattr(params, field, None) not in (None, [], {})
+        field for field in _TEAM_SAVE_FIELDS if getattr(params, field, None) is not None
     )
     lines: list[str] = []
     for field in changes:
@@ -759,13 +760,15 @@ def _team_receipt(
 ) -> str:
     """The account-save receipt: fields, diff, backup and the exact revert call."""
     revision = team_revision(team)
-    details.update(fields=list(changes), diff=summary, revision=revision, backup_id=backup_id)
-    changed = f" Changed: {', '.join(changes) or 'nothing named'}."
+    details.update(
+        fields=list(changes), diff=summary.splitlines(), revision=revision, backup_id=backup_id
+    )
+    changed = "\n" + profile_diff_summary(summary)
     if not backup_id:
         return changed
     update_profile_backup(getattr(context, "session_dir", None), backup_id, saved_revision=revision)
     details["revert"] = {"op": "revert", "backup_id": backup_id}
-    return f"{changed} Revert with team(op='revert', backup_id='{backup_id}')."
+    return f"{changed}\nRevert with team(op='revert', backup_id='{backup_id}')."
 
 
 async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: str) -> ToolResult:
@@ -789,6 +792,12 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         current = None
     if current is None:
         return _error(tool_call_id, "team", f"team {name!r} no longer exists; nothing to revert.")
+    if current.name != name:
+        return _error(
+            tool_call_id,
+            "team",
+            "backup identity does not match the target team; nothing was written.",
+        )
     if not saved or team_revision(current) != saved:
         return _error(
             tool_call_id,
@@ -796,18 +805,38 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
             f"team {name!r} was edited after that save, so reverting would undo the later "
             "change too; nothing was written. Show the user the current team instead.",
         )
+    row = Team.model_validate(record.get("row") or {})
+    if str(row.id) != str(current.id) or row.name != current.name:
+        return _error(
+            tool_call_id,
+            "team",
+            "backup identity does not match the target team; nothing was written.",
+        )
+    changed = tuple(
+        key
+        for key in _TEAM_SAVE_FIELDS
+        if key != "overrides" and getattr(row, key, None) != getattr(current, key, None)
+    )
+    proposed = TeamParams(
+        op="update",
+        name=name,
+        **{key: getattr(row, key) for key in changed if key != "members"},
+    )
+    changes, summary = _team_changes(current, proposed)
+    if "members" in changed:
+        changes = (*changes, "members")
+        summary += "\nmembers (roster and model/effort pins): restored from backup"
     intent = DurableWriteIntent(
         kind="team",
         operation="revert",
-        name=name,
-        changes=_TEAM_SAVE_FIELDS,
-        summary=f"restore team {name!r} to its state before backup {backup_id}",
+        name=current.name,
+        changes=changes,
+        summary=summary,
         base_revision=str(saved),
     )
     authorized_by, reason = await durable_write_decision(context, intent)
     if authorized_by is None:
         return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
-    row = Team.model_validate(record.get("row") or {})
     try:
         registry.update_team(
             str(current.id),
@@ -836,6 +865,8 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
             "scope": "global",
             "authorized_by": authorized_by,
             "reverted_backup_id": backup_id,
+            "fields": list(changes),
+            "diff": summary.splitlines(),
         },
     )
 

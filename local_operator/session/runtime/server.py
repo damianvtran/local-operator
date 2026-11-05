@@ -8334,6 +8334,14 @@ class RuntimeServer:
 
                     raise DocumentCarriageUnsupported()
                 fields["files"] = requested_files
+            if authority.locality != "local" and "owner_typed" in parameters:
+                # A REMOTE prompt (mesh ``drive`` member, a peer's ``sessions
+                # send``, the relayed phone) is the user's turn but not the owner
+                # typing on this machine: it must never authorize a card-free
+                # account profile save — those go to the approval card, which
+                # the operator's own devices can still answer with their
+                # capability. Local attaches keep the default.
+                fields["owner_typed"] = False
             return await h.prompt(frame["text"], **fields)
         if op == "steer":
             fields = {"images": frame.get("images")}
@@ -8364,6 +8372,9 @@ class RuntimeServer:
 
                     raise DocumentCarriageUnsupported()
                 fields["files"] = requested_files
+            if authority.locality != "local" and "owner_typed" in parameters:
+                # Same rule as the prompt op above.
+                fields["owner_typed"] = False
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()

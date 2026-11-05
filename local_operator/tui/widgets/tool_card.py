@@ -3509,6 +3509,16 @@ class ToolCard(ExpandableActionBlock):
             # the plain-output branch below (no diff was produced) and keeps
             # its argument block: there the args are the only account of what
             # was attempted, and the error only makes sense next to them.
+            if self.tool_name.lower() in {"agent", "team"}:
+                # Profile receipts are not file edits: their status, per-field
+                # summary and exact revert call are part of the result, not
+                # duplicate input. Keep them visible above the diff, wrapping
+                # each authored line so the backup id cannot be clipped away.
+                line_width = max(1, width - 2 - OUTPUT_INDENT)
+                receipt_style = bindings.style("tool.row.dim")
+                for source in self._output:
+                    for line in wrap_cells(source, line_width):
+                        row.append("\n" + " " * OUTPUT_INDENT + line, style=receipt_style)
             self._append_diff_body(row, width)
         elif self._bridge_view is not None and self._state in ("success", "error"):
             self._append_bridge_body(row, width)

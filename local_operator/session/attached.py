@@ -31,6 +31,7 @@ from typing import Any, Awaitable, Callable, Literal, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
+from local_operator.harness.approval import never_auto_approved
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
 from local_operator.harness.types import (
@@ -7704,8 +7705,14 @@ class AttachedSession:
                 pending.request_id,
             )
             return
+        # An account profile save is never answered by the background
+        # auto-approve: with gates detached it stays parked for a person
+        # (``harness.approval.never_auto_approved``).
         background = (
-            self._gates_detached and self._background_approval and pending.kind == "approval"
+            self._gates_detached
+            and self._background_approval
+            and pending.kind == "approval"
+            and not never_auto_approved(pending.title)
         )
         if self._gates_detached and not background:
             logger.debug(
@@ -7856,11 +7863,17 @@ class AttachedSession:
         #: the gate would spin (issue #1310, UX review round 3, U12).
         answered_without_a_person = True
         try:
+            if self._gates_detached and never_auto_approved(pending.title):
+                return
             handler = self._approval_handler
             client = self._client
             if client is None:
                 return
-            if self._gates_detached and self._background_approval:
+            if (
+                self._gates_detached
+                and self._background_approval
+                and not never_auto_approved(pending.title)
+            ):
                 approved = True
             elif handler is not None:
                 answered_without_a_person = False

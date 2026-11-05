@@ -404,6 +404,26 @@ logger = logging.getLogger(__name__)
 BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
 
 
+#: ``provider_payload`` key on a user row whose prompt arrived over a REMOTE
+#: connection (mesh member, peer pilot, relayed phone). Invisible to the model and
+#: to providers, like the harness-injection stamp beside it, and read only by
+#: ``Session._note_run_input``: such a row is the user's turn, but it is not the
+#: owner typing at this machine, so it never authorizes a card-free account
+#: profile save (operator: "a peer ... request never authorizes an edit").
+REMOTE_PROMPT_KEY = "lop_remote_prompt"
+
+
+def _stamp_remote_prompt(message: Any) -> None:
+    payload = dict(getattr(message, "provider_payload", None) or {})
+    payload[REMOTE_PROMPT_KEY] = True
+    message.provider_payload = payload
+
+
+def _is_remote_prompt(message: Any) -> bool:
+    payload = getattr(message, "provider_payload", None)
+    return isinstance(payload, Mapping) and bool(payload.get(REMOTE_PROMPT_KEY))
+
+
 def _saver_redaction(variables: Any) -> Any:
     """The session's two redaction passes as Radient Saver's ``Redaction``, or ``None``.
 
@@ -9656,8 +9676,15 @@ class Session:
         input_path: str | None = None,
         audio: Sequence[AudioContent] | None = None,
         documents: Sequence[DocumentContent] | None = None,
+        owner_typed: bool = True,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
+
+        ``owner_typed=False`` marks a person's prompt that did NOT come from a
+        local operator surface (a mesh ``drive`` member, a peer's ``sessions
+        send``, the relayed phone): it is still the user's turn for every other
+        purpose, but it never authorizes a card-free account profile save
+        (``_authorize_account_profile_write``; stamp: ``REMOTE_PROMPT_KEY``).
 
         ``input_mode``/``input_path`` are the silent input-metadata carriage
         (see ``Message.input_mode``): set by the desktop composer for a
@@ -9864,6 +9891,8 @@ class Session:
             elif input_path is not None:
                 extra["input_path"] = input_path
             user = Message.user(text, images, audio=audio, documents=documents, **extra)
+            if not owner_typed:
+                _stamp_remote_prompt(user)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -9936,8 +9965,12 @@ class Session:
         audio: Sequence[AudioContent] | None = None,
         documents: Sequence[DocumentContent] | None = None,
         harness_injected: bool = False,
+        owner_typed: bool = True,
     ) -> None:
         """Inject an identified steering message into the running turn.
+
+        ``owner_typed`` has ``prompt``'s meaning: False for a steer that did not
+        come from a local operator surface.
 
         Attachments ride along for the same reason they do on ``prompt``. The
         optional producer identity is persisted when the queue drains, letting
@@ -9996,6 +10029,8 @@ class Session:
         elif input_path is not None:
             extra["input_path"] = input_path
         message = Message.user(text, images, audio=audio, documents=documents, **extra)
+        if not owner_typed:
+            _stamp_remote_prompt(message)
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
             # row is born — the same contract ``prompt`` documents one method
@@ -10719,6 +10754,9 @@ class Session:
             [],
             message_id=command_id or None,
             harness_injected=bool(getattr(line, "harness_injected", False)),
+            # A prompt spooled from a REMOTE connection keeps that provenance
+            # (``serving.REMOTE_ORIGIN_SENDER_KEY``): never owner-typed here.
+            owner_typed=not bool((getattr(line, "sender", None) or {}).get("remote_origin")),
         )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
@@ -14361,8 +14399,12 @@ class Session:
 
         * PATH A, the user asked: this run took in the owner's own typed,
           non-injected message (``_run_owner_texts``; ask answers, peer and
-          Team Bridge messages, wakes, monitors and job results never write
-          it), the session has no parent, and that message names the profile.
+          Team Bridge messages, wakes, monitors, remote prompts and job results
+          never write it), the session has no parent, and that message names
+          the profile AND explicitly requests the definition fields in a direct
+          edit imperative. Only wording-only update/revert (instructions, label
+          or description) qualifies; ambiguous mentions, policy fields and every
+          other operation ask.
           The name match narrows only: failing it routes to path B.
         * PATH B, anything else: the host's tool-approval gate, asked with a
           card naming the profile, the operation, the changed fields and a diff
@@ -14374,11 +14416,27 @@ class Session:
           under the write lock, so an approval cannot land on a moved row.
         """
         from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
-        from local_operator.profile_scope import owner_text_names_profile
+        from local_operator.profile_scope import (
+            owner_text_requests_profile_edit,
+            profile_field_label,
+        )
 
-        if not self._parent_session_id and self._run_owner_texts:
+        # A name mention is not permission to change policy. Only ordinary
+        # wording edits and their revert may use the no-card path; every other
+        # operation or field (including a model-selected create name) asks.
+        wording_only = (
+            intent.operation in {"update", "revert"}
+            and bool(intent.changes)
+            and set(intent.changes) <= {"instructions", "description", "label"}
+        )
+        if wording_only and not self._parent_session_id and self._run_owner_texts:
             names = [intent.name, *self._profile_labels(intent)]
-            if any(owner_text_names_profile(text, names) for text in self._run_owner_texts):
+            if any(
+                owner_text_requests_profile_edit(
+                    text, names, operation=intent.operation, fields=intent.changes
+                )
+                for text in self._run_owner_texts
+            ):
                 run_ms = int(self._run_started_at * 1000)
                 return f"owner-prompt:{self._session_id or 'session'}@{run_ms}"
         gate = self._request_approval
@@ -14386,9 +14444,11 @@ class Session:
             from local_operator.harness.approval import ApprovalUnavailableError
 
             raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no approval surface is attached")
-        changed = ", ".join(intent.changes) or "(no fields named)"
+        changed = (
+            ", ".join(profile_field_label(field) for field in intent.changes) or "(no fields named)"
+        )
         card = (
-            f"Save {intent.kind} {intent.name!r} in your account ({intent.operation}). "
+            f"Save {intent.kind} {intent.name!r} in your account ({intent.operation}).\n"
             f"Changes: {changed}."
         )
         if intent.summary:
@@ -16206,7 +16266,8 @@ class Session:
                 # (a person answered), but answering a question the MODEL asked
                 # is not the person requesting a profile edit, so it never lands
                 # here. Full text, untruncated: the name match must see it all.
-                self._run_owner_texts.append(str(getattr(message, "text", "") or ""))
+                if not _is_remote_prompt(message):
+                    self._run_owner_texts.append(str(getattr(message, "text", "") or ""))
 
     def _turn_is_user_directed(self) -> bool:
         """Whether a person's own message drives this run (body-exclusion gate).

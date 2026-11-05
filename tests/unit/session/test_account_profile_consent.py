@@ -200,7 +200,7 @@ async def test_owner_message_naming_the_profile_saves_with_receipt_and_revert(st
     gate = Gate(answer=False)
     session = _session(stores, gate=gate)
     try:
-        _start_run(session, Message.user("Please make the Reviewer stricter about tests."))
+        _start_run(session, Message.user("Update Reviewer instructions to demand tests."))
         result = await _agent(
             _context(session, stores),
             op="update",
@@ -224,7 +224,7 @@ async def test_owner_message_naming_the_profile_saves_with_receipt_and_revert(st
         )
 
         # Revert, asked for by name in the user's next message.
-        _start_run(session, Message.user("revert that reviewer change"))
+        _start_run(session, Message.user("Revert the reviewer change"))
         reverted = await _agent(
             _context(session, stores), op="revert", backup_id=details["backup_id"]
         )
@@ -241,7 +241,7 @@ async def test_instructions_only_update_preserves_pins_tools_class_and_model(sto
         account = stores["account"]
         before_row = account.get_agent_by_name("reviewer")
         before = profile_from_agent(account, before_row)
-        _start_run(session, Message.user("update reviewer: be kinder"))
+        _start_run(session, Message.user("Update reviewer instructions to be kinder"))
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="Be kind."
         )
@@ -253,13 +253,14 @@ async def test_instructions_only_update_preserves_pins_tools_class_and_model(sto
         assert after.action_class == before.action_class
         assert after.may_delegate == before.may_delegate
         assert after_row.model == before_row.model == "anthropic/claude-opus-5"
+        assert after_row.tags == before_row.tags
     finally:
         await session.dispose()
 
 
 @pytest.mark.asyncio
 async def test_policy_field_changes_are_named_in_the_receipt(stores) -> None:
-    session = _session(stores, gate=Gate(answer=False))
+    session = _session(stores, gate=Gate(answer=True))
     try:
         _start_run(session, Message.user("pin reviewer to lo and make it proactive"))
         result = await _agent(
@@ -271,7 +272,7 @@ async def test_policy_field_changes_are_named_in_the_receipt(stores) -> None:
             tools=["read"],
         )
         assert not result.is_error, _text(result)
-        diff = result.details["diff"]
+        diff = "\n".join(result.details["diff"])
         assert "model/effort:" in diff and "class:" in diff and "tools:" in diff
     finally:
         await session.dispose()
@@ -405,7 +406,8 @@ async def test_no_gate_attached_refuses_with_the_owner_prompt_remedy(stores) -> 
             _context(session, stores), op="update", name="reviewer", instructions="X."
         )
         assert result.is_error
-        assert "naming 'reviewer', it saves" in _text(result)
+        assert "naming 'reviewer'" in _text(result)
+        assert "No durable queued approval" in _text(result)
     finally:
         await session.dispose()
 
@@ -423,7 +425,7 @@ async def test_child_and_sdk_sessions_keep_the_no_seam_refusal(stores) -> None:
         intent = DurableWriteIntent(kind="agent", operation="update", name="reviewer")
         context = _context(sdk, stores)
         assert await durable_write_decision(context, intent) == (None, "no_seam")
-        _start_run(sdk, Message.user("update reviewer"))
+        _start_run(sdk, Message.user("Update reviewer instructions to use revised guidance"))
         result = await _agent(context, op="update", name="reviewer", instructions="X.")
         assert _text(result).endswith(durable_write_refusal(intent, "no_seam"))
     finally:
@@ -440,7 +442,7 @@ async def test_team_update_follows_the_same_paths_and_reverts(stores) -> None:
     session = _session(stores, gate=gate)
     try:
         teams = stores["teams"]
-        _start_run(session, Message.user("change the lopdev brief"))
+        _start_run(session, Message.user("Update lopdev instructions to ship carefully."))
         result = await execute_team(
             "tc",
             {"op": "update", "name": "lopdev", "instructions": "Ship carefully."},
@@ -483,16 +485,230 @@ async def test_agent_revert_after_a_later_edit_is_refused(stores) -> None:
     session = _session(stores, gate=Gate(answer=False))
     try:
         account = stores["account"]
-        _start_run(session, Message.user("update reviewer"))
+        _start_run(session, Message.user("Update reviewer instructions to use revised guidance"))
         saved = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="V2."
         )
         backup = saved.details["backup_id"]
         row = account.get_agent_by_name("reviewer")
         account.set_agent_system_prompt(row.id, "V3 by hand.")
-        _start_run(session, Message.user("revert the reviewer"))
+        _start_run(session, Message.user("Revert reviewer"))
         refused = await _agent(_context(session, stores), op="revert", backup_id=backup)
         assert refused.is_error and "edited after that save" in _text(refused)
         assert account.get_agent_system_prompt(row.id) == "V3 by hand."
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation,changes",
+    [
+        ("reset", ()),
+        ("sync", ()),
+        ("promote", ()),
+        ("install", ()),
+        ("create", ("instructions",)),
+        ("update", ("description", "tools")),
+        ("update", ("effort",)),
+        ("update", ("action_class",)),
+        ("update", ("delegate",)),
+        ("update", ("saver",)),
+        ("update", ("members",)),
+        ("update", ("manager",)),
+        ("update", ("overrides",)),
+    ],
+)
+async def test_name_mention_never_grants_policy_or_other_ops(stores, operation, changes):
+    gate = Gate(answer=False)
+    session = _session(stores, gate=gate)
+    try:
+        _start_run(session, Message.user("fix the typo in the reviewer description"))
+        origin = await session._authorize_account_profile_write(
+            DurableWriteIntent(
+                kind="agent",
+                operation=operation,
+                name="reviewer",
+                changes=changes,
+            )
+        )
+        assert origin is None and len(gate.cards) == 1
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_remote_prompt_naming_profile_never_authorizes(stores):
+    from local_operator.session.session import _stamp_remote_prompt
+
+    gate = Gate(answer=False)
+    session = _session(stores, gate=gate)
+    try:
+        message = Message.user("please update reviewer")
+        _stamp_remote_prompt(message)
+        _start_run(session, message)
+        result = await _agent(
+            _context(session, stores), op="update", name="reviewer", instructions="Remote edit."
+        )
+        assert result.is_error and len(gate.cards) == 1
+        assert "Do not retry" in _text(result)
+        assert "TUI" not in _text(result)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_revert_refuses_mismatched_backup_identity(stores):
+    session = _session(stores, gate=Gate(answer=True))
+    try:
+        _start_run(session, Message.user("Update reviewer instructions to use revised guidance"))
+        saved = await _agent(
+            _context(session, stores), op="update", name="reviewer", instructions="V2."
+        )
+        backup = stores["session_dir"] / "profile-backups" / (saved.details["backup_id"] + ".json")
+        record = json.loads(backup.read_text())
+        record["name"] = "another-profile"
+        backup.write_text(json.dumps(record))
+        _start_run(session, Message.user("revert another-profile"))
+        refused = await _agent(
+            _context(session, stores), op="revert", backup_id=saved.details["backup_id"]
+        )
+        assert refused.is_error and "identity" in _text(refused)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_remote_server_dispatch_forwards_host_origin_only():
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime.server import (
+        RuntimeServer,
+        _ConnectionAuthority,
+    )
+
+    seen = []
+
+    async def prompt(text, *, images=None, owner_typed=True):
+        seen.append(owner_typed)
+        return "ok"
+
+    server = object.__new__(RuntimeServer)
+    server._handle = SimpleNamespace(prompt=prompt, steer=prompt)
+    for op in ("prompt", "steer"):
+        await server._dispatch(
+            op,
+            {"op": op, "text": "update reviewer", "owner_typed": True},
+            authority=_ConnectionAuthority("remote", frozenset({"prompt"})),
+        )
+        await server._dispatch(
+            op,
+            {"op": op, "text": "update reviewer"},
+            authority=_ConnectionAuthority("local", frozenset()),
+        )
+    assert seen == [False, True, False, True]
+
+
+@pytest.mark.asyncio
+async def test_detached_viewer_never_sends_background_profile_approval():
+    from types import SimpleNamespace
+
+    from local_operator.mobile.types import PendingRequest
+    from local_operator.session.attached import AttachedSession
+
+    viewer = object.__new__(AttachedSession)
+    viewer._gates_detached = True
+    viewer._background_approval = True
+    viewer._gate_key = None
+    viewer._gate_task = None
+
+    async def unexpected(*args):
+        pytest.fail("a detached profile gate must wait for a person")
+
+    viewer._approval_handler = unexpected
+    viewer._client = SimpleNamespace(approval_answer=unexpected)
+    pending = PendingRequest(
+        request_id="profile-request",
+        kind="approval",
+        title=ACCOUNT_PROFILE_GATE,
+        detail="Change reviewer instructions",
+    )
+    await viewer._run_approval(pending)
+    assert viewer._gate_task is None
+
+
+@pytest.mark.asyncio
+async def test_receipt_is_the_toolcard_diff_contract(stores):
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    session = _session(stores, gate=Gate(answer=False))
+    try:
+        _start_run(session, Message.user("Update reviewer instructions to use revised guidance"))
+        result = await _agent(
+            _context(session, stores),
+            op="update",
+            name="reviewer",
+            instructions=SEED_INSTRUCTIONS.replace("Be terse.", "Demand tests."),
+        )
+        card = ToolCard("tc", "agent", {"op": "update", "name": "reviewer"})
+        card._absorb_result(_text(result), result.details)
+        assert card._diff and "+Demand tests." in card._diff
+        assert "instructions: +1/-1 lines" in _text(result)
+        assert any(line.startswith("Revert with agent(") for line in card._output)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_serving_preserves_remote_origin_through_prompt_queue_and_steer(tmp_path):
+    from tests.unit.session.runtime.test_serving import make_handle
+
+    directory = tmp_path / "sessions" / "remote-origin"
+    directory.mkdir(parents=True)
+    handle, session = make_handle(directory=directory)
+    seen = []
+
+    async def prompt(text, images=None, *, message_id=None, admitted=None, owner_typed=True):
+        seen.append(("prompt", owner_typed))
+        if admitted is not None:
+            admitted.set_result(None)
+
+    def steer(text, images=None, *, message_id=None, owner_typed=True):
+        seen.append(("steer", owner_typed))
+
+    session.prompt = prompt
+    session.steer = steer
+    try:
+        await handle.prompt("update reviewer", owner_typed=False, wait_complete=True)
+        await handle.steer("update reviewer", owner_typed=False)
+        assert seen == [("prompt", False), ("steer", False)]
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "owner_text",
+    [
+        "Ask the reviewer to look at PR12",
+        "What does reviewer do?",
+        "Please make the reviewer stricter about tests",
+        "Update reviewer instructions",
+    ],
+)
+async def test_profile_mentions_are_not_definition_edit_consent(stores, owner_text):
+    gate = Gate(answer=False)
+    session = _session(stores, gate=gate)
+    try:
+        _start_run(session, Message.user(owner_text))
+        before = _snapshot(stores)
+        result = await _agent(
+            _context(session, stores),
+            op="update",
+            name="reviewer",
+            instructions="Must not land on mention alone.",
+        )
+        assert result.is_error and len(gate.cards) == 1
+        assert _snapshot(stores) == before
     finally:
         await session.dispose()

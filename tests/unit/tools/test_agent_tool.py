@@ -303,7 +303,7 @@ async def test_a_long_brief_is_kept_whole_up_to_ten_thousand_chars(context, regi
     body = await call(
         context, op="create", name="chief-of-staff", description="d", instructions=brief
     )
-    assert "created role 'chief-of-staff'" in body
+    assert "created agent 'chief-of-staff'" in body
 
     created = registry.get_agent_by_name("chief-of-staff")
     assert created is not None
@@ -1483,7 +1483,7 @@ async def test_the_non_role_refusal_names_an_escape_that_runs(context, registry)
     created = await call(
         context, op="create", name="my-reviewer", description="d", instructions="pasted"
     )
-    assert "created role 'my-reviewer'" in created
+    assert "created agent 'my-reviewer'" in created
     assert registry.get_agent_system_prompt(agent.id) == "Be agreeable.", "must not overwrite"
 
 

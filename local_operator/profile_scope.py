@@ -275,6 +275,81 @@ async def durable_write_decision(
     return (str(origin), "granted") if origin else (None, "declined")
 
 
+def profile_field_label(field: str) -> str:
+    """One vocabulary shared by approval, receipt and diff."""
+    return {"effort": "model/effort", "action_class": "class"}.get(field, field)
+
+
+def profile_diff_summary(summary: str) -> str:
+    """One line per changed field, keeping the revert line out of long prose."""
+    lines: list[str] = []
+    instruction_lines: list[str] = []
+    for line in summary.splitlines():
+        if line.startswith("instructions"):
+            instruction_lines = []
+            lines.append("instructions: updated")
+        elif line.startswith(("---", "+++", "@@")):
+            continue
+        elif line.startswith(("+", "-")):
+            instruction_lines.append(line)
+        elif ": " in line and not line.startswith(" "):
+            lines.append(line)
+    if instruction_lines:
+        added = sum(line.startswith("+") for line in instruction_lines)
+        removed = sum(line.startswith("-") for line in instruction_lines)
+        lines = [
+            f"instructions: +{added}/-{removed} lines" if line == "instructions: updated" else line
+            for line in lines
+        ]
+    return "\n".join(lines)
+
+
+def owner_text_requests_profile_edit(
+    text: str, names: Iterable[str], *, operation: str, fields: tuple[str, ...]
+) -> bool:
+    """A conservative explicit-edit grammar, never a semantic intent guess.
+
+    Merely mentioning a profile ("ask reviewer to look" / "what does reviewer
+    do?") is not consent. Only a direct imperative naming the profile AND the
+    changed definition fields qualifies. Other valid phrasings safely reach the
+    approval card; widening this grammar cannot be inferred by a model.
+    Revert must itself be the explicit imperative and name the target.
+    """
+    import re
+
+    for raw in names:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        target = re.escape(name)
+        prefix = r"^\s*(?:please\s+)?"
+        if operation == "revert":
+            pattern = (
+                prefix
+                + rf"revert\s+(?:(?:the|that)\s+)?{target}(?![\w-])"
+                + r"(?:\s+(?:change|update|edit))?[.!]?\s*$"
+            )
+            if re.fullmatch(pattern, text, flags=re.IGNORECASE):
+                return True
+            continue
+        # Require the entire field list before the replacement delimiter; an
+        # instruction body mentioning an unrelated field is never permission
+        # to edit that field too.
+        pattern = (
+            prefix + rf"(?:update|change|edit|revise|rewrite|replace)\s+(?:the\s+)?{target}"
+            r"(?:'s)?\s+(?:profile\s+)?"
+            r"(?P<fields>(?:instructions|description|label)"
+            + r"(?:(?:\s*(?:,|and|&)\s*)(?:instructions|description|label))*)"
+            r"\s*(?:to\b|:|=)"
+        )
+        match = re.match(pattern, text, flags=re.IGNORECASE)
+        if match:
+            requested = set(re.findall(r"instructions|description|label", match["fields"].lower()))
+            if set(fields) <= requested:
+                return True
+    return False
+
+
 def owner_text_names_profile(text: str, names: Iterable[str]) -> bool:
     """Whether the user's own words name one of ``names`` as a whole word.
 
@@ -409,20 +484,12 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
     the TUI verb — so the refusal never implies the agent can do it alone.
     """
     article = "an" if intent.kind == "agent" else "a"
-    if reason == "declined" and intent.operation == "promote":
-        opening = (
-            f"the user declined to copy this {intent.kind} into their account, so "
-            "nothing in their account was changed."
-        )
-    elif reason == "declined":
-        opening = (
+    if reason == "declined":
+        return (
             f"the user declined to save this {intent.kind} for every conversation, so "
-            "nothing in their account was changed."
-            if intent.operation != "sync"
-            else "the user declined the account updates, so no role saved in their "
-            "account was changed."
+            "nothing in their account was changed. Do not retry this change."
         )
-    elif reason == "error":
+    if reason == "error":
         opening = (
             "the confirmation channel failed before the user could answer, so nothing "
             "in their account was changed."
@@ -434,7 +501,10 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
         opening = (
             f"this {intent.kind} change was not asked for in the user's own message, and "
             "no one is attached to approve it, so nothing in their account was changed. "
-            f"If the user asks for it in their own message, naming {intent.name!r}, it saves."
+            f"For a wording-only update, the user can ask in their own local message, "
+            f"naming {intent.name!r} and the definition fields to edit. Policy changes and "
+            "other operations need an attached "
+            "approval surface. No durable queued approval was filed."
         )
     elif intent.operation == "promote":
         opening = (

@@ -1764,6 +1764,12 @@ def write_profile(
                 if text.lower().startswith(marker_prefix):
                     tags.append(text)
                     break
+    # Wording edits must not reorder or normalize unrelated policy tags.
+    if existing is not None and all(
+        getattr(params, field) is None
+        for field in ("tools", "effort", "delegate", "action_class", "saver")
+    ):
+        tags = list(existing.tags or [])
     categories = ["role"] if kind == "role" else ["specialist"]
 
     # Every field is spelled out (``AgentEditFields`` is validated in strict
@@ -1876,7 +1882,7 @@ _SAVE_FIELDS: tuple[tuple[str, str | None], ...] = (
     ("tools", "tools"),
     ("delegate", "delegate"),
     ("action_class", "action_class"),
-    ("saver", None),
+    ("saver", "saver"),
 )
 
 
@@ -1907,6 +1913,7 @@ def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _Ac
     agent_id = str(existing.id) if existing is not None else None
     if agent_id is not None:
         before = dict(registry.definition_revision_fields(agent_id))
+        before["saver"] = profile_from_agent(registry, existing).saver
         base_revision = definition_revision("agent", agent_id, before)
     changes = tuple(field for field, _key in _SAVE_FIELDS if getattr(params, field) is not None)
     lines: list[str] = []
@@ -1980,6 +1987,7 @@ def _take_backup(
         "scope": "global",
         "row": dump(mode="json") if callable(dump) else dict(vars(row)),
         "instructions": instructions,
+        "definition_fields": plan.before,
         "base_revision": plan.base_revision,
         "authorized_by": authorized_by,
     }
@@ -2003,10 +2011,10 @@ def _account_save_receipt(
     button is claimed — the surfaces render ``details.revert`` as text today.
     """
     from local_operator.hub_sync.definition import definition_revision
-    from local_operator.profile_scope import update_profile_backup
+    from local_operator.profile_scope import profile_diff_summary, update_profile_backup
 
     details["fields"] = list(plan.changes)
-    details["diff"] = plan.summary
+    details["diff"] = plan.summary.splitlines()
     revision: str | None = None
     try:
         row = registry.get_agent_by_name(name)
@@ -2019,13 +2027,14 @@ def _account_save_receipt(
     details["revision"] = revision
     details["backup_id"] = plan.backup_id
     if not plan.backup_id:
-        return f" Changed: {', '.join(plan.changes) or 'nothing named'}."
+        return "\n" + profile_diff_summary(plan.summary)
     session_dir = getattr(context, "session_dir", None) if context is not None else None
     update_profile_backup(session_dir, plan.backup_id, saved_revision=revision)
     details["revert"] = {"op": "revert", "backup_id": plan.backup_id}
     return (
-        f" Changed: {', '.join(plan.changes) or 'nothing named'}. "
-        f"Revert with agent(op='revert', backup_id='{plan.backup_id}')."
+        "\n"
+        + profile_diff_summary(plan.summary)
+        + f"\nRevert with agent(op='revert', backup_id='{plan.backup_id}')."
     )
 
 
@@ -2058,6 +2067,12 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         fields = registry.definition_revision_fields(agent_id)
     except Exception:  # noqa: BLE001 — a deleted row cannot be reverted in place
         return _error(tool_call_id, "agent", f"{name!r} no longer exists; nothing to revert.")
+    if str(fields.get("name") or "") != name:
+        return _error(
+            tool_call_id,
+            "agent",
+            "backup identity does not match the target agent; nothing was written.",
+        )
     if not saved or definition_revision("agent", agent_id, fields) != saved:
         return _error(
             tool_call_id,
@@ -2066,20 +2081,46 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
             "change too; nothing was written. Show the user the current profile instead.",
         )
     row = dict(record.get("row") or {})
+    if str(row.get("id") or "") != agent_id or str(row.get("name") or "") != name:
+        return _error(
+            tool_call_id,
+            "agent",
+            "backup identity does not match the target agent; nothing was written.",
+        )
+    fields["saver"] = profile_from_agent(registry, registry.get_agent(agent_id)).saver
+    before = dict(record.get("definition_fields") or {})
+    if not before or before.get("name") != name:
+        return _error(
+            tool_call_id,
+            "agent",
+            "backup definition does not match the target agent; nothing was written.",
+        )
+    changes = tuple(
+        key for key, _ in _SAVE_FIELDS if key in before and before[key] != fields.get(key)
+    )
+    from local_operator.profile_scope import profile_field_label
+
+    summary_lines: list[str] = []
+    for key in changes:
+        if key == "instructions":
+            rendered, _ = _instruction_diff(
+                str(fields.get(key) or ""),
+                str(before.get(key) or ""),
+                fromfile="before",
+                tofile="after",
+            )
+            summary_lines.append(f"instructions:\n{rendered}")
+        else:
+            summary_lines.append(
+                f"{profile_field_label(key)}: {_format_field(fields.get(key))} -> "
+                f"{_format_field(before.get(key))}"
+            )
     intent = DurableWriteIntent(
         kind="agent",
         operation="revert",
-        name=name,
-        changes=(
-            "label",
-            "description",
-            "instructions",
-            "effort",
-            "tools",
-            "delegate",
-            "action_class",
-        ),
-        summary=f"restore {name!r} to its state before backup {backup_id}",
+        name=str(fields["name"]),
+        changes=changes,
+        summary="\n".join(summary_lines),
         base_revision=str(saved),
     )
     authorized_by, reason = await durable_write_decision(context, intent)
@@ -2133,13 +2174,15 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
     return _text(
         tool_call_id,
         "agent",
-        f"reverted {identifier_text(context, repr(name))} in your account to its state "
+        f"reverted agent {identifier_text(context, repr(name))} in your account to its state "
         f"before backup {backup_id}.",
         details={
             "name": name,
             "scope": "global",
             "authorized_by": authorized_by,
             "reverted_backup_id": backup_id,
+            "fields": list(changes),
+            "diff": "\n".join(summary_lines).splitlines(),
         },
     )
 
@@ -2289,7 +2332,7 @@ async def _op_write(
     return _text(
         tool_call_id,
         "agent",
-        f"{verb} {kind} {identifier_text(context, repr(name))} "
+        f"{verb} agent {identifier_text(context, repr(name))} "
         f"in {scope_words(target)}; {how}.{class_clause}{receipt}",
         details=details,
     )

@@ -581,6 +581,17 @@ def _question_prose(question: Any) -> str:
     return str(getattr(question, "question", "") or "the agent is asking")
 
 
+#: The sender stamp a spooled owner line carries when its prompt came from a
+#: REMOTE connection. ``Session._run_spooled_owner_prompt`` reads it back so a
+#: prompt spooled across a runtime update keeps the provenance it would have
+#: had live (it never authorizes a card-free account profile save).
+REMOTE_ORIGIN_SENDER_KEY = "remote_origin"
+
+
+def _owner_sender(owner_typed: bool) -> dict[str, Any]:
+    return {} if owner_typed else {REMOTE_ORIGIN_SENDER_KEY: True}
+
+
 @dataclass
 class _PromptCommand:
     command_id: str
@@ -618,6 +629,8 @@ class _PromptCommand:
     #: ``Message.user(..., documents=...)``. Resolved from ``Prompt.files`` in
     #: the synchronous prelude, so nothing here touches the store again.
     documents: list["DocumentContent"] | None = None
+    #: False for a prompt from a remote connection (see ``prompt``).
+    owner_typed: bool = True
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -3941,8 +3954,14 @@ class ServingSessionHandle(SessionHandle):
         wait_complete: bool = False,
         harness_injected: bool = False,
         wait_for_turn: bool = True,
+        owner_typed: bool = True,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``owner_typed=False`` is set by the control server for a prompt from a
+        REMOTE connection (``RuntimeServer._dispatch``): it rides to
+        ``Session.prompt`` (and onto a spooled line's sender) so the row never
+        authorizes a card-free account profile save.
 
         ``input_mode``/``input_path`` are the silent input metadata the
         desktop composer sends for a dictation (see ``Message.input_mode``).
@@ -4125,7 +4144,7 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender={},
+                    sender=_owner_sender(owner_typed),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -4176,7 +4195,7 @@ class ServingSessionHandle(SessionHandle):
                         text,
                         mode="mailbox",
                         wake=True,
-                        sender={},
+                        sender=_owner_sender(owner_typed),
                         source=SOURCE_USER,
                         command_id=command_id,
                         harness_injected=harness_injected,
@@ -4213,6 +4232,7 @@ class ServingSessionHandle(SessionHandle):
             input_path=input_path,
             audio=audio_blocks_decoded,
             documents=document_blocks_decoded,
+            owner_typed=owner_typed,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -5105,6 +5125,8 @@ class ServingSessionHandle(SessionHandle):
                         # keyword's whole job is to stamp a marker those hosts
                         # never read.
                         fields["harness_injected"] = command.harness_injected
+                    if "owner_typed" in parameters and not command.owner_typed:
+                        fields["owner_typed"] = False
                     if "input_mode" in parameters:
                         fields["input_mode"] = command.input_mode
                     if "input_path" in parameters:
@@ -5196,7 +5218,9 @@ class ServingSessionHandle(SessionHandle):
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
         files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
+        owner_typed: bool = True,
     ) -> str:
+        # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
         # Bounded BEFORE the reservation, deliberately: the bound is a thread
@@ -5259,6 +5283,7 @@ class ServingSessionHandle(SessionHandle):
                     document_blocks=document_blocks_decoded,
                     carries_attachments=carries_attachments,
                     harness_injected=harness_injected,
+                    owner_typed=owner_typed,
                 )
             )
             receipt, raise_successor = await self._await_steer_admission(admission)
@@ -5336,6 +5361,7 @@ class ServingSessionHandle(SessionHandle):
         document_blocks: list[Any],
         carries_attachments: bool,
         harness_injected: bool,
+        owner_typed: bool = True,
     ) -> tuple[str, bool]:
         """The admission half of :meth:`steer`, once its blocks are decoded.
 
@@ -5372,7 +5398,7 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender={},
+                    sender=_owner_sender(owner_typed),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -5416,7 +5442,7 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender={},
+                    sender=_owner_sender(owner_typed),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -5462,6 +5488,8 @@ class ServingSessionHandle(SessionHandle):
         # session that predates the keyword never receives it.
         if "harness_injected" in parameters:
             fields["harness_injected"] = harness_injected
+        if "owner_typed" in parameters and not owner_typed:
+            fields["owner_typed"] = False
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:
