@@ -1083,6 +1083,9 @@ _COMPOUND_CLOSERS = ("fi", "done", "esac")
 _TRAILING_REDIRECT_RE = re.compile(r"(?:\s+\d*(?:>>|>&|<&|>|<)\s*\S*|\s+&>>?\s*\S*)+\s*$")
 
 
+_UNSEEN_SCRIPT_REASON = "shell reads a script from stdin or a file (not resolved)"
+
+
 def _strip_trailing_redirects(text: str) -> str:
     """``} 2>&1`` → ``}`` (R5-1): a redirect after a closer is still a closer."""
     return _TRAILING_REDIRECT_RE.sub("", text.strip())
@@ -1125,15 +1128,41 @@ def _group_closes(text: str) -> int:
     return count
 
 
+#: A STDOUT redirect: fd-less or ``1>``, or ``&>`` (R6-2). ``2>err.log`` only
+#: moves stderr, so the body still reaches the next reader. ``scan`` drops fd
+#: numbers, hence a dedicated, quote-blind pattern: it can only fail toward
+#: "not sunk" (walked) because a match inside quotes merely misses a sink.
+_STDOUT_REDIRECT_RE = re.compile(r"(?:(?<![\w&<>])1?|&)(?:>>|>\||>)(?!&)\s*([^\s;|&<>]+)")
+
+
 def _redirects_stdout_to_file(segment: str) -> bool:
-    """The segment sends stdout to a named file (not a descriptor, not /dev/*)."""
-    _words, redirects = scan(segment)
-    for op, raw in redirects:
-        if op in (">", ">>", ">|"):
-            target = "".join(p.text for p in raw.parts)
-            if target and not target.startswith("/dev/"):
-                return True
+    """The segment sends stdout to a named file or /dev/null (R6-2/R6-3).
+
+    ``/dev/null`` is a sink; other ``/dev/*`` targets (``/dev/stdout``,
+    ``/dev/fd/N``) are not, since they hand the body on.
+    """
+    for target in _STDOUT_REDIRECT_RE.findall(_strip_quoted(segment)):
+        if target == "/dev/null" or not target.startswith("/dev/"):
+            return True
     return False
+
+
+def _strip_quoted(text: str) -> str:
+    """Blank quoted spans so a ``>`` inside a string is not read as a redirect."""
+    return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", text)
+
+
+#: R6-3: programs that CONSUME a heredoc as data (commit/PR text, a config,
+#: an interpreter script that is not a shell). A body fed to one of these and
+#: not piped onward is sunk. Deliberately excluded: shells, ``exec``,
+#: ``coproc``, ``eval``, ``source``/``.`` and anything unknown such as a shell
+#: function — those can hand the body to a shell. Filters that ECHO their
+#: input (cat, tee, grep, sed, jq, …) are excluded too: inside a group or
+#: compound command whose output is piped on, the echoed body is still a
+#: script, so they count as sunk only via a stdout redirect to a file.
+_NON_SHELL_CONSUMERS = frozenset(
+    {"git", "gh", "glab", "python", "python3", "node", "ruby", "kubectl", "psql", "sqlite3"}
+)
 
 
 def _herestring_texts(segment: str) -> list[str]:
@@ -1299,7 +1328,9 @@ class _Walker:
             upstream_bodies = upstream_bodies + produced
             for bodies in group_bodies:
                 bodies.extend(produced)
-            to_file = _redirects_stdout_to_file(text)
+            to_file = _redirects_stdout_to_file(text) or (
+                not nxt_piped and _stage_program(text) in _NON_SHELL_CONSUMERS
+            )
             consumer = pieces[index + 1][0] if nxt_piped else None
             for body in produced:
                 produced_so_far.append(_Produced(body=body, to_file=to_file, consumer=consumer))
@@ -1621,6 +1652,9 @@ class _Walker:
             ]
             if walked:
                 self._walk_stdin_bodies(walked, [], depth)
+                # R6-1: walking an earlier body says nothing about the stream
+                # this shell actually reads, so a fetch upstream still counts.
+                self._fetched_script(stdin_piped, feed)
                 return
         self._unseen_script(segment, stdin_piped, pipeline, feed)
 
@@ -1633,19 +1667,23 @@ class _Walker:
     ) -> None:
         """Record a shell running text this command does not contain — if it matters."""
         haystack = pipeline if stdin_piped else segment
-        # R3-4: a fetch is a PROGRAM upstream (``curl …``, ``timeout 30 wget``),
-        # not a word in an argument (``cat ncat.log``, ``echo http://x``).
-        fetched = (
+        if _DELETE_WORD_RE.search(haystack):
+            self.result.opaque_reasons.append(_UNSEEN_SCRIPT_REASON)
+        else:
+            self._fetched_script(stdin_piped, feed)
+
+    def _fetched_script(self, stdin_piped: bool, feed: _Feed | None) -> None:
+        """R3-4: a fetch is a PROGRAM upstream (``curl …``, ``timeout 30 wget``),
+        not a word in an argument (``cat ncat.log``, ``echo http://x``)."""
+        if (
             stdin_piped
             and feed is not None
             and any(
                 _NETWORK_FETCH_RE.fullmatch(_stage_program(stage) or "") for stage in feed.stages
             )
-        )
-        if _DELETE_WORD_RE.search(haystack) or fetched:
-            self.result.opaque_reasons.append(
-                "shell reads a script from stdin or a file (not resolved)"
-            )
+            and _UNSEEN_SCRIPT_REASON not in self.result.opaque_reasons
+        ):
+            self.result.opaque_reasons.append(_UNSEEN_SCRIPT_REASON)
 
     def _source(
         self,
