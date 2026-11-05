@@ -1,0 +1,57 @@
+{
+  "tui.profile_actions.available": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Checking/reverting are in progress; check_status is a READ ONLY reconciliation, never another mutation. Reverted is terminal cached completion.",
+    "role": "profile receipt Revert control",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  },
+  "tui.profile_actions.check_status": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Checking/reverting are in progress; check_status is a READ ONLY reconciliation, never another mutation. Reverted is terminal cached completion.",
+    "role": "profile receipt Revert control",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  },
+  "tui.profile_actions.checking": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Checking/reverting are in progress; check_status is a READ ONLY reconciliation, never another mutation. Reverted is terminal cached completion.",
+    "role": "profile receipt Revert control",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  },
+  "tui.profile_actions.failed": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Failed means outcome could not be completed: inspect current profile; never promise no changes or blindly retry.",
+    "role": "profile receipt Revert control",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  },
+  "tui.profile_actions.failed_reason": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Failed means outcome could not be completed: inspect current profile; never promise no changes or blindly retry.",
+    "role": "profile receipt Revert guidance",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  },
+  "tui.profile_actions.reverted": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Checking/reverting are in progress; check_status is a READ ONLY reconciliation, never another mutation. Reverted is terminal cached completion.",
+    "role": "profile receipt Revert control",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  },
+  "tui.profile_actions.reverting": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Checking/reverting are in progress; check_status is a READ ONLY reconciliation, never another mutation. Reverted is terminal cached completion.",
+    "role": "profile receipt Revert control",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  },
+  "tui.profile_actions.stale": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Stale means later edits exist: refuse this inverse, inspect current version, never force undo.",
+    "role": "profile receipt Revert control",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  },
+  "tui.profile_actions.stale_reason": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Stale means later edits exist: refuse this inverse, inspect current version, never force undo.",
+    "role": "profile receipt Revert guidance",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  },
+  "tui.profile_actions.unavailable": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Unavailable means identity/live authority cannot be verified: inspect current profile before a NEW request.",
+    "role": "profile receipt Revert control",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  },
+  "tui.profile_actions.unavailable_reason": {
+    "note": "A successful agent/team edit receipt's authenticated one-use inverse. Wire states/IDs are NOT translated. Only fresh live proof enables the control. Reasons wrap to the current card width; no fixed maxCells. Short labels must fit the tested 60-column layout (52 cells after the card's indent). {shortcut}, where present, is the actual Latin R keyboard binding: preserve it, do not translate it. No manual bidi controls; final paint isolates Urdu and the technical shortcut. Unavailable means identity/live authority cannot be verified: inspect current profile before a NEW request.",
+    "role": "profile receipt Revert guidance",
+    "tone": "plain, safety-conscious; no promise of a retry or guaranteed historical undo"
+  }
+}

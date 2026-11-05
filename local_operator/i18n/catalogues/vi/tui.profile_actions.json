@@ -1,0 +1,13 @@
+{
+  "tui.profile_actions.available": "[ Khôi phục ({shortcut}) ]",
+  "tui.profile_actions.check_status": "[ Kiểm tra trạng thái ({shortcut}) ]",
+  "tui.profile_actions.checking": "[ Đang xác minh khôi phục… ]",
+  "tui.profile_actions.failed": "[ Khôi phục chưa hoàn tất ]",
+  "tui.profile_actions.failed_reason": "Không thể hoàn tất khôi phục. Kiểm tra hồ sơ hiện tại trước khi yêu cầu thay đổi khác.",
+  "tui.profile_actions.reverted": "[ Đã khôi phục ]",
+  "tui.profile_actions.reverting": "[ Đang khôi phục… ]",
+  "tui.profile_actions.stale": "[ Hồ sơ đã thay đổi ]",
+  "tui.profile_actions.stale_reason": "Hồ sơ đã thay đổi sau lần lưu này. Kiểm tra phiên bản hiện tại; thao tác này sẽ không hoàn tác các thay đổi sau đó.",
+  "tui.profile_actions.unavailable": "[ Không thể khôi phục ]",
+  "tui.profile_actions.unavailable_reason": "Phiên này không thể xác minh thao tác này. Kiểm tra hồ sơ hiện tại trước khi yêu cầu thay đổi khác."
+}

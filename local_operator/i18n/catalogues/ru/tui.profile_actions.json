@@ -1,0 +1,13 @@
+{
+  "tui.profile_actions.available": "[ Восстановить ({shortcut}) ]",
+  "tui.profile_actions.check_status": "[ Проверить статус ({shortcut}) ]",
+  "tui.profile_actions.checking": "[ Проверка восстановления… ]",
+  "tui.profile_actions.failed": "[ Восстановление не завершено ]",
+  "tui.profile_actions.failed_reason": "Не удалось завершить восстановление. Проверьте текущий профиль перед запросом нового изменения.",
+  "tui.profile_actions.reverted": "[ Восстановлено ]",
+  "tui.profile_actions.reverting": "[ Восстановление… ]",
+  "tui.profile_actions.stale": "[ Профиль изменён ]",
+  "tui.profile_actions.stale_reason": "После сохранения профиль изменился. Проверьте текущую версию: это действие не отменит последующие изменения.",
+  "tui.profile_actions.unavailable": "[ Восстановление недоступно ]",
+  "tui.profile_actions.unavailable_reason": "В этой сессии нельзя проверить это действие. Проверьте текущий профиль перед запросом нового изменения."
+}
