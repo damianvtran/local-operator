@@ -28017,7 +28017,11 @@ class OperatorApp(App[None]):
         gate_key = self._sidebar_gate_identity(source)
         if job_id is None and self._source_approvals_are_denied(source, epoch):
             return False
-        if bool(source.draft.approve_all):
+        # Approve-all never covers an account profile save (see
+        # ``harness.approval.never_auto_approved``): that card always shows.
+        from local_operator.harness.approval import never_auto_approved
+
+        if bool(source.draft.approve_all) and not never_auto_approved(tool_name):
             return True
         # ADOPT THE CARD THE REVEAL ALREADY MOUNTED FOR THIS GATE, if there is
         # one. It is not a competing prompt — it IS this gate's card, built by

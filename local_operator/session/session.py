@@ -3335,6 +3335,12 @@ class Session:
         authorize_durable_write: (
             Callable[["DurableWriteIntent"], Awaitable[str | None]] | None
         ) = None,
+        #: Install the session-owned account-profile consent
+        #: (:meth:`_authorize_account_profile_write`) when no explicit seam was
+        #: passed. Off by default so an SDK/embedding host keeps today's
+        #: ``no_seam`` refusal byte for byte; the CLI headless path and the
+        #: runtime that serves the TUI/desktop/phone turn it on.
+        owner_prompt_consent: bool = False,
         goal_state: GoalState | None = None,
         #: The variables surface behind list_variables/read_variable. Held by
         #: the SESSION because ``_build_tool_context`` is rebuilt every turn:
@@ -3669,6 +3675,10 @@ class Session:
         #: ineligible. Reset at the pipeline head beside ``_run_triggers``, written by
         #: ``_note_run_input``, frozen onto ``_last_run_provenance`` by ``_emit``.
         self._run_typed_user: bool = False
+        #: The owner's own typed words in THIS run (see ``_note_run_input``):
+        #: the only input that can authorize an account profile save without a
+        #: card (``_authorize_account_profile_write``). Reset at the pipeline head.
+        self._run_owner_texts: list[str] = []
         self._run_last_trigger: str | None = None
         self._run_user_text: str = ""
         #: Wall-clock start of the current pipeline (the logical turn), frozen onto the
@@ -4268,6 +4278,11 @@ class Session:
         )
         self._request_approval = request_approval
         self._authorize_durable_write = authorize_durable_write
+        if authorize_durable_write is None and owner_prompt_consent and not self._parent_session_id:
+            # TOP-LEVEL ONLY: a subagent's opening prompt is its parent's text,
+            # never the person's, so a child never gets the owner-prompt seam
+            # (and the callback re-checks the parent id at call time anyway).
+            self._authorize_durable_write = self._authorize_account_profile_write
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the
         # terminal can draw a picker, so the hook arrives from
@@ -14336,6 +14351,66 @@ class Session:
         resolver = self._fallback_tool_resolver
         return resolver(name) if resolver is not None else None
 
+    async def _authorize_account_profile_write(self, intent: "DurableWriteIntent") -> str | None:
+        """The session-owned consent seam for tool-issued ACCOUNT profile writes.
+
+        Users ask their agents to edit agent and team profiles; before this seam
+        no host installed ``authorize_durable_write`` and every such write was
+        refused even right after the user asked. It decides from HOST-HELD state
+        only — no tool parameter and no model text grants anything:
+
+        * PATH A, the user asked: this run took in the owner's own typed,
+          non-injected message (``_run_owner_texts``; ask answers, peer and
+          Team Bridge messages, wakes, monitors and job results never write
+          it), the session has no parent, and that message names the profile.
+          The name match narrows only: failing it routes to path B.
+        * PATH B, anything else: the host's tool-approval gate, asked with a
+          card naming the profile, the operation, the changed fields and a diff
+          summary. That gate's approve is an authority-checked answer
+          (``approval_answer`` is in ``harness.approval.AUTHORITY_OPS``) and is
+          never auto-approved (``never_auto_approved``), so ``--yolo`` and
+          approve-all cannot grant it. It pauses this one tool call, not the
+          session. The base revision on the intent is re-checked by the tool
+          under the write lock, so an approval cannot land on a moved row.
+        """
+        from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+        from local_operator.profile_scope import owner_text_names_profile
+
+        if not self._parent_session_id and self._run_owner_texts:
+            names = [intent.name, *self._profile_labels(intent)]
+            if any(owner_text_names_profile(text, names) for text in self._run_owner_texts):
+                run_ms = int(self._run_started_at * 1000)
+                return f"owner-prompt:{self._session_id or 'session'}@{run_ms}"
+        gate = self._request_approval
+        if gate is None:
+            from local_operator.harness.approval import ApprovalUnavailableError
+
+            raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no approval surface is attached")
+        changed = ", ".join(intent.changes) or "(no fields named)"
+        card = (
+            f"Save {intent.kind} {intent.name!r} in your account ({intent.operation}). "
+            f"Changes: {changed}."
+        )
+        if intent.summary:
+            card += f"\n{intent.summary}"
+        if await ask_approval(gate, ACCOUNT_PROFILE_GATE, card, None):
+            return f"approval:{intent.base_revision or 'new'}"
+        return None
+
+    def _profile_labels(self, intent: "DurableWriteIntent") -> list[str]:
+        """The target row's display label, so "update the Code Reviewer" names it."""
+        try:
+            if intent.kind == "team":
+                registry = self.team_registry
+                row = registry.get_team_by_name(intent.name) if registry is not None else None
+            else:
+                registry = self.agent_registry
+                row = registry.get_agent_by_name(intent.name) if registry is not None else None
+        except Exception:  # noqa: BLE001 — a label is a convenience, never a refusal
+            return []
+        label = str(getattr(row, "label", "") or "").strip() if row is not None else ""
+        return [label] if label else []
+
     def _tool_approval_gate(self) -> ApprovalGate | None:
         """The gate this turn's tool calls are decided by.
 
@@ -16125,6 +16200,13 @@ class Session:
                 self._run_last_trigger = TRIGGER_TYPED
                 self._run_user_text = str(getattr(message, "text", "") or "")[:USER_TEXT_MAX_CHARS]
                 self._last_typed_user_text = self._run_user_text
+                # THE OWNER-PROMPT WITNESS for account profile saves. Only this
+                # branch writes it: a typed, non-injected user row with no
+                # custom type. An ask answer also sets ``_run_typed_user`` above
+                # (a person answered), but answering a question the MODEL asked
+                # is not the person requesting a profile edit, so it never lands
+                # here. Full text, untruncated: the name match must see it all.
+                self._run_owner_texts.append(str(getattr(message, "text", "") or ""))
 
     def _turn_is_user_directed(self) -> bool:
         """Whether a person's own message drives this run (body-exclusion gate).
@@ -18708,6 +18790,7 @@ class Session:
         self._run_catchup_unidentified = False
         self._run_aida_checkin = False
         self._run_typed_user = False
+        self._run_owner_texts = []
         self._run_last_trigger = None
         self._run_user_text = ""
         self._run_started_at = time.time()

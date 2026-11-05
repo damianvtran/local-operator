@@ -2011,12 +2011,27 @@ class DurableWriteIntent:
     #: ``promote`` is the verb that copies a CONVERSATION definition into the
     #: account (LOH-9 S4): the tool may propose it, and only the user's own
     #: surface can authorise it, which is exactly what the seam answers.
-    operation: Literal["create", "update", "delete", "install", "reset", "sync", "promote"]
+    #: ``revert`` restores a row from the backup a granted save took; it is an
+    #: account write like any other, so it goes through the same seam.
+    operation: Literal[
+        "create", "update", "delete", "install", "reset", "sync", "promote", "revert"
+    ]
     name: str
     #: Always ``global`` today: a conversation-scoped write never asks. Kept
     #: explicit so a future scope cannot be read as "no consent needed" by
     #: omission.
     scope: Literal["global"] = "global"
+    #: The fields this call would change, in the tool's vocabulary, and a short
+    #: human diff summary of them. DESCRIPTION ONLY, like the rest of this type:
+    #: the seam renders them on the approval card so the person approves the
+    #: exact change rather than a bare name. Empty for the seed/sync operations,
+    #: whose payload is a packaged starter rather than caller-chosen fields.
+    changes: tuple[str, ...] = ()
+    summary: str = ""
+    #: The definition revision the change was computed against (``None`` for a
+    #: create). The tool re-checks it under the registry's write lock, so an
+    #: approval of this card can never land on a row that moved meanwhile.
+    base_revision: str | None = None
 
 
 class ToolContext(BaseModel):

@@ -189,6 +189,24 @@ class ApprovalUnavailableError(RuntimeError):
         super().__init__(APPROVAL_UNAVAILABLE_NOTICE.format(tool=tool_name, reason=reason))
 
 
+#: The gate "tool name" an account profile save is asked under (the agent/team
+#: tools' approval card for a change the user did not request in their own
+#: message). It contains a space, so no registered tool can ever carry it.
+#:
+#: WHY IT IS NEVER AUTO-APPROVED. ``--yolo``, ``/approvals auto`` and the TUI's
+#: approve-all exist so the operator need not babysit tool calls; they are not
+#: consent to the agent rewriting the operator's account-wide agents and teams,
+#: which every later conversation inherits. Each gate that short-circuits to
+#: True consults :func:`never_auto_approved` first, so this card always reaches
+#: a person (or refuses when none can be asked).
+ACCOUNT_PROFILE_GATE = "account profile save"
+
+
+def never_auto_approved(tool_name: str) -> bool:
+    """Whether an auto-approve shortcut must still ask a person for this gate."""
+    return tool_name == ACCOUNT_PROFILE_GATE
+
+
 def loosening_is_authorised(*, source: str, gate_is_here: bool) -> bool:
     """Whether a write may LOOSEN a live approval gate (``ask`` -> ``auto``).
 

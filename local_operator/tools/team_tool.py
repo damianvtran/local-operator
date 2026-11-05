@@ -32,9 +32,19 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.hub_sync.definition import DefinitionRevisionMismatch
+from local_operator.profile_scope import (
+    durable_write_decision,
+    durable_write_refusal,
+    load_profile_backup,
+    save_profile_backup,
+    team_revision,
+    update_profile_backup,
+)
 from local_operator.projects import truncate_row
 from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
+    Team,
     TeamEditFields,
     TeamMember,
     TeamRegistryLockTimeout,
@@ -93,11 +103,12 @@ class TeamOverride(BaseModel):
 class TeamParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "show", "create", "update", "promote"] = Field(
+    op: Literal["list", "show", "create", "update", "promote", "revert"] = Field(
         description=(
             "list/show: what teams exist and what they say; create/update: "
             "author or fix a team; promote: copy THIS conversation's team into "
-            "the user's account. Use team_delete for irreversible removal."
+            "the user's account; revert: undo an account save by its backup_id. "
+            "Use team_delete for irreversible removal."
         )
     )
     name: str | None = Field(default=None, description="Team name (all ops but list).")
@@ -166,6 +177,10 @@ class TeamParams(BaseModel):
     # too — one spelling on every surface rather than a translation per layer.
     as_name: str | None = Field(
         default=None, description="promote: copy it under this name (default: its own)."
+    )
+    backup_id: str | None = Field(
+        default=None,
+        description="revert: the backup_id an account save's receipt returned.",
     )
     # The flag IS the confirmation, exactly as on the agent twin: one answer, one
     # field, so a caller cannot ask for the overwrite while dropping the part that
@@ -522,13 +537,45 @@ async def _op_write(
             "use op='update' to change it.",
         )
     authorized_by: str | None = None
+    #: Set only for an approved ACCOUNT update: the revision the card was shown
+    #: against (the write is CAS-bound to it) and the backup taken at it.
+    base_revision: str | None = None
+    backup_id: str | None = None
+    changes: tuple[str, ...] = ()
+    summary = ""
     if context is not None and target == "global" and needs_durable_consent(registry, params.scope):
+        changes, summary = _team_changes(existing, params)
+        base_revision = team_revision(existing) if existing is not None else None
         intent = DurableWriteIntent(
-            kind="team", operation="update" if not creating else "create", name=name
+            kind="team",
+            operation="update" if not creating else "create",
+            name=name,
+            changes=changes,
+            summary=summary,
+            base_revision=base_revision,
         )
         authorized_by, reason = await durable_write_decision(context, intent)
         if authorized_by is None:
             return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
+        if existing is not None:
+            # The backup is the row at the APPROVED revision; a row that moved
+            # since the card refuses here, and one that moves after refuses at
+            # the CAS-bound write below.
+            current = registry.get_team(existing.id)
+            if team_revision(current) != base_revision:
+                return _error(tool_call_id, "team", _moved_refusal(name))
+            backup_id = save_profile_backup(
+                getattr(context, "session_dir", None),
+                {
+                    "kind": "team",
+                    "name": current.name,
+                    "id": str(current.id),
+                    "scope": "global",
+                    "row": current.model_dump(mode="json"),
+                    "base_revision": base_revision,
+                    "authorized_by": authorized_by,
+                },
+            )
     if not creating and existing is None:
         return _error(
             tool_call_id,
@@ -587,8 +634,16 @@ async def _op_write(
             verb = "created"
         else:
             assert existing is not None  # guarded above
-            team = registry.update_team(existing.id, fields)
+            team = registry.update_team(
+                existing.id,
+                fields,
+                precondition=(
+                    _revision_precondition(base_revision) if base_revision is not None else None
+                ),
+            )
             verb = "updated"
+    except DefinitionRevisionMismatch:
+        return _error(tool_call_id, "team", _moved_refusal(name))
     except TeamRegistryLockTimeout as exc:
         # U5-1: contention is recoverable, so the model gets the same concise
         # guidance the CLI prints rather than a generic "could not save".
@@ -611,6 +666,17 @@ async def _op_write(
             f" No model is configured for tier {', '.join(repr(t) for t in unconfigured)} "
             "in values.subagents.models, so a slot pinned to it will refuse to launch."
         )
+    # The team receipt used to carry no details at all, so a transcript audit
+    # could not tell where a team was written. Same fields as the agent
+    # receipt: the store, and the consent origin for an account write.
+    details: dict[str, Any] = {
+        "name": team.name,
+        "scope": target,
+        "authorized_by": authorized_by,
+    }
+    receipt = ""
+    if authorized_by:
+        receipt = _team_receipt(context, team, changes, summary, backup_id, details)
     return _text(
         tool_call_id,
         "team",
@@ -619,14 +685,157 @@ async def _op_write(
         f"{len(team.members)} member slot(s)."
         + (f" {pinned} carries a model/effort override." if pinned else "")
         + note
-        + f" Launch with /team {identifier_text(context, team.name)} <request>.",
-        # The team receipt used to carry no details at all, so a transcript audit
-        # could not tell where a team was written. Same fields as the agent
-        # receipt: the store, and the consent origin for an account write.
+        + f" Launch with /team {identifier_text(context, team.name)} <request>."
+        + receipt,
+        details=details,
+    )
+
+
+#: The team fields an account save can change, in the tool's vocabulary.
+_TEAM_SAVE_FIELDS = (
+    "label",
+    "description",
+    "manager",
+    "members",
+    "overrides",
+    "aliases",
+    "instructions",
+    "project",
+)
+
+
+def _team_changes(existing: Any, params: TeamParams) -> tuple[tuple[str, ...], str]:
+    """The fields this call names, and a short diff summary for the card/receipt.
+
+    Members and overrides are where model pins live on a team, so a change to
+    either is called out as a model/effort change rather than a bare field name.
+    """
+    from local_operator.tools.agent_tool import _format_field, _instruction_diff
+
+    changes = tuple(
+        field for field in _TEAM_SAVE_FIELDS if getattr(params, field, None) not in (None, [], {})
+    )
+    lines: list[str] = []
+    for field in changes:
+        new = getattr(params, field)
+        old = getattr(existing, field, None) if existing is not None else None
+        if field == "instructions":
+            rendered, is_diff = _instruction_diff(
+                str(old or ""), str(new or ""), fromfile="before", tofile="after"
+            )
+            heading = "instructions" if is_diff else "instructions (replaced; new text)"
+            lines.append(f"{heading}:\n{rendered}")
+        elif field in ("members", "overrides"):
+            lines.append(f"{field} (roster and model/effort pins): replaced as given")
+        else:
+            lines.append(f"{field}: {_format_field(old)} -> {_format_field(new)}")
+    return changes, "\n".join(lines)
+
+
+def _moved_refusal(name: str) -> str:
+    return (
+        f"team {name!r} changed after this save was approved, so nothing was written. "
+        "Show the user the current team and propose the change again."
+    )
+
+
+def _revision_precondition(expected: str) -> Callable[[Any], None]:
+    """Refuse under the team registry's lock when the row left ``expected``."""
+
+    def check(current: Any) -> None:
+        if team_revision(current) != expected:
+            raise DefinitionRevisionMismatch("the team changed since it was approved")
+
+    return check
+
+
+def _team_receipt(
+    context: ToolContext | None,
+    team: Any,
+    changes: tuple[str, ...],
+    summary: str,
+    backup_id: str | None,
+    details: dict[str, Any],
+) -> str:
+    """The account-save receipt: fields, diff, backup and the exact revert call."""
+    revision = team_revision(team)
+    details.update(fields=list(changes), diff=summary, revision=revision, backup_id=backup_id)
+    changed = f" Changed: {', '.join(changes) or 'nothing named'}."
+    if not backup_id:
+        return changed
+    update_profile_backup(getattr(context, "session_dir", None), backup_id, saved_revision=revision)
+    details["revert"] = {"op": "revert", "backup_id": backup_id}
+    return f"{changed} Revert with team(op='revert', backup_id='{backup_id}')."
+
+
+async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: str) -> ToolResult:
+    """Restore an account team from the backup a granted save took.
+
+    Same rules as the agent twin: the row must still be at the revision
+    recorded right after that save (a later edit is never clobbered), and the
+    restore goes through the same consent seam as the save.
+    """
+    registry = _registry(context)
+    record = load_profile_backup(
+        getattr(context, "session_dir", None) if context is not None else None, backup_id
+    )
+    if registry is None or record is None or record.get("kind") != "team":
+        return _error(tool_call_id, "team", f"no team backup {backup_id!r} in this conversation.")
+    name = str(record.get("name") or "")
+    saved = record.get("saved_revision")
+    try:
+        current = registry.get_team(str(record.get("id") or ""))
+    except Exception:  # noqa: BLE001 — a deleted team cannot be reverted in place
+        current = None
+    if current is None:
+        return _error(tool_call_id, "team", f"team {name!r} no longer exists; nothing to revert.")
+    if not saved or team_revision(current) != saved:
+        return _error(
+            tool_call_id,
+            "team",
+            f"team {name!r} was edited after that save, so reverting would undo the later "
+            "change too; nothing was written. Show the user the current team instead.",
+        )
+    intent = DurableWriteIntent(
+        kind="team",
+        operation="revert",
+        name=name,
+        changes=_TEAM_SAVE_FIELDS,
+        summary=f"restore team {name!r} to its state before backup {backup_id}",
+        base_revision=str(saved),
+    )
+    authorized_by, reason = await durable_write_decision(context, intent)
+    if authorized_by is None:
+        return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
+    row = Team.model_validate(record.get("row") or {})
+    try:
+        registry.update_team(
+            str(current.id),
+            TeamEditFields(
+                description=row.description,
+                manager=row.manager,
+                members=list(row.members),
+                label=row.label or "",
+                aliases=list(row.aliases),
+                instructions=row.instructions,
+                project=row.project,
+            ),
+            precondition=_revision_precondition(str(saved)),
+        )
+    except DefinitionRevisionMismatch:
+        return _error(
+            tool_call_id, "team", f"team {name!r} was edited after that save; nothing was written."
+        )
+    return _text(
+        tool_call_id,
+        "team",
+        f"reverted team {identifier_text(context, repr(name))} in your account to its "
+        f"state before backup {backup_id}.",
         details={
-            "name": team.name,
-            "scope": target,
+            "name": name,
+            "scope": "global",
             "authorized_by": authorized_by,
+            "reverted_backup_id": backup_id,
         },
     )
 
@@ -719,6 +928,10 @@ async def execute_team(
         return await _op_show(context, tool_call_id, str(params.name))
     if params.op == "promote":
         return await _op_promote(context, tool_call_id, params)
+    if params.op == "revert":
+        if not (params.backup_id or "").strip():
+            return _error(tool_call_id, "team", "op='revert' needs 'backup_id'.")
+        return await _op_revert(context, tool_call_id, str(params.backup_id).strip())
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 
 

@@ -56,6 +56,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -100,6 +101,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.hub_sync.definition import DefinitionRevisionMismatch
 from local_operator.profile_scope import Scope
 from local_operator.projects import truncate_row
 from local_operator.tools.builtin import (
@@ -137,6 +139,7 @@ class AgentParams(BaseModel):
         "sync",
         "delete",
         "promote",
+        "revert",
     ] = Field(description="The op to run.")
     # The no-spaces guidance is a modularity contract, not registry law: the
     # registry itself accepts any string, but a role/specialist name is also a
@@ -286,6 +289,10 @@ class AgentParams(BaseModel):
     # name this module then has to translate.
     as_name: str | None = Field(
         default=None, description="promote: copy it under this name (default: its own)."
+    )
+    backup_id: str | None = Field(
+        default=None,
+        description="revert: the backup_id an account save's receipt returned.",
     )
     # ONE field, not ``replace`` + ``confirm_replace``: on this op the flag IS the
     # confirmation (the desktop body and the TUI's typed ``yes`` carry the same
@@ -491,7 +498,9 @@ def _class_label(value: object) -> str:
     return "reactive"
 
 
-def _instruction_diff(mine: str, packaged: str) -> tuple[str, bool]:
+def _instruction_diff(
+    mine: str, packaged: str, *, fromfile: str = "yours", tofile: str = "packaged"
+) -> tuple[str, bool]:
     """``(rendered, is_diff)`` for two instruction bodies.
 
     The flag is returned rather than inferred by the caller so the heading can
@@ -513,8 +522,8 @@ def _instruction_diff(mine: str, packaged: str) -> tuple[str, bool]:
         difflib.unified_diff(
             (mine or "").strip().splitlines(),
             packaged_lines,
-            fromfile="yours",
-            tofile="packaged",
+            fromfile=fromfile,
+            tofile=tofile,
             lineterm="",
             n=1,
         )
@@ -1856,6 +1865,285 @@ def write_profile(
     return name, kind, action_class
 
 
+#: The fields an account save can change, in the tool's own vocabulary, and the
+#: definition-revision key each one is read back from (``None``: not a
+#: definition field, so the diff can only say it was set).
+_SAVE_FIELDS: tuple[tuple[str, str | None], ...] = (
+    ("label", "label"),
+    ("description", "description"),
+    ("instructions", "instructions"),
+    ("effort", "effort"),
+    ("tools", "tools"),
+    ("delegate", "delegate"),
+    ("action_class", "action_class"),
+    ("saver", None),
+)
+
+
+@dataclass
+class _AccountSave:
+    """What one tool-issued ACCOUNT save proposes, computed before consent.
+
+    The same value feeds the approval card (``DurableWriteIntent.changes`` /
+    ``summary``), the CAS-bound write (``base_revision``) and the receipt, so
+    what the person approved, what is written and what is reported cannot
+    drift apart.
+    """
+
+    agent_id: str | None
+    changes: tuple[str, ...]
+    summary: str
+    base_revision: str | None
+    before: dict[str, Any]
+    backup_id: str | None = None
+
+
+def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _AccountSave:
+    """Diff the proposed fields against the stored row (``existing`` may be None)."""
+    from local_operator.hub_sync.definition import definition_revision
+
+    before: dict[str, Any] = {}
+    base_revision: str | None = None
+    agent_id = str(existing.id) if existing is not None else None
+    if agent_id is not None:
+        before = dict(registry.definition_revision_fields(agent_id))
+        base_revision = definition_revision("agent", agent_id, before)
+    changes = tuple(field for field, _key in _SAVE_FIELDS if getattr(params, field) is not None)
+    lines: list[str] = []
+    for field, key in _SAVE_FIELDS:
+        new = getattr(params, field)
+        if new is None:
+            continue
+        if field == "instructions":
+            rendered, is_diff = _instruction_diff(
+                str(before.get("instructions") or ""),
+                str(new or ""),
+                fromfile="before",
+                tofile="after",
+            )
+            # ``_instruction_diff`` falls back to the whole body when a diff
+            # would not be shorter; say so, or a reader cannot tell a full new
+            # text from a two-line diff.
+            heading = "instructions" if is_diff else "instructions (replaced; new text)"
+            lines.append(f"{heading}:\n{rendered}")
+            continue
+        old = before.get(key) if key is not None else None
+        # THE POLICY FIELDS ARE NAMED EXPLICITLY (operator requirement): a
+        # change to the model/effort pin, the tool allowlist or the class must
+        # never hide inside a generic "fields changed" line.
+        label = {
+            "effort": "model/effort",
+            "tools": "tools",
+            "action_class": "class",
+        }.get(field, field)
+        lines.append(f"{label}: {_format_field(old)} -> {_format_field(new)}")
+    return _AccountSave(
+        agent_id=agent_id,
+        changes=changes,
+        summary="\n".join(lines),
+        base_revision=base_revision,
+        before=before,
+    )
+
+
+def _take_backup(
+    context: ToolContext | None,
+    registry: Any,
+    existing: Any,
+    plan: _AccountSave,
+    authorized_by: str | None,
+) -> str | None:
+    """Snapshot the row the approved save will replace; a refusal string or None.
+
+    Read, then re-checked against the APPROVED revision: if the row moved
+    between the card and here, nothing is written and the backup is not kept.
+    The write itself is CAS-bound to the same revision, so a move after this
+    point refuses the write instead. Mutates nothing but the backup file.
+    """
+    from local_operator.hub_sync.definition import definition_revision
+    from local_operator.profile_scope import save_profile_backup
+
+    agent_id = str(existing.id)
+    row = registry.get_agent(agent_id)
+    instructions = registry.get_agent_system_prompt(agent_id) or ""
+    current = definition_revision("agent", agent_id, registry.definition_revision_fields(agent_id))
+    if current != plan.base_revision:
+        return (
+            f"{existing.name!r} changed after this save was approved, so nothing was "
+            "written. Show the user the current profile and propose the change again."
+        )
+    dump = getattr(row, "model_dump", None)
+    payload = {
+        "kind": "agent",
+        "name": str(existing.name),
+        "id": agent_id,
+        "scope": "global",
+        "row": dump(mode="json") if callable(dump) else dict(vars(row)),
+        "instructions": instructions,
+        "base_revision": plan.base_revision,
+        "authorized_by": authorized_by,
+    }
+    session_dir = getattr(context, "session_dir", None) if context is not None else None
+    backup_id = save_profile_backup(session_dir, payload)
+    plan.backup_id = backup_id
+    return None
+
+
+def _account_save_receipt(
+    context: ToolContext | None,
+    registry: Any,
+    name: str,
+    plan: _AccountSave,
+    details: dict[str, Any],
+) -> str:
+    """Fill the receipt card's details and return the text's revert sentence.
+
+    The card the operator asked for: profile, changed fields, a diff summary,
+    explicit policy-field lines, the backup and the exact revert call. No UI
+    button is claimed — the surfaces render ``details.revert`` as text today.
+    """
+    from local_operator.hub_sync.definition import definition_revision
+    from local_operator.profile_scope import update_profile_backup
+
+    details["fields"] = list(plan.changes)
+    details["diff"] = plan.summary
+    revision: str | None = None
+    try:
+        row = registry.get_agent_by_name(name)
+        if row is not None:
+            revision = definition_revision(
+                "agent", str(row.id), registry.definition_revision_fields(str(row.id))
+            )
+    except Exception:  # noqa: BLE001 — the receipt is best effort after a landed save
+        logger.debug("post-save revision read failed", exc_info=True)
+    details["revision"] = revision
+    details["backup_id"] = plan.backup_id
+    if not plan.backup_id:
+        return f" Changed: {', '.join(plan.changes) or 'nothing named'}."
+    session_dir = getattr(context, "session_dir", None) if context is not None else None
+    update_profile_backup(session_dir, plan.backup_id, saved_revision=revision)
+    details["revert"] = {"op": "revert", "backup_id": plan.backup_id}
+    return (
+        f" Changed: {', '.join(plan.changes) or 'nothing named'}. "
+        f"Revert with agent(op='revert', backup_id='{plan.backup_id}')."
+    )
+
+
+async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: str) -> ToolResult:
+    """Restore an account row from the backup a granted save took.
+
+    REFUSES TO CLOBBER: the row must still be at the revision recorded right
+    after that save, so a later edit (by anyone, on any surface) is never
+    silently undone. Goes through the same consent seam as the save — the user
+    asking "revert the reviewer" is the owner-prompt path because it names the
+    profile; anything else is the approval card.
+    """
+    from local_operator.agents import AgentEditFields
+    from local_operator.hub_sync.definition import definition_revision
+    from local_operator.profile_scope import (
+        durable_write_decision,
+        durable_write_refusal,
+        load_profile_backup,
+    )
+
+    registry = _registry(context)
+    session_dir = getattr(context, "session_dir", None) if context is not None else None
+    record = load_profile_backup(session_dir, backup_id)
+    if registry is None or record is None or record.get("kind") != "agent":
+        return _error(tool_call_id, "agent", f"no agent backup {backup_id!r} in this conversation.")
+    agent_id = str(record.get("id") or "")
+    name = str(record.get("name") or "")
+    saved = record.get("saved_revision")
+    try:
+        fields = registry.definition_revision_fields(agent_id)
+    except Exception:  # noqa: BLE001 — a deleted row cannot be reverted in place
+        return _error(tool_call_id, "agent", f"{name!r} no longer exists; nothing to revert.")
+    if not saved or definition_revision("agent", agent_id, fields) != saved:
+        return _error(
+            tool_call_id,
+            "agent",
+            f"{name!r} was edited after that save, so reverting would undo the later "
+            "change too; nothing was written. Show the user the current profile instead.",
+        )
+    row = dict(record.get("row") or {})
+    intent = DurableWriteIntent(
+        kind="agent",
+        operation="revert",
+        name=name,
+        changes=(
+            "label",
+            "description",
+            "instructions",
+            "effort",
+            "tools",
+            "delegate",
+            "action_class",
+        ),
+        summary=f"restore {name!r} to its state before backup {backup_id}",
+        base_revision=str(saved),
+    )
+    authorized_by, reason = await durable_write_decision(context, intent)
+    if authorized_by is None:
+        return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
+
+    def check(current: Any) -> None:
+        if (
+            definition_revision(
+                "agent", str(current.id), registry.definition_revision_fields(str(current.id))
+            )
+            != saved
+        ):
+            raise DefinitionRevisionMismatch("the definition changed since the save")
+
+    # Only the fields ``write_profile`` writes are restored (label, description,
+    # tags carrying effort/tools/delegate/class/provenance, categories, the
+    # instructions); every other column was never touched by the save.
+    try:
+        registry.update_agent(
+            agent_id,
+            AgentEditFields(
+                name=None,
+                label=str(row.get("label") or ""),
+                description=row.get("description"),
+                tags=list(row.get("tags") or []),
+                categories=list(row.get("categories") or []),
+                security_prompt=None,
+                hosting=None,
+                model=None,
+                last_message=None,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
+                current_working_directory=None,
+            ),
+            precondition=check,
+        )
+    except DefinitionRevisionMismatch:
+        return _error(
+            tool_call_id,
+            "agent",
+            f"{name!r} was edited after that save; nothing was written.",
+        )
+    registry.set_agent_system_prompt(agent_id, str(record.get("instructions") or ""))
+    return _text(
+        tool_call_id,
+        "agent",
+        f"reverted {identifier_text(context, repr(name))} in your account to its state "
+        f"before backup {backup_id}.",
+        details={
+            "name": name,
+            "scope": "global",
+            "authorized_by": authorized_by,
+            "reverted_backup_id": backup_id,
+        },
+    )
+
+
 async def _op_write(
     context: ToolContext | None,
     tool_call_id: str,
@@ -1907,17 +2195,34 @@ async def _op_write(
     # and cannot act on.
     writable_here = existing is None or is_role(existing) or is_specialist(existing)
     authorized_by: str | None = None
+    account_save: _AccountSave | None = None
     if target == "global" and writable_here and needs_durable_consent(registry, params.scope):
         # THE ASK HAPPENS HERE, before any mutation, and only where the target is
         # known. ``write_profile`` re-checks the RESULT of this answer under the
         # write lock, so a row that changed owner between the two calls cannot
         # slip an unconsented account write through.
+        try:
+            account_save = _plan_account_save(registry, existing, params)
+        except Exception as error:  # noqa: BLE001 — an unreadable row is a refusal
+            return _error(tool_call_id, "agent", f"could not read {name!r}: {error}")
         intent = DurableWriteIntent(
-            kind="agent", operation="update" if not creating else "create", name=name
+            kind="agent",
+            operation="update" if not creating else "create",
+            name=name,
+            changes=account_save.changes,
+            summary=account_save.summary,
+            base_revision=account_save.base_revision,
         )
         authorized_by, reason = await durable_write_decision(context, intent)
         if authorized_by is None:
             return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
+        if existing is not None:
+            # THE BACKUP IS TAKEN AT THE APPROVED REVISION, and the write below
+            # is CAS-bound to that same revision, so the backup is exactly the
+            # row the save replaced (or the save does not happen at all).
+            refusal = _take_backup(context, registry, existing, account_save, authorized_by)
+            if refusal is not None:
+                return _error(tool_call_id, "agent", refusal)
     try:
         name, kind, action_class = write_profile(
             registry,
@@ -1925,6 +2230,9 @@ async def _op_write(
             creating=creating,
             scope=scope,  # type: ignore[arg-type]
             authorized_by=authorized_by,
+            expected_definition_revision=(
+                account_save.base_revision if account_save is not None else None
+            ),
             context=context,
             # The tool layer already ran the decision: it either got an origin or
             # the host has no conversation store, where an omitted scope is the
@@ -1933,6 +2241,13 @@ async def _op_write(
         )
     except ValueError as error:
         return _error(tool_call_id, "agent", str(error))
+    except DefinitionRevisionMismatch:
+        return _error(
+            tool_call_id,
+            "agent",
+            f"{name!r} changed after this save was approved, so nothing was written. "
+            "Show the user the current profile and propose the change again.",
+        )
     verb = "created" if creating else "updated"
     if kind == "role":
         how = f"launch with task(agent={identifier_text(context, repr(name))})"
@@ -1961,18 +2276,22 @@ async def _op_write(
     # say WHO authorized an account write without parsing prose.
     from local_operator.profile_scope import scope_words
 
+    details: dict[str, Any] = {
+        "name": name,
+        "kind": kind,
+        "class": action_class,
+        "scope": target,
+        "authorized_by": authorized_by,
+    }
+    receipt = ""
+    if account_save is not None and authorized_by:
+        receipt = _account_save_receipt(context, registry, name, account_save, details)
     return _text(
         tool_call_id,
         "agent",
         f"{verb} {kind} {identifier_text(context, repr(name))} "
-        f"in {scope_words(target)}; {how}.{class_clause}",
-        details={
-            "name": name,
-            "kind": kind,
-            "class": action_class,
-            "scope": target,
-            "authorized_by": authorized_by,
-        },
+        f"in {scope_words(target)}; {how}.{class_clause}{receipt}",
+        details=details,
     )
 
 
@@ -2138,6 +2457,10 @@ async def execute_agent(
         return _error(tool_call_id, "agent", f"op={params.op!r} needs 'name'.")
     if params.op == "search" and not (params.query or "").strip():
         return _error(tool_call_id, "agent", "op='search' needs 'query'.")
+    if params.op == "revert":
+        if not (params.backup_id or "").strip():
+            return _error(tool_call_id, "agent", "op='revert' needs 'backup_id'.")
+        return await _op_revert(context, tool_call_id, str(params.backup_id).strip())
 
     if params.op == "list":
         return await _op_list(context, tool_call_id)

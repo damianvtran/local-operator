@@ -1414,8 +1414,12 @@ class ServingSessionHandle(SessionHandle):
             # Full-auto: the owner's saved default is to approve every tier,
             # exactly as the TUI adopts ``tool_approval_mode: auto`` at boot
             # (see OperatorApp._load_approvals_default). Answer inline so the
-            # turn never stalls on a card no front end would present.
-            if self._auto_approve:
+            # turn never stalls on a card no front end would present. An
+            # account profile save is the exception: auto-approve is not
+            # consent to rewriting account-wide agents (``never_auto_approved``).
+            from local_operator.harness.approval import never_auto_approved
+
+            if self._auto_approve and not never_auto_approved(tool_name):
                 return True
             if self._gates_closed_for_exit:
                 # Leaving on a signal: nobody will be asked before the exit, and
@@ -12170,6 +12174,10 @@ async def spawn_owned_session(
         agent_registry,
         has_ui=False,
         cwd=cwd,
+        # The runtime behind the TUI, desktop and phone: the person's own typed
+        # request may save an account profile, and anything else is asked on
+        # this runtime's approval card (``Session._authorize_account_profile_write``).
+        owner_prompt_consent=True,
         # MCP WIRING RIDES THE RECORD, NOT THE BOOT PATH. Everything this
         # session does before ``RecordPublisher`` runs (``process.amain``:
         # spawn_owned_session -> _drain_inbox_into -> async_init ->
