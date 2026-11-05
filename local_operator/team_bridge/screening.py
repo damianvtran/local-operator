@@ -1173,6 +1173,9 @@ def _screen_prepare(
     #    row exists, the caller must EQUAL it, so a stale retained caller
     #    can neither screen against it nor rewind it (H3-Q3).
     try:
+        # Same-message retries must not keep an UNSENT fallback allow in the
+        # write-once slot: a new preferred verdict needs its own receipt.
+        store.retire_unsent_fallback_allow(owner, message_id, body_sha256=envelope.body_sha256)
         current = store.current_screening_policy(owner)
         if current is None:
             try:
@@ -1794,21 +1797,18 @@ async def _screen_spend(
 def _answered_preferred(runner: Any, actual_model: str | None) -> bool:
     """Whether the screener that answered is a PREFERRED one.
 
-    The chain runner knows which hop answered (``answered_hop``); a bare runner
-    (a test seam, an embedding host) does not, so its answer is judged by the
-    model id alone against the preferred table. ``False`` whenever unsure: a
-    non-preferred verdict is only denied the receipt cache and B4b release,
-    never delivery, so erring that way costs a re-screen, not safety.
+    Only the trusted chain's answering-hop provenance qualifies. A bare runner
+    cannot manufacture preferred status with a model name or a boolean field.
+    Missing/legacy provenance is False; ordinary cascade hops stay False even
+    if their model names resemble an evaluated screener.
     """
 
-    flag = getattr(runner, "answered_preferred", None)
-    if isinstance(flag, bool):
-        return flag
-    from local_operator.team_bridge.model_boundary import SCREENING_EVALUATED_MODELS
+    from local_operator.team_bridge.model_boundary import ScreenChainRunner
 
-    return bool(actual_model) and any(
-        model_id == actual_model for _provider, model_id in SCREENING_EVALUATED_MODELS
-    )
+    if not isinstance(runner, ScreenChainRunner):
+        return False
+    hop = runner.answered_hop
+    return bool(hop is not None and hop.model_id == actual_model and hop.preferred)
 
 
 def _conclude_parsed(

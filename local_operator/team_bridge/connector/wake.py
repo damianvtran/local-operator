@@ -637,7 +637,9 @@ def recorded_read_verdict(
     Returns ``(RECORDED_VERDICT, receipt)`` to hand off on a recorded decision
     with no model call, ``(RECORDED_HOLD, code)`` to hold, or
     ``(RECORDED_SCREEN, None)`` when no verdict exists and screening decides.
-    Pure local reads; it never deletes or rewrites a record.
+    Local-only recovery. An UNSENT non-preferred allow is retired atomically
+    so the next screen can commit a new decision; ACK/reservation-bound tuples
+    remain immutable.
 
     NEVER DISCARD A VERDICT THE HUB OR THE LEDGER ALREADY HOLDS (PR #3063
     review r7 M8). The hub's ack ledger is WRITE-ONCE per message
@@ -655,7 +657,8 @@ def recorded_read_verdict(
     * the message's own committed ``allow`` receipt (decided, not yet sent)
       → hand off on it, unless it was made by another enrollment generation:
       the hub was never told, so a new owner's own screen is still possible
-      and is the honest decision;
+      and is the honest decision. An UNSENT non-preferred allow is likewise
+      provisional: retire it and screen again, never replay the weak decision;
     * nothing recorded → screen.
 
     What a recorded verdict replaces is the MODEL DECISION only. Every gate
@@ -674,7 +677,15 @@ def recorded_read_verdict(
     from local_operator.team_bridge.store import Store, StoreRefused
 
     store = Store(config_dir)
+    # Validate before retiring anything: a changed body must never erase the
+    # old receipt's hash binding in order to manufacture a new decision.
+    envelope, bad_code = validate_envelope(owner, item)
+    if envelope is None:
+        return RECORDED_HOLD, bad_code or "envelope_malformed"
     try:
+        # An unsent fallback allow is provisional, not an immutable hub ACK.
+        # Retire it before recovery so the same message must screen again.
+        store.retire_unsent_fallback_allow(owner, message_id, body_sha256=envelope.body_sha256)
         recorded = store.recorded_intent(owner, message_id, "read")
         own_receipt = None if recorded is not None else store.receipt_for_message(owner, message_id)
     except StoreRefused as refusal:
@@ -696,10 +707,6 @@ def recorded_read_verdict(
         stored, identity = own_receipt, None
     else:
         return RECORDED_SCREEN, None
-    # The envelope gate, exactly as a fresh screen's step 3.
-    envelope, bad_code = validate_envelope(owner, item)
-    if envelope is None:
-        return RECORDED_HOLD, bad_code or "envelope_malformed"
     if stored.get("body_sha256") != envelope.body_sha256:
         return RECORDED_SCREEN, None
     if (

@@ -237,10 +237,10 @@ class DefaultSelection:
     #: serving identity check compares tuples, so a foreign provider
     #: offering the same model id is refused (R6/Q10).
     approved_tuples: frozenset[tuple[str, str]] = field(default_factory=frozenset)
-    #: Whether this hop is on :data:`SCREENING_EVALUATED_MODELS`. Set by the
-    #: resolver, never by a caller string; ``False`` (the safe default) for a
-    #: hop that came from the receiver's own default/fallback cascade. It is
-    #: what stamps ``screener_preferred`` on the receipt of the hop that
+    #: Whether this hop was selected in the trusted PREFERRED stage from
+    #: :data:`SCREENING_EVALUATED_MODELS`. Never inferred from a model name;
+    #: ``False`` (the safe default) for a hop from the ordinary cascade.
+    #: It is what stamps ``screener_preferred`` on the receipt of the hop that
     #: answered.
     preferred: bool = False
 
@@ -466,7 +466,8 @@ def _receiver_cascade(config_dir: Path, settings: Any) -> list[DefaultSelection]
     resolved (provider, model) tuple; an unbuildable hop is skipped; tuple
     duplicates are dropped keeping first order. A target's per-entry ``effort``
     is not carried: screening is a fixed, bounded two-line grammar. Every hop's
-    ``preferred`` flag is derived from the table, never assumed.
+    ``preferred`` flag stays False: these are ordinary cascade hops, not
+    evidence of dispatch through the preferred stage.
     """
 
     primary = resolve_default_selection(config_dir)
@@ -510,8 +511,8 @@ def _receiver_cascade(config_dir: Path, settings: Any) -> list[DefaultSelection]
                 approved_identities=frozenset({resolved}),
             )
         )
-    for hop in hops:
-        hop.preferred = is_evaluated_screening_model(hop.provider, hop.model_id)
+    # These are ordinary cascade hops, not preferred-stage provenance. Even
+    # a concrete evaluated id here cannot promote a fallback verdict (S-2).
     return hops
 
 
@@ -536,7 +537,7 @@ def resolve_screening_chain(
     ran before the pin. Operator directive 2026-11-04: the pin must never
     block Team Bridge because a receiver has no Anthropic account or is out of
     quota. Pairs already tried in stage 1 are dropped. These hops carry
-    ``preferred = False`` unless the pair is itself on the table, so a verdict
+    ``preferred = False`` even for a listed pair, so a verdict
     they produce is stamped non-preferred: delivered normally, but never
     reused from the receipt cache and never eligible for a B4b release.
 

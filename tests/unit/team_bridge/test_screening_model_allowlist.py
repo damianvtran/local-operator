@@ -528,3 +528,147 @@ def test_a_selection_built_outside_the_resolver_is_not_preferred() -> None:
         DefaultSelection(provider="anthropic", model_id="claude-sonnet-5-5", spec=None).preferred
         is False
     )
+
+
+@pytest.mark.parametrize("recovered", [True, False])
+def test_same_message_unsent_fallback_allow_must_screen_again(
+    tmp_path, monkeypatch, credentials, recovered
+) -> None:
+    """R1-M1/S-1: recovery is not a cache exemption for an UNSENT allow."""
+    from local_operator.team_bridge.connector.wake import (
+        RECORDED_SCREEN,
+        recorded_read_verdict,
+    )
+    from tests.unit.team_bridge.test_screening import _item
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    credentials.add("openai")
+    wire = _Wire({"gpt-6-astra": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+    first = _cycle(tmp_path, owner)
+    assert first.disposition == "deliver" and first.screener_preferred is False
+    assert store.recorded_intent(owner, "bmsg_1", "read") is None
+
+    credentials.add("anthropic")
+    wire2 = _Wire(
+        {
+            "claude-sonnet-5-5": ("reply", DELIVER) if recovered else ("fail", 503),
+            "claude-opus-5-5": ("fail", 503),
+            "gpt-6-astra": ("fail", 503),
+        }
+    )
+    _install_wire(monkeypatch, wire2)
+    assert recorded_read_verdict(owner, "bmsg_1", _item(), config_dir=tmp_path) == (
+        RECORDED_SCREEN,
+        None,
+    )
+    assert store.receipt_for_message(owner, "bmsg_1") is None
+    second = _cycle(tmp_path, owner)
+    assert _sends(wire2)[0] == SONNET
+    if recovered:
+        assert second.disposition == "deliver" and second.screener_preferred is True
+        row = store.receipt_for_message(owner, "bmsg_1")
+        assert row is not None and row["model"] == SONNET[1] and row["screener_preferred"]
+    else:
+        assert second.disposition == "hold"
+        assert store.receipt_for_message(owner, "bmsg_1") is None
+        # A second recovery cannot rediscover the retired weak allow.
+        assert (
+            recorded_read_verdict(owner, "bmsg_1", _item(), config_dir=tmp_path)[0]
+            == RECORDED_SCREEN
+        )
+
+
+def test_pending_ack_preserves_fallback_tuple_without_another_screen(
+    tmp_path, monkeypatch, credentials
+) -> None:
+    from local_operator.team_bridge.connector.wake import (
+        RECORDED_VERDICT,
+        recorded_read_verdict,
+    )
+    from tests.unit.team_bridge.test_screening import _item
+
+    (store, owner, first, _second), wire = _reuse_pair(
+        tmp_path, monkeypatch, credentials, preferred_route=False
+    )
+    store.record_ack_intent(owner, "bmsg_1", "read", first.receipt, "ref-original")
+    credentials.add("anthropic")
+    before = len(wire.sends)
+    decision, stored = recorded_read_verdict(owner, "bmsg_1", _item(), config_dir=tmp_path)
+    assert decision == RECORDED_VERDICT and stored["model"] == "gpt-6-astra"
+    assert (
+        store.retire_unsent_fallback_allow(owner, "bmsg_1", body_sha256=first.receipt.body_sha256)
+        is False
+    )
+    assert len(wire.sends) == before  # ACK may already be committed at the hub
+
+
+def test_bare_runner_cannot_manufacture_preferred_provenance() -> None:
+    from local_operator.team_bridge.screening import _answered_preferred
+
+    class AdversarialBareRunner:
+        answered_preferred = True
+        answered_hop = model_boundary.DefaultSelection(
+            provider=SONNET[0], model_id=SONNET[1], spec=None, preferred=True
+        )
+
+    assert _answered_preferred(AdversarialBareRunner(), SONNET[1]) is False
+    assert _answered_preferred(object(), SONNET_R[1]) is False
+
+
+def test_listed_name_in_ordinary_cascade_is_not_preferred(tmp_path, credentials) -> None:
+    # No locally evidenced preferred credential: the receiver's ordinary
+    # cascade must not manufacture provenance by returning a familiar name.
+    _config(tmp_path, SONNET[0], SONNET[1])
+    hops = resolve_screening_chain(tmp_path)
+    assert len(hops) == 1 and hops[0].preferred is False
+
+
+def test_direct_cycle_retry_can_replace_an_unsent_fallback_receipt(
+    tmp_path, monkeypatch, credentials
+) -> None:
+    # The core is independently safe even if a caller bypasses connector
+    # recovery (e.g. the batch path): no stale write-once receipt may block
+    # the preferred result from being recorded for these same bytes.
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    credentials.add("openai")
+    _install_wire(monkeypatch, _Wire({"gpt-6-astra": ("reply", DELIVER)}))
+    first = _cycle(tmp_path, owner)
+    assert first.screener_preferred is False and first.disposition == "deliver"
+    credentials.add("anthropic")
+    wire = _Wire({SONNET[1]: ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+    second = _cycle(tmp_path, owner)
+    assert second.disposition == "deliver" and second.screener_preferred
+    assert _sends(wire) == [SONNET]
+    row = store.receipt_for_message(owner, "bmsg_1")
+    assert row is not None and row["model"] == SONNET[1] and row["screener_preferred"]
+
+
+def test_bare_runner_preferred_looking_allow_stays_nonpreferred_in_store(tmp_path) -> None:
+    from tests.unit.team_bridge.test_screening import Policy, _run
+
+    class BareRunner:
+        # Neither a familiar model name nor this self-asserted flag is trusted.
+        answered_preferred = True
+
+        def __call__(self, prompt, *, default_model):
+            return DELIVER, SONNET[1]
+
+    store, owner = _setup(tmp_path)
+    result = _run(
+        owner,
+        tmp_path,
+        BareRunner(),
+        policy=Policy(
+            provider=SONNET[0],
+            default_model=SONNET[1],
+            approved_serving_identities=(SONNET[1],),
+        ),
+    )
+    assert result.disposition == "deliver" and result.screener_preferred is False
+    row = store.receipt_for_message(owner, "bmsg_1")
+    assert row is not None and row["model"] == SONNET[1]
+    assert row["screener_preferred"] is False

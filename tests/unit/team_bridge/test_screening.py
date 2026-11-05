@@ -18,6 +18,10 @@ from local_operator.team_bridge.client import (
     SCREENING_TEMPLATE_V1_SHA256,
     SCREENING_VERSION_V1,
 )
+from local_operator.team_bridge.model_boundary import (
+    DefaultSelection,
+    ScreenChainRunner,
+)
 from local_operator.team_bridge.store import (
     SCHEMA_VERSION,
     OwnerReceipt,
@@ -41,7 +45,7 @@ class Policy:
     approved_serving_identities: tuple[str, ...] = ("qa/default-model",)
 
 
-class Runner:
+class Runner(ScreenChainRunner):
     def __init__(
         self,
         reply: str = "VERDICT: deliver\nREASON: ordinary.",
@@ -49,13 +53,26 @@ class Runner:
         fn=None,
         error: Exception | None = None,
     ) -> None:
+        super().__init__([], factory=lambda _hop: None)
+        # A trusted chain stand-in for cache-mechanism tests, not a bare
+        # runner's model-name claim. The real resolver is tested separately.
+        self.answered_hop = DefaultSelection(
+            provider="qa", model_id=model or "", spec=None, preferred=True
+        )
         self.reply = reply
         self.model = model
         self.fn = fn
         self.error = error
         self.calls: list[str] = []
 
-    def __call__(self, prompt: str, *, default_model: str) -> tuple[str, str | None]:
+    async def acall(self, prompt: str, *, default_model: str, images=None):
+        if images is not None:
+            # This cache-mechanism fixture deliberately cannot screen pixels;
+            # the image suite pins that it never silently drops them.
+            raise TypeError("text-only fixture")
+        return self(prompt, default_model=default_model)
+
+    def __call__(self, prompt: str, *, default_model: str, images=None) -> tuple[str, str | None]:
         self.calls.append(prompt)
         if self.fn is not None:
             self.fn()

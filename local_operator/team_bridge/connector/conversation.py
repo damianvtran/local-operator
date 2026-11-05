@@ -1196,6 +1196,9 @@ async def handle_conversation_available(
                 # re-screening. The hub's admission and this machine's own
                 # receipt for these exact body bytes decide what was already
                 # concluded; only a message with neither is screened.
+                # Do not let the image shortcut revive an UNSENT fallback
+                # allow. ACK/reservation-bound decisions remain write-once.
+                store.retire_unsent_fallback_allow(owner, message_id, body_sha256=served_digest)
                 prior = store.receipt_for_message(owner, message_id)
                 if prior is not None and prior.get("body_sha256") != served_digest:
                     prior = None

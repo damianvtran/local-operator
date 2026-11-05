@@ -5242,6 +5242,37 @@ class Store:
             # under normal accounting); it can never silently certify.
             return None
 
+    def retire_unsent_fallback_allow(
+        self, owner: OwnerSnapshot, message_id: str, *, body_sha256: str
+    ) -> bool:
+        """Retire ONLY a provisional fallback allow that never crossed a handoff.
+
+        Operator directive 2026-11-04: a weaker screener's allow cannot buy a
+        later retry a free pass. A local receipt with no ACK intent and no body
+        reservation is still UNSENT, so it may be re-screened. Once either
+        durable handoff exists, its write-once tuple must survive (the hub may
+        already have committed it even if its response was lost). Check and
+        retire in ONE transaction, fenced to the live owner; failure never
+        authorizes a cached delivery. NULL legacy provenance is not preferred.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_receipt_rendered_template_column(conn)
+            key = _owner_key(owner)
+            removed = conn.execute(
+                "DELETE FROM screening_receipts WHERE owner_key = ? AND message_id = ? "
+                "AND body_sha256 = ? "
+                "AND verdict = 'allow' AND COALESCE(screener_preferred, 0) != 1 "
+                "AND NOT EXISTS (SELECT 1 FROM ack_intents WHERE owner_key = ? AND message_id = ?) "
+                "AND NOT EXISTS (SELECT 1 FROM body_reservations "
+                "WHERE owner_key = ? AND message_id = ?)",
+                (key, message_id, body_sha256, key, message_id, key, message_id),
+            ).rowcount
+            return removed == 1
+
     def receipt_for_message(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
         """THE trusted record for one screened message, by message id (H5 F3).
 
