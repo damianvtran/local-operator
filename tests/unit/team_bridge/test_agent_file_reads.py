@@ -60,16 +60,6 @@ CID = "bcv_abcdefgh"
 MID = "bcmsg_abcdef01"
 FID = "bfile_0f8fad5b"
 
-#: The hub's pinned vectors, copied verbatim from
-#: ``internal/models/bridge_file_commitment_test.go`` (TestBridgeFilesAdmissionHashV1Golden).
-GOLDEN = [
-    ((), "00877878a60b09b502cc888262ae707be13b01080ebcf3edca6554926d7cc7dc"),
-    (
-        (("bfile_1", "text", 5, "a" * 64),),
-        "2dfe7ecce01e08e6d8ed653282881519af52be27c819d74cad4ca4bf9f62b9e3e",
-    ),
-]
-
 
 @pytest.fixture(autouse=True)
 def _destination_open(monkeypatch: pytest.MonkeyPatch) -> None:
