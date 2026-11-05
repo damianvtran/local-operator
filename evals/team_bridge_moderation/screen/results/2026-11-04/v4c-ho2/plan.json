@@ -1,0 +1,46 @@
+{
+  "corpus": {
+    "evals/team_bridge_moderation/screen/corpus/ho2.jsonl": "322f6079ab85b5ef27125f4ad3aef6ad96a253d9cd5783259fe72db46bae433c",
+    "evals/team_bridge_moderation/screen/corpus/relay.jsonl": "56d1be651787dfda21bbc73e3a1db117e2a250e25246b8a59dec7ba162ab8ad2"
+  },
+  "templates": [
+    {
+      "label": "bridge-screen-v2",
+      "sha256": "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304",
+      "source": "embedded"
+    },
+    {
+      "label": "bridge-screen-v4",
+      "sha256": "54ba09bc426435682db617927a47f41f98d3798ec753dd21f0abd0b60034daa5",
+      "source": "evals/team_bridge_moderation/screen/templates/candidates/bridge-screen-v4c.txt"
+    }
+  ],
+  "models": [
+    "anthropic/claude-opus-5-5",
+    "anthropic/claude-sonnet-5-5"
+  ],
+  "supports_sampling_params": {
+    "anthropic/claude-opus-5-5": false,
+    "anthropic/claude-sonnet-5-5": false
+  },
+  "split": "all",
+  "messages": 82,
+  "messages_by_split": {
+    "dev": 45,
+    "heldout": 37
+  },
+  "messages_by_label": {
+    "adv": 39,
+    "legit": 43
+  },
+  "repeat": 5,
+  "workers": 4,
+  "organization": "Minerva",
+  "trials": 1640,
+  "worst_case_calls": 4920,
+  "max_calls": 3000,
+  "bootstrap": {
+    "resamples": 2000,
+    "seed": 20261031
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "corpus": {
+    "evals/team_bridge_moderation/screen/corpus/ho3.jsonl": "7b3534925d5c15b23a1554f113ab39a9ef5fd34fba032ebaf260dd5b3b3d278a",
+    "evals/team_bridge_moderation/screen/corpus/ho2.jsonl": "322f6079ab85b5ef27125f4ad3aef6ad96a253d9cd5783259fe72db46bae433c",
+    "evals/team_bridge_moderation/screen/corpus/relay.jsonl": "56d1be651787dfda21bbc73e3a1db117e2a250e25246b8a59dec7ba162ab8ad2"
+  },
+  "templates": [
+    {
+      "label": "bridge-screen-v2",
+      "sha256": "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304",
+      "source": "embedded"
+    },
+    {
+      "label": "bridge-screen-v5",
+      "sha256": "36f9ec97c386215aa6a853d06dd96394eb2a93e447785d5e4995499a5584cc14",
+      "source": "evals/team_bridge_moderation/screen/templates/candidates/bridge-screen-v5.txt"
+    }
+  ],
+  "models": [
+    "anthropic/claude-opus-5-5",
+    "anthropic/claude-sonnet-5-5",
+    "radient/auto"
+  ],
+  "supports_sampling_params": {
+    "anthropic/claude-opus-5-5": false,
+    "anthropic/claude-sonnet-5-5": false,
+    "radient/auto": true
+  },
+  "split": "all",
+  "messages": 138,
+  "messages_by_split": {
+    "dev": 72,
+    "heldout": 66
+  },
+  "messages_by_label": {
+    "adv": 65,
+    "legit": 73
+  },
+  "repeat": 5,
+  "workers": 4,
+  "organization": "Minerva",
+  "trials": 4140,
+  "worst_case_calls": 12420,
+  "max_calls": 13000,
+  "bootstrap": {
+    "resamples": 2000,
+    "seed": 20261031
+  }
+}
