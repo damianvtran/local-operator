@@ -462,6 +462,8 @@ def context_caption(
             lines.append(head + "bytes not read: over this read's 3-file budget")
         elif reason == "budget_bytes":
             lines.append(head + "bytes not read: over this read's 128 KiB total")
+        elif reason == "set_mismatch":
+            lines.append(head + "bytes not read: the file SET does not match the hub's commitment")
         elif reason == "refused":
             lines.append(
                 head

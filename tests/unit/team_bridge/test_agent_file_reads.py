@@ -987,3 +987,146 @@ def test_the_withheld_reasons_are_sentences_a_person_can_act_on() -> None:
         marker = withheld_marker(1, reason)
         assert reason not in marker, marker
         assert marker.startswith("[1 file withheld: ") and marker.endswith("]")
+
+
+# ---------------------------------------------------------------------------
+# B4b owner release: a released message delivers, and never grants files
+# ---------------------------------------------------------------------------
+
+
+class _FileWire:
+    """A files-bearing classification wire for the connector's delivery turn."""
+
+    def __init__(self, body: str, payload: bytes) -> None:
+        self.body = body
+        self.payload = payload
+        self.descriptor = _descriptor(data=payload)
+        self.fetches: list[tuple[str, str | None]] = []
+        self.admits: list[dict[str, Any]] = []
+
+    def body_response(self) -> dict[str, Any]:
+        return {
+            "message_id": MID,
+            "body": self.body,
+            "body_hash": hashlib.sha256(self.body.encode()).hexdigest(),
+            "files": [_row(self.descriptor)],
+            "files_hash": files_admission_hash((self.descriptor,)),
+        }
+
+    async def conversation_body(self, *a: Any, **k: Any) -> dict[str, Any]:
+        return self.body_response()
+
+    async def status(self, **k: Any) -> dict[str, Any]:
+        return _status_payload(agent_read=True)
+
+    async def fetch_attachment(self, cid, mid, fid, *, purpose=None, **k: Any):
+        self.fetches.append((fid, purpose))
+        return self.payload, FILE_SERVED_MIME
+
+    async def conversation_admit(
+        self, cid, mid, *, verdict, body_hash, **kw: Any
+    ) -> dict[str, Any]:
+        self.admits.append(
+            {
+                "verdict": verdict,
+                "body_hash": body_hash,
+                **{
+                    key: kw[key]
+                    for key in ("attachments_hash", "files_hash", "template_sha256")
+                    if kw.get(key)
+                },
+            }
+        )
+        return {"ok": True}
+
+
+def _file_rig(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, wire: _FileWire, *, released: bool
+):
+    """The connector's delivery turn, with only the screening dispatch scripted."""
+
+    from local_operator.team_bridge import hold_release as hr
+    from local_operator.team_bridge.screening import ScreenResult
+    from local_operator.team_bridge.types import ConversationFeedRef, ScreeningReceipt
+    from tests.unit.team_bridge.test_attachments import _persist_receipt
+    from tests.unit.team_bridge.test_conversation_delivery import _enroll, _owner as conv_owner
+
+    owner = conv_owner("a", 1)
+    _enroll(tmp_path, owner, "sess_a")
+    cards: list[str] = []
+
+    async def fake_screen(owner: Any, item: Any, **kwargs: Any) -> Any:
+        if released:
+            # EXACTLY what ``_consume_owner_release`` returns: the person's signed
+            # decision, taken BEFORE any dispatch, so no set hash can be carried.
+            receipt = ScreeningReceipt(
+                verdict="allow",
+                model=hr.OWNER_RELEASE_MODEL,
+                prompt_version=hr.OWNER_RELEASE_PROMPT_VERSION,
+                template_sha256=hr.OWNER_RELEASE_SHA256,
+                body_sha256=hashlib.sha256(wire.body.encode()).hexdigest(),
+                categories=(),
+            ).validated()
+        else:
+            receipt = ScreeningReceipt(
+                verdict="allow",
+                model="qa",
+                prompt_version="bridge-screen-v2",
+                template_sha256="ab" * 32,
+                body_sha256=hashlib.sha256(wire.body.encode()).hexdigest(),
+                categories=(),
+            ).validated()
+        _persist_receipt(tmp_path, receipt, MID)
+        # A release carries no set hash; an ORDINARY verdict here has simply lost the
+        # binding (the shape the file hold exists for).
+        return ScreenResult("deliver", receipt=receipt, files_hash=None)
+
+    async def fake_deliver(owner: Any, payload: str, **kwargs: Any) -> str:
+        cards.append(payload)
+        return "delivered"
+
+    monkeypatch.setattr(conversation_mod, "screen_item", fake_screen)
+    monkeypatch.setattr(conversation_mod, "deliver_wake", fake_deliver)
+    monkeypatch.setattr(conversation_mod, "engagement_hold", lambda designation, config_dir: "")
+
+    ref = ConversationFeedRef(CID, MID, 1, True, sender_kind="human")
+    return owner, ref, cards
+
+
+async def _deliver_files(owner: Any, ref: Any, tmp_path: Path, wire: _FileWire):
+    return await conversation_mod.handle_conversation_available(
+        owner,
+        ref,
+        config_dir=tmp_path,
+        auth_store=None,
+        access=SimpleNamespace(credential_id=1),
+        wire=wire,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_owner_released_files_message_delivers_and_grants_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M3: the release carries no set hash by construction; it must not hold forever."""
+
+    wire = _FileWire("quarterly numbers attached", b"region,count\nemea,3\n")
+    owner, ref, cards = _file_rig(monkeypatch, tmp_path, wire, released=True)
+    out = await _deliver_files(owner, ref, tmp_path, wire)
+    assert out["action"] == "delivered", out
+    assert cards, "the released message's card is handed off"
+    assert [a["verdict"] for a in wire.admits] == ["allow"]
+    assert "files_hash" not in wire.admits[0], "a release grants no file set"
+
+
+@pytest.mark.asyncio
+async def test_an_unreleased_carrier_without_a_set_hash_still_holds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exemption is the RELEASE, not the shape: an ordinary unbound verdict holds."""
+
+    wire = _FileWire("quarterly numbers attached", b"region,count\nemea,3\n")
+    owner, ref, cards = _file_rig(monkeypatch, tmp_path, wire, released=False)
+    out = await _deliver_files(owner, ref, tmp_path, wire)
+    assert out["action"] == "hold" and out["code"] == "files_unbound", out
+    assert cards == [] and wire.admits == []

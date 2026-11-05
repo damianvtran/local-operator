@@ -1712,11 +1712,20 @@ async def handle_conversation_available(
         if screened_files is not None:
             if getattr(result, "files_hash", None) == screened_files.files_hash:
                 admitted_files_hash = screened_files.files_hash
-        if screened_files is not None and admitted_files_hash is None:
+        released = _owner_released(receipt)
+        if screened_files is not None and admitted_files_hash is None and not released:
             # The file sibling of ``attachments_unbound``: a verdict that lost the set
             # it screened can never grant bytes it did not judge.
             return await held("files_unbound")
-        if _owner_released(receipt):
+        if released:
+            # B4b OWNER RELEASE IS EXEMPT, and must be: a person's signed decision is
+            # that message's answer, taken BEFORE any dispatch, so its verdict carries no
+            # set hash by construction (``_consume_owner_release`` returns a text-only
+            # result with ``attachments_hash=None`` for the same reason). Holding here
+            # would make every released message that carries files wait forever —
+            # including its text, which is exactly what the release exists to deliver.
+            # Nothing is granted: ``admitted_files_hash`` stays ``None``, so the hub
+            # keeps the files withheld from this endpoint.
             metadata = replace(metadata, owner_released=True)
 
         async def _admit(*, files_hash: str | None, template: str | None) -> None:

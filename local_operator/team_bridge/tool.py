@@ -3069,7 +3069,7 @@ async def _history_files(
                         message,
                         context_caption(
                             [],
-                            [(d, "unverified") for d in descriptors],
+                            [(d, "set_mismatch") for d in descriptors],
                             source=(
                                 "the file set does not match the hub's commitment: "
                                 "no bytes were read"
