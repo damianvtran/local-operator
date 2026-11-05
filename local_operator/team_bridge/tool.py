@@ -3066,6 +3066,11 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             # choke point cannot be reopened by a new read shape. ``details``
             # stays untouched — it is never serialized to providers, and the
             # wire, the hub row and ``body_hash`` are not ours to rewrite.
+            #
+            # The ``is_error`` branch below returns only ``outcome["error"]``,
+            # which ``_failure_text`` guarantees is a refusal sentence and never
+            # a body, so it needs no bound — if that invariant ever changes,
+            # this is the line that must move above the ``ok`` test (review N-1).
             content = bound_inline_data_uris(content)
             notes = _model_notes(outcome)
             if notes and not peer_receipt:

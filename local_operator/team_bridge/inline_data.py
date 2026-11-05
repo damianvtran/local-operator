@@ -23,55 +23,96 @@ they were withheld, not shown them — so the decoded size is derived
 arithmetically from the base64 length. Decoding a sender-controlled payload
 would be the one part of this that could be made expensive or hostile.
 
-WHY THE SCAN IS WINDOWED. The input is attacker-sized, so the work must not be.
-:data:`INLINE_DATA_SCAN_MAX_CHARS` bounds one body's scan and the size of what
-this can emit; a body longer than the window keeps its scanned prefix and its
-unscanned remainder is replaced by an explicit marker rather than passed
-through, because the whole point is that nothing unscanned reaches the model
-as a blob. Total work is then linear in the page the client has already read
-into memory, never quadratic in it.
+WHY THE COST IS LINEAR, AND WHY THAT IS THE WHOLE DESIGN. The input is
+attacker-sized, so the work must not be super-linear: a body is delivered
+synchronously on an ``async`` tool path, and a scan that stalls the event loop
+is a worse defect than the blob it was meant to remove. Two rules buy that,
+and both are load-bearing:
+
+* **Every quantifier in :data:`_HEADER` is bounded.** An unbounded ``+`` inside
+  a group that can fail (``[^;,\\s]+`` before a required ``;base64,``) retries
+  from every start position and is quadratic in the body — measured at 3.5 s
+  for a 25 KB body and ~1.5 h at 1 MiB. A real media type and its parameters
+  are short, so the caps (:data:`_MAX_MIME_CHARS`, :data:`_MAX_PARAM_CHARS`,
+  :data:`_MAX_PARAMS`) cost nothing a real URI needs and make each attempt
+  O(1) instead of O(rest-of-body).
+* **The payload is consumed by a forward scanner, not by the regex.** One
+  ``while`` pass (:func:`_consume_payload`) with a monotonic cursor cannot
+  backtrack, so the payload grammar — which includes line folding — cannot
+  reintroduce the cost the header caps just removed.
+
+The result is ~2 passes over the text and no truncation: NOTHING is dropped
+from a body that carries no data URI, however long it is (a page that merely
+mentions ``metadata:`` is returned identical, by identity), which is why there
+is no scan window here any more.
 """
 
 from __future__ import annotations
 
 import re
+import string
 
 __all__ = [
-    "INLINE_DATA_SCAN_MAX_CHARS",
     "bound_inline_data_uris",
     "inline_data_marker",
 ]
 
-#: Characters of ONE body this will look at. A body at or under the window is
-#: scanned whole, so the common pathological case (the operator's ~600 KB
-#: receipt) still reports its TRUE decoded size instead of an "at least"
-#: figure. Above it the remainder is withheld with a stated marker.
-INLINE_DATA_SCAN_MAX_CHARS = 1024 * 1024
-
-#: Media types with no ``/`` that are still legal in the header (the RFC
-#: allows an omitted type, which defaults to ``text/plain``).
+#: Media types with no ``/`` are still legal in the header (the RFC allows an
+#: omitted type, which defaults to ``text/plain``).
 _DEFAULT_MIME = "text/plain"
 
-#: One inline data URI. Deliberately narrow on purpose: it matches only the
-#: ``;base64,`` form, because the percent-encoded form is human-readable-ish
-#: text and carries no base64 run to blow up a context window. ``mime`` and
-#: the ``;param=value`` list are captured only so the receipt can name the type.
-_INLINE_DATA_URI = re.compile(
-    r"data:(?P<mime>[^;,\s]+)?(?P<params>(?:;[^;,\s]+)*);base64,(?P<payload>[A-Za-z0-9+/]*={0,2})"
+#: Header caps. These exist for COST, not for validation (see the module
+#: docstring): they turn a quadratic retry into a constant one. A DNS-style
+#: media type is far under 127 characters and RFC 2397 allows no unbounded
+#: parameter list, so no URI a sender can actually mean is refused by them.
+_MAX_MIME_CHARS = 127
+_MAX_PARAM_CHARS = 127
+_MAX_PARAMS = 8
+
+#: One inline data URI HEADER — everything up to and including ``;base64,``.
+#: Case-insensitive because RFC 2397/5234 ABNF literals are, and browsers parse
+#: ``DATA:image/png;BASE64,`` exactly like the lowercase spelling.
+#:
+#: The parameter group requires ``name=value`` so the literal ``;base64`` cannot
+#: be absorbed into it and then backtracked out of. The payload is deliberately
+#: NOT part of this pattern; :func:`_consume_payload` reads it.
+_HEADER = re.compile(
+    rf"data:(?P<mime>[^;,\s]{{0,{_MAX_MIME_CHARS}}})?"
+    rf"(?P<params>(?:;[^;,\s=]{{0,{_MAX_PARAM_CHARS}}}="
+    rf"[^;,\s]{{0,{_MAX_PARAM_CHARS}}}){{0,{_MAX_PARAMS}}})"
+    r";[ \t]*base64[ \t]*,",
+    re.IGNORECASE,
 )
 
-#: How many bytes of a body were left unscanned, and that they were withheld.
-#: Stated rather than silent: an agent must never believe it read a body it saw
-#: only the prefix of (same rule the file-inlining design fixes for files).
-_TAIL_MARKER = "[{count} more bytes of this body were not scanned for inline data and are withheld]"
+#: Cheap pre-test so the no-op path (the overwhelmingly common one) allocates
+#: nothing: a lowercased copy of a 2 MB body would be a 2 MB allocation per call.
+_ANY_DATA = re.compile(r"data:", re.IGNORECASE)
+
+#: Payload alphabet. Both standard and URL-safe base64, plus padding: a sender
+#: may paste either spelling, and ``-_`` is what URL-safe encoders emit.
+_PAYLOAD_CHARS = frozenset(string.ascii_letters + string.digits + "+/-_=")
+
+#: Whitespace that can separate folded lines of ONE payload.
+_FOLD_WS = " \t\r\n"
+
+#: A fold is resumed only when the continuation line carries at least this
+#: many payload characters. Wrapped encoders emit 64- or 76-column lines
+#: (``base64``, ``textwrap``, MIME), all above this; a short run followed by a
+#: newline is the END of the blob. Resuming there would swallow the first word
+#: of the prose after it (``…base64,AAAA\nthanks``), and over-deleting a
+#: sender's own words is a worse failure than leaving a fragment: a final
+#: wrap line under this width is therefore LEFT in place, which bounds what can
+#: survive to under 60 characters — under the 64-char blob threshold, and three
+#: orders of magnitude below the 700 KB this exists to remove.
+_FOLD_MIN_LINE = 60
 
 #: Placeholder for one replaced URI. Names the type, the decoded size and that
 #: the bytes are gone — no base64, no hash, no filename (the hub never gives an
 #: agent a display name, so there is none here to leak).
 _MARKER = "[inline data withheld: {mime}, {size} bytes decoded]"
 
-#: Same marker when the payload was cut by the scan window, so the count is a
-#: floor and the reader is told so instead of being given a wrong exact number.
+#: Same marker when the payload was cut mid-quantum, so the count is a floor and
+#: the reader is told so instead of being given a wrong exact number.
 _MARKER_AT_LEAST = "[inline data withheld: {mime}, at least {size} bytes decoded]"
 
 
@@ -79,8 +120,10 @@ def _decoded_size(payload: str) -> int:
     """Decoded byte count from a base64 string's LENGTH, without decoding it.
 
     Every 4 base64 characters carry 3 bytes, and each trailing ``=`` pads one
-    of those bytes away. A truncated payload (a length that is not a multiple
-    of 4) is rounded down, which is why the caller marks such a size "at least".
+    of those bytes away. ``payload`` is already whitespace-free (the fold
+    scanner never appends the separators), so this is the true length. A
+    truncated payload (a length that is not a multiple of 4) is rounded down,
+    which is why the caller marks such a size "at least".
     """
 
     if not payload:
@@ -100,42 +143,95 @@ def inline_data_marker(mime: str, size: int, *, at_least: bool = False) -> str:
     return template.format(mime=mime or _DEFAULT_MIME, size=size)
 
 
-def _replace_one(match: re.Match[str], *, truncated: bool) -> str:
-    payload = match.group("payload")
-    # A header with no payload is a mention of a data URI, not a blob to
-    # withhold: replacing it would turn readable text into a false claim that
-    # bytes were dropped. Leave those alone.
-    if not payload:
-        return match.group(0)
-    cut = truncated and match.end() == len(match.string)
-    return inline_data_marker(
-        (match.group("mime") or _DEFAULT_MIME).strip(),
-        _decoded_size(payload),
-        at_least=cut or len(payload) % 4 != 0,
-    )
+def _consume_payload(text: str, start: int) -> tuple[str, int, bool]:
+    """``(whitespace-free payload, end index, tail_left)``; one forward pass.
+
+    WHY A HAND-WRITTEN SCANNER. Base64 payloads are legally folded across lines
+    (MIME wrapping, ``textwrap``), so the grammar is "alphabet chars, optionally
+    separated by a newline". Expressing that as a nested quantifier is the
+    textbook catastrophic-backtracking shape, and this input is sender-chosen.
+    A cursor that only ever moves forward cannot backtrack, so the cost is the
+    length of the payload and nothing else.
+
+    The cursor always advances or returns, so callers may treat this as
+    monotonic and never rescan a region.
+    """
+
+    length = len(text)
+    index = start
+    line_start = start
+    folded = False
+    pieces: list[str] = []
+    while True:
+        end = index
+        while end < length and text[end] in _PAYLOAD_CHARS:
+            end += 1
+        pieces.append(text[index:end])
+        index = end
+        # A fold is only a fold if the line it would continue was a full line of
+        # payload; otherwise this newline ends the blob (see _FOLD_MIN_LINE).
+        if index < length and text[index] in "\r\n" and (index - line_start) >= _FOLD_MIN_LINE:
+            resumed = index
+            while resumed < length and text[resumed] in _FOLD_WS:
+                resumed += 1
+            next_end = resumed
+            while next_end < length and text[next_end] in _PAYLOAD_CHARS:
+                next_end += 1
+            # The NEXT line must also be a full-width line. That is what tells a
+            # wrap apart from a single blob followed by a short word: prose is
+            # never 60+ unbroken base64 characters.
+            if (next_end - resumed) >= _FOLD_MIN_LINE:
+                line_start = resumed
+                index = resumed
+                folded = True
+                continue
+        break
+    # ``tail_left`` only when a SHORT continuation was declined AFTER the wrap
+    # was already established: that short run is the wrap's final line, so the
+    # size above is a floor. With no fold it is prose, and the payload is whole.
+    tail_left = folded and index < length and text[index] in "\r\n"
+    return "".join(pieces), index, tail_left
 
 
 def bound_inline_data_uris(text: str) -> str:
     """Return ``text`` with every inline ``;base64`` data URI replaced.
 
-    Pure: no I/O, no decoding, no globals mutated. ``text`` that contains no
-    ``data:`` at all is returned unchanged and unscanned — a plain long body
-    keeps every byte, so this cannot silently truncate ordinary content.
+    Pure: no I/O, no decoding, no globals mutated. ``text`` that carries no data
+    URI is returned as the SAME object, unscanned in the sense that matters —
+    not one byte is dropped from it, at any length. That identity is asserted in
+    the tests because a body mentioning ``metadata:`` contains the substring
+    ``data:`` and used to be truncated for it.
 
-    A body longer than :data:`INLINE_DATA_SCAN_MAX_CHARS` is scanned only up to
-    the window and its remainder is replaced by an explicit marker. That tail is
-    withheld rather than forwarded because an unscanned tail is exactly the
-    unbounded blob this module exists to keep out of context; stating the count
-    keeps the omission honest instead of invisible.
+    Cost is linear in ``len(text)``: a bounded-quantifier header search plus one
+    monotonic payload scan per URI (see the module docstring). Nothing here can
+    be made super-linear by a sender, which is what makes it safe to call
+    synchronously from the ``async`` tool path.
     """
 
-    if "data:" not in text:
+    if _ANY_DATA.search(text) is None:
         return text
-    scanned = text[:INLINE_DATA_SCAN_MAX_CHARS]
-    unscanned = len(text) - len(scanned)
-    bounded = _INLINE_DATA_URI.sub(
-        lambda match: _replace_one(match, truncated=bool(unscanned)), scanned
-    )
-    if unscanned:
-        bounded = f"{bounded}\n\n{_TAIL_MARKER.format(count=unscanned)}"
-    return bounded
+    pieces: list[str] = []
+    cursor = 0
+    for header in _HEADER.finditer(text):
+        if header.start() < cursor:
+            # Inside a payload a previous iteration already replaced.
+            continue
+        payload, end, tail_left = _consume_payload(text, header.end())
+        if not payload:
+            # A header with no payload is a mention of a data URI, not a blob to
+            # withhold: replacing it would turn readable text into a false claim
+            # that bytes were dropped.
+            continue
+        pieces.append(text[cursor : header.start()])
+        pieces.append(
+            inline_data_marker(
+                (header.group("mime") or _DEFAULT_MIME).strip(),
+                _decoded_size(payload),
+                at_least=tail_left or len(payload) % 4 != 0,
+            )
+        )
+        cursor = end
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)

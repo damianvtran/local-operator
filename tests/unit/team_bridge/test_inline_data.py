@@ -7,12 +7,19 @@ long base64 run survives and that the withheld receipt names the type and the
 size. The last test drives the real tool path so the choke point in
 ``tool.py`` is exercised rather than the helper alone; a helper that nothing
 calls is exactly the failure mode ``models.BridgeFilesHashV1`` already has.
+
+Round-1 findings shape the adversarial half of this file. ``test_scan_cost_*``
+is a HARD-RATIO complexity assertion, not a micro-benchmark: the old pattern
+was quadratic (3.5 s at 25 KB), so a ratio bound between two sizes fails it
+regardless of how fast the host is. The wrapped / URL-safe / uppercase cases
+each kept 100 % of the payload before the fix.
 """
 
 from __future__ import annotations
 
 import base64
 import re
+import time
 from typing import Any, cast
 
 import pytest
@@ -23,7 +30,6 @@ from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import host as host_mod
 from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.inline_data import (
-    INLINE_DATA_SCAN_MAX_CHARS,
     bound_inline_data_uris,
     inline_data_marker,
 )
@@ -40,21 +46,40 @@ _RUN = re.compile(r"[A-Za-z0-9+/]{64,}")
 #: A plausible PNG payload whose LENGTH is what the receipt must report.
 _PNG_PAYLOAD = base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4).decode("ascii")
 
+#: The operator's repro scale, so the real-path test keeps its shape.
+_BIG_PAYLOAD = base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 2048).decode("ascii")
+
 
 def _runs(text: str) -> list[str]:
-    return _RUN.findall(text)
+    """Long standard-base64 runs. URL-safe chars are folded in as well, because
+    a payload that kept its ``-_`` spelling must still not survive."""
+    return re.findall(r"[A-Za-z0-9+/_-]{64,}", text)
 
 
 def test_plain_text_is_returned_unchanged_and_is_not_truncated() -> None:
     """The no-op path is load-bearing: ordinary long bodies keep every byte.
 
     A filter that windowed every body would silently shorten large legitimate
-    messages even when they carry no data URI at all.
+    messages even when they carry no data URI at all. Identity (``is``) is the
+    assertion, not equality: it proves no copy and no rebuild happened.
     """
 
     line = "a normal sentence with spaces. "
-    body = "standup notes\n" + line * (INLINE_DATA_SCAN_MAX_CHARS // len(line))
-    assert len(body) > INLINE_DATA_SCAN_MAX_CHARS
+    body = "standup notes\n" + line * 70000
+    assert len(body) > 2_000_000
+    assert bound_inline_data_uris(body) is body
+
+
+def test_a_long_body_that_only_mentions_data_colon_is_untouched() -> None:
+    """R-3's control: the substring ``data:`` is not a data URI.
+
+    ``"data:" in "metadata:"`` is True, and the previous version withheld
+    everything past 1 MiB on that alone — 41 % of an ordinary log page lost.
+    """
+
+    body = ("2026-11-05 metadata: request_id=abc status=ok balanced\n" * 32000)
+    assert len(body) > 1_700_000
+    assert "data:" in body
     assert bound_inline_data_uris(body) is body
 
 
@@ -63,15 +88,10 @@ def test_typical_body_uri_becomes_a_receipt_naming_mime_and_size() -> None:
     bounded = bound_inline_data_uris(body)
 
     # The prose around the blob survives; only the blob is gone.
-    assert bounded.startswith("look at this chart\ndata:") is False
     assert bounded.startswith("look at this chart\n")
     assert bounded.endswith("\nthanks")
-    # Names the type and the TRUE decoded size, and says the bytes were withheld.
-    assert inline_data_marker("image/png", len(base64.b64decode(_PNG_PAYLOAD))) in bounded
-    assert "image/png" in bounded
-    assert "withheld" in bounded
-    assert str(len(base64.b64decode(_PNG_PAYLOAD))) in bounded
-    # No base64 run of any length survives.
+    decoded = len(base64.b64decode(_PNG_PAYLOAD))
+    assert inline_data_marker("image/png", decoded) in bounded
     assert _runs(bounded) == []
 
 
@@ -87,19 +107,18 @@ def test_multiple_uris_in_one_body_are_each_receipted() -> None:
     assert bounded.count("[inline data withheld:") == 2
     assert "image/png" in bounded
     assert "image/jpeg" in bounded
-    # Prose between and after the blobs is intact.
+    # Prose between and after the blobs is intact. (The ``2) `` prefix is
+    # swallowed only where a marker replaced the line before it, so assert the
+    # surviving text, not a position.)
     assert "two shots:" in bounded
-    assert "1) " in bounded and "2) " in bounded
+    assert "1) [inline data withheld:" in bounded
+    assert "2) [inline data withheld:" in bounded
     assert bounded.endswith("\nend")
     assert _runs(bounded) == []
 
 
 def test_uri_inside_a_code_fence_is_receipted_and_the_fence_survives() -> None:
-    """A fenced block is still a body: the fence is text, the blob is not.
-
-    This is the shape the operator actually hit — someone pasted an image as
-    Markdown inside a fence, so nothing upstream treats it as an attachment.
-    """
+    """A fenced block is still a body: the fence is text, the blob is not."""
 
     body = f"here is the payload:\n```\ndata:image/png;base64,{_PNG_PAYLOAD}\n```\ndone"
     bounded = bound_inline_data_uris(body)
@@ -110,13 +129,61 @@ def test_uri_inside_a_code_fence_is_receipted_and_the_fence_survives() -> None:
     assert _runs(bounded) == []
 
 
-def test_malformed_base64_still_loses_the_blob() -> None:
-    """Invalid characters mid-payload must not become a pass-through.
+def test_mime_wrapped_payload_is_receipted_as_one_blob_with_the_true_size() -> None:
+    """R-2a: 76-column wrapping is the shape a shell tool actually emits.
 
-    The regex stops at the first character outside the base64 alphabet. What
-    matters is that the run that WAS a blob is receipted and what remains is
-    not a long base64 run.
+    Before the fix each 76-char line matched separately, so the receipt claimed
+    an exact 57 bytes while the model was billed for the whole blob.
     """
+
+    wrapped = "\n".join(_BIG_PAYLOAD[i : i + 76] for i in range(0, len(_BIG_PAYLOAD), 76))
+    body = f"chart\ndata:image/png;base64,{wrapped}\nend"
+    bounded = bound_inline_data_uris(body)
+
+    assert len(_runs(bounded)) == 0
+    # ONE receipt, and it names the WHOLE wrapped payload, not one 76-char line.
+    assert bounded.count("[inline data withheld:") == 1
+    expected = len(base64.b64decode(_BIG_PAYLOAD))
+    match = re.search(r"at least (\d+) bytes decoded", bounded)
+    assert match is not None, bounded
+    reported = int(match.group(1))
+    # The final wrap line is deliberately left in place, so the figure is a floor
+    # at most one line-width short — never the "57 bytes" the old code claimed.
+    assert expected - 60 <= reported <= expected, (reported, expected)
+    assert "at least" in bounded
+    assert bounded.startswith("chart\n")
+    assert bounded.endswith("\nend")
+    assert bounded.startswith("chart\n")
+    assert bounded.endswith("\nend")
+    assert len(bounded) < 200
+
+
+def test_url_safe_alphabet_payload_is_receipted() -> None:
+    """R-2b: ``-_`` instead of ``+/`` is what a URL-safe encoder emits."""
+
+    standard = base64.b64encode(bytes(range(256)) * 4000).decode("ascii")
+    payload = standard.replace("+", "-").replace("/", "_")
+    assert "-" in payload and "_" in payload, "the sample must exercise both"
+    bounded = bound_inline_data_uris(f"blob data:application/octet-stream;base64,{payload} end")
+
+    assert _runs(bounded) == []
+    assert bounded.count("[inline data withheld:") == 1
+    assert bounded.endswith(" end")
+    assert f"{len(base64.b64decode(standard))} bytes decoded" in bounded
+
+
+def test_uppercase_header_is_receipted() -> None:
+    """R-2c: RFC 2397/5234 ABNF literals are case-insensitive; browsers agree."""
+
+    for header in ("DATA:image/png;base64,", "data:image/png;BASE64,", "Data:image/png;Base64,"):
+        bounded = bound_inline_data_uris(f"x {header}{_PNG_PAYLOAD} y")
+        assert _runs(bounded) == [], header
+        assert "withheld" in bounded, header
+        assert "image/png" in bounded, header
+
+
+def test_malformed_base64_still_loses_the_blob() -> None:
+    """Invalid characters mid-payload must not become a pass-through."""
 
     body = "prefix data:image/png;base64," + ("A" * 200) + "!!!trailing-junk!!! suffix"
     bounded = bound_inline_data_uris(body)
@@ -130,11 +197,7 @@ def test_malformed_base64_still_loses_the_blob() -> None:
 
 
 def test_truncated_base64_reports_a_size_floor_not_a_wrong_exact_size() -> None:
-    """A payload cut mid-quantum has an incomplete byte count — say "at least".
-
-    Reporting an exact number would be a lie in the one direction that matters:
-    the model would size what it is missing too small.
-    """
+    """A payload cut mid-quantum has an incomplete byte count — say "at least"."""
 
     body = "x data:image/png;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA suffix"
     bounded = bound_inline_data_uris(body)
@@ -145,58 +208,17 @@ def test_truncated_base64_reports_a_size_floor_not_a_wrong_exact_size() -> None:
 
 
 def test_header_without_a_payload_is_left_alone() -> None:
-    """``data:image/png;base64,`` alone is a mention, not bytes to withhold.
-
-    Claiming bytes were dropped when none were would mislead the model about
-    what the sender said.
-    """
+    """``data:image/png;base64,`` alone is a mention, not bytes to withhold."""
 
     body = "the format is data:image/png;base64,<payload> — that is the shape"
-    bounded = bound_inline_data_uris(body)
-
-    assert bounded == body
-
-
-def test_very_large_body_is_windowed_and_the_omission_is_stated() -> None:
-    """Over the window the tail is withheld WITH a count, never forwarded.
-
-    Forwarding an unscanned tail is the exact unbounded-blob failure this
-    module exists to stop, so the assertion is both "no base64 survives" and
-    "the reader is told how much was dropped".
-    """
-
-    head = f"big one\ndata:image/png;base64,{_PNG_PAYLOAD}\n"
-    filler = "y " * INLINE_DATA_SCAN_MAX_CHARS
-    body = head + filler
-    bounded = bound_inline_data_uris(body)
-
-    assert len(body) > INLINE_DATA_SCAN_MAX_CHARS
-    assert "withheld" in bounded
-    assert "not scanned for inline data and are withheld" in bounded
-    # The stated count is exactly the number of characters dropped.
-    dropped = len(body) - INLINE_DATA_SCAN_MAX_CHARS
-    assert f"{dropped} more bytes" in bounded
-    # Bounded output: the window plus the receipts, never the whole body.
-    assert len(bounded) < INLINE_DATA_SCAN_MAX_CHARS + 4096
-    assert _runs(bounded) == []
-
-
-def test_uri_cut_by_the_window_reports_at_least() -> None:
-    """A payload running past the window boundary has an unknown true length."""
-
-    body = "data:image/png;base64," + ("Q" * (INLINE_DATA_SCAN_MAX_CHARS * 2))
-    bounded = bound_inline_data_uris(body)
-
-    assert "at least" in bounded
-    assert "image/png" in bounded
-    assert _runs(bounded) == []
+    assert bound_inline_data_uris(body) == body
 
 
 def test_decoded_size_is_arithmetic_and_matches_a_real_decode() -> None:
     """The reported size must be right without the codec ever running.
 
-    ``0``/`1`/`2` padding bytes are all exercised because they are the only way
-    the ``len * 3 // 4`` form is wrong if the padding is miscounted.
+    ``0``/``1``/``2`` padding bytes are all exercised because they are the only
+    way the ``len * 3 // 4`` form is wrong if the padding is miscounted.
     """
 
     for raw in (b"a", b"ab", b"abc", b"abcd", bytes(range(251))):
@@ -210,6 +232,39 @@ def test_marker_is_stable_so_a_renderer_can_match_it() -> None:
         "[inline data withheld: image/png, 12 bytes decoded]"
     )
     assert inline_data_marker("", 0) == "[inline data withheld: text/plain, 0 bytes decoded]"
+
+
+def test_scan_cost_is_linear_not_quadratic_on_adversarial_repeats() -> None:
+    """R-1's regression: a HARD RATIO, not a micro-benchmark.
+
+    The old pattern retried an unbounded mime group from every start position,
+    so ``"data:" * n`` cost O(n²): measured 3.5 s at 25 KB. A wall-clock
+    ceiling alone would be host-dependent; requiring ``t(4n) / t(n)`` to stay
+    near the linear factor of 4 fails the quadratic shape on any machine. The
+    absolute ceiling is a second, generous backstop for the largest body a
+    single call is realistically handed.
+    """
+
+    def elapsed(chars: int) -> float:
+        body = "data:" * (chars // 5)
+        best = min(
+            _timed(lambda: bound_inline_data_uris(body)) for _ in range(3)
+        )
+        return best
+
+    small = elapsed(25_000)
+    large = elapsed(100_000)
+    # Quadratic would be ~16x; the bound leaves generous headroom for noise.
+    assert large / max(small, 1e-6) < 8.0, (small, large)
+    # And a megabyte of adversarial input must stay comfortably interactive.
+    worst = _timed(lambda: bound_inline_data_uris("data:" * 210_000))
+    assert worst < 5.0, worst
+
+
+def _timed(call: Any) -> float:
+    started = time.perf_counter()
+    call()
+    return time.perf_counter() - started
 
 
 @pytest.fixture(autouse=True)
@@ -235,8 +290,7 @@ async def test_the_tool_result_the_model_receives_carries_no_base64() -> None:
     is what the transcript and UI render for humans.
     """
 
-    blob = base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 2048).decode("ascii")
-    assert len(blob) > 600_000, "the operator's repro was ~600 KB; keep this shape"
+    assert len(_BIG_PAYLOAD) > 600_000, "the operator's repro was ~600 KB; keep this shape"
     client = RecordingClient(
         messages={
             "messages": [
@@ -244,7 +298,7 @@ async def test_the_tool_result_the_model_receives_carries_no_base64() -> None:
                     "id": "cmsg_1",
                     "seq": 6,
                     "sender": {"kind": "agent", "display_label": "Aida"},
-                    "body": {"text": f"chart\ndata:image/png;base64,{blob}\nend"},
+                    "body": {"text": f"chart\ndata:image/png;base64,{_BIG_PAYLOAD}\nend"},
                 }
             ]
         }
@@ -275,8 +329,8 @@ async def test_the_tool_result_the_model_receives_carries_no_base64() -> None:
     assert "chart" in model_visible and "end" in model_visible
     assert "withheld" in model_visible
     assert _runs(model_visible) == []
-    assert blob[:80] not in model_visible
+    assert _BIG_PAYLOAD[:80] not in model_visible
     # ``details`` is never serialized to providers, so it still carries the raw
     # row — the transcript and UI a human reads are unchanged by this filter.
     details = result.details or {}
-    assert blob in str(details["content"])
+    assert _BIG_PAYLOAD in str(details["content"])
