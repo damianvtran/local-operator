@@ -513,6 +513,17 @@ def decide(
     return False, f"event {event!r} is not superseded by definition"
 
 
+#: Job/step statuses that mean "created but not executing". `queued` is the
+#: obvious one; `waiting`, `requested` and `pending` are the same condition seen
+#: through a concurrency group, an environment-protection gate or a runner
+#: request. They were previously outside the allowlist, so the guard reported
+#: "job execution state unreadable" and KEPT such a run forever -- the exact
+#: opposite of the abandonment rule, which exists to clear runs nothing will
+#: ever read. None of them carries execution evidence: no runner, no started
+#: step, so recognising them as unstarted is safe as well as necessary.
+NOT_STARTED_STATES = ("queued", "waiting", "requested", "pending")
+
+
 def jobs_are_unstarted(repo: str, run_id: Any) -> tuple[bool, str]:
     """Prove the latest attempt has no execution evidence before cancelling it.
 
@@ -520,6 +531,12 @@ def jobs_are_unstarted(repo: str, run_id: Any) -> tuple[bool, str]:
     (observed on run 42067886772). Its queued jobs also populate started_at
     with created_at, so that timestamp alone cannot distinguish execution.
     A partial, changing or unreadable inventory is not permission to cancel.
+    Execution evidence is a runner assignment, an in-progress job, a started
+    step, or a completed job that was not skipped. At JOB level a `cancelled`
+    job is also exempt: cancelling a job before it starts leaves no work behind,
+    so it is not evidence that this run's work mattered. That exemption is
+    job-level only -- at STEP level just `skipped` is exempt, which is the
+    stricter reading a step deserves.
     This read cannot make the subsequent POST atomic with runner assignment;
     it only prevents discarding work whose execution is already observable.
     """
@@ -552,7 +569,9 @@ def jobs_are_unstarted(repo: str, run_id: Any) -> tuple[bool, str]:
             seen.add(job_id)
             status = job.get("status")
             steps = job.get("steps", [])
-            if status not in ("queued", "completed", "in_progress") or not isinstance(steps, list):
+            if status not in NOT_STARTED_STATES + ("completed", "in_progress") or not isinstance(
+                steps, list
+            ):
                 return False, "job execution state unreadable"
             if (
                 status == "in_progress"
@@ -563,9 +582,7 @@ def jobs_are_unstarted(repo: str, run_id: Any) -> tuple[bool, str]:
                 return False, "job execution has already begun"
             for step in steps:
                 if not isinstance(step, dict) or step.get("status") not in (
-                    "queued",
-                    "completed",
-                    "in_progress",
+                    NOT_STARTED_STATES + ("completed", "in_progress")
                 ):
                     return False, "job step execution state unreadable"
                 if step.get("status") == "in_progress" or (
@@ -642,12 +659,6 @@ def main() -> int:
             kept += 1
             print(f"  KEEP   {label}: {reason}", flush=True)
             continue
-        if args.dry_run:
-            cancelled += 1
-            if run.get("head_branch") == PROTECTED_MAIN:
-                post_merge.append((run_id, str(run.get("head_sha"))[:9]))
-            print(f"  WOULD  {label}: {reason}", flush=True)
-            continue
         # C-6: re-read the status immediately before writing. A run can start
         # between the listing and this call, and cancelling work that has
         # already begun is the one thing this script must never do.
@@ -668,6 +679,17 @@ def main() -> int:
         if not unstarted:
             print(f"  KEEP   {label}: {execution_reason}", flush=True)
             kept += 1
+            continue
+        # The preview sits AFTER both reads above, deliberately. A dry run that
+        # reported WOULD without performing them disagreed with the real sweep
+        # exactly when it mattered -- on a run whose work had already started --
+        # and the preview is the mode an operator uses to decide whether a
+        # schedule is safe. It performs the reads and stops before the write.
+        if args.dry_run:
+            cancelled += 1
+            if run.get("head_branch") == PROTECTED_MAIN:
+                post_merge.append((run_id, str(run.get("head_sha"))[:9]))
+            print(f"  WOULD  {label}: {reason}", flush=True)
             continue
         try:
             gh_api(f"repos/{args.repo}/actions/runs/{run_id}/cancel", method="POST")
