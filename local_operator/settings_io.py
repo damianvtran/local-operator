@@ -73,6 +73,7 @@ from local_operator.i18n.keys import wire_radient_saver as _rsv
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
+from local_operator.i18n.keys import wire_settings_hub_org as _ho
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import (
@@ -121,6 +122,7 @@ logger = logging.getLogger(__name__)
 _CHILD_SETTINGS_NAMESPACES = (
     "wire.settings.account_policy",
     "wire.settings.hub_defaults",
+    "wire.settings.hub_org",
     "wire.aida_cadence",
     "wire.host_speed",
     "wire.console",
@@ -961,6 +963,18 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.hub_title()),
         Scope.LIVE,
         _t(_ws.hub_description()),
+    ),
+    # The organization Agent Hub. Its OWN section, not rows under ``hub``,
+    # because visibility is dynamic: it is a Radient Team feature and must not
+    # be advertised to anyone signed out or outside a team-plan organization,
+    # so ``team_bridge.availability.section_visible`` hides the whole section
+    # off the cached gate (``hub_org.eligibility``, zero network). LIVE: the
+    # enrol path re-reads the key on every boundary.
+    Section(
+        "hub_org",
+        _t(_ho.title()),
+        Scope.LIVE,
+        _t(_ho.description()),
     ),
     # The agents key. NEW_LAUNCH, honestly: its one consumer is the startup
     # seed-update pass, which reads it under the config-migration seam at each
@@ -5446,6 +5460,22 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=5,
         maximum=1440,
         help=_t(_ws.hub_check_interval_min_help()),
+    ),
+    # Org auto-enrol. The literal restates
+    # ``hub_org.settings.DEFAULT_ORG_AUTO_ENROL`` (``_consumer_defaults`` pins
+    # the two); NESTED path read by ``hub_org.settings.auto_enrol_enabled``.
+    Setting(
+        key="hub.org.auto_enrol",
+        path=("hub", "org", "auto_enrol"),
+        section="hub_org",
+        label=_t(_ho.auto_enrol_label()),
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices(
+            _t(_ho.auto_enrol_on_description()),
+            _t(_ho.auto_enrol_off_description()),
+        ),
+        help=_t(_ho.auto_enrol_help()),
     ),
     # -- agents ------------------------------------------------------------
     # The starter-update switch. A LITERAL default for the same reason the hub

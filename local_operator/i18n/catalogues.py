@@ -90,6 +90,9 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.settings.hub_defaults": (
         "hub settings keys rendered in-process by settings_io._t as plain strings"
     ),
+    "wire.settings.hub_org": (
+        "org Agent Hub settings section rendered in-process by settings_io._t as plain strings"
+    ),
     "wire.console": "console section title/description and row labels rendered by settings_io._t",
     "wire.memory": "memory section rows rendered by settings_io._t as plain label/help strings",
     "wire.host_speed": "host-speed threshold label/help rendered by settings_io._t",

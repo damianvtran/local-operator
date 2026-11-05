@@ -1,0 +1,148 @@
+{
+  "record_kind": "translator_staging_packet_not_audit",
+  "locale": "fr",
+  "namespace": "wire.settings.hub_defaults",
+  "created_at": "2026-11-03T13:55:34.395652+00:00",
+  "status": "translated_staged_not_audited",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "key_count": 9,
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7b2ba4ed501d",
+    "actual_model_source": "Persisted assistant translation write/edit tool-call usage.provider and usage.model_id, not header",
+    "transcript_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/transcript.jsonl",
+    "translation_entries": [
+      {
+        "entry_id": "2293a6c4e0dc45ee9e28b0691ce05dd5",
+        "timestamp": 1793713953.1828961,
+        "tool": "write",
+        "usage": {
+          "billing_basis": "subscription_api_equivalent",
+          "input_tokens": 101211,
+          "output_tokens": 367,
+          "cache_read_tokens": 99200,
+          "context_tokens": 101211,
+          "reasoning_tokens": 41,
+          "at_ms": 1793713952745,
+          "provider": "openai",
+          "model_id": "gpt-6.1-sol"
+        }
+      },
+      {
+        "entry_id": "b11b52f1d41f476e86bcd173c65e62c6",
+        "timestamp": 1793714022.218669,
+        "tool": "edit",
+        "usage": {
+          "billing_basis": "subscription_api_equivalent",
+          "input_tokens": 103504,
+          "output_tokens": 174,
+          "cache_read_tokens": 103296,
+          "context_tokens": 103504,
+          "reasoning_tokens": 68,
+          "at_ms": 1793714021578,
+          "provider": "openai",
+          "model_id": "gpt-6.1-sol"
+        }
+      }
+    ],
+    "fallback_routes": [
+      {
+        "entry_id": "b890d01d056149efa86ce524b5919819",
+        "primary": "anthropic/claude-sonnet-5-5",
+        "active": {
+          "selector": "anthropic/claude-opus-5-5",
+          "effort": "medium"
+        },
+        "reason": "provider failure: quota"
+      },
+      {
+        "entry_id": "9db45f79733b4e59a7181e007150d99f",
+        "primary": "anthropic/claude-sonnet-5-5",
+        "active": {
+          "selector": "openai/gpt-6.1-sol",
+          "effort": "medium"
+        },
+        "reason": "provider failure: quota"
+      }
+    ],
+    "method": "Direct LLM reasoning; no translation API/SDK/MT service/site.",
+    "actual_models": [
+      "openai/gpt-6.1-sol"
+    ]
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.hub_defaults.json",
+      "sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.hub_defaults.context.json",
+      "sha256": "a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba"
+    },
+    "style": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "source": "Read working checkout; exact snapshot retained"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "source": "Read working checkout; exact snapshot retained"
+    }
+  },
+  "target": {
+    "staged_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-hub-defaults-0e7cde33/wire.settings.hub_defaults.json",
+    "intended_path": "local_operator/i18n/catalogues/fr/wire.settings.hub_defaults.json",
+    "sha256": "9733a2653109b4e5b30964d0bbc9fb5974fe799bb086ce8d21354517d1936940"
+  },
+  "gap_counts": {
+    "missing_at_pinned_commit": 9,
+    "missing_in_packet": 0,
+    "repository_gap_not_resolved_by_scratch_packet": 9
+  },
+  "human_copy_contract": "No English sentence parsing found on the inspected registry path: labels/help/descriptions are _t-rendered strings; configuration paths, types, booleans, numeric bounds and IDs are separate. This is source proof, not whole-repository absence proof.",
+  "caller_caveat": "At pinned settings_io.py only four _hd.agents_* functions have direct call sites. Team rows still use _ws.hub_auto_update_teams_* from wire.settings; no direct caller was found for the four hub_defaults.teams.* keys or model_default.note. All nine requested keys are translated, but this packet alone cannot claim changes to those five rendered surfaces.",
+  "native_glossary_decisions": {
+    "agent": "agent",
+    "skill": "compétence",
+    "team": "équipe",
+    "link": "lien",
+    "subscribe": "abonner",
+    "Hub": "Hub, surface name retained",
+    "merge": "merge, kept-English technical word per French style guide",
+    "MAJ": "Compact French abbreviation for mises à jour, proposed only for 72-cell agents help; all-update pause and new-link subscription both retained. Full spelling in label and neighboring descriptions.",
+    "scope": "Agent/skill OFF is a ceiling on existing links plus creation default; team setting only affects new links. No master team-disable claim.",
+    "model": "Current default model used for Hub merges; old Hub-specific model override ignored."
+  },
+  "validation": {
+    "command": "node --max-old-space-size=256 /Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-hub-defaults-0e7cde33/validate.mjs wire.settings.hub_defaults",
+    "exit_code": 0,
+    "checks": "Exact key order/parity, JSON, argument-free ICU, no bidi controls, numeric literal preservation",
+    "negative_controls_rejected": 2,
+    "cldr": "N/A: zero plural/select arguments",
+    "widths": [
+      {
+        "key": "wire.settings.hub_defaults.agents.help",
+        "cells": 72,
+        "maxCells": 72
+      },
+      {
+        "key": "wire.settings.hub_defaults.teams.help",
+        "cells": 70,
+        "maxCells": 72
+      }
+    ],
+    "width_execution": "Existing core .venv Python rich.cells.cell_len; exit 0",
+    "full_validator_scanner_build_native": "NOT RUN as instructed",
+    "pseudo": "NOT RUN",
+    "RTL": "NOT RUN",
+    "rendered_fit": "NOT RUN",
+    "runtime_caller_execution": "NOT RUN; caller-proof is source inspection only"
+  },
+  "audit": {
+    "self_audit": false,
+    "independent_audits": "NOT RUN; independent readers follow",
+    "status": "not_audited"
+  },
+  "scope": "Own scratch packet only; no repository edits/PR/commit/ledger/activation; account-policy packet and SDK namespaces untouched."
+}

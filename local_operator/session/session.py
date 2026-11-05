@@ -8582,7 +8582,20 @@ class Session:
         complete = getattr(self.agent_registry, "require_complete_metadata", None)
         if complete is not None:
             complete()
-        return resolve_profile_or_specialist(name, registry=self.agent_registry)
+        kind, profile, prompt, display = resolve_profile_or_specialist(
+            name, registry=self.agent_registry
+        )
+        # A stale registered engineering role attached here (``/agent`` or a
+        # team's manager) runs its old prompt in THIS session exactly like a
+        # stale child would, so it gets the same delivery pointer the child
+        # launch path adds. Both callers only stamp the brief from the
+        # profile; neither writes it back to the row, so the stored text stays
+        # the operator's (see ``with_delivery_pointer``).
+        if kind == "role" and profile is not None:
+            from local_operator.agent_profiles import with_delivery_pointer
+
+            profile = with_delivery_pointer(profile)
+        return kind, profile, prompt, display
 
     def attach_agent_profile(self, name: str) -> str | None:
         """Attach a named role/specialist's instructions to THIS session.

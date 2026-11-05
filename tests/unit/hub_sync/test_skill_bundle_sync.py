@@ -604,7 +604,17 @@ def test_the_cli_push_uploads_the_new_archive_then_publishes(
     (root / "skills" / NAME / "references" / "guide.md").write_text("v2\n", encoding="utf-8")
     newer = bundle_manifest_from_directory(root / "skills" / NAME)
     assert newer.bundle.hash != _built.bundle.hash
-    transport = FakeTransport(accepted=newer.to_json())
+
+    class LandingTransport(FakeTransport):
+        """The hub then SERVES what it accepted: the CLI re-reads the head after a
+        push to verify it holds the document that was sent."""
+
+        async def commit(self, **kw: Any) -> Any:
+            result = await super().commit(**kw)
+            remote.document = {**remote.document, **dict(kw["document"])}
+            return result
+
+    transport = LandingTransport(accepted=newer.to_json())
 
     monkeypatch.setattr(
         "local_operator.hub_sync.service.build_clients_sync", lambda _cm: (lambda _t: remote, "ok")
@@ -624,6 +634,7 @@ def test_the_cli_push_uploads_the_new_archive_then_publishes(
     assert hashlib.sha256(remote.uploads[0]).hexdigest() == newer.bundle.hash
     assert transport.commit_calls[0]["document"]["bundle"]["hash"] == newer.bundle.hash
     assert transport.preview_calls == []
+    assert json.loads(captured.out)["verified"] is True
 
 
 @pytest.mark.parametrize("json_output", [False, True])
