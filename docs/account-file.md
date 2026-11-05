@@ -37,11 +37,25 @@ from lop's config directory, the same way it reads Claude Code's
     "provider": "anthropic",
     "account_ref": "0123456789abcdef",
     "kind": "oauth",
-    "org_type": null
+    "org_type": null,
+    "accounts": [{"account_ref": "0123456789abcdef", "kind": "oauth", "org_type": null}]
   },
   "providers": {
-    "anthropic": {"account_ref": "0123456789abcdef", "kind": "oauth", "org_type": null},
-    "openai": {"account_ref": "fedcba9876543210", "kind": "api_key", "org_type": null}
+    "anthropic": {
+      "account_ref": "0123456789abcdef",
+      "kind": "oauth",
+      "org_type": null,
+      "accounts": [{"account_ref": "0123456789abcdef", "kind": "oauth", "org_type": null}]
+    },
+    "openai": {
+      "account_ref": null,
+      "kind": null,
+      "org_type": null,
+      "accounts": [
+        {"account_ref": "fedcba9876543210", "kind": "oauth", "org_type": "plus"},
+        {"account_ref": "1111222233334444", "kind": "oauth", "org_type": "pro"}
+      ]
+    }
   }
 }
 ```
@@ -51,22 +65,38 @@ from lop's config directory, the same way it reads Claude Code's
   `docs/USAGE_ANALYTICS_DESIGN.md` §1.1). Stable across re-logins of one account.
   An OAuth identity ref is the same on every host. A ref for a stored API key, or
   for an OAuth login with no IdP identity, is namespaced to that machine's auth
-  store, so it is equal across hosts only through the owner's ref on a mesh grant.
+  store (a random per-store id), so it is equal across hosts only through the
+  owner's ref on a mesh grant.
 - `kind`: `"oauth"` (a subscription login) or `"api_key"` (a stored key).
 - `org_type`: a short lowercase plan slug when lop already holds one from the
   login exchange, else `null`. Today only OpenAI/ChatGPT logins carry one
   (`chatgpt_plan_type`, e.g. `plus`, `pro`). Anthropic logins store only the
   organization's name, and lop makes no profile call to learn the type, so
   Anthropic is `null`. `null` means the plan is unknown.
-- `default`: the account lop uses for the configured default model's provider
-  (`hosting` in `config.yml`, mapped to its credential storage id). `null` when no
-  default is configured or that provider has no enabled stored credential. Agent
-  and per-request model overrides are not reflected.
-- `providers`: one entry per provider with an enabled stored credential. With
-  several accounts for a provider the entry is the first lop's cascade would reach:
-  the lowest-id enabled OAuth row, else the lowest-id enabled API-key row. Which
-  account served an individual call is what `Usage.account_ref` records.
-- Environment-variable credentials have no stored row and are not listed.
+- `providers`: one entry per provider with at least one enabled stored credential.
+  **Determinability rule.** `account_ref`, `kind` and `org_type` of an entry name
+  the serving account only when lop's credential cascade can be certain of it,
+  and are all `null` otherwise. The cascade tries OAuth rows, then API keys saved
+  by `login`, then an environment variable, then any other stored key. The winning
+  tier is the first non-empty of OAuth rows, login keys and other stored keys, and
+  the fields are set only when that tier holds exactly one enabled row. They are
+  `null` when it holds several (the pick is made per session: sticky, usage-aware
+  or round-robin, not by row order) and when only a plain stored key exists (an
+  environment variable outranks it and this file cannot see one).
+- `accounts`: every enabled stored row of the provider as
+  `{account_ref, kind, org_type}`, in cascade order (OAuth, login keys, other
+  keys; then row id). An inventory of accounts lop may use, not a claim about
+  which one serves. Rows without a durable ref are left out. Which account served
+  an individual call is what `Usage.account_ref` records.
+- `default`: `{"provider": p, ...entry}` for the configured default model's
+  provider (`hosting` in `config.yml`, mapped to its credential storage id), so
+  `default.account_ref` is `null` exactly when that provider's account is not
+  determinable. `default` itself is `null` when no default is configured or that
+  provider has no enabled stored credential. Agent and per-request model overrides
+  are not reflected.
+- Credentials from an environment variable, a config override or a runtime
+  override have no stored row and are not represented; a provider that has one
+  may still show a stored account that the environment variable outranks.
 
 ## Host configuration
 

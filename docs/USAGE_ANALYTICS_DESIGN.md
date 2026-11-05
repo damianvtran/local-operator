@@ -74,7 +74,13 @@ from one account, and drops it when they are mixed, as `billing_basis` does.
 
 The same ref is published for terminal hosts in `account.json` (see
 `docs/account-file.md`), so a host's per-terminal attribution and the per-call
-ledger name an account identically.
+ledger name an account identically. The file follows the credential cascade: it
+names one account per provider only when exactly one enabled row sits in the
+winning tier (OAuth, then login-stored keys, then other stored keys), and
+otherwise reports `account_ref: null` with an `accounts` inventory, because the
+per-session pick or an environment key decides. Publication is serialized under
+`.account-file.lock` and rebuilt from the current rows, so a stale publisher
+cannot resurrect a logged-out account.
 
 ## 2. The extension
 

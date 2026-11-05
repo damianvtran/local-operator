@@ -228,14 +228,21 @@ def test_file_follows_login_and_has_no_secrets_or_labels(config: Path, store: Au
     document = _file(config)
     expected = account_ref("anthropic", kind="oauth", credential_id=row.id, org_id="org-1")
     assert document["version"] == 1
+    inventory = [{"account_ref": expected, "kind": "oauth", "org_type": None}]
     assert document["default"] == {
         "provider": "anthropic",
         "account_ref": expected,
         "kind": "oauth",
         "org_type": None,
+        "accounts": inventory,
     }
     assert document["providers"] == {
-        "anthropic": {"account_ref": expected, "kind": "oauth", "org_type": None}
+        "anthropic": {
+            "account_ref": expected,
+            "kind": "oauth",
+            "org_type": None,
+            "accounts": inventory,
+        }
     }
     text = (config / ACCOUNT_FILE_NAME).read_text()
     for forbidden in (EMAIL, ORG_NAME, "org-1", *SECRETS):
@@ -257,13 +264,14 @@ def test_file_follows_disable(config: Path, store: AuthStore) -> None:
     first = store.upsert_credential("anthropic", _oauth("org-1"))
     second = store.upsert_credential("anthropic", _oauth("org-2"))
     assert first.id != second.id
-    assert _file(config)["default"]["account_ref"] == account_ref(
-        "anthropic", kind="oauth", credential_id=first.id, org_id="org-1"
-    )
+    ref_1 = account_ref("anthropic", kind="oauth", credential_id=first.id, org_id="org-1")
+    ref_2 = account_ref("anthropic", kind="oauth", credential_id=second.id, org_id="org-2")
+    # Two enabled accounts: which serves is a per-session choice, so the file says unknown.
+    both = _file(config)["default"]
+    assert both["account_ref"] is None
+    assert [a["account_ref"] for a in both["accounts"]] == [ref_1, ref_2]
     store.disable_credential(first.id, "operator")
-    assert _file(config)["default"]["account_ref"] == account_ref(
-        "anthropic", kind="oauth", credential_id=second.id, org_id="org-2"
-    )
+    assert _file(config)["default"]["account_ref"] == ref_2
 
 
 def test_file_follows_a_default_model_change(config: Path, store: AuthStore) -> None:
@@ -275,7 +283,9 @@ def test_file_follows_a_default_model_change(config: Path, store: AuthStore) -> 
     manager.set_config_value("hosting", "openai")
     document = _file(config)
     assert document["default"]["provider"] == "openai"
-    assert document["default"]["kind"] == "api_key"
+    # A lone stored key without ``source="login"`` is outranked by an env var: unknown.
+    assert document["default"]["kind"] is None and document["default"]["account_ref"] is None
+    assert len(document["default"]["accounts"]) == 1
     assert set(document["providers"]) == {"anthropic", "openai"}
 
 
@@ -534,3 +544,76 @@ def test_a_bare_config_dir_gets_no_lock_file(tmp_path: Path) -> None:
     bare.mkdir()
     assert refresh_account_file(bare) is False
     assert list(bare.iterdir()) == []
+
+
+# -- the published account follows the cascade ----------------------------
+
+
+def _providers(config: Path) -> dict[str, Any]:
+    return _file(config)["providers"]
+
+
+def test_login_key_beats_an_older_plain_key_like_the_real_cascade(
+    config: Path, store: AuthStore
+) -> None:
+    import asyncio
+
+    ConfigManager(config).set_config_value("hosting", "openai")
+    store.upsert_credential("openai", {"type": "api_key", "key": "sk-old"})
+    newer = store.upsert_credential(
+        "openai", {"type": "api_key", "key": "sk-new", "source": "login"}
+    )
+    access = asyncio.run(store.get_oauth_access("openai"))
+    assert access is not None and access.credential_id == newer.id
+    default = _file(config)["default"]
+    assert default["account_ref"] is not None
+    assert default["account_ref"] == access.account_ref
+    # The older plain key stays in the inventory, after the serving one.
+    assert len(default["accounts"]) == 2
+    assert default["accounts"][0]["account_ref"] == access.account_ref
+
+
+def test_two_oauth_rows_are_undeterminable_but_both_inventoried(
+    config: Path, store: AuthStore
+) -> None:
+    store.upsert_credential("anthropic", _oauth("org-1"))
+    store.upsert_credential("anthropic", _oauth("org-2"))
+    entry = _providers(config)["anthropic"]
+    assert entry["account_ref"] is None and entry["kind"] is None and entry["org_type"] is None
+    assert [a["account_ref"] for a in entry["accounts"]] == [
+        account_ref("anthropic", kind="oauth", credential_id=1, org_id="org-1"),
+        account_ref("anthropic", kind="oauth", credential_id=2, org_id="org-2"),
+    ]
+
+
+def test_only_a_tier_six_key_is_unknown_but_listed(config: Path, store: AuthStore) -> None:
+    ConfigManager(config).set_config_value("hosting", "openai")
+    store.upsert_credential("openai", {"type": "api_key", "key": "sk-plain"})
+    entry = _providers(config)["openai"]
+    assert entry["account_ref"] is None and entry["kind"] is None
+    assert len(entry["accounts"]) == 1 and entry["accounts"][0]["kind"] == "api_key"
+    assert _file(config)["default"]["account_ref"] is None
+
+
+def test_oauth_outranks_a_login_key(config: Path, store: AuthStore) -> None:
+    store.upsert_credential("openai", {"type": "api_key", "key": "sk-l", "source": "login"})
+    store.upsert_credential("openai", _oauth("acct-1"))
+    entry = _providers(config)["openai"]
+    assert entry["kind"] == "oauth"
+    assert entry["account_ref"] == account_ref(
+        "openai", kind="oauth", credential_id=2, org_id="acct-1"
+    )
+    assert [a["kind"] for a in entry["accounts"]] == ["oauth", "api_key"]
+
+
+def test_disabled_rows_are_excluded_from_entry_and_inventory(
+    config: Path, store: AuthStore
+) -> None:
+    first = store.upsert_credential("anthropic", _oauth("org-1"))
+    store.upsert_credential("anthropic", _oauth("org-2"))
+    store.disable_credential(first.id, "operator")
+    entry = _providers(config)["anthropic"]
+    assert entry["account_ref"] == account_ref(
+        "anthropic", kind="oauth", credential_id=2, org_id="org-2"
+    )
+    assert len(entry["accounts"]) == 1

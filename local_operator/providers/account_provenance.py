@@ -14,10 +14,14 @@ and the file cannot disagree about who the account is. A mesh borrower does not
 derive a ref at all: it carries the owner's (``OAuthAccess.account_ref``).
 The contract is documented in ``docs/account-file.md``.
 
+The file names the serving account only where the credential cascade makes it
+certain (see :func:`build_account_document`) and publishes ``null`` otherwise;
+it never guesses from row order.
+
 NON-SECRET BY CONSTRUCTION. The ref is a truncated SHA-256 over the provider id
 and an identity, so it is stable for one account, opaque to a reader, and not
 reversible to an email, an organization name or a raw IdP id. The file carries
-the ref, the credential kind and a coarse plan slug, nothing else.
+the ref, the credential kind and a coarse plan slug per account, nothing else.
 """
 
 from __future__ import annotations
@@ -137,21 +141,42 @@ def _entry_for(row: Any, store_uid: str | None) -> dict[str, Any] | None:
     return {"account_ref": ref, "kind": kind, "org_type": org_type_for(row.provider, kind, data)}
 
 
+def _tier(row: Any) -> int:
+    """The cascade tier of a stored row: 3 OAuth, 4 login-stored key, 6 other key.
+
+    Mirrors ``AuthStore._resolve``: OAuth rows first, then API keys persisted by
+    ``login`` (``data.source == "login"``), then (after the environment variable,
+    tier 5, which no stored row can describe) any other stored key.
+    """
+    if row.credential_type == "oauth":
+        return 3
+    data = row.data if isinstance(row.data, Mapping) else {}
+    return 4 if data.get("source") == "login" else 6
+
+
 def build_account_document(
     rows: list[Any], hosting: str | None, store_uid: str | None = None
 ) -> dict[str, Any]:
     """The ``account.json`` document for ``rows`` and the configured ``hosting``.
 
-    PER-PROVIDER RULE. The row lop would reach first in its credential cascade:
-    the lowest-id enabled OAuth row (the cascade walks OAuth before stored API
-    keys), else the lowest-id enabled API-key row. Disabled rows never count. A
-    provider with several accounts is reported as its first; the per-call stamp
-    on ``Usage`` is the exact record of which one served.
+    PER-PROVIDER ENTRY. ``accounts`` lists every enabled row's
+    ``{account_ref, kind, org_type}`` in cascade order (tier, then row id): an
+    inventory, not a claim about which one serves. The entry's own ``account_ref``,
+    ``kind`` and ``org_type`` name the serving account only when lop's credential
+    cascade (``AuthStore._resolve``) is certain of it: the winning tier is the
+    first non-empty of OAuth rows (3), login-stored keys (4), other stored keys
+    (6), and it must hold exactly ONE row. With several rows the pick is made per
+    session (sticky, usage-aware, round-robin), so the file cannot say; a tier-6
+    key is outranked by an environment variable, which no file here can see. In
+    both cases the three fields are ``null``. Disabled rows never count. A
+    credential from an environment variable, a config override or the runtime is
+    not represented at all.
 
-    DEFAULT RULE. The provider of the configured default model, i.e.
-    ``hosting`` in ``config.yml`` mapped through ``credential_provider_id``.
-    ``null`` when no default is configured or that provider has no usable
-    credential. Per-agent and per-request model overrides are not consulted.
+    DEFAULT RULE. ``default`` is ``{"provider": p, **entry}`` for the provider of
+    the configured default model (``hosting`` in ``config.yml`` mapped through
+    ``credential_provider_id``) when that provider has an entry, else ``null``;
+    its ``account_ref`` is ``null`` when the serving account is not determinable.
+    Per-agent and per-request model overrides are not consulted.
     """
     from local_operator.providers.local import LOCAL_PROVIDER_IDS
     from local_operator.providers.registry import (
@@ -159,30 +184,38 @@ def build_account_document(
         get_provider_definition,
     )
 
-    chosen: dict[str, Any] = {}
-    for row in sorted(rows, key=lambda r: (r.credential_type != "oauth", r.id)):
+    by_provider: dict[str, list[Any]] = {}
+    for row in rows:
         if row.disabled_cause is not None or row.credential_type not in ("oauth", "api_key"):
             continue
         # Only chat providers the registry owns: the same table also holds MCP
         # and console credentials, which are not an account lop spends.
         if get_provider_definition(row.provider) is None or row.provider in LOCAL_PROVIDER_IDS:
             continue
-        if row.provider in chosen:
-            continue
-        entry = _entry_for(row, store_uid)
-        if entry is not None:
-            chosen[row.provider] = entry
+        by_provider.setdefault(row.provider, []).append(row)
+
+    providers: dict[str, Any] = {}
+    for provider, group in by_provider.items():
+        ordered = sorted(group, key=lambda r: (_tier(r), r.id))
+        winning = [r for r in ordered if _tier(r) == _tier(ordered[0])]
+        entry: dict[str, Any] = {"account_ref": None, "kind": None, "org_type": None}
+        if _tier(ordered[0]) in (3, 4) and len(winning) == 1:
+            sole = _entry_for(winning[0], store_uid)
+            if sole is not None:
+                entry = sole
+        entry["accounts"] = [e for e in (_entry_for(r, store_uid) for r in ordered) if e]
+        providers[provider] = entry
 
     default: dict[str, Any] | None = None
     if hosting:
         provider = credential_provider_id(str(hosting))
-        entry = chosen.get(provider)
-        if entry is not None:
-            default = {"provider": provider, **entry}
+        chosen = providers.get(provider)
+        if chosen is not None:
+            default = {"provider": provider, **chosen}
     return {
         "version": ACCOUNT_FILE_VERSION,
         "default": default,
-        "providers": dict(sorted(chosen.items())),
+        "providers": dict(sorted(providers.items())),
     }
 
 
