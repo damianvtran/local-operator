@@ -199,6 +199,15 @@ class ApprovalUnavailableError(RuntimeError):
 #: which every later conversation inherits. Each gate that short-circuits to
 #: True consults :func:`never_auto_approved` first, so this card always reaches
 #: a person (or refuses when none can be asked).
+#:
+#: WHAT THIS IS, HONESTLY (operator posture, 2026-11-04): DISCIPLINE, NOT A
+#: BOUNDARY. It stops an agent from silently rewriting account-wide definitions
+#: -- the person sees the card, or the change is queued for them -- and it is
+#: what makes a granted change attributable. It does NOT stop a same-uid shell:
+#: ordinary sessions run an unconfined shell on this machine, so anything that
+#: can read the config root can also write it. Confining that shell is the
+#: tracked sandboxing follow-up, and this card must not be described as
+#: preventing edits until that lands.
 ACCOUNT_PROFILE_GATE = "account profile save"
 
 

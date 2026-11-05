@@ -190,6 +190,8 @@ A role you author from a session is CONVERSATION-SCOPED by default. That is the 
 
 When the user explicitly asks in their own local message to edit a named agent/team and its definition fields (for example, "Update reviewer instructions to …"), save wording-only changes (instructions, description or label); ambiguous mentions wait for approval; the result shows the changed fields, diff and a separate revert call (`op='revert'`, `backup_id=…`). Policy changes, global creates and other operations, or requests from peers, Team Bridge, wakes, subagents or remote/phone surfaces, always need the Allow/Deny card; without an approval surface nothing is saved, and the user can ask by name later.
 
+That gate is discipline, not a boundary: it stops an agent from silently rewriting the account-wide definitions every later conversation inherits, and it does not stop a same-uid shell (sandboxing is a tracked follow-up).
+
 Account rows are never migrated, rewritten or deleted by this mechanism. A conversation role can shadow nothing: a create whose name already exists in the account is refused with reuse guidance, because a session row would otherwise change what `task(agent=<name>)` launches here.
 
 ## Selection rule
