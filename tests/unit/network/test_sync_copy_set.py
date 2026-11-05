@@ -286,6 +286,13 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/guardrails/classify.py": (
+        4,
+        "_CONFIG_FILE, _SECRETS_DIRNAME, _SESSIONS_DIRNAME and _STATE_DIRNAME "
+        "name protected state-root paths used for static deletion classification, "
+        "not entries to copy within an individual session directory. In particular "
+        "sessions names the parent of session directories, not a session child.",
+    ),
     "local_operator/agent_avatar.py": (
         3,
         "``PNG_NAME``/``JPEG_NAME`` ('avatar.png', 'avatar.jpg'): an AGENT's picture, "

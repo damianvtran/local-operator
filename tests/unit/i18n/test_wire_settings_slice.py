@@ -118,3 +118,26 @@ def test_provider_rows_render_the_product_name_from_the_preset() -> None:
         ]
         == "{name} endpoint"
     )
+
+
+def test_guardrails_extraction_slots_reuse_audited_bytes_in_every_locale() -> None:
+    """The registry snapshot uses historical wire.settings names; guardrails
+    renders its child namespace. Compatibility slots must copy the audited
+    source values exactly, not introduce independently drifting translations.
+    See docs/guardrails-settings-extraction.md for the two audit lineages.
+    """
+    aliases = {
+        "wire.settings.guardrails.title": "wire.guardrails.section.title",
+        "wire.settings.guardrails.description": "wire.guardrails.section.description",
+    }
+    for row in ("enabled", "critical_override", "judge_timeout_s", "rules_dir"):
+        for field in ("label", "help"):
+            aliases[f"wire.settings.guardrails_{row}.{field}"] = f"wire.guardrails.{row}.{field}"
+    for locale in ("en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"):
+        parent = catalogues.load_catalogue(locale, "wire.settings")
+        child = catalogues.load_catalogue(locale, "wire.guardrails")
+        for dest, src in aliases.items():
+            assert parent[dest].encode("utf-8") == child[src].encode("utf-8"), (locale, dest)
+            assert messages.render(dest, {}, locale=locale).encode("utf-8") == child[src].encode(
+                "utf-8"
+            ), (locale, dest)

@@ -1,0 +1,12 @@
+{
+  "wire.guardrails.critical_override.help": "Off by default. On sends critical deletions (state dir, config, secrets, home) to the safety check instead of refusing them. Only honoured when set from this machine's settings, never from a file edit.",
+  "wire.guardrails.critical_override.label": "Review critical deletions",
+  "wire.guardrails.enabled.help": "Applies your guardrail rule files to tool calls before they run. The built-in dangerous-delete check stays on either way.",
+  "wire.guardrails.enabled.label": "Guardrail rules",
+  "wire.guardrails.judge_timeout_s.help": "How long the safety check may take before the call is blocked. A check that cannot answer always blocks.",
+  "wire.guardrails.judge_timeout_s.label": "Safety check timeout (s)",
+  "wire.guardrails.rules_dir.help": "An extra folder of guardrail rule files (*.md), loaded in addition to the rules folder in the config directory.",
+  "wire.guardrails.rules_dir.label": "Rules folder",
+  "wire.guardrails.section.description": "Checks that run before a tool call and can refuse dangerous ones.",
+  "wire.guardrails.section.title": "Guardrails"
+}

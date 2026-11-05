@@ -1,0 +1,12 @@
+{
+  "wire.guardrails.critical_override.help": "ڈیفالٹ طور پر بند۔ آن ہونے پر اہم چیزیں حذف کرنے کی کالیں (اسٹیٹ فولڈر، کنفیگ، خفیہ معلومات، ہوم فولڈر) مسترد ہونے کے بجائے حفاظتی جانچ کو بھیجی جاتی ہیں۔ صرف اسی مشین کی ترتیبات سے سیٹ کرنے پر مؤثر، فائل میں ترمیم سے کبھی نہیں۔",
+  "wire.guardrails.critical_override.label": "اہم چیزیں حذف کرنے کا جائزہ",
+  "wire.guardrails.enabled.help": "ٹول کالز چلنے سے پہلے ان پر آپ کی حفاظتی اصولوں کی فائلیں لاگو کرتا ہے۔ بلٹ اِن dangerous-delete جانچ ہر صورت میں آن رہتی ہے۔",
+  "wire.guardrails.enabled.label": "حفاظتی اصول",
+  "wire.guardrails.judge_timeout_s.help": "کال روکے جانے سے پہلے حفاظتی جانچ کتنی دیر لے سکتی ہے۔ جو جانچ جواب نہ دے سکے وہ ہمیشہ روک دیتی ہے۔",
+  "wire.guardrails.judge_timeout_s.label": "حفاظتی جانچ کی مہلت (سیکنڈ)",
+  "wire.guardrails.rules_dir.help": "حفاظتی اصولوں کی فائلوں (*.md) کا ایک اضافی فولڈر، جو کنفیگ ڈائریکٹری کے rules فولڈر کے علاوہ بھی لوڈ ہوتا ہے۔",
+  "wire.guardrails.rules_dir.label": "اصولوں کا فولڈر",
+  "wire.guardrails.section.description": "ٹول کال سے پہلے چلنے والی جانچیں جو خطرناک کالز مسترد کر سکتی ہیں۔",
+  "wire.guardrails.section.title": "حفاظتی انتظامات"
+}
