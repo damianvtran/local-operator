@@ -51,8 +51,10 @@ from __future__ import annotations
 
 import re
 import string
+from typing import Any
 
 __all__ = [
+    "bound_inline_data_payload",
     "bound_inline_data_uris",
     "inline_data_marker",
 ]
@@ -62,12 +64,18 @@ __all__ = [
 _DEFAULT_MIME = "text/plain"
 
 #: Header caps. These exist for COST, not for validation (see the module
-#: docstring): they turn a quadratic retry into a constant one. A DNS-style
-#: media type is far under 127 characters and RFC 2397 allows no unbounded
-#: parameter list, so no URI a sender can actually mean is refused by them.
-_MAX_MIME_CHARS = 127
-_MAX_PARAM_CHARS = 127
-_MAX_PARAMS = 8
+#: docstring): they turn a quadratic retry into a constant one. They are set
+#: generously — well past any media type or parameter list a real payload uses —
+#: and pair with the atomic groups in :data:`_HEADER` so the widened bound costs
+#: nothing per attempt. They are still a RESIDUAL, stated rather than hidden:
+#: RFC 2397's ``*( ";" parameter )`` is unbounded, so a header longer than these
+#: caps (a >255-char media type, or a >16-parameter list) is NOT matched and its
+#: payload is not withheld. That is a deliberate trade — an unbounded header is
+#: exactly what made the scan quadratic — and it is bounded in turn by the class
+#: of URI a sender can plausibly construct.
+_MAX_MIME_CHARS = 255
+_MAX_PARAM_CHARS = 255
+_MAX_PARAMS = 16
 
 #: One inline data URI HEADER — everything up to and including ``;base64,``.
 #: Case-insensitive because RFC 2397/5234 ABNF literals are, and browsers parse
@@ -77,9 +85,9 @@ _MAX_PARAMS = 8
 #: be absorbed into it and then backtracked out of. The payload is deliberately
 #: NOT part of this pattern; :func:`_consume_payload` reads it.
 _HEADER = re.compile(
-    rf"data:(?P<mime>[^;,\s]{{0,{_MAX_MIME_CHARS}}})?"
-    rf"(?P<params>(?:;[^;,\s=]{{0,{_MAX_PARAM_CHARS}}}="
-    rf"[^;,\s]{{0,{_MAX_PARAM_CHARS}}}){{0,{_MAX_PARAMS}}})"
+    rf"data:(?>(?P<mime>[^;,\s]{{0,{_MAX_MIME_CHARS}}}))?"
+    rf"(?P<params>(?>;(?>[^;,\s=]{{0,{_MAX_PARAM_CHARS}}})="
+    rf"(?>[^;,\s]{{0,{_MAX_PARAM_CHARS}}})){{0,{_MAX_PARAMS}}})"
     r";[ \t]*base64[ \t]*,",
     re.IGNORECASE,
 )
@@ -105,6 +113,11 @@ _FOLD_WS = " \t\r\n"
 #: survive to under 60 characters — under the 64-char blob threshold, and three
 #: orders of magnitude below the 700 KB this exists to remove.
 _FOLD_MIN_LINE = 60
+
+#: How much of the sender-chosen media type the marker echoes. The header cap
+#: (:data:`_MAX_MIME_CHARS`) exists for COST, not for display: echoing all of it
+#: would put up to 255 characters of sender text into model content.
+_MAX_MARKER_MIME_CHARS = 64
 
 #: Placeholder for one replaced URI. Names the type, the decoded size and that
 #: the bytes are gone — no base64, no hash, no filename (the hub never gives an
@@ -137,10 +150,47 @@ def _decoded_size(payload: str) -> int:
 
 
 def inline_data_marker(mime: str, size: int, *, at_least: bool = False) -> str:
-    """The short structured placeholder that stands in for one withheld URI."""
+    """The short structured placeholder that stands in for one withheld URI.
+
+    ``mime`` is clamped: it is SENDER-CHOSEN text, and the header cap alone would
+    let 255 characters of it into model content verbatim. A real media type is
+    far shorter, so the clamp costs nothing a caller wants and keeps the marker
+    the short structured thing the rest of this module promises.
+    """
 
     template = _MARKER_AT_LEAST if at_least else _MARKER
-    return template.format(mime=mime or _DEFAULT_MIME, size=size)
+    shown = (mime or _DEFAULT_MIME).strip()[: _MAX_MARKER_MIME_CHARS]
+    return template.format(mime=shown or _DEFAULT_MIME, size=size)
+
+
+def _fold_resume(text: str, index: int) -> int | None:
+    """Index just past a fold separator at ``index``, or ``None`` if there is none.
+
+    TWO FORMS, because the same fold reaches this module in two states. While a
+    body is still a plain Python string the separator is a REAL newline; once
+    ``json.dumps`` has serialised it the newline becomes the two characters
+    ``\\`` ``n``. Accepting both is the defensive half of the R-2 fix: the primary
+    fix bounds the string BEFORE serialisation (:func:`bound_inline_data_payload`),
+    and this keeps the serialised path correct too, so a future change to how a
+    page is built cannot silently reopen the hole that shipped the whole blob.
+    """
+
+    length = len(text)
+    i = index
+    seen = False
+    while i < length:
+        char = text[i]
+        if char in _FOLD_WS:
+            i += 1
+            seen = True
+            continue
+        # The escaped spellings json.dumps emits for whitespace.
+        if char == "\\" and i + 1 < length and text[i + 1] in "nrt":
+            i += 2
+            seen = True
+            continue
+        break
+    return i if seen else None
 
 
 def _consume_payload(text: str, start: int) -> tuple[str, int, bool]:
@@ -169,27 +219,27 @@ def _consume_payload(text: str, start: int) -> tuple[str, int, bool]:
         pieces.append(text[index:end])
         index = end
         # A fold is only a fold if the line it would continue was a full line of
-        # payload; otherwise this newline ends the blob (see _FOLD_MIN_LINE).
-        if index < length and text[index] in "\r\n" and (index - line_start) >= _FOLD_MIN_LINE:
-            resumed = index
-            while resumed < length and text[resumed] in _FOLD_WS:
-                resumed += 1
-            next_end = resumed
+        # payload; otherwise this separator ends the blob (see _FOLD_MIN_LINE).
+        resume = (
+            _fold_resume(text, index) if (index - line_start) >= _FOLD_MIN_LINE else None
+        )
+        if resume is not None:
+            next_end = resume
             while next_end < length and text[next_end] in _PAYLOAD_CHARS:
                 next_end += 1
             # The NEXT line must also be a full-width line. That is what tells a
             # wrap apart from a single blob followed by a short word: prose is
             # never 60+ unbroken base64 characters.
-            if (next_end - resumed) >= _FOLD_MIN_LINE:
-                line_start = resumed
-                index = resumed
+            if (next_end - resume) >= _FOLD_MIN_LINE:
+                line_start = resume
+                index = resume
                 folded = True
                 continue
         break
     # ``tail_left`` only when a SHORT continuation was declined AFTER the wrap
     # was already established: that short run is the wrap's final line, so the
     # size above is a floor. With no fold it is prose, and the payload is whole.
-    tail_left = folded and index < length and text[index] in "\r\n"
+    tail_left = folded and _fold_resume(text, index) is not None
     return "".join(pieces), index, tail_left
 
 
@@ -235,3 +285,44 @@ def bound_inline_data_uris(text: str) -> str:
         return text
     pieces.append(text[cursor:])
     return "".join(pieces)
+
+
+def bound_inline_data_payload(value: Any) -> Any:
+    """Bound every string INSIDE a JSON-ish payload, BEFORE it is serialised.
+
+    WHY BEFORE SERIALISATION, and why that is the shipping fix rather than a
+    nicety. Every history op builds its model-visible page with
+    ``json.dumps(result)``, and ``json.dumps`` rewrites a newline in a body to the
+    two characters ``\\`` ``n``. A MIME-wrapped payload therefore reaches the model
+    as one long line of visible ``\\n`` escapes, and scanning only the serialised
+    text meant the fold was never seen: the first 76-char line matched on its own
+    (a false exact ``57 bytes`` receipt) and the remaining ~700 KB shipped
+    unchanged. Bounding the plain Python string here means the escaped form never
+    carries a payload at all.
+
+    :func:`bound_inline_data_uris` also understands the escaped form, so a caller
+    that only has serialised text is still covered — two layers because this hole
+    was reachable by exactly one of them.
+
+    COPY-ON-WRITE. A payload with no data URI is returned as the SAME object at
+    every level, so the overwhelmingly common case allocates nothing and the
+    pass-through guarantee is observable by identity, not just by equality.
+    """
+
+    if isinstance(value, str):
+        return bound_inline_data_uris(value)
+    if isinstance(value, dict):
+        changed = False
+        mapped: dict[Any, Any] = {}
+        for key, item in value.items():
+            bounded = bound_inline_data_payload(item)
+            changed = changed or bounded is not item
+            mapped[key] = bounded
+        return mapped if changed else value
+    if isinstance(value, list):
+        bounded_items = [bound_inline_data_payload(item) for item in value]
+        return value if all(new is old for new, old in zip(bounded_items, value)) else bounded_items
+    if isinstance(value, tuple):
+        bounded_items = tuple(bound_inline_data_payload(item) for item in value)
+        return value if all(new is old for new, old in zip(bounded_items, value)) else bounded_items
+    return value

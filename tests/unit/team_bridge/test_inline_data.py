@@ -18,6 +18,7 @@ each kept 100 % of the payload before the fix.
 from __future__ import annotations
 
 import base64
+import json
 import re
 import time
 from typing import Any, cast
@@ -30,6 +31,7 @@ from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import host as host_mod
 from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.inline_data import (
+    bound_inline_data_payload,
     bound_inline_data_uris,
     inline_data_marker,
 )
@@ -334,3 +336,172 @@ async def test_the_tool_result_the_model_receives_carries_no_base64() -> None:
     # row — the transcript and UI a human reads are unchanged by this filter.
     details = result.details or {}
     assert _BIG_PAYLOAD in str(details["content"])
+
+
+# ---------------------------------------------------------------------------
+# Round-2 findings. The JSON page is THE shipping path: every history op builds
+# its model-visible content with ``json.dumps``, which turns the newline inside
+# a MIME-wrapped payload into the two characters ``\`` ``n``. A scan of that
+# serialised text therefore never sees the fold, and the previous version kept
+# the whole blob while claiming an exact 57 bytes. These drive the real tool
+# because that is the only test that would have caught it.
+# ---------------------------------------------------------------------------
+
+
+def _wrapped(payload: str, width: int = 76) -> str:
+    return "\n".join(payload[i : i + width] for i in range(0, len(payload), width))
+
+
+def _assert_no_payload(visible: str) -> None:
+    """No PAYLOAD survives. The receipts are stripped first: their media type is
+    a bounded label (clamped to 64 chars), not withheld bytes, and a real one —
+    ``application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`` — is a
+    long alphanumeric run that a naive detector would call a blob."""
+
+    stripped = re.sub(r"\[inline data withheld: [^\]]*\]", "", visible)
+    assert _runs(stripped) == [], "a base64 run survived into model content"
+    assert "base64," not in visible, "a data URI payload survived"
+
+
+@pytest.mark.asyncio
+async def test_channel_history_json_page_withholds_a_wrapped_payload() -> None:
+    """The shipping path: a 76-column wrap inside a ``json.dumps`` page."""
+
+    body = f"chart\ndata:image/png;base64,{_wrapped(_BIG_PAYLOAD)}\nend"
+    client = RecordingClient(
+        messages={
+            "messages": [
+                {
+                    "id": "cmsg_1",
+                    "seq": 6,
+                    "sender": {"kind": "agent", "display_label": "Aida"},
+                    "body": {"text": body},
+                }
+            ]
+        }
+    )
+    runtime = BridgeRuntime(
+        client=cast(TeamBridgeClient, client),
+        config_dir=".",
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="sess_1",
+    )
+    context = ToolContext(bridge_runtime=runtime)
+    tool = build_bridge_tool(context)
+    assert tool is not None
+    result = await tool.execute(
+        "synthetic-call",
+        {"op": "channel_history", "channel_id": "bcv_abcd1234", "limit": 20},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    visible = "\n".join(getattr(block, "text", "") or "" for block in result.content)
+    _assert_no_payload(visible)
+    # Truthful floor, not the old false exact "57 bytes" for one wrapped line.
+    assert "at least" in visible
+    # The page the model receives is still valid JSON — the cut lands inside a
+    # string, never across the object.
+    json.loads(visible[len(BRIDGE_UNTRUSTED_CLAUSE) + 2 :])
+    # Humans still get the raw row: ``details`` is not serialized to providers.
+    # Raw row preserved for renderers — the wrapped payload is present with its
+    # newlines escaped, so compare a prefix rather than the unwrapped string.
+    assert _BIG_PAYLOAD[:64] in str((result.details or {})["content"])
+
+
+@pytest.mark.asyncio
+async def test_channel_thread_json_page_withholds_a_wrapped_payload() -> None:
+    """``channel_thread`` builds its page the same way and gets the same bound."""
+
+    row = {
+        "id": "cmsg_1",
+        "seq": 6,
+        "sender": {"kind": "agent"},
+        "body": {"text": f"chart\ndata:image/png;base64,{_wrapped(_BIG_PAYLOAD)}\nend"},
+    }
+    client = RecordingClient()
+    client.replies_result = {"root": row, "replies": [], "has_more": False}
+    runtime = BridgeRuntime(
+        client=cast(TeamBridgeClient, client),
+        config_dir=".",
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="sess_1",
+    )
+    context = ToolContext(bridge_runtime=runtime)
+    tool = build_bridge_tool(context)
+    assert tool is not None
+    result = await tool.execute(
+        "synthetic-call",
+        {
+            "op": "channel_thread",
+            "channel_id": "bcv_abcd1234",
+            "thread_root_id": "bcmsg_abcd1234",
+            "limit": 20,
+        },
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    visible = "\n".join(getattr(block, "text", "") or "" for block in result.content)
+    _assert_no_payload(visible)
+    assert "at least" in visible
+    assert _BIG_PAYLOAD[:64] in str((result.details or {}).get("content", ""))
+
+
+def test_escaped_newlines_are_a_second_layer() -> None:
+    """If a caller only has the SERIALISED text, the fold is still understood.
+
+    The shipping fix bounds the plain string before serialisation, so this is
+    the defensive half: a future page builder that hands over only JSON text
+    must not silently reopen the hole that shipped 700 KB.
+    """
+
+    dumped = json.dumps({"body": {"text": f"x\ndata:image/png;base64,{_wrapped(_BIG_PAYLOAD)}\ny"}})
+    assert "\\n" in dumped, "the fold must appear escaped, or this tests nothing"
+    bounded = bound_inline_data_uris(dumped)
+
+    assert _runs(bounded) == []
+    assert "at least" in bounded
+    # The escaped page is still valid JSON after the substitution.
+    json.loads(bounded)
+
+
+def test_a_long_media_type_and_many_parameters_are_matched() -> None:
+    """The NIT: caps widened so these shapes cannot hide a 700 KB blob.
+
+    They remain a stated residual — RFC 2397's parameter list is unbounded, so
+    some cap has to exist or the scan is quadratic again.
+    """
+
+    long_mime = "application/" + "x" * 200
+    many_params = "".join(f";p{i}=v" for i in range(12))
+    for header in (f"data:{long_mime};base64,", f"data:image/png{many_params};base64,"):
+        bounded = bound_inline_data_uris(f"x {header}{_BIG_PAYLOAD} y")
+        assert "withheld" in bounded, header[:40]
+        _assert_no_payload(bounded)
+
+
+def test_payload_walker_passes_an_unaffected_page_through_by_identity() -> None:
+    """Copy-on-write: the common case allocates nothing and keeps the object."""
+
+    page = {"messages": [{"id": "cmsg_1", "body": {"text": "no inline data here"}}]}
+    assert bound_inline_data_payload(page) is page
+    assert bound_inline_data_payload(page["messages"]) is page["messages"]
+    body = page["messages"][0]["body"]["text"]
+    assert bound_inline_data_payload(body) is body
+
+
+def test_payload_walker_bounds_a_body_it_does_have_to_change() -> None:
+    page = {"messages": [{"body": {"text": f"a\ndata:image/png;base64,{_PNG_PAYLOAD}\nb"}}]}
+    bounded = bound_inline_data_payload(page)
+    text = bounded["messages"][0]["body"]["text"]
+    assert text is not page["messages"][0]["body"]["text"]
+    assert "withheld" in text
+    # The untouched sibling is still the same object.
+    assert bound_inline_data_payload(page)["messages"] is not page["messages"]
