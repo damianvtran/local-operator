@@ -183,7 +183,7 @@ class TestEnableDisable:
     def test_enabled_false_suppresses_and_keeps_name_owned(
         self, tmp_path: Path, home: Path
     ) -> None:
-        """A disabled entry is dropped (suppressed): it must not shadow."""
+        """A disabled owned entry is absent from effective configs."""
         cwd = tmp_path / "proj"
         _write(
             cwd / ".local-operator" / "mcp.json",
@@ -191,6 +191,85 @@ class TestEnableDisable:
         )
         configs, _ = load_all_mcp_configs(cwd)
         assert "x" not in configs
+
+    @pytest.mark.parametrize("scope", ["project", "dot", "user"])
+    @pytest.mark.parametrize(
+        "lists",
+        [
+            {},
+            {"enabledServers": ["x"]},
+            {"enabledServers": ["x"], "disabledServers": ["x"]},
+        ],
+    )
+    def test_owned_false_blocks_lower_sources_unless_allowlisted(
+        self, tmp_path: Path, home: Path, scope: str, lists: dict[str, list[str]]
+    ) -> None:
+        """An explicit owned disable cannot resurrect a same-named Codex import."""
+        cwd = tmp_path / "proj"
+        paths = [
+            cwd / ".local-operator" / "mcp.json",
+            cwd / ".mcp.json",
+            home / ".local-operator" / "mcp.json",
+        ]
+        owned = paths[["project", "dot", "user"].index(scope)]
+        for path in paths[paths.index(owned) :]:
+            _write(path, {"mcpServers": {"x": _stdio("lower-owned")}})
+        _write(owned, {"mcpServers": {"x": _stdio("disabled-owned", enabled=False)}})
+        # Lists deliberately live in a different owned scope: existing list
+        # aggregation stays global, unlike declaration priority/tombstones.
+        list_path = paths[2] if scope != "user" else paths[0]
+        doc = json.loads(list_path.read_text()) if list_path.exists() else {}
+        _write(list_path, {**doc, **lists})
+        _write_toml(home / ".codex" / "config.toml", '[mcp_servers.x]\ncommand = "codex"')
+
+        configs, sources = load_all_mcp_configs(cwd)
+        if "enabledServers" in lists and "disabledServers" not in lists:
+            assert _command(configs, "x") == "disabled-owned"
+            assert sources["x"] == str(owned)
+        else:
+            assert "x" not in configs
+            assert "x" not in sources
+
+    @pytest.mark.parametrize(
+        "higher,lower", [("project", "dot"), ("project", "user"), ("dot", "user")]
+    )
+    @pytest.mark.parametrize("flag", [None, True])
+    def test_higher_priority_declaration_beats_lower_owned_false(
+        self, tmp_path: Path, home: Path, higher: str, lower: str, flag: bool | None
+    ) -> None:
+        cwd = tmp_path / "proj"
+        paths = {
+            "project": cwd / ".local-operator" / "mcp.json",
+            "dot": cwd / ".mcp.json",
+            "user": home / ".local-operator" / "mcp.json",
+        }
+        _write(paths[higher], {"mcpServers": {"x": _stdio("winner", enabled=flag)}})
+        _write(paths[lower], {"mcpServers": {"x": _stdio("off", enabled=False)}})
+        configs, sources = load_all_mcp_configs(cwd)
+        assert _command(configs, "x") == "winner"
+        assert sources["x"] == str(paths[higher])
+
+    @pytest.mark.parametrize("allowlisted", [False, True])
+    @pytest.mark.parametrize("fallback", [False, True])
+    def test_imported_false_retains_fallback_behavior(
+        self, tmp_path: Path, home: Path, allowlisted: bool, fallback: bool
+    ) -> None:
+        cwd = tmp_path / "proj"
+        _write(
+            home / ".claude.json", {"mcpServers": {"x": _stdio("claude", enabled=False)}}
+        )
+        if fallback:
+            _write_toml(home / ".codex" / "config.toml", '[mcp_servers.x]\ncommand = "codex"')
+        if allowlisted:
+            _write(cwd / ".mcp.json", {"enabledServers": ["x"]})
+        configs, sources = load_all_mcp_configs(cwd)
+        if not allowlisted and not fallback:
+            assert configs == {}
+            assert sources == {}
+            return
+        assert _command(configs, "x") == ("claude" if allowlisted else "codex")
+        expected = home / (".claude.json" if allowlisted else ".codex/config.toml")
+        assert sources["x"] == str(expected)
 
     def test_disable_list_from_user_file_applies(self, tmp_path: Path, home: Path) -> None:
         cwd = tmp_path / "proj"
