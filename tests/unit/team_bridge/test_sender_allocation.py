@@ -38,6 +38,7 @@ def _provider(
     script=None,
     on_request=None,
     reply=chain.DELIVER,
+    resend_401=False,
 ):
     observed = []
 
@@ -46,6 +47,8 @@ def _provider(
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             observed.append(payload)
             code, message = (script or {}).get(payload["model"], (status, error))
+            if resend_401 and len(observed) == 1:
+                code, message = 401, "expired synthetic credential"
             if on_request is not None:
                 on_request(payload)
             self.send_response(code)
@@ -64,7 +67,7 @@ def _provider(
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     chain._config(root, chain=["deepseek/deepseek-flash"] if fallback else None)
-    chain._install_wire(monkeypatch, chain._Wire({}))
+    chain._install_wire(monkeypatch, chain._Wire({}), resend_401=resend_401)
 
     class LoopbackTransport(real_transport):
         async def handle_async_request(self, request):
@@ -431,3 +434,36 @@ def test_batch_noncarrier_sender_mutation_blocks_fallback_http(tmp_path, monkeyp
         results = _batch_cycle(tmp_path, owner, items)
         assert all(result.disposition == "hold" for result in results)
         assert len(requests) == 1
+
+
+@pytest.mark.parametrize("prefill", [0, 19])
+def test_actual_401_resend_rechecks_sender_http_allowance(tmp_path, monkeypatch, prefill):
+    store, owner = _setup(tmp_path)
+    proof = {"sender_account_id": "sender-a", "sender_kind": "human"}
+    for _ in range(prefill):
+        store._reserve_bucket(
+            owner,
+            kind="http",
+            message_id="bmsg_prior",
+            fingerprint=_PROOF_PREFIX + json.dumps(proof),
+            sender_account_id="sender-a",
+        )
+    monkeypatch.setattr(chain, "_item", lambda message_id: _identity_item(message_id))
+    with _provider(monkeypatch, tmp_path, resend_401=True) as requests:
+        result = chain._cycle(tmp_path, owner)
+        assert len(requests) == (1 if prefill else 2)
+        assert [r["model"] for r in requests] == ["gpt-5.4"] * len(requests)
+        assert result.disposition == ("hold" if prefill else "deliver")
+        print(
+            "401-resend",
+            {
+                "prefill": prefill,
+                "actual_requests": len(requests),
+                "disposition": result.disposition,
+                "ledger": _counts(tmp_path),
+            },
+        )
+    assert _counts(tmp_path) == [
+        ("http", "sender-a", 20 if prefill else 2),
+        ("logical", "sender-a", 1),
+    ]

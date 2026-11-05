@@ -137,6 +137,7 @@ def _install_wire(
     prewire: dict[str, BaseException] | None = None,
     postwire: dict[str, BaseException] | None = None,
     failover: dict[str, BaseException] | None = None,
+    resend_401: bool = False,
 ) -> None:
     """Fake ONLY the vendor client, the physical transport and, optionally, the
     failover dispatch loop.
@@ -197,6 +198,19 @@ def _install_wire(
                             "isolated": request.isolated,
                         },
                     )
+                    if resend_401 and response.status_code == 401:
+                        # A synthetic vendor's auth re-resolution retry, still
+                        # inside ONE guarded stream call. Both socket sends must
+                        # cross the native charging transport independently.
+                        response = await http_client.post(
+                            f"https://{request.model.provider}.invalid/v1/chat",
+                            json={
+                                "provider": request.model.provider,
+                                "model": request.model.model_id,
+                                "temperature": request.temperature,
+                                "isolated": request.isolated,
+                            },
+                        )
                     if response.status_code >= 400:
                         raise ProviderError(response.status_code, response.json()["error"])
                     after = (postwire or {}).get(mid)
