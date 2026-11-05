@@ -1357,3 +1357,37 @@ async def test_an_unreadable_settings_read_falls_back_to_the_module_default(
 
     assert len(reads) == 2, "expected the tick's read to succeed and the delay's to fail"
     assert sleeps == [0.0, 420.0]
+
+
+@pytest.mark.asyncio
+async def test_zero_links_tick_still_runs_org_enrol(rig, monkeypatch) -> None:
+    """Org auto-enrol rides the tick BEFORE the no-links early return.
+
+    A machine that has linked nothing yet is exactly the one that most needs
+    its organization's catalogue; returning early first would mean it never
+    enrols at all.
+    """
+    from local_operator.hub_org import enrol
+
+    runner, _hub, _agents, root, *_ = rig
+    calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        enrol, "on_boundary", lambda cfg, boundary, **kw: calls.append((cfg, boundary, kw))
+    )
+    report = await runner.tick(reason="timer")
+    assert report.skipped == "no-linked-items"
+    assert calls == [(root, "timer", {"background": False})]
+
+
+@pytest.mark.asyncio
+async def test_a_raising_org_enrol_never_costs_the_tick(rig, monkeypatch) -> None:
+    from local_operator.hub_org import enrol
+
+    runner, *_ = rig
+
+    def boom(*_a, **_k):
+        raise RuntimeError("org hub down")
+
+    monkeypatch.setattr(enrol, "on_boundary", boom)
+    report = await runner.tick(reason="timer")
+    assert report.skipped == "no-linked-items"

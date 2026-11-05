@@ -1,0 +1,16 @@
+{
+  "cli.hub_org.ineligible": "تنظیمی کیٹلاگ Radient Team کی خصوصیت ہیں؛ یہ اکاؤنٹ کسی Team پلان والی تنظیم میں شامل نہیں۔",
+  "cli.hub_org.choose_org": "آپ کئی Team پلان والی تنظیموں کے رکن ہیں؛ ان میں سے کسی ایک کے ساتھ --org دیں:",
+  "cli.hub_org.resolved": "“{ref}” کی مطابقت → {hub_id}",
+  "cli.hub_org.ambiguous": "“{ref}” کئی آئٹمز سے ملتا ہے؛ ہب id یا لمبا نام دیں:",
+  "cli.hub_org.not_found": "تنظیم “{org}” میں کوئی آئٹم “{ref}” سے نہیں ملتا۔",
+  "cli.hub_org.unlinked_copies": "غیر منسلک مقامی کاپیاں: {names} — انہیں منسلک کرنے کے لیے `lop hub org pull` چلائیں",
+  "cli.hub_org.plan": "pull کے لیے {count, plural, one {# آئٹم} other {# آئٹمز}}، {conflicts, plural, one {# غیر منسلک مقامی کاپی} other {# غیر منسلک مقامی کاپیاں}}؛ لاگو کرنے کے لیے --yes کے ساتھ دوبارہ چلائیں۔",
+  "cli.hub_org.adopted_heading": "منسلک کی گئی مقامی کاپیاں:",
+  "cli.hub_org.last_enrol": "آخری خودکار ہم آہنگی: {at}، {pulled, plural, one {# آئٹم pull ہوا} other {# آئٹمز pull ہوئے}}",
+  "cli.hub_org.list_failed": "تنظیم کے {kind} آئٹمز کی فہرست نہیں بن سکی: {cause}",
+  "cli.hub_org.ineligible_signed_out": "تنظیمی کیٹلاگ Radient Team کی خصوصیت ہیں؛ آپ Radient میں سائن اِن نہیں ہیں (lop login radient)۔",
+  "cli.hub_org.unknown_org": "آپ کی کوئی Team پلان والی تنظیم “{ref}” سے نہیں ملتی؛ ان میں سے کسی ایک کے ساتھ --org دیں:",
+  "cli.hub_org.plan_empty": "سب کچھ پہلے سے منسلک ہے؛ pull کرنے کو کچھ نہیں۔",
+  "cli.hub_org.team_block_heading": "{org} (تنظیم)"
+}

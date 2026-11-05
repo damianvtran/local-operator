@@ -1,0 +1,9 @@
+{
+  "cli.skills_push.stale_base": "hub已推进到{head}，超出了此链接用于push的基准版本{base}，因此未发布任何内容：基于旧基准进行merge可能会重新发布hub已替换的文本。",
+  "cli.skills_push.stale_base_next": "安全的下一步：push基准现已指向hub最新版本{head}。运行`lop skills sync --name {name} --check`查看hub的更改，然后再次运行`lop skills push {name}`；本地编辑会重新应用到hub当前文档之上。",
+  "cli.skills_push.stale_base_bundle_next": "安全的下一步：运行`lop skills sync --name {name}`将hub的文件树同步到本地副本，重新应用你的更改，然后再次运行`lop skills push {name}`。",
+  "cli.skills_push.merge_refused_next": "安全的下一步：push基准现已指向hub最新版本{head}。运行`lop skills sync --name {name}`将hub的更改同步到本地副本（解决报告的所有冲突），若你的编辑丢失则重新应用，然后运行`lop skills push {name}`。不要用旧版本覆盖hub的文本。",
+  "cli.skills_push.verified": "已验证：hub最新版本{revision}保存的文档与此次push发送的文档完全一致。",
+  "cli.skills_push.verify_mismatch": "警告：hub最新版本{revision}与此次push发送的文档不一致；hub当前可能保存了不同的内容。再次push前，运行`lop skills sync --name {name} --check`检查。",
+  "cli.skills_push.verify_unavailable": "未验证：push后无法重新读取hub（{reason}）。运行`lop skills sync --name {name} --check`检查。"
+}

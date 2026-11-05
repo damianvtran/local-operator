@@ -1,0 +1,37 @@
+{
+  "cli.skills_push.stale_base": {
+    "role": "lop skills push CLI output: why a push was refused",
+    "tone": "plain, factual, operator-facing; no blame",
+    "note": "head and base are opaque hub revision tokens (keep verbatim). 'push baseline' = the hub revision this machine last published or integrated."
+  },
+  "cli.skills_push.stale_base_next": {
+    "role": "lop skills push CLI output: the safe next step after a stale-base refusal",
+    "tone": "instructional, concise",
+    "note": "head is an opaque revision token; name is the skill name. Commands in backticks are literal and must not be translated."
+  },
+  "cli.skills_push.stale_base_bundle_next": {
+    "role": "lop skills push CLI output: next step for a bundle skill whose hub tree moved",
+    "tone": "instructional, concise",
+    "note": "name is the skill name; backticked commands are literal. 'tree' = the bundle's file tree."
+  },
+  "cli.skills_push.merge_refused_next": {
+    "role": "lop skills push CLI output: the safe next step after a refused merge",
+    "tone": "instructional, concise; the last sentence is a warning",
+    "note": "head is either empty or ' ' + an opaque revision token, appended directly after 'hub head'; name is the skill name; backticked commands are literal."
+  },
+  "cli.skills_push.verified": {
+    "role": "lop skills push CLI output after a successful publication",
+    "tone": "terse confirmation",
+    "note": "revision is an opaque hub revision token."
+  },
+  "cli.skills_push.verify_mismatch": {
+    "role": "lop skills push CLI warning: the hub holds something other than what was sent",
+    "tone": "urgent but calm",
+    "note": "revision is an opaque token; name is the skill name; backticked command is literal."
+  },
+  "cli.skills_push.verify_unavailable": {
+    "role": "lop skills push CLI output: post-push verification could not run",
+    "tone": "factual",
+    "note": "reason is a short technical code (English); name is the skill name; backticked command is literal."
+  }
+}

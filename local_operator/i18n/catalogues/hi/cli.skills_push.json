@@ -1,0 +1,9 @@
+{
+  "cli.skills_push.stale_base": "हब अब {head} पर पहुँच गया है, जो इस लिंक के push की आधार रिविज़न {base} से आगे है, इसलिए कुछ भी प्रकाशित नहीं किया गया: पुराने आधार से merge करने पर वह पाठ फिर से प्रकाशित हो सकता है जिसे हब इस बीच बदल चुका है।",
+  "cli.skills_push.stale_base_next": "अगला सुरक्षित कदम: push की आधार रिविज़न अब हब की नवीनतम रिविज़न {head} को इंगित करती है। `lop skills sync --name {name} --check` से हब के बदलाव देखें, फिर `lop skills push {name}` दोबारा चलाएँ; आपके स्थानीय संपादन हब के मौजूदा दस्तावेज़ पर फिर से लागू किए जाएँगे।",
+  "cli.skills_push.stale_base_bundle_next": "अगला सुरक्षित कदम: `lop skills sync --name {name}` से हब का फ़ाइल ट्री अपनी कॉपी में लाएँ, अपना बदलाव फिर से लागू करें, फिर `lop skills push {name}` दोबारा चलाएँ।",
+  "cli.skills_push.merge_refused_next": "अगला सुरक्षित कदम: push की आधार रिविज़न अब हब की नवीनतम रिविज़न{head} को इंगित करती है। हब के बदलाव अपनी कॉपी में लाने के लिए `lop skills sync --name {name}` चलाएँ (बताए गए सभी टकराव हल करें), अपना संपादन खो गया हो तो फिर से लागू करें, फिर `lop skills push {name}` चलाएँ। हब के पाठ पर पुराना संस्करण न लिखें।",
+  "cli.skills_push.verified": "सत्यापित: हब की नवीनतम रिविज़न {revision} में ठीक वही दस्तावेज़ है जो इस push ने भेजा था।",
+  "cli.skills_push.verify_mismatch": "चेतावनी: हब की नवीनतम रिविज़न {revision} इस push के भेजे गए दस्तावेज़ से मेल नहीं खाती; हब में अब अलग सामग्री हो सकती है। दोबारा push करने से पहले `lop skills sync --name {name} --check` से इसकी जाँच करें।",
+  "cli.skills_push.verify_unavailable": "सत्यापित नहीं: push के बाद हब को दोबारा पढ़ा नहीं जा सका ({reason})। `lop skills sync --name {name} --check` से इसकी जाँच करें।"
+}

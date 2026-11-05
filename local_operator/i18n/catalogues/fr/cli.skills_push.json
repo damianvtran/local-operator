@@ -1,0 +1,9 @@
+{
+  "cli.skills_push.stale_base": "Le hub est passé à {head} après la révision de référence {base} utilisée pour le push de ce lien. Rien n’a donc été publié : un merge à partir d’une référence plus ancienne pourrait republier du texte que le hub a remplacé depuis.",
+  "cli.skills_push.stale_base_next": "Étape suivante sûre : la référence de push pointe désormais vers la dernière révision du hub, {head}. Examinez les changements du hub avec `lop skills sync --name {name} --check`, puis relancez `lop skills push {name}` ; vos modifications locales sont réappliquées par-dessus le document actuel du hub.",
+  "cli.skills_push.stale_base_bundle_next": "Étape suivante sûre : récupérez l’arborescence du hub dans votre copie avec `lop skills sync --name {name}`, réappliquez votre modification, puis relancez `lop skills push {name}`.",
+  "cli.skills_push.merge_refused_next": "Étape suivante sûre : la référence de push pointe désormais vers la dernière révision du hub{head}. Exécutez `lop skills sync --name {name}` pour intégrer les changements du hub à votre copie (résolvez tout conflit signalé), réappliquez votre modification si elle a été perdue, puis exécutez `lop skills push {name}`. Ne remplacez pas le texte du hub par une ancienne version.",
+  "cli.skills_push.verified": "Vérifié : la dernière révision du hub, {revision}, contient exactement le document envoyé par ce push.",
+  "cli.skills_push.verify_mismatch": "Attention : la dernière révision du hub, {revision}, ne correspond PAS au document envoyé par ce push ; le hub peut désormais contenir un autre contenu. Examinez-le avec `lop skills sync --name {name} --check` avant de refaire un push.",
+  "cli.skills_push.verify_unavailable": "Non vérifié : impossible de relire le hub après le push ({reason}). Vérifiez-le avec `lop skills sync --name {name} --check`."
+}

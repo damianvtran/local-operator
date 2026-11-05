@@ -1,0 +1,8 @@
+{
+  "wire.settings.hub_org.auto_enrol.help": "Pull tác nhân, nhóm và kỹ năng mới của tổ chức và giữ đăng ký.",
+  "wire.settings.hub_org.auto_enrol.label": "Thêm mục mới của tổ chức",
+  "wire.settings.hub_org.auto_enrol.off.description": "chỉ khi tôi chạy lop hub org pull",
+  "wire.settings.hub_org.auto_enrol.on.description": "tự động thêm mục mới",
+  "wire.settings.hub_org.description": "Tổ chức của bạn chia sẻ tác nhân, nhóm và kỹ năng qua Agent Hub riêng tư của mình. Chọn có tự động thêm các mục mới vào máy này hay không.",
+  "wire.settings.hub_org.title": "Agent Hub của tổ chức"
+}

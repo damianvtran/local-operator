@@ -1,0 +1,14 @@
+{
+  "cli.hub_org_help.org": "Tác nhân, nhóm và kỹ năng dùng chung của tổ chức bạn (Radient Team)",
+  "cli.hub_org_help.list": "Liệt kê danh mục của tổ chức và trạng thái cục bộ của từng mục",
+  "cli.hub_org_help.pull": "Pull danh mục của tổ chức và tiếp tục đăng ký nhận cập nhật",
+  "cli.hub_org_help.org_flag": "Tên tổ chức, tiền tố tên duy nhất hoặc id tenant (mặc định là tổ chức đủ điều kiện duy nhất của bạn)",
+  "cli.hub_org_help.kind": "Chỉ loại này (có thể lặp lại)",
+  "cli.hub_org_help.name": "Chỉ mục này: id hub, tên hoặc tiền tố tên duy nhất (có thể lặp lại)",
+  "cli.hub_org_help.json": "Xuất JSON máy đọc được",
+  "cli.hub_org_help.on_conflict": "Với bản cục bộ chưa liên kết có cùng tên: adopt-link giữ nội dung của bạn và liên kết nó, adopt lấy bản trên hub, reconcile thực hiện merge, skip giữ nguyên",
+  "cli.hub_org_help.no_subscribe": "Pull mà không đăng ký nhận cập nhật",
+  "cli.hub_org_help.auto_push": "Đồng thời tự động xuất bản các chỉnh sửa cục bộ của bạn (chỉ chủ sở hữu và quản trị viên tổ chức)",
+  "cli.hub_org_help.no_llm": "Không bao giờ gọi mô hình để merge các bản khác nhau",
+  "cli.hub_org_help.yes": "Áp dụng kế hoạch thay vì chỉ in ra"
+}
