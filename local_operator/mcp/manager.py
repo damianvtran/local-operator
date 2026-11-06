@@ -2150,7 +2150,7 @@ class McpManager:
         return await self._connect_round(configs, sources)
 
     async def reload(self) -> McpLoadResult:
-        """Re-discover and reconnect in place (the app's MCP Reload, ``/mcp add|remove``).
+        """Re-discover and reconnect in place (session-route ``reload``, ``/mcp add|remove``).
 
         Bumps the epoch so in-flight reconnects and gate continuations die,
         cancels pending reconnects, tears down every live connection, drops

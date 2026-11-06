@@ -13,7 +13,6 @@ session is the shared ``make_session`` fixture.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import pytest
@@ -497,35 +496,22 @@ async def test_a_manager_whose_discovery_did_not_complete_is_unavailable(tmp_pat
         await session.dispose()
 
 
-def test_the_discovery_failed_remedy_names_only_commands_that_exist() -> None:
-    """The sentence is the operator's only route out, so every command it names
-    must be one the surface accepts. Review round 2 caught the first version
-    sending the operator to ``/mcp reload``, which the terminal answers with
-    "unknown mcp subcommand": ``/mcp`` has no such verb. The copy must also
-    survive the stall notice's clip whole, or the remedy is the part cut off.
+def test_the_discovery_failed_copy_is_the_verified_sentence() -> None:
+    """The exact sentence, pinned, because every earlier version named a route
+    that does not retry discovery for this state: ``/mcp reload`` (no such
+    verb, review round 2), the app's Reload (its catalog rows never carry one,
+    round 3) and ``/reload`` (viewer-only in shipped builds, round 4).
+
+    A change to this copy must re-verify, against a FRESH runtime, every route
+    it names before this pin moves: the sentence is the operator's only way
+    out of the wait, and a route that does not work is worse than none.
     """
     from local_operator.monitors.delivery import NOTICE_ERROR_CHARS
-    from local_operator.session.frontend_state import MCP_SUBCOMMANDS
-    from local_operator.slash_commands import SLASH_COMMANDS
 
-    detail = MCP_DISCOVERY_FAILED_DETAIL
-    registered = {command.name for command in SLASH_COMMANDS}
-    named = re.findall(r"(?<![\w/])/(\w+)(?: (\w+))?", detail)
-    assert named, "the remedy must name a command, not only a cause"
-    for command, verb in named:
-        assert command in registered, f"/{command} is not a registered slash command"
-        if command == "mcp":
-            assert verb in MCP_SUBCOMMANDS, f"/mcp {verb} is not a verb /mcp accepts"
-    assert "/mcp reload" not in detail
-    # And NO app control. In this state the session's roster is empty, so the
-    # app's catalog row carries no live facts: it offers no reload and no
-    # connect (``mcp.catalog._row``) -- in practice Test -- and review round 3
-    # caught a copy that sent the operator to a Reload the app never shows. A
-    # PR that does add an app control for this state must update the copy AND
-    # this assertion together.
-    for app_control in ("Settings", "Integrations", "\u2192", "in the app"):
-        assert app_control not in detail, f"the remedy names an app control: {app_control!r}"
-    assert len(detail) < NOTICE_ERROR_CHARS
+    assert MCP_DISCOVERY_FAILED_DETAIL == (
+        "MCP discovery failed at startup; it is retried when the session restarts"
+    )
+    assert len(MCP_DISCOVERY_FAILED_DETAIL) < NOTICE_ERROR_CHARS
 
 
 @pytest.mark.asyncio

@@ -3322,24 +3322,30 @@ MCP_NOT_READY_DETAIL = (
 #: ``connect_configured_server``, fills one entry on an explicit login and runs
 #: no round.)
 #:
-#: The retry it names is the one every host has: any fresh process for the
-#: session builds it through ``create_session``, which runs
-#: ``wire_mcp_into_session`` and so discovery again — a wake re-hosting it, a
-#: runtime replaced after ``lop-update``, or ``/reload`` from a terminal that
-#: OWNS the session. A viewer's ``/reload`` relaunches only the viewer ("runtime
-#: work continues"), hence the qualifier. It names NO app control, on purpose:
-#: the row the app shows in this state carries no reload, and ``connect`` only
-#: with live facts an empty roster does not have (``mcp.catalog._row``), while
-#: the app's own ``/reload`` reattaches (``preserve_running``) rather than
-#: restarting the host. There is no ``/mcp reload`` verb (``MCP_SUBCOMMANDS``)
-#: either. A future app control for this state must update this copy and
-#: ``test_the_discovery_failed_remedy_names_only_commands_that_exist`` together.
+#: "When the session restarts" is the one retry every host has: a fresh process
+#: builds the session through ``create_session``, whose deferred-boot and
+#: synchronous paths both run ``wire_mcp_into_session`` with a fresh manager —
+#: a wake re-hosting it, or the next engage after an idle runtime retires on a
+#: ``lop-update``.
+#:
+#: Routes checked and found NOT to retry discovery for this state. Do not name
+#: one here again without re-verifying it against a fresh runtime:
+#:
+#: - the app's Reload: the catalog rows the app shows never carry ``reload``
+#:   (``mcp.catalog._row``), and the app's own ``/reload`` reattaches;
+#: - ``/mcp reload``: there is no such verb (``MCP_SUBCOMMANDS``);
+#: - ``/reload``: viewer-only in shipped builds. ``lop``'s ``viewer_factory``
+#:   only ever returns an ``AttachedSession`` (cli.py, "THE OWNER PATH IS GONE"),
+#:   so it relaunches the terminal and reattaches to the same live runtime —
+#:   review round 4 reproduced it with 0 spawn attempts.
+#:
 #: When the record itself is refreshed is the KNOWN LIMIT on
 #: ``Session._mcp_discovery_incomplete``. Well under the stall notice's
-#: 200-character clip (``monitors.delivery.NOTICE_ERROR_CHARS``).
+#: 200-character clip (``monitors.delivery.NOTICE_ERROR_CHARS``); the exact
+#: sentence is pinned by
+#: ``test_the_discovery_failed_copy_is_the_verified_sentence``.
 MCP_DISCOVERY_FAILED_DETAIL = (
-    "MCP discovery failed at startup; it is retried when the session restarts "
-    "(/reload, if this session runs in your terminal)"
+    "MCP discovery failed at startup; it is retried when the session restarts"
 )
 
 
