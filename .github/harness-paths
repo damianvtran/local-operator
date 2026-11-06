@@ -1,0 +1,40 @@
+# Harness-path manifest — read by scripts/harness_delta_proof.py.
+#
+# Why: after a clean agent-review round, a delta that touches ONLY harness
+# (probes, benches, evals, evidence workflows) skips the numbered round and is
+# settled by one merge-gate `### Harness delta check` (guide://delivery,
+# "Harness-only delta"). The invariant: no byte the shipping pipeline — the
+# wheel/sdist and the published release — consumes differs between the reviewed
+# head and the current head.
+#
+# Constraints:
+# - This file is PRODUCT. Any change to it opens a round, so the exemption set
+#   cannot grow without review.
+# - A path matching neither list is product. tests/** is deliberately product:
+#   tests guard product behaviour, and weakening one must open a round.
+# - Where a harness and a ship glob both match, the more specific glob wins
+#   (ci.yml/publish.yml/release-gate.yml beat .github/workflows/**).
+# - Listing a path under harness never exempts it on its own: the script also
+#   refuses any harness file NAMED by the ship closure (repo path, basename,
+#   import/source specifier). Example, verified when this manifest landed:
+#   scripts/rebase_proof.py is harness here, but local_operator/guides/delivery/
+#   GUIDE.md names it, so a change to it reports SHIP-REACHABLE and opens a
+#   round. That is correct and conservative — the guide ships in the wheel and
+#   tells agents to run it — not a false alarm to tune away.
+
+# Ship: everything the wheel, sdist and release pipeline consume.
+ship: pyproject.toml
+ship: MANIFEST.in
+ship: Makefile
+ship: local_operator/**
+ship: packaging/**
+ship: .github/workflows/publish.yml
+ship: .github/workflows/release-gate.yml
+ship: .github/workflows/ci.yml
+
+# Harness: paths that never reach the wheel or the published release.
+harness: scripts/**
+harness: benchmarks/**
+harness: evals/**
+harness: fixtures/**
+harness: .github/workflows/**
