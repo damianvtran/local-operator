@@ -1411,6 +1411,78 @@ async def test_a_changed_blind_reason_refreshes_the_index(tmp_path: Any) -> None
 
 
 @pytest.mark.asyncio
+async def test_the_stall_episode_publishes_its_two_edges_and_no_ticks(tmp_path: Any) -> None:
+    """The opening and closing edges are the only moments a stall is NEWS.
+
+    Every reader that is not the owner's own process — `lop monitor status`,
+    the desktop route, the TUI band through the frontend state — derives from
+    the published row, and before this nothing ever told it a watch had
+    stalled: ``unavailable_since`` is written on a tick, and ticks deliberately
+    publish nothing (§10.2), so an unreachable watch kept painting as a normal
+    one for the whole 24 hours until the disable announced itself. The
+    episode's EDGES publish; its ticks stay silent, the same one-write
+    discipline the blind episode follows (agent review round 1, MAJOR-1).
+    """
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 60_000)  # baseline
+        baseline = harness.changes
+
+        harness.results.append({"error": "no such tool", "kind": "unavailable"})
+        await rill(harness, 60_000)
+        assert harness.changes == baseline + 1  # entering the episode
+        assert harness.scheduler.index_rows()[0]["unavailable_since"] > 0
+
+        # Same episode: the next unreachable tick moves counters the published
+        # row does not carry, and must not rewrite it.
+        harness.results.append({"error": "no such tool", "kind": "unavailable"})
+        await rill(harness, 60_000)
+        # The tick RAN (otherwise "no rewrite" would hold vacuously).
+        assert harness.counters()["unavailable_ticks"] == 2
+        assert harness.changes == baseline + 1
+
+        harness.results.append({"text": "A", "error": None})
+        # 120 s, not 60: the retry ladder doubles per unavailable tick
+        # (``every_ms * 2 ** (ticks - 1)``, no jitter), so after the second one
+        # a 60 s step leaves the closing check not yet due.
+        await rill(harness, 120_000)
+        assert harness.counters()["unavailable_ticks"] == 0
+        assert harness.changes == baseline + 2  # and leaving it
+        assert harness.scheduler.index_rows()[0]["unavailable_since"] == 0
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_failing_tick_publishes_nothing(tmp_path: Any) -> None:
+    """The auto-disable ladder writes the counters file alone (§10.2).
+
+    Asserted rather than left to a comment because a VIEWER's band now derives
+    its warning ink from exactly this fact: a strike count the reader cannot
+    see move is published history, never a live alarm, so the band must not
+    paint one in warning ink (agent review round 1, MAJOR-1). If this ever
+    starts publishing per tick, the band's rule and this test disagree — which
+    is the point of pinning it here, next to the surface that depends on it.
+    """
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 60_000)  # baseline
+        before = harness.changes
+
+        harness.results.append({"error": "boom"})
+        await rill(harness, 60_000)
+        assert harness.changes == before
+        # The live memory knows; the published row is the last change event's.
+        assert harness.scheduler.index_rows()[0]["consecutive_failures"] == 1
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_rate_capped_change_refreshes_the_index(tmp_path: Any) -> None:
     """Review round 1, F3: the rate-cap suppression count must reach the row."""
     settings = dataclasses.replace(MonitorSettings(), max_deliveries_per_hour=1)

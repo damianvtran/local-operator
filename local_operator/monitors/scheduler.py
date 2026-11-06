@@ -694,6 +694,9 @@ class MonitorScheduler:
                     now = self._now()
                     error = outcome.get("error")
                     kind = outcome.get("kind")
+                    # Read BEFORE the outcome applies, compared after: see the
+                    # edge publish below.
+                    was_unavailable = bool(entry.counters.get("unavailable_since"))
                     if kind == "blind":
                         # The call RAN; only the comparison is impossible. It is
                         # neither a success (nothing may be adopted as the new
@@ -724,7 +727,19 @@ class MonitorScheduler:
                         if restored is not None:
                             notices.append(restored)
                     self._write_counters(entry)
-                    if entry.counters.get("disabled"):
+                    # AN UNAVAILABLE EPISODE PUBLISHES ITS TWO EDGES, NEVER ITS
+                    # TICKS. Every reader outside this process — `lop monitor
+                    # status`, the desktop route, the TUI band through the
+                    # frontend state — renders the published row, and a tick
+                    # publishes nothing (§10.2), so before this an unreachable
+                    # watch rendered as a normal one everywhere but here until
+                    # the 24 h episode ended in a disable (agent review round 1,
+                    # MAJOR-1). One site, AFTER the write, so the published row
+                    # and the counters file agree on every key — the retry's
+                    # ``next_due_at`` included — and one call even when the
+                    # episode's end IS the disable.
+                    stall_edge = was_unavailable != bool(entry.counters.get("unavailable_since"))
+                    if entry.counters.get("disabled") or stall_edge:
                         self._notify_change()
                 if change is not None:
                     # The gate runs OUTSIDE the write lock: the classifier

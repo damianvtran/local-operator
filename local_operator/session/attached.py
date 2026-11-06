@@ -113,6 +113,7 @@ from local_operator.session.frontend_state import (
     MonitorState,
     SnapshotJobs,
     SnapshotMcpManager,
+    SnapshotMonitorScheduler,
     SnapshotSubagentComms,
     SnapshotWakeScheduler,
     WakeState,
@@ -1463,6 +1464,16 @@ class AttachedSession:
         self._wire_attachments: AttachmentStore | None = None
         self.jobs = SnapshotJobs()
         self.wake_scheduler = SnapshotWakeScheduler()
+        #: The band's monitor half reads this exactly like the live scheduler
+        #: (``.monitors`` / ``.runtime(id).counters``); the runtime's scheduler
+        #: is in-process only, so a viewer — and the TUI opens every session as
+        #: one (``cli.py``'s ``viewer_factory``) — answers from the canonical
+        #: rows the owner publishes. Without it the band finds no scheduler,
+        #: reports no monitors, and hides: an armed watch looking absent on the
+        #: one surface built to show it. The snapshot also declares
+        #: ``clocks_are_published``, so the band paints what the owner reported
+        #: instead of judging a frozen deadline against its own clock.
+        self.monitor_scheduler = SnapshotMonitorScheduler()
         self.mcp_manager = SnapshotMcpManager()
         # The full-page subagent view's hierarchy keys read this facade; built
         # from the canonical jobs so a follower's parent/peer/child navigation
@@ -7485,6 +7496,8 @@ class AttachedSession:
             self._subagent_comms.replace(state.jobs)
         if changed_fields is None or "wakes" in changed_fields:
             self.wake_scheduler.replace(state.wakes)
+        if changed_fields is None or "monitors" in changed_fields:
+            self.monitor_scheduler.replace(state.monitors)
         if changed_fields is None or "mcp_servers" in changed_fields:
             self.mcp_manager.replace(state.mcp_servers)
         startup = state.mcp_startup
