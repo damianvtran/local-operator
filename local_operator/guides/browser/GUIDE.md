@@ -515,23 +515,36 @@ How a value is matched and what comes back:
   dispatched after it.
 - **Date/time**: `date`, `time`, `datetime-local`, `month` and `week` hold only
   the ISO spelling the DOM itself stores (`2027-03-01`, `13:45`,
-  `2027-03-01T13:45`). A locale spelling (`01/03/2027`) is not translated: the
-  host refuses a value the control cannot hold, and a host older than that check
-  leaves the field EMPTY and answers `value unverified` — either way the value it
-  had is gone, so pass ISO.
+  `2027-03-01T13:45`). A locale spelling (`01/03/2027`) is not translated — the
+  control's own sanitizer will not store it, so the host refuses the write as
+  `value_rejected` and names the format it does accept (`expected`:
+  `YYYY-MM-DD`). That refusal covers `number`, `range` and `color` too, because
+  a clamp and a fallback are the same failed write as a cleared date. Passing
+  ISO is the whole fix; when you do meet the refusal, read `expected` instead of
+  retrying the same string, and re-read the field before assuming it still holds
+  what it did — the current host writes before it refuses, so a refused date
+  write leaves it empty, while a host that restores on refusal keeps the old
+  value. A host older than the check entirely answers `value unverified` with
+  the same emptied field.
 - **The result reports the read-back** — the value the control holds after the
   dispatch, which is not always what was asked for (a select maps a label onto
   its value; a masked field reports its own format). If the host could not read
   it, the sentence says `value unverified` instead of presenting an empty string
   as success.
-- **A password control reports no value.** The harness reads the host's
-  `input_type` and, when it is `password`, prints `value withheld: a password
-  field` and leaves the value out of the details — so a page-held secret never
-  reaches the transcript, including from an older host that still sends one.
+- **A credential control reports no value.** The harness withholds it when the
+  host names `input_type: "password"` OR sets `redacted: true` — both, because a
+  host may declare secrecy one way and not the other — printing
+  `value withheld: a credential field` and leaving the value out of the details.
+  It is deliberate in the safe direction: a host that redacts but still sends a
+  value, or names a password without redacting, is not trusted to have done it
+  for us, so a page-held secret cannot reach the transcript either way.
 - **Refused**: a target that is not a form control (use `select` for a
-  page-owned ARIA listbox, or `type` for a `contenteditable`), a disabled, inert
-  or read-only control, a file input (that is `upload`), or a missing target or
-  value. An empty `text` is a legitimate value: it clears an input or textarea.
+  page-owned ARIA listbox, or `type` for a `contenteditable`), a checkbox or
+  radio (`not_a_value_control` — its `value` is what it would SUBMIT and its
+  state is `checked`, so toggle it with `click`; writing the value would report
+  success on an unticked box), a disabled, inert or read-only control, a file
+  input (that is `upload`), or a missing target or value. An empty `text` is a
+  legitimate value: it clears an input or textarea.
   A credential field is `type` with `secret_ref`, never `setvalue` — this action
   carries a literal by definition and refuses a secret ref, so `type` is the only
   action that can enter a stored secret. The one place a secret can still meet

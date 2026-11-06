@@ -11,6 +11,7 @@ the fix degrades back into an echo of the caller's own value.
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -163,31 +164,65 @@ async def test_an_empty_value_is_a_legitimate_clear() -> None:
     assert missing.is_error and "needs 'text'" in missing.text
 
 
+SECRET_RESULT = {
+    "kind": "input",
+    "value": "hunter2",
+    "verified": True,
+    "url": "https://example.test/",
+    "title": "Sign in",
+}
+
+
 @pytest.mark.asyncio
-async def test_a_password_read_back_is_never_rendered() -> None:
-    # A password box whose value did not stick would otherwise hand the page's
-    # OWN secret to the transcript: this is the one verb that renders a value.
-    # `input_type` is the host's echo of the control's type — the harness must
-    # not infer it from the selector, and must stay safe against an older host
-    # that still sends the value (review R1-2).
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        # The two ways a host can declare secrecy. Both must withhold, because
+        # keying off ONE of them leaks the host that answers the other way —
+        # a `redacted` host sending no `input_type` was exactly that leak.
+        {"input_type": "password"},
+        {"redacted": True},
+        # And a host that does both, because the current host does.
+        {"input_type": "password", "redacted": True},
+    ],
+)
+async def test_a_credential_read_back_is_withheld_on_either_declaration(
+    declaration: dict[str, Any],
+) -> None:
+    # A credential control's value must never reach the transcript: this is the
+    # one verb that renders a value. The harness withholds on `input_type ==
+    # "password"` OR `redacted`, and never infers secrecy from the selector
+    # (a selector says WHERE a field is, not what it holds). Fail-safe in the
+    # important direction: the value is present in this host result in every
+    # case, so a renderer that trusted the host to have stripped it would leak.
+    result = await setvalue(App(result={**SECRET_RESULT, **declaration}))
+    assert not result.is_error, result.text
+    assert "hunter2" not in result.text, result.text
+    assert "hunter2" not in str(result.details or {})
+    assert "value withheld: a credential field" in result.text
+    assert "value" not in (result.details or {})
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_field_still_reports_its_value() -> None:
+    # The negative control for the withholding above: an ordinary field is not
+    # over-redacted. A renderer that withheld too much would be as useless as
+    # one that leaked — the read-back is the point of the verb.
     result = await setvalue(
         App(
             result={
                 "kind": "input",
-                "input_type": "password",
-                "value": "hunter2",
+                "value": "Acme Ltd",
                 "verified": True,
                 "url": "https://example.test/",
-                "title": "Sign in",
+                "title": "Settings",
             }
         )
     )
     assert not result.is_error, result.text
-    assert "hunter2" not in result.text, result.text
-    assert "hunter2" not in str(result.details or {})
-    assert "value withheld: a password field" in result.text
-    assert (result.details or {})["input_type"] == "password"
-    assert "value" not in (result.details or {})
+    assert (result.details or {})["value"] == "Acme Ltd"
+    assert "Acme Ltd" in result.text
+    assert "withheld" not in result.text
 
 
 @pytest.mark.asyncio
@@ -294,16 +329,23 @@ async def test_a_missing_value_match_lists_the_controls_own_options() -> None:
 @pytest.mark.parametrize(
     "reason",
     [
+        # The host's refusal vocabulary, complete: the eight tokens its page
+        # program can answer with (`not_a_value_control` for a checkbox/radio,
+        # `value_rejected` when the control's own sanitizer would not store the
+        # value). Every one must arrive as the host's typed `reason` rather than
+        # as prose the tool would have to parse.
         "disabled",
         "readonly",
         "not_a_form_control",
+        "not_a_value_control",
+        "value_rejected",
         "file_input",
-        # The statuses the paired host's page program answers with (or is being
-        # changed to answer with: `credential_input` for a password target), so a
-        # new one cannot reach the model as prose the tool would have to parse.
+        "option_not_found",
         "option_ambiguous",
-        "credential_input",
-        "invalid_arguments",
+        # `credential_input` deliberately ABSENT: it was never a host status, and
+        # from the host head that redacts password writes it never will be. A
+        # credential target answers `ready` + `redacted`, so keeping the token
+        # here would document a refusal that cannot occur.
     ],
 )
 async def test_a_host_refusal_keeps_its_typed_reason(reason: str) -> None:

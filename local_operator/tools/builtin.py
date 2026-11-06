@@ -28282,20 +28282,23 @@ async def _bridge_action(
         raw_value = result.get("value")
         verified = result.get("verified")
         got = "" if raw_value is None else str(raw_value)
-        # A password control's read-back is a page-held secret, and this is the
+        # A credential's read-back must never reach the transcript: this is the
         # one verb that reads a value INTO model-visible text, so it must not be
-        # the verb that surfaces one. The host is being changed to send no
-        # `value` for a password target; this check is the fail-safe for an older
-        # host that still sends one. The detector is the host's own `input_type`
-        # — the result's echo of the control's `type` — never an inference from
-        # the selector text: a selector says WHERE a field is, not what it holds.
+        # the verb that surfaces a secret. TWO triggers, because a host can
+        # declare secrecy either way and keying off only one leaks the other:
+        # `input_type == "password"` (the control's own type echoed back) and
+        # `redacted: true` (the host stating it withheld the value itself). The
+        # fail-safe direction matters — a host that says `redacted` but still
+        # sends a value, or names a password without redacting, is a host we
+        # must not trust to have done it for us. Never inferred from the
+        # selector: a selector says WHERE a field is, not what it holds.
         input_type = str(result.get("input_type") or "")
-        withheld = input_type == "password"
+        withheld = input_type == "password" or bool(result.get("redacted"))
         # A host that could not read the value back says so rather than letting
         # an empty string pass as "the field is now empty" — the same honesty
         # `select`'s `verified` flag buys.
         if withheld:
-            feedback = " (value withheld: a password field)"
+            feedback = " (value withheld: a credential field)"
         else:
             feedback = (
                 " (value unverified — check the page)"
@@ -28305,6 +28308,8 @@ async def _bridge_action(
         details["kind"] = result.get("kind")
         if input_type:
             details["input_type"] = input_type
+        if result.get("redacted"):
+            details["redacted"] = True
         if not withheld:
             details["value"] = got
         if isinstance(verified, bool):

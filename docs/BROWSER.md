@@ -210,16 +210,21 @@ Wire contract, which the desktop host implements as follows:
 - Params `{tab, selector, text}` — no new parameter and no new method beside
   `setvalue` itself. `selector` resolves exactly as `click`/`select` do (CSS,
   snapshot ref, `role=`/`label=`/`text=` locator); `text` is the value.
-- Result `{value, kind?, input_type?, verified?, url, title}`, where `value` is
-  what the control HOLDS after the dispatch — a native select maps a label onto
-  its own option value, and the harness renders that read-back rather than
-  echoing the request. `input_type` is the control's own `type`, which is what
-  lets the harness withhold a `password` field's read-back: that result renders
-  as `value withheld: a password field` with no value in the details, so the one
-  verb that reads a value back cannot surface a page-held secret (fail-safe: it
-  also covers a host that still sends the value). `verified:false` (or an absent
-  `value`) makes the tool say `value unverified` instead of reporting an empty
-  read as success.
+- Result `{value, kind?, input_type?, redacted?, verified?, url, title}`, where
+  `value` is what the control HOLDS after the dispatch — a native select maps a
+  label onto its own option value, and the harness renders that read-back rather
+  than echoing the request. `verified:false` (or an absent `value`) makes the
+  tool say `value unverified` instead of reporting an empty read as success.
+- **A credential write reports no value, and the harness enforces it on TWO
+  triggers**: `input_type == "password"` (the control's own type, echoed back)
+  and `redacted: true` (the host stating it withheld the value). Either one makes
+  the result render as `value withheld: a credential field`, with `details`
+  carrying `redacted`/`input_type` and no `value`. Both triggers are needed
+  because a host may declare secrecy one way and not the other, and keying off
+  `input_type` alone leaks a `redacted` host's value. The direction is
+  deliberately fail-safe: a host that says `redacted` and still sends a value,
+  or names `password` without redacting, is not trusted to have done it for us.
+  (The paired host at `cefd05708dc` sets `redacted` and omits `value`.)
 - Native `<select>`: an option is matched by trimmed label, then option value,
   exact before case-insensitive; `multiple` requires exactly one match. No match
   (or an ambiguous one) is `element_not_found` with `data.reason` written the way
@@ -238,6 +243,28 @@ Wire contract, which the desktop host implements as follows:
   disabled/inert/read-only control, and a file input (`upload`). A secret cannot
   travel through this action at all: `secret_ref` is `type`-only and is refused
   here, so a credential field is `type` with a ref, never a literal in `text`.
+- **The refusal vocabulary is the host's eight tokens**, carried in `data.reason`
+  so a caller branches on the token and never on prose: `disabled`, `readonly`,
+  `file_input`, `not_a_form_control`, `not_a_value_control`, `value_rejected`,
+  `option_not_found`, `option_ambiguous`. Two of them need saying, because the
+  remedy is a different action rather than a retry:
+  - `not_a_value_control` — the target is a `checkbox` or a `radio`, whose
+    `value` is what the control would SUBMIT and whose state is `checked`.
+    Writing the value would answer `verified:true` while the box stayed unticked,
+    so it is refused; toggle it with `click`, which fires real activation.
+  - `value_rejected` — the control's own sanitizer would not store the value as
+    asked, so the requested value is NOT what the control holds; the refusal
+    carries `input_type` plus `expected`, the format that type accepts
+    (`YYYY-MM-DD`, `HH:MM or HH:MM:SS`, `YYYY-MM-DDTHH:MM`, `YYYY-MM`,
+    `YYYY-Www`, `a number`, `#rrggbb`). It is a refusal and not a coercion,
+    because a `range` clamps and a `color` falls back rather than clearing, and
+    both were once the same silent success. What the field holds afterwards is
+    host-version dependent and must not be assumed: the host at `cefd05708dc`
+    writes through the setter and only then reads back, so a refused date write
+    leaves the field EMPTY and the page has already seen `input`/`change`; a host
+    that restores on refusal leaves the previous value in place. Re-read the
+    control before retrying rather than assuming either. (A host older than the
+    check entirely answers `value unverified` with the same emptied field.)
 - The option-list refusal has two reasons, and the harness renders the list for
   both: `option_not_found` and `option_ambiguous` (a `multiple` select whose
   label matched more than one option). One set, `_OPTION_LIST_REASONS`, so the
