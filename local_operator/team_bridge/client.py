@@ -89,6 +89,12 @@ from local_operator.providers.radient_credentials import (
 )
 from local_operator.team_bridge import availability
 
+# The hub serves a generic FILE as one type whatever its class, and that name is
+# the contract's (agent-server ``BridgeFileServedMime``). Imported rather than
+# respelled so the human save lane and the agent file lane cannot disagree about
+# the type an octet-stream body must claim.
+from local_operator.team_bridge.agent_file_reads import FILE_SERVED_MIME
+
 # V2/V3 are re-exported: callers and tests have always imported the consent
 # version names from ``client``.
 from local_operator.team_bridge.consent_versions import (  # noqa: F401
@@ -5037,6 +5043,7 @@ class TeamBridgeClient:
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
         served_types: tuple[str, ...] | None = None,
+        mode: Literal["image", "file"] = "image",
     ) -> tuple[bytes, str]:
         """One bound attachment's bytes and served type: ``(data, mime)``.
 
@@ -5055,6 +5062,17 @@ class TeamBridgeClient:
         the class must never become a response content type. It is an explicit parameter
         and not a default, so an image read can never quietly accept an octet-stream body
         (which would skip the png/jpeg sniff the image lane depends on).
+
+        ``mode="file"`` is the HUMAN save lane for one bound generic file
+        (agent-server S3a/S3b, the same message-scoped path and id space as an
+        image). The two lanes are told apart by the CALLER, never inferred from
+        the body: the hub serves a file as :data:`FILE_SERVED_MIME` whatever its
+        class, so this lane accepts exactly that type, asks for it with an
+        ``Accept`` that names no image, and reads up to the hub's transport
+        bound :data:`FILE_MAX_BYTES`. An image stays at
+        :data:`ATTACHMENT_MAX_BYTES`, and the AGENT lanes (:mod:`purpose`,
+        ``endpoint_id``) stay image-only rather than quietly reaching a wider
+        body through this switch.
         """
 
         _require_attachment_id(attachment_id)
@@ -5062,6 +5080,16 @@ class TeamBridgeClient:
             raise ValueError("purpose must be 'screen' or 'context'")
         if purpose is not None and not endpoint_id:
             raise ValueError("an attachment purpose is an agent read and needs endpoint_id")
+        if mode not in ("image", "file"):
+            raise ValueError("mode must be 'image' or 'file'")
+        accepted = served_types if served_types is not None else ATTACHMENT_MIME_TYPES
+        limit = ATTACHMENT_MAX_BYTES
+        accept: str | None = None
+        if mode == "file":
+            if served_types is not None or purpose is not None or endpoint_id is not None:
+                raise ValueError("file mode takes no served_types, purpose or endpoint_id")
+            accepted, limit = (FILE_SERVED_MIME,), FILE_MAX_BYTES
+            accept = f"{FILE_SERVED_MIME}, application/json"
         params: dict[str, Any] = {}
         if tenant_id:
             params["tenant_id"] = tenant_id
@@ -5075,13 +5103,13 @@ class TeamBridgeClient:
             f"/attachments/{attachment_id}",
             params=params or None,
             access=access,
-            max_response_bytes=ATTACHMENT_MAX_BYTES,
+            max_response_bytes=limit,
             expected_account_id=expected_account_id,
+            accept=accept,
         )
         if response.status_code >= 400:
             raise _refusal(response)
         mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        accepted = served_types if served_types is not None else ATTACHMENT_MIME_TYPES
         if response.status_code != 200 or mime not in accepted or not response.content:
             raise BridgeRefusal(
                 "bridge_invalid_response",

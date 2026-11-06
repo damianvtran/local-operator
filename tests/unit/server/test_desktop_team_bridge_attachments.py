@@ -209,6 +209,8 @@ def _owner(url: str) -> str:
 def test_route_constants_match_the_client() -> None:
     assert routes._ATTACHMENT_MAX_BYTES == bridge.ATTACHMENT_MAX_BYTES
     assert routes._ATTACHMENT_SERVABLE == set(bridge.ATTACHMENT_MIME_TYPES)
+    assert routes._FILE_SERVED_MIME == bridge.FILE_SERVED_MIME
+    assert routes._FILE_MAX_BYTES == bridge.FILE_MAX_BYTES
 
 
 def test_upload_streams_raw_bytes_and_returns_201_descriptor(proxy):
@@ -996,3 +998,154 @@ def test_file_display_name_never_reaches_a_log(proxy, caplog):
                 assert FILE_NAME_WIRE in caplog.text, name
             finally:
                 probe.removeHandler(caplog.handler)
+
+
+# -- the member FILE byte lane (operator decision a-fdf0) ---------------------
+#
+# ``?mode=file`` serves a message's bound GENERIC file on the SAME route under the
+# SAME gates: tenant, membership, message/attachment binding and the captured-owner
+# receipt are all unchanged, and the hub still decides every one of them. These
+# rows pin what the lane itself owns — the required served type, the download
+# disposition, the transport cap, and that neither lane can widen the other.
+
+#: Arbitrary, non-image bytes with a marker no other fixture value contains, so a
+#: leak into a log line or a header is detectable rather than assumed absent.
+FILE_BYTES = b"%PDF-1.7\nMARKER-a-fdf0\n" + bytes(range(256)) * 64
+FILE_QUERY = "tenant_id=org-a&mode=file"
+
+
+def _wire_headers(state: dict[str, Any]) -> dict[str, str]:
+    return {key.lower(): value for key, value in state["headers"][-1].items()}
+
+
+def test_a_bound_file_is_served_as_a_download_with_its_exact_bytes(proxy, caplog):
+    client, calls, state = proxy
+    state["serve"], state["serve_type"] = FILE_BYTES, "application/octet-stream"
+    with caplog.at_level(logging.DEBUG):
+        response = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?{FILE_QUERY}"))
+    assert response.status_code == 200, response.text
+    assert response.content == FILE_BYTES
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["content-disposition"] == 'attachment; filename="attachment.bin"'
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-security-policy"] == "default-src 'none'; sandbox"
+    assert response.headers["cache-control"] in {"private, no-store", "no-store"}
+    # No signed URL, no redirect: the bytes arrive in this one response or not at all.
+    assert "location" not in response.headers
+    # The tenant is forwarded, so the hub — not this route — decides who may read it.
+    method, path, *_ = calls[-1]
+    assert (method, path) == (
+        "GET",
+        f"/v1/messaging/conversations/{CID}/messages/{MID}/attachments/{AID}?tenant_id=org-a",
+    )
+    # The wire asks for the file type and names no image, so a negotiating hop can
+    # never answer this lane with image bytes.
+    sent = _wire_headers(state)
+    assert sent["accept"] == "application/octet-stream, application/json"
+    # Neither the bytes nor the name reach a log line through this route.
+    assert "MARKER-a-fdf0" not in caplog.text
+
+
+def test_the_image_lane_keeps_its_pinned_type_and_bound(proxy):
+    client, _calls, state = proxy
+    response = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?tenant_id=org-a"))
+    assert response.status_code == 200, response.text
+    assert response.content == PNG
+    assert response.headers["content-type"] == "image/png"
+    assert "content-disposition" not in response.headers
+    sent = _wire_headers(state)
+    assert "image/png" in sent["accept"] and "octet-stream" not in sent["accept"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "served"),
+    [("file", "image/png"), ("image", "application/octet-stream")],
+    ids=["an-image-asked-for-as-a-file", "a-file-asked-for-as-an-image"],
+)
+def test_a_class_mismatch_is_refused_and_never_returns_bytes(proxy, mode, served):
+    client, _calls, state = proxy
+    state["serve"], state["serve_type"] = PNG, served
+    response = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?mode={mode}"))
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "bridge_invalid_response"
+    assert "content-disposition" not in response.headers
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["another tenant", "a non-member", "revoked membership", "an expired file"],
+)
+def test_hub_refusals_are_surfaced_never_replaced_by_bytes(proxy, case):
+    """The hub owns tenant, membership and expiry, and answers all four alike.
+
+    This route's contract is to surface that one refusal unchanged — same status,
+    same code, no attachment headers — rather than to substitute bytes, a local
+    status, or an empty 200. The request really reached the hub, which is why the
+    refusal is evidence of a decision and not of a local short-circuit.
+    """
+
+    client, calls, state = proxy
+    state["error"] = (404, "attachment_not_found")
+    response = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?{FILE_QUERY}"))
+    assert response.status_code == 404, f"{case}: {response.text}"
+    assert response.json()["detail"]["code"] == "attachment_not_found"
+    assert "content-disposition" not in response.headers
+    assert [call[0] for call in calls] == ["GET"]
+
+
+def test_the_file_cap_is_served_at_its_boundary_and_refused_one_byte_past_it(proxy):
+    """The transport bound is INCLUSIVE: 25 MiB serves, 25 MiB + 1 does not.
+
+    Both ends are exercised because an off-by-one here is the difference between
+    a legitimate 25 MiB file being refused and a 26 MiB one being buffered.
+    """
+
+    client, _calls, state = proxy
+    at_cap = b"f" * routes._FILE_MAX_BYTES
+    state["serve"], state["serve_type"] = at_cap, "application/octet-stream"
+    served = client.get(
+        _owner(f"{BASE}/messages/{MID}/attachments/{AID}?{FILE_QUERY}"), timeout=120
+    )
+    assert served.status_code == 200, served.text
+    # Above the IMAGE cap and inside the FILE cap: the widening is real, not a
+    # relabelled image lane.
+    assert len(served.content) == routes._FILE_MAX_BYTES
+    assert served.content == at_cap
+
+    state["serve"], state["serve_type"] = at_cap + b"f", "application/octet-stream"
+    refused = client.get(
+        _owner(f"{BASE}/messages/{MID}/attachments/{AID}?{FILE_QUERY}"), timeout=120
+    )
+    assert refused.status_code == 502, refused.text
+    assert refused.json()["detail"]["code"] == "attachment_too_large"
+
+
+@pytest.mark.parametrize(
+    "query", ["mode=file&mode=image", "mode=blob", "mode="], ids=["repeated", "unknown", "blank"]
+)
+def test_an_invalid_mode_is_refused_before_any_hub_call(proxy, query):
+    client, calls, _state = proxy
+    response = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?{query}"))
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert calls == []
+
+
+def test_the_file_lane_still_requires_the_captured_owner_receipt(proxy):
+    """Widening the type class must not add an unguarded verb."""
+
+    client, calls, _state = proxy
+    response = client.get(f"{BASE}/messages/{MID}/attachments/{AID}?mode=file")
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert calls == []
+
+
+def test_the_file_lane_refuses_a_stale_receipt_before_any_bytes_move(proxy):
+    client, calls, _state = proxy
+    response = client.get(
+        f"{BASE}/messages/{MID}/attachments/{AID}?mode=file&expected_account_id=acc_other"
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == bridge.ACCOUNT_MISMATCH_CODE
+    assert calls == []

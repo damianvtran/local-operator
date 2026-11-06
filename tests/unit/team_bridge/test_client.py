@@ -1448,3 +1448,64 @@ async def test_owned_invitations_on_an_old_hub_is_outdated_hub_but_a_coded_404_i
     with pytest.raises(BridgeRefusal) as info:
         await client.owned_agent_invitations(expected_account_id="acc_1")
     assert info.value.code == "tenant_not_found"
+
+
+# ---------------------------------------------------------------------------
+# fetch_attachment: the human FILE lane
+#
+# ``mode="file"`` is the one widening the member byte route needed for a person
+# to save a file another member sent them. These rows pin the transport half:
+# what the request negotiates, what answer it accepts, and that the AGENT lanes
+# cannot reach the wider body through the same switch.
+# ---------------------------------------------------------------------------
+
+FILE_CID = "bcv_" + "b" * 32
+FILE_MID = "bcmsg_" + "c" * 16
+FILE_AID = "batt_0f8fad5b-d9cb-469f-a165-70867728950e"
+
+
+async def test_a_file_read_negotiates_octet_stream_and_the_file_cap():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200, content=b"%PDF-1.7", headers={"content-type": "application/octet-stream"}
+        )
+
+    client = _make_client(handler)
+    data, mime = await client.fetch_attachment(
+        FILE_CID, FILE_MID, FILE_AID, tenant_id="tnt_1", expected_account_id="acc_1", mode="file"
+    )
+    assert (data, mime) == (b"%PDF-1.7", "application/octet-stream")
+    # No image type is named, so a negotiating hop cannot answer this lane with
+    # image bytes; identity keeps the bound measuring wire bytes.
+    assert seen[0].headers["accept"] == "application/octet-stream, application/json"
+    assert seen[0].headers["accept-encoding"] == "identity"
+
+
+async def test_a_file_read_refuses_an_image_body():
+    client = _make_client(
+        lambda request: httpx.Response(
+            200, content=b"\x89PNG\r\n", headers={"content-type": "image/png"}
+        )
+    )
+    with pytest.raises(BridgeRefusal) as info:
+        await client.fetch_attachment(FILE_CID, FILE_MID, FILE_AID, mode="file")
+    assert info.value.code == "bridge_invalid_response"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mode": "file", "served_types": ("application/octet-stream",)},
+        {"mode": "file", "purpose": "context", "endpoint_id": "bep_1"},
+        {"mode": "file", "endpoint_id": "bep_1"},
+        {"mode": "file-ish"},
+    ],
+    ids=["second-type-knob", "agent-purpose", "agent-endpoint", "unknown-mode"],
+)
+async def test_file_mode_refuses_a_second_type_knob_or_an_agent_lane(kwargs):
+    client = _make_client(lambda request: pytest.fail("no request may be sent"))
+    with pytest.raises(ValueError):
+        await client.fetch_attachment(FILE_CID, FILE_MID, FILE_AID, **kwargs)

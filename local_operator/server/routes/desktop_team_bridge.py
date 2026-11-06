@@ -155,11 +155,23 @@ _ATTACHMENT_ID = re.compile(ATTACHMENT_ID_PATTERN)
 #: ``client.ATTACHMENT_MAX_BYTES`` / ``ATTACHMENT_MIME_TYPES`` by a test.
 _ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
 _ATTACHMENT_SERVABLE = {"image/png", "image/jpeg"}
-#: Generic-file upload bound (``client.FILE_MAX_BYTES``, the hub's 25 MiB
+#: The ONE type the hub serves a GENERIC (non-image) file as, whatever its class:
+#: agent-server ``models.BridgeFileServedMime`` (``client.FILE_SERVED_MIME``). The
+#: class must never become a response content type, or a renderer would be invited
+#: to render a teammate's file under a type it chose. Spelled here for the same
+#: boot-path reason as the image table and pinned equal to the client by a test.
+_FILE_SERVED_MIME = "application/octet-stream"
+#: A served file's download header. The hub publishes no display name on the byte
+#: route (a file descriptor is name-free), so this is the contract's fixed name:
+#: ``attachment`` + ``.bin``, the same one the owner-audit byte route serves.
+_FILE_DISPOSITION = 'attachment; filename="attachment.bin"'
+#: Generic-file transport bound (``client.FILE_MAX_BYTES``, the hub's 25 MiB
 #: transport cap), spelled here for the same boot-path reason and pinned equal by
 #: a test. File mode streams up to this many bytes and refuses one more, so this
 #: loopback route never holds more than one file and never reaches the hub with
-#: a body the hub would only answer 413.
+#: a body the hub would only answer 413. The same cap bounds a SERVED file:
+#: refusing above it keeps a misbehaving hub or proxy from handing this route a
+#: caller-sized buffer.
 _FILE_MAX_BYTES = 25 * 1024 * 1024
 #: ``files`` on an immediate send: the hub's combined images+files bound
 #: (``BridgeFileMaxPerMessage``); ``client._file_ids`` enforces the sum.
@@ -2888,6 +2900,25 @@ def _upload_query(request: Request) -> tuple[str | None, str, str]:
     return tenant_id, expected, mode
 
 
+def _download_query(request: Request) -> tuple[str | None, str, Literal["image", "file"]]:
+    """The member byte route's closed query: the attachment table plus ``mode``.
+
+    Same vocabulary as :func:`_upload_query`, for the same reason: the class is
+    STATED by the caller and never inferred from a body, so an image id asked
+    for as a file (or the reverse) is a request the far end must refuse rather
+    than a request whose class this route guessed. ``image`` is the default, so
+    every existing caller's wire is unchanged; a repeated or unknown value is
+    refused rather than mapped to the image lane.
+    """
+
+    modes = request.query_params.getlist("mode")
+    if len(modes) > 1 or (modes and modes[0] not in ("image", "file")):
+        _raise_read("invalid_request")
+    mode: Literal["image", "file"] = "file" if modes and modes[0] == "file" else "image"
+    tenant_id, expected = _attachment_query(request, frozenset({"mode"}))
+    return tenant_id, expected, mode
+
+
 def _upload_file_name(request: Request) -> str | None:
     """The renderer's percent-encoded ``X-Bridge-File-Name``, decoded, or ``None``.
 
@@ -3301,21 +3332,34 @@ async def get_conversation_attachment(
     request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> Response:
-    """One bound image's bytes for the HUMAN reader (the renderer's blob cache).
+    """One bound attachment's bytes for the HUMAN reader (the renderer's blob cache).
+
+    ``?mode=file`` serves the message's bound GENERIC FILE instead of an image:
+    the operator's download decision (a-fdf0) needs the signed-in person to be
+    able to fetch a file another member sent them. Same route, same
+    authorization — tenant, conversation membership, message/attachment binding,
+    the captured-owner receipt and the hub's own membership check are all
+    unchanged — so what widens is the TYPE CLASS and its bound, not a gate. A
+    file keeps the hub's ONE served type (:data:`_FILE_SERVED_MIME`) up to the
+    hub's transport cap (:data:`_FILE_MAX_BYTES`); an image stays pinned to
+    png/jpeg at the image cap, and the two lanes never widen each other. A file
+    is served ``Content-Disposition: attachment`` under the contract's fixed
+    name, never inline, so a renderer is never invited to render a teammate's
+    file under a type it chose. No signed URL, no redirect, no shared cache.
 
     No ``endpoint_id``/``purpose`` is accepted: those name an AGENT read, and
     the agent's screen/context fetches happen inside the runtime, never through
     this renderer-facing route. Response headers follow the attachment route in
     ``desktop_sessions`` and the hub: a closed type map (the client already
-    refused anything but png/jpeg), ``nosniff`` so the browser never
-    re-decides the type, a sandboxing CSP for a direct navigation, and
-    ``private, no-store`` so no shared or disk cache keeps a teammate's image.
+    refused anything outside it), ``nosniff`` so the browser never re-decides
+    the type, a sandboxing CSP for a direct navigation, and ``private,
+    no-store`` so no shared or disk cache keeps a teammate's file.
     """
 
     _require_conversation_id(conversation_id)
     _require_message_id(message_id)
     _require_attachment_id(attachment_id)
-    tenant_id, expected_account_id = _attachment_query(request)
+    tenant_id, expected_account_id, mode = _download_query(request)
     client = _conversation_client(config_manager)
     data, mime = await _conversation_reply(
         client.fetch_attachment(
@@ -3324,19 +3368,22 @@ async def get_conversation_attachment(
             attachment_id,
             tenant_id=tenant_id,
             expected_account_id=expected_account_id,
+            mode=mode,
         )
     )
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, no-store",
+    }
+    if mode == "file":
+        if mime != _FILE_SERVED_MIME:  # the client refuses first; defence in depth
+            _raise_read("malformed_page")
+        headers["Content-Disposition"] = _FILE_DISPOSITION
+        return Response(content=data, media_type=_FILE_SERVED_MIME, headers=headers)
     if mime not in _ATTACHMENT_SERVABLE:  # the client refuses first; defence in depth
         _raise_read("malformed_page")
-    return Response(
-        content=data,
-        media_type=mime,
-        headers={
-            "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": "default-src 'none'; sandbox",
-            "Cache-Control": "private, no-store",
-        },
-    )
+    return Response(content=data, media_type=mime, headers=headers)
 
 
 @router.get(
@@ -3670,9 +3717,11 @@ async def conversation_unread(
 # value below is what a router-only mount sees.
 OWNER_AUDIT_CACHE_CONTROL = "private, no-store"
 #: Spelled here (not imported from the client) for the httpx boot rule; pinned
-#: equal to ``client.OWNER_AUDIT_ATTACHMENT_MIME_TYPES`` by a test.
-_OWNER_AUDIT_SERVABLE = {"image/png", "image/jpeg", "application/octet-stream"}
-_OWNER_AUDIT_FILE_MIME = "application/octet-stream"
+#: equal to ``client.OWNER_AUDIT_ATTACHMENT_MIME_TYPES`` by a test. The file half
+#: is the SAME contract string the member byte route serves, so it is written
+#: once (``_FILE_SERVED_MIME``) and aliased rather than respelled.
+_OWNER_AUDIT_SERVABLE = {"image/png", "image/jpeg", _FILE_SERVED_MIME}
+_OWNER_AUDIT_FILE_MIME = _FILE_SERVED_MIME
 
 
 def _log_owner_audit_refusal(operation: str, status_class: str) -> None:
@@ -3960,7 +4009,7 @@ async def owner_audit_attachment(
             "Cache-Control": OWNER_AUDIT_CACHE_CONTROL,
         }
         if mime == _OWNER_AUDIT_FILE_MIME:
-            headers["Content-Disposition"] = 'attachment; filename="attachment.bin"'
+            headers["Content-Disposition"] = _FILE_DISPOSITION
         return Response(content=data, media_type=mime, headers=headers)
 
 
