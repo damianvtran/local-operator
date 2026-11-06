@@ -205,11 +205,24 @@ class _InProcessRelay:
 
 
 def _borrower_root(tmp_path: Path, owner_root: Path) -> Path:
-    """The borrower's root: its own copy of the owner's placement, nothing else."""
+    """The borrower's root: its own copy of the owner's placement, plus membership.
+
+    A joined device's root also carries its network record, and the adopt path reads that
+    record before it accepts a grant (``client._self_membership_active``). A root with
+    only the placement copy describes a client ``for_this_device`` cannot build, so every
+    borrow here would be refused ``not_a_holder`` before the rule under test was reached.
+    """
+    from local_operator.network import store as net_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
     root = tmp_path / "borrower"
     (root / "network" / "credentials" / "n_owner").mkdir(parents=True)
     source = placement_mod.placement_path("n_owner", owner_root)
     placement_mod.placement_path("n_owner", root).write_bytes(source.read_bytes())
+    record = NetworkRecord(network_id="n_owner", name="owner", self_device_id=BORROWER_DEVICE)
+    record.members.append(MemberRecord(device_id=BORROWER_DEVICE, name="borrower"))
+    record.members.append(MemberRecord(device_id=OWNER_DEVICE, name="owner-laptop"))
+    net_store.save(record, root)
     return root
 
 

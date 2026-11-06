@@ -48,6 +48,11 @@ def _native() -> Grant:
 
 
 def _source(root: Path) -> MeshCredentialClient:
+    # A joined device's root carries its membership record, and the adopt path reads it
+    # before accepting any grant (``client._self_membership_active``). Without it this
+    # fixture would describe a client ``for_this_device`` cannot build, and every borrow
+    # below would be refused ``not_a_holder`` instead of exercising the path under test.
+    _bridge_before_placement(root, "recipient")
     document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
     document.declare("openai", owner_device=OWNER, provider="openai", by=OWNER)
     document.grant("openai", "recipient", scope="session", by=OWNER)

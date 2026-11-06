@@ -1288,9 +1288,12 @@ def selected_model_row(
             (f"sign in to {provider} on {peer_label}, or choose another model",),
         ),
     }
-    if state not in readings:
+    if state not in readings and state != "held_offline":
         state = "pending"
-    detail, remedies = readings[state]
+    # A held grant is borrowed access the owner lent (``held_offline``): the same
+    # reading as a resolved borrow, whose "the next request verifies the owner again"
+    # is exactly what the client does. Its own CODE stays on the row below.
+    detail, remedies = readings["effective_borrow" if state == "held_offline" else state]
     if state == "expired" and observer_is_admin and getattr(member, "role", "") == "admin":
         import shlex
 
@@ -1307,7 +1310,7 @@ def selected_model_row(
         device_id=member.device_id,
         device_name=peer_label,
         capability="selected_model_credential",
-        ok=fact.get("usable") is True and state in {"local", "effective_borrow"},
+        ok=fact.get("usable") is True and state in {"local", "effective_borrow", "held_offline"},
         code=state,
         detail=detail,
         remedies=remedies,

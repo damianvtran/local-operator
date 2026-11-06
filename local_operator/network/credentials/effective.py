@@ -24,6 +24,9 @@ from local_operator.network.credentials.types import (
 
 logger = logging.getLogger(__name__)
 
+#: The states that publish as usable access.
+USABLE_STATES: frozenset[str] = frozenset({"local", "effective_borrow", "held_offline"})
+
 _lock = threading.Lock()
 _receipts: dict[tuple[str, str], EffectiveAccess] = {}
 
@@ -91,7 +94,11 @@ class EffectiveAccess:
 
     @property
     def usable(self) -> bool:
-        return self.state in {"local", "effective_borrow"}
+        # ``held_offline`` is usable: a grant the owner lent, served inside the lease
+        # the owner itself set, while the owner cannot be reached. It is NOT a fresh
+        # verification and is published under its own name so no reader confuses it
+        # with one (see ``MeshCredentialClient._held_grant``).
+        return self.state in USABLE_STATES
 
 
 def _root(root: Path | None) -> str:
@@ -110,12 +117,15 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
         expiry = result.grant_expires_at_ms
         if result.token_expires_at_ms:
             expiry = min(expiry, result.token_expires_at_ms)
+        held = bool(getattr(result, "held_offline", False))
         receipt = EffectiveAccess(
-            "effective_borrow",
+            "held_offline" if held else "effective_borrow",
             owner=result.credential_ref.owner_device,
             owner_label=result.credential_ref.owner_device_name,
             observed_at=now,
-            last_grant_at=now,
+            # A held grant is the LAST owner resolve, re-served: when it was granted
+            # is the true "last grant", not this moment.
+            last_grant_at=result.granted_at if held else now,
             last_grant_expires_at=expiry / 1000,
         )
     else:
@@ -241,12 +251,16 @@ def effective_access(
             "eligible_borrow_unverified", True, owner, source.owner_label(provider)
         )
     state = receipt.state
-    if (
-        state == "effective_borrow"
-        and receipt.last_grant_expires_at is not None
-        and receipt.last_grant_expires_at <= time.time()
-    ):
+    lapsed = (
+        receipt.last_grant_expires_at is not None and receipt.last_grant_expires_at <= time.time()
+    )
+    if state == "effective_borrow" and lapsed:
         # Permission is still present: expiry needs owner resolution, not a new
         # authorization. Withdrawal must remain reserved for lost permission.
         state = "expired"
+    elif state == "held_offline" and lapsed:
+        # The owner's lease ran out while it was still unreachable. Nothing is held
+        # any more (the client refuses past the lease), and the cause is the owner
+        # being away, so it reads as that, not as a routine expiry.
+        state = "owner_unavailable"
     return replace(receipt, state=state, eligible=True)

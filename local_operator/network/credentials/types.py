@@ -723,6 +723,13 @@ class Grant:
     #: wire shape is unchanged for them; peer values are bounded in
     #: :func:`_bounded_narrowing`.
     narrowing: dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: THIS process served the grant from its own memory because the owner did not
+    #: answer (``MeshCredentialClient._held_grant``). Never on the wire: ``to_detail``
+    #: and ``from_detail`` name their fields explicitly and this is not one of them,
+    #: so an owner can never tell a borrower its grant is "held". It only lets
+    #: ``effective.note_resolution`` say ``held_offline`` instead of claiming a fresh
+    #: owner resolve.
+    held_offline: bool = dataclasses.field(default=False, compare=False)
 
     def usable_at(self, now_ms: float | None = None) -> bool:
         """Whether this grant may still be handed to a request right now."""
