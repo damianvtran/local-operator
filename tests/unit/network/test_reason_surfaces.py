@@ -509,9 +509,19 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # prose can ever reach it, unlike the mesh reasons the glosses exist for. The
     # remedy in that sentence is authored here, and the same token rides the `--json`
     # payload for a script.
+    # ...plus (review round 5) the four reads `credentials --repair` added: the
+    # ``skipped:``/``still refused:``/``repair:`` lines. Every value they print is
+    # authored on THIS device -- ``_skip``'s literals and the no-askable branch's
+    # prose in this file, and ``HealOutcome.sentence``, which ``healing.repair_for``
+    # composes from the cause and the owner's NAME (the bearer never leaves the
+    # client's cache). The one token that can appear is an owner code this build
+    # cannot classify, quoted inside the sentence that sends the operator at
+    # ``lop network doctor`` -- deliberate, and not a peer's prose.
     ("local_operator/network/cli.py", "_cmd_credentials", "reason"): (
-        1,
-        "the credential client's own two-token vocabulary, not a peer's prose",
+        5,
+        "the credential client's own two-token skip vocabulary plus the repair "
+        "receipt's locally composed sentences (skips, no-askable prose, "
+        "healing.repair_for), none of them peer prose",
     ),
     # The incident receipt's per-peer rows: ``reason`` here is either the PEER'S OWN
     # refusal sentence (the authoriser's prose, carried verbatim — the panicking device
