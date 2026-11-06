@@ -474,7 +474,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # `text=` forms. Measured: 8,089 chars against the 8,192 cap — headroom up
     # from 4 to 103.
     # Nothing else about any other tool moved.
-    "browser": 2118,
+    # RE-MEASURED (code-requests browser PR): 2,118 -> 2,129 is main's `copy`
+    # action landing in the same doc — its row plus the two new error values it
+    # names — not this branch, whose own schema tax was paid by trimming the
+    # `selector`/`text` help (see the note above). Counted on the rebased tree:
+    # 8,171 chars against the 8,192 cap.
+    "browser": 2129,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
