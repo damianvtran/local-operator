@@ -1,0 +1,102 @@
+{
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_startup",
+  "audit_date": "2026-11-03",
+  "key_count": 4,
+  "commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+  "target_sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+  "context_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7b2ba4ed501d"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c44e0f808e48",
+    "instance": "c44e0f808e48",
+    "model": "radient/auto",
+    "model_label": "auto - opaque route; underlying model undisclosed",
+    "served_route": {
+      "provider": "radient",
+      "model_id": "auto",
+      "message_id": "5cf38bee0b434aa780f9a231eaa152b8",
+      "ts": 1793725499.660301
+    },
+    "actual_model_source": {
+      "kind": "own_completed_assistant_usage",
+      "artifact": "served-model-evidence.json",
+      "note": "The session exposes only the opaque auto route; no underlying model or fallback is inferred."
+    },
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder": "eae0961e4e78",
+    "date": "2026-11-03",
+    "result": "clean-with-findings",
+    "status": "passed",
+    "findings": 1
+  },
+  "verdict": {
+    "status": "passed",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    }
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "MINOR",
+      "file": "context",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "current": "The context note treats this child namespace as English-only and defers translated consumers to a future migration.",
+      "problem": "Contradicts the verified locale path: sdk.py:584-598 resolves the configured language and renders the resolved locale. The other three notes in the same sidecar make no such claim, and docs/SDK.md documents the resolution. A later translator could read it as a pin and leave the namespace untranslated.",
+      "suggestion": "Renders in the resolved locale after root isolation (sdk.py::startup_refusal_text); English is the fallback when the catalogue is absent, not a pin. Keep the embedded error as opaque text and preserve its sentence boundary.",
+      "affects_translated_copy": false
+    },
+    {
+      "id": "O1",
+      "severity": "observation",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "note": "The embedded error is followed by a capitalised French sentence, as in English; today's producer ends with a full stop. Never insert punctuation inside the placeholder."
+    },
+    {
+      "id": "O2",
+      "severity": "observation",
+      "file": "docs",
+      "note": "docs/design/backend-originated-strings.md:60 and the docs/SDK.md:220 heading still inventory this namespace as English-only while the body documents locale resolution; coordinator-owned docs consistency."
+    }
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "snapshot": "en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "snapshot": "context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "snapshot": "fr.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d"
+    },
+    "style_guide": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/style-guides/fr.md",
+      "snapshot": "fr-style.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/glossary.md",
+      "snapshot": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "report": "report.md",
+  "record_reference": "record.json"
+}

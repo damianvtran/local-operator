@@ -1,0 +1,52 @@
+{
+  "agent": "i18n-translator",
+  "session": "7b2ba4ed501d",
+  "actual_models": [
+    "radient/auto"
+  ],
+  "actual_model_source": "Persisted assistant translation write/edit tool-call usage.provider and usage.model_id in this session transcript (not the system model header).",
+  "transcript_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/transcript.jsonl",
+  "translation_usage_entries": [
+    {
+      "entry_id": "4bdf4a5b60ef450eb16a18be21767f6c",
+      "timestamp": 1793723989.966178,
+      "tool": "write",
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 154341,
+        "output_tokens": 2064,
+        "cache_read_tokens": 151680,
+        "context_tokens": 154341,
+        "reasoning_tokens": 1704,
+        "usd_cost": 0.00418518,
+        "at_ms": 1793723987700,
+        "provider": "radient",
+        "model_id": "auto"
+      }
+    }
+  ],
+  "routing": "Session model header and the persisted translation-call usage both expose only the opaque route provider=radient, model_id=auto; the underlying model is not disclosed. That opaque route is recorded as-is and no GPT/OpenAI fallback is claimed for this packet.",
+  "fallback_events_in_session": [
+    {
+      "entry_id": "b890d01d056149efa86ce524b5919819",
+      "primary": "anthropic/claude-sonnet-5-5",
+      "active": {
+        "selector": "anthropic/claude-opus-5-5",
+        "effort": "medium"
+      },
+      "reason": "provider failure: quota"
+    },
+    {
+      "entry_id": "9db45f79733b4e59a7181e007150d99f",
+      "primary": "anthropic/claude-sonnet-5-5",
+      "active": {
+        "selector": "openai/gpt-6.1-sol",
+        "effort": "medium"
+      },
+      "reason": "provider failure: quota"
+    }
+  ],
+  "method": "Human-readable French authored directly; no MT API/SDK/service/site.",
+  "earlier_turn_route_events_note": "The two active_model_route events listed under fallback_events_in_session come from EARLIER turns of this same session, when the primary route was anthropic/claude-sonnet-5-5. They are retained for session history only and are NOT attributed to this packet's translation calls.",
+  "underlying_model_disclosed": false
+}

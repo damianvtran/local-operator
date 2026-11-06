@@ -1,0 +1,89 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_startup",
+  "audit_date": "2026-11-03",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "e55f54b6a26e",
+    "model": "radient/auto",
+    "model_label_kind": "auto-router label observed in own completed usage; upstream model not recorded",
+    "actual_model_source": "own transcript.jsonl completed assistant payload.usage",
+    "actual_usage_at_ms": 1793725073197,
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder_session": "eae0961e4e78",
+    "fallback": "No fallback event asserted for this turn; auto routing is not claimed as fallback."
+  },
+  "record_reference": "record.json",
+  "current_report_verdict": {
+    "status": "passed",
+    "scope": "staged catalogue linguistic/mechanical, reader 1 only",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "F1",
+      "F2"
+    ],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 2,
+      "NIT": 0
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02"
+    },
+    "style": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/zh-CN.style.md",
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+    },
+    "glossary": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "artifacts": {
+    "record.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json",
+      "sha256": "5189f1836f9d158a0192dd14fc73130a4658f831001888144b9d8519006aa6d3"
+    },
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/report.md",
+      "sha256": "0e83c924eff74f9c875cf6c9627bbb443076e5a95805277d57604dbf223c95a9"
+    },
+    "audit.log": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/audit.log",
+      "sha256": "709138f61290076a753ace6ac22b1680774736ec062214d204237b0c9b36ff96"
+    },
+    "validate.py.txt": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/validate.py.txt",
+      "sha256": "058727c77b8b155522b90f02edd54ea4361f1261a746af995fe11a0482f76997"
+    },
+    "check-en-default.py.txt": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/check-en-default.py.txt",
+      "sha256": "bfcda8bae9b955cd314b4129e5aa8bd814ff0d6a3e0b4981b0a8dc011f8d8ab8"
+    },
+    "check-en-default.log": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/check-en-default.log",
+      "sha256": "a034bebd1d55ee26b243341141ca76c79e37049c6b9e79cb6d00656e5aad4cb9"
+    },
+    "input-hashes.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/input-hashes.json",
+      "sha256": "03511840cd05743e373e4f95d82261c934365a9249e2a14654be5dbb3c4740db"
+    },
+    "model-provenance.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/model-provenance.json",
+      "sha256": "f6de22d6a478c84116af3c1d324d5eef3fe83f0a1753b08d4360ae8d9359a46e"
+    }
+  }
+}

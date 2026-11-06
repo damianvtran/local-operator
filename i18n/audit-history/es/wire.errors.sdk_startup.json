@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.errors.sdk_startup",
+  "history_sha256": "22e46f2118f8929d158da02e38f87cc3cb177459a2452e6fb1ed1bc2f64dc6dc",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.errors.sdk_startup",
+      "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "context_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "target_sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "model_kind": "recorded opaque router selector; concrete underlying model UNKNOWN",
+        "underlying_model": "UNKNOWN",
+        "date": "2026-11-03",
+        "session": "804764f54d82",
+        "evidence": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/translator-record.json"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": null,
+        "model_status": "UNKNOWN concrete served model; original route/header disclosure retained, not promoted to served-model proof",
+        "date": "2026-11-03",
+        "session": "dd6c62eeb8a7",
+        "result": "passed",
+        "unresolved_blocker_major_count": 0,
+        "scope": "first_full_independent_native_audit_retained_translations",
+        "original_provenance": {
+          "agent": "i18n-auditor",
+          "session": "dd6c62eeb8a7",
+          "requested_route": "radient/auto",
+          "served_model_underlying": "UNKNOWN",
+          "actual_model_source": "not exposed within the strict source-only scope; no usage/provider payload was reachable and no process could be run to obtain one. The session header `Model: radient/auto` names a SELECTOR, not the served model; it is not treated as served proof.",
+          "fallback": "UNKNOWN",
+          "fallback_note": "no failure, quota or incident event was exposed in this turn. UNKNOWN is recorded rather than NONE, because NONE is not proven.",
+          "independent_from_translator_session": true,
+          "translator": {
+            "agent": "i18n-translator",
+            "session": "804764f54d82",
+            "source": "binding.json original path .../sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/wire.errors.sdk_startup.json (byte-identical to the audited frozen target)"
+          },
+          "translation_method_disclaimer": "this audit used reasoning only: no translation API, SDK, MT service or website was called to produce, compare or back-translate the text"
+        },
+        "evidence": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader1-dd6c62eeb8a7/record.json",
+        "prior_full_evidence": []
+      },
+      "status": "passed",
+      "note": "Recovered authentic audit es-ssu-reader1-20261103, dated 2026-11-03; no new translation/audit/pass invented. Full current-context audit. Current exact English/context/target binding retained. Original #3378-unmerged notes remain historical; prerequisite now merged in base 0b70efcc2bbff79020c4ccf2f1fe82b9e52ac7c0. All original advisory findings deferred in i18n/audits/evidence/sdk-startup-recovered-20261105/advisory-dispositions.json without copy changes. Underlying model/fallback UNKNOWN retained; model=null means not proven, not NONE. Evidence: i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader1-dd6c62eeb8a7/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.sdk_startup",
+      "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "context_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "target_sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto",
+        "model_kind": "recorded opaque router selector; concrete underlying model UNKNOWN",
+        "underlying_model": "UNKNOWN",
+        "date": "2026-11-03",
+        "session": "804764f54d82",
+        "evidence": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/translator-record.json"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (reader 2)",
+        "model": null,
+        "model_status": "UNKNOWN concrete served model; original route/header disclosure retained, not promoted to served-model proof",
+        "date": "2026-11-03",
+        "session": "fbfe8c1294ba",
+        "result": "passed",
+        "unresolved_blocker_major_count": 0,
+        "scope": "full_first_independent_audit",
+        "original_provenance": {
+          "agent": "i18n-auditor (reader 2)",
+          "session": "fbfe8c1294ba",
+          "model": "UNKNOWN",
+          "requested_route": "radient/auto",
+          "actual_model_source": "harness header line only ('Model: radient/auto'); not served-model proof",
+          "fallback": "UNKNOWN - not exposed",
+          "independent_from_translator_session": true,
+          "translator_session": "804764f54d82",
+          "independent_from_reader_1": true
+        },
+        "evidence": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/record.json",
+        "prior_full_evidence": []
+      },
+      "status": "passed",
+      "note": "Recovered authentic audit es-startup-r2, dated 2026-11-03; no new translation/audit/pass invented. Full current-context audit. Current exact English/context/target binding retained. Original #3378-unmerged notes remain historical; prerequisite now merged in base 0b70efcc2bbff79020c4ccf2f1fe82b9e52ac7c0. All original advisory findings deferred in i18n/audits/evidence/sdk-startup-recovered-20261105/advisory-dispositions.json without copy changes. Underlying model/fallback UNKNOWN retained; model=null means not proven, not NONE. Evidence: i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/record.json"
+    }
+  ]
+}

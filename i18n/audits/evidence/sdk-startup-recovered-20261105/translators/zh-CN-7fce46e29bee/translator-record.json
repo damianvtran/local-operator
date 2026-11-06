@@ -1,0 +1,120 @@
+{
+  "status": "translated_staged_only_not_audited_not_activated",
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_startup",
+  "file_group": "local_operator/i18n/catalogues/<locale>/wire.errors.sdk_startup.json",
+  "key_count": 4,
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7fce46e29bee",
+    "reported_model": "radient/auto",
+    "actual_model_source": "own completed assistant-turn usage in this session's transcript.jsonl (provider radient, model_id auto); the concrete upstream model behind the router is not recorded in that usage record",
+    "prior_turns_same_session": "earlier completed turns in this session recorded openai/gpt-6.1-sol; those belong to earlier packets and are not cited as this packet's model",
+    "fallback_disclosure": "No fallback event found in own usage/error records for this turn; auto routing is not claimed as a fallback and no concrete served model is claimed beyond the recorded router label."
+  },
+  "inputs": {
+    "local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json": {
+      "snapshot": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json": {
+      "snapshot": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    "i18n/style-guides/zh-CN.md": {
+      "snapshot": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/zh-CN.style.md",
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+    },
+    "i18n/glossary.md": {
+      "snapshot": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02"
+    }
+  },
+  "caller_proof": {
+    "pinned_source": "sdk.callers.txt in this bundle: sdk.py lines 584-598, 619-646, 662-676, 680-690, 697-712 at the pinned commit",
+    "graph": "attach_hosting_unconfigured: open_session except HostingNotConfiguredError, only when mode == \"attach\" (cold id in a root without hosting). attach_runtime_missing: the mode == \"attach\" branch, after disposing an owning session. profile_attach_failed: spec.profile branch after attach_agent_profile returns false. tool_inventory_mismatch: approvals.mode == \"declared\" branch when the live inventory and the policy list disagree.",
+    "locale_contract": "startup_refusal_text resolves from config language via resolve_language and calls i18n.messages.render, so these four refusals render in the resolved locale, unlike the 21 sdk_spec producers which pin locale='en'.",
+    "behavior_change_if_activated": "For a root whose resolved locale is zh-CN these exceptions currently fall back to the English catalogue; carrying this namespace makes their text Chinese. That is the RFC per-CARRIED policy and the reason the context demands a caller-contract migration boundary; this packet performs no migration.",
+    "architect_assessment": "/Users/damian/Documents/LocalOperator/Reports/i18n-sdk-contract-assessment-2026-11-03-3ef6295a5545.md (assessment, not implementation)"
+  },
+  "context_conflict": {
+    "pinned_note": "Each context entry pins the existing exception text and calls this an English-only child namespace that falls back under RFC §6 per-CARRIED policy, adding that future translated consumers still owe the RFC migration boundary.",
+    "handling": "Recorded, not removed. Translation is catalogue-only; no producer, str(), args, attributes, API or runtime sink change is claimed."
+  },
+  "embedded_english_defect_observed": {
+    "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+    "fact": "at the pinned commit session_factory.py:816 raises HostingNotConfiguredError('Hosting platform is not configured.'), and the {error} placeholder embeds that raw producer text",
+    "consequence": "a localized outer sentence will still contain one English clause; the catalogue cannot fix it without a new owned message and a source change, which this packet does not make"
+  },
+  "glossary_proposals": {
+    "运行时": "runtime (already established in zh-CN wire.settings/cli.*)",
+    "配置档": "agent profile (established in zh-CN wire.errors.desktop/tui.authoring); note the prior sdk_spec packet used 配置档案 — cross-packet inconsistency for auditors, not edited here",
+    "附接": "attach a viewer to an existing runtime (coinage in this SDK family; alternative 接入)",
+    "工具清单": "tool inventory",
+    "托管": "hosting"
+  },
+  "validation": {
+    "command": "node --max-old-space-size=256 validate.mjs",
+    "exit_code": 0,
+    "wall_clock_s": "0.7",
+    "heap_limit_MiB": 256,
+    "budget_s": 90,
+    "log": "mechanical.log",
+    "details": "mechanical-validation.json",
+    "negative_controls": 8,
+    "positive_checks": [
+      "exact 4 keys",
+      "English key order",
+      "no English duplication",
+      "Chinese prose present",
+      "identical ICU argument names/types",
+      "no added ICU branches",
+      "technical tokens preserved",
+      "no manual bidi",
+      "register: no 请",
+      "ICU apostrophe escape renders mode='own'",
+      "punctuation register"
+    ],
+    "opaque_smoke": "parser-AST substitution with braces/quotes/percent/tags; not production renderer"
+  },
+  "evidence_states": {
+    "rendered_fit": "NOT RUN",
+    "pseudo": "NOT RUN",
+    "RTL": "NOT RUN",
+    "production_renderer": "NOT RUN",
+    "live_exception_text": "NOT RUN",
+    "independent_audit": "NOT RUN"
+  },
+  "locale_presence_at_pin": {
+    "pinned_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+    "namespace": "wire.errors.sdk_startup",
+    "observed": "git cat-file -e per locale; present means the file exists at the pinned commit, not that it is audited",
+    "fr": {
+      "present_at_pin": false
+    },
+    "es": {
+      "present_at_pin": false
+    },
+    "zh-CN": {
+      "present_at_pin": false
+    },
+    "ru": {
+      "present_at_pin": true
+    },
+    "vi": {
+      "present_at_pin": true
+    },
+    "ur": {
+      "present_at_pin": true
+    },
+    "hi": {
+      "present_at_pin": true
+    }
+  },
+  "scope": "Only this scratch bundle. No repo edit/commit/PR/ledger/generation/baseline/scanner/build/install/native run. Prior UI census, account_policy and sdk_spec packets untouched."
+}

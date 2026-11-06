@@ -1,0 +1,21 @@
+{
+  "session": "e55f54b6a26e",
+  "observed_label": "radient/auto",
+  "source": "own transcript.jsonl completed assistant payload.usage (last completed turn)",
+  "usage": {
+    "provider": "radient",
+    "model_id": "auto",
+    "at_ms": 1793725073197,
+    "usd_cost": 0.00180774,
+    "input_tokens": 121853,
+    "output_tokens": 208,
+    "cache_read_tokens": 119040,
+    "context_tokens": 121853,
+    "billing_basis": "subscription_api_equivalent"
+  },
+  "claims_not_made": [
+    "no concrete upstream model behind the router",
+    "no fallback event asserted for this turn",
+    "earlier turns in this session recorded openai/gpt-6.1-sol and belong to earlier packets, not this one"
+  ]
+}

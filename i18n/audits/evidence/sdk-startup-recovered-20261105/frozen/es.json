@@ -1,0 +1,6 @@
+{
+  "wire.errors.sdk_startup.attach_hosting_unconfigured": "ningún runtime activo atiende {resume}, y esta raíz no puede iniciar uno: {error} Configura el alojamiento para esta raíz (su config.yml), luego activa el id con spawn_session()/deliver() y conéctate cuando exista un runtime.",
+  "wire.errors.sdk_startup.attach_runtime_missing": "ningún runtime activo atiende {resume}; ábrelo con mode=''own'' para ejecutarlo en este proceso, o actívalo antes con spawn_session()/deliver() y conéctate cuando exista un runtime.",
+  "wire.errors.sdk_startup.profile_attach_failed": "No se pudo vincular el perfil {profile}",
+  "wire.errors.sdk_startup.tool_inventory_mismatch": "spec.tools {spec_tools} y ApprovalPolicy.declared({policy_tools}) nombran inventarios distintos; declara el alcance de la ejecución una sola vez"
+}

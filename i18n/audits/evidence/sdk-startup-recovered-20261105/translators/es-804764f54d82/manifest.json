@@ -1,0 +1,130 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.errors.sdk_startup",
+  "immutable_revision": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "key_count": 4,
+  "kind": "staged_translation_packet_not_audit",
+  "files": [
+    {
+      "path": "HOWTO.md",
+      "sha256": "3253eac7c2cfe0955ab5f80cccd09ca2377ccb477526c7d8fe745009c762cc63",
+      "bytes": 26120
+    },
+    {
+      "path": "README.md",
+      "sha256": "3ca4902fc4e21f5946146e033fe6fb481de037922d7473b6e9c911cae755f303",
+      "bytes": 2700
+    },
+    {
+      "path": "RFC.md",
+      "sha256": "ade4d909428ccf1951d5ad826528db3b8c694946963b71246dbc93f6951a1dd2",
+      "bytes": 74923
+    },
+    {
+      "path": "architect-assessment.md",
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "bytes": 10289
+    },
+    {
+      "path": "caller-proof.md",
+      "sha256": "dcb8396e4319caa4e49e2378a75172980cf81b1b77f468a968e853213a71a2c0",
+      "bytes": 4599
+    },
+    {
+      "path": "check_staged.py",
+      "sha256": "ecf7ea5211d34ebf52d2e826c3df0a30d992c5f95393bdf1990a0cd7bb3a0511",
+      "bytes": 9032
+    },
+    {
+      "path": "context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "bytes": 1890
+    },
+    {
+      "path": "en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "bytes": 772
+    },
+    {
+      "path": "es-style.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6",
+      "bytes": 8893
+    },
+    {
+      "path": "factory-producer.py",
+      "sha256": "6ba11df9c7442b446809e5fa923ee47c5267a7373193fcf16bd19afb63f3eb45",
+      "bytes": 343903
+    },
+    {
+      "path": "format.py",
+      "sha256": "dd15c8fefaeddc121a8f7722fb179ef82e0b0e44e19d0c2dcb99d78ec49f5bc7",
+      "bytes": 17921
+    },
+    {
+      "path": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "bytes": 13399
+    },
+    {
+      "path": "mechanical.log",
+      "sha256": "4cb19886b0a335e1421c3c183b2b812ac789561b6f8a93682649dd96eede3310",
+      "bytes": 3478
+    },
+    {
+      "path": "messages-render.py",
+      "sha256": "57c9dafd86483d83cde9fbaf9b260c5d286e15c13b0e9ce3aa5097fe492857ac",
+      "bytes": 7729
+    },
+    {
+      "path": "runtime.py",
+      "sha256": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5",
+      "bytes": 23958
+    },
+    {
+      "path": "sdk-producer.py",
+      "sha256": "2f3ef2d9e33da374b116cd215c6641d99c9bc41f9a30343b23970ec96fdf78ca",
+      "bytes": 61449
+    },
+    {
+      "path": "served-model-evidence.json",
+      "sha256": "0ccd7f905cdec1366c70d5f51c9f48aa2736191d254ee46ac2de744178585c5e",
+      "bytes": 2054
+    },
+    {
+      "path": "shipped-rule.py",
+      "sha256": "e78e58c257c4cb45af14b48c6330ad13613b052bc2d4f3eccee49bf55f4be488",
+      "bytes": 39295
+    },
+    {
+      "path": "sibling-hi.json",
+      "sha256": "3362b1bc1a45d94c3f8455557cad031ebe2b6475b8d0c4171d465fb65e771c50",
+      "bytes": 1391
+    },
+    {
+      "path": "sibling-ru.json",
+      "sha256": "a78344f18145f9016b018d451d0c7d09906a09ff9937ceff36356c297328930f",
+      "bytes": 1195
+    },
+    {
+      "path": "sibling-ur.json",
+      "sha256": "b3c5f56714ed21faa9f210c3610ae80936d59f13c0a96df460dab2c7bb618382",
+      "bytes": 1112
+    },
+    {
+      "path": "sibling-vi.json",
+      "sha256": "ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd",
+      "bytes": 961
+    },
+    {
+      "path": "translator-record.json",
+      "sha256": "aea9bbe3bbb8c25a0df671e13c42c9d22950833c41949c9917ed135c8bdc6902",
+      "bytes": 9729
+    },
+    {
+      "path": "wire.errors.sdk_startup.json",
+      "sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+      "bytes": 830
+    }
+  ]
+}

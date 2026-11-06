@@ -1,0 +1,39 @@
+{
+  "en": {
+    "original": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+    "frozen": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+    "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+    "keys": 4
+  },
+  "context": {
+    "original": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+    "frozen": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+    "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+    "keys": 4
+  },
+  "zh-CN": {
+    "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+    "frozen": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/zh-CN.json",
+    "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+    "keys": 4
+  },
+  "fr": {
+    "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+    "frozen": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/fr.json",
+    "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+    "keys": 4
+  },
+  "es": {
+    "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/wire.errors.sdk_startup.json",
+    "frozen": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/es.json",
+    "sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+    "keys": 4
+  },
+  "dependency": {
+    "pr": "https://github.com/damianvtran/local-operator/pull/3378",
+    "head": "0066245ce4f90109933c59e74f1ad21b86d647bd",
+    "context_note_unmerged": true,
+    "old_context_sha256_prefix": "ee0bbde5",
+    "scope": "FR/ZH context-delta confirmations; ES first independent audits; no new translation"
+  }
+}

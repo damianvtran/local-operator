@@ -1,0 +1,29 @@
+{
+  "source": "/Users/damian/.local-operator/sessions/c44e0f808e48/transcript.jsonl",
+  "completed_usage_rows": [
+    {
+      "message_id": "4aa6244e44a8480eaeca99a6f57457bb",
+      "ts": 1793725481.705634,
+      "provider": "radient",
+      "model_id": "auto",
+      "input_tokens": 154543,
+      "output_tokens": 262
+    },
+    {
+      "message_id": "976b34c024cd44ceaa49ed464e5a6545",
+      "ts": 1793725491.9269178,
+      "provider": "radient",
+      "model_id": "auto",
+      "input_tokens": 155182,
+      "output_tokens": 544
+    },
+    {
+      "message_id": "5cf38bee0b434aa780f9a231eaa152b8",
+      "ts": 1793725499.660301,
+      "provider": "radient",
+      "model_id": "auto",
+      "input_tokens": 156250,
+      "output_tokens": 523
+    }
+  ]
+}

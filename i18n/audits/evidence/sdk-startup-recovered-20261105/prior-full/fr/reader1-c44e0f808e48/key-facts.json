@@ -1,0 +1,68 @@
+[
+  {
+    "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+    "arguments": [
+      [
+        "resume",
+        "simple"
+      ],
+      [
+        "error",
+        "simple"
+      ]
+    ],
+    "cells": 303,
+    "punct_space_codepoints": [
+      "0x202f"
+    ],
+    "starts_upper": false,
+    "en_starts_upper": false
+  },
+  {
+    "key": "wire.errors.sdk_startup.attach_runtime_missing",
+    "arguments": [
+      [
+        "resume",
+        "simple"
+      ]
+    ],
+    "cells": 220,
+    "punct_space_codepoints": [
+      "0x202f"
+    ],
+    "starts_upper": false,
+    "en_starts_upper": false
+  },
+  {
+    "key": "wire.errors.sdk_startup.profile_attach_failed",
+    "arguments": [
+      [
+        "profile",
+        "simple"
+      ]
+    ],
+    "cells": 62,
+    "punct_space_codepoints": [],
+    "starts_upper": true,
+    "en_starts_upper": true
+  },
+  {
+    "key": "wire.errors.sdk_startup.tool_inventory_mismatch",
+    "arguments": [
+      [
+        "spec_tools",
+        "simple"
+      ],
+      [
+        "policy_tools",
+        "simple"
+      ]
+    ],
+    "cells": 190,
+    "punct_space_codepoints": [
+      "0x202f"
+    ],
+    "starts_upper": false,
+    "en_starts_upper": false
+  }
+]

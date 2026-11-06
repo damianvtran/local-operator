@@ -1,0 +1,186 @@
+{
+  "schema": 1,
+  "audit_id": "es-ssu-reader1-20261103",
+  "locale": "es",
+  "namespace": "wire.errors.sdk_startup",
+  "mode": "first_full_independent_native_audit_retained_translations",
+  "audit_date": "2026-11-03",
+  "key_count": 4,
+  "keys": [
+    "wire.errors.sdk_startup.attach_hosting_unconfigured",
+    "wire.errors.sdk_startup.attach_runtime_missing",
+    "wire.errors.sdk_startup.profile_attach_failed",
+    "wire.errors.sdk_startup.tool_inventory_mismatch"
+  ],
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "dd6c62eeb8a7",
+    "requested_route": "radient/auto",
+    "served_model_underlying": "UNKNOWN",
+    "actual_model_source": "not exposed within the strict source-only scope; no usage/provider payload was reachable and no process could be run to obtain one. The session header `Model: radient/auto` names a SELECTOR, not the served model; it is not treated as served proof.",
+    "fallback": "UNKNOWN",
+    "fallback_note": "no failure, quota or incident event was exposed in this turn. UNKNOWN is recorded rather than NONE, because NONE is not proven.",
+    "independent_from_translator_session": true,
+    "translator": {
+      "agent": "i18n-translator",
+      "session": "804764f54d82",
+      "source": "binding.json original path .../sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/wire.errors.sdk_startup.json (byte-identical to the audited frozen target)"
+    },
+    "translation_method_disclaimer": "this audit used reasoning only: no translation API, SDK, MT service or website was called to produce, compare or back-translate the text"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "original_path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "bytes": 772,
+      "matches_original_bytes": true
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "original_path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "bytes": 2298,
+      "matches_original_bytes": true
+    },
+    "target": {
+      "locale": "es",
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/es.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/wire.errors.sdk_startup.json",
+      "sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+      "bytes": 830,
+      "matches_original_bytes": true
+    }
+  },
+  "rules_inputs": {
+    "style_guide": "/Users/damian/local-operator/i18n/style-guides/es.md",
+    "style_guide_sha256": "77b9227213802d14c74d4298d6b346ad842bbf2a5ca3b9d46fc6144430d26c3e",
+    "style_guide_bytes": 5543,
+    "glossary": "/Users/damian/local-operator/i18n/glossary.md",
+    "glossary_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+    "glossary_bytes": 13399,
+    "note": "style guide and glossary read for conformance; both hashed in this audit"
+  },
+  "dependency": {
+    "pr": "https://github.com/damianvtran/local-operator/pull/3378",
+    "head": "0066245ce4f90109933c59e74f1ad21b86d647bd",
+    "merged": false,
+    "shipped_claim": false,
+    "code_read_only": "local_operator/sdk.py lines 545-745 (attach/build path) to confirm the display contract; no source or caller change by the auditor"
+  },
+  "context_delta": {
+    "old_path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/candidates/es/context.json",
+    "old_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+    "old_bytes": 1890,
+    "new_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+    "new_bytes": 2298,
+    "delta_scope": "only attach_hosting_unconfigured.note; role/tone and the other three notes are byte-identical",
+    "effect": "removes the stale English-only framing and adds the localized-cause rule; the retained ES frame carries no English cause wording, so no retained value is invalidated"
+  },
+  "prior_audits": {
+    "es_wire_errors_sdk_startup": "none found",
+    "search": "glob 'i18n/audits/evidence/es/wire.errors.sdk*/**/*' -> 0 matches",
+    "prior_audits_read": "none; no FR/ZH audit was read for this ES pass and no parallel reader report was read"
+  },
+  "mechanical": {
+    "validator": "NOT RUN",
+    "validator_reason": "strict source-only scope (read/grep/glob/write + stdlib json/hashlib/difflib/unicodedata only) overrides the role's mechanical-validator default: no process, shell, Node, generator or network",
+    "self_checks_executed": [
+      "json parse and key-set identity 4/4/4, identical order, none added or dropped",
+      "placeholder names, counts and order identical per key",
+      "brace balance and max depth 1 in every value",
+      "no plural/select and no comma inside any brace: 0 plural messages, CLDR categories not applicable",
+      "ICU apostrophe parity: 4 apostrophes in attach_runtime_missing (two doubled pairs) both sides; renders mode='own'",
+      "byte-identical technical tokens: config.yml, spawn_session(), deliver(), spec.tools, ApprovalPolicy.declared(, mode=''own''",
+      "whitespace/invisible scan: no lead/trail space, no double space, no NBSP/NNBSP/ZWSP/LRM/RLM/TAB, no newline, no backtick, no #",
+      "width: 225 / 181 / 39 / 144 cells; no wide glyphs, no combining marks"
+    ],
+    "rendered_fit": "NOT RUN",
+    "pseudo_locale": "NOT RUN",
+    "rtl": "not applicable (es)",
+    "maxcells": "absent from the context sidecar for all four keys (role/tone/note only); no cell budget invented"
+  },
+  "findings": {
+    "ES-SSU-M1": {
+      "severity": "MINOR",
+      "key": "wire.errors.sdk_startup.tool_inventory_mismatch",
+      "current": "spec.tools {spec_tools} y ApprovalPolicy.declared({policy_tools}) nombran inventarios distintos; declara el alcance de la ejecución una sola vez",
+      "problem": "'nombran' on two spec expressions is a calque of English 'name'; understandable and corpus-adjacent, but a diagnostic whose subjects specify a set reads better with especificar/designar/definir",
+      "suggestion": "spec.tools {spec_tools} y ApprovalPolicy.declared({policy_tools}) especifican inventarios distintos; declara el alcance de la ejecución una sola vez",
+      "gating": false
+    },
+    "ES-SSU-N1": {
+      "severity": "NIT",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "current": "Configura el alojamiento para esta raíz (su config.yml)",
+      "problem": "'su' can momentarily read as 'your' in a tú-addressed sentence; both readings are true, nothing misleading",
+      "suggestion": "(el config.yml de esa raíz)",
+      "gating": false
+    },
+    "ES-SSU-N2": {
+      "severity": "NIT",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "current": "luego activa el id con spawn_session()/deliver()",
+      "problem": "the ES catalogue writes the noun as ID elsewhere; lowercase id reads as the parameter token",
+      "suggestion": "luego activa el ID con spawn_session()/deliver() (code tokens unchanged)",
+      "gating": false
+    }
+  },
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 2
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ES-SSU-M1",
+      "ES-SSU-N1",
+      "ES-SSU-N2"
+    ]
+  },
+  "safety_and_english": {
+    "untranslated_english_human_wording": "none",
+    "hosting": "translated: frame says 'el alojamiento'; catalogued ES cause sentence is 'La plataforma de alojamiento no está configurada.' (wire.errors.hosting.not_configured, catalogue state only)",
+    "kept_latin_named": [
+      "runtime (es guide wave-1 kept-English)",
+      "config.yml (path)",
+      "mode='own'",
+      "spawn_session()",
+      "deliver()",
+      "spec.tools",
+      "ApprovalPolicy.declared(...)",
+      "id (technical token, see ES-SSU-N2)"
+    ],
+    "safety_review": "every value is a refusal with its remedy intact; no permission/destructive caveat dropped; no polarity inversion"
+  },
+  "gaps": [
+    "repo validator/generator NOT RUN (strict source-only scope); recorded as a gap, never as a pass",
+    "rendered/terminal fit, screenshots, pseudo-locale and overflow NOT RUN",
+    "no maxCells/maxChars in the sidecar, so no fit verdict and no invented budget",
+    "no runtime or whole-frame clearance claimed from this source-only pass",
+    "ledger row NOT written (no repo edits in this scope); requester records it citing this record",
+    "no translation edited, no PR comment posted, no merged/shipped state claimed"
+  ],
+  "audit_notes_not_execution_log": true,
+  "notes_scope": "the audit checks ran as in-process stdlib computations (json/hashlib/difflib/unicodedata) in the auditor session; no validator, scanner, generator, render or app execution exists to log, and these notes must not be read as such a log. Disclosed: after the checks ran, one `bash -c true` no-op was launched by mistake under the strict scope; it produced no output, fed no value into any finding or verdict, and touched no file. It is recorded here rather than omitted.",
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/report.md",
+      "sha256": "d936212601c20ec66756cbf2f9e1ebd3d94a5fbfd8bcfc1379b1bbe28c1b50e1",
+      "bytes": 13288,
+      "kind": "audit_report"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/receipt.json",
+      "sha256": null,
+      "bytes": null,
+      "kind": "receipt",
+      "note": "hash left null on purpose: the receipt records THIS record's hash, so a mutually-referential pair would be circular; the receipt's own hash is reported in the hand-off message"
+    }
+  ],
+  "temporary_artifacts": [],
+  "unattached_scratch": "none: the record, report and receipt are the served artifacts; no unique ignored staging copy holds anything this audit produced that is not reproduced in these files"
+}

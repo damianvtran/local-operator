@@ -1,0 +1,23 @@
+PASS key parity: exactly 4 keys, no added/dropped keys, English order kept
+PASS attach_hosting_unconfigured: args=(('resume', 'simple'), ('error', 'simple')) Cf=0 no-plural no-请 opaque-pass-through
+PASS attach_runtime_missing: args=(('resume', 'simple'),) Cf=0 no-plural no-请 opaque-pass-through
+PASS profile_attach_failed: args=(('profile', 'simple'),) Cf=0 no-plural no-请 opaque-pass-through
+PASS tool_inventory_mismatch: args=(('spec_tools', 'simple'), ('policy_tools', 'simple')) Cf=0 no-plural no-请 opaque-pass-through
+PASS technical tokens kept: config.yml, spawn_session()/deliver(), spec.tools, ApprovalPolicy.declared(), ICU-escaped mode='own'
+PASS negative control: malformed ICU rejected
+PASS negative control: added placeholder rejected
+PASS negative control: missing argument refused (MessageFormatError)
+PASS negative control: plural upgrade/downgrade shape rejected
+resolve_language('zh-CN') -> zh-CN
+resolve_language('EN')    -> en
+resolve_language(None-ish default) -> en
+PASS producer path: a configured zh-CN root resolves zh-CN, so the pinned startup_refusal_text reaches this namespace with no producer change
+RESULT PASS 4/4 staged catalogue checks; scoped core parser/render/argument helpers only; no scanner, build or native run
+
+=== extra control: default-English path (executed after the main run) ===
+$ python /Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/check-en-default.py.txt
+PASS default-en attach_hosting_unconfigured: English source rendered unchanged
+PASS default-en attach_runtime_missing: English source rendered unchanged
+PASS default-en profile_attach_failed: English source rendered unchanged
+PASS default-en tool_inventory_mismatch: English source rendered unchanged
+RESULT PASS 4/4 default-English control

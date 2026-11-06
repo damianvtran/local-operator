@@ -1,0 +1,187 @@
+{
+  "kind": "staged_translation_not_audit",
+  "status": "translated_staged_only",
+  "locale": "es",
+  "namespace": "wire.errors.sdk_startup",
+  "key_count": 4,
+  "date_utc": "2026-11-03T16:44:33.638853+00:00",
+  "repository": "/Users/damian/local-operator",
+  "immutable_revision": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "804764f54d82",
+    "served_model_selector": "radient/auto",
+    "actual_model_source": "served-model-evidence.json — own completed message payload.usage records in this turn (15 records, all provider=radient, model_id=auto); the session Model line was not used",
+    "fallback": "NONE CLAIMED for this turn: no failure/incident event occurred in it. Two route events with reason \"provider failure: quota\" sit early in the transcript (record indices 4-5) and belong to the previous sdk_spec run; auto-routing is a selector, not proven fallback",
+    "translation_method": "reasoned by the translator model; no translation API, SDK, MT service or website called"
+  },
+  "target": {
+    "file": "wire.errors.sdk_startup.json",
+    "sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+    "intended_repo_path": "local_operator/i18n/catalogues/es/wire.errors.sdk_startup.json",
+    "absent_at_immutable_revision": true,
+    "installed": false,
+    "committed": false
+  },
+  "translations": {
+    "wire.errors.sdk_startup.attach_hosting_unconfigured": "ningún runtime activo atiende {resume}, y esta raíz no puede iniciar uno: {error} Configura el alojamiento para esta raíz (su config.yml), luego activa el id con spawn_session()/deliver() y conéctate cuando exista un runtime.",
+    "wire.errors.sdk_startup.attach_runtime_missing": "ningún runtime activo atiende {resume}; ábrelo con mode=''own'' para ejecutarlo en este proceso, o actívalo antes con spawn_session()/deliver() y conéctate cuando exista un runtime.",
+    "wire.errors.sdk_startup.profile_attach_failed": "No se pudo vincular el perfil {profile}",
+    "wire.errors.sdk_startup.tool_inventory_mismatch": "spec.tools {spec_tools} y ApprovalPolicy.declared({policy_tools}) nombran inventarios distintos; declara el alcance de la ejecución una sola vez"
+  },
+  "inputs": [
+    {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "snapshot": "en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "snapshot": "context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    {
+      "path": "i18n/style-guides/es.md",
+      "snapshot": "es-style.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "snapshot": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    {
+      "path": "docs/I18N.md",
+      "snapshot": "HOWTO.md",
+      "sha256": "3253eac7c2cfe0955ab5f80cccd09ca2377ccb477526c7d8fe745009c762cc63"
+    },
+    {
+      "path": "docs/design/i18n.md",
+      "snapshot": "RFC.md",
+      "sha256": "ade4d909428ccf1951d5ad826528db3b8c694946963b71246dbc93f6951a1dd2"
+    },
+    {
+      "path": "local_operator/sdk.py",
+      "snapshot": "sdk-producer.py",
+      "sha256": "2f3ef2d9e33da374b116cd215c6641d99c9bc41f9a30343b23970ec96fdf78ca"
+    },
+    {
+      "path": "local_operator/session_factory.py",
+      "snapshot": "factory-producer.py",
+      "sha256": "6ba11df9c7442b446809e5fa923ee47c5267a7373193fcf16bd19afb63f3eb45"
+    },
+    {
+      "path": "local_operator/i18n/messages.py",
+      "snapshot": "messages-render.py",
+      "sha256": "57c9dafd86483d83cde9fbaf9b260c5d286e15c13b0e9ce3aa5097fe492857ac"
+    },
+    {
+      "path": "scripts/i18n/generate.py",
+      "snapshot": "shipped-rule.py",
+      "sha256": "e78e58c257c4cb45af14b48c6330ad13613b052bc2d4f3eccee49bf55f4be488"
+    },
+    {
+      "path": "local_operator/i18n/runtime.py",
+      "snapshot": "runtime.py",
+      "sha256": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5"
+    },
+    {
+      "path": "local_operator/i18n/format.py",
+      "snapshot": "format.py",
+      "sha256": "dd15c8fefaeddc121a8f7722fb179ef82e0b0e44e19d0c2dcb99d78ec49f5bc7"
+    },
+    {
+      "path": "local_operator/i18n/catalogues/ru/wire.errors.sdk_startup.json",
+      "snapshot": "sibling-ru.json",
+      "sha256": "a78344f18145f9016b018d451d0c7d09906a09ff9937ceff36356c297328930f"
+    },
+    {
+      "path": "local_operator/i18n/catalogues/vi/wire.errors.sdk_startup.json",
+      "snapshot": "sibling-vi.json",
+      "sha256": "ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd"
+    },
+    {
+      "path": "local_operator/i18n/catalogues/ur/wire.errors.sdk_startup.json",
+      "snapshot": "sibling-ur.json",
+      "sha256": "b3c5f56714ed21faa9f210c3610ae80936d59f13c0a96df460dab2c7bb618382"
+    },
+    {
+      "path": "local_operator/i18n/catalogues/hi/wire.errors.sdk_startup.json",
+      "snapshot": "sibling-hi.json",
+      "sha256": "3362b1bc1a45d94c3f8455557cad031ebe2b6475b8d0c4171d465fb65e771c50"
+    }
+  ],
+  "caller_proof": {
+    "file": "caller-proof.md",
+    "sha256": "dcb8396e4319caa4e49e2378a75172980cf81b1b77f468a968e853213a71a2c0",
+    "derived": "one producer call site per key, all in local_operator/sdk.py (624/654/667/687) via startup_refusal_text -> messages.render; no second Python producer; relay keys.gen.ts is type-only",
+    "assessment": {
+      "path": "/Users/damian/Documents/LocalOperator/Reports/i18n-sdk-contract-assessment-2026-11-03-3ef6295a5545.md",
+      "snapshot": "architect-assessment.md",
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "attribution": "architect session 96042fdf7d41, openai/gpt-6.1-sol; source assessment, not translator runtime proof"
+    }
+  },
+  "contract": {
+    "exception_shape": "unchanged: one-argument SessionSpecError; no attributes added; no producer/API/str/args migration in this packet",
+    "localization_difference": "unlike the 21 sdk_spec keys pinned to locale=\"en\", these four render through the root-scoped locale; committed+audited es copy would localize their single message string for es roots - the designed path ru/vi/ur/hi already exercise",
+    "ship_set_caveat": "generate.py::_shipped_locales requires every CARRIED namespace to have a passed fresh ledger row; committing this file without its audit row would drop es from shipped.json. File and audit row must land together; this packet changes neither.",
+    "embedded_english": "attach_hosting_unconfigured keeps {error} opaque, so session_factory.py English cause prose still appears inside the Spanish sentence; a display-specific key is the assessment section 3 recommendation, out of scope here"
+  },
+  "mechanical": {
+    "status": "PASS",
+    "log": "mechanical.log",
+    "exit_code": 0,
+    "memory_limit_mib": 256,
+    "timeout_s": 90,
+    "runner": "/Users/damian/local-operator/scripts/run_bounded.py",
+    "env": "inherited CMUX_* stripped; python3 -I -B",
+    "parser": "pinned runtime.py + format.py snapshots from the immutable revision",
+    "positive": "4/4 exact keys and order, strict JSON duplicate guard, ICU parse, placeholder name/type parity, technical literal inventory, English-fragment guards, punctuation parity, no bidi controls",
+    "negative_controls_rejected": 11,
+    "cldr": "NOT_APPLICABLE: no plural/select messages in source or target",
+    "render_control": "opaque {error}/tuple/repr-quoted params inserted verbatim under locale es; no re-parse; doubled apostrophes render as one"
+  },
+  "not_run": [
+    "linguistic audit",
+    "product/UI rendering",
+    "pseudo-localization",
+    "RTL rendering",
+    "SDK/runtime integration",
+    "full catalogue validator",
+    "coverage/union gates",
+    "scanner",
+    "tests/full suite",
+    "build",
+    "install",
+    "native run",
+    "repo edit/PR/commit",
+    "ledger/activation/generated-key/baseline changes"
+  ],
+  "terminology": {
+    "runtime": "kept English (es guide kept-English list)",
+    "root": "raiz (shipped es vocabulary: raiz de configuracion)",
+    "hosting": "alojamiento, following the shipped es catalogue (Plataforma de alojamiento) rather than leaving the English word",
+    "live_runtime": "runtime activo",
+    "attach_viewer": "conectar / conectate",
+    "attach_configured_link": "vincular",
+    "engage": "activar",
+    "run_reach": "el alcance de la ejecucion",
+    "inventories": "inventarios",
+    "mode_literals": "own preserved byte-identically with ICU doubled apostrophes"
+  },
+  "glossary_proposals": {
+    "hosting": "es prose renders \"alojamiento\" (matches shipped cli.global_help / cli.exec_worker_help); the config key hosting stays Latin when named as a key",
+    "live runtime": "es: \"runtime activo\"",
+    "engage an id": "es: \"activar el id\" (after spawn_session()/deliver())",
+    "run reach": "es: \"el alcance de la ejecucion\""
+  },
+  "preservation": {
+    "previous_packet": "i18n-es-sdk-spec-21-2026-11-03-804764f54d82.zip",
+    "previous_archive_sha256": "abca2cddd77a5fac75be872b8811b667a8c34c0452ac2416ca222776502f039e",
+    "previous_bundle": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-spec-21-0e7cde3",
+    "previous_target_sha256": "2ea0f6de21acb3777198ab3bab8db31e73dd0d897c98fd1eb7b8379fe6c71bbb",
+    "note": "previous sdk_spec / UI / policy packets untouched; nothing retranslated"
+  },
+  "independence": "translator mechanical checks only; no self-audit, no ledger/receipt/activation/generated-key/baseline edits"
+}

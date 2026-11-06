@@ -1,0 +1,34 @@
+[run_bounded] memory budget 256 MiB (explicit, capped by inherited); sampled owned child group only
+Python: 3.14.7
+Pinned revision: 0e7cde33ca8008d561e74f4aed774aa5f76ff7d5
+Parser: runtime.py + format.py snapshots (core ICU subset, no dependency)
+PASS wire.errors.sdk_startup.attach_hosting_unconfigured arguments=(('resume', 'simple'), ('error', 'simple')) plural_arms=()
+PASS wire.errors.sdk_startup.attach_runtime_missing arguments=(('resume', 'simple'),) plural_arms=()
+PASS wire.errors.sdk_startup.profile_attach_failed arguments=(('profile', 'simple'),) plural_arms=()
+PASS wire.errors.sdk_startup.tool_inventory_mismatch arguments=(('spec_tools', 'simple'), ('policy_tools', 'simple')) plural_arms=()
+PASS 4/4: JSON strict, exact keys/order, ICU parse, placeholder parity, literals, English-leak guards, no bidi
+CLDR: NOT_APPLICABLE (no plural/select messages in either source or target)
+RENDER wire.errors.sdk_startup.attach_hosting_unconfigured => 'ningún runtime activo atiende \'01J9EXAMPLE\', y esta raíz no puede iniciar uno: Hosting platform is not configured. 100% done {not_icu} \'quoted\' "dq" \\ backslash'…
+RENDER wire.errors.sdk_startup.attach_runtime_missing => "ningún runtime activo atiende '01J9EXAMPLE'; ábrelo con mode='own' para ejecutarlo en este proceso, o actívalo antes con spawn_session()/deliver() y conéctate c"…
+RENDER wire.errors.sdk_startup.profile_attach_failed => "No se pudo vincular el perfil 'ops-profile'"
+RENDER wire.errors.sdk_startup.tool_inventory_mismatch => "spec.tools ('bash', 'read') y ApprovalPolicy.declared(('bash', 'read')) nombran inventarios distintos; declara el alcance de la ejecución una sola vez"
+PASS opaque: producer prose, tuples and repr-quoted ids inserted verbatim; no re-parse
+NEGATIVE_CONTROL_REJECTED missing-key AssertionError expected exactly 4 keys, got 3
+NEGATIVE_CONTROL_REJECTED renamed-placeholder AssertionError wire.errors.sdk_startup.attach_runtime_missing: placeholder name/type mismatch
+NEGATIVE_CONTROL_REJECTED changed-placeholder-type AssertionError wire.errors.sdk_startup.attach_runtime_missing: placeholder name/type mismatch
+NEGATIVE_CONTROL_REJECTED malformed-icu MessageSyntaxError expected an argument name (at offset 41 of 'No se pudo vincular el perfil {profile} {')
+NEGATIVE_CONTROL_REJECTED untranslated-english AssertionError wire.errors.sdk_startup.profile_attach_failed: identical to English source
+NEGATIVE_CONTROL_REJECTED planted-english-fragment AssertionError wire.errors.sdk_startup.attach_hosting_unconfigured: English fragment 'Configure hosting'
+NEGATIVE_CONTROL_REJECTED translated-mode-literal AssertionError wire.errors.sdk_startup.attach_runtime_missing: lost technical literal "mode=''own''"
+NEGATIVE_CONTROL_REJECTED introduced-plural AssertionError wire.errors.sdk_startup.tool_inventory_mismatch: placeholder name/type mismatch
+NEGATIVE_CONTROL_REJECTED terminal-punctuation-drift AssertionError wire.errors.sdk_startup.profile_attach_failed: terminal punctuation drift
+NEGATIVE_CONTROL_REJECTED injected-bidi-control AssertionError wire.errors.sdk_startup.profile_attach_failed: manual bidi control
+NEGATIVE_CONTROL_REJECTED duplicate-json-key duplicate key: a
+PASS negative controls: 11/11 rejected
+PASS final positive control on unchanged candidate
+NOT_RUN: linguistic audit, product/UI render, pseudo-locale, RTL, SDK integration, full validator, coverage/union gates
+[run_bounded] python3 rc=0 wall=1.2s
+
+EXIT_CODE=0
+TIMEOUT_S=90
+MEMORY_MB=256

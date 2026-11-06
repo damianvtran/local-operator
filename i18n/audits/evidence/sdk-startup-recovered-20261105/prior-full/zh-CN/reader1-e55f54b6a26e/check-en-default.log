@@ -1,0 +1,5 @@
+PASS default-en attach_hosting_unconfigured: English source rendered unchanged
+PASS default-en attach_runtime_missing: English source rendered unchanged
+PASS default-en profile_attach_failed: English source rendered unchanged
+PASS default-en tool_inventory_mismatch: English source rendered unchanged
+RESULT PASS 4/4 default-English control

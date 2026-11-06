@@ -1,0 +1,166 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_startup",
+  "audit_id": "zh-r2-ctx-82f193",
+  "audit_date": "2026-11-03",
+  "mode": "context-delta confirmation + current-parameter integrity (reader 2, priority locale); source-only",
+  "key_count": 4,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "0feda324e9e3",
+    "role": "zh-CN reader 2 (second independent reader for a high-visibility group: startup refusals)",
+    "model": "radient/auto",
+    "requested_route": "Radient Auto",
+    "model_label_kind": "harness header label; not served-model proof",
+    "underlying_served_model": "UNKNOWN",
+    "actual_model_source": "harness session header only; no execution proof of a concrete upstream model was produced in this source-only run",
+    "fallback": "UNKNOWN (not exposed)",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder_session": true,
+    "other_reader_report_read": false,
+    "prior_zh_audits_read": [
+      "sdk-startup-inventory-20261103/audit/zh-CN/sdk-startup-zh-CN-r1/record.json",
+      "sdk-startup-inventory-20261103/audit/zh-CN/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    ]
+  },
+  "source_binding": {
+    "dependency": "core PR #3378 (unmerged)",
+    "head": "0066245ce4f90109933c59e74f1ad21b86d647bd",
+    "verified_from": "~/local-operator/.worktrees/startup-owned-copy (.git gitdir -> refs/heads/fix/startup-refusal-owned-copy = head)",
+    "files_read_only": [
+      "local_operator/sdk.py:545-740",
+      "local_operator/i18n/keys/wire_errors_sdk_startup.py",
+      "local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+      "local_operator/i18n/catalogues/zh-CN/wire.errors.hosting.json",
+      "local_operator/i18n/runtime.py (ICU escaping docstring, lines 16-22)"
+    ],
+    "shipped_claim": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "original": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "original": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/zh-CN.json",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "unchanged_vs_translator_candidate": true,
+      "unchanged_from_prior_audits_input": true
+    },
+    "context_superseded": {
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/candidates/zh-CN/context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "relation": "delta base for the two prior zh-CN full audits"
+    },
+    "style": {
+      "path": "/Users/damian/local-operator/i18n/style-guides/zh-CN.md",
+      "sha256": "NOT_COMPUTED_IN_THIS_RUN",
+      "note": "read from repo checkout; hash only recorded by the prior audits' own snapshots"
+    },
+    "glossary": {
+      "path": "/Users/damian/local-operator/i18n/glossary.md",
+      "sha256": "NOT_COMPUTED_IN_THIS_RUN"
+    }
+  },
+  "binding_verification": {
+    "recomputed": "10/10 (en, context, zh-CN, fr, es each at both original and frozen paths) matched the binding's sha256",
+    "binding_file": "~/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/binding.json",
+    "note": "binding context sha 82f193fd matched; the 82b typo warned about in the brief was not used"
+  },
+  "context_delta": {
+    "keys_changed": ["wire.errors.sdk_startup.attach_hosting_unconfigured"],
+    "keys_identical": [
+      "wire.errors.sdk_startup.attach_runtime_missing",
+      "wire.errors.sdk_startup.profile_attach_failed",
+      "wire.errors.sdk_startup.tool_inventory_mismatch"
+    ],
+    "removed_claim": "the old note asserted an English-only child namespace falling back per-CARRIED policy",
+    "corrected_claim": "the frame renders in the resolved locale; only non-carrying locales fall back per-namespace; the owned not-configured cause is substituted as a separately localized sentence, so the frame must carry no English cause wording of its own; foreign producer text stays verbatim",
+    "code_corroboration": [
+      "sdk.py:587-596 resolve_language over the scoped ConfigManager language (no English pin)",
+      "sdk.py:598-601 render(code, params, locale=resolved)",
+      "sdk.py:603-632 localized cause only for exact type + catalogued EN sentence, else str(error) passthrough",
+      "sdk.py:660-665 resume=repr(spec.resume) confirms the 'already-quoted identifier' the note names"
+    ],
+    "effect_on_approved_target": "none required: the 4 zh-CN strings were authored against the opaque-cause reading and remain correct; the delta removes a false claim rather than imposing a new target constraint",
+    "prior_residual_gap_closed": "prior audit Z2-1 (zh refusal still contained one English clause, produced outside the catalogue) is closed at the source by this context+code pair, with the target hash unchanged"
+  },
+  "mechanical": {
+    "method": "stdlib json/hashlib/re/unicodedata only in this session; repo validator NOT RUN under the task's source-only override",
+    "valid_json": "4/4 both sides",
+    "key_sets_identical": true,
+    "placeholders_identical_per_key": "4/4 (correct names spaced exactly as source; all simple identifiers, no ICU pattern argument)",
+    "placeholder_python_types": {"resume": "str", "error": "str", "profile": "str", "spec_tools": "str", "policy_tools": "str"},
+    "generated_signatures_match": true,
+    "icu_structure": "no plural/select in source or target -> no CLDR categories owed for zh-CN in this namespace; brace balance holds in all 4",
+    "apostrophe_escaping": "'' count identical to source where present (mode=''own'', 2); no lone ' in target; runtime.py documents '' -> ' escaping",
+    "literal_tokens": "config.yml, spawn_session(), deliver(), mode=''own'', spec.tools, ApprovalPolicy.declared( all preserved",
+    "punctuation_spacing": "full-width ,。：；、 only; no ASCII , ; : outside code tokens; no space inserted between Chinese and Latin runs; the single space before {spec_tools} is Latin-to-Latin"
+  },
+  "width": {
+    "sidecar_budget": "none present (no maxCells/maxChars in the current context sidecar) — confirmed, none invented",
+    "cells_estimate": {"attach_hosting_unconfigured": 170, "attach_runtime_missing": 143, "profile_attach_failed": 23, "tool_inventory_mismatch": 110},
+    "cells_estimate_en": {"attach_hosting_unconfigured": 210, "attach_runtime_missing": 173, "profile_attach_failed": 34, "tool_inventory_mismatch": 123},
+    "fit_verdict": "NOT CLAIMED (no budget; rendered pass not run)"
+  },
+  "findings": [
+    {
+      "id": "NIT-1",
+      "severity": "NIT",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "current": "…无法启动一个：{error}为此根目录（其config.yml）配置托管，…",
+      "problem": "Correct with the owned cause (托管平台未配置。), but a foreign cause without terminal punctuation runs into the remedy clause (e.g. '：boom: socket closed为此根目录…'). Typographic only; meaning and safety unaffected; the frame contributes no English of its own.",
+      "suggested": "Leave as-is (recommended). If QA's rendered pass objects, move the cause into its own sentence (…无法启动一个。原因：{error}) and keep the remedy separate; do not add a separator after {error} that assumes a missing full stop.",
+      "gating": false
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "scope": "zh-CN context-delta confirmation + current-parameter integrity, reader 2; NOT a fresh full re-audit of unaffected strings, and not a whole-frame/runtime clearance",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": ["NIT-1"],
+    "severity_counts": {"BLOCKER": 0, "MAJOR": 0, "MINOR": 0, "NIT": 1}
+  },
+  "prior_judgment_retained": {
+    "source": "both prior zh-CN full audits (0 unresolved BLOCKER/MAJOR; per-key PASS retained)",
+    "unchanged_target_sha256_proof": "fcff2fac… is the same bytes both audits reviewed",
+    "reopened_findings": "none"
+  },
+  "not_run_explicit": [
+    "repo validator (scripts/i18n/check.py, Node) — source-only override; prior audits' executed validator runs stand as the mechanical evidence",
+    "rendered fit / design / pseudo-localization",
+    "live ICU engine execution and real zh-CN SDK refusal execution",
+    "sink/UI reach audit",
+    "activation, release eligibility, shipped state (unmerged PR head)"
+  ],
+  "audit_notes_not_execution_log": [
+    "This record's 'mechanical' section describes stdlib verification I ran in-session (hash/parse/diff), which IS execution of my own checks; no repo tooling was executed and no execution log companion is claimed.",
+    "Rendered strings quoted in report.md are string substitutions over the frozen catalogue bytes, emulating the caller's placeholder pass; they are not output of the product's ICU renderer.",
+    "I did not edit the target, the ledger, the repo or any PR; no PR comment posted."
+  ],
+  "artifacts": {
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/report.md",
+      "sha256": "a781c73c936ab259c9094c5c438985a1c468aebf38c1885a2d86391a6e9ee278",
+      "bytes": 10884,
+      "kind": "audit_notes_not_execution_log"
+    }
+  },
+  "retention": {
+    "location": "own session scratch, immutable for this audit",
+    "intended_canonical_root": "i18n/audits/evidence/zh-CN/wire.errors.sdk_startup/zh-r2-ctx-82f193/",
+    "tracked_commit_exists": false,
+    "prior_bundles_mutated": false
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

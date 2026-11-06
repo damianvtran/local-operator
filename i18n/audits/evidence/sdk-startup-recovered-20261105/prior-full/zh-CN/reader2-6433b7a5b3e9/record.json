@@ -1,0 +1,123 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_startup",
+  "audit_date": "2026-11-03T17:01:22.058972+00:00",
+  "key_count": 4,
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6433b7a5b3e9",
+    "model": "radient/auto",
+    "actual_model_source": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+      "entry_id": "ca73b1a356784a479300812347532a78",
+      "at_ms": 1793725272835,
+      "note": "own completed-turn usage; radient/auto is a router label and the concrete upstream model is not recorded in usage"
+    },
+    "fallback": "no fallback event inferred; router label only, no concrete served model or upstream fallback claimed",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder": true,
+    "second_independent_reader": true,
+    "other_reader_report_read": false
+  },
+  "input_hashes": {
+    "context.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    "en.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "glossary.md": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "input-hashes.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/input-hashes.json",
+      "sha256": "92cb011c2908632364e46af8549a174c127aba6132c9b78d739bff769af259ff"
+    },
+    "locale-presence.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/locale-presence.json",
+      "sha256": "737a4b6176cddb9291967875c5b34bb05a95570cb2c573e46d19e65d1376a5a4"
+    },
+    "mechanical-validation.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/mechanical-validation.json",
+      "sha256": "30b6b8bf20735b93f886cfe0ceffa8634e5c475cf57f24f43b2254065dcfeb09"
+    },
+    "mechanical.log": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/mechanical.log",
+      "sha256": "767c846a1a28d7c3344e7fa6a337e8c8eeee52656b89474ac4baad2105f68f43"
+    },
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/report.md",
+      "sha256": "823eb1fad15c367ab20e2616c3250fec7d909bd5c86f4b85a881cdb34a7b4123"
+    },
+    "sdk.callers.txt": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/sdk.callers.txt",
+      "sha256": "5af97ccc5d5d2287b45247bd8c4765d2cc9aa5d1705f5c35ef80e356515d7873"
+    },
+    "translator-record.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/translator-record.json",
+      "sha256": "732bd805b74638d74f233625ba7a885e41461127183afbadf80eb1ff56bf8479"
+    },
+    "validate.mjs": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/validate.mjs",
+      "sha256": "912f82cd0adf548e90e916f3544aef9a92828bb41ee11b57b86e22c49abf471d"
+    },
+    "wire.errors.sdk_startup.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02"
+    },
+    "zh-CN.style.md": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/zh-CN.style.md",
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/report.md",
+      "sha256": "d7f7a6ec2f532dea72c2665fb27336771e3646ec7649b1cf658c136906d0806b"
+    },
+    "audit.log": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/audit.log",
+      "sha256": "5abc7b00414c14c49e62c1ca6580bd0de490d8311af61b492272979873f92e9a"
+    }
+  },
+  "findings": [
+    {
+      "id": "Z2-1",
+      "severity": "minor",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "problem": "Rendered {error} is str(HostingNotConfiguredError) = the raw English producer sentence at session_factory.py:816, so a zh-CN refusal still contains one English clause. Produced by the caller, not by this catalogue; the pinned context marks {error} opaque and forbids interpreting or replacing it.",
+      "suggested": "Out of catalogue scope: give the hosting preflight an owned message id and pass its localized text (or a caller-chosen localized clause) instead of str(error). No target wording change is warranted here.",
+      "gate": "does not gate: no blocker/major; target fidelity is correct"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "Z2-1"
+    ]
+  },
+  "context_note_conflict": "Pinned context calls the namespace English-only; pinned sdk.py:584-598 renders resolve_language(), so the real caller localizes. Recorded, not waived; no producer change claimed.",
+  "remaining_proof": [
+    "native rendered fit/design after integration",
+    "production SDK refusal execution under a real zh-CN config",
+    "pseudo-localization if the integration gate requires it",
+    "current caller/UI sink confirmation is out of this linguistic audit"
+  ],
+  "audit_notes_not_execution_log": [
+    "PER-KEY VERDICT (all four PASS as translation):",
+    "attach_hosting_unconfigured: meaning and both facts preserved; remedy order preserved; opaque {error} boundary is inherent (Z2-1). \"正在运行的运行时\" is acceptable though slightly repetitive; \"启动该ID\" compresses English engage-the-id, still readable.",
+    "attach_runtime_missing: disposal-then-refusal meaning preserved; mode=own remedy and engage-then-attach order preserved; no extra disposal or exception-attribute claim.",
+    "profile_attach_failed: \"无法附接配置档{profile}\" preserves Could-not and the quoted profile value; no punctuation invented; 配置档 matches existing zh-CN shipped usage (tui.authoring, wire.errors.desktop, wire.settings) rather than sdk_spec's 配置档案, so this packet is the consistent one and no finding is raised against it.",
+    "tool_inventory_mismatch: two named inventories and the state-once remedy preserved; no inventory widening implied; the space before {spec_tools} separates the identifier from a stringified tuple and is Latin-to-Latin spacing, not a Chinese-Latin gap.",
+    "Glossary/style: 会话/工具/审批 follow glossary; 运行时/托管/工具清单 are natural technical Chinese; 附接 is an SDK-family coinage with no glossary row, used consistently across all four keys. No 请, no !, no sentence-final 。 on the label, full sentences keep 。. No pronoun repetition.",
+    "Contrary to the pinned context note (English-only child namespace), the pinned caller sdk.py:584-598 renders the RESOLVED locale through messages.render, so this data is intended to localize startup refusals. I did not force English, and I did not read the sibling reader report.",
+    "Original context bytes retained as the translator input; the stale English-only note is recorded, not waived, and no caller-contract change is claimed."
+  ],
+  "retention": "Original independent scratch audit; coordinator must retain under the tracked canonical evidence root. No ledger write, generation, activation or repo edit."
+}
