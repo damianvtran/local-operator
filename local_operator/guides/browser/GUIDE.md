@@ -682,10 +682,15 @@ control's value on its line, so a one-time key already sitting in a field rides
 that line into the transcript and into every later result that quotes it. Snapshot
 before the page shows the key, or reach the element with a CSS `selector` instead
 of a ref when the value is already on the page. Find that selector from markup you
-saw before the key appeared, or with `read`, which returns `textContent` and so
-leaves out an input's value (a key shown as plain text is still printed). Once the
-key is showing, never point `query`, `snapshot` or `screenshot` at that element:
-`query` returns an input's value and `snapshot` prints it.
+saw before the key appeared. Once the key is showing, run no `snapshot`,
+`screenshot` or `query` at all, not just at that element: an unscoped `snapshot`
+covers the whole page and prints the input's value, a full-page `screenshot`
+shows the key, and `query` returns an input's value. `read` returns the element's
+text (`textContent`, or `innerText` on cmux), which leaves out an `<input>`'s
+value but not a key shown as text: a server-filled `<textarea>`, `<pre>` or
+`<code>` holds it as child text, and every host's `read` prints it. So never run
+an unscoped `read` then either; scope it only to a container you saw before the
+key appeared, and only when the key sits in an `<input>`.
 - **Use `printf '%s' "$(pbpaste)"`, not bare `pbpaste`.** Command substitution
 strips the trailing newline a page may have written, and that newline would
 become part of the stored secret — every later use of it then fails in a way
