@@ -176,10 +176,10 @@ class MeshAwareAuthStore:
         self._mesh_delegate = mesh
         self._discover_mesh = discover_mesh
         self.config_dir = config_dir
-        #: One future per ``(provider, session_id)`` so several provider calls in one
-        #: turn share ONE borrow (design §3.5). Without it a turn issues one request
-        #: per provider call, and each is a round trip to a device that may be
-        #: refreshing.
+        #: One IN-FLIGHT future per ``(key, session_id, force_refresh)``, so provider
+        #: calls that overlap share ONE borrow (design §3.5). It is not a cache: a
+        #: finished borrow is not reused and sequential calls each dial, by design
+        #: (``_borrow`` says why).
         self._grants: dict[tuple[str, str, bool], asyncio.Future[Any]] = {}
         #: The synthetic id of the credential last borrowed for ``(provider,
         #: session_id)``, so a later failure can be attributed to the BORROW rather
@@ -575,26 +575,32 @@ class MeshAwareAuthStore:
         model_id: str,
         force_refresh: bool,
     ) -> Grant | BrokerError | None:
-        """One borrow, shared with the other provider calls in this turn.
+        """One borrow, shared with the provider calls that overlap it.
 
-        THE FUTURE IS THE COALESCER: the first caller creates it, later callers in
-        the same turn await the same one. The event loop is this session's own, so
-        the future belongs to it; a borrow that is already finished is not cached
-        here.
+        THE FUTURE IS THE COALESCER: the first caller creates it, and callers that
+        arrive while it is still pending await the same one. The event loop is this
+        session's own, so the future belongs to it. A finished borrow is not reused
+        here, so sequential provider calls each dial: that per-request round trip is
+        the accepted cost, not a missing optimisation.
 
-        A FINISHED BORROW IS NOT SERVED FROM THE CLIENT CACHE EITHER, unless the
-        key is a GitHub installation key. The CLIENT keeps a grant cache
-        (``grant_ttl_s``, in memory) and serves it for GitHub keys and MCP bearers
-        only: ``MeshCredentialClient.request_grant_sync`` gates the cache read
-        behind ``is_github_key``. A provider key re-resolves with the owner on
-        every request by design — a grant TTL is not an upstream credential
-        generation, and an owner logout does not rewrite THIS device's placement
-        document, so a cached provider bearer would outlive the login it
-        represents (0385927ab9 removed the unconditional short-circuit;
-        458a1474a4 restored it for forge keys only).
+        A PROVIDER KEY DIALS THE OWNER ON EVERY RESOLVE. The CLIENT caches the grant
+        a dial returns (expiry capped at ``now + grant_ttl_s``), but
+        ``MeshCredentialClient.request_grant_sync`` reads that cache ahead of the
+        dial only for the ``github`` key (``is_github_key``); MCP bearers read it in
+        ``mcp_bearer``. A grant TTL is not an upstream credential generation, and an
+        owner logout does not rewrite THIS device's placement document, so a
+        provider bearer served from the cache would outlive the login it represents
+        (0385927ab9 removed the unconditional short-circuit; 458a1474a4 restored it
+        for the ``github`` key only). The one provider exception is
+        ``MeshCredentialClient._held_or``: when the owner is unreachable, a
+        still-live cached grant is served marked ``held_offline``, which is why
+        ``grant_ttl_s`` still bounds what this device can serve unasked.
+
         ``test_native_hot_access.test_live_grant_and_old_login_refusal_do_not_short_circuit_owner``
-        fails if that gate is widened to providers, so do not "optimise" the dial
-        back.
+        fails if the client's cache read is widened to providers. It drives the
+        client directly and never reaches this method, so keeping this future past
+        its borrow would be a turn-level cache that test cannot see. Design §3.5's
+        as-built note has the detail.
         """
         from local_operator.network.credentials.effective import (
             effective_access,
