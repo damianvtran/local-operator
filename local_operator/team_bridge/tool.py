@@ -1931,24 +1931,32 @@ def _channel_create_free_text(args: Mapping[str, Any]) -> str:
 def _room_name_key(name: str, *, allow_hash: bool) -> str:
     """The comparison form of a room name: trimmed and case-insensitive.
 
-    The hub's duplicate rule is ``strings.TrimSpace`` plus a case-insensitive
-    compare, so the create precheck uses exactly that (``allow_hash=False``) —
-    a stricter local rule would refuse creates the server accepts. A LOOKUP
-    also drops one leading ``#``: people write "#qa-coordination", and the
-    stored name never carries the sigil.
+    The hub's duplicate rule is ``strings.TrimSpace`` plus Go's
+    ``strings.EqualFold`` (SIMPLE case folding). ``str.lower()`` is the closest
+    Python match; ``casefold()`` is FULL folding ("Straße" == "STRASSE") and
+    would refuse creates the hub accepts. The two can still disagree on rare
+    non-ASCII letters, which is why the create precheck is only best-effort and
+    the hub's 409 stays authoritative (``allow_hash=False``). A LOOKUP also
+    drops one leading ``#``: people write "#qa-coordination", and the stored
+    name never carries the sigil.
     """
 
     key = name.strip()
     if allow_hash and key.startswith("#"):
         key = key[1:].strip()
-    return key.casefold()
+    return key.lower()
 
 
-async def _list_open_conversations(runtime: BridgeRuntime) -> list[dict[str, Any]]:
+async def _list_open_conversations(
+    runtime: BridgeRuntime,
+) -> tuple[list[dict[str, Any]], bool]:
     """Up to ``CHANNEL_NAME_LOOKUP_MAX_PAGES`` pages of the tenant's open list.
 
-    Raises whatever the client raises; callers decide whether a failed listing
-    refuses (a lookup) or proceeds (the create precheck).
+    Returns ``(rows, truncated)``: ``truncated`` is True when the page bound
+    stopped the read with a cursor still pending, so a "not found" is only
+    "not found in the rows read" and the refusal must say so. Raises whatever
+    the client raises; callers decide whether a failed listing refuses (a
+    lookup) or proceeds (the create precheck).
     """
 
     rows: list[dict[str, Any]] = []
@@ -1958,15 +1966,15 @@ async def _list_open_conversations(runtime: BridgeRuntime) -> list[dict[str, Any
             tenant_id=runtime.tenant_id, limit=CONVERSATION_PAGE_MAX, cursor=cursor
         )
         if not isinstance(page, dict):
-            break
+            return rows, False
         items = page.get("conversations")
         if isinstance(items, list):
             rows.extend(row for row in items if isinstance(row, dict))
         next_cursor = page.get("next_cursor")
         if not isinstance(next_cursor, str) or not next_cursor:
-            break
+            return rows, False
         cursor = next_cursor
-    return rows
+    return rows, True
 
 
 def _is_tenant_visible_channel(row: Mapping[str, Any]) -> bool:
@@ -1999,7 +2007,7 @@ async def _resolve_channel_name(
     if not key or key.startswith("bcv_"):
         return None, _error(f"{op} needs a conversation id (bcv_…) or a channel name")
     try:
-        rows = await _list_open_conversations(runtime)
+        rows, truncated = await _list_open_conversations(runtime)
     except Exception as failure:
         return None, _error(
             f"could not look up the channel '{name.strip()}': {_failure_text(failure)}. "
@@ -2022,9 +2030,17 @@ async def _resolve_channel_name(
     if len(ids) == 1:
         return ids[0], None
     if not ids:
+        # Past the page bound the room may still exist further down the list:
+        # say how far the read went rather than claim it does not exist.
+        where = (
+            f" in the first {CHANNEL_NAME_LOOKUP_MAX_PAGES * CONVERSATION_PAGE_MAX} "
+            "conversations"
+            if truncated
+            else ""
+        )
         return None, _error(
-            f"no tenant-visible channel named '{name.strip()}' was found. Do not "
-            "create one; ask your chief of staff or the operator for the "
+            f"no tenant-visible channel named '{name.strip()}' was found{where}. "
+            "Do not create one; ask your chief of staff or the operator for the "
             "conversation id (bcv_…)",
             code="channel_not_found",
         )
@@ -2054,19 +2070,27 @@ async def _existing_room_named(
 ) -> tuple[str, str] | None:
     """BEST-EFFORT precheck: an open room of ``kind`` already holding ``name``.
 
-    Visibility follows the hub's rule: a channel collides when it is
-    tenant-visible or the owner is a member; a group only when the owner is a
-    member. The owner's list already holds exactly those rooms (a private room
-    the owner cannot see is absent, so it can never leak through a refusal),
-    hence any listed row of the kind counts. A listing failure returns None and
-    the create proceeds: the hub enforces the same rule authoritatively (409
-    ``conversation_name_taken``), so this read only saves a round trip and must
-    never be the reason a legitimate create is refused.
+    The hub's rule: a channel collides when it is tenant-visible or the
+    caller's account is a member; a group only when the account is a member.
+    The owner's list is authoritative for only part of that — tenant-visible
+    channels and rooms the owner belongs to AS A PERSON. A group or private
+    channel the account joined only through its agent is absent from that list,
+    so this precheck misses it and the hub's 409 ``conversation_name_taken``
+    catches it instead (one extra round trip, same ``channel_exists`` answer).
+    A listing failure returns None and the create proceeds for the same reason:
+    this read only saves a round trip and must never be the reason a legitimate
+    create is refused.
+
+    A NARROW DISCLOSURE, the hub's own: ``channel_create`` sits on the relaxed
+    outbound fence, so a task session that guesses a name learns that a group
+    or private channel the OWNER is already in exists, and its id. That is the
+    same answer the hub's 409 gives the same caller; rooms the owner is not in
+    never match here or there.
     """
 
     key = _room_name_key(name, allow_hash=False)
     try:
-        rows = await _list_open_conversations(runtime)
+        rows, _truncated = await _list_open_conversations(runtime)
     except Exception:
         return None
     for row in rows:
@@ -2506,16 +2530,14 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             if refused is not None or resolved is None:
                 return refused or _error("channel_post could not resolve that channel name")
             channel_id = resolved
+            # Same contract as a named recipient: from here on ``args`` carries
+            # the resolved id, so every later reader of ``args["channel_id"]``
+            # (the reply-binding checks, the pre-HTTP guard) binds against the
+            # real room instead of silently deferring on a name.
+            args = {**args, "channel_id": channel_id}
             if params.in_reply_to_message_id.strip():
                 # The pre-admission binding check deferred on a name; bind now.
-                refused = _validate_reply_destination(
-                    runtime,
-                    {
-                        "in_reply_to_message_id": params.in_reply_to_message_id,
-                        "new_post": params.new_post,
-                        "channel_id": channel_id,
-                    },
-                )
+                refused = _validate_reply_destination(runtime, args)
                 if refused is not None:
                     return refused
         if not params.body.strip() and not params.files:
@@ -2854,6 +2876,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             if refused is not None or resolved is None:
                 return refused or _error("channel_history could not resolve that channel name")
             channel_id = resolved
+            args = {**args, "channel_id": channel_id}
         if params.before_seq is not None and params.after_seq is not None:
             return _error(
                 "channel_history takes at most one of before_seq/after_seq "

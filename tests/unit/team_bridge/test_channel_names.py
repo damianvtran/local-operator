@@ -24,6 +24,7 @@ import pytest
 from local_operator import settings_io
 from local_operator.config import ConfigManager
 from local_operator.team_bridge import client as tb_client
+from local_operator.team_bridge import tool as tb_tool
 from local_operator.team_bridge.client import BridgeRefusal, TeamBridgeClient
 from local_operator.team_bridge.host import (
     admit_bridge_runtime,
@@ -411,6 +412,16 @@ async def test_the_lookup_pages_but_stays_bounded() -> None:
     )
     assert missed["code"] == "channel_not_found"
     assert [c["method"] for c in deep.calls].count("conversations") == 5
+    # The bound stopped the read with rooms unread: say how far it went.
+    assert "was found in the first 500 conversations" in missed["error"]
+
+    # A list that ENDED without the name is a plain "not found".
+    short = FakeHub(filler, page_size=5)
+    absent = await execute_bridge(
+        _gated_runtime(short), {"op": "channel_history", "channel_id": "qa-coordination"}
+    )
+    assert absent["code"] == "channel_not_found"
+    assert "in the first" not in absent["error"]
 
 
 @pytest.mark.asyncio
@@ -420,3 +431,53 @@ async def test_neither_id_nor_name_names_both_forms() -> None:
     assert outcome["error"] == "channel_history needs a conversation id (bcv_…) or a channel name"
     content = json.dumps(outcome)
     assert "not_found" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("open_gates")
+async def test_the_create_precheck_uses_simple_case_folding_like_the_hub() -> None:
+    # Go's EqualFold("Straße", "STRASSE") is false, so the hub accepts this
+    # create; full folding (str.casefold) would wrongly refuse it locally.
+    hub = FakeHub([{"id": QA_ID, "kind": "channel", "name": "STRASSE", "visibility": "tenant"}])
+    runtime = _gated_runtime(hub)
+
+    distinct = await execute_bridge(runtime, _create("Straße"))
+    same = await execute_bridge(runtime, _create("strasse"))
+
+    assert distinct["ok"] is True, distinct
+    assert same["code"] == "channel_exists"
+    assert same["conversation_id"] == QA_ID
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_name_is_written_back_into_args(
+    task_session: BridgeRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After resolution every reader of ``args`` sees the id, never the name."""
+
+    await _admit(task_session, monkeypatch)
+    hub = FakeHub(_qa_rooms())
+    task_session.client = cast(TeamBridgeClient, hub)
+    seen: list[str] = []
+    real = tb_tool._validate_reply_destination
+
+    def recording(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any] | None:
+        seen.append(args.get("channel_id", ""))
+        return real(runtime, args)
+
+    monkeypatch.setattr(tb_tool, "_validate_reply_destination", recording)
+    outcome = await execute_bridge(
+        task_session,
+        {
+            "op": "channel_post",
+            "channel_id": "#qa-coordination",
+            "body": "QA window open",
+            "new_post": True,
+        },
+    )
+
+    assert outcome["ok"] is True, outcome
+    # The pre-admission check necessarily sees the name; every later one, the id.
+    assert seen[0] == "#qa-coordination"
+    assert len(seen) > 1
+    assert set(seen[1:]) == {QA_ID}
