@@ -545,10 +545,10 @@ def repair_command(key: str, *, name: str = "") -> str:
 #: ``notifications.db`` item per open key — high on its first raise, so the banner
 #: ladder tells the owner's operator once without a panel open (#3522). That is the
 #: sense in which this wording reaches an operator: recomposed on their own
-#: surfaces, never sent to them. What the borrower has is the ``interactive_required`` sentence in
-#: :func:`render_broker_error` — which names the owner and the command to run there,
-#: and is the reason the composed MCP failure line can be truthful without a repair
-#: op.
+#: surfaces, never sent to them. What the borrower has is the
+#: ``interactive_required`` sentence in :func:`render_broker_error` — which names
+#: the owner and the command to run there, and is the reason the composed MCP
+#: failure line can be truthful without a repair op.
 #:
 #: ``key`` is the placement key (``mcp:<url>`` or a provider name); the quoting is
 #: deliberate, because the operator pastes the command.

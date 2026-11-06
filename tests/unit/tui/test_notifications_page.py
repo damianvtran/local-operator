@@ -447,9 +447,11 @@ async def test_the_wide_pane_takes_the_keys_and_esc_returns_them(
     gesture meanwhile, and the pane carries the ▸ marker.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    # A REAL conversation for S1: `o`/`a` are offered on the evidence that there is
-    # one (#3522 D1/U2 — a row with no conversation directory offers neither).
+    # REAL conversations for BOTH seeds: `o`/`a` are offered on the evidence that
+    # there is one (#3522 D1/U2), and which row the pane paints after the first is
+    # marked read is not this cell's subject.
     _conversation(tmp_path, S1)
+    _conversation(tmp_path, S2)
     store = NotificationStore(tmp_path)
     item = store.notify(S1, title="a tall one", body_md="x", priority="high")
     # A SECOND row: opening the first marks it read, and on the default Unread
@@ -1790,7 +1792,7 @@ def _seed_repair_item(root: Path) -> Any:
             network_id=_D1_NETWORK,
             key=_D1_MCP,
             generation="g0",
-            title="Run '/mcp login <name>' on this device (mcp.repair.test)",
+            title="mcp.repair.test: run '/mcp login <name>' on this device",
             body=(
                 "- device-b needs '/mcp login <name>' here - "
                 "its borrowed credential cannot be refreshed"
@@ -1857,3 +1859,44 @@ async def test_a_row_with_no_conversation_hides_o_and_a(tmp_path: Path, monkeypa
         hints = dict((key, label) for key, label in view._hint_labels())
         assert "o" not in hints and "a" not in hints, hints
         assert "e" in hints, "dismiss still works on a row with no conversation"
+
+
+@pytest.mark.asyncio
+async def test_Q2_opening_a_ghost_row_does_not_hand_back_o(tmp_path: Path, monkeypatch) -> None:
+    """Q2: the read that drops the row from the page must not resurrect its `o`.
+
+    Opening a ghost row (no conversation directory) under the default `unread`
+    filter marks it read, and the reload then leaves it off the page. Rebuilding
+    the no-conversation set from the remaining rows alone forgot the row the
+    DETAIL still paints — so `o` came back and printed "This conversation is no
+    longer available" (#3522 round 2, QA D1-b).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    store = NotificationStore(tmp_path)
+    # A plain pseudo-session, NOT the repair one: that one has its own route to
+    # `/network`, and this cell is about a row with nowhere to go at all.
+    ghost = store.notify("qa-ghost-session", title="an owner-scoped item", priority="high")
+    app = _app()
+    async with app.run_test(size=(140, 32)) as pilot:
+        await _settle(pilot)
+        app._open_notifications_view()
+        await _page_idle(app, pilot)
+        view = _page(app)
+        rows = [str(r["id"]) for r in view.rows]
+        view._move_to(rows.index(ghost.item_id))
+        await _page_idle(app, pilot)
+        assert "o" not in dict(view._hint_labels()), "the list already hides `o`"
+
+        await pilot.press("enter")  # open it: marks read, which drops it from `unread`
+        await _page_idle(app, pilot)
+        await _settle(pilot, 10)
+
+        detail = view.detail_row
+        assert detail is not None and str(detail["id"]) == ghost.item_id, detail
+        hints = dict(view._hint_labels())
+        assert "o" not in hints, hints
+        assert "a" not in hints, hints
+
+        await pilot.press("o")
+        await _settle(pilot, 10)
+        assert app._notifications_view is not None, "`o` closed the page on a dead end"

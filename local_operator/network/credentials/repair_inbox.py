@@ -165,11 +165,17 @@ def render_title(notice: RepairNotice) -> str:
     backticks for the CLI, but a title is drawn as plain text — in the reel, the
     pane header and the OS banner — so the backticks showed literally beside a
     body that says ``'/login openai'``. Same words, the body's quoting.
+
+    THE HOST LEADS WHEN THERE IS ONE (#3522 round 2, D7). An unnamed MCP key put
+    its host after "on this device", where both the 140- and the 80-column list
+    truncate it — two such rows read identically. First, it survives the cut and
+    the rows are distinguishable; the action still reads in full wherever it fits.
     """
     remedy = notice.remedy.replace("`", "'")
-    title = remedy[:1].upper() + remedy[1:]
     host = _server_host(notice)
-    return f"{title} ({host})" if host else title
+    if host:
+        return f"{host}: {remedy}"
+    return remedy[:1].upper() + remedy[1:]
 
 
 def render_body(askers: Iterable[tuple[str, str]], notice: RepairNotice) -> str:
@@ -177,8 +183,10 @@ def render_body(askers: Iterable[tuple[str, str]], notice: RepairNotice) -> str:
 
     A LIST, because the pane collapses a blank line and two wrapped sentences then
     read as one block (#3522 D5/N2); the sentences themselves stay byte-identical
-    to ``render_repair_notice``. An MCP key with no local name ends with its URL
-    (see :func:`_server_host`).
+    to ``render_repair_notice``. An MCP key with no local name gets its URL as the
+    last list item (see :func:`_server_host`), PLAIN — the body is rendered as
+    Markdown but the reel is not, so a backtick-wrapped URL reached the operator
+    with its formatting characters showing (#3522 round 2, D6/U7).
 
     STABLE FACTS ONLY — device names and the key's command, no timestamps and no
     counters — so a retry renders byte-identical text, the store's content hash
@@ -191,8 +199,7 @@ def render_body(askers: Iterable[tuple[str, str]], notice: RepairNotice) -> str:
     if _server_host(notice):
         from local_operator.network.credentials.types import mcp_url_from_key
 
-        lines.append("")
-        lines.append(f"`{mcp_url_from_key(notice.key)}`")
+        lines.append(f"- {mcp_url_from_key(notice.key)}")
     return "\n".join(lines)
 
 
@@ -301,7 +308,9 @@ def publish_notices(
         # a banner for an episode they had already said they know about. With the
         # dismissed row's token as the floor, the raise lands on that row: same
         # content → ``unchanged``, new asker → ``absorbed`` silently (contract §1.3).
-        dismissed = _standing_items(notifications, state="dismissed") if plan else {}
+        dismissed = (
+            _standing_items(notifications, state="dismissed") if (plan or repaired_set) else {}
+        )
         for (network_id, key), item in plan.items():
             rows = standing.get((network_id, key), [])
             generation = item.generation
@@ -342,6 +351,19 @@ def publish_notices(
                 # eventually repairs it still wakes a derivation (see ``_tick``).
                 newest = max((gen for gen, _ in rows), key=_generation_rank)
                 episodes.setdefault((network_id, key), (newest, "", ""))
+        # A RENEWAL REPAIRS AN OPERATOR-DISMISSED ROW TOO (#3522 round 2, review m1).
+        # Without this, "operator dismisses → signs in → the same login breaks again"
+        # raised nothing when no peer borrowed in between: the dismissed row still
+        # held the current generation, so the new episode's raise landed on it and
+        # was absorbed silently, while the doctor row showed the break. Marking the
+        # row REPAIRED (once the owner's own sign-in proves it was) makes the next
+        # break a new episode, which reopens the row at ``high``.
+        for episode_key, rows in dismissed.items():
+            if episode_key[1] not in repaired_set:
+                continue
+            for _, row in rows:
+                result.closed += _mark_repaired(notifications, row)
+            episodes.pop(episode_key, None)
         # Nothing to close and nothing open: forgotten, so a lingering key cannot keep
         # every later grant row paying for a derivation.
         for stale in [k for k in episodes if k not in plan and k not in standing]:
@@ -396,6 +418,30 @@ def _close(notifications: Any, row: Mapping[str, Any]) -> int:
         "dismiss", ids=[(str(row["id"]), int(row["revision"]))], via=DISMISSED_VIA
     )
     return len(applied.changed)
+
+
+def _mark_repaired(notifications: Any, row: Mapping[str, Any]) -> int:
+    """Re-file a DISMISSED row as repaired (``dismissed_via=mesh_repair``); 0 if already.
+
+    Two token-bound writes, because the store refuses a ``dismiss`` on a row that is
+    already dismissed (``apply`` answers ``already`` and changes nothing): the row is
+    undismissed and dismissed again under the repaired reason. A row this module
+    already closed needs neither.
+    """
+    if str(row.get("dismissed_via") or "") == DISMISSED_VIA:
+        return 0
+    item_id, revision = str(row["id"]), int(row["revision"])
+    if not notifications.apply("undismiss", ids=[(item_id, revision)], via=DISMISSED_VIA).changed:
+        return 0
+    current = notifications.get_by_key(SESSION_ID, str(row.get("key") or ""))
+    if current is None:
+        return 0
+    notifications.apply(
+        "dismiss",
+        ids=[(str(current["id"]), int(current["revision"]))],
+        via=DISMISSED_VIA,
+    )
+    return 1
 
 
 def _raise(notifications: Any, item: PlannedItem, generation: str) -> str:

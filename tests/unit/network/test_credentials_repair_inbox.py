@@ -39,6 +39,7 @@ from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials import repair_inbox
 from local_operator.network.credentials.messages import render_repair_notice
 from local_operator.network.credentials.owner import broker_for_relay
+from local_operator.network.credentials.repair import RepairNotice
 from local_operator.network.credentials.sync import credentials_sync_step
 from local_operator.network.credentials.types import BrokerError, Grant
 from local_operator.notifications.store import NotificationStore
@@ -273,11 +274,13 @@ def test_row2_the_owner_is_asked_once_and_the_doctor_row_is_untouched(
     assert item["read"] is False and item["dismissed"] is False
     assert item["priority"] == "high"
     # D2: the body's quoting in the title, not the CLI's backticks.
-    # D3/U5: an MCP key this device cannot NAME says which server it is.
-    assert item["title"] == "Run '/mcp login <name>' on this device (mcp.repair.test)"
+    # D3/U5 + D7: an MCP key this device cannot NAME leads with its host, so two
+    # such rows stay distinguishable after the list truncates them.
+    assert item["title"] == "mcp.repair.test: run '/mcp login <name>' on this device"
     # D5/N2: a list, so two askers do not run together in the pane.
+    # D6/U7: the URL is its own item, plain (no backticks: the reel is not Markdown).
     assert item["body_md"] == "\n".join(
-        [f"- {render_repair_notice(_b_name(rig), MCP_KEY)}", "", f"`{MCP_KEY[4:]}`"]
+        [f"- {render_repair_notice(_b_name(rig), MCP_KEY)}", f"- {MCP_KEY[4:]}"]
     )
     assert item["session_title"] == "/network"
     # No token material: the item is a key name, a device name and a command.
@@ -380,8 +383,7 @@ def test_row4_a_second_peer_updates_the_same_item(
         [
             f"- {render_repair_notice(_b_name(rig), MCP_KEY)}",
             f"- {render_repair_notice('device-c', MCP_KEY)}",
-            "",
-            f"`{MCP_KEY[4:]}`",
+            f"- {MCP_KEY[4:]}",
         ]
     )
     # NOT ``high``: the ladder banners a high revision, and the operator was already
@@ -1151,3 +1153,120 @@ def test_m2_a_failing_store_says_so_once_and_stops_the_re_derivation(
     bell.retry_at = 0.0
     assert repair_inbox.tick(rig.a) == "published"
     assert len(_items(rig)) == 1
+
+
+# ---------------------------------------------------------------------------
+# round 2 remediation: review m1, design D6/D7, UX U7
+# ---------------------------------------------------------------------------
+
+
+def test_review_m1_a_break_after_a_repair_raises_even_if_the_operator_dismissed(
+    rig: Any, gates_open: None, no_mcp_discovery: None
+) -> None:
+    """review m1: dismiss → sign in (the repair) → the same login breaks again.
+
+    No peer borrows in between, so nothing advances the generation. The dismissed
+    row must still give way to a NEW high item, because the operator's dismissal was
+    answered by a real repair, not by the login staying dead.
+    """
+    _seed_mcp(rig, expired=True)
+    _share_mcp(rig)
+    assert isinstance(_borrow(rig), BrokerError)
+    _owner_tick(rig)
+    (first,) = _items(rig)
+    NotificationStore(rig.a.root).apply(
+        "dismiss", ids=[(first["id"], int(first["revision"]))], via="explicit"
+    )
+
+    # The REPAIR: a fresh sign-in through the token storage `/mcp login` uses.
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+
+    auth = _auth(rig)
+    try:
+        asyncio.run(
+            McpTokenStorage(MCP_URL, auth).set_tokens(
+                OAuthToken.model_validate(
+                    {
+                        "access_token": "-".join(("synthetic", "repaired", "access")),
+                        "refresh_token": "-".join(("synthetic", "repaired", "refresh")),
+                        "expires_in": 3600,
+                    }
+                )
+            )
+        )
+    finally:
+        auth.close()
+    _owner_tick(rig)
+    (repaired,) = _items(rig, state="dismissed")
+    assert (
+        repaired["dismissed_via"] == "mesh_repair"
+    ), "the sign-in did not register as a repair on the dismissed row"
+
+    # THE SAME LOGIN BREAKS AGAIN: the IdP refuses it once more.
+    _tombstone_mcp(rig)
+    auth = _auth(rig)
+    try:
+        rows = [r for r in auth.list_credentials("mcp-oauth") if r.identity_key == MCP_URL]
+        data = dict(rows[0].data)
+        data["tokens_obtained_at"] = time.time() - 7200
+        auth.upsert_credential("mcp-oauth", data)
+    finally:
+        auth.close()
+    assert isinstance(_borrow(rig), BrokerError)
+    _owner_tick(rig)
+
+    items = _items(rig)
+    assert len(items) == 1, items
+    assert items[0]["priority"] == "high", "a new break after a repair is new news"
+    assert items[0]["read"] is False
+    assert _doctor_repairs(rig), "the doctor row should show the new break"
+
+
+def test_D6_U7_the_body_is_plain_text_with_the_url_on_its_own_line() -> None:
+    """D6/U7: no backticks (the reel does not render Markdown), URL as a list item."""
+    notice = RepairNotice(
+        network_id="n_x",
+        key="mcp:https://mcp.example.invalid/mcp",
+        borrower="d_" + "2" * 32,
+        borrower_name="build-box",
+        login_name="",
+        askers=(("d_" + "2" * 32, "build-box"),),
+        failure="interactive_required",
+        generation="g0",
+    )
+
+    body = repair_inbox.render_body(notice.askers, notice)
+
+    assert "`" not in body, body
+    assert body.splitlines() == [
+        f"- {render_repair_notice('build-box', notice.key)}",
+        "- https://mcp.example.invalid/mcp",
+    ]
+
+
+def test_D7_an_unnamed_mcp_key_leads_with_its_host() -> None:
+    """D7: the host survives the 140- and 80-column list truncation."""
+    rows = [
+        RepairNotice(
+            network_id="n_x",
+            key=f"mcp:https://{host}/mcp",
+            borrower="d_" + "2" * 32,
+            borrower_name="build-box",
+            login_name="",
+            askers=(("d_" + "2" * 32, "build-box"),),
+            failure="interactive_required",
+            generation="g0",
+        )
+        for host in ("alpha.example.invalid", "beta.example.invalid")
+    ]
+
+    titles = [repair_inbox.render_title(n) for n in rows]
+
+    assert titles[0] != titles[1]
+    for title, host in zip(titles, ("alpha", "beta"), strict=True):
+        assert title.startswith(f"{host}.example.invalid: run '/mcp login <name>'")
+        # 80 columns is the narrowest list the renderer clips for; the host is
+        # inside the first 24 characters, so it is never the part that is cut.
+        assert len(title[: title.index(" ")]) <= 24

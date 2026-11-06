@@ -288,8 +288,17 @@ class NotificationsView(Vertical):
         except Exception as error:  # noqa: BLE001 - the page states the failure
             snapshot = model.Snapshot(error=str(error) or type(error).__name__)
         try:
+            # The DETAIL row's session rides along with the page's (#3522 round 2,
+            # Q2): opening a row under the unread filter marks it read, the reload
+            # then drops it from the page, and a set rebuilt from the remaining rows
+            # alone forgot that its session has no conversation — so the open detail
+            # offered `o` again and printed "no longer available". The union below
+            # cannot go stale the same way: a session is asked about while it is on
+            # the page OR pinned in the detail.
             self._no_conversation = await asyncio.to_thread(
-                _sessions_without_conversation, self._root, snapshot.rows
+                _sessions_without_conversation,
+                self._root,
+                _sessions_on_screen(snapshot.rows, self.detail_row),
             )
         except Exception:  # noqa: BLE001 - unknown keeps `o` offered, as before
             self._no_conversation = frozenset()
@@ -1075,6 +1084,16 @@ class NotificationsView(Vertical):
                 labels.append(("f", _t(_k.hint_filter())))
         labels.append(("esc", _t(_k.hint_clear()) if self.selected_ids else _t(_k.hint_back())))
         return labels
+
+
+def _sessions_on_screen(
+    rows: list[dict[str, Any]], detail: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """``rows`` plus the detail row, de-duplicated: what the page can offer `o` for."""
+    seen = {str(r.get("id") or "") for r in rows}
+    if detail is not None and str(detail.get("id") or "") not in seen:
+        return [*rows, detail]
+    return rows
 
 
 def _sessions_without_conversation(root: Path, rows: list[dict[str, Any]]) -> frozenset[str]:
