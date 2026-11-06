@@ -1276,19 +1276,39 @@ class NotificationStore:
 
         return self._write(body, "seen")
 
-    def undelivered(self, *, priority: str | None = None, limit: int = 4) -> list[dict[str, Any]]:
+    def undelivered(
+        self,
+        *,
+        priority: str | None = None,
+        limit: int = 4,
+        exclude_prefixes: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
         """Items a banner leg may still raise: unread, undismissed, unclaimed.
 
         THE FILTER IS SQL, not a post-read pass: a caller that fetched N unread
         rows and filtered `delivered_rev` afterwards could starve the oldest
         item for ever once the newest N had been claimed, which is the one
-        failure a drain-by-ticks design has to avoid.
+        failure a drain-by-ticks design has to avoid. ``exclude_prefixes`` is
+        part of the query for that same reason — a ladder leg that dropped park
+        rows after the LIMIT left live parks occupying the window and starved
+        every other item behind them.
+
+        ``exclude_prefixes`` is how a banner leg declines a family of rows the
+        PARK's own path announces (``notifications/delivery.py::
+        announced_by_its_park``). It is an ARGUMENT rather than a built-in rule
+        because the store cannot know which of its callers speak for a park;
+        the ladder's own module owns that decision.
         """
         clauses = ["dismissed_at IS NULL", "read_rev < revision", "delivered_rev < revision"]
         params: list[Any] = []
         if priority is not None:
             clauses.append("priority = ?")
             params.append(str(priority))
+        for prefix in exclude_prefixes:
+            # ``NOT LIKE`` keeps every unkeyed row (``key`` is NOT NULL DEFAULT
+            # ''), which is the overwhelming majority of the reel.
+            clauses.append("key NOT LIKE ?")
+            params.append(f"{prefix}%")
         params.append(max(1, int(limit)))
 
         def body(conn: sqlite3.Connection) -> list[dict[str, Any]]:

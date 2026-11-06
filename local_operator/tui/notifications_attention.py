@@ -97,10 +97,17 @@ def announce_items(
         from local_operator.notifications.store import NotificationStore
 
         store = NotificationStore(root)
-    from local_operator.notifications.delivery import grace_remaining_ms
+    from local_operator.notifications.delivery import (
+        PARK_ITEM_PREFIXES,
+        grace_remaining_ms,
+    )
 
     stamp = now_ms if now_ms is not None else int(time.time() * 1000)
-    owed = list(store.undelivered(priority="high", limit=BURST_LIMIT + 1))
+    owed = list(
+        store.undelivered(
+            priority="high", limit=BURST_LIMIT + 1, exclude_prefixes=PARK_ITEM_PREFIXES
+        )
+    )
     held_rows = [row for row in owed if grace_remaining_ms(row, stamp) > 0]
     # THE WATCHED SESSION'S ROWS ARE HELD, NOT COVERED (R3-1). They were skipped
     # outright, so a pass that saw only them reported nothing held, the caller

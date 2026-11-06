@@ -57,6 +57,8 @@ from local_operator.tui.notify import (
     remote_park_banner,
     remote_park_card,
     remote_park_hints,
+    remote_park_item_body,
+    remote_park_item_title,
     sanitize_text,
     should_use_desktop_fallback,
     wrap_tmux_passthrough,
@@ -1019,10 +1021,33 @@ def test_no_remote_park_string_offers_an_allow_from_here() -> None:
     strings += [remote_park_banner("demo-laptop", kind) for kind in ("approval", "ask")]
     strings += list(remote_park_hints("demo-laptop", "approval"))
     strings += list(remote_park_hints("demo-laptop", "ask"))
+    strings += [remote_park_item_title("demo-laptop", kind) for kind in ("approval", "ask")]
+    strings += [remote_park_item_body("demo-laptop", kind) for kind in ("approval", "ask")]
     for text in strings:
         lowered = text.lower()
         assert "allow from here" not in lowered
         assert "allow it here" not in lowered
+
+
+def test_the_item_body_names_the_one_privileged_step_in_both_commands() -> None:
+    """Behaviour 3: command-exact, not "check the docs" (operator report).
+
+    The inbox row's job is the remedy a reader can ACT on: the export on this
+    machine, the install on the peer, what that install grants, and the gesture
+    that needs no authority at all. The two commands are the ones
+    ``operator/cli.py`` ships (``anchor export --file``, ``install --from``) —
+    this pin is what stops a later paraphrase from inventing a spelling.
+    """
+    body = remote_park_item_body("cloud-node-1", "approval")
+    assert "lop operator anchor export --file anchor.json" in body
+    assert "lop operator install --from anchor.json" in body
+    assert "cloud-node-1" in body
+    assert "check a signature made on this machine" in body
+    assert "grants nothing else" in body
+    assert remote_park_item_body("cloud-node-1", "ask") == "Open the session here to answer it."
+    assert remote_park_item_title("cloud-node-1", "approval") == (
+        "Waiting for approval on cloud-node-1"
+    )
 
 
 def test_the_remote_park_hint_rungs_shed_whole_clauses() -> None:

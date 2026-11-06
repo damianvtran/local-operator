@@ -38437,11 +38437,23 @@ class OperatorApp(App[None]):
                 rows,
                 unanswered=[peer.device_id for peer in unanswered],
             )
-            cleared = [key for key in self._remote_park_episodes if key not in state]
+            # A key ENDS when it leaves the state OR when its KIND changed. The
+            # kind is part of the row's key, so ``ask`` → ``approval`` on one
+            # conversation is two rows: the old kind's row must be dismissed as
+            # the old episode ending, or it stays unread and ``high`` for ever
+            # after the park has gone — the lie the row exists not to tell. A
+            # key carried forward for a SILENT device keeps its kind
+            # (``park_edges`` inserts it unchanged), so the outage rule is
+            # untouched.
+            ended: list[dict[str, str]] = []
+            for key, kind in self._remote_park_episodes.items():
+                if state.get(key) == kind:
+                    continue
+                ended.append({"device_id": key[0], "session_id": key[1], "kind": kind})
             self._remote_park_episodes = state
             toast = self.query_one(Toast)
-            for key in cleared:
-                owner = self._remote_park_owners.pop(key, None)
+            for item in ended:
+                owner = self._remote_park_owners.pop((item["device_id"], item["session_id"]), None)
                 if owner is not None:
                     toast.withdraw(owner)
             for park in edges:
@@ -38452,8 +38464,44 @@ class OperatorApp(App[None]):
                 if attached and self._remote_park_card_is_up():
                     continue
                 self._show_remote_park(park, toast, attached=attached)
+            self._write_remote_park_items(ended, edges)
         except Exception:  # pragma: no cover - defensive; chrome must not raise
             logger.debug("remote park notice failed", exc_info=True)
+
+    def _write_remote_park_items(
+        self, ended: Sequence[dict[str, str]], edges: Sequence[RemotePark]
+    ) -> None:
+        """The DURABLE half of these notices: one inbox row per live peer park.
+
+        The toast above is an edge — an operator who was not looking loses it,
+        and the park then waits unobserved (the 2026-09-28 offload test: a
+        session on a peer sat parked for hours while this machine was told
+        nothing). The row is what survives the toast, the banner and a restart,
+        and it is raised for EVERY edge, including the park whose card is on
+        screen: the card goes with the app, the row does not.
+
+        Rides the same transitions the notice does — no timer, no second
+        detector — and writes through the inbox's own door
+        (``notifications/remote_park.py``). Never raises: an attention row is
+        chrome beside a parked tool call, and this runs where an exception
+        would be reported as a failed catalog or a failed poll.
+        """
+        from local_operator.notifications import remote_park as remote_park_items
+        from local_operator.paths import config_dir
+
+        fresh = [
+            {
+                "device_id": park.device_id,
+                "session_id": park.session_id,
+                "kind": park.kind,
+                "device_name": park.device_name,
+                "name": park.name,
+            }
+            for park in edges
+        ]
+        if not ended and not fresh:
+            return
+        remote_park_items.write_transitions(config_dir(), ended, fresh)
 
     def _remote_park_is_attached(self, park: RemotePark) -> bool:
         """Whether THIS app's current session IS the peer session ``park`` names.

@@ -1259,6 +1259,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/mobile/peer_send.py": (1, "``peer-`` prefixes a message id"),
     "local_operator/mobile/push_payload.py": (1, "``attention-`` prefixes a push payload key"),
     "local_operator/network/invite.py": (1, "``lop1`` prefixes an invite token string"),
+    "local_operator/notifications/remote_park.py": (
+        1,
+        "``remote-gate`` prefixes a notification row's KEY in ``notifications.db`` "
+        "(``remote-gate:<device>:<session>:<kind>``, see ``remote_park.item_key``): a "
+        "primary key inside SQLite, never a path on disk and never a session directory "
+        "entry, so there is nothing for the copy to carry",
+    ),
     "local_operator/secrets/store.py": (
         1,
         "``LOP_PROVIDER_`` prefixes an environment variable name, not a path",
