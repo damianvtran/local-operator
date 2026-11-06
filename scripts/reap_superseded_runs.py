@@ -14,7 +14,10 @@ result nobody will read.
 What it will NEVER touch -- the safety rules, in order of how much damage each
 one prevents:
 
-1. Only runs in status `queued`. A run that has STARTED is doing work whose
+1. Only runs in status `queued` with a complete latest-attempt job inventory
+   showing no execution evidence. Workflow status alone can remain queued while
+   individual jobs are running; queued-job started_at alone is a placeholder.
+   A run that has STARTED is doing work whose
    artifacts or logs someone may still need, and cancelling it wastes the work
    already done. The bug this addresses is a QUEUE problem, so the queue is
    the only place it acts.
@@ -510,6 +513,93 @@ def decide(
     return False, f"event {event!r} is not superseded by definition"
 
 
+#: Job/step statuses that mean "created but not executing". `queued` is the
+#: obvious one; `waiting`, `requested` and `pending` are the same condition seen
+#: through a concurrency group, an environment-protection gate or a runner
+#: request. They were previously outside the allowlist, so the guard reported
+#: "job execution state unreadable" and KEPT such a run forever -- the exact
+#: opposite of the abandonment rule, which exists to clear runs nothing will
+#: ever read. None of them carries execution evidence: no runner, no started
+#: step, so recognising them as unstarted is safe as well as necessary.
+NOT_STARTED_STATES = ("queued", "waiting", "requested", "pending")
+
+
+def jobs_are_unstarted(repo: str, run_id: Any) -> tuple[bool, str]:
+    """Prove the latest attempt has no execution evidence before cancelling it.
+
+    GitHub can label a WORKFLOW queued while some of its jobs are running
+    (observed on run 42067886772). Its queued jobs also populate started_at
+    with created_at, so that timestamp alone cannot distinguish execution.
+    A partial, changing or unreadable inventory is not permission to cancel.
+    Execution evidence is a runner assignment, an in-progress job, a started
+    step, or a completed job that was not skipped. At JOB level a `cancelled`
+    job is also exempt: cancelling a job before it starts leaves no work behind,
+    so it is not evidence that this run's work mattered. That exemption is
+    job-level only -- at STEP level just `skipped` is exempt, which is the
+    stricter reading a step deserves.
+    This read cannot make the subsequent POST atomic with runner assignment;
+    it only prevents discarding work whose execution is already observable.
+    """
+    seen: set[int] = set()
+    total: int | None = None
+    for page in range(1, 21):
+        data = gh_api(
+            f"repos/{repo}/actions/runs/{run_id}/jobs"
+            f"?filter=latest&per_page={SEARCH_LIMIT}&page={page}"
+        )
+        if not isinstance(data, dict):
+            return False, "job inventory unreadable"
+        count = data.get("total_count")
+        batch = data.get("jobs")
+        if (
+            type(count) is not int
+            or count < 0
+            or not isinstance(batch, list)
+            or len(batch) > SEARCH_LIMIT
+            or (total is not None and count != total)
+        ):
+            return False, "job inventory incomplete or changed"
+        total = count
+        for job in batch:
+            if not isinstance(job, dict):
+                return False, "job inventory contains an unreadable job"
+            job_id = job.get("id")
+            if type(job_id) is not int or job_id in seen:
+                return False, "job inventory has missing or duplicate identities"
+            seen.add(job_id)
+            status = job.get("status")
+            steps = job.get("steps", [])
+            if status not in NOT_STARTED_STATES + ("completed", "in_progress") or not isinstance(
+                steps, list
+            ):
+                return False, "job execution state unreadable"
+            if (
+                status == "in_progress"
+                or job.get("runner_id")
+                or job.get("runner_name")
+                or (status == "completed" and job.get("conclusion") not in ("skipped", "cancelled"))
+            ):
+                return False, "job execution has already begun"
+            for step in steps:
+                if not isinstance(step, dict) or step.get("status") not in (
+                    NOT_STARTED_STATES + ("completed", "in_progress")
+                ):
+                    return False, "job step execution state unreadable"
+                if step.get("status") == "in_progress" or (
+                    step.get("status") == "completed" and step.get("conclusion") != "skipped"
+                ):
+                    return False, "job step execution has already begun"
+        if len(seen) > total:
+            return False, "job inventory exceeds its reported size"
+        if len(batch) < SEARCH_LIMIT:
+            return (
+                (True, "all jobs unstarted")
+                if len(seen) == total
+                else (False, "job inventory incomplete")
+            )
+    return False, "job inventory exceeded the pagination bound"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True, help="OWNER/NAME")
@@ -569,12 +659,6 @@ def main() -> int:
             kept += 1
             print(f"  KEEP   {label}: {reason}", flush=True)
             continue
-        if args.dry_run:
-            cancelled += 1
-            if run.get("head_branch") == PROTECTED_MAIN:
-                post_merge.append((run_id, str(run.get("head_sha"))[:9]))
-            print(f"  WOULD  {label}: {reason}", flush=True)
-            continue
         # C-6: re-read the status immediately before writing. A run can start
         # between the listing and this call, and cancelling work that has
         # already begun is the one thing this script must never do.
@@ -587,6 +671,25 @@ def main() -> int:
         if (fresh or {}).get("status") != "queued":
             print(f"  KEEP   {label}: no longer queued ({(fresh or {}).get('status')})", flush=True)
             kept += 1
+            continue
+        try:
+            unstarted, execution_reason = jobs_are_unstarted(args.repo, run_id)
+        except ApiError as exc:
+            unstarted, execution_reason = False, f"job inventory read failed ({exc})"
+        if not unstarted:
+            print(f"  KEEP   {label}: {execution_reason}", flush=True)
+            kept += 1
+            continue
+        # The preview sits AFTER both reads above, deliberately. A dry run that
+        # reported WOULD without performing them disagreed with the real sweep
+        # exactly when it mattered -- on a run whose work had already started --
+        # and the preview is the mode an operator uses to decide whether a
+        # schedule is safe. It performs the reads and stops before the write.
+        if args.dry_run:
+            cancelled += 1
+            if run.get("head_branch") == PROTECTED_MAIN:
+                post_merge.append((run_id, str(run.get("head_sha"))[:9]))
+            print(f"  WOULD  {label}: {reason}", flush=True)
             continue
         try:
             gh_api(f"repos/{args.repo}/actions/runs/{run_id}/cancel", method="POST")

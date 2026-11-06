@@ -35,6 +35,7 @@ WHAT THIS MODULE GUARANTEES, and the mechanism for each:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import threading
 import time
@@ -63,9 +64,21 @@ from local_operator.network.credentials.types import (
     Grant,
     credential_key_for_mcp,
     credential_key_for_provider,
+    is_device_bound_provider,
+    is_mcp_key,
 )
 
 logger = logging.getLogger("local_operator.network.credentials.client")
+
+#: The outcomes that mean "the owner did not answer" and nothing more. Only these may
+#: be bridged by a grant this process already holds (:meth:`_held_or`).
+_HOLDABLE_REFUSALS: frozenset[str] = frozenset({"owner_offline", "owner_unreachable"})
+
+#: Outcomes that are not an owner answer about permission either, so they neither
+#: serve nor drop a held grant: a local broker fault, a busy owner, a quota rest.
+_TRANSIENT_REFUSALS: frozenset[str] = frozenset(
+    {"internal", "rate_limited", "quota_blocked", "unsupported"}
+)
 
 #: The borrower's whole budget for one borrow, in seconds. Below the local secret
 #: broker's 10 s (see this module's docstring) and far below the owner-side
@@ -101,6 +114,7 @@ class GrantCache:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._grants: dict[tuple[str, str], Grant] = {}
+        self._policy_fences: dict[tuple[str, str], Any] = {}
 
     def get(self, key: str, session_id: str) -> Grant | None:
         """The cached grant when it is still usable, else ``None``.
@@ -130,18 +144,52 @@ class GrantCache:
         with self._lock:
             return self._grants.get((key, session_id))
 
-    def put(self, key: str, session_id: str, grant: Grant) -> None:
+    def put(self, key: str, session_id: str, grant: Grant, *, policy_fence: Any = "") -> None:
         with self._lock:
             self._grants[(key, session_id)] = grant
+            self._policy_fences[(key, session_id)] = policy_fence
+
+    def policy_stamp(self, key: str, session_id: str) -> Any:
+        with self._lock:
+            return self._policy_fences.get((key, session_id))
+
+    def drop_borrowed(self, self_device: str) -> None:
+        """One client owns one root/network; local-owned sentinels are unrelated."""
+        with self._lock:
+            for pair, grant in list(self._grants.items()):
+                if grant.credential_ref.owner_device != self_device:
+                    del self._grants[pair]
+                    self._policy_fences.pop(pair, None)
+
+    def invalidate_policy(self, key: str, session_id: str, fence: str) -> bool:
+        """Drop ALL old slots, not just the session that first hears the refusal.
+
+        Compare opaque generations, never the remote owner's clock. A fresh
+        authorized grant can coexist with this watermark without resurrecting
+        grants issued before a restriction another process persisted.
+        """
+        with self._lock:
+            stale = [
+                pair
+                for pair in self._grants
+                if pair[0] == key and self._policy_fences.get(pair, "") != fence
+            ]
+            requested = (key, session_id) in stale
+            for pair in stale:
+                del self._grants[pair]
+                self._policy_fences.pop(pair, None)
+            return requested
 
     def drop(self, key: str, session_id: str = "") -> None:
         """Forget one grant, or every session's grant for ``key`` when unnamed."""
         with self._lock:
             if session_id:
                 self._grants.pop((key, session_id), None)
+                self._policy_fences.pop((key, session_id), None)
                 return
             for pair in [p for p in self._grants if p[0] == key]:
                 del self._grants[pair]
+                self._policy_fences.pop(pair, None)
 
     def find_by_token(self, key: str, bearer: str) -> tuple[str, str] | None:
         """The ``(key, session_id)`` a bearer belongs to, for attributing a failure.
@@ -175,6 +223,7 @@ class GrantCache:
     def clear(self) -> None:
         with self._lock:
             self._grants.clear()
+            self._policy_fences.clear()
 
 
 class MeshCredentialClient:
@@ -208,6 +257,10 @@ class MeshCredentialClient:
         self._relay = relay
         self.deadline_s = deadline_s
         self.grants = GrantCache()
+        # A validated store remains established even after every cached lease is
+        # evicted. This is deny-only knowledge, scoped to canonical identity,
+        # never permission or a claim about another process's unobserved history.
+        self._held_policy_established: set[tuple[Path, str, str]] = set()
         self._state_lock = threading.Lock()
         #: The sync engine used by the CLI's direct fallback. Built lazily; the
         #: runtime never reaches it (it asks its own relay, leg 1).
@@ -485,6 +538,12 @@ class MeshCredentialClient:
         )
 
     def _remember(self, key: str, error: BrokerError) -> None:
+        if error.code in _HOLDABLE_REFUSALS and self.state.held_policy_refusal(
+            key, error.owner_device or self.owner_of(key)
+        ):
+            # Connectivity cannot erase an authenticated refusal, including after
+            # its retry-cache TTL. Publish only the final held/policy decision.
+            return
         ttl = error.cache_ttl_ms
         if ttl == NO_RETRY:
             ttl = UNSUPPORTED_OBSERVATION_MS
@@ -502,7 +561,11 @@ class MeshCredentialClient:
         )
         from local_operator.network.credentials.effective import note_resolution
 
-        note_resolution(self.root, key, error)
+        # A transport observation is not yet the resolution: this process may
+        # still use the owner's valid held lease. Publishing here made the real
+        # session host emit a false outage before that decision was made.
+        if error.code not in _HOLDABLE_REFUSALS:
+            note_resolution(self.root, key, error)
         self._remember_evidence(key, error)
         self._save_state()
 
@@ -655,6 +718,12 @@ class MeshCredentialClient:
         # (see ``PlacementState.cool_down``). An explicit refresh still carries
         # them: a forced refresh is a repair of the bearer, not a request to be
         # served by a row the provider said is spent.
+        # What this device last heard about ``key``, read BEFORE the dial overwrites
+        # it: a non-transport refusal recorded by ANOTHER process (another session,
+        # the relay's own pull) is an owner answer this process's memory never saw,
+        # and it must keep a held grant from being served (:meth:`_held_or`).
+        prior_status = self.state.status(key)
+        request_stamp = self._capture_request(key)
         resting = self.state.cooldowns(key, model_id, owner_device=self.owner_of(key))
         excluded = sorted({int(row["credential_id"]) for row in resting})
         try:
@@ -663,7 +732,13 @@ class MeshCredentialClient:
 
             record = store.find_own_relay(self.root)
             if record is None:
-                return self._offline(key, label)
+                return self._held_or(
+                    self._offline(key, label),
+                    key,
+                    session_id,
+                    force_refresh=force_refresh,
+                    prior_status=prior_status,
+                )
             extra: dict[str, Any] = {}
             if excluded:
                 # Only when there is something to hide, so the frame an older relay
@@ -694,7 +769,214 @@ class MeshCredentialClient:
                 owner_device_name=self.owner_label(key),
                 message=exc.__class__.__name__,
             )
-        return self._from_reply(reply, key, label, session_id, resting=resting)
+        outcome = self._from_reply(
+            reply, key, label, session_id, resting=resting, request_stamp=request_stamp
+        )
+        if isinstance(outcome, BrokerError):
+            return self._held_or(
+                outcome, key, session_id, force_refresh=force_refresh, prior_status=prior_status
+            )
+        return outcome
+
+    def _policy(self) -> Any:
+        from local_operator.network.credentials.held_policy import HeldPolicyStore
+
+        return HeldPolicyStore(self.network_id, self.self_device, self.root)
+
+    def _placement_authority(self, key: str) -> Any:
+        entry = self.entry(key)
+        holder = entry.holder(self.self_device) if entry else None
+        if entry is None or holder is None:
+            return None
+        return (
+            entry.owner_device,
+            entry.provider,
+            entry.kind,
+            entry.doc_rev,
+            holder.scope,
+            holder.granted_at,
+            holder.granted_by,
+        )
+
+    def _capture_request(self, key: str) -> Any:
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
+        try:
+            policy = self._policy()
+            identity = (policy.root, policy.network_id, policy.recipient)
+            # Evaluate genesis eligibility UNDER the store's shared locks: a
+            # concurrent capture may have validated this identity while we wait.
+            with policy.transaction(
+                initialize=lambda: identity not in self._held_policy_established
+            ) as document:
+                self._held_policy_established.add(identity)
+                if document["membership_denied"] and self._self_membership_active():
+                    # This only permits a later loss to advance its deny counter;
+                    # it NEVER restamps an old grant or resets that counter.
+                    document["membership_denied"] = False
+                return (
+                    policy.stamp(document, self.owner_of(key), key),
+                    self._placement_authority(key),
+                )
+        except PolicyUnknown:
+            return None
+
+    def _lifecycle_restriction(self, key: str) -> str:
+        from local_operator.network.credentials import lifecycle
+
+        life = lifecycle.LifecycleStore(self.network_id, self.root)
+        document = life.load()
+        if life.restriction_pending() or document.needs_baseline:
+            return "consent_unverifiable"
+        if any(
+            owner == self.owner_of(key)
+            and row_key == key
+            and state in lifecycle._RESTRICTIVE_STATES
+            for (owner, row_key, _scope), state in document.observation_states.items()
+        ):
+            return "consent_withdrawn"
+        return ""
+
+    def _policy_error(self, key: str, code: str) -> BrokerError:
+        return self._render(
+            BrokerError(
+                code=code,
+                key=key,
+                owner_device=self.owner_of(key),
+                owner_device_name=self.owner_label(key),
+            ),
+            key,
+            key,
+        )
+
+    def _invalidate_membership_scope(self, key: str, document: Any = None) -> BrokerError:
+        """The SAME persistent deny operation at both membership checkpoints.
+
+        A network generation fences OTHER clients/processes too. Cache eviction
+        is namespace-wide but leaves locally owned contexts intact. No retry
+        snapshot, rejoin or transport success can license those old stamps.
+        """
+        policy = self._policy()
+        if document is None:
+            with policy.transaction() as row:
+                policy.deny_network(row)
+                self.grants.drop_borrowed(self.self_device)
+        else:
+            policy.deny_network(document)
+            self.grants.drop_borrowed(self.self_device)
+        return self._policy_error(key, "not_a_holder")
+
+    def _adopt_online(
+        self, grant: Grant, key: str, session_id: str, request_stamp: Any, *, cache: bool = True
+    ) -> Grant | BrokerError:
+        """CAS before ANY positive cache/status/publication, on BOTH relay legs.
+
+        Only an owner-verified response for this dispatch generation can tag its
+        new slot. A late reply never adopts a deny discovered on completion.
+        No network call or placement mutation runs under this transaction.
+        """
+        from local_operator.network.credentials.effective import note_resolution
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
+        denied = None
+        try:
+            policy = self._policy()
+            with policy.transaction() as document:
+                if not self._self_membership_active():
+                    denied = self._invalidate_membership_scope(key, document)
+                elif (
+                    request_stamp is None
+                    or request_stamp[0] != policy.stamp(document, self.owner_of(key), key)
+                    or request_stamp[1] != self._placement_authority(key)
+                ):
+                    denied = self._policy_error(
+                        key,
+                        policy.code(document, self.owner_of(key), key) or "consent_unverifiable",
+                    )
+                elif (
+                    not self.should_borrow(key)
+                    or grant.credential_ref.owner_device != request_stamp[0].owner
+                    or self.owner_of(key) != request_stamp[0].owner
+                    or not grant.usable_at()
+                ):
+                    denied = self._policy_error(key, "not_a_holder")
+                elif restriction := self._lifecycle_restriction(key):
+                    denied = self._policy_error(key, restriction)
+                else:
+                    # Fence -> cache lock order. Success changes only the retry
+                    # diagnosis; durable deny generations NEVER reset on success.
+                    if cache:
+                        self.grants.put(key, session_id, grant, policy_fence=request_stamp[0])
+                    self._remember_grant(key, grant)
+                    return grant
+        except PolicyUnknown:
+            denied = self._policy_error(key, "consent_unverifiable")
+        self.grants.drop(key)
+        assert denied is not None
+        note_resolution(self.root, key, denied)
+        return denied
+
+    def _held_or(
+        self,
+        refusal: BrokerError,
+        key: str,
+        session_id: str,
+        *,
+        force_refresh: bool,
+        prior_status: str = "",
+    ) -> Grant | BrokerError:
+        """A CURRENT immutable stamp + original owner lease, never a retry-cache vote."""
+        from local_operator.network.credentials.effective import note_resolution
+        from local_operator.network.credentials.github import is_github_key
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
+        if is_mcp_key(key) or is_device_bound_provider(key) or is_github_key(key):
+            note_resolution(self.root, key, refusal)
+            return refusal
+        if refusal.code not in _HOLDABLE_REFUSALS:
+            if refusal.code not in _TRANSIENT_REFUSALS:
+                self.grants.drop(key)
+            return refusal
+        outcome: Grant | BrokerError = refusal
+        try:
+            if not self._self_membership_active():
+                outcome = self._invalidate_membership_scope(key)
+            else:
+                policy = self._policy()
+                with policy.transaction() as document:
+                    stamp = policy.stamp(document, self.owner_of(key), key)
+                    restriction = self._lifecycle_restriction(key)
+                    # The final membership read MUST use the same invalidation
+                    # helper as the first, before any successful hold is visible.
+                    if not self._self_membership_active():
+                        outcome = self._invalidate_membership_scope(key, document)
+                    elif not self.should_borrow(key) or restriction:
+                        code = restriction or "not_a_holder"
+                        policy.deny(document, self.owner_of(key), key, code)
+                        self.grants.drop(key)
+                        outcome = self._policy_error(key, code)
+                    else:
+                        stale = self.grants.invalidate_policy(key, session_id, stamp)
+                        held = self.grants.peek(key, session_id)
+                        if stale or held is None:
+                            code = policy.code(document, self.owner_of(key), key)
+                            if code:
+                                outcome = self._policy_error(key, code)
+                        elif not held.usable_at():
+                            self.grants.drop(key, session_id)
+                        elif not force_refresh:
+                            outcome = dataclasses.replace(held, held_offline=True)
+                            # Positive publication is part of this linearized
+                            # read, not a callback after releasing the deny lock.
+                            note_resolution(self.root, key, outcome)
+                            return outcome
+        except PolicyUnknown:
+            self.grants.drop(key)
+            outcome = self._policy_error(key, "consent_unverifiable")
+        # Commit a discovered deny BEFORE publication. The successful path never
+        # publishes an intermediate owner_unavailable or changes grant clocks.
+        note_resolution(self.root, key, outcome)
+        return outcome
 
     def _resting_refusal(self, key: str, label: str, resting: list[dict[str, Any]]) -> BrokerError:
         """``quota_blocked`` built from this device's own cooldowns. Not cached.
@@ -768,6 +1050,7 @@ class MeshCredentialClient:
                 )
             )
         owner = self.owner_of(key)
+        request_stamp = self._capture_request(key)
         frame = {
             "op": PEER_BROKER_OP,
             "kind": "grant",
@@ -790,7 +1073,11 @@ class MeshCredentialClient:
         direct = self._ask_owner_directly(owner, frame)
         if direct is not None:
             return self._detail_from_owner(
-                direct, key, label, excluded=bool(exclude_credential_ids)
+                direct,
+                key,
+                label,
+                excluded=bool(exclude_credential_ids),
+                request_stamp=request_stamp,
             )
         return self._detail_error(self._render(self._offline(key, label, owner=owner), key, label))
 
@@ -1471,9 +1758,8 @@ class MeshCredentialClient:
             owner_device_name=self.owner_label(key),
             retry_after_ms=BROKER_ERROR_TTL_MS["owner_offline"],
         )
-        from local_operator.network.credentials.effective import note_resolution
-
-        note_resolution(self.root, key, error)
+        # Publication belongs to the final borrower decision in _held_or;
+        # the relay cannot know whether that borrower holds a valid lease.
         return error
 
     def _render(self, error: BrokerError, key: str, label: str) -> BrokerError:
@@ -1516,6 +1802,7 @@ class MeshCredentialClient:
         session_id: str,
         *,
         resting: list[dict[str, Any]] | None = None,
+        request_stamp: Any = None,
     ) -> Grant | BrokerError:
         """Turn a leg-1 control reply into a grant or a refusal.
 
@@ -1550,9 +1837,7 @@ class MeshCredentialClient:
             )
         if detail.get("kind") == "grant":
             grant = self._bounded(Grant.from_detail(detail))
-            self.grants.put(key, session_id, grant)
-            self._remember_grant(key, grant)
-            return grant
+            return self._adopt_online(grant, key, session_id, request_stamp)
         refused = BrokerError.from_detail(detail)
         if resting and refused.is_holder_exclusion:
             return self._resting_refusal(key, label, resting)
@@ -1561,7 +1846,13 @@ class MeshCredentialClient:
         return error
 
     def _detail_from_owner(
-        self, reply: dict[str, Any], key: str, label: str, *, excluded: bool = False
+        self,
+        reply: dict[str, Any],
+        key: str,
+        label: str,
+        *,
+        excluded: bool = False,
+        request_stamp: Any = None,
     ) -> dict[str, Any]:
         """A leg-2 reply as a detail object, with the cache updated.
 
@@ -1589,8 +1880,8 @@ class MeshCredentialClient:
             return self._detail_error(self._render(error, key, label))
         if detail.get("kind") == "grant":
             grant = Grant.from_detail(detail)
-            self._remember_grant(key, grant)
-            return detail
+            result = self._adopt_online(grant, key, "", request_stamp, cache=False)
+            return self._detail_error(result) if isinstance(result, BrokerError) else detail
         error = self._render(BrokerError.from_detail(detail), key, label)
         if excluded and error.is_holder_exclusion:
             # The answer to the HOLDER'S exclusion, not an owner-side state (review

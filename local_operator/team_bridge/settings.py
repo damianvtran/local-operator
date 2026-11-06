@@ -197,12 +197,72 @@ HOLD_ALERT_MAX_MINUTES = 10080
 #: OFF, because a release path must never open on a value nobody wrote.
 DEFAULT_HOLD_RELEASE = False
 
+#: ``team_bridge.screening.*`` — the rolling-hour ceilings on SCREENING SPEND,
+#: now CONFIGURABLE. They were fixed class constants on ``Store`` (40/30/35/20,
+#: "the frozen §8 budget"); these are the 10x replacements and the shipped
+#: defaults of four ``/settings`` rows.
+#:
+#: WHY THEY MOVED — MEASURED IN BUDGET UNITS, NOT ROWS. The cap counts DISTINCT
+#: ``COALESCE(batch_id, attempt_id)`` per kind, so a RAW ROW count double-counts
+#: one screen (a logical row plus an http row, plus shared batch rows). Measured
+#: against the live store (``~/.local-operator/team_bridge/state.sqlite3``,
+#: read-only, 2026-11-05) in that unit: peak LOGICAL units in one hour = 40 —
+#: exactly the old ceiling, reached in four separate hours (2026-10-31 05Z, 07Z,
+#: 10Z and 2026-11-05 18Z), with peak HTTP units also 40; the last 24 hours spent
+#: 248 logical units against a 40/hour cap. A ceiling that ordinary use touches
+#: exactly, in four different hours, is binding — the room spent the hour and the
+#: owner's own DM then waited for a refill.
+#:
+#: HONESTLY: part of that spend was REPEAT screening, not unique demand. 416
+#: distinct messages produced 1,044 logical units (2.5 screens per message), 41
+#: messages were screened more than twice, 191 logical attempts belong to
+#: messages that never got a receipt, and one message was screened 155 times
+#: over 54 hours. So the old number was too low for real demand AND was being
+#: spent on retries; the raise fixes the first, and the repeat behaviour is worth
+#: its own look rather than being hidden by a constant that hid it before.
+#:
+#: THE TIER RELATIONSHIPS ARE PRESERVED EXACTLY, not rescaled one at a time:
+#: ambient 300 of 400 is the old three quarters (30 of 40); unaddressed 350 is
+#: the old 35 (everything but a person addressing this agent); sender 200 is
+#: half the account ceiling, the old 20-of-40 share, so one sender still cannot
+#: monopolise the window however its messages batch. Every reserve is CARVED
+#: OUT of the account ceiling, never added to it.
+#:
+#: A BIGGER CEILING IS NOT A WEAKER SAFETY STORY. The two bounds on a runaway
+#: are untouched by these numbers and read none of them: the screening breaker
+#: opens on provider FAILURE (its own threshold), and the owner is notified
+#: ONCE PER EXHAUSTION EPISODE at whatever the ceiling is. What these keys bound
+#: is spend — and an operator who wants it lower can now say so in config, in
+#: the running receiver, instead of waiting for a release.
+DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR = 400
+DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR = 300
+DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR = 350
+DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR = 200
+
 ENABLED_PATH = ("team_bridge", "enabled")
 ONBOARDING_PATH = ("team_bridge", "onboarding")
 DEFAULT_ENROLLMENT_PATH = ("team_bridge", "default_enrollment")
 SESSION_PATH = ("team_bridge", "session")
 HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
+#: The SUBTREE the four screening ceilings live under. Readers take this tuple,
+#: so no consumer re-spells "where screening lives" and drifts from the writer.
+SCREENING_SUBTREE = ("team_bridge", "screening")
+#: Leaf names inside :data:`SCREENING_SUBTREE`; :class:`ScreeningBudget` reads
+#: exactly these, and the registry's own ``path`` literals spell them (it cannot
+#: import this module — see the module docstring).
+SCREENING_BUDGET_LEAF = "budget_per_hour"
+SCREENING_AMBIENT_BUDGET_LEAF = "ambient_budget_per_hour"
+SCREENING_UNADDRESSED_BUDGET_LEAF = "unaddressed_budget_per_hour"
+SCREENING_SENDER_BUDGET_LEAF = "sender_budget_per_hour"
+#: The largest ceiling the READ path will adopt. It mirrors the ``maximum`` of
+#: the four ``/settings`` rows, which this module cannot import (the registry
+#: stays off this package's import path — see the module docstring), so
+#: ``tests/unit/test_settings_io.py::_consumer_defaults`` pins the two together.
+#: The read path clamps DOWN only: an above-maximum hand edit reads as the
+#: maximum with a warning rather than as a number no surface could show, edit
+#: back or refund.
+SCREENING_BUDGET_MAX_READ = 100_000
 
 
 #: Distinguishes "the key is absent" (the shipped default) from "the key is
@@ -256,6 +316,34 @@ def _session(value: Any) -> str:
     return DEFAULT_TEAM_BRIDGE_SESSION
 
 
+def _screening_ceiling(value: Any, default: int) -> int:
+    """A usable ceiling: a real positive int, else the shipped default.
+
+    See :class:`ScreeningBudget` for the whole rule and why nothing here raises.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value if value >= 1 else default
+
+
+def _walk_subtree(values: Any, path: tuple[str, ...]) -> Any:
+    """``values``' node at ``path``, or :data:`_MISSING` when a step is absent.
+
+    The whole-document twin of ``ConfigManager.get_nested_value``: the reader
+    that starts from ``config.read_config_values`` has no manager to ask, and a
+    step that is not a mapping (a hand-edited ``team_bridge: off``) is an absent
+    subtree rather than an error.
+    """
+
+    node = values
+    for step in path:
+        if not isinstance(node, Mapping) or step not in node:
+            return _MISSING
+        node = node[step]
+    return node
+
+
 def _hold_alert_after_minutes(value: Any) -> int:
     """Whole minutes in 0..10080, else the default.
 
@@ -269,6 +357,202 @@ def _hold_alert_after_minutes(value: Any) -> int:
     if not 0 <= value <= HOLD_ALERT_MAX_MINUTES:
         return DEFAULT_HOLD_ALERT_AFTER_MINUTES
     return value
+
+
+@dataclass(frozen=True)
+class ScreeningClamp:
+    """One configured ceiling the read path held down, and what it reads as.
+
+    The pair is what makes the read's clamp defensible to a person staring at
+    the file: the warning says which key, what it said, what is in force, and
+    the rule that made the difference — never just "ignored".
+    """
+
+    leaf: str
+    configured: int
+    in_force: int
+    rule: str
+
+    def describe(self) -> str:
+        """One clause for the read path's single warning line."""
+
+        return (
+            f"{self.leaf}: {self.configured} configured, " f"{self.in_force} in force ({self.rule})"
+        )
+
+
+@dataclass(frozen=True)
+class ScreeningBudget:
+    """The four rolling-hour screening ceilings, as configured or as shipped.
+
+    ``account`` bounds every unit of screening spend. ``ambient`` bounds agent
+    chatter in a shared room (tier 0). ``unaddressed`` bounds everything that is
+    not a PERSON addressing this agent (tiers 0-2), so the units above it are
+    reachable only by the owner's — or another person's — DM or mention.
+    ``sender`` bounds ONE verified sender inside the account's window.
+
+    THE INVARIANT IS A NESTING, and the two boundaries answer a contradiction in
+    OPPOSITE directions — deliberately, because their duties are opposite:
+
+    * the WRITE path REFUSES a write that would create one (``settings_io
+      .validate`` / ``_SCREENING_BUDGET_RULES``), naming the rule while the user
+      is still looking at the command that caused it — so "lower the total" is
+      answered with which sibling has to come down first, in the same breath;
+    * the READ path (a hand-edited YAML, an older config, a file written before
+      a rule existed) CLAMPS DOWN, never up: :meth:`clamped` holds each tier to
+      the ceiling it is carved out of and adopts the rest of the set exactly as
+      written.
+
+    WHY THE READ CLAMPS RATHER THAN DISCARDING THE SET (review round 1, S-2 /
+    Q-1). The first version dropped all four to the shipped defaults on any
+    contradiction, so the single most likely tightening edit —
+    ``budget_per_hour: 10`` written above its siblings — made the receiver spend
+    10x what the page showed. Clamping down spends LESS than the file states at
+    worst and never more, and :meth:`clamped` returns what it held so the one
+    warning can name each key and the value actually in force.
+
+    PER-FIELD RULE (the module's ordinary convention for a present-but-unusable
+    value): a value that is missing, not an ``int``, or below 1 reads the SHIPPED
+    default for THAT field only. ``bool`` is excluded by name: it is an ``int``
+    to Python, so ``true`` would otherwise read as the tightest possible ceiling
+    (1) from a value nobody meant as a number.
+
+    THE READ'S UPPER BOUND is :data:`SCREENING_BUDGET_MAX_READ`, the registry's
+    own maximum for these rows, and it is the only clamp that is not about the
+    nesting: the settings page can show and edit 1..100_000, so a hand edit
+    above it would otherwise put the receiver somewhere no surface in the product
+    can reach to lower again.
+    """
+
+    account: int = DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR
+    ambient: int = DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR
+    unaddressed: int = DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR
+    sender: int = DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR
+
+    def __post_init__(self) -> None:
+        # The per-field rule applies to EVERY construction path, not only
+        # ``from_values``: a caller that builds one from arithmetic must not be
+        # able to hand the store a non-int. The CROSS-field rules are NOT
+        # enforced here: the WRITE boundary refuses on them (``settings_io
+        # .validate``) and the READ boundary holds them down (``clamped``), so
+        # neither has to accept a constructor that rewrites a number nobody
+        # asked it to rewrite.
+        object.__setattr__(
+            self,
+            "account",
+            _screening_ceiling(self.account, DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR),
+        )
+        object.__setattr__(
+            self,
+            "ambient",
+            _screening_ceiling(self.ambient, DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR),
+        )
+        object.__setattr__(
+            self,
+            "unaddressed",
+            _screening_ceiling(
+                self.unaddressed, DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR
+            ),
+        )
+        object.__setattr__(
+            self,
+            "sender",
+            _screening_ceiling(self.sender, DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR),
+        )
+
+    def clamped(self) -> "tuple[ScreeningBudget, tuple[ScreeningClamp, ...]]":
+        """This set held to its nesting — DOWNWARD only — and what was held.
+
+        In containment order (account → unaddressed → ambient, with sender a
+        share of the account), and each step compares against the value its
+        parent has ALREADY been held to, so a chain of over-large hand edits
+        lands on the ceiling the file can actually mean rather than on an
+        intermediate its own parent would still refuse.
+        """
+
+        held: list[ScreeningClamp] = []
+        account = self.account
+        if account > SCREENING_BUDGET_MAX_READ:
+            held.append(
+                ScreeningClamp(
+                    SCREENING_BUDGET_LEAF,
+                    account,
+                    SCREENING_BUDGET_MAX_READ,
+                    f"account <= {SCREENING_BUDGET_MAX_READ}",
+                )
+            )
+            account = SCREENING_BUDGET_MAX_READ
+        unaddressed = self.unaddressed
+        if unaddressed > account:
+            held.append(
+                ScreeningClamp(
+                    SCREENING_UNADDRESSED_BUDGET_LEAF,
+                    unaddressed,
+                    account,
+                    "unaddressed <= account",
+                )
+            )
+            unaddressed = account
+        ambient = self.ambient
+        if ambient > unaddressed:
+            held.append(
+                ScreeningClamp(
+                    SCREENING_AMBIENT_BUDGET_LEAF,
+                    ambient,
+                    unaddressed,
+                    "ambient <= unaddressed",
+                )
+            )
+            ambient = unaddressed
+        sender = self.sender
+        if sender > account:
+            held.append(
+                ScreeningClamp(SCREENING_SENDER_BUDGET_LEAF, sender, account, "sender <= account")
+            )
+            sender = account
+        if not held:
+            return self, ()
+        return (
+            ScreeningBudget(
+                account=account, ambient=ambient, unaddressed=unaddressed, sender=sender
+            ),
+            tuple(held),
+        )
+
+    @classmethod
+    def read_from_document(
+        cls, values: Any
+    ) -> "tuple[ScreeningBudget, tuple[ScreeningClamp, ...]]":
+        """The ceilings IN FORCE for a whole ``config.yml`` ``values`` mapping.
+
+        The read path's one entry point: it locates :data:`SCREENING_SUBTREE`
+        itself (no reader re-spells where screening lives), applies the
+        per-field rule and then :meth:`clamped`, so a caller cannot adopt a
+        configured set the receiver would refuse to run.
+        """
+
+        node = _walk_subtree(values, SCREENING_SUBTREE)
+        return cls.from_values({} if node is _MISSING else node).clamped()
+
+    @classmethod
+    def from_values(cls, values: Any) -> "ScreeningBudget":
+        """The ``team_bridge.screening`` subtree, per-field defaulted.
+
+        Takes the SUBTREE — what ``SCREENING_SUBTREE`` names — not the whole
+        document, so a caller cannot pass a shape this reader never sees and
+        silently get the shipped ceilings. Anything that is not a mapping (a
+        hand-edited ``screening: off``) reads as the shipped ones. The
+        CROSS-FIELD action belongs to :meth:`clamped`; a reader that wants the
+        set it may run asks :meth:`read_from_document`.
+        """
+
+        node = values if isinstance(values, Mapping) else {}
+        return cls(
+            account=node.get(SCREENING_BUDGET_LEAF, _MISSING),
+            ambient=node.get(SCREENING_AMBIENT_BUDGET_LEAF, _MISSING),
+            unaddressed=node.get(SCREENING_UNADDRESSED_BUDGET_LEAF, _MISSING),
+            sender=node.get(SCREENING_SENDER_BUDGET_LEAF, _MISSING),
+        )
 
 
 @dataclass(frozen=True)

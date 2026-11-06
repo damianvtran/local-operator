@@ -33,19 +33,6 @@
       ]
     },
     {
-      "locale": "fr",
-      "namespace": "wire.errors.sdk_startup",
-      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2026-12-31",
-      "missing": [
-        "wire.errors.sdk_startup.attach_hosting_unconfigured",
-        "wire.errors.sdk_startup.attach_runtime_missing",
-        "wire.errors.sdk_startup.profile_attach_failed",
-        "wire.errors.sdk_startup.tool_inventory_mismatch"
-      ]
-    },
-    {
       "locale": "es",
       "namespace": "wire.errors.sdk_spec",
       "reason": "English-pinned by CALLER CONTRACT, not untranslated debt: these diagnostics are raised by SessionSpec/ApprovalPolicy and parsed by SDK callers, and their bytes are deliberately byte-compatible English (the en sidecars say 'English source only ... translation requires caller-contract migration'). Translating them requires moving callers to stable codes first, which is a mechanism change, not a locale wave.",
@@ -73,32 +60,6 @@
         "wire.errors.sdk_spec.tools_empty",
         "wire.errors.sdk_spec.world_root_empty",
         "wire.errors.sdk_spec.yolo_approval_unreachable"
-      ]
-    },
-    {
-      "locale": "es",
-      "namespace": "wire.errors.sdk_startup",
-      "reason": "English-pinned by CALLER CONTRACT, not untranslated debt: these diagnostics are raised by SessionSpec/ApprovalPolicy and parsed by SDK callers, and their bytes are deliberately byte-compatible English (the en sidecars say 'English source only ... translation requires caller-contract migration'). Translating them requires moving callers to stable codes first, which is a mechanism change, not a locale wave.",
-      "owner": "i18n programme (SDK caller-contract migration)",
-      "payoff": "2027-01-31 — revisit after the caller-contract migration; the entry stays until then",
-      "missing": [
-        "wire.errors.sdk_startup.attach_hosting_unconfigured",
-        "wire.errors.sdk_startup.attach_runtime_missing",
-        "wire.errors.sdk_startup.profile_attach_failed",
-        "wire.errors.sdk_startup.tool_inventory_mismatch"
-      ]
-    },
-    {
-      "locale": "zh-CN",
-      "namespace": "wire.errors.sdk_startup",
-      "reason": "English-only namespace: zh-CN does not carry it; renders the English child fallback.",
-      "owner": "i18n-translator lane",
-      "payoff": "2027-02-28",
-      "missing": [
-        "wire.errors.sdk_startup.attach_hosting_unconfigured",
-        "wire.errors.sdk_startup.attach_runtime_missing",
-        "wire.errors.sdk_startup.profile_attach_failed",
-        "wire.errors.sdk_startup.tool_inventory_mismatch"
       ]
     }
   ]

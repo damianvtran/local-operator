@@ -1,0 +1,214 @@
+{
+  "record_kind": "translator_staging_packet_not_audit",
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_startup",
+  "created_at": "2026-11-03T16:58:10.631397+00:00",
+  "status": "translated_staged_not_audited",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "key_count": 4,
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7b2ba4ed501d",
+    "actual_models": [
+      "radient/auto"
+    ],
+    "actual_model_source": "Persisted assistant translation write/edit tool-call usage.provider and usage.model_id in this session transcript (not the system model header).",
+    "transcript_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/transcript.jsonl",
+    "translation_usage_entries": [
+      {
+        "entry_id": "4bdf4a5b60ef450eb16a18be21767f6c",
+        "timestamp": 1793723989.966178,
+        "tool": "write",
+        "usage": {
+          "billing_basis": "subscription_api_equivalent",
+          "input_tokens": 154341,
+          "output_tokens": 2064,
+          "cache_read_tokens": 151680,
+          "context_tokens": 154341,
+          "reasoning_tokens": 1704,
+          "usd_cost": 0.00418518,
+          "at_ms": 1793723987700,
+          "provider": "radient",
+          "model_id": "auto"
+        }
+      }
+    ],
+    "routing": "Session model header and the persisted translation-call usage both expose only the opaque route provider=radient, model_id=auto; the underlying model is not disclosed. That opaque route is recorded as-is and no GPT/OpenAI fallback is claimed for this packet.",
+    "fallback_events_in_session": [
+      {
+        "entry_id": "b890d01d056149efa86ce524b5919819",
+        "primary": "anthropic/claude-sonnet-5-5",
+        "active": {
+          "selector": "anthropic/claude-opus-5-5",
+          "effort": "medium"
+        },
+        "reason": "provider failure: quota"
+      },
+      {
+        "entry_id": "9db45f79733b4e59a7181e007150d99f",
+        "primary": "anthropic/claude-sonnet-5-5",
+        "active": {
+          "selector": "openai/gpt-6.1-sol",
+          "effort": "medium"
+        },
+        "reason": "provider failure: quota"
+      }
+    ],
+    "method": "Human-readable French authored directly; no MT API/SDK/service/site.",
+    "earlier_turn_route_events_note": "The two active_model_route events listed under fallback_events_in_session come from EARLIER turns of this same session, when the primary route was anthropic/claude-sonnet-5-5. They are retained for session history only and are NOT attributed to this packet's translation calls.",
+    "underlying_model_disclosed": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "note": "Snapshot re-verified byte-identical to the working checkout at packet finalisation; not pinned to the core commit."
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "note": "Snapshot re-verified byte-identical to the working checkout at packet finalisation; not pinned to the core commit."
+    },
+    "architect_assessment": {
+      "path": "inputs/architect-assessment.md",
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "attribution": "Retained architect SDK contract assessment; used as evidence, not re-proved here."
+    }
+  },
+  "target": {
+    "staged_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+    "intended_path": "local_operator/i18n/catalogues/fr/wire.errors.sdk_startup.json",
+    "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d"
+  },
+  "gap_counts": {
+    "missing_at_pinned_commit": 4,
+    "missing_in_packet": 0,
+    "repository_gap_not_resolved_by_scratch_packet": 4
+  },
+  "caller_contract": {
+    "producer_count": 4,
+    "producer_key_set_matches_source": true,
+    "renderer": "sdk.py::startup_refusal_text resolves the scoped config language and renders via messages.render; the result is one plain str on SessionSpecError(ValueError).",
+    "resolved_locale_not_forced_english": true,
+    "contrast_with_sdk_spec_21": "Those 21 guards each request locale=\"en\". These 4 do not; English is the default-fallback outcome, and a carried fr catalogue with a resolved fr locale is the intended localized path.",
+    "no_runtime_claim": "No execution of these refusals, no localized-output proof and no claim that any client currently displays them.",
+    "opaque_error_parameter": "attach_hosting_unconfigured embeds {error}=str(HostingNotConfiguredError), whose producer sentence is English. Preserved as opaque data; no producer, exception-string, attribute or API migration.",
+    "evidence": "caller-proof.json"
+  },
+  "native_glossary_decisions": {
+    "runtime": "runtime kept English per fr style guide wave-1 decision",
+    "root": "racine, as the fr corpus uses (racine de configuration, racines intégrées)",
+    "hosting": "plateforme d’hébergement, matching the existing fr corpus term (Plateforme d’hébergement)",
+    "attach": "rattacher / se rattacher, matching the sibling fr SDK-spec packet vocabulary (vue, rattachement)",
+    "engage": "démarrer l’identifiant — French verb rather than importing the English engage",
+    "inventory": "inventaires; portée de l’exécution for the run’s reach",
+    "preserved_tokens": [
+      "config.yml",
+      "spawn_session()/deliver()",
+      "mode=''own''",
+      "spec.tools",
+      "ApprovalPolicy.declared(...)",
+      "{resume}",
+      "{profile}",
+      "{spec_tools}",
+      "{policy_tools}"
+    ],
+    "icu_apostrophes": "Doubled ASCII apostrophes in mode=''own'' retained in source; the rendered form is mode='own' as the validator asserts",
+    "typography": "U+202F before : and ; inside prose; U+2019 apostrophes so no ICU quoting ambiguity",
+    "glossary_proposals": [
+      "portée de l’exécution = the run’s reach (tool inventory scope)",
+      "démarrez l’identifiant = engage the id (start the id running)"
+    ]
+  },
+  "validation": {
+    "command": "cd /Users/damian/local-operator-ui && /usr/bin/time -p env NODE_OPTIONS=--max-old-space-size=256 node <packet>/validate.mjs",
+    "exit_code": 0,
+    "real_seconds": 0.55,
+    "heap_cap_mb": 256,
+    "time_budget_seconds": 90,
+    "log": "validation.log",
+    "status": "PASS",
+    "checks": "4/4 keys in source order; exact argument names/types; technical literals preserved; all four messages formatted through IntlMessageFormat/fr with hostile opaque parameters preserved verbatim; no English duplicates; no bidi controls",
+    "apostrophe_probe": "PASS: doubled ICU apostrophes render literal mode='own' with no leakage",
+    "negative_controls_rejected": 4,
+    "negative_controls": [
+      "missing key",
+      "renamed argument",
+      "English duplicate",
+      "translated technical literal (config.yml)"
+    ],
+    "cldr_width": "Not applicable: no plural/select forms, no declared maxCells",
+    "validator_bug_note": "Two earlier runs failed on validator bugs (opaque check not scoped to a message’s own arguments; raw-text token expected the rendered rather than the doubled-apostrophe source form). The validator was corrected and the recorded run is the passing one; the Python target file was never altered by these fixes.",
+    "not_run": [
+      "SDK guard execution",
+      "disposal and profile-failure lifecycle",
+      "production/localized runtime rendering",
+      "pseudo-localization",
+      "RTL",
+      "rendered frames",
+      "full catalogue validator/scanner/build/native/full suite",
+      "independent semantic audits"
+    ]
+  },
+  "sibling_census": {
+    "not_a_semantic_audit": true,
+    "source": {
+      "es": {
+        "absent_at_pin": true,
+        "missing_keys": 4
+      },
+      "fr": {
+        "absent_at_pin": true,
+        "missing_keys": 4
+      },
+      "zh-CN": {
+        "absent_at_pin": true,
+        "missing_keys": 4
+      },
+      "hi": {
+        "absent_at_pin": false,
+        "key_count": 4,
+        "exact_key_set": true,
+        "nonidentical_to_English": 4,
+        "sha256": "3362b1bc1a45d94c3f8455557cad031ebe2b6475b8d0c4171d465fb65e771c50"
+      },
+      "ru": {
+        "absent_at_pin": false,
+        "key_count": 4,
+        "exact_key_set": true,
+        "nonidentical_to_English": 4,
+        "sha256": "a78344f18145f9016b018d451d0c7d09906a09ff9937ceff36356c297328930f"
+      },
+      "ur": {
+        "absent_at_pin": false,
+        "key_count": 4,
+        "exact_key_set": true,
+        "nonidentical_to_English": 4,
+        "sha256": "b3c5f56714ed21faa9f210c3610ae80936d59f13c0a96df460dab2c7bb618382"
+      },
+      "vi": {
+        "absent_at_pin": false,
+        "key_count": 4,
+        "exact_key_set": true,
+        "nonidentical_to_English": 4,
+        "sha256": "ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd"
+      }
+    },
+    "summary": "es, fr and zh-CN have no file for this namespace at the pinned commit; hi, ru, ur and vi each carry 4/4 keys, all distinct from English."
+  },
+  "audit": {
+    "self_audit": false,
+    "independent_auditors": "REQUIRED; not performed by the translator",
+    "status": "not_audited",
+    "activation": "not authorized by this packet"
+  },
+  "scope": "Scratch namespace-only packet. No source code, ledger, receipt, generation, baseline, PR or commit changes; the four target values are unchanged from this packet’s original authoring. Earlier 38 translated keys (sdk_spec 21, console 8, hub_defaults 9) and the 14-key account-policy packet are immutable and untouched."
+}

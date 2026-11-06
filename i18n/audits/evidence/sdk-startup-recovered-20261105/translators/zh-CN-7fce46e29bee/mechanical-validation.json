@@ -1,0 +1,57 @@
+{
+  "status": "PASS",
+  "key_count": 4,
+  "parser": "existing @formatjs/icu-messageformat-parser from installed UI dependencies (no install)",
+  "heap_limit_MiB": 256,
+  "negative_controls": [
+    {
+      "name": "missing-key",
+      "rejected": true
+    },
+    {
+      "name": "renamed-placeholder",
+      "rejected": true
+    },
+    {
+      "name": "wrong-placeholder-type",
+      "rejected": true
+    },
+    {
+      "name": "mutated-identifier",
+      "rejected": true
+    },
+    {
+      "name": "lost-apostrophe-escape",
+      "rejected": true
+    },
+    {
+      "name": "english-copy",
+      "rejected": true
+    },
+    {
+      "name": "bidi-injection",
+      "rejected": true
+    },
+    {
+      "name": "malformed-icu",
+      "rejected": true
+    }
+  ],
+  "rendered_fit": "NOT RUN",
+  "pseudo": "NOT RUN",
+  "RTL": "NOT RUN",
+  "production_renderer": "NOT RUN",
+  "embedded_error_caveat": "attach_hosting_unconfigured {error} carries opaque producer English from session_factory; translating the outer sentence does not localize it",
+  "log": [
+    "PASS: 4/4 keys, English key order, genuine Chinese prose, identical ICU argument sets, preserved identifiers, no bidi, register and punctuation checks, ICU apostrophe escape renders as 'own'",
+    "PASS negative control rejected: missing-key",
+    "PASS negative control rejected: renamed-placeholder",
+    "PASS negative control rejected: wrong-placeholder-type",
+    "PASS negative control rejected: mutated-identifier",
+    "PASS negative control rejected: lost-apostrophe-escape",
+    "PASS negative control rejected: english-copy",
+    "PASS negative control rejected: bidi-injection",
+    "PASS negative control rejected: malformed-icu",
+    "PASS: parser-AST opaque interpolation keeps braces/quotes/percent/tags as data (not production renderer proof)"
+  ]
+}

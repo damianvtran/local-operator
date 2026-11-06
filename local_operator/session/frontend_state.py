@@ -819,6 +819,13 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
                     if component.context_tokens is not None
                     else existing.context_tokens
                 ),
+                # The key does not split on account, so a bucket names one only
+                # while every call folded into it came from it.
+                "account_ref": (
+                    existing.account_ref
+                    if existing.account_ref == getattr(component, "account_ref", None)
+                    else None
+                ),
                 # Nested components are already folded into the buckets above;
                 # keeping them would double-count on the next fold.
                 "cost_components": [],
@@ -3427,6 +3434,15 @@ class FrontendModelAccess(BaseModel):
         ]
         | None
     ) = None
+
+    @field_validator("effective_state", mode="before")
+    @classmethod
+    def _public_borrow_phase(cls, value: Any) -> Any:
+        # Current AND released readers understand effective_borrow, not a new
+        # held phase. Internal policy retains the distinction and original lease
+        # timestamps; the public claim is only that this grant remains usable.
+        return "effective_borrow" if value == "held_offline" else value
+
     #: Keyless borrow context, explicitly historical. A failed/expired reading
     #: retains the last successful grant's bound but NEVER marks it usable.
     #: Epoch seconds; None means this process has not observed that fact.
@@ -10196,6 +10212,11 @@ def _aggregate_usage(usages: list[Usage]) -> Usage:
             components[0].billing_basis
             if components
             and all(c.billing_basis == components[0].billing_basis for c in components)
+            else None
+        ),
+        account_ref=(
+            components[0].account_ref
+            if components and all(c.account_ref == components[0].account_ref for c in components)
             else None
         ),
     )

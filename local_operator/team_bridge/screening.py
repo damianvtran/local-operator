@@ -2855,7 +2855,9 @@ def screen_message(
 # #294 removed its wake caps), so the connector's coalescing is what protects a
 # recipient owner's screening spend. Coalescing used to batch only the WAKE;
 # every message was still one model call and one budget unit, so a busy room
-# spent the 40/h account budget in minutes. A wake's messages are now screened
+# spent the whole hourly account budget in minutes (the cap is
+# ``team_bridge.screening.*``; ``team_bridge.settings.ScreeningBudget`` states
+# the live value). A wake's messages are now screened
 # by ONE call that returns ONE verdict PER MESSAGE, charged as one unit.
 #
 # WHAT DOES NOT CHANGE. Each message keeps its own envelope validation, its own

@@ -1,0 +1,22 @@
+{
+  "wire.errors.sdk_startup.attach_hosting_unconfigured": {
+    "role": "SDK post-isolation attach startup refusal",
+    "tone": "diagnostic with remedy; preserve the existing exception text",
+    "note": "resume is an already repr-quoted identifier; error is opaque producer text, including whitespace, quotes, braces, percent tokens and Unicode. Never interpret either as ICU or a message code. Preserve config.yml and spawn_session()/deliver() literally. English-only child namespace falls back under RFC §6 per-CARRIED policy; future translated consumers still owe the RFC migration boundary."
+  },
+  "wire.errors.sdk_startup.attach_runtime_missing": {
+    "role": "SDK attach refusal after disposing a cold owning runtime",
+    "tone": "diagnostic with remedy; preserve the existing exception text",
+    "note": "resume is already repr-quoted. Preserve mode='own' and spawn_session()/deliver() literally; doubled source apostrophes are ICU escaping, not display text. Rendering must not change disposal or introduce exception code/params attributes."
+  },
+  "wire.errors.sdk_startup.profile_attach_failed": {
+    "role": "SDK post-isolation profile attachment refusal",
+    "tone": "diagnostic; preserve the existing exception text",
+    "note": "profile is an already repr-quoted name, not catalogue syntax. Preserve capitalization. This extraction does not change the existing profile-failure lifecycle."
+  },
+  "wire.errors.sdk_startup.tool_inventory_mismatch": {
+    "role": "SDK inconsistent declared tool inventory refusal",
+    "tone": "diagnostic with remedy; preserve the existing exception text",
+    "note": "spec_tools and policy_tools are already stringified tuples. Preserve spec.tools and ApprovalPolicy.declared(...) literally. Doubled apostrophes are ICU escaping. No inventory widening, baseline/checker reduction or locale-eligibility change is authorized."
+  }
+}

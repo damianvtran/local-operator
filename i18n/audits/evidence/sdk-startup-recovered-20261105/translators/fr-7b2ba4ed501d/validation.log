@@ -1,0 +1,8 @@
+PASS: 4/4 keys, exact source order/parity; valid JSON+ICU; argument names/types identical; technical literals preserved; opaque ICU-looking parameters survive verbatim; no English duplicates; no bidi controls.
+PASS: doubled ICU apostrophes render the literal mode='own'; no double-quote leakage.
+PASS: four negative controls rejected: missing key, renamed argument, English duplicate, translated technical literal.
+CLDR/width: not applicable — no plural/select forms and no declared maxCells in this namespace.
+NOT RUN: SDK guard execution, disposal/profile-failure lifecycle, production rendering, pseudo, RTL, rendered frames, full validator/scanner/build/native, independent audits.
+real 0.55
+user 0.06
+sys 0.02

@@ -447,6 +447,11 @@ def _usage_aggregate(rows: list[Any]) -> dict[str, Any] | None:
     }
     if len(bases) == 1:
         aggregate["billing_basis"] = bases.pop()
+    # An aggregate names one account only when every call came from it; a mixed
+    # (or partly unstamped) turn drops it rather than misattribute.
+    refs = {component.get("account_ref") for component in components}
+    if len(refs) == 1 and None not in refs:
+        aggregate["account_ref"] = refs.pop()
     return aggregate
 
 

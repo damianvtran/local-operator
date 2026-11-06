@@ -1,0 +1,227 @@
+{
+  "record_version": 1,
+  "kind": "independent_context_delta_confirmation_of_prior_full_native_audit",
+  "audit_id": "frsdkstartup-ctxdelta-604100",
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_startup",
+  "mode": "FR context-delta confirmation only: EN source and FR target are byte-identical to the inputs the two prior independent FR full audits approved; only the English context sidecar changed (PR #3378, unmerged). No re-authoring, no re-literary audit of unaffected strings.",
+  "audit_date": "2026-11-03",
+  "key_count": 4,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "604100bf1795",
+    "reader": "fr-reader1",
+    "model": "radient/auto",
+    "model_label": "auto — opaque route; underlying model undisclosed",
+    "requested_route": {
+      "provider": "radient",
+      "model_id": "auto"
+    },
+    "actual_model_source": {
+      "kind": "session_header_only",
+      "value": "Model: radient/auto",
+      "note": "Header provenance, not a served-usage extract. No served-model evidence artifact was produced in this run, so the underlying served model is UNKNOWN."
+    },
+    "underlying_model_known": false,
+    "fallback": "UNKNOWN — not exposed by this run; no fallback observed, none claimed",
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder_session": "eae0961e4e78 (as recorded by the prior FR audit records; not re-verified here)",
+    "independence_statement": "No part of the English source, the context sidecar, the French translation or the producer was authored or edited here. Only the prior FR full-audit records were read for compatibility; no parallel reader report from this follow-on round was read before this verdict."
+  },
+  "source_binding": {
+    "pr": "https://github.com/damianvtran/local-operator/pull/3378",
+    "head": "0066245ce4f90109933c59e74f1ad21b86d647bd",
+    "context_note_unmerged": true,
+    "shipped_claim": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/fr.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+      "same_version_as_prior_audits": true
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "same_version_as_prior_audits": true
+    },
+    "owned_cause_key": {
+      "en": {
+        "path": "local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+        "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+        "value": "Hosting platform is not configured."
+      },
+      "fr": {
+        "path": "local_operator/i18n/catalogues/fr/wire.errors.hosting.json",
+        "sha256": "83432e2af01eff5982e4d7a0fca57ebb2223626b0d5713c136d60bb6bec8aa69",
+        "value": "La plateforme d’hébergement n’est pas configurée."
+      }
+    },
+    "producer_source_read_only": {
+      "path": "local_operator/sdk.py",
+      "sha256": "be133837cbc28e50a77213c24759de890e2aae0adf49a8961ec7bcfca65c7621",
+      "range": "545-650",
+      "use": "startup_refusal_locale/startup_refusal_text/startup_cause_text read to confirm the new note's claim; nothing changed"
+    }
+  },
+  "context_delta": {
+    "old_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+    "old_snapshot_read": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/candidates/zh-CN/context.json (same ee0bbde5 blob the FR candidates were authored against; identical to the FR-authored snapshot hash)",
+    "new_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+    "changed_keys": [
+      "wire.errors.sdk_startup.attach_hosting_unconfigured"
+    ],
+    "unchanged_keys": [
+      "wire.errors.sdk_startup.attach_runtime_missing",
+      "wire.errors.sdk_startup.profile_attach_failed",
+      "wire.errors.sdk_startup.tool_inventory_mismatch"
+    ],
+    "changed_fields": ["note (role/tone unchanged)"],
+    "substantive_change": "The false claim that this child namespace is English-only and owes a future RFC migration boundary is removed. The new note states the frame renders in the resolved locale and that the owned cause (exact type HostingNotConfiguredError plus the published wire.errors.hosting sentence) is substituted with the separately localized cause sentence, so the frame must never carry English cause wording of its own; foreign reasons stay opaque and verbatim; the namespace falls back to English only when a locale does not carry it (RFC §6).",
+    "en_unchanged": true,
+    "fr_unchanged": true,
+    "en_sha_equal_to_prior_audits": true,
+    "fr_sha_equal_to_prior_audits": true
+  },
+  "prior_audits": [
+    {
+      "audit_id": "frsdkstartup-c44e0f808e48",
+      "reader": "fr-first",
+      "session": "c44e0f808e48",
+      "model": "radient/auto",
+      "status": "passed",
+      "severity": {"blocker": 0, "major": 0, "minor": 1, "nit": 0},
+      "finding": "F1 — the old context note claimed English-only; affects_translated_copy=false",
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/audit/fr/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "audit_id": "fr-second-sdk-startup-0e7cde33",
+      "reader": "fr-second",
+      "session": "35aac0a677bc",
+      "model": "radient/auto",
+      "status": "passed",
+      "severity": {"blocker": 0, "major": 0, "minor": 1, "nit": 0},
+      "finding": "F1 — bare reflexive 'se rattacher' lacks its complement (both runtime keys)",
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/audit/fr/fr-second-sdk-startup-0e7cde33/record.json"
+    }
+  ],
+  "context_delta_finding": {
+    "id": "C1",
+    "severity": "none — resolution of the prior context defect",
+    "verdict": "The old FR F1 (false English-only context note) is closed by the new note: it is byte-confirmed absent ('English-only' appears in the old blob and nowhere in the new one), and the replacement states resolved-locale rendering, owned-cause substitution, foreign-cause passthrough and per-namespace English fallback. The claim is consistent with local_operator/sdk.py:587-632 read here (resolve_language on the scoped config, render(locale=...), exact-type plus published-sentence ownership test).",
+    "new_incompatibility_with_fr_copy": "none found"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "MINOR",
+      "provenance": "carried from prior FR reader 2 (session 35aac0a677bc); not re-raised new, not re-litigated",
+      "keys": [
+        "wire.errors.sdk_startup.attach_hosting_unconfigured",
+        "wire.errors.sdk_startup.attach_runtime_missing"
+      ],
+      "current_text": "… et cette racine ne peut en démarrer un : {error} … et rattachez-vous dès qu’un runtime existe. / … puis rattachez-vous dès qu’un runtime existe.",
+      "problem": "Bare reflexive « se rattacher » without a complement; the shipped fr corpus supplies one (wire.exec.session_pointer: « rattacher ou reprendre »). Reads as a calque of intransitive 'attach'.",
+      "suggested": "… puis rattachez-vous à la session dès qu’un runtime existe.",
+      "blocks_merge": false,
+      "affects_context_delta": false,
+      "status": "open (pre-existing; prior readers passed with 0 blocker/major)"
+    }
+  ],
+  "observations": [
+    {
+      "id": "O1",
+      "provenance": "inherited (prior FR reader 1 O1, prior FR reader 2 O1)",
+      "severity": "not a finding",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "observation": "The frame resumes with a capitalised sentence right after the {error} slot. With the product's own cause the slot now carries « La plateforme d’hébergement n’est pas configurée. », so the composed French refusal reads cleanly end to end. A foreign opaque cause without terminal punctuation still runs into the remedy (« … : [Errno 61] Connection refused Configurez la plateforme … »); that concatenation is byte-identical in shape to the English frame and cannot be fixed from a catalogue file.",
+      "operator_goal_relevance": "Not a translation gap: with the owned cause the frame plus cause is fully French; foreign producer text stays verbatim English by contract, as the new note states."
+    },
+    {
+      "id": "O2",
+      "provenance": "new, this pass",
+      "severity": "not a finding",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "observation": "Only now that the cause renders French does the composed sentence show the term twice: « La plateforme d’hébergement n’est pas configurée. Configurez la plateforme d’hébergement de cette racine (son config.yml) ». Kept deliberately: the cause names the condition, the frame names the remedy, and the frame must stay self-contained because a foreign opaque cause supplies no antecedent — a pronoun variant (« Configurez-la pour cette racine ») would dangle on that path. Wording matches fr wire.errors.hosting.not_configured exactly, so the term is consistent across the two keys that now render adjacently.",
+      "change_requested": false
+    }
+  ],
+  "mechanical_verification": {
+    "method": "pure-stdlib JSON/parse inspection in this session (json + re over the frozen bytes); the repository validator was NOT executed — source-only restriction",
+    "json_valid": true,
+    "key_sets_equal": true,
+    "keys_added": [],
+    "keys_dropped": [],
+    "placeholder_names_and_types": "identical to source on all 4 keys: {resume,error} / {resume} / {profile} / {spec_tools,policy_tools}, all plain arguments",
+    "icu_argument_kinds": "none — no plural/select/selectordinal/number/date/time on any of the 4 messages, so CLDR plural categories are not applicable for this file group (confirmed by parse, not assumed)",
+    "brace_balance": "0 delta on all 4 keys; no stray braces outside placeholders",
+    "icu_apostrophe_escaping": "fr preserves the doubled apostrophes of mode=''own'' (2, exactly as source) and adds none elsewhere",
+    "technical_tokens_preserved": ["config.yml", "spawn_session()", "deliver()", "mode=''own''", "spec.tools", "ApprovalPolicy.declared", "runtime"],
+    "technical_token_diff_vs_source": "empty both directions",
+    "typography": "U+202F before each : and ; (3 occurrences: k1 'un : ', k2 ' ; ', k4 ' ; '; k3 has none), U+2019 apostrophes only (0 ASCII apostrophes in prose), guillemets not needed here",
+    "register": "vous + imperative (Configurez, ouvrez, démarrez, ne déclarez … qu’une seule fois); no Veuillez; no Title Case",
+    "terminology": "runtime kept English per fr guide wave-1 addition and consistent across the shipped fr corpus; « racine » for root matches corpus usage (cli.browser.config_root_line, cli.serve_help.host, cli.sessions_help.reclaim_description); « rattacher » matches wire.exec.session_pointer; « portée » for reach",
+    "width": {
+      "measure": "stdlib east_asian_width/combining approximation over the rendered strings, NOT rich.cells and NOT rendered",
+      "cells": {
+        "attach_hosting_unconfigured": {"en": 210, "fr": 262, "ratio": 1.25},
+        "attach_runtime_missing": {"en": 173, "fr": 202, "ratio": 1.17},
+        "profile_attach_failed": {"en": 34, "fr": 43, "ratio": 1.26},
+        "tool_inventory_mismatch": {"en": 123, "fr": 160, "ratio": 1.30}
+      },
+      "budget": "none — the sidecar carries role/tone/note only, no maxCells/maxChars on any of the 4 entries (checked), so no budget is breached and none was invented"
+    },
+    "rtl": "not applicable to fr",
+    "pseudo": "NOT RUN"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "result": "context delta confirmed compatible; prior approved native copy retained",
+    "unresolved_blocker_major_count": 0,
+    "new_findings_this_pass": 0,
+    "finding_ids": ["F1 (carried MINOR, open, non-blocking)", "O1", "O2"]
+  },
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor_new": 0,
+    "minor_carried_open": 1,
+    "nit": 0,
+    "observation": 2
+  },
+  "not_run": [
+    {"item": "repository validator / scripts.i18n.check", "reason": "source-only restriction for this task; overridden by the parent, not a clean result"},
+    {"item": "Node generation/typecheck", "reason": "source-only restriction"},
+    {"item": "rendered frame, live SDK guard execution, real configured root", "reason": "source-only restriction; no runtime was started"},
+    {"item": "rendered UI/terminal fit and overflow", "reason": "no rendering; width figures are a stdlib approximation against no budget"},
+    {"item": "pseudo-localisation", "reason": "not run in this pass"},
+    {"item": "ledger append (i18n/ledger/fr.json) and aggregate generation", "reason": "ledger/PR writes are out of this task's scope; the coordinator batches them"},
+    {"item": "tracked evidence commit under i18n/audits/evidence/fr/wire.errors.sdk_startup/", "reason": "no repo edits permitted in this run; this record is the retained session-scratch original"}
+  ],
+  "evidence_types": {
+    "record.json": "record of this audit (hashes computed in-session over the frozen bytes)",
+    "report.md": "audit_notes_not_execution_log",
+    "no execution log": "no command was executed in this run; there is no stdout/stderr artifact to cite"
+  },
+  "no_producer_or_exception_contract_change": true,
+  "no_translation_edit": true,
+  "no_repo_edit": true,
+  "original_packet_preserved": true,
+  "previous_bundles_preserved": true,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "retention": "Immutable session-scratch original of this run. Canonical tracked target is i18n/audits/evidence/fr/wire.errors.sdk_startup/frsdkstartup-ctxdelta-604100/{record.json,report.md}; not written and not claimed on main by this auditor."
+}

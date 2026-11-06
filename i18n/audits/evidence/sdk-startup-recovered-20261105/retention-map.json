@@ -1,0 +1,759 @@
+{
+  "kind": "retention-map-not-new-audit",
+  "base": "0b70efcc2bbff79020c4ccf2f1fe82b9e52ac7c0",
+  "recovery_manifest_sha256": "084fbaf1197d2bb124baa95c516bfdd0424c5b185271e30c6f7b7bc0b5219b6e",
+  "verified_original_payloads": 106,
+  "unique_retained_payloads": 78,
+  "files": [
+    {
+      "recovered_path": "frozen/binding.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/binding.json",
+      "sha256": "f1cd356c7f6f57e03089ff40e2a2eb16069450173ec8c890290af4f885c3697b",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/binding.json"
+    },
+    {
+      "recovered_path": "frozen/zh-CN.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/zh-CN.json",
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/zh-CN.json"
+    },
+    {
+      "recovered_path": "frozen/en.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/en.json"
+    },
+    {
+      "recovered_path": "frozen/fr.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/fr.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/fr.json"
+    },
+    {
+      "recovered_path": "frozen/context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/context.json"
+    },
+    {
+      "recovered_path": "frozen/es.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/es.json",
+      "sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/es.json"
+    },
+    {
+      "recovered_path": "current/zh-CN/reader1-d6d8c41965c3/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json",
+      "sha256": "2ea4a5d61d3b565e7eccc50e713cf0f1d25306cfc1edb3ac9043b5f5b3889179",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader1-d6d8c41965c3/record.json"
+    },
+    {
+      "recovered_path": "current/zh-CN/reader1-d6d8c41965c3/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/report.md",
+      "sha256": "c0dbfa59d5bfeef08ba1f64e3758007f2c7cfcfb29e8764fee2bebfb4c4965fc",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader1-d6d8c41965c3/report.md"
+    },
+    {
+      "recovered_path": "current/zh-CN/reader2-0feda324e9e3/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/record.json",
+      "sha256": "21949a7149ab72fe475e4972e2b7f48a7a88f5afdaa748966c142eb87047f7c1",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader2-0feda324e9e3/record.json"
+    },
+    {
+      "recovered_path": "current/zh-CN/reader2-0feda324e9e3/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/report.md",
+      "sha256": "a781c73c936ab259c9094c5c438985a1c468aebf38c1885a2d86391a6e9ee278",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader2-0feda324e9e3/report.md"
+    },
+    {
+      "recovered_path": "current/fr/reader1-604100bf1795/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json",
+      "sha256": "5fc8396a4a440a1e29a079487959e8ee2d92ed2710f6379d5c853f3045087715",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader1-604100bf1795/record.json"
+    },
+    {
+      "recovered_path": "current/fr/reader1-604100bf1795/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/report.md",
+      "sha256": "0f3f2983090de39c4bcfa93ab71444128741fe52b2cf730c45baad4b62624745",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader1-604100bf1795/report.md"
+    },
+    {
+      "recovered_path": "current/fr/reader2-3fb9e3fb5be6/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json",
+      "sha256": "6bfc8c205528e822ac0c6b70c2bb9891c763d7e4b7c4690113a5dfce8e00cd67",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader2-3fb9e3fb5be6/record.json"
+    },
+    {
+      "recovered_path": "current/fr/reader2-3fb9e3fb5be6/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/report.md",
+      "sha256": "cfa36327e214ab0ff6ae7caa13eaa7df3be6fc7001d6744f75c628e1c7aa41d8",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader2-3fb9e3fb5be6/report.md"
+    },
+    {
+      "recovered_path": "current/es/reader1-dd6c62eeb8a7/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/record.json",
+      "sha256": "4fd3ec143c1219b81ca843c6f6beb7f64553a004f359e33ba5bb8c6716040428",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader1-dd6c62eeb8a7/record.json"
+    },
+    {
+      "recovered_path": "current/es/reader1-dd6c62eeb8a7/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/report.md",
+      "sha256": "d936212601c20ec66756cbf2f9e1ebd3d94a5fbfd8bcfc1379b1bbe28c1b50e1",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader1-dd6c62eeb8a7/report.md"
+    },
+    {
+      "recovered_path": "current/es/reader1-dd6c62eeb8a7/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/receipt.json",
+      "sha256": "1d6bdb028b01caeaaaeeced4177fa5672e6009f021ccba391e2252cc16bd4ee0",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader1-dd6c62eeb8a7/receipt.json"
+    },
+    {
+      "recovered_path": "current/es/reader2-fbfe8c1294ba/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/record.json",
+      "sha256": "545f1abdb226ee84882c0e4e5907928d4535fde1fb86d0242da4e3592ce681cc",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/record.json"
+    },
+    {
+      "recovered_path": "current/es/reader2-fbfe8c1294ba/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/report.md",
+      "sha256": "cb8afb89fffd057930fd9646a45fbebcbf387771dc7a6414e3b87d8f3494276e",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/report.md"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json",
+      "sha256": "42b929680e88328d06b3bbc9e64240e40b6eeb169c57dee47c1098e6cf57cb6c",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/record.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/key-facts.json",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/key-facts.json",
+      "sha256": "62db07083549d33c28916b69c0f2be60c0e145f060dc87cc78941f465c82e91e",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/key-facts.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/fr-style.md",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/fr-style.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/fr-style.md"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/report.md",
+      "sha256": "1a975a25753bd7980190af65ba6d09c3371b9413c8cf599d125d1d5449159ea8",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/report.md"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/glossary.md",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/glossary.md"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/en.json",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/en.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/audit.log",
+      "sha256": "2ea1d5e32873c000541200d981d51cab547df62bdf3fcac14d261064de976241",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/audit.log"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/served-model-evidence.json",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/served-model-evidence.json",
+      "sha256": "db4be20df5873848a6f4099b6f8516ac3a0862f1dd3750882b4f8dd9cf9c1b1a",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/served-model-evidence.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/fr.json",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/fr.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/fr.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/translator-fr-style.md",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/translator-fr-style.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/translator-fr-style.md"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/context.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/receipt.json",
+      "sha256": "5c085fda3d5e6b00db2c597e9d33320b3fc4d4ecf08988eeddf0d6e45af58832",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/receipt.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/catalogues/fr/wire.errors.sdk_startup.json",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/catalogues/fr/wire.errors.sdk_startup.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/fr.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/catalogues/en/wire.errors.sdk_startup.context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/context.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader1-c44e0f808e48/catalogues/en/wire.errors.sdk_startup.json",
+      "original_path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/en.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/input-verification.json",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/input-verification.json",
+      "sha256": "4a4fdd7dbc9f7cd44621b39a94c34ccf9d512d6b1015b937d5c5800e3a982347",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/input-verification.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json",
+      "sha256": "b86620e30db7f073d4b3f05b394c92800fad4b217e06fe3b57d4259be57cf22d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/record.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/provenance.json",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/provenance.json",
+      "sha256": "2ece6262cf95a7c1141d639351f1328eed705279a0e0e3943bb0437c16deec6f",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/provenance.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/glossary.md",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/glossary.md"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/mechanical.json",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/mechanical.json",
+      "sha256": "fb14837c92ca243c721f0079aeb12a9aa84eb909dd07367bb471685aa794af37",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/mechanical.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/architect-assessment.md",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/architect-assessment.md",
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/architect-assessment.md"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/audit-report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/audit-report.md",
+      "sha256": "c6797dd2452f75fc185429ed142fc7f40418f3fb4b394094f1321d3f95dc538d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/audit-report.md"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/mechanical.stderr.log",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/mechanical.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/mechanical.stderr.log"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/manifest.json",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/manifest.json",
+      "sha256": "8c777ecdabd16dba716a40566b567f774c12203bf1b0a505c0a6ad676a4f8c88",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/manifest.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/style-fr.md",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/style-fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/translator-fr-style.md"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/catalogues/fr/wire.errors.sdk_startup.json",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/catalogues/fr/wire.errors.sdk_startup.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/fr.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/catalogues/en/wire.errors.sdk_startup.context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/context.json"
+    },
+    {
+      "recovered_path": "prior-full/fr/reader2-35aac0a677bc/catalogues/en/wire.errors.sdk_startup.json",
+      "original_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/en.json"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader1-e55f54b6a26e/input-hashes.json",
+      "original_path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/input-hashes.json",
+      "sha256": "03511840cd05743e373e4f95d82261c934365a9249e2a14654be5dbb3c4740db",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/input-hashes.json"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader1-e55f54b6a26e/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json",
+      "sha256": "5189f1836f9d158a0192dd14fc73130a4658f831001888144b9d8519006aa6d3",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/record.json"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader1-e55f54b6a26e/validate.py.txt",
+      "original_path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/validate.py.txt",
+      "sha256": "058727c77b8b155522b90f02edd54ea4361f1261a746af995fe11a0482f76997",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/validate.py.txt"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader1-e55f54b6a26e/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/report.md",
+      "sha256": "0e83c924eff74f9c875cf6c9627bbb443076e5a95805277d57604dbf223c95a9",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/report.md"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader1-e55f54b6a26e/check-en-default.py.txt",
+      "original_path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/check-en-default.py.txt",
+      "sha256": "bfcda8bae9b955cd314b4129e5aa8bd814ff0d6a3e0b4981b0a8dc011f8d8ab8",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/check-en-default.py.txt"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader1-e55f54b6a26e/model-provenance.json",
+      "original_path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/model-provenance.json",
+      "sha256": "f6de22d6a478c84116af3c1d324d5eef3fe83f0a1753b08d4360ae8d9359a46e",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/model-provenance.json"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader1-e55f54b6a26e/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/audit.log",
+      "sha256": "709138f61290076a753ace6ac22b1680774736ec062214d204237b0c9b36ff96",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/audit.log"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader1-e55f54b6a26e/check-en-default.log",
+      "original_path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/check-en-default.log",
+      "sha256": "a034bebd1d55ee26b243341141ca76c79e37049c6b9e79cb6d00656e5aad4cb9",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/check-en-default.log"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader1-e55f54b6a26e/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/receipt.json",
+      "sha256": "c9e0ee19891dcfcb4e3f57b031fcb70a6d27cb1c02c714ec2d2a968ca36b3672",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/receipt.json"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader2-6433b7a5b3e9/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json",
+      "sha256": "38cf424c9c6b3bbbaff25df223c086bb7c4329a32340f66b1a07dd5c1899d3e4",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader2-6433b7a5b3e9/record.json"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader2-6433b7a5b3e9/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/report.md",
+      "sha256": "d7f7a6ec2f532dea72c2665fb27336771e3646ec7649b1cf658c136906d0806b",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader2-6433b7a5b3e9/report.md"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader2-6433b7a5b3e9/audit.log",
+      "original_path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/audit.log",
+      "sha256": "5abc7b00414c14c49e62c1ca6580bd0de490d8311af61b492272979873f92e9a",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader2-6433b7a5b3e9/audit.log"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader2-6433b7a5b3e9/receipt.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/receipt.json",
+      "sha256": "6eaed8baa35eb88f4563beb1a8dbc99cf291a9dfeb8fcdd6d8c72bc212078b9b",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader2-6433b7a5b3e9/receipt.json"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader2-6433b7a5b3e9/fixture/zh-CN/wire.errors.sdk_startup.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/fixture/zh-CN/wire.errors.sdk_startup.json",
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/zh-CN.json"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader2-6433b7a5b3e9/fixture/en/wire.errors.sdk_startup.context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/fixture/en/wire.errors.sdk_startup.context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/context.json"
+    },
+    {
+      "recovered_path": "prior-full/zh-CN/reader2-6433b7a5b3e9/fixture/en/wire.errors.sdk_startup.json",
+      "original_path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/fixture/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/en.json"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/validation.log",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/validation.log",
+      "sha256": "0b4bc3b426e204eb6da08606b435dea84a34b002e73c6c2e6294160a30da8aa8",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/fr-7b2ba4ed501d/validation.log"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/record.json",
+      "sha256": "eb00a5fd2016f0ff56a910ba843c0e9a857d18d608bcd8eec78f31d123b616f6",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/fr-7b2ba4ed501d/record.json"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/provenance.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/provenance.json",
+      "sha256": "b1cb4e92c1b8a0775ebb53eac8328d4bada0ba58395af1c5bc25393da45d3b6d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/fr-7b2ba4ed501d/provenance.json"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/caller-proof.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/caller-proof.json",
+      "sha256": "cdcb701335d9239182745582767e9acc0ec6fd994114546bee8f7fdf2bff6e6b",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/fr-7b2ba4ed501d/caller-proof.json"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/README.md",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/README.md",
+      "sha256": "20913f5c5a3dc25b02faf273968fa795e3364ac60146d0c96e2ddc4e3b7f0dea",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/fr-7b2ba4ed501d/README.md"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/wire.errors.sdk_startup.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/fr.json"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/manifest.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/manifest.json",
+      "sha256": "f92f0b7419d8de77398bcfeb188cd01e9b1e18b4a91161780cdf46afcc26e89d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/fr-7b2ba4ed501d/manifest.json"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/inputs/fr.md",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/inputs/fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/translator-fr-style.md"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/inputs/en.context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/inputs/en.context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/context.json"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/inputs/glossary.md",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/inputs/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/glossary.md"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/inputs/en.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/inputs/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/en.json"
+    },
+    {
+      "recovered_path": "translators/fr-7b2ba4ed501d/inputs/architect-assessment.md",
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/inputs/architect-assessment.md",
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/architect-assessment.md"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/input-hashes.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/input-hashes.json",
+      "sha256": "92cb011c2908632364e46af8549a174c127aba6132c9b78d739bff769af259ff",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/input-hashes.json"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/locale-presence.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/locale-presence.json",
+      "sha256": "737a4b6176cddb9291967875c5b34bb05a95570cb2c573e46d19e65d1376a5a4",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/locale-presence.json"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/report.md",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/report.md",
+      "sha256": "823eb1fad15c367ab20e2616c3250fec7d909bd5c86f4b85a881cdb34a7b4123",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/report.md"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/glossary.md",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/glossary.md"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/sdk.callers.txt",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/sdk.callers.txt",
+      "sha256": "5af97ccc5d5d2287b45247bd8c4765d2cc9aa5d1705f5c35ef80e356515d7873",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/sdk.callers.txt"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/en.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/en.json"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/wire.errors.sdk_startup.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/zh-CN.json"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/zh-CN.style.md",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/zh-CN.style.md",
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/zh-CN.style.md"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/context.json"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/manifest.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/manifest.json",
+      "sha256": "aee1a36cbb92b3e0795d6bd3a85ca2e56222dfa2672d9da6b7c155722fdfd691",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/manifest.json"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/translator-record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/translator-record.json",
+      "sha256": "732bd805b74638d74f233625ba7a885e41461127183afbadf80eb1ff56bf8479",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/translator-record.json"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/mechanical.log",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/mechanical.log",
+      "sha256": "767c846a1a28d7c3344e7fa6a337e8c8eeee52656b89474ac4baad2105f68f43",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/mechanical.log"
+    },
+    {
+      "recovered_path": "translators/zh-CN-7fce46e29bee/mechanical-validation.json",
+      "original_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/mechanical-validation.json",
+      "sha256": "30b6b8bf20735b93f886cfe0ceffa8634e5c475cf57f24f43b2254065dcfeb09",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/mechanical-validation.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/sibling-vi.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/sibling-vi.json",
+      "sha256": "ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/sibling-vi.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/RFC.md",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/RFC.md",
+      "sha256": "ade4d909428ccf1951d5ad826528db3b8c694946963b71246dbc93f6951a1dd2",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/RFC.md"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/sibling-hi.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/sibling-hi.json",
+      "sha256": "3362b1bc1a45d94c3f8455557cad031ebe2b6475b8d0c4171d465fb65e771c50",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/sibling-hi.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/HOWTO.md",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/HOWTO.md",
+      "sha256": "3253eac7c2cfe0955ab5f80cccd09ca2377ccb477526c7d8fe745009c762cc63",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/HOWTO.md"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/glossary.md",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/glossary.md"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/en.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/en.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/README.md",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/README.md",
+      "sha256": "3ca4902fc4e21f5946146e033fe6fb481de037922d7473b6e9c911cae755f303",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/README.md"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/architect-assessment.md",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/architect-assessment.md",
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/architect-assessment.md"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/served-model-evidence.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/served-model-evidence.json",
+      "sha256": "0ccd7f905cdec1366c70d5f51c9f48aa2736191d254ee46ac2de744178585c5e",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/served-model-evidence.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/caller-proof.md",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/caller-proof.md",
+      "sha256": "dcb8396e4319caa4e49e2378a75172980cf81b1b77f468a968e853213a71a2c0",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/caller-proof.md"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/wire.errors.sdk_startup.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/wire.errors.sdk_startup.json",
+      "sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/frozen/es.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/sibling-ru.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/sibling-ru.json",
+      "sha256": "a78344f18145f9016b018d451d0c7d09906a09ff9937ceff36356c297328930f",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/sibling-ru.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/context.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/context.json",
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/context.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/manifest.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/manifest.json",
+      "sha256": "3292057c8d7a2da8b72b18ba56ddbee39d5f00a5e9a549dba66dbaf5aa668d94",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/manifest.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/sibling-ur.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/sibling-ur.json",
+      "sha256": "b3c5f56714ed21faa9f210c3610ae80936d59f13c0a96df460dab2c7bb618382",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/sibling-ur.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/translator-record.json",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/translator-record.json",
+      "sha256": "aea9bbe3bbb8c25a0df671e13c42c9d22950833c41949c9917ed135c8bdc6902",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/translator-record.json"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/mechanical.log",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/mechanical.log",
+      "sha256": "4cb19886b0a335e1421c3c183b2b812ac789561b6f8a93682649dd96eede3310",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/mechanical.log"
+    },
+    {
+      "recovered_path": "translators/es-804764f54d82/es-style.md",
+      "original_path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/es-style.md",
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6",
+      "retained": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/es-style.md"
+    }
+  ],
+  "audit_scope": {
+    "fr": "two prior full audits plus two current context-only confirmations",
+    "zh-CN": "two prior full audits plus two current context-only confirmations",
+    "es": "two full current-context audits"
+  },
+  "historical_notes": "Original unmerged #3378 notes/dates/model disclosures are retained verbatim. Prerequisite is now merged and an ancestor of this base; no original record has been rewritten. Unknown underlying models/fallbacks remain UNKNOWN.",
+  "chains": {
+    "zh-CN": {
+      "translator_record": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/zh-CN-7fce46e29bee/translator-record.json",
+      "target": "local_operator/i18n/catalogues/zh-CN/wire.errors.sdk_startup.json",
+      "target_sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "prior_full": [
+        {
+          "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/record.json",
+          "record_sha256": "5189f1836f9d158a0192dd14fc73130a4658f831001888144b9d8519006aa6d3",
+          "report": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader1-e55f54b6a26e/report.md",
+          "report_sha256": "0e83c924eff74f9c875cf6c9627bbb443076e5a95805277d57604dbf223c95a9",
+          "original_mode": null,
+          "original_date": "2026-11-03"
+        },
+        {
+          "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader2-6433b7a5b3e9/record.json",
+          "record_sha256": "38cf424c9c6b3bbbaff25df223c086bb7c4329a32340f66b1a07dd5c1899d3e4",
+          "report": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader2-6433b7a5b3e9/report.md",
+          "report_sha256": "d7f7a6ec2f532dea72c2665fb27336771e3646ec7649b1cf658c136906d0806b",
+          "original_mode": null,
+          "original_date": "2026-11-03T17:01:22.058972+00:00"
+        }
+      ],
+      "current": [
+        {
+          "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader1-d6d8c41965c3/record.json",
+          "record_sha256": "2ea4a5d61d3b565e7eccc50e713cf0f1d25306cfc1edb3ac9043b5f5b3889179",
+          "report": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader1-d6d8c41965c3/report.md",
+          "report_sha256": "c0dbfa59d5bfeef08ba1f64e3758007f2c7cfcfb29e8764fee2bebfb4c4965fc",
+          "original_mode": "context-delta-confirmation",
+          "original_date": "2026-11-03"
+        },
+        {
+          "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader2-0feda324e9e3/record.json",
+          "record_sha256": "21949a7149ab72fe475e4972e2b7f48a7a88f5afdaa748966c142eb87047f7c1",
+          "report": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader2-0feda324e9e3/report.md",
+          "report_sha256": "a781c73c936ab259c9094c5c438985a1c468aebf38c1885a2d86391a6e9ee278",
+          "original_mode": "context-delta confirmation + current-parameter integrity (reader 2, priority locale); source-only",
+          "original_date": "2026-11-03"
+        }
+      ]
+    },
+    "fr": {
+      "translator_record": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/fr-7b2ba4ed501d/record.json",
+      "target": "local_operator/i18n/catalogues/fr/wire.errors.sdk_startup.json",
+      "target_sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "prior_full": [
+        {
+          "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/record.json",
+          "record_sha256": "42b929680e88328d06b3bbc9e64240e40b6eeb169c57dee47c1098e6cf57cb6c",
+          "report": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/report.md",
+          "report_sha256": "1a975a25753bd7980190af65ba6d09c3371b9413c8cf599d125d1d5449159ea8",
+          "original_mode": null,
+          "original_date": "2026-11-03"
+        },
+        {
+          "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/record.json",
+          "record_sha256": "b86620e30db7f073d4b3f05b394c92800fad4b217e06fe3b57d4259be57cf22d",
+          "report": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/audit-report.md",
+          "report_sha256": "c6797dd2452f75fc185429ed142fc7f40418f3fb4b394094f1321d3f95dc538d",
+          "original_mode": null,
+          "original_date": "2026-11-03T17:06:07.189994+00:00"
+        }
+      ],
+      "current": [
+        {
+          "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader1-604100bf1795/record.json",
+          "record_sha256": "5fc8396a4a440a1e29a079487959e8ee2d92ed2710f6379d5c853f3045087715",
+          "report": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader1-604100bf1795/report.md",
+          "report_sha256": "0f3f2983090de39c4bcfa93ab71444128741fe52b2cf730c45baad4b62624745",
+          "original_mode": "FR context-delta confirmation only: EN source and FR target are byte-identical to the inputs the two prior independent FR full audits approved; only the English context sidecar changed (PR #3378, unmerged). No re-authoring, no re-literary audit of unaffected strings.",
+          "original_date": "2026-11-03"
+        },
+        {
+          "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader2-3fb9e3fb5be6/record.json",
+          "record_sha256": "6bfc8c205528e822ac0c6b70c2bb9891c763d7e4b7c4690113a5dfce8e00cd67",
+          "report": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader2-3fb9e3fb5be6/report.md",
+          "report_sha256": "cfa36327e214ab0ff6ae7caa13eaa7df3be6fc7001d6744f75c628e1c7aa41d8",
+          "original_mode": "context_delta_confirmation_only",
+          "original_date": "2026-11-03"
+        }
+      ]
+    },
+    "es": {
+      "translator_record": "i18n/audits/evidence/sdk-startup-recovered-20261105/translators/es-804764f54d82/translator-record.json",
+      "target": "local_operator/i18n/catalogues/es/wire.errors.sdk_startup.json",
+      "target_sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+      "prior_full": [],
+      "current": [
+        {
+          "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader1-dd6c62eeb8a7/record.json",
+          "record_sha256": "4fd3ec143c1219b81ca843c6f6beb7f64553a004f359e33ba5bb8c6716040428",
+          "report": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader1-dd6c62eeb8a7/report.md",
+          "report_sha256": "d936212601c20ec66756cbf2f9e1ebd3d94a5fbfd8bcfc1379b1bbe28c1b50e1",
+          "original_mode": "first_full_independent_native_audit_retained_translations",
+          "original_date": "2026-11-03"
+        },
+        {
+          "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/record.json",
+          "record_sha256": "545f1abdb226ee84882c0e4e5907928d4535fde1fb86d0242da4e3592ce681cc",
+          "report": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/report.md",
+          "report_sha256": "cb8afb89fffd057930fd9646a45fbebcbf387771dc7a6414e3b87d8f3494276e",
+          "original_mode": "full_first_independent_audit",
+          "original_date": "2026-11-03"
+        }
+      ]
+    }
+  }
+}

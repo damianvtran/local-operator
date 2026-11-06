@@ -2930,6 +2930,38 @@ def team_bridge_enabled_label() -> Msg:
     return Msg("wire.settings.team_bridge_enabled.label", {})
 
 
+def team_bridge_screening_ambient_budget_per_hour_help() -> Msg:
+    return Msg("wire.settings.team_bridge_screening_ambient_budget_per_hour.help", {})
+
+
+def team_bridge_screening_ambient_budget_per_hour_label() -> Msg:
+    return Msg("wire.settings.team_bridge_screening_ambient_budget_per_hour.label", {})
+
+
+def team_bridge_screening_budget_per_hour_help() -> Msg:
+    return Msg("wire.settings.team_bridge_screening_budget_per_hour.help", {})
+
+
+def team_bridge_screening_budget_per_hour_label() -> Msg:
+    return Msg("wire.settings.team_bridge_screening_budget_per_hour.label", {})
+
+
+def team_bridge_screening_sender_budget_per_hour_help() -> Msg:
+    return Msg("wire.settings.team_bridge_screening_sender_budget_per_hour.help", {})
+
+
+def team_bridge_screening_sender_budget_per_hour_label() -> Msg:
+    return Msg("wire.settings.team_bridge_screening_sender_budget_per_hour.label", {})
+
+
+def team_bridge_screening_unaddressed_budget_per_hour_help() -> Msg:
+    return Msg("wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help", {})
+
+
+def team_bridge_screening_unaddressed_budget_per_hour_label() -> Msg:
+    return Msg("wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label", {})
+
+
 def team_bridge_session_help() -> Msg:
     return Msg("wire.settings.team_bridge_session.help", {})
 

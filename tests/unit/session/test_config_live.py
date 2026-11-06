@@ -258,6 +258,23 @@ def _bridge_settings() -> Any:
     return TeamBridgeSettings.from_values(watcher.values)
 
 
+def _screening_budget() -> Any:
+    """The LIVE spending ceilings the receiver resolves, read the way it does.
+
+    ``Store`` asks ``screening_budget_from_config(paths.config_dir())`` per
+    construction, and that reader caches on the config file's identity — so an
+    external write lands on the next construction with no restart, which is why
+    these four rows are LIVE. The probe reads through that exact function rather
+    than through ``TeamBridgeSettings``: the ceilings are a separate subtree with
+    their own clamping rules, and observing them through the bridge's local
+    prefs would prove nothing about the numbers the budget actually charges.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.team_bridge.store import screening_budget_from_config
+
+    return screening_budget_from_config(config_dir())
+
+
 def _lapsed_choice(watcher: ConfigWatcher) -> str:
     """The ``asks.lapsed_visible_for`` choice the reader resolves, by its window."""
     from local_operator.asks.store import LAPSED_VISIBLE_FOR_S
@@ -877,6 +894,27 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "team_bridge.session": (
         "synthetic-live-probe-session",
         lambda s, w: _bridge_settings().session,
+    ),
+    # The screening spend ceilings. LIVE for the same reason the two rows above
+    # are: the receiver re-reads the subtree on every ``Store`` construction. The
+    # probe values are the shipped defaults nudged inside their nesting (each is
+    # a valid set against its siblings, so the write path accepts it and the
+    # clamp never has to correct it).
+    "team_bridge.screening.budget_per_hour": (
+        420,
+        lambda s, w: _screening_budget().account,
+    ),
+    "team_bridge.screening.unaddressed_budget_per_hour": (
+        360,
+        lambda s, w: _screening_budget().unaddressed,
+    ),
+    "team_bridge.screening.ambient_budget_per_hour": (
+        320,
+        lambda s, w: _screening_budget().ambient,
+    ),
+    "team_bridge.screening.sender_budget_per_hour": (
+        220,
+        lambda s, w: _screening_budget().sender,
     ),
     # -- hub_org: the org Agent Hub auto-enrol switch ---------------------------
     # LIVE because the enrol path re-reads it from config.yml at every boundary

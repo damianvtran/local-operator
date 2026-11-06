@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "kind": "audit_receipt_companion",
+  "audit_id": "es-ssu-reader1-20261103",
+  "locale": "es",
+  "namespace": "wire.errors.sdk_startup",
+  "audit_date": "2026-11-03",
+  "role": "independent auditor (reader 1), first full pass for this group",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "dd6c62eeb8a7",
+    "requested_route": "radient/auto (selector only, NOT served-model proof)",
+    "served_model_underlying": "UNKNOWN",
+    "fallback": "UNKNOWN",
+    "actual_model_source": "none reachable under the strict source-only scope; no usage/provider payload was obtained, so the served model and any fallback stay UNKNOWN rather than guessed",
+    "independent_from_translator_session": true,
+    "translator_session": "804764f54d82",
+    "translator_agent": "i18n-translator"
+  },
+  "chain": {
+    "report": {
+      "path": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/report.md",
+      "sha256": "d936212601c20ec66756cbf2f9e1ebd3d94a5fbfd8bcfc1379b1bbe28c1b50e1",
+      "bytes": 13288
+    },
+    "record": {
+      "path": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/record.json",
+      "sha256": "4fd3ec143c1219b81ca843c6f6beb7f64553a004f359e33ba5bb8c6716040428",
+      "bytes": 10472
+    },
+    "self": "this receipt carries no hash of itself; it is the terminal companion and its own hash is reported by the auditor in the hand-off message"
+  },
+  "inputs": {
+    "en": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+    "context": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+    "target_es": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+    "old_context_es_packet": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+    "style_guide": "77b9227213802d14c74d4298d6b346ad842bbf2a5ca3b9d46fc6144430d26c3e",
+    "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+  },
+  "verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "ES-SSU-M1",
+      "ES-SSU-N1",
+      "ES-SSU-N2"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 2
+    }
+  },
+  "integrity_notes": [
+    "input hashes were computed from the frozen files and cross-checked byte-equal to the worktree English/context originals and to the translator's original ES file",
+    "the staged ES packet was built against the older context ee0bbde5…; the delta touches only attach_hosting_unconfigured.note and invalidates none of the four retained values",
+    "audit_notes_not_execution_log: the checks were in-process stdlib computations; no validator, scanner, render or app run exists to log. One `bash -c true` no-op launched by mistake after the checks produced no output and no effect; it is disclosed in both record and report",
+    "not claimed: repo-validator pass, rendered/terminal fit, pseudo-locale behaviour, runtime or whole-frame clearance, ledger row, PR comment, merged or shipped state",
+    "PR #3378 head 0066245ce4f90109933c59e74f1ad21b86d647bd is unmerged; this receipt records a source-only audit of staged copy, not a shipped artefact"
+  ]
+}

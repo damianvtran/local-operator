@@ -1,0 +1,143 @@
+{
+  "locale": "es",
+  "namespace": "wire.errors.sdk_startup",
+  "mode": "full_first_independent_audit",
+  "audit_date": "2026-11-03",
+  "key_count": 4,
+  "audit_id": "es-startup-r2",
+  "record_path": "~/local-operator/i18n/audits/evidence/es/wire.errors.sdk_startup/es-startup-r2/",
+  "auditor": {
+    "agent": "i18n-auditor (reader 2)",
+    "session": "fbfe8c1294ba",
+    "model": "UNKNOWN",
+    "requested_route": "radient/auto",
+    "actual_model_source": "harness header line only ('Model: radient/auto'); not served-model proof",
+    "fallback": "UNKNOWN - not exposed",
+    "independent_from_translator_session": true,
+    "translator_session": "804764f54d82",
+    "independent_from_reader_1": true
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "original": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "original": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e"
+    },
+    "es": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/es.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/wire.errors.sdk_startup.json",
+      "sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd"
+    }
+  },
+  "binding_context_note": "context hash is 82f193fd... from binding+FROZEN bytes; NOT the 82b... value in the inventory chat; en/es match binding",
+  "dependency": {
+    "pr": "https://github.com/damianvtran/local-operator/pull/3378",
+    "head": "0066245ce4f90109933c59e74f1ad21b86d647bd",
+    "merged": false,
+    "shipped_claim": false
+  },
+  "mechanical": {
+    "repo_validator": "NOT RUN - source-only mandate forbids process/Node/scripts",
+    "json_valid": true,
+    "keys_en": 4,
+    "keys_es": 4,
+    "key_order_identical": true,
+    "placeholders_match": true,
+    "icu_plural_select_present": false,
+    "cldr_categories_required": null,
+    "apostrophe_escape_preserved": true,
+    "literals_preserved": [
+      "config.yml",
+      "spawn_session()",
+      "deliver()",
+      "mode='own'",
+      "spec.tools",
+      "ApprovalPolicy.declared"
+    ],
+    "declared_max_cells": null,
+    "context_sidecar_fields": [
+      "role",
+      "tone",
+      "note"
+    ]
+  },
+  "findings": [
+    {
+      "id": "es-sdk-r2-01",
+      "severity": "MINOR",
+      "key": "wire.errors.sdk_startup.attach_runtime_missing",
+      "issue": "masculine anaphora (abrelo/ejecutarlo/activalo) for la sesion; nearest masculine noun is 'runtime' -> wrong-antecedent read",
+      "suggestion": "abrela ... ejecutarla ... activala (or name 'el id' explicitly)"
+    },
+    {
+      "id": "es-sdk-r2-02",
+      "severity": "MINOR",
+      "key": "wire.errors.sdk_startup.tool_inventory_mismatch",
+      "issue": "'nombran inventarios distintos' calques EN 'name different inventories'; nombrar = to name/appoint/mention",
+      "suggestion": "'enumeran inventarios distintos' (especifican; avoid 'declaran' - remedy uses 'declara')"
+    },
+    {
+      "id": "es-sdk-r2-n1",
+      "severity": "NIT",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "issue": "'Configura el alojamiento' elides the shipped collocation 'plataforma de alojamiento'",
+      "suggestion": "Configura la plataforma de alojamiento para esta raiz (su config.yml)"
+    },
+    {
+      "id": "es-sdk-r2-n2",
+      "severity": "NIT",
+      "key": "wire.errors.sdk_startup.attach_runtime_missing",
+      "issue": "bare 'antes' for 'first'",
+      "suggestion": "'primero' states the ordering"
+    },
+    {
+      "id": "es-sdk-r2-n3",
+      "severity": "NIT",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "issue": "'esta raiz' can read as a filesystem root",
+      "suggestion": "'esta raiz de configuracion' where width is free"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 2,
+      "NIT": 3
+    },
+    "finding_ids": [
+      "es-sdk-r2-01",
+      "es-sdk-r2-02",
+      "es-sdk-r2-n1",
+      "es-sdk-r2-n2",
+      "es-sdk-r2-n3"
+    ]
+  },
+  "old_audit_refs": [],
+  "prior_es_namespace_audit": "none found (evidence/es/wire.errors.sdk_startup*/ absent)",
+  "gaps": [
+    "rendered fit NOT RUN (no maxCells; no renderer)",
+    "RTL n/a; pseudo-locale NOT RUN",
+    "whole-frame/runtime render path NOT RUN (sdk.py 545-640 read-only, contract shape only)",
+    "live English-in-frame scan NOT RUN",
+    "ledger row NOT WRITTEN (source-only)",
+    "tracked evidence bundle NOT WRITTEN by auditor"
+  ],
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/report.md",
+      "sha256": "cb8afb89fffd057930fd9646a45fbebcbf387771dc7a6414e3b87d8f3494276e"
+    }
+  ],
+  "companions": [],
+  "audit_notes_not_execution_log": "no execution log kept; mechanical checks were stdlib json/re/hashlib on frozen bytes in-session",
+  "new_report_is_original": true,
+  "backdated": false
+}

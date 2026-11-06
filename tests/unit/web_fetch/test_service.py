@@ -67,6 +67,80 @@ def test_validate_allows_public_target(monkeypatch: pytest.MonkeyPatch) -> None:
     validate_public_url("https://example.com/", allow_private=False)  # no raise
 
 
+def test_a_name_with_no_address_is_a_host_refusal_not_a_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``EAI_NONAME`` is a POLICY answer: waiting changes nothing about DNS.
+
+    Classified as the guard's own refusal rather than a bare transport error so a
+    caller that caches outcomes (a link preview's negative cache) can tell "this
+    host does not exist" from "this host timed out" — while every existing catcher
+    still sees a ``FetchError`` by inheritance.
+
+    The code is spelled ``socket.EAI_NONAME``, not a literal ``-2``: the errno
+    values are platform-specific (macOS uses ``8`` for "no such name"), and a test
+    that hard-codes glibc's is a test of the wrong number (review R2-1).
+    """
+
+    def _no_such_name(*args: object, **kwargs: object) -> object:
+        raise service.socket.gaierror(service.socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(service.socket, "getaddrinfo", _no_such_name)
+    with pytest.raises(service.PolicyRefusal) as caught:
+        validate_public_url("http://nowhere.invalid/x", allow_private=False)
+    assert caught.value.reason == "host"
+    assert isinstance(caught.value, FetchError)
+
+
+def test_a_transient_resolver_failure_is_retryable_not_a_host_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``EAI_AGAIN`` means "ask again", so it must never become ``blocked-host``.
+
+    Folding every ``gaierror`` into the policy refusal (review R2-1) parked a live
+    host behind a 30-minute negative-cache entry for one bad second: the resolver
+    says "try again" under load, and that is exactly what a retry decision needs to
+    hear. Asserted rather than described: the RAISED TYPE is the contract, because
+    ``PolicyRefusal`` is what the preview turns into an uncached-for-a-half-hour
+    ``blocked-host`` while a classified ``FetchError`` stays retryable.
+    """
+
+    def _ask_again(*args: object, **kwargs: object) -> object:
+        raise service.socket.gaierror(
+            service.socket.EAI_AGAIN, "Temporary failure in name resolution"
+        )
+
+    monkeypatch.setattr(service.socket, "getaddrinfo", _ask_again)
+    with pytest.raises(FetchError) as caught:
+        validate_public_url("http://busy.example/x", allow_private=False)
+    assert not isinstance(caught.value, service.PolicyRefusal)
+    # The fetcher's own retry decision reads this, so it is the load-bearing half:
+    # a failure with no classification is re-raised at once as though it were a
+    # policy refusal, which is how a transient lookup would escape retrying.
+    assert caught.value.failure is not None
+    assert caught.value.failure.retryable is True
+
+
+def test_credentials_in_the_url_are_refused_before_any_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """httpx turns URL userinfo into ``Authorization: Basic``; it is never forwarded.
+
+    The refusal must cost no DNS and no socket, so the resolver is rigged to fail
+    the test if it is ever reached.
+    """
+
+    def _must_not_resolve(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a credentialed URL reached the resolver")
+
+    monkeypatch.setattr(service.socket, "getaddrinfo", _must_not_resolve)
+    with pytest.raises(service.PolicyRefusal) as caught:
+        validate_public_url("http://someone:hunter2@example.com/x", allow_private=False)
+    assert caught.value.reason == "host"
+    # The message must not repeat the credential back at whoever reads the error.
+    assert "hunter2" not in str(caught.value)
+
+
 def test_validate_allow_private_bypasses(monkeypatch: pytest.MonkeyPatch) -> None:
     # With allow_private, DNS is not even consulted — the switch is the escape.
     validate_public_url("http://localhost:3000/", allow_private=True)
@@ -925,3 +999,87 @@ def test_coerce_clamps_attempts() -> None:
     assert coerce_fetch_settings({"max_attempts": 0}).max_attempts == 1
     assert coerce_fetch_settings({}).max_attempts == 3
     assert coerce_fetch_settings({}).blocked_retry is True
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        # IPv4 carrier-grade NAT, and Tailscale's MagicDNS (100.64.0.0/10). The
+        # six-flag list missed these; ``is_global`` catches them.
+        "100.64.0.1",
+        "100.100.100.100",
+        "::ffff:100.64.0.1",
+        # IPv4 and IPv6 MULTICAST: ``is_global`` is True for these, so the
+        # is_global-only predicate this test was written for ALLOWED them.
+        "224.0.0.1",
+        "239.255.255.250",
+        "ff02::1",
+        "ff0e::1",
+        # NAT64 (64:ff9b::/96) embeds an IPv4 address, so this IS 169.254.169.254 on
+        # a NAT64 host — and on an IPv6-only host it is the address the connection
+        # would be pinned to.
+        "64:ff9b::a9fe:a9fe",
+        "64:ff9b::7f00:1",
+        # IPv4-COMPATIBLE ``::a.b.c.d``: is_reserved, and never unwrapped by
+        # ``ipv4_mapped``, so only the reserved term catches it.
+        "::a9fe:a9fe",
+        "::7f00:1",
+        # IPv6 SITE-LOCAL ``fec0::/10`` (S-2): RFC 3879 deprecated the prefix and
+        # removed it from the registries ``is_global`` reasons about, so the stdlib
+        # reports ``is_global=True`` while ``is_site_local`` is True. Measured
+        # here — the only term that catches it, and it is IPv6-only.
+        "fec0::1",
+        "fec0:0:0:ffff::1",
+        # The plain guards, kept here so one test states the whole closed set.
+        "169.254.169.254",
+        "127.0.0.1",
+        "::1",
+        "10.0.0.1",
+        "192.168.0.1",
+        "0.0.0.0",
+        "198.18.0.1",
+        "192.0.2.1",
+    ],
+)
+def test_every_address_class_the_guard_must_refuse_is_refused(
+    address: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1/S-10: ``is_global`` ALONE REGRESSED six classes the old list refused.
+
+    Both delta lanes measured it independently: ``is_global`` is True for IPv4 and
+    IPv6 multicast, for the NAT64 prefix that embeds an IPv4 address, and for
+    IPv4-compatible ``::a.b.c.d`` — every one of which the six-flag list this
+    replaced refused, and every one of which ``validate_public_url`` would then PIN
+    the connection to. The predicate therefore carries ``is_multicast`` and
+    ``is_reserved`` alongside ``not is_global``, plus ``is_site_local`` for the
+    deprecated ``fec0::/10`` prefix (S-2), which ``is_global`` also calls global.
+    This parametrisation is what keeps all four terms honest in both directions.
+    """
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: [address])
+    with pytest.raises(service.PolicyRefusal) as caught:
+        validate_public_url("https://pasted.example/x", allow_private=False)
+    assert caught.value.reason == "private", address
+
+
+@pytest.mark.parametrize("address", ["93.184.216.34", "2606:4700::1", "8.8.8.8"])
+def test_a_globally_routable_address_still_passes(
+    address: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tightening must not refuse the addresses it exists to fetch."""
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: [address])
+    assert validate_public_url("https://pasted.example/x", allow_private=False) == address
+
+
+def test_allow_private_is_still_the_only_way_to_reach_a_local_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator's deliberate escape survives the tightening, and is explicit.
+
+    ``allow_private`` bypasses IP judgement entirely — that is the documented local
+    dev switch, and tightening the predicate must not quietly disable it. What must
+    NOT happen is any of the refused classes getting through it implicitly.
+    """
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["127.0.0.1"])
+    assert validate_public_url("http://localhost:3000/x", allow_private=True) is None
+    with pytest.raises(service.PolicyRefusal):
+        validate_public_url("http://localhost:3000/x", allow_private=False)

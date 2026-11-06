@@ -1,0 +1,135 @@
+"""Independent reader-1 scoped audit: zh-CN wire.errors.sdk_startup (4 keys).
+
+Read-only. Uses the core checkout's existing parser/checker and public i18n
+helpers; no repo edit, no generation, no activation, no fixture install.
+"""
+
+import json
+import pathlib
+import sys
+import unicodedata
+
+sys.path.insert(0, "/Users/damian/local-operator")
+
+from local_operator.i18n import runtime
+from local_operator.i18n.resolve import resolve_language
+from scripts.i18n import check
+
+PACKET = pathlib.Path(
+    "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33"
+)
+CORE = pathlib.Path("/Users/damian/local-operator")
+
+
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        assert key not in result, ("duplicate key", key)
+        result[key] = value
+    return result
+
+
+load = lambda path: json.loads(path.read_text(), object_pairs_hook=unique)
+
+en = load(PACKET / "en.json")
+target = load(PACKET / "wire.errors.sdk_startup.json")
+context = load(PACKET / "context.json")
+
+# ---- 1. key parity, order, no extras ---------------------------------------
+assert len(en) == len(target) == len(context) == 4, (len(en), len(target), len(context))
+assert set(en) == set(target) == set(context)
+assert list(en) == list(target) == list(context), "key order differs from English"
+print("PASS key parity: exactly 4 keys, no added/dropped keys, English order kept")
+
+plural = json.loads((CORE / "local_operator/i18n/data/plural_rules.json").read_text())
+problems = []
+
+expected_args = {
+    "attach_hosting_unconfigured": (("resume", "simple"), ("error", "simple")),
+    "attach_runtime_missing": (("resume", "simple"),),
+    "profile_attach_failed": (("profile", "simple"),),
+    "tool_inventory_mismatch": (("spec_tools", "simple"), ("policy_tools", "simple")),
+}
+opaque = "\u4f60 '{braces}' \"quotes\" 100% <tag> \\ {x} "  # braces/quotes/percent/tag
+bidi = "\u2067\u202e"
+
+for key, source in en.items():
+    short = key.removeprefix("wire.errors.sdk_startup.")
+    text = target[key]
+    args = runtime.message_arguments(source)
+    got = runtime.message_arguments(text)
+    assert args == got == expected_args[short], (short, args, got)
+    assert check.arguments_match(
+        args, got, translated_source=text, locale="zh-CN", plural=plural
+    )
+    check._check_plural_categories(
+        problems, "zh-CN", "wire.errors.sdk_startup", key, text, plural, "zh-CN"
+    )
+    assert runtime.plural_selectors(text) == (), (short, "unexpected plural arm")
+    assert not any(unicodedata.category(c) == "Cf" for c in text), (short, "Cf control")
+    assert not any(c in text for c in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+    assert "\u8bf7" not in text, (short, "请 without English please")
+    assert "maxCells" not in context[key] and "maxChars" not in context[key]
+
+    # Opaque values must pass through byte-identically, never be re-parsed.
+    for payload in (opaque, "plain", "", bidi, "\u65b0\n\u884c"):
+        params = {name: payload for name, kind in args}
+        rendered = runtime.render_message(text, params, "zh-CN")
+        for name, kind in args:
+            assert payload in rendered, (short, name, "opaque value altered")
+    print(f"PASS {short}: args={args} Cf=0 no-plural no-请 opaque-pass-through")
+
+# ---- 2. technical identifiers and mode literals ---------------------------
+assert "''own''" in target["wire.errors.sdk_startup.attach_runtime_missing"]
+rendered_own = runtime.render_message(
+    target["wire.errors.sdk_startup.attach_runtime_missing"], {"resume": "s-1"}, "zh-CN"
+)
+assert "mode='own'" in rendered_own and "''" not in rendered_own, rendered_own
+for token in ("config.yml", "spawn_session()/deliver()", "ID", "（其config.yml）"):
+    assert token in target["wire.errors.sdk_startup.attach_hosting_unconfigured"], token
+for token in ("spawn_session()/deliver()", "mode=''own''"):
+    assert token in target["wire.errors.sdk_startup.attach_runtime_missing"], token
+for token in ("spec.tools", "ApprovalPolicy.declared("):
+    assert token in target["wire.errors.sdk_startup.tool_inventory_mismatch"], token
+print("PASS technical tokens kept: config.yml, spawn_session()/deliver(), spec.tools, ApprovalPolicy.declared(), ICU-escaped mode='own'")
+
+# ---- 3. negative controls --------------------------------------------------
+try:
+    runtime.message_arguments("broken {")
+except runtime.MessageSyntaxError:
+    print("PASS negative control: malformed ICU rejected")
+else:
+    raise AssertionError("malformed ICU accepted")
+
+assert not check.arguments_match(
+    (), runtime.message_arguments("{injected}"), translated_source="{injected}",
+    locale="zh-CN", plural=plural,
+)
+print("PASS negative control: added placeholder rejected")
+
+try:
+    runtime.render_message(
+        target["wire.errors.sdk_startup.profile_attach_failed"], {}, "zh-CN"
+    )
+except Exception as error:
+    print(f"PASS negative control: missing argument refused ({type(error).__name__})")
+else:
+    raise AssertionError("missing argument rendered")
+
+assert not check.arguments_match(
+    (("resume", "simple"),),
+    runtime.message_arguments("{resume, plural, other {x}}"),
+    translated_source="{x}", locale="zh-CN", plural=plural,
+)
+print("PASS negative control: plural upgrade/downgrade shape rejected")
+
+assert not problems, problems
+
+# ---- 4. producer locale path (read-only, no activation) -------------------
+print("resolve_language('zh-CN') ->", resolve_language("zh-CN"))
+print("resolve_language('EN')    ->", resolve_language("EN"))
+print("resolve_language(None-ish default) ->", resolve_language("en"))
+assert resolve_language("zh-CN") == "zh-CN"
+print("PASS producer path: a configured zh-CN root resolves zh-CN, so the pinned startup_refusal_text reaches this namespace with no producer change")
+
+print("RESULT PASS 4/4 staged catalogue checks; scoped core parser/render/argument helpers only; no scanner, build or native run")

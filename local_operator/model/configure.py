@@ -2043,6 +2043,12 @@ def _oauth_listing_token(
                 )
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not read a stored %s token for the listing: %s", provider, exc)
+    if provider == "openai":
+        # A bare borrowed token loses Codex account/auth-kind semantics and a
+        # catalogue-purpose bearer could bypass inference budget restrictions.
+        # Its replacement is the owner-fetched, scoped metadata reader, never
+        # another secret-selection rung.
+        return "", False, None
     borrowed = _borrowed_listing_token(provider, base=base)
     if borrowed:
         # The borrow returns a VALUE only (its contract is ``str | None``), so the
@@ -2102,6 +2108,7 @@ def _info_from_discovery(
         )
         rows, status = available_models(
             provider,
+            config_dir=base,
             api_key=secret or None,
             is_oauth=is_oauth,
             account_id=account_id,
@@ -2801,6 +2808,26 @@ def resolve_model_info(
             scope = f"{scope}:{_document_stamp(_cache_path(scope, None))}"
         if provider == "openai" and credential[1] and not credential[2]:
             scope = "openai-oauth-unscoped"
+        if provider == "openai" and not credential[0]:
+            from local_operator.providers.shared_catalogue import cached
+
+            receipt = cached(base)
+            if receipt is not None:
+                # This is ONLY the memo key; never masquerade an opaque scope
+                # as an OAuth account/header or an API-key listing document.
+                scope = "mesh-catalogue:" + ":".join(
+                    str(receipt[field])
+                    for field in (
+                        "network_id",
+                        "owner_device",
+                        "provider",
+                        "account_scope",
+                        "incarnation",
+                        "material_generation",
+                        "login_chain_revision",
+                        "validator",
+                    )
+                )
         token = _listing_credential.set(credential)
         try:
             info = _resolve_model_info_cached(
@@ -8013,6 +8040,7 @@ class SessionStreamFn:
                     ok=ok,
                     usd_cost=getattr(usage, "usd_cost", None),
                     billing_basis=billing_basis,
+                    account_ref=getattr(usage, "account_ref", None),
                     cost_source=cost_source,
                     request_id=request_id,
                     parent_session_id=getattr(self, "_parent_session_id", "") or "",

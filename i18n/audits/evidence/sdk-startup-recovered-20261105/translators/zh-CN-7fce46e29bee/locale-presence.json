@@ -1,0 +1,26 @@
+{
+  "pinned_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "namespace": "wire.errors.sdk_startup",
+  "observed": "git cat-file -e per locale; present means the file exists at the pinned commit, not that it is audited",
+  "fr": {
+    "present_at_pin": false
+  },
+  "es": {
+    "present_at_pin": false
+  },
+  "zh-CN": {
+    "present_at_pin": false
+  },
+  "ru": {
+    "present_at_pin": true
+  },
+  "vi": {
+    "present_at_pin": true
+  },
+  "ur": {
+    "present_at_pin": true
+  },
+  "hi": {
+    "present_at_pin": true
+  }
+}

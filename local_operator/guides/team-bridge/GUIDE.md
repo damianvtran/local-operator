@@ -189,6 +189,91 @@ the designated session and clears it once nothing is held that long. It has no
 receiver re-reads it without a restart. `lop team-bridge receiver status` shows
 what is held.
 
+## Screening budgets
+
+Every message is screened before an agent reads it (the admission gate). The
+receiver may spend at most a fixed number of screenings per **rolling hour**
+(the last 60 minutes at any moment), per account — shared across every session
+and machine signed in to that account. Four ceilings carve that hour up:
+
+| Ceiling | Key | Default | What it bounds |
+|---|---|---|---|
+| Account | `team_bridge.screening.budget_per_hour` | 400 | everything: the total for the hour |
+| Unaddressed | `team_bridge.screening.unaddressed_budget_per_hour` | 350 | all but the person reserve |
+| Agent chatter | `team_bridge.screening.ambient_budget_per_hour` | 300 | agents talking in a shared room |
+| Per sender | `team_bridge.screening.sender_budget_per_hour` | 200 | one verified sender's share |
+
+Each unit is one SCREENING CALL, not one message: a burst of messages that
+arrives together is screened in one call, so its cost is one unit however many
+messages it covers.
+
+The ceilings are NESTED, not separate budgets. The unaddressed ceiling is
+carved out of the account ceiling, the chatter ceiling out of the unaddressed
+one, and the per-sender ceiling is a share of the account ceiling — nothing is
+ever added on top. The units above the unaddressed ceiling are therefore
+reachable only by a person writing to this account directly (a DM or a mention),
+which is what keeps a noisy channel from spending the window before an actual
+person gets an answer. The per-sender share defaults to half the account
+ceiling, so one sender cannot monopolise the hour however its messages batch.
+
+Change them by editing the four keys:
+
+```bash
+lop config edit team_bridge.screening.budget_per_hour 800
+```
+
+The receiver re-reads them without a restart. Four rules apply:
+
+- A write that would leave a ceiling above the one it is carved from is
+  **refused**, with the rule named: lower the inner ceiling first, then the
+  outer one. Raising a carve-out never raises the account total — the account
+  key is the only number that admits more spend, and a carve-out is always a
+  slice of it.
+- If the file is hand-edited into a contradiction, the receiver **holds the
+  inner ceiling down** to the one it is carved from and runs the rest of the set
+  as written, with one log line naming each number held and the value in force.
+  Lowering the account key to 10 without touching its siblings gives an hour of
+  10, not the shipped 400. A single value that is missing, not a whole number,
+  or below 1 reads its own default; a value above 100000 reads as 100000, the
+  largest the settings page can edit back.
+- A per-sender ceiling **equal to** the account ceiling deliberately disables
+  the one-sender share (the default is half of it). That is a supported choice,
+  not a defect: it is what you write when one sender may use the whole hour.
+- Resetting ANY one of the four rows — the settings page's reset, `PATCH
+  /v1/settings/{key}/reset`, or the agent's settings reset — restores all four
+  to the shipped defaults, because one ceiling cannot be reset to a default that
+  contradicts the three it is nested in.
+
+On the settings page each row's help sits in the band under the list: two rows
+when the sentence wraps, and one row cut with a visible `…` when it cannot. Copy
+with no spaces to break at (a space-free script, such as Chinese) always takes
+the cut rather than the wrap.
+
+**Why the numbers moved** (2026-11-05). They were 40/30/35/20 — a tenth of
+these — and measured use against the live ledger showed the account ceiling was
+being reached exactly. Both figures are worth stating, because they are the same
+ledger in two different units: in the busiest hour the ledger recorded **83
+screening attempt rows**, and **505 rows** over the last 24 hours; counted in the
+cap's OWN unit — the chargeable logical unit — that is **40 units in the peak
+hour and 248 units in 24 hours**. One screen writes two rows (a logical attempt
+plus its HTTP attempt), so a row count is larger than the spend these four keys
+bound; the numbers to compare against the ceilings above are the logical units.
+Peak 40/hour was reached in four separate hours (2026-10-31 05Z, 07Z, 10Z and
+2026-11-05 18Z). A ceiling that ordinary traffic touches exactly, repeatedly, is
+refusing real work; the owner's own DM then waited for a refill.
+
+Honestly: part of that spend was repeat screening rather than unique demand —
+416 distinct messages produced 1,044 logical units (2.5 screenings per message),
+41 messages were screened more than twice, one message was screened 155 times
+across 54 hours, and 191 logical attempts belong to messages that never got a
+receipt. The raise fixes the demand side; the repeat behaviour is a separate
+question and this budget no longer hides it.
+
+These keys are SPEND ONLY. Nothing that stops a broken provider is governed by
+them: the screening breaker opens on repeated provider failure at its own
+threshold whatever the ceiling is, and the owner is notified once per exhaustion
+episode, not once per refused message.
+
 ## Linux: lingering
 
 Without lingering, systemd only runs a user's services while that user is

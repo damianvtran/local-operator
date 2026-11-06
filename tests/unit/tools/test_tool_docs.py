@@ -481,7 +481,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # 931 -> 975 (media artifact naming): the new ``filename`` stem field's
     # teaching description renders in the parameter table. The sanitising and
     # collision rules live in the image guide, so the wire keeps one sentence.
-    "generate_image": 975,
+    # 975 -> 984 (2026-11-05, image-intent routing lane): the source fields now
+    # say "not a path" and the note names BOTH digest origins, so a model that
+    # only reads `tool://generate_image` cannot pass a file path where a digest
+    # belongs. The wire pair got CHEAPER in the same pass (description 160 ->
+    # 157, schema 2,270 -> 2,259 chars) so this doc's growth is paid for on the
+    # always-loaded arm, which is why ``bench_context_budget.py`` was re-measured
+    # to a PASS at 97,038 chars / 34,906 billed (29 headroom) rather than raised.
+    "generate_image": 984,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_sound_effect``
     # doc — the two rungs and the no-OpenAI rule, the REQUIRED duration and
     # what it costs, the estimate rules and the honest cancel paragraphs.
@@ -707,7 +714,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # read side: states, the at-most-once registration and the watcher handoff.
     "video_status": 202,
     "wait": 268,
-    "wake": 308,
+    # RE-MEASURED (wake local-clock fix, PR #3485): 308 -> 333 (+25). The `at`
+    # description now says the one thing a model gets wrong about this value —
+    # 'HH:MM' is this device's LOCAL clock, not UTC — and names the two forms
+    # that are exact ('+30m', ISO with an offset). Deliberate and reviewed: the
+    # text is billed every turn, so the cost is paid here in the ledger rather
+    # than discovered as context creep.
+    "wake": 333,
     # RE-MEASURED (web-research-speed): 348 -> 363 — the new optional
     # ``query`` parameter (passage previews for oversized pages) in the
     # rendered schema, net of the description trimmed to pay for it.

@@ -2809,8 +2809,22 @@ class ProviderController:
                 definition.id,
                 cache_dir=cache_dir,
                 values=values,
+                config_dir=self.config_dir,
+                allow_shared=not has_api_key_override,
                 **({"account_id": account_scope} if account_scope is not None else {}),
             )
+            if definition.id == "openai" and not has_api_key_override and account_scope is None:
+                from local_operator.providers import shared_catalogue
+
+                receipt = shared_catalogue.cached(self.config_dir)
+                if receipt is not None:
+                    models = shared_catalogue.rows(receipt)
+                    if usable is not None:
+                        usable = usable | {definition.id}
+                elif shared_catalogue.approved(self.config_dir):
+                    # An approved owner with no current receipt is pending, not
+                    # a local login invitation or a public-API static catalogue.
+                    models = []
             listed.append((definition, models))
         priced = _price_listing_only_rows(listed, cache_dir=cache_dir)
         for definition, models in listed:
@@ -3078,6 +3092,11 @@ class ProviderController:
         engaged = self._engaged_providers()
         failures: dict[str, str] = {}
         for provider, status in statuses.items():
+            if provider == "openai" and status in {"owner_unavailable", "unsupported"}:
+                # Existing generic failure copy: a remote outage is not advice
+                # to sign in locally, and need not introduce a new UI label.
+                failures[provider] = CATALOGUE_FAILURE_REASON
+                continue
             if provider in NO_LISTING_PROVIDERS:
                 continue
             definition = get_provider_definition(provider)
@@ -3177,6 +3196,24 @@ class ProviderController:
                 if providers is not None
                 else (engaged is None or definition.id in engaged)
             )
+            if providers is None and definition.id == "openai":
+                # Reuse the native view already read for this frame; a wrapped
+                # store must instead inspect its actual local side, not virtual rows.
+                shared = await self.shared_catalogue(
+                    definition.id,
+                    _local_connected=(
+                        connected
+                        if getattr(self.auth_store, "local", self.auth_store) is self.auth_store
+                        else None
+                    ),
+                )
+                if shared is not None:
+                    models, status = shared
+                    if status == "ok":
+                        oauth_context[definition.id] = {
+                            row.id: row.context_window for row in models
+                        }
+                    return definition, status == "ok", models, status
             api_key: str | None = None
             is_oauth = False
             account_id: str | None = None
@@ -3202,6 +3239,10 @@ class ProviderController:
                 "is_oauth": is_oauth,
                 "account_id": account_id,
             }
+            # The metadata seam above already chose (or declined) the shared
+            # source using this controller's real native context. Do not let a
+            # lower, ambient cache read undo native overrides or phone admission.
+            kwargs["allow_shared"] = False
             if ttl_s is not None:
                 # The caller's TTL reaches EVERY provider untouched, so
                 # ``PICKER_TTL_S`` stays the single statement of picker freshness
@@ -3306,6 +3347,80 @@ class ProviderController:
         # protocol. Keep their calling convention while sharing the identity
         # decision with the authoring HTTP catalogue below.
         return await self.listing_credential(provider)
+
+    def shared_catalogue_provider(self) -> str | None:
+        """The provider whose CURRENT approved machine share supplies rows.
+
+        The same receipt question :meth:`initial_catalogue` asks for its row
+        source, without that frame's override/account-scope branches — those
+        decide WHICH rows it paints, not whether an owner share exists. A
+        validated receipt for this config root is the answer, so the desktop
+        ``scope=usable`` filter and the authoring catalogue cannot disagree about
+        an owner-approved model. Local credentials are deliberately not
+        consulted: their ids are already in :meth:`usable_providers`, and a
+        local login always outranks the share.
+        """
+        from local_operator.providers import shared_catalogue
+
+        return "openai" if shared_catalogue.cached(self.config_dir) is not None else None
+
+    async def shared_catalogue(
+        self, provider: str, *, fresh: bool = False, _local_connected: bool | None = None
+    ) -> tuple[list[DiscoveredModel], str] | None:
+        """Metadata-only alternative, distinct from the bearer-shaped seam.
+
+        No factory/write store is replaced. Explicit phone allowlists do not call
+        this fallback; ordinary desktop/TUI reads use it only with no native auth.
+        """
+        if provider != "openai":
+            return None
+        from local_operator.network.types import MeshRefusal
+        from local_operator.providers import shared_catalogue
+
+        if _local_connected is True:
+            return None
+        local = getattr(self.auth_store, "local", self.auth_store)
+        overrides = getattr(local, "override_keys", None)
+        # Explicit in-memory CLI/config keys are not persisted inventory rows.
+        # Their precedence cannot be inferred from a machine share or DB alone.
+        if callable(overrides) and overrides(provider):
+            return None
+        if _local_connected is None:
+            # Mesh-aware stores expose their actual local side explicitly. A
+            # synthetic borrower row is not a local native catalogue credential.
+            local = getattr(self.auth_store, "local", self.auth_store)
+            local_controller = (
+                self if local is self.auth_store else ProviderController(local, self.config_dir)
+            )
+            try:
+                engaged = local_controller._engaged_providers()
+            except Exception:  # noqa: BLE001 - cannot prove "not local"
+                # This is a PRECEDENCE pre-check, not the authority itself: it
+                # asks whether a local credential already owns the provider so
+                # a machine share never outranks it. A store that cannot
+                # enumerate (a stand-in controller, a damaged store) leaves the
+                # answer unknown, and unknown must read exactly like "locally
+                # engaged": leave the share unconsulted rather than raise out
+                # of a listing route. `usable_providers` keeps its narrow
+                # contract of raising on genuine programming errors.
+                return None
+            if engaged is None or provider in engaged:
+                return None
+        try:
+            if shared_catalogue.source(self.config_dir, strict=True) is None:
+                return None
+            document = await asyncio.to_thread(
+                shared_catalogue.refresh, self.config_dir, fresh=fresh
+            )
+        except MeshRefusal as error:
+            return [], (
+                "unsupported" if error.code == "catalogue_unsupported" else "owner_unavailable"
+            )
+        except (OSError, ValueError, RuntimeError):
+            return [], "owner_unavailable"
+        if document is None:
+            return [], "owner_unavailable"
+        return shared_catalogue.rows(document), "ok"
 
     async def listing_credential(
         self, provider: str, *, read_only: bool = False

@@ -2222,6 +2222,8 @@ def cached_available_models(
     cache_dir: Path | None = None,
     base_url: str | None = None,
     values: Mapping[str, Any] | None = None,
+    config_dir: Path | None = None,
+    allow_shared: bool = True,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
     """Every model cached on disk for ``provider_id`` with zero network calls.
 
@@ -2241,6 +2243,12 @@ def cached_available_models(
         cache payload is unusable, in which case the bundled static registry rows
         are returned as fallback.
     """
+    if allow_shared and provider_id == "openai" and account_id is None and base_url is None:
+        from local_operator.providers import shared_catalogue
+
+        receipt = shared_catalogue.cached(config_dir)
+        if receipt is not None:
+            return shared_catalogue.rows(receipt), "cached"
     rows = _static_rows(provider_id)
     definition = get_provider_definition(provider_id)
     if definition is None:
@@ -2343,6 +2351,14 @@ def offered_model_ids(provider_id: str, *, cache_dir: Path | None = None) -> set
         return None
     from local_operator.model.defaults import default_model_for
 
+    if provider_id == "openai":
+        from local_operator.providers import shared_catalogue
+
+        receipt = shared_catalogue.cached()
+        if receipt is not None:
+            # A current account-native set owns this namespace, not an additive
+            # sweep of static/unscoped listings or older account incarnations.
+            return {row["id"] for row in receipt["models"]}
     storage_id = credential_provider_id(definition.id)
     # The CATALOGUE half: what the shipped registry describes for this provider
     # plus every listing document on disk for it. A DEFAULT model is added below
@@ -2385,6 +2401,8 @@ def available_models(
     client: httpx.Client | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
     want_id: str | None = None,
+    config_dir: Path | None = None,
+    allow_shared: bool = True,
 ) -> tuple[list[DiscoveredModel], ListingStatus]:
     """Every model a UI should offer for ``provider_id``, plus how it was obtained.
 
@@ -2416,6 +2434,19 @@ def available_models(
         to list and none was supplied) or ``"empty"`` (the provider answered and
         listed no models).
     """
+    if (
+        allow_shared
+        and provider_id == "openai"
+        and not api_key
+        and not is_oauth
+        and not account_id
+        and not base_url
+    ):
+        from local_operator.providers import shared_catalogue
+
+        receipt = shared_catalogue.cached(config_dir)
+        if receipt is not None:
+            return shared_catalogue.rows(receipt), "cached"
     rows = _static_rows(provider_id)
     if is_oauth and provider_id in OPENAI_OAUTH_PROVIDERS:
         # Scope the outer exception fallback too: a cache error is not evidence

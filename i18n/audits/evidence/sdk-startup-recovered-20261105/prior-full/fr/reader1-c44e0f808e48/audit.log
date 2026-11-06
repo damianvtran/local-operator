@@ -1,0 +1,20 @@
+PACKET PASS: all 12 manifest bytes canonical
+INPUT en 5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd
+INPUT context ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822
+INPUT fr 82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d
+KEYS ['wire.errors.sdk_startup.attach_hosting_unconfigured', 'wire.errors.sdk_startup.attach_runtime_missing', 'wire.errors.sdk_startup.profile_attach_failed', 'wire.errors.sdk_startup.tool_inventory_mismatch']
+CORE CHECKER PASS: isolated 4-key en/fr fixture, zero problems
+NEGATIVE REJECTED: added argument -> fr/wire.errors.sdk_startup: wire.errors.sdk_startup.attach_hosting_unconfigured: arguments (('resume', 'simple'), ('error', 'simple'), ('unexpected_parameter', 'simple')) != en's (('resume', 'simple'), ('error', 'simple')): en has 2 argument(s), translation has 3
+NEGATIVE REJECTED: missing key -> fr/wire.errors.sdk_startup: missing key 'wire.errors.sdk_startup.attach_hosting_unconfigured'
+NEGATIVE REJECTED: invalid ICU -> fr/wire.errors.sdk_startup: wire.errors.sdk_startup.attach_hosting_unconfigured: expected ',' or '}' after argument name 'unclosed' (at offset 9 of '{unclosed')
+NEGATIVE REJECTED: translated technical literal -> own literal guard flags missing mode=own
+KEY PASS wire.errors.sdk_startup.attach_hosting_unconfigured args (('resume', 'simple'), ('error', 'simple')) Cf=0 opaque preserved cells 303 punct ['0x202f'] case a / n
+KEY PASS wire.errors.sdk_startup.attach_runtime_missing args (('resume', 'simple'),) Cf=0 opaque preserved cells 220 punct ['0x202f'] case a / n
+KEY PASS wire.errors.sdk_startup.profile_attach_failed args (('profile', 'simple'),) Cf=0 opaque preserved cells 62 punct [] case I / C
+KEY PASS wire.errors.sdk_startup.tool_inventory_mismatch args (('spec_tools', 'simple'), ('policy_tools', 'simple')) Cf=0 opaque preserved cells 190 punct ['0x202f'] case s / s
+PRODUCTION RENDER fr -> Impossible de rattacher le profil 'demo' | en -> Could not attach profile 'demo'
+FALLBACK PROBE: fr file absent -> English source "Could not attach profile 'demo'"
+SRC PATH PASS: startup_refusal_text resolves locale (sdk.py 584-598); 4 keys are not English-pinned
+OWN SERVED MODEL (observed) {'message_id': '5cf38bee0b434aa780f9a231eaa152b8', 'ts': 1793725499.660301, 'provider': 'radient', 'model_id': 'auto', 'input_tokens': 156250, 'output_tokens': 523}
+NOT RUN: pseudo, RTL/native rendering, rendered UI fit, real SDK guard execution, full suite, ledger/activation
+AUDIT MECHANICAL PASS

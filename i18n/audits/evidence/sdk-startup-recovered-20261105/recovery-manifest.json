@@ -1,0 +1,1641 @@
+{
+  "kind": "recovery-copy-manifest-not-audit-or-admission",
+  "created_at": "2026-11-05T14:11:19.029058+00:00",
+  "frozen_bindings": {
+    "en": {
+      "original": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "frozen": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "keys": 4
+    },
+    "context": {
+      "original": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "frozen": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "keys": 4
+    },
+    "zh-CN": {
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "frozen": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/zh-CN.json",
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "keys": 4
+    },
+    "fr": {
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "frozen": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/fr.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "keys": 4
+    },
+    "es": {
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/wire.errors.sdk_startup.json",
+      "frozen": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/es.json",
+      "sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+      "keys": 4
+    },
+    "dependency": {
+      "pr": "https://github.com/damianvtran/local-operator/pull/3378",
+      "head": "0066245ce4f90109933c59e74f1ad21b86d647bd",
+      "context_note_unmerged": true,
+      "old_context_sha256_prefix": "ee0bbde5",
+      "scope": "FR/ZH context-delta confirmations; ES first independent audits; no new translation"
+    }
+  },
+  "audit_summaries": [
+    {
+      "kind": "current",
+      "locale": "zh-CN",
+      "session": "d6d8c41965c3",
+      "record_sha256": "2ea4a5d61d3b565e7eccc50e713cf0f1d25306cfc1edb3ac9043b5f5b3889179",
+      "verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "ZD-1",
+          "ZD-2"
+        ],
+        "basis": "context delta verified truthful against the caller code at the dependency head; English source, style guide, glossary and the four zh-CN target bytes are unchanged from the two prior independent audits; prior native judgments preserved; no BLOCKER/MAJOR"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "d6d8c41965c3",
+        "model": "radient/auto",
+        "requested_route": "radient/auto",
+        "served_underlying_model": "UNKNOWN",
+        "actual_model_source": {
+          "kind": "session header / router label only",
+          "note": "the route label radient/auto is a header value and is NOT proof of the served upstream model; no execution-level served-model or provider record was exposed in this session"
+        },
+        "fallback": "UNKNOWN — no fallback event was exposed; NONE is not claimed",
+        "independent_from_translator_session": true,
+        "translator_session": "7fce46e29bee",
+        "independent_from_prior_reader_sessions": true,
+        "prior_reader_sessions": [
+          "e55f54b6a26e",
+          "6433b7a5b3e9"
+        ],
+        "prior_audit_bundle": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103",
+        "other_parallel_reader_report_read": false,
+        "note_on_scope_of_reading": "Prior zh-CN full audits (r1 e55f54b6a26e, second 6433b7a5b3e9) were read for compatibility only, as permitted. The new parallel reader's report was not read."
+      },
+      "mode": "context-delta-confirmation",
+      "record_original": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json"
+    },
+    {
+      "kind": "current",
+      "locale": "zh-CN",
+      "session": "0feda324e9e3",
+      "record_sha256": "21949a7149ab72fe475e4972e2b7f48a7a88f5afdaa748966c142eb87047f7c1",
+      "verdict": {
+        "status": "passed",
+        "scope": "zh-CN context-delta confirmation + current-parameter integrity, reader 2; NOT a fresh full re-audit of unaffected strings, and not a whole-frame/runtime clearance",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "NIT-1"
+        ],
+        "severity_counts": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 0,
+          "NIT": 1
+        }
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "0feda324e9e3",
+        "role": "zh-CN reader 2 (second independent reader for a high-visibility group: startup refusals)",
+        "model": "radient/auto",
+        "requested_route": "Radient Auto",
+        "model_label_kind": "harness header label; not served-model proof",
+        "underlying_served_model": "UNKNOWN",
+        "actual_model_source": "harness session header only; no execution proof of a concrete upstream model was produced in this source-only run",
+        "fallback": "UNKNOWN (not exposed)",
+        "independent_from_translator_session": true,
+        "translator_session": "7fce46e29bee",
+        "independent_from_coder_session": true,
+        "other_reader_report_read": false,
+        "prior_zh_audits_read": [
+          "sdk-startup-inventory-20261103/audit/zh-CN/sdk-startup-zh-CN-r1/record.json",
+          "sdk-startup-inventory-20261103/audit/zh-CN/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+        ]
+      },
+      "mode": "context-delta confirmation + current-parameter integrity (reader 2, priority locale); source-only",
+      "record_original": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/record.json"
+    },
+    {
+      "kind": "current",
+      "locale": "fr",
+      "session": "604100bf1795",
+      "record_sha256": "5fc8396a4a440a1e29a079487959e8ee2d92ed2710f6379d5c853f3045087715",
+      "verdict": {
+        "status": "passed",
+        "result": "context delta confirmed compatible; prior approved native copy retained",
+        "unresolved_blocker_major_count": 0,
+        "new_findings_this_pass": 0,
+        "finding_ids": [
+          "F1 (carried MINOR, open, non-blocking)",
+          "O1",
+          "O2"
+        ]
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "604100bf1795",
+        "reader": "fr-reader1",
+        "model": "radient/auto",
+        "model_label": "auto — opaque route; underlying model undisclosed",
+        "requested_route": {
+          "provider": "radient",
+          "model_id": "auto"
+        },
+        "actual_model_source": {
+          "kind": "session_header_only",
+          "value": "Model: radient/auto",
+          "note": "Header provenance, not a served-usage extract. No served-model evidence artifact was produced in this run, so the underlying served model is UNKNOWN."
+        },
+        "underlying_model_known": false,
+        "fallback": "UNKNOWN — not exposed by this run; no fallback observed, none claimed",
+        "independent_from_translator_session": "7b2ba4ed501d",
+        "independent_from_coder_session": "eae0961e4e78 (as recorded by the prior FR audit records; not re-verified here)",
+        "independence_statement": "No part of the English source, the context sidecar, the French translation or the producer was authored or edited here. Only the prior FR full-audit records were read for compatibility; no parallel reader report from this follow-on round was read before this verdict."
+      },
+      "mode": "FR context-delta confirmation only: EN source and FR target are byte-identical to the inputs the two prior independent FR full audits approved; only the English context sidecar changed (PR #3378, unmerged). No re-authoring, no re-literary audit of unaffected strings.",
+      "record_original": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json"
+    },
+    {
+      "kind": "current",
+      "locale": "fr",
+      "session": "3fb9e3fb5be6",
+      "record_sha256": "6bfc8c205528e822ac0c6b70c2bb9891c763d7e4b7c4690113a5dfce8e00cd67",
+      "verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "F1",
+          "N1"
+        ]
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "3fb9e3fb5be6",
+        "model": "radient/auto",
+        "requested_route": "Radient Auto (radient/auto)",
+        "served_underlying_model": "UNKNOWN",
+        "actual_model_source": {
+          "kind": "session_model_header_only",
+          "value": "radient/auto",
+          "opaque_label": true,
+          "underlying_model_known": false,
+          "header_is_primary_not_served_proof": true,
+          "execution_proof_present": false
+        },
+        "fallback": "UNKNOWN",
+        "fallback_note": "No fallback identity was exposed by this run; none inferred, no NONE invented.",
+        "independent_from_translator_session": "7b2ba4ed501d",
+        "independent_from_coder_session": "not named in this run (core PR #3378 author session); no coder record read",
+        "independence_statement": "No source, context, translation or repo file was authored or edited here. No new parallel reader report was read; only the two prior FR audit records, for compatibility."
+      },
+      "mode": "context_delta_confirmation_only",
+      "record_original": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json"
+    },
+    {
+      "kind": "current",
+      "locale": "es",
+      "session": "dd6c62eeb8a7",
+      "record_sha256": "4fd3ec143c1219b81ca843c6f6beb7f64553a004f359e33ba5bb8c6716040428",
+      "verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "ES-SSU-M1",
+          "ES-SSU-N1",
+          "ES-SSU-N2"
+        ]
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "dd6c62eeb8a7",
+        "requested_route": "radient/auto",
+        "served_model_underlying": "UNKNOWN",
+        "actual_model_source": "not exposed within the strict source-only scope; no usage/provider payload was reachable and no process could be run to obtain one. The session header `Model: radient/auto` names a SELECTOR, not the served model; it is not treated as served proof.",
+        "fallback": "UNKNOWN",
+        "fallback_note": "no failure, quota or incident event was exposed in this turn. UNKNOWN is recorded rather than NONE, because NONE is not proven.",
+        "independent_from_translator_session": true,
+        "translator": {
+          "agent": "i18n-translator",
+          "session": "804764f54d82",
+          "source": "binding.json original path .../sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/wire.errors.sdk_startup.json (byte-identical to the audited frozen target)"
+        },
+        "translation_method_disclaimer": "this audit used reasoning only: no translation API, SDK, MT service or website was called to produce, compare or back-translate the text"
+      },
+      "mode": "first_full_independent_native_audit_retained_translations",
+      "record_original": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/record.json"
+    },
+    {
+      "kind": "current",
+      "locale": "es",
+      "session": "fbfe8c1294ba",
+      "record_sha256": "545f1abdb226ee84882c0e4e5907928d4535fde1fb86d0242da4e3592ce681cc",
+      "verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "counts": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 2,
+          "NIT": 3
+        },
+        "finding_ids": [
+          "es-sdk-r2-01",
+          "es-sdk-r2-02",
+          "es-sdk-r2-n1",
+          "es-sdk-r2-n2",
+          "es-sdk-r2-n3"
+        ]
+      },
+      "auditor": {
+        "agent": "i18n-auditor (reader 2)",
+        "session": "fbfe8c1294ba",
+        "model": "UNKNOWN",
+        "requested_route": "radient/auto",
+        "actual_model_source": "harness header line only ('Model: radient/auto'); not served-model proof",
+        "fallback": "UNKNOWN - not exposed",
+        "independent_from_translator_session": true,
+        "translator_session": "804764f54d82",
+        "independent_from_reader_1": true
+      },
+      "mode": "full_first_independent_audit",
+      "record_original": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/record.json"
+    },
+    {
+      "kind": "prior-full",
+      "locale": "fr",
+      "session": "c44e0f808e48",
+      "record_sha256": "42b929680e88328d06b3bbc9e64240e40b6eeb169c57dee47c1098e6cf57cb6c",
+      "verdict": {
+        "status": "passed",
+        "result": "clean-with-findings",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "F1"
+        ]
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "c44e0f808e48",
+        "instance": "c44e0f808e48",
+        "model": "radient/auto",
+        "model_label": "auto - opaque route; underlying model undisclosed",
+        "served_route": {
+          "provider": "radient",
+          "model_id": "auto",
+          "message_id": "5cf38bee0b434aa780f9a231eaa152b8",
+          "ts": 1793725499.660301
+        },
+        "actual_model_source": {
+          "kind": "own_completed_assistant_usage",
+          "artifact": "served-model-evidence.json",
+          "note": "The session exposes only the opaque auto route; no underlying model or fallback is inferred."
+        },
+        "independent_from_translator_session": "7b2ba4ed501d",
+        "independent_from_coder": "eae0961e4e78"
+      },
+      "mode": null,
+      "record_original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "kind": "prior-full",
+      "locale": "fr",
+      "session": "35aac0a677bc",
+      "record_sha256": "b86620e30db7f073d4b3f05b394c92800fad4b217e06fe3b57d4259be57cf22d",
+      "verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "F1"
+        ]
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "reader": "fr-second",
+        "session": "35aac0a677bc",
+        "model": "radient/auto",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 0
+        },
+        "independent_from_translator_session": "7b2ba4ed501d",
+        "independent_from_coder_session": "eae0961e4e78",
+        "coder_identity_source": "Coordinator-provided actual session; coder job 196c3a94b346 is not a session id. No own historical execution claimed.",
+        "actual_model_source": {
+          "kind": "own_completed_payload_usage",
+          "record": "provenance.json",
+          "value": "provider=radient, model=auto",
+          "opaque_label": true,
+          "underlying_model_known": false
+        },
+        "independence_statement": "No part of the source, translation or context was authored or edited here; no other independent reviewer report was read before this verdict."
+      },
+      "mode": null,
+      "record_original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "kind": "prior-full",
+      "locale": "zh-CN",
+      "session": "e55f54b6a26e",
+      "record_sha256": "5189f1836f9d158a0192dd14fc73130a4658f831001888144b9d8519006aa6d3",
+      "verdict": {
+        "status": "passed",
+        "scope": "staged catalogue linguistic/mechanical, reader 1 only",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "F1",
+          "F2"
+        ],
+        "severity_counts": {
+          "BLOCKER": 0,
+          "MAJOR": 0,
+          "MINOR": 2,
+          "NIT": 0
+        }
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "e55f54b6a26e",
+        "model": "radient/auto",
+        "model_label_kind": "auto-router label observed in own completed usage; upstream model not recorded",
+        "actual_model_source": "own transcript.jsonl completed assistant payload.usage",
+        "actual_usage_at_ms": 1793725073197,
+        "independent_from_translator_session": true,
+        "translator_session": "7fce46e29bee",
+        "independent_from_coder_session": "eae0961e4e78",
+        "fallback": "No fallback event asserted for this turn; auto routing is not claimed as fallback."
+      },
+      "mode": null,
+      "record_original": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "kind": "prior-full",
+      "locale": "zh-CN",
+      "session": "6433b7a5b3e9",
+      "record_sha256": "38cf424c9c6b3bbbaff25df223c086bb7c4329a32340f66b1a07dd5c1899d3e4",
+      "verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [
+          "Z2-1"
+        ]
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "6433b7a5b3e9",
+        "model": "radient/auto",
+        "actual_model_source": {
+          "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+          "entry_id": "ca73b1a356784a479300812347532a78",
+          "at_ms": 1793725272835,
+          "note": "own completed-turn usage; radient/auto is a router label and the concrete upstream model is not recorded in usage"
+        },
+        "fallback": "no fallback event inferred; router label only, no concrete served model or upstream fallback claimed",
+        "independent_from_translator_session": true,
+        "translator_session": "7fce46e29bee",
+        "independent_from_coder": true,
+        "second_independent_reader": true,
+        "other_reader_report_read": false
+      },
+      "mode": null,
+      "record_original": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    }
+  ],
+  "referenced_hash_checks": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "expected_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/zh-CN.json",
+      "expected_sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/i18n/style-guides/zh-CN.md",
+      "expected_sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/i18n/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/candidates/zh-CN/context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "expected_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/zh-CN.json",
+      "expected_sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/candidates/zh-CN/context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/report.md",
+      "expected_sha256": "a781c73c936ab259c9094c5c438985a1c468aebf38c1885a2d86391a6e9ee278",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "expected_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/fr.json",
+      "expected_sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/i18n/style-guides/fr.md",
+      "expected_sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/i18n/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+      "expected_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/local_operator/i18n/catalogues/fr/wire.errors.hosting.json",
+      "expected_sha256": "83432e2af01eff5982e4d7a0fca57ebb2223626b0d5713c136d60bb6bec8aa69",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/local_operator/sdk.py",
+      "expected_sha256": "be133837cbc28e50a77213c24759de890e2aae0adf49a8961ec7bcfca65c7621",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/sdk.py",
+      "expected_sha256": "be133837cbc28e50a77213c24759de890e2aae0adf49a8961ec7bcfca65c7621",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "expected_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/fr.json",
+      "expected_sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/candidates/es/context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/audit/fr/fr-sdk-startup-0e7cde33-first/record.json",
+      "expected_sha256": "42b929680e88328d06b3bbc9e64240e40b6eeb169c57dee47c1098e6cf57cb6c",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/audit/fr/fr-second-sdk-startup-0e7cde33/record.json",
+      "expected_sha256": "b86620e30db7f073d4b3f05b394c92800fad4b217e06fe3b57d4259be57cf22d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/report.md",
+      "expected_sha256": "cfa36327e214ab0ff6ae7caa13eaa7df3be6fc7001d6744f75c628e1c7aa41d8",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "expected_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/es.json",
+      "expected_sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/report.md",
+      "expected_sha256": "d936212601c20ec66756cbf2f9e1ebd3d94a5fbfd8bcfc1379b1bbe28c1b50e1",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "expected_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/es.json",
+      "expected_sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/report.md",
+      "expected_sha256": "cb8afb89fffd057930fd9646a45fbebcbf387771dc7a6414e3b87d8f3494276e",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "expected_sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/style-guides/fr.md",
+      "expected_sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/audit.log",
+      "expected_sha256": "2ea1d5e32873c000541200d981d51cab547df62bdf3fcac14d261064de976241",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/audit.py",
+      "expected_sha256": "ed79d85202140324661a03cf17b23c5ec3d9e07723a09aaf0a1b3a3ea5d6a927",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/en.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/fr-style.md",
+      "expected_sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/fr.json",
+      "expected_sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/key-facts.json",
+      "expected_sha256": "62db07083549d33c28916b69c0f2be60c0e145f060dc87cc78941f465c82e91e",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/receipt.json",
+      "expected_sha256": "5c085fda3d5e6b00db2c597e9d33320b3fc4d4ecf08988eeddf0d6e45af58832",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/report.md",
+      "expected_sha256": "1a975a25753bd7980190af65ba6d09c3371b9413c8cf599d125d1d5449159ea8",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/served-model-evidence.json",
+      "expected_sha256": "db4be20df5873848a6f4099b6f8516ac3a0862f1dd3750882b4f8dd9cf9c1b1a",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/translator-fr-style.md",
+      "expected_sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "expected_sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/i18n/style-guides/fr.md",
+      "expected_sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/i18n/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MISSING",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/Documents/LocalOperator/Reports/i18n-sdk-contract-assessment-2026-11-03-3ef6295a5545.md",
+      "expected_sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/architect-assessment.md",
+      "expected_sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/audit-report.md",
+      "expected_sha256": "c6797dd2452f75fc185429ed142fc7f40418f3fb4b394094f1321d3f95dc538d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/catalogues/en/wire.errors.sdk_startup.context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/catalogues/en/wire.errors.sdk_startup.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/catalogues/fr/wire.errors.sdk_startup.json",
+      "expected_sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/input-verification.json",
+      "expected_sha256": "4a4fdd7dbc9f7cd44621b39a94c34ccf9d512d6b1015b937d5c5800e3a982347",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/mechanical.json",
+      "expected_sha256": "fb14837c92ca243c721f0079aeb12a9aa84eb909dd07367bb471685aa794af37",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/mechanical.stderr.log",
+      "expected_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/provenance.json",
+      "expected_sha256": "2ece6262cf95a7c1141d639351f1328eed705279a0e0e3943bb0437c16deec6f",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/style-fr.md",
+      "expected_sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/verify.py",
+      "expected_sha256": "3306219cde8b77463106974c0a2ea70c83bb7934f554888326111073295bc1a6",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/en.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "expected_sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/zh-CN.style.md",
+      "expected_sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/report.md",
+      "expected_sha256": "0e83c924eff74f9c875cf6c9627bbb443076e5a95805277d57604dbf223c95a9",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/audit.log",
+      "expected_sha256": "709138f61290076a753ace6ac22b1680774736ec062214d204237b0c9b36ff96",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/validate.py.txt",
+      "expected_sha256": "058727c77b8b155522b90f02edd54ea4361f1261a746af995fe11a0482f76997",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/check-en-default.py.txt",
+      "expected_sha256": "bfcda8bae9b955cd314b4129e5aa8bd814ff0d6a3e0b4981b0a8dc011f8d8ab8",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/check-en-default.log",
+      "expected_sha256": "a034bebd1d55ee26b243341141ca76c79e37049c6b9e79cb6d00656e5aad4cb9",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/input-hashes.json",
+      "expected_sha256": "03511840cd05743e373e4f95d82261c934365a9249e2a14654be5dbb3c4740db",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/model-provenance.json",
+      "expected_sha256": "f6de22d6a478c84116af3c1d324d5eef3fe83f0a1753b08d4360ae8d9359a46e",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/context.json",
+      "expected_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/en.json",
+      "expected_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/glossary.md",
+      "expected_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/input-hashes.json",
+      "expected_sha256": "92cb011c2908632364e46af8549a174c127aba6132c9b78d739bff769af259ff",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/locale-presence.json",
+      "expected_sha256": "737a4b6176cddb9291967875c5b34bb05a95570cb2c573e46d19e65d1376a5a4",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/mechanical-validation.json",
+      "expected_sha256": "30b6b8bf20735b93f886cfe0ceffa8634e5c475cf57f24f43b2254065dcfeb09",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/mechanical.log",
+      "expected_sha256": "767c846a1a28d7c3344e7fa6a337e8c8eeee52656b89474ac4baad2105f68f43",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/report.md",
+      "expected_sha256": "823eb1fad15c367ab20e2616c3250fec7d909bd5c86f4b85a881cdb34a7b4123",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/sdk.callers.txt",
+      "expected_sha256": "5af97ccc5d5d2287b45247bd8c4765d2cc9aa5d1705f5c35ef80e356515d7873",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/translator-record.json",
+      "expected_sha256": "732bd805b74638d74f233625ba7a885e41461127183afbadf80eb1ff56bf8479",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/validate.mjs",
+      "expected_sha256": "912f82cd0adf548e90e916f3544aef9a92828bb41ee11b57b86e22c49abf471d",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "expected_sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/zh-CN.style.md",
+      "expected_sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/report.md",
+      "expected_sha256": "d7f7a6ec2f532dea72c2665fb27336771e3646ec7649b1cf658c136906d0806b",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/audit.log",
+      "expected_sha256": "5abc7b00414c14c49e62c1ca6580bd0de490d8311af61b492272979873f92e9a",
+      "status": "MATCH",
+      "record": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json"
+    }
+  ],
+  "files": [
+    {
+      "path": "frozen/binding.json",
+      "original": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/binding.json",
+      "bytes": 2144,
+      "sha256": "f1cd356c7f6f57e03089ff40e2a2eb16069450173ec8c890290af4f885c3697b"
+    },
+    {
+      "path": "frozen/zh-CN.json",
+      "original": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/zh-CN.json",
+      "bytes": 817,
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02"
+    },
+    {
+      "path": "frozen/en.json",
+      "original": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "bytes": 772,
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    {
+      "path": "frozen/fr.json",
+      "original": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/fr.json",
+      "bytes": 933,
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d"
+    },
+    {
+      "path": "frozen/context.json",
+      "original": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "bytes": 2298,
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e"
+    },
+    {
+      "path": "frozen/es.json",
+      "original": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/es.json",
+      "bytes": 830,
+      "sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd"
+    },
+    {
+      "path": "current/zh-CN/reader1-d6d8c41965c3/record.json",
+      "original": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/record.json",
+      "bytes": 16901,
+      "sha256": "2ea4a5d61d3b565e7eccc50e713cf0f1d25306cfc1edb3ac9043b5f5b3889179"
+    },
+    {
+      "path": "current/zh-CN/reader1-d6d8c41965c3/report.md",
+      "original": "/Users/damian/.local-operator/sessions/d6d8c41965c3/scratchpad/sdk-startup-followon-zh-CN-context-delta-20261103/report.md",
+      "bytes": 8692,
+      "sha256": "c0dbfa59d5bfeef08ba1f64e3758007f2c7cfcfb29e8764fee2bebfb4c4965fc"
+    },
+    {
+      "path": "current/zh-CN/reader2-0feda324e9e3/record.json",
+      "original": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/record.json",
+      "bytes": 10437,
+      "sha256": "21949a7149ab72fe475e4972e2b7f48a7a88f5afdaa748966c142eb87047f7c1"
+    },
+    {
+      "path": "current/zh-CN/reader2-0feda324e9e3/report.md",
+      "original": "/Users/damian/.local-operator/sessions/0feda324e9e3/scratchpad/zh-CN-sdk-startup-reader2-20261103/report.md",
+      "bytes": 10884,
+      "sha256": "a781c73c936ab259c9094c5c438985a1c468aebf38c1885a2d86391a6e9ee278"
+    },
+    {
+      "path": "current/fr/reader1-604100bf1795/record.json",
+      "original": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/record.json",
+      "bytes": 14547,
+      "sha256": "5fc8396a4a440a1e29a079487959e8ee2d92ed2710f6379d5c853f3045087715"
+    },
+    {
+      "path": "current/fr/reader1-604100bf1795/report.md",
+      "original": "/Users/damian/.local-operator/sessions/604100bf1795/scratchpad/sdk-startup-followon-fr-reader1/report.md",
+      "bytes": 9593,
+      "sha256": "0f3f2983090de39c4bcfa93ab71444128741fe52b2cf730c45baad4b62624745"
+    },
+    {
+      "path": "current/fr/reader2-3fb9e3fb5be6/record.json",
+      "original": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/record.json",
+      "bytes": 9916,
+      "sha256": "6bfc8c205528e822ac0c6b70c2bb9891c763d7e4b7c4690113a5dfce8e00cd67"
+    },
+    {
+      "path": "current/fr/reader2-3fb9e3fb5be6/report.md",
+      "original": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/report.md",
+      "bytes": 10645,
+      "sha256": "cfa36327e214ab0ff6ae7caa13eaa7df3be6fc7001d6744f75c628e1c7aa41d8"
+    },
+    {
+      "path": "current/es/reader1-dd6c62eeb8a7/record.json",
+      "original": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/record.json",
+      "bytes": 10472,
+      "sha256": "4fd3ec143c1219b81ca843c6f6beb7f64553a004f359e33ba5bb8c6716040428"
+    },
+    {
+      "path": "current/es/reader1-dd6c62eeb8a7/report.md",
+      "original": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/report.md",
+      "bytes": 13288,
+      "sha256": "d936212601c20ec66756cbf2f9e1ebd3d94a5fbfd8bcfc1379b1bbe28c1b50e1"
+    },
+    {
+      "path": "current/es/reader1-dd6c62eeb8a7/receipt.json",
+      "original": "/Users/damian/.local-operator/sessions/dd6c62eeb8a7/scratchpad/es-sdk-startup-reader1/receipt.json",
+      "bytes": 3244,
+      "sha256": "1d6bdb028b01caeaaaeeced4177fa5672e6009f021ccba391e2252cc16bd4ee0"
+    },
+    {
+      "path": "current/es/reader2-fbfe8c1294ba/record.json",
+      "original": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/record.json",
+      "bytes": 5578,
+      "sha256": "545f1abdb226ee84882c0e4e5907928d4535fde1fb86d0242da4e3592ce681cc"
+    },
+    {
+      "path": "current/es/reader2-fbfe8c1294ba/report.md",
+      "original": "/Users/damian/.local-operator/sessions/fbfe8c1294ba/scratchpad/es-sdk-startup-4-r2/report.md",
+      "bytes": 8268,
+      "sha256": "cb8afb89fffd057930fd9646a45fbebcbf387771dc7a6414e3b87d8f3494276e"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/record.json",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/record.json",
+      "bytes": 6689,
+      "sha256": "42b929680e88328d06b3bbc9e64240e40b6eeb169c57dee47c1098e6cf57cb6c"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/key-facts.json",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/key-facts.json",
+      "bytes": 1199,
+      "sha256": "62db07083549d33c28916b69c0f2be60c0e145f060dc87cc78941f465c82e91e"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/fr-style.md",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/fr-style.md",
+      "bytes": 4906,
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/report.md",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/report.md",
+      "bytes": 8624,
+      "sha256": "1a975a25753bd7980190af65ba6d09c3371b9413c8cf599d125d1d5449159ea8"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/glossary.md",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/glossary.md",
+      "bytes": 13399,
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/en.json",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/en.json",
+      "bytes": 772,
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/audit.log",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/audit.log",
+      "bytes": 2505,
+      "sha256": "2ea1d5e32873c000541200d981d51cab547df62bdf3fcac14d261064de976241"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/served-model-evidence.json",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/served-model-evidence.json",
+      "bytes": 756,
+      "sha256": "db4be20df5873848a6f4099b6f8516ac3a0862f1dd3750882b4f8dd9cf9c1b1a"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/fr.json",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/fr.json",
+      "bytes": 933,
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/translator-fr-style.md",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/translator-fr-style.md",
+      "bytes": 4196,
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/context.json",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/context.json",
+      "bytes": 1890,
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/receipt.json",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/receipt.json",
+      "bytes": 4431,
+      "sha256": "5c085fda3d5e6b00db2c597e9d33320b3fc4d4ecf08988eeddf0d6e45af58832"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/catalogues/fr/wire.errors.sdk_startup.json",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/catalogues/fr/wire.errors.sdk_startup.json",
+      "bytes": 933,
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/catalogues/en/wire.errors.sdk_startup.context.json",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/catalogues/en/wire.errors.sdk_startup.context.json",
+      "bytes": 1890,
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    {
+      "path": "prior-full/fr/reader1-c44e0f808e48/catalogues/en/wire.errors.sdk_startup.json",
+      "original": "/Users/damian/.local-operator/sessions/c44e0f808e48/scratchpad/fr-sdk-startup-0e7cde33-first/catalogues/en/wire.errors.sdk_startup.json",
+      "bytes": 772,
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/input-verification.json",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/input-verification.json",
+      "bytes": 2373,
+      "sha256": "4a4fdd7dbc9f7cd44621b39a94c34ccf9d512d6b1015b937d5c5800e3a982347"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/record.json",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/record.json",
+      "bytes": 10660,
+      "sha256": "b86620e30db7f073d4b3f05b394c92800fad4b217e06fe3b57d4259be57cf22d"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/provenance.json",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/provenance.json",
+      "bytes": 3470,
+      "sha256": "2ece6262cf95a7c1141d639351f1328eed705279a0e0e3943bb0437c16deec6f"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/glossary.md",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/glossary.md",
+      "bytes": 13399,
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/mechanical.json",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/mechanical.json",
+      "bytes": 7273,
+      "sha256": "fb14837c92ca243c721f0079aeb12a9aa84eb909dd07367bb471685aa794af37"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/architect-assessment.md",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/architect-assessment.md",
+      "bytes": 10289,
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/audit-report.md",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/audit-report.md",
+      "bytes": 12299,
+      "sha256": "c6797dd2452f75fc185429ed142fc7f40418f3fb4b394094f1321d3f95dc538d"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/mechanical.stderr.log",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/mechanical.stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/manifest.json",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/manifest.json",
+      "bytes": 2216,
+      "sha256": "8c777ecdabd16dba716a40566b567f774c12203bf1b0a505c0a6ad676a4f8c88"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/style-fr.md",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/style-fr.md",
+      "bytes": 4196,
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/catalogues/fr/wire.errors.sdk_startup.json",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/catalogues/fr/wire.errors.sdk_startup.json",
+      "bytes": 933,
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/catalogues/en/wire.errors.sdk_startup.context.json",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/catalogues/en/wire.errors.sdk_startup.context.json",
+      "bytes": 1890,
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    {
+      "path": "prior-full/fr/reader2-35aac0a677bc/catalogues/en/wire.errors.sdk_startup.json",
+      "original": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-second-sdk-startup-0e7cde33/catalogues/en/wire.errors.sdk_startup.json",
+      "bytes": 772,
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    {
+      "path": "prior-full/zh-CN/reader1-e55f54b6a26e/input-hashes.json",
+      "original": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/input-hashes.json",
+      "bytes": 1102,
+      "sha256": "03511840cd05743e373e4f95d82261c934365a9249e2a14654be5dbb3c4740db"
+    },
+    {
+      "path": "prior-full/zh-CN/reader1-e55f54b6a26e/record.json",
+      "original": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/record.json",
+      "bytes": 6138,
+      "sha256": "5189f1836f9d158a0192dd14fc73130a4658f831001888144b9d8519006aa6d3"
+    },
+    {
+      "path": "prior-full/zh-CN/reader1-e55f54b6a26e/validate.py.txt",
+      "original": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/validate.py.txt",
+      "bytes": 5923,
+      "sha256": "058727c77b8b155522b90f02edd54ea4361f1261a746af995fe11a0482f76997"
+    },
+    {
+      "path": "prior-full/zh-CN/reader1-e55f54b6a26e/report.md",
+      "original": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/report.md",
+      "bytes": 7732,
+      "sha256": "0e83c924eff74f9c875cf6c9627bbb443076e5a95805277d57604dbf223c95a9"
+    },
+    {
+      "path": "prior-full/zh-CN/reader1-e55f54b6a26e/check-en-default.py.txt",
+      "original": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/check-en-default.py.txt",
+      "bytes": 1192,
+      "sha256": "bfcda8bae9b955cd314b4129e5aa8bd814ff0d6a3e0b4981b0a8dc011f8d8ab8"
+    },
+    {
+      "path": "prior-full/zh-CN/reader1-e55f54b6a26e/model-provenance.json",
+      "original": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/model-provenance.json",
+      "bytes": 689,
+      "sha256": "f6de22d6a478c84116af3c1d324d5eef3fe83f0a1753b08d4360ae8d9359a46e"
+    },
+    {
+      "path": "prior-full/zh-CN/reader1-e55f54b6a26e/audit.log",
+      "original": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/audit.log",
+      "bytes": 1794,
+      "sha256": "709138f61290076a753ace6ac22b1680774736ec062214d204237b0c9b36ff96"
+    },
+    {
+      "path": "prior-full/zh-CN/reader1-e55f54b6a26e/check-en-default.log",
+      "original": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/check-en-default.log",
+      "bytes": 341,
+      "sha256": "a034bebd1d55ee26b243341141ca76c79e37049c6b9e79cb6d00656e5aad4cb9"
+    },
+    {
+      "path": "prior-full/zh-CN/reader1-e55f54b6a26e/receipt.json",
+      "original": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-startup-zh-CN-r1/receipt.json",
+      "bytes": 4093,
+      "sha256": "c9e0ee19891dcfcb4e3f57b031fcb70a6d27cb1c02c714ec2d2a968ca36b3672"
+    },
+    {
+      "path": "prior-full/zh-CN/reader2-6433b7a5b3e9/record.json",
+      "original": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json",
+      "bytes": 8094,
+      "sha256": "38cf424c9c6b3bbbaff25df223c086bb7c4329a32340f66b1a07dd5c1899d3e4"
+    },
+    {
+      "path": "prior-full/zh-CN/reader2-6433b7a5b3e9/report.md",
+      "original": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/report.md",
+      "bytes": 1819,
+      "sha256": "d7f7a6ec2f532dea72c2665fb27336771e3646ec7649b1cf658c136906d0806b"
+    },
+    {
+      "path": "prior-full/zh-CN/reader2-6433b7a5b3e9/audit.log",
+      "original": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/audit.log",
+      "bytes": 3814,
+      "sha256": "5abc7b00414c14c49e62c1ca6580bd0de490d8311af61b492272979873f92e9a"
+    },
+    {
+      "path": "prior-full/zh-CN/reader2-6433b7a5b3e9/receipt.json",
+      "original": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/receipt.json",
+      "bytes": 2627,
+      "sha256": "6eaed8baa35eb88f4563beb1a8dbc99cf291a9dfeb8fcdd6d8c72bc212078b9b"
+    },
+    {
+      "path": "prior-full/zh-CN/reader2-6433b7a5b3e9/fixture/zh-CN/wire.errors.sdk_startup.json",
+      "original": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/fixture/zh-CN/wire.errors.sdk_startup.json",
+      "bytes": 817,
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02"
+    },
+    {
+      "path": "prior-full/zh-CN/reader2-6433b7a5b3e9/fixture/en/wire.errors.sdk_startup.context.json",
+      "original": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/fixture/en/wire.errors.sdk_startup.context.json",
+      "bytes": 1890,
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    {
+      "path": "prior-full/zh-CN/reader2-6433b7a5b3e9/fixture/en/wire.errors.sdk_startup.json",
+      "original": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/fixture/en/wire.errors.sdk_startup.json",
+      "bytes": 772,
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/validation.log",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/validation.log",
+      "bytes": 717,
+      "sha256": "0b4bc3b426e204eb6da08606b435dea84a34b002e73c6c2e6294160a30da8aa8"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/record.json",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/record.json",
+      "bytes": 10077,
+      "sha256": "eb00a5fd2016f0ff56a910ba843c0e9a857d18d608bcd8eec78f31d123b616f6"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/provenance.json",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/provenance.json",
+      "bytes": 2175,
+      "sha256": "b1cb4e92c1b8a0775ebb53eac8328d4bada0ba58395af1c5bc25393da45d3b6d"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/caller-proof.json",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/caller-proof.json",
+      "bytes": 10663,
+      "sha256": "cdcb701335d9239182745582767e9acc0ec6fd994114546bee8f7fdf2bff6e6b"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/README.md",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/README.md",
+      "bytes": 3694,
+      "sha256": "20913f5c5a3dc25b02faf273968fa795e3364ac60146d0c96e2ddc4e3b7f0dea"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/wire.errors.sdk_startup.json",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "bytes": 933,
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/manifest.json",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/manifest.json",
+      "bytes": 2127,
+      "sha256": "f92f0b7419d8de77398bcfeb188cd01e9b1e18b4a91161780cdf46afcc26e89d"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/inputs/fr.md",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/inputs/fr.md",
+      "bytes": 4196,
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/inputs/en.context.json",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/inputs/en.context.json",
+      "bytes": 1890,
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/inputs/glossary.md",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/inputs/glossary.md",
+      "bytes": 13399,
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/inputs/en.json",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/inputs/en.json",
+      "bytes": 772,
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    {
+      "path": "translators/fr-7b2ba4ed501d/inputs/architect-assessment.md",
+      "original": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/inputs/architect-assessment.md",
+      "bytes": 10289,
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/input-hashes.json",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/input-hashes.json",
+      "bytes": 1271,
+      "sha256": "92cb011c2908632364e46af8549a174c127aba6132c9b78d739bff769af259ff"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/locale-presence.json",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/locale-presence.json",
+      "bytes": 528,
+      "sha256": "737a4b6176cddb9291967875c5b34bb05a95570cb2c573e46d19e65d1376a5a4"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/report.md",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/report.md",
+      "bytes": 1765,
+      "sha256": "823eb1fad15c367ab20e2616c3250fec7d909bd5c86f4b85a881cdb34a7b4123"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/glossary.md",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/glossary.md",
+      "bytes": 13399,
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/sdk.callers.txt",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/sdk.callers.txt",
+      "bytes": 7031,
+      "sha256": "5af97ccc5d5d2287b45247bd8c4765d2cc9aa5d1705f5c35ef80e356515d7873"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/en.json",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/en.json",
+      "bytes": 772,
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/wire.errors.sdk_startup.json",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "bytes": 817,
+      "sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/zh-CN.style.md",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/zh-CN.style.md",
+      "bytes": 3348,
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/context.json",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/context.json",
+      "bytes": 1890,
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/manifest.json",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/manifest.json",
+      "bytes": 1210,
+      "sha256": "aee1a36cbb92b3e0795d6bd3a85ca2e56222dfa2672d9da6b7c155722fdfd691"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/translator-record.json",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/translator-record.json",
+      "bytes": 6888,
+      "sha256": "732bd805b74638d74f233625ba7a885e41461127183afbadf80eb1ff56bf8479"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/mechanical.log",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/mechanical.log",
+      "bytes": 697,
+      "sha256": "767c846a1a28d7c3344e7fa6a337e8c8eeee52656b89474ac4baad2105f68f43"
+    },
+    {
+      "path": "translators/zh-CN-7fce46e29bee/mechanical-validation.json",
+      "original": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33/mechanical-validation.json",
+      "bytes": 1823,
+      "sha256": "30b6b8bf20735b93f886cfe0ceffa8634e5c475cf57f24f43b2254065dcfeb09"
+    },
+    {
+      "path": "translators/es-804764f54d82/sibling-vi.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/sibling-vi.json",
+      "bytes": 961,
+      "sha256": "ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd"
+    },
+    {
+      "path": "translators/es-804764f54d82/RFC.md",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/RFC.md",
+      "bytes": 74923,
+      "sha256": "ade4d909428ccf1951d5ad826528db3b8c694946963b71246dbc93f6951a1dd2"
+    },
+    {
+      "path": "translators/es-804764f54d82/sibling-hi.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/sibling-hi.json",
+      "bytes": 1391,
+      "sha256": "3362b1bc1a45d94c3f8455557cad031ebe2b6475b8d0c4171d465fb65e771c50"
+    },
+    {
+      "path": "translators/es-804764f54d82/HOWTO.md",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/HOWTO.md",
+      "bytes": 26120,
+      "sha256": "3253eac7c2cfe0955ab5f80cccd09ca2377ccb477526c7d8fe745009c762cc63"
+    },
+    {
+      "path": "translators/es-804764f54d82/glossary.md",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/glossary.md",
+      "bytes": 13399,
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    {
+      "path": "translators/es-804764f54d82/en.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/en.json",
+      "bytes": 772,
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    {
+      "path": "translators/es-804764f54d82/README.md",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/README.md",
+      "bytes": 2700,
+      "sha256": "3ca4902fc4e21f5946146e033fe6fb481de037922d7473b6e9c911cae755f303"
+    },
+    {
+      "path": "translators/es-804764f54d82/architect-assessment.md",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/architect-assessment.md",
+      "bytes": 10289,
+      "sha256": "a78ee2ad13bd998b66dfa33f54f8d8b9e34ca3365553cd3a521b056c99f02d5d"
+    },
+    {
+      "path": "translators/es-804764f54d82/served-model-evidence.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/served-model-evidence.json",
+      "bytes": 2054,
+      "sha256": "0ccd7f905cdec1366c70d5f51c9f48aa2736191d254ee46ac2de744178585c5e"
+    },
+    {
+      "path": "translators/es-804764f54d82/caller-proof.md",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/caller-proof.md",
+      "bytes": 4599,
+      "sha256": "dcb8396e4319caa4e49e2378a75172980cf81b1b77f468a968e853213a71a2c0"
+    },
+    {
+      "path": "translators/es-804764f54d82/wire.errors.sdk_startup.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/wire.errors.sdk_startup.json",
+      "bytes": 830,
+      "sha256": "2f60ae79a4350194cf1a22af6bcbbcc01452b0316835e8d7607f67a46790cfcd"
+    },
+    {
+      "path": "translators/es-804764f54d82/sibling-ru.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/sibling-ru.json",
+      "bytes": 1195,
+      "sha256": "a78344f18145f9016b018d451d0c7d09906a09ff9937ceff36356c297328930f"
+    },
+    {
+      "path": "translators/es-804764f54d82/context.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/context.json",
+      "bytes": 1890,
+      "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822"
+    },
+    {
+      "path": "translators/es-804764f54d82/manifest.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/manifest.json",
+      "bytes": 3830,
+      "sha256": "3292057c8d7a2da8b72b18ba56ddbee39d5f00a5e9a549dba66dbaf5aa668d94"
+    },
+    {
+      "path": "translators/es-804764f54d82/sibling-ur.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/sibling-ur.json",
+      "bytes": 1112,
+      "sha256": "b3c5f56714ed21faa9f210c3610ae80936d59f13c0a96df460dab2c7bb618382"
+    },
+    {
+      "path": "translators/es-804764f54d82/translator-record.json",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/translator-record.json",
+      "bytes": 9729,
+      "sha256": "aea9bbe3bbb8c25a0df671e13c42c9d22950833c41949c9917ed135c8bdc6902"
+    },
+    {
+      "path": "translators/es-804764f54d82/mechanical.log",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/mechanical.log",
+      "bytes": 3478,
+      "sha256": "4cb19886b0a335e1421c3c183b2b812ac789561b6f8a93682649dd96eede3310"
+    },
+    {
+      "path": "translators/es-804764f54d82/es-style.md",
+      "original": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/es-sdk-startup-4-0e7cde3/es-style.md",
+      "bytes": 8893,
+      "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+    }
+  ],
+  "nonclaims": [
+    "No new translation or audit",
+    "No active branch, ledger or generated outputs changed",
+    "Historical dependency status and provenance preserved verbatim",
+    "Underlying models remain unknown where records say unknown"
+  ]
+}

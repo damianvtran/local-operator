@@ -34,6 +34,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import re
 import time
 import zlib
 from collections.abc import Mapping
@@ -668,6 +669,20 @@ class CredentialRef:
     #: ``0`` from an owner that predates it: the borrower then records no receipt
     #: and sends no anchor, which is the pre-affinity behaviour.
     account_created_at: int = 0
+    #: The owner's ``account_ref`` for the row behind the grant (``usage`` stamps
+    #: it, ``providers/account_provenance.py``). A borrower cannot derive one: the
+    #: row id it sees is a synthetic stand-in and the row's store namespace is the
+    #: owner's. ``""`` from an owner that predates it or has no durable ref.
+    account_ref: str = ""
+
+
+#: A peer-supplied ``account_ref`` is accepted only in the exact shape the owner
+#: mints (16 lowercase hex), so a hostile or garbled value never reaches a ledger.
+_WIRE_ACCOUNT_REF = re.compile(r"[0-9a-f]{16}")
+
+
+def _wire_account_ref(value: object) -> str:
+    return value if isinstance(value, str) and _WIRE_ACCOUNT_REF.fullmatch(value) else ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -708,6 +723,13 @@ class Grant:
     #: wire shape is unchanged for them; peer values are bounded in
     #: :func:`_bounded_narrowing`.
     narrowing: dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: THIS process served the grant from its own memory because the owner did not
+    #: answer (``MeshCredentialClient._held_grant``). Never on the wire: ``to_detail``
+    #: and ``from_detail`` name their fields explicitly and this is not one of them,
+    #: so an owner can never tell a borrower its grant is "held". It only lets
+    #: ``effective.note_resolution`` say ``held_offline`` instead of claiming a fresh
+    #: owner resolve.
+    held_offline: bool = dataclasses.field(default=False, compare=False)
 
     def usable_at(self, now_ms: float | None = None) -> bool:
         """Whether this grant may still be handed to a request right now."""
@@ -771,6 +793,7 @@ class Grant:
                 kind=str(ref_row.get("kind") or "oauth"),
                 credential_id=peer_int(ref_row.get("credential_id")),
                 account_created_at=peer_int(ref_row.get("account_created_at")),
+                account_ref=_wire_account_ref(ref_row.get("account_ref")),
             ),
             served_by=str(detail.get("served_by") or ""),
             refreshed=bool(detail.get("refreshed")),

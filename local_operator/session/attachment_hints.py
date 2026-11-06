@@ -135,6 +135,19 @@ _HINT_ID_SUFFIX = HINT_ID_SUFFIX
 #: The note's opening, one line, singular and plural. A shared constant so the
 #: two arities cannot drift in wording — the sentence is the whole interface
 #: the model reads.
+# Keep intent guidance beside verified references, on provider-request copies.
+# This survives routing misses, steering, resume and provider failover without
+# rewriting user history or relying on a skill-embedding hit.
+_IMAGE_EDIT_GUIDANCE = (
+    "\nFor a requested creative version or change to these references (even implicitly), "
+    "read guide://image-generation and use generate_image if available, passing the "
+    "relevant digest(s) as source_attachment/source_attachments; preserve all requested "
+    "references rather than generating from text alone. This is not an instruction to "
+    "generate for analysis, OCR, downloads, or explicitly deterministic pixel operations. "
+    "If unavailable, the guide explains setup; do not claim generation is impossible "
+    "or that an unconfigured provider is ready."
+)
+
 _SINGLE_OPEN = (
     "[image attachment stored on disk — read or edit the file directly; "
     "no filesystem search is needed:\n"
@@ -225,6 +238,7 @@ def with_attachment_hints(
             continue
         rows: list[tuple[str, bool]] = []
         has_documents = False
+        has_stored_images = False
         for block in message.content:
             if isinstance(block, ImageContent):
                 row = _block_row(store, block, boundary)
@@ -235,6 +249,7 @@ def with_attachment_hints(
                 continue
             if row is not None:
                 rows.append(row)
+                has_stored_images |= isinstance(block, ImageContent)
         if not rows:
             out.append(message)
             continue
@@ -250,7 +265,10 @@ def with_attachment_hints(
                 )
             else:
                 opening = _CONFINED_SINGLE_OPEN if len(rows) == 1 else _CONFINED_MULTI_OPEN
-        note = opening + "\n".join(text for text, _full in rows) + "]"
+        guidance = (
+            _IMAGE_EDIT_GUIDANCE if has_stored_images and all(full for _text, full in rows) else ""
+        )
+        note = opening + "\n".join(text for text, _full in rows) + guidance + "]"
         out.append(_hinted_copy(message, note))
     return out
 

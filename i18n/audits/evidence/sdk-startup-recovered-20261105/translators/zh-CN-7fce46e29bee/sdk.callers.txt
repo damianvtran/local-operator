@@ -1,0 +1,90 @@
+Pinned commit: 0e7cde33ca8008d561e74f4aed774aa5f76ff7d5
+Source path: local_operator/sdk.py
+Source SHA256: 2f3ef2d9e33da374b116cd215c6641d99c9bc41f9a30343b23970ec96fdf78ca
+Extracted line ranges: 584-598 (startup_refusal_text: scoped locale render), 621-646 (attach_hosting_unconfigured), 664-676 (attach_runtime_missing, after dispose), 682-690 (profile_attach_failed), 700-712 (tool_inventory_mismatch)
+
+local_operator/sdk.py:584:     config_manager = ConfigManager(config_dir=roots.config_path)
+local_operator/sdk.py:585:     agent_registry = AgentRegistry(config_dir=roots.config_path)
+local_operator/sdk.py:586: 
+local_operator/sdk.py:587:     def startup_refusal_text(message: "Msg") -> str:
+local_operator/sdk.py:588:         # The SDK still raises a plain, one-argument SessionSpecError: the
+local_operator/sdk.py:589:         # envelope is an internal rendering boundary, not a new exception API.
+local_operator/sdk.py:590:         # Only refusals pay for locale imports/reads, AFTER public root isolation.
+local_operator/sdk.py:591:         # Reuse this already-scoped manager; None would make the resolver build
+local_operator/sdk.py:592:         # another manager (and potentially repair config/load credentials).
+local_operator/sdk.py:593:         from local_operator.i18n.messages import render
+local_operator/sdk.py:594:         from local_operator.i18n.resolve import DEFAULT_LANGUAGE, resolve_language
+local_operator/sdk.py:595: 
+local_operator/sdk.py:596:         language = config_manager.get_config().values.get("language")
+local_operator/sdk.py:597:         locale = resolve_language(language if isinstance(language, str) else DEFAULT_LANGUAGE)
+local_operator/sdk.py:598:         return render(message.code, message.params, locale=locale)
+local_operator/sdk.py:619:         # build), so in a root with no hosting configured the remedy the attach
+local_operator/sdk.py:620:         # contract promises would never run. Refused with both facts: no live
+local_operator/sdk.py:621:         # runtime is serving the id, and this root cannot start one until its
+local_operator/sdk.py:622:         # hosting is configured — which is also why spawn_session()/deliver()
+local_operator/sdk.py:623:         # cannot be the next step here yet.
+local_operator/sdk.py:624:         from local_operator.i18n.keys import wire_errors_sdk_startup
+local_operator/sdk.py:625: 
+local_operator/sdk.py:626:         raise SessionSpecError(
+local_operator/sdk.py:627:             startup_refusal_text(
+local_operator/sdk.py:628:                 wire_errors_sdk_startup.attach_hosting_unconfigured(
+local_operator/sdk.py:629:                     resume=repr(spec.resume), error=str(error)
+local_operator/sdk.py:630:                 )
+local_operator/sdk.py:631:             )
+local_operator/sdk.py:632:         ) from error
+local_operator/sdk.py:633: 
+local_operator/sdk.py:634:     if spec.radient_saver is not None:
+local_operator/sdk.py:635:         from local_operator.saver.command import refusal_text, set_saver_choice
+local_operator/sdk.py:636: 
+local_operator/sdk.py:637:         # A program asked for a state the gate will not honour (signed out, mode
+local_operator/sdk.py:638:         # off, empty balance). The writer refuses to journal it, and a caller
+local_operator/sdk.py:639:         # that is told nothing would build a session whose stated policy is not
+local_operator/sdk.py:640:         # in effect — the one thing a programmatic caller cannot check for
+local_operator/sdk.py:641:         # itself, so it is an error rather than a warning.
+local_operator/sdk.py:642:         result = await set_saver_choice(session, spec.radient_saver)
+local_operator/sdk.py:643:         if not result.written:
+local_operator/sdk.py:644:             await session.dispose()
+local_operator/sdk.py:645:             raise SessionSpecError(refusal_text(result.decision))
+local_operator/sdk.py:646:     if mode == "attach":
+local_operator/sdk.py:662: 
+local_operator/sdk.py:663:     if team is not None:
+local_operator/sdk.py:664:         session.attach_team(team)
+local_operator/sdk.py:665:     if spec.profile:
+local_operator/sdk.py:666:         if not session.attach_agent_profile(spec.profile):
+local_operator/sdk.py:667:             from local_operator.i18n.keys import wire_errors_sdk_startup
+local_operator/sdk.py:668: 
+local_operator/sdk.py:669:             raise SessionSpecError(
+local_operator/sdk.py:670:                 startup_refusal_text(
+local_operator/sdk.py:671:                     wire_errors_sdk_startup.profile_attach_failed(profile=repr(spec.profile))
+local_operator/sdk.py:672:                 )
+local_operator/sdk.py:673:             )
+local_operator/sdk.py:674:     inventory = declared_tool_inventory(session, runner_args)
+local_operator/sdk.py:675:     if spec.approvals.mode == "declared":
+local_operator/sdk.py:676:         # The policy's own list is the declaration when spec.tools does not
+local_operator/sdk.py:680:         # second place for it to drift, and the session refuses a widening
+local_operator/sdk.py:681:         # re-declaration anyway (set_tool_inventory is one-way), so agreeing
+local_operator/sdk.py:682:         # here is what keeps that refusal from becoming a startup failure.
+local_operator/sdk.py:683:         policy_tools = spec.approvals.tools
+local_operator/sdk.py:684:         if inventory is None:
+local_operator/sdk.py:685:             inventory = policy_tools
+local_operator/sdk.py:686:         elif tuple(inventory) != policy_tools:
+local_operator/sdk.py:687:             from local_operator.i18n.keys import wire_errors_sdk_startup
+local_operator/sdk.py:688: 
+local_operator/sdk.py:689:             raise SessionSpecError(
+local_operator/sdk.py:690:                 startup_refusal_text(
+local_operator/sdk.py:697:         session.set_tool_inventory(inventory, unattended=spec.approvals.stands_as_approval)
+local_operator/sdk.py:698:     if spec.goal is not None:
+local_operator/sdk.py:699:         session.set_goal(spec.goal)
+local_operator/sdk.py:700:     if spec.name is not None:
+local_operator/sdk.py:701:         session.set_conversation_name(spec.name)
+local_operator/sdk.py:702:     if spec.output_format is not None:
+local_operator/sdk.py:703:         # The output contract, applied through the same post-open session
+local_operator/sdk.py:704:         # method exec installs it with — see the docstring above for why this
+local_operator/sdk.py:705:         # path calls the method rather than ``apply_startup``. Validation is
+local_operator/sdk.py:706:         # ``OutputContract``'s (the one validator both paths share); a refused
+local_operator/sdk.py:707:         # contract surfaces as ``SessionSpecError``, the spec surface's own
+local_operator/sdk.py:708:         # error type, so callers catch one class.
+local_operator/sdk.py:709:         from local_operator.output_contract import (
+local_operator/sdk.py:710:             OutputContract,
+local_operator/sdk.py:711:             OutputContractError,
+local_operator/sdk.py:712:             OutputFormat,

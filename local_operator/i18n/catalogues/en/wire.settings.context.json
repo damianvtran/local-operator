@@ -250,5 +250,49 @@
     "note": "Label fits the 29-cell label budget. No ICU arguments.",
     "role": "Settings row label",
     "tone": "concise"
+  },
+  "wire.settings.team_bridge_screening_budget_per_hour.label": {
+    "maxCells": 29,
+    "note": "A CEILING is a maximum the feature may spend, not a target. It counts SCREENING calls — the automatic safety check a message passes before an agent sees it — over a ROLLING hour (a window that slides: the last 60 minutes at any moment), per account. Keep it a ceiling on spend, never a quota to fill. No ICU arguments.",
+    "role": "Settings row label",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.team_bridge_screening_budget_per_hour.help": {
+    "note": "The whole sentence is the account-wide ceiling and says an edit applies at once with no restart. 'Rolling hour' means the last 60 minutes at any moment, not a clock hour; render it as the locale's natural phrase for a sliding one-hour window. Do NOT add, drop or restate the numeric default: the number lives in the app's own registry and must not be transliterated into this copy, so a later adjustment cannot leave a stale figure in a translation. 'Account' is the user's organization account, shared by every session and machine signed in to it. No ICU arguments.",
+    "role": "Settings row help",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": {
+    "maxCells": 29,
+    "note": "'Chatter' is unsolicited agent-to-agent background talk in a shared room, the cheapest thing to leave unscreened when the hour is spent; keep the informal-but-clear register. 'Ceiling per hour' as in the sibling rows. No ICU arguments.",
+    "role": "Settings row label",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": {
+    "note": "The point of the sentence is ORDER, not arithmetic: this slice is taken OUT of the unaddressed ceiling (only part of the account's total), and the account total is named only as the thing it is never ADDED to, so raising this slice never raises the total. Keep 'carved out of, never added to' as the shape of that claim even if the idiom changes. No numbers: do not transliterate a default. No ICU arguments.",
+    "role": "Settings row help",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": {
+    "maxCells": 29,
+    "note": "'Unaddressed' means a message NOT addressed to the user's own agent — chatter in a room, or an agent mentioning it in passing — as opposed to a person writing to it directly. Keep the label short; the help carries the definition. No ICU arguments.",
+    "role": "Settings row label",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": {
+    "note": "Same carved-out-of-the-ceiling claim as the ambient sibling: a slice of the account total, never an addition. 'A person addressing your agent' is a human writing to the agent directly (a DM or an @mention) — the messages the remaining slice is reserved for. No numbers: do not transliterate a default. No ICU arguments.",
+    "role": "Settings row help",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.team_bridge_screening_sender_budget_per_hour.label": {
+    "maxCells": 29,
+    "note": "'Sender' is one other member or one of their agents in the organization; this ceiling limits a SINGLE sender's share of the account's hour. Keep 'per-sender' as the compact form of that. No ICU arguments.",
+    "role": "Settings row label",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.team_bridge_screening_sender_budget_per_hour.help": {
+    "note": "Two claims to preserve: one sender's share defaults to HALF the account ceiling ('half' is a ratio, so it may be expressed in the locale's own words, but it is not a number to transliterate), and no sender can ever exceed the account ceiling itself — the share is capped by the total, so one busy sender cannot monopolise the hour. No ICU arguments.",
+    "role": "Settings row help",
+    "tone": "concise, neutral"
   }
 }

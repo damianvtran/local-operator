@@ -1,0 +1,206 @@
+{
+  "provenance_reference": "record.json:auditor",
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_startup",
+  "key_count": 4,
+  "repo_validator": {
+    "function": "scripts.i18n.check.check_catalogues",
+    "problems": []
+  },
+  "arguments": {
+    "attach_hosting_unconfigured": [
+      [
+        "error",
+        "simple"
+      ],
+      [
+        "resume",
+        "simple"
+      ]
+    ],
+    "attach_runtime_missing": [
+      [
+        "resume",
+        "simple"
+      ]
+    ],
+    "profile_attach_failed": [
+      [
+        "profile",
+        "simple"
+      ]
+    ],
+    "tool_inventory_mismatch": [
+      [
+        "policy_tools",
+        "simple"
+      ],
+      [
+        "spec_tools",
+        "simple"
+      ]
+    ]
+  },
+  "plural_select_cldr": "not applicable: zero plural/select nodes on either side",
+  "typography": "U+202F before : and ; verified; U+2019 apostrophes; straight apostrophes only as ICU '' escapes",
+  "render": [
+    {
+      "key": "attach_hosting_unconfigured",
+      "rendered_fr": "aucun runtime actif ne sert 'abc123', et cette racine ne peut en démarrer un : Hosting platform is not configured. {braces} 100% \"quoted\" — ünïcode Configurez la plateforme d’hébergement de cette racine (son config.yml), puis démarrez l’identifiant avec spawn_session()/deliver() et rattachez-vous dès qu’un runtime existe.",
+      "rendered_en": "no live runtime is serving 'abc123', and this root cannot start one: Hosting platform is not configured. {braces} 100% \"quoted\" — ünïcode Configure hosting for this root (its config.yml), then engage the id with spawn_session()/deliver() and attach once a runtime exists.",
+      "provenance": null,
+      "cells_fr": 323,
+      "max_cells": null
+    },
+    {
+      "key": "attach_runtime_missing",
+      "rendered_fr": "aucun runtime actif ne sert 'abc123' ; ouvrez-le avec mode='own' pour l’exécuter dans ce processus, ou démarrez-le d’abord avec spawn_session()/deliver(), puis rattachez-vous dès qu’un runtime existe.",
+      "rendered_en": "no live runtime is serving 'abc123'; open it with mode='own' to run it in this process, or engage it first with spawn_session()/deliver() and attach once a runtime exists.",
+      "provenance": null,
+      "cells_fr": 200,
+      "max_cells": null
+    },
+    {
+      "key": "profile_attach_failed",
+      "rendered_fr": "Impossible de rattacher le profil 'fast'",
+      "rendered_en": "Could not attach profile 'fast'",
+      "provenance": null,
+      "cells_fr": 40,
+      "max_cells": null
+    },
+    {
+      "key": "tool_inventory_mismatch",
+      "rendered_fr": "spec.tools ('bash', 'read') et ApprovalPolicy.declared(('bash', 'edit')) désignent des inventaires différents ; ne déclarez la portée de l’exécution qu’une seule fois",
+      "rendered_en": "spec.tools ('bash', 'read') and ApprovalPolicy.declared(('bash', 'edit')) name different inventories; state the run's reach once",
+      "provenance": null,
+      "cells_fr": 166,
+      "max_cells": null
+    }
+  ],
+  "missing_parameter_observed": [
+    {
+      "key": "attach_hosting_unconfigured",
+      "params_supplied": [
+        "resume"
+      ],
+      "result": "wire.errors.sdk_startup.attach_hosting_unconfigured"
+    },
+    {
+      "key": "attach_runtime_missing",
+      "params_supplied": [
+        "resume"
+      ],
+      "result": "aucun runtime actif ne sert 'abc123' ; ouvrez-le avec mode='own' pour l’exécuter dans ce processus, ou démarrez-le d’abord avec spawn_session()/deliver(), puis rattachez-vous dès qu’un runtime existe."
+    },
+    {
+      "key": "profile_attach_failed",
+      "params_supplied": [],
+      "result": "wire.errors.sdk_startup.profile_attach_failed"
+    },
+    {
+      "key": "tool_inventory_mismatch",
+      "params_supplied": [
+        "spec_tools"
+      ],
+      "result": "wire.errors.sdk_startup.tool_inventory_mismatch"
+    }
+  ],
+  "negative_controls": [
+    {
+      "name": "missing_key",
+      "rejected_by": "repo check_catalogues",
+      "actual": [
+        "fr/wire.errors.sdk_startup: missing key 'wire.errors.sdk_startup.profile_attach_failed'"
+      ]
+    },
+    {
+      "name": "renamed_argument",
+      "rejected_by": "repo check_catalogues",
+      "actual": [
+        "fr/wire.errors.sdk_startup: wire.errors.sdk_startup.attach_runtime_missing: arguments (('identifiant', 'simple'),) != en's (('resume', 'simple'),): argument 1 is 'identifiant', en's is 'resume' (renamed or reordered)"
+      ]
+    },
+    {
+      "name": "extra_argument",
+      "rejected_by": "repo check_catalogues",
+      "actual": [
+        "fr/wire.errors.sdk_startup: wire.errors.sdk_startup.profile_attach_failed: arguments (('profile', 'simple'), ('extra', 'simple')) != en's (('profile', 'simple'),): en has 1 argument(s), translation has 2"
+      ]
+    },
+    {
+      "name": "malformed_icu",
+      "rejected_by": "repo check_catalogues",
+      "actual": [
+        "fr/wire.errors.sdk_startup: wire.errors.sdk_startup.tool_inventory_mismatch: expected ',' or '}' after argument name 'ne' (at offset 111 of 'spec.tools {spec_tools} et ApprovalPolicy.declared({policy_tools}) désignent des inventaires différents\\u202f; { ne déclarez la portée de l’exécution qu’une seule fois')"
+      ]
+    },
+    {
+      "name": "technical_token_drift",
+      "rejected_by": "independent extra checks"
+    },
+    {
+      "name": "english_stub",
+      "rejected_by": "independent extra checks"
+    },
+    {
+      "name": "cf_injection",
+      "rejected_by": "independent extra checks"
+    },
+    {
+      "name": "ascii_space_before_semicolon",
+      "rejected_by": "independent extra checks"
+    }
+  ],
+  "widths": [
+    {
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "cells": 262,
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_startup.attach_runtime_missing",
+      "cells": 202,
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_startup.profile_attach_failed",
+      "cells": 43,
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_startup.tool_inventory_mismatch",
+      "cells": 160,
+      "maxCells": null
+    }
+  ],
+  "fixture_restored": true,
+  "scope_limits": {
+    "native_ui_fit": "NOT RUN",
+    "pseudo": "NOT RUN",
+    "rtl": "not applicable to French",
+    "sdk_guards_or_settings_requests": "NOT RUN",
+    "full_suite_or_scanner": "NOT RUN"
+  },
+  "tool_inputs": [
+    {
+      "path": "/Users/damian/local-operator/scripts/i18n/check.py",
+      "sha256": "98dee7f1112848163c7a3365c39668118caa4bfe13e3afee4b137478d0bf39fb"
+    },
+    {
+      "path": "/Users/damian/local-operator/local_operator/i18n/runtime.py",
+      "sha256": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5"
+    },
+    {
+      "path": "/Users/damian/local-operator/local_operator/i18n/messages.py",
+      "sha256": "57c9dafd86483d83cde9fbaf9b260c5d286e15c13b0e9ce3aa5097fe492857ac"
+    },
+    {
+      "path": "/Users/damian/local-operator/local_operator/i18n/catalogues.py",
+      "sha256": "437179854ac210daeaf01bbecf8d89bfb9c1a901b63c55cbb623d4e4985d351e"
+    },
+    {
+      "path": "/Users/damian/local-operator/local_operator/i18n/resolve.py",
+      "sha256": "25f89ced6dfcb5bbde3aae6c75054732ef6ab48d0e006793c903f72776d66045"
+    }
+  ]
+}

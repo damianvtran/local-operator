@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings",
-  "history_sha256": "0cbf337c19827885e5ca91eeae744281877a6fe3149d51a1d43c29e3d94a8ffb",
+  "history_sha256": "57ddc49f18a714ef8ebb4563b31fdc5268a785860054caf9bc589fd699a3ff77",
   "entries": [
     {
       "locale": "ru",
@@ -69,6 +69,46 @@
           "wire.settings.guardrails_rules_dir.help": "wire.guardrails.rules_dir.help"
         }
       }
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "55e4545f2bbd8a698b792d04b1f9f4285898247028316a3611e948304bacd9d5",
+      "translator": {
+        "agent": "translator specialist (local-operator subagent 9f58f64f88fc)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator subagent i18n-auditor)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Read all 8 keys in en and ru against the en context sidecar and the shipped ru precedent (ceiling->потолок 10/10, screening->фильтрация, account->учётная запись, sender->отправитель, per hour->в час; 8/8 values, labels 24/22/28/28 cells vs maxCells 29, diff 8 additions 0 deletions, sorted, no digits/ICU/bidi). Passed with 3 accepted nits: the elliptical 'Потолок неадресованных в час' label kept because every noun-bearing alternative exceeds 29 cells, an optional de-tautologised 'Остальное оставляют людям.', and the shipped notify's 'часовой лимит фильтрации' vs this surface's 'потолок', which follows the English budget/ceiling split."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "0ec165e369c36fbc415811610fa3beb1ad8be89f090b1cc28a8b16ca671dae29",
+      "translator": {
+        "agent": "translator specialist (local-operator subagent 2294230bea6d); model radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator subagent i18n-auditor); model radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Delta re-audit of the ambient help, 0 findings. 'Выделяется из потолка неадресованных и никогда не повышает потолок учётной записи' keeps the carve-out and the order claim; the sibling's 'не добавляется к нему' was unusable here because 'к нему' would bind to the nearest antecedent (the unaddressed ceiling) and invert the claim, and the explicit parallel form would need a third row. 144 cells vs 143 English, wraps in two lines at 74 and 94, no numerals, placeholders or bidi controls."
     }
   ]
 }

@@ -1088,6 +1088,7 @@ class MeshCredentialBroker:
             token=str(access.access_token),
             credential_id=int(access.credential_id),
             account_created_at=int(getattr(access, "account_created_at", 0) or 0),
+            account_ref=getattr(access, "account_ref", None) or "",
             kind=str(getattr(access, "kind", "oauth") or "oauth"),
             token_exp_ms=token_exp_ms,
             refreshed=refreshed,
@@ -1340,6 +1341,7 @@ class MeshCredentialBroker:
         for_session: str,
         identity: dict[str, str],
         account_created_at: int = 0,
+        account_ref: str = "",
     ) -> Grant:
         """Build the grant, applying §3.3's narrowing rule to the expiry.
 
@@ -1365,6 +1367,7 @@ class MeshCredentialBroker:
                 kind=kind,
                 credential_id=credential_id,
                 account_created_at=account_created_at,
+                account_ref=account_ref,
             ),
             served_by=self.self_device,
             refreshed=refreshed,

@@ -1,0 +1,50 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_startup",
+  "status": "passed",
+  "key_count": 4,
+  "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+  "target_sha256": "fcff2fac99196a9e4dbd03957fb959c2af69013b1471532f819ddbc705293e02",
+  "context_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6433b7a5b3e9",
+    "model": "radient/auto",
+    "actual_model_source": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+      "entry_id": "ca73b1a356784a479300812347532a78",
+      "at_ms": 1793725272835,
+      "note": "own completed-turn usage; radient/auto is a router label and the concrete upstream model is not recorded in usage"
+    },
+    "fallback": "no fallback event inferred; router label only, no concrete served model or upstream fallback claimed",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder": true,
+    "second_independent_reader": true,
+    "other_reader_report_read": false
+  },
+  "findings": [
+    {
+      "id": "Z2-1",
+      "severity": "minor",
+      "key": "wire.errors.sdk_startup.attach_hosting_unconfigured",
+      "problem": "Rendered {error} is str(HostingNotConfiguredError) = the raw English producer sentence at session_factory.py:816, so a zh-CN refusal still contains one English clause. Produced by the caller, not by this catalogue; the pinned context marks {error} opaque and forbids interpreting or replacing it.",
+      "suggested": "Out of catalogue scope: give the hosting preflight an owned message id and pass its localized text (or a caller-chosen localized clause) instead of str(error). No target wording change is warranted here.",
+      "gate": "does not gate: no blocker/major; target fidelity is correct"
+    }
+  ],
+  "record": {
+    "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/record.json",
+    "sha256": "38cf424c9c6b3bbbaff25df223c086bb7c4329a32340f66b1a07dd5c1899d3e4"
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/report.md",
+      "sha256": "d7f7a6ec2f532dea72c2665fb27336771e3646ec7649b1cf658c136906d0806b"
+    },
+    "audit.log": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-startup-second-6433b7a5b3e9/audit.log",
+      "sha256": "5abc7b00414c14c49e62c1ca6580bd0de490d8311af61b492272979873f92e9a"
+    }
+  }
+}

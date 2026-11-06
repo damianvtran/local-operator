@@ -533,11 +533,18 @@ def test_build_auth_store_returns_the_mesh_store_when_borrowing(
 
 
 def _bridge_before_placement(root: Path, device: str) -> None:
-    """Model a securely admitted peer before its first provider login arrives."""
+    """Model a securely admitted peer before its first provider login arrives.
+
+    The device is a MEMBER of its own network, which is what a real admission leaves on
+    disk. The adopt path reads that record (``client._self_membership_active``) before it
+    accepts any grant, so a root carrying only a placement copy describes a client
+    ``for_this_device`` cannot build and every borrow is refused ``not_a_holder``.
+    """
     from local_operator.network import store
     from local_operator.network.types import MemberRecord, NetworkRecord
 
     record = NetworkRecord(network_id=NETWORK, name="synthetic-bridge", self_device_id=device)
+    record.members.append(MemberRecord(device_id=device, name="synthetic-self"))
     record.members.append(MemberRecord(device_id=OWNER, name="synthetic-owner"))
     store.save(record, root)
 
@@ -2106,17 +2113,45 @@ def test_a_far_future_grant_is_cached_no_longer_than_grant_ttl(tmp_path: Path) -
 
     An expiry ten years out is a VALID number (below the peer ceiling), so the boundary
     helper keeps it. Only the owner capped a grant's life until now; an owner clock far
-    ahead, or an owner that just said so, got a bearer cached as live for years.
+    ahead, or an owner that just said so, got a bearer cached as live for years, so the
+    ceiling must come from this device's own TTL and nothing else.
+
+    Driven through the production sequence — the request that captures the watermark, then
+    the reply — because an unfenced reply is not a shape this client adopts now that the
+    deny store gates adoption (QA round 4, Q4-1). Membership and placement are seeded for
+    the same reason: without them the adopt path refuses long before the lease bound under
+    test is reached, and the assertion would pass or fail for the wrong reason.
     """
     import time
 
+    from local_operator.network import store as network_store
     from local_operator.network.credentials import client as client_mod
     from local_operator.network.credentials import grant_ttl_s
     from local_operator.network.credentials.types import Grant
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    root = tmp_path / "borrower"
+    record = NetworkRecord(network_id=NETWORK, name="placement-ttl", self_device_id=THIRD)
+    record.members.append(MemberRecord(device_id=THIRD, name="borrower"))
+    record.members.append(MemberRecord(device_id=OWNER, name="damian-mbp"))
+    network_store.save(record, root)
+    document = _document(root)
+    document.declare(
+        "deepseek",
+        owner_device=OWNER,
+        owner_device_name="damian-mbp",
+        provider="deepseek",
+        kind="api_key",
+        by=OWNER,
+    )
+    document.grant("deepseek", THIRD, scope="session", by=OWNER)
+    document.save()
 
     client = client_mod.MeshCredentialClient(
-        root=tmp_path, self_device=THIRD, network_id=NETWORK, placement=_document(tmp_path)
+        root=root, self_device=THIRD, network_id=NETWORK, placement=document
     )
+    request_stamp = client._capture_request("deepseek")  # noqa: SLF001 — the asking leg
+    assert request_stamp is not None, "the request path must establish the deny store"
     ten_years_ms = int(time.time() * 1000) + 10 * 365 * 86_400_000
     before_ms = int(time.time() * 1000)
     grant = client._from_reply(  # noqa: SLF001 — the leg-1 reply path the cache is fed from
@@ -2125,15 +2160,26 @@ def test_a_far_future_grant_is_cached_no_longer_than_grant_ttl(tmp_path: Path) -
             "detail": {
                 "kind": "grant",
                 "access_token": "-".join(("synthetic", "bearer")),
+                "token_kind": "bearer",
                 "grant_expires_at_ms": ten_years_ms,
                 "token_expires_at_ms": ten_years_ms,
+                "credential_ref": {
+                    "owner_device": OWNER,
+                    "owner_device_name": "damian-mbp",
+                    "provider": "deepseek",
+                    "kind": "api_key",
+                    "credential_id": 1,
+                    "account_created_at": 0,
+                },
+                "scope": {"kind": "session", "session_id": "sess-far"},
             },
         },
         "deepseek",
         "deepseek",
         "sess-far",
+        request_stamp=request_stamp,
     )
-    ceiling_ms = int(time.time() * 1000) + int(grant_ttl_s(tmp_path) * 1000)
+    ceiling_ms = int(time.time() * 1000) + int(grant_ttl_s(root) * 1000)
     assert isinstance(grant, Grant), grant
     cached = client.grants.get("deepseek", "sess-far")
     assert cached is grant

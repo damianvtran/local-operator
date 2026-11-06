@@ -1,0 +1,111 @@
+{
+  "auditor_agent": "i18n-auditor",
+  "reader": "fr-second",
+  "auditor_session": "35aac0a677bc",
+  "namespace": "wire.errors.sdk_startup",
+  "locale": "fr",
+  "actual_served_model": "radient/auto",
+  "model_label_kind": "opaque provider-exposed auto label; underlying model not exposed and therefore not claimed",
+  "actual_model_source": "Own completed assistant payload.usage.provider/payload.usage.model_id in persisted transcript for this task",
+  "transcript_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/transcript.jsonl",
+  "task_start_timestamp": 1793725337.2004821,
+  "usage_entry_count": 26,
+  "usage_entries_sampled": [
+    {
+      "entry_id": "c1562f76ca4b4354ba5267cd0f82c57f",
+      "timestamp": 1793725360.330004,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 167267,
+        "output_tokens": 722,
+        "cache_read_tokens": 23040,
+        "context_tokens": 167267,
+        "reasoning_tokens": 510,
+        "usd_cost": 0.04427274,
+        "at_ms": 1793725351631,
+        "provider": "radient",
+        "model_id": "auto"
+      },
+      "actions": [
+        "bash"
+      ]
+    },
+    {
+      "entry_id": "df6710d93c2b4dfd8cdcdb56f1a83580",
+      "timestamp": 1793725367.166334,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 170781,
+        "output_tokens": 304,
+        "cache_read_tokens": 167936,
+        "context_tokens": 170781,
+        "reasoning_tokens": 15,
+        "usd_cost": 0.0022259159999999997,
+        "at_ms": 1793725363090,
+        "provider": "radient",
+        "model_id": "auto"
+      },
+      "actions": [
+        "bash"
+      ]
+    },
+    {
+      "entry_id": "b308643fa57a4921ae32ba50995f1712",
+      "timestamp": 1793725392.375137,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 172017,
+        "output_tokens": 4468,
+        "cache_read_tokens": 171008,
+        "context_tokens": 172017,
+        "reasoning_tokens": 3956,
+        "usd_cost": 0.006690347999999999,
+        "at_ms": 1793725390044,
+        "provider": "radient",
+        "model_id": "auto"
+      },
+      "actions": [
+        "bash"
+      ]
+    },
+    {
+      "entry_id": "f7483ccc35e348b5a23738b14b928250",
+      "timestamp": 1793725555.251581,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 206056,
+        "output_tokens": 108,
+        "cache_read_tokens": 205952,
+        "context_tokens": 206056,
+        "usd_cost": 0.001396512,
+        "at_ms": 1793725554907,
+        "provider": "radient",
+        "model_id": "auto"
+      },
+      "actions": [
+        "bash"
+      ]
+    },
+    {
+      "entry_id": "6ed82e0508084ce7aa87a246d52cfcc2",
+      "timestamp": 1793725557.110775,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 207015,
+        "output_tokens": 281,
+        "cache_read_tokens": 206080,
+        "context_tokens": 207015,
+        "reasoning_tokens": 78,
+        "usd_cost": 0.00185418,
+        "at_ms": 1793725556792,
+        "provider": "radient",
+        "model_id": "auto"
+      },
+      "actions": [
+        "edit"
+      ]
+    }
+  ],
+  "route_notices_during_task": [],
+  "fallback_disclosure": "No route or fallback notice was emitted during this task, and the completed usage exposes only provider=radient, model_id=auto. No underlying model and no no-fallback claim is made."
+}

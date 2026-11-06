@@ -14662,7 +14662,15 @@ class WakeParams(BaseModel):
     )
     at: str | None = Field(
         default=None,
-        description="First fire time: 'HH:MM', '+<duration>', or ISO datetime.",
+        # Says the two things a caller gets wrong about this value: a bare clock
+        # is read in the DEVICE's zone (so it is not the UTC instant the caller
+        # may have meant), and the forms that name an instant exactly. Kept to
+        # one sentence of wording on purpose — this text is billed on every
+        # turn, and the context-budget ratchet has almost no headroom left.
+        description=(
+            "First fire: 'HH:MM' (or 'local:HH:MM') is this device's LOCAL clock, not UTC; "
+            "'+30m' or ISO-8601 with an offset is exact."
+        ),
     )
     every: str | None = Field(
         default=None,
@@ -14767,9 +14775,16 @@ async def _wake_create(
     schedule = outcome["schedule"]
     updated = [s for s in existing if s.id != schedule.id] + [schedule]
     await scheduler.update(updated)
-    from local_operator.wakes.display import format_wake_time
+    from local_operator.wakes.display import format_wake_at_echo, format_wake_time
 
     due = format_wake_time(schedule.next_due_at)
+    # A LOCAL clock reading is the one input whose TEXT and whose INSTANT are two
+    # different statements, so the short clock render is replaced by the echo:
+    # the resolved instant with its offset, beside the string that produced it.
+    # A caller that wrote 18:45 meaning 18:45Z can then see the difference in
+    # the reply instead of discovering it when the wake fails to fire on time.
+    # Every other form already reads as itself, and the echo is empty for those.
+    echo = format_wake_at_echo(schedule.next_due_at, params.at, now_ms)
     # The ID and the instant ride as structured DETAILS as well as in the
     # sentence, so a caller that is not a model reading prose (the desktop
     # owner command, whose reply becomes an HTTP body) does not have to parse
@@ -14778,7 +14793,7 @@ async def _wake_create(
     return _text(
         tool_call_id,
         "wake",
-        f"Scheduled wake '{schedule.id}' at {due}: \"{schedule.message}\"",
+        f"Scheduled wake '{schedule.id}' at {echo or due}: \"{schedule.message}\"",
         details={"wake_id": schedule.id, "next_due_at": schedule.next_due_at},
     )
 

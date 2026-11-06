@@ -104,6 +104,7 @@ import asyncio
 import collections
 import dataclasses
 import hashlib
+import json
 import logging
 import random
 import time
@@ -253,13 +254,10 @@ def _cache_key(request: RecommendationRequest, limit: int | None) -> str:
     is what makes the ROSTER half of the key a digest of the ROSTER half of the
     body.
 
-    WHAT IS STILL OUTSIDE THE KEY, since this docstring is a future caller's only
-    warning. The key is ``user_message`` plus this digest, so two other body
-    inputs are not covered: ``context`` (a state field when a caller supplies
-    one — none does today) and the ladder rung that ``maxStateChars`` selects, a
-    session setting whose change moves the body without moving the key. Both are
-    benign while the first caller-side half is unbuilt, and closing them belongs
-    with whoever builds it rather than with the roster fix.
+    Context participates because a short follow-up can mean different things
+    after an image edit and after an OCR request. Reusing a decision across
+    those histories would silently discard the intent the caller preserved.
+    ``maxStateChars`` remains a session setting, not a per-turn input.
 
     It stays a plain function taking the limit rather than reading the settings
     itself, because the caller is the one that knows which limit its request
@@ -271,7 +269,10 @@ def _cache_key(request: RecommendationRequest, limit: int | None) -> str:
     mistake.
     """
     roster = select_candidates(request.candidates, limit)
-    payload = f"{request.user_message}\n{candidates_digest(roster)}"
+    payload = json.dumps(
+        [request.user_message, request.context, candidates_digest(roster)],
+        ensure_ascii=False,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

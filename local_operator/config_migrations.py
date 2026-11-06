@@ -581,6 +581,17 @@ def run_startup_migrations(
             logger.warning("config migration: seed update pass skipped: %s", exc)
             logger.debug("config migration: traceback", exc_info=True)
     try:
+        # Host-facing ``account.json``: cheap (a read-only open and a byte
+        # compare) and only writes when missing or stale, so a config dir that
+        # predates the file, or one whose rows changed out of band, converges
+        # on the first launch.
+        from local_operator.providers.account_provenance import refresh_account_file
+
+        refresh_account_file(config_dir)
+    except Exception as exc:  # noqa: BLE001 — never a reason not to start
+        logger.warning("config migration: account file refresh skipped: %s", exc)
+        logger.debug("config migration: traceback", exc_info=True)
+    try:
         # Lazily imported: the store module (pydantic models, the runtime
         # scan's dependencies) must not ride the import path of every CLI
         # start just because one migration may touch it.

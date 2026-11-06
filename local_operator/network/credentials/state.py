@@ -115,6 +115,55 @@ class PlacementState:
             return ""
         return str(row.get("status") or "")
 
+    def held_policy_fence(self, key: str, owner: str = "") -> tuple[str, str]:
+        """Restriction generation, independent of the retry-cache TTL.
+
+        Keep this keyless watermark after a later authorized success: that success
+        licenses its NEW grant, not another session's older in-memory grant. It is
+        device/network/key/owner scoped and never changes any owner lease.
+        """
+        row = self._observations.get(key, {})
+        fence_owner = str(row.get("held_fence_owner") or row.get("owner_device") or "")
+        if owner and fence_owner and fence_owner != owner:
+            return "", ""
+        if row.get("held_fence"):
+            return str(row["held_fence"]), str(row.get("held_fence_code") or "consent_unverifiable")
+        status = str(row.get("status") or "")
+        if status and status not in {
+            "active",
+            "owner_offline",
+            "owner_unreachable",
+            "internal",
+            "rate_limited",
+            "quota_blocked",
+            "unsupported",
+        }:
+            # Legacy rows also fence existing memory even after their retry TTL.
+            return f"legacy:{row.get('observed_at')}:{status}", status
+        return "", ""
+
+    def held_policy_refusal(self, key: str, owner: str = "") -> str:
+        """A known restriction only a verified owner success can resolve."""
+        fence, code = self.held_policy_fence(key, owner)
+        authorized = self._observations.get(key, {}).get("held_authorized_fence", "")
+        return code if fence and authorized != fence else ""
+
+    def _held_fence_fields(self, key: str) -> dict[str, str]:
+        row = self._observations.get(key, {})
+        fence, code = self.held_policy_fence(key)
+        return (
+            {
+                "held_fence": fence,
+                "held_fence_code": code,
+                "held_fence_owner": str(
+                    row.get("held_fence_owner") or row.get("owner_device") or ""
+                ),
+                "held_authorized_fence": str(row.get("held_authorized_fence") or ""),
+            }
+            if fence
+            else {}
+        )
+
     def active(self, key: str) -> bool:
         return self.status(key) == "active"
 
@@ -161,7 +210,61 @@ class PlacementState:
         stated. The owner's number is recorded separately, absent when none was
         sent, and is the only one a countdown may ever show.
         """
+        # Diagnostics may still be saved by old/stale instances. Restrictive
+        # evidence lives separately and is committed before this best-effort row.
+        if status not in {
+            "active",
+            "owner_offline",
+            "owner_unreachable",
+            "internal",
+            "rate_limited",
+            "quota_blocked",
+            "unsupported",
+        }:
+            from local_operator.network import store
+            from local_operator.network.credentials.held_policy import HeldPolicyStore
+
+            try:
+                record = store.load(self.network_id, self.root)
+                member = record.self_member()
+                recipient = member.device_id if member is not None else ""
+            except (FileNotFoundError, ValueError):
+                recipient = ""
+            if recipient:
+                policy = HeldPolicyStore(self.network_id, recipient, self.root)
+                if policy.path.exists() or policy.marker.exists():
+                    with policy.transaction() as document:
+                        owner = owner_device
+                        if not owner:
+                            from local_operator.network.credentials.placement import (
+                                PlacementDocument,
+                            )
+
+                            entry = PlacementDocument.load(
+                                self.network_id, self.root, self_device=recipient
+                            ).entry(key)
+                            owner = entry.owner_device if entry else ""
+                        policy.deny(document, owner, key, status)
+        fence = self._held_fence_fields(key)
+        if status not in {
+            "active",
+            "owner_offline",
+            "owner_unreachable",
+            "internal",
+            "rate_limited",
+            "quota_blocked",
+            "unsupported",
+        }:
+            import uuid
+
+            fence = {
+                "held_fence": uuid.uuid4().hex,
+                "held_fence_code": status,
+                "held_fence_owner": owner_device,
+                "held_authorized_fence": "",
+            }
         row: dict[str, Any] = {
+            **fence,
             "key": key,
             "owner_device": owner_device,
             "status": status,
@@ -185,6 +288,8 @@ class PlacementState:
         taken effect for a minute.
         """
         self._observations[key] = {
+            **self._held_fence_fields(key),
+            "held_authorized_fence": self.held_policy_fence(key, owner_device)[0],
             "key": key,
             "owner_device": owner_device,
             "status": "active",

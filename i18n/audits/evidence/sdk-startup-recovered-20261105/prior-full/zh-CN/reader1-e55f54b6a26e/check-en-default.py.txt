@@ -1,0 +1,29 @@
+"""Default-English control: with locale 'en' the runtime must render the English
+source unchanged (no catalogue involved), so carrying this namespace cannot alter
+the default path. Read-only; core render helper only."""
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, "/Users/damian/local-operator")
+from local_operator.i18n import runtime
+
+PACKET = pathlib.Path(
+    "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-startup-0e7cde33"
+)
+en = json.loads((PACKET / "en.json").read_bytes())
+params = {
+    "resume": "'s-1'",
+    "error": "Hosting platform is not configured. ",
+    "profile": "'reviewer'",
+    "spec_tools": "('bash',)",
+    "policy_tools": "('read',)",
+}
+for key, source in en.items():
+    args = runtime.message_arguments(source)
+    rendered = runtime.render_message(source, {n: params[n] for n, _ in args}, "en")
+    for name, _ in args:
+        assert params[name] in rendered, (key, name)
+    assert runtime.message_arguments(rendered) == (), (key, "rendered text re-parsed")
+    print(f"PASS default-en {key.removeprefix('wire.errors.sdk_startup.')}: English source rendered unchanged")
+print("RESULT PASS 4/4 default-English control")

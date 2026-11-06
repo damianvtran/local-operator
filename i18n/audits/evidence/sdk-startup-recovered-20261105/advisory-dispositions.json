@@ -1,0 +1,135 @@
+[
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader1-dd6c62eeb8a7/record.json",
+    "id": "ES-SSU-M1",
+    "severity": "MINOR",
+    "reason": "'nombran' on two spec expressions is a calque of English 'name'; understandable and corpus-adjacent, but a diagnostic whose subjects specify a set reads better with especificar/designar/definir",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader1-dd6c62eeb8a7/record.json",
+    "id": "ES-SSU-N1",
+    "severity": "NIT",
+    "reason": "'su' can momentarily read as 'your' in a tú-addressed sentence; both readings are true, nothing misleading",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader1-dd6c62eeb8a7/record.json",
+    "id": "ES-SSU-N2",
+    "severity": "NIT",
+    "reason": "the ES catalogue writes the noun as ID elsewhere; lowercase id reads as the parameter token",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/record.json",
+    "id": "es-sdk-r2-01",
+    "severity": "MINOR",
+    "reason": "masculine anaphora (abrelo/ejecutarlo/activalo) for la sesion; nearest masculine noun is 'runtime' -> wrong-antecedent read",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/record.json",
+    "id": "es-sdk-r2-02",
+    "severity": "MINOR",
+    "reason": "'nombran inventarios distintos' calques EN 'name different inventories'; nombrar = to name/appoint/mention",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/record.json",
+    "id": "es-sdk-r2-n1",
+    "severity": "NIT",
+    "reason": "'Configura el alojamiento' elides the shipped collocation 'plataforma de alojamiento'",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/record.json",
+    "id": "es-sdk-r2-n2",
+    "severity": "NIT",
+    "reason": "bare 'antes' for 'first'",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/es/reader2-fbfe8c1294ba/record.json",
+    "id": "es-sdk-r2-n3",
+    "severity": "NIT",
+    "reason": "'esta raiz' can read as a filesystem root",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader1-604100bf1795/record.json",
+    "id": "F1",
+    "severity": "MINOR",
+    "reason": "Bare reflexive « se rattacher » without a complement; the shipped fr corpus supplies one (wire.exec.session_pointer: « rattacher ou reprendre »). Reads as a calque of intransitive 'attach'.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader2-3fb9e3fb5be6/record.json",
+    "id": "F1",
+    "severity": "MINOR",
+    "reason": "Bare reflective se rattacher without its complement; corpus otherwise supplies one. Meaning survives; unchanged text, not re-scored.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/fr/reader2-3fb9e3fb5be6/record.json",
+    "id": "N1",
+    "severity": "NIT",
+    "reason": "Under the new contract the substituted cause is now French, so the composed frame repeats « plateforme d’hébergement » in two adjacent sentences (cause + remedy). Composition of two independently owned strings; not a mistranslation.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader1-d6d8c41965c3/record.json",
+    "id": "ZD-1",
+    "severity": "NIT",
+    "reason": "运行 appears three times in one sentence (正在运行的运行时 / 启动一个 / 运行时存在), which reads slightly heavy in native zh-CN diagnostics.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader1-d6d8c41965c3/record.json",
+    "id": "ZD-2",
+    "severity": "NIT",
+    "reason": "启动 renders both 'start (a runtime)' and 'engage (the id)', so the two different actions in the English text share one verb.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/current/zh-CN/reader2-0feda324e9e3/record.json",
+    "id": "NIT-1",
+    "severity": "NIT",
+    "reason": "Correct with the owned cause (托管平台未配置。), but a foreign cause without terminal punctuation runs into the remedy clause (e.g. '：boom: socket closed为此根目录…'). Typographic only; meaning and safety unaffected; the frame contributes no English of its own.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/record.json",
+    "id": "F1",
+    "severity": "MINOR",
+    "reason": "Contradicts the verified locale path: sdk.py:584-598 resolves the configured language and renders the resolved locale. The other three notes in the same sidecar make no such claim, and docs/SDK.md documents the resolution. A later translator could read it as a pin and leave the namespace untranslated.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/record.json",
+    "id": "O1",
+    "severity": "OBSERVATION",
+    "reason": "The embedded error is followed by a capitalised French sentence, as in English; today's producer ends with a full stop. Never insert punctuation inside the placeholder.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader1-c44e0f808e48/record.json",
+    "id": "O2",
+    "severity": "OBSERVATION",
+    "reason": "docs/design/backend-originated-strings.md:60 and the docs/SDK.md:220 heading still inventory this namespace as English-only while the body documents locale resolution; coordinator-owned docs consistency.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/fr/reader2-35aac0a677bc/record.json",
+    "id": "F1",
+    "severity": "MINOR",
+    "reason": "Bare reflexive se rattacher lacks its required complement; corpus always supplies one (rattachés à un enregistrement, une vue se rattache à un identifiant). Reads as a calque of intransitive “attach”. Meaning/action survive → MINOR, not MAJOR.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  },
+  {
+    "record": "i18n/audits/evidence/sdk-startup-recovered-20261105/prior-full/zh-CN/reader2-6433b7a5b3e9/record.json",
+    "id": "Z2-1",
+    "severity": "MINOR",
+    "reason": "Rendered {error} is str(HostingNotConfiguredError) = the raw English producer sentence at session_factory.py:816, so a zh-CN refusal still contains one English clause. Produced by the caller, not by this catalogue; the pinned context marks {error} opaque and forbids interpreting or replacing it.",
+    "disposition": "deferred — non-gating original advisory; preserve approved bytes and audit scope; no issue/new wording/minor-only cycle"
+  }
+]

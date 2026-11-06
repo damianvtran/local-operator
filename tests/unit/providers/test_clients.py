@@ -995,6 +995,84 @@ async def test_mock_client_tool_branch() -> None:
     assert events[-1].stop_reason == "toolUse"
 
 
+async def test_mock_client_ask_markers_emit_the_real_ask_tool() -> None:
+    """``[ask]``/``[ask-secret]`` cross the LLM boundary as ordinary tool calls.
+
+    The UI recovery needs a credential-free way to put a REAL ``ask`` card in
+    front of a real runtime. This asserts only the wire vocabulary: the mock
+    chooses the production tool and its arguments, exactly as a model would;
+    dispatch, the permission tier and the blocking/queued gate remain the
+    production paths under test.
+    """
+    client = MockClient()
+
+    ordinary = await _collect(
+        client.stream(
+            ChatRequest(model=_spec("test", "mock"), messages=[Message.user("[ask]")]),
+            None,
+        )
+    )
+    ordinary_calls = [e for e in ordinary if isinstance(e, StreamToolCallDelta)]
+    assert ordinary_calls[0].name == "ask"
+    ordinary_args = json.loads(
+        "".join(e.argument_delta for e in ordinary_calls if e.argument_delta)
+    )
+    assert ordinary_args["questions"] == [
+        {
+            "id": "mock_choice",
+            "question": "Which option should the mock choose?",
+            "options": [
+                {"label": "First", "description": "The first mock option."},
+                {"label": "Second", "description": "The second mock option."},
+            ],
+            "multi": False,
+            "recommended": None,
+            "secret": False,
+            "persist": False,
+        }
+    ]
+    assert ordinary[-1].stop_reason == "toolUse"
+
+    secret = await _collect(
+        client.stream(
+            ChatRequest(model=_spec("test", "mock"), messages=[Message.user("[ask-secret]")]),
+            None,
+        )
+    )
+    secret_calls = [e for e in secret if isinstance(e, StreamToolCallDelta)]
+    assert secret_calls[0].name == "ask"
+    secret_args = json.loads("".join(e.argument_delta for e in secret_calls if e.argument_delta))
+    question = secret_args["questions"][0]
+    assert question["secret"] is True
+    assert question["options"] == []
+    assert question["persist"] is False
+    assert secret[-1].stop_reason == "toolUse"
+
+
+async def test_mock_client_ask_marker_settles_after_its_tool_result() -> None:
+    """A tool result ends the turn; only the newest USER instruction selects a marker."""
+    client = MockClient()
+    request = ChatRequest(
+        model=_spec("test", "mock"),
+        messages=[
+            Message.user("please [ask-secret]"),
+            Message(
+                role="tool",
+                tool_call_id="call_mock_ask",
+                tool_name="ask",
+                content=[TextContent(text="mock_ask_key")],
+            ),
+        ],
+    )
+    events = await _collect(client.stream(request, None))
+    assert not [event for event in events if isinstance(event, StreamToolCallDelta)]
+    assert events[-1].stop_reason == "stop"
+    assert [event.delta for event in events if isinstance(event, StreamTextDelta)] == [
+        "Hello",
+        " from the mock provider!",
+    ]
+
+
 async def test_mock_client_hang_branch_never_ends_the_stream() -> None:
     """``[hang]``: the one request that never returns — the drain's reap shape.
 

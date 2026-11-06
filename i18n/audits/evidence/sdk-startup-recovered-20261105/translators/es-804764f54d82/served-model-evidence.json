@@ -1,0 +1,63 @@
+{
+  "session": "804764f54d82",
+  "agent": "i18n-translator",
+  "transcript": "/Users/damian/.local-operator/sessions/804764f54d82/transcript.jsonl",
+  "turn_boundary_record_index": 145,
+  "this_turn_usage_records": 15,
+  "this_turn_models": [
+    "radient/auto"
+  ],
+  "sample_records": [
+    {
+      "record_id": "754bd55f7d4e4f91a9124543bce40101",
+      "ts": 1793724150.0377548,
+      "provider": "radient",
+      "model_id": "auto",
+      "output_tokens": 485
+    },
+    {
+      "record_id": "477c4ed322744b2fb6312c3564830d95",
+      "ts": 1793724203.007852,
+      "provider": "radient",
+      "model_id": "auto",
+      "output_tokens": 765
+    },
+    {
+      "record_id": "436f7eb113384d26aeef73289c9a3533",
+      "ts": 1793724211.8880682,
+      "provider": "radient",
+      "model_id": "auto",
+      "output_tokens": 393
+    }
+  ],
+  "route_events": [
+    {
+      "record_index": 4,
+      "record_id": "21ea881422c345ffb05a57da5e47ad56",
+      "ts": 1793692676.589765,
+      "details": {
+        "primary": "anthropic/claude-sonnet-5-5",
+        "active": {
+          "selector": "anthropic/claude-opus-5-5",
+          "effort": "medium"
+        },
+        "reason": "provider failure: quota"
+      }
+    },
+    {
+      "record_index": 5,
+      "record_id": "df2a890b70e543d293990b7cc66fda14",
+      "ts": 1793692676.775272,
+      "details": {
+        "primary": "anthropic/claude-sonnet-5-5",
+        "active": {
+          "selector": "openai/gpt-6.1-sol",
+          "effort": "medium"
+        },
+        "reason": "provider failure: quota"
+      }
+    }
+  ],
+  "interpretation": "Served model for this turn is the auto-routing selector radient/auto, read from this session's own completed assistant message usage payloads. No failure or incident event occurred in this turn, so no fallback is claimed. The two provider-quota route events precede this turn (indices 4,5 vs boundary 145) and belong to the earlier sdk_spec run.",
+  "header_not_used": "The session Model line was displayed as radient/auto; it is not evidence of completed usage."
+}

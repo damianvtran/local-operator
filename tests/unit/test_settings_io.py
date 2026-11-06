@@ -653,17 +653,34 @@ def _team_bridge_consumer_defaults() -> dict[str, object]:
     turns a drifted literal into a red test rather than a page that advertises
     a state the feature will not honour — the rule every consumer block above
     follows. Only the REGISTERED rows appear here: ``onboarding`` is internal
-    state (no row), and the allowlist's defaults are server truth surfaced as
-    data by ``team_bridge.client.allowlist_view``, not config.
+    state (no row), the allowlist's defaults are server truth surfaced as data
+    by ``team_bridge.client.allowlist_view``, not config, and
+    ``hold_alert_after_minutes``/``hold_release`` are read keys with no row.
+    The four ``team_bridge.screening.*`` ceilings are here because a page that
+    showed a ceiling the receiver does not read would be exactly this drift.
     """
 
     from local_operator.team_bridge.settings import (
         DEFAULT_TEAM_BRIDGE_ENABLED,
+        DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR,
+        DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
+        DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR,
+        DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR,
         DEFAULT_TEAM_BRIDGE_SESSION,
     )
 
     return {
         "team_bridge.enabled": DEFAULT_TEAM_BRIDGE_ENABLED,
+        "team_bridge.screening.ambient_budget_per_hour": (
+            DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR
+        ),
+        "team_bridge.screening.budget_per_hour": DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
+        "team_bridge.screening.sender_budget_per_hour": (
+            DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR
+        ),
+        "team_bridge.screening.unaddressed_budget_per_hour": (
+            DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR
+        ),
         "team_bridge.session": DEFAULT_TEAM_BRIDGE_SESSION,
     }
 
@@ -780,6 +797,34 @@ def test_the_team_depth_maximum_matches_max_org_depth() -> None:
 
     setting = settings_io.BY_KEY["subagents.max_team_depth"]
     assert setting.maximum == MAX_ORG_DEPTH
+
+
+def test_the_screening_read_maximum_matches_the_registry_rows() -> None:
+    """``SCREENING_BUDGET_MAX_READ`` is the read path's own upper bound.
+
+    The four rows carry ``maximum=100_000`` as literals because ``settings_io``
+    stays off ``team_bridge.settings``'s import path, and the receiver's config
+    read clamps a hand edit above it (review round 1, S-5): the read may only
+    run a ceiling some surface can still show and edit back down. A moved
+    maximum with a stale literal here would either refuse a value the receiver
+    runs or run one the page cannot reach — the same drift pair, and the same
+    guard shape, as the team-depth maximum above.
+    """
+    from local_operator.team_bridge.settings import SCREENING_BUDGET_MAX_READ
+
+    rows = [
+        setting
+        for setting in settings_io.SETTINGS
+        if setting.key.startswith("team_bridge.screening.")
+    ]
+    assert [row.key for row in rows] == [
+        "team_bridge.screening.budget_per_hour",
+        "team_bridge.screening.unaddressed_budget_per_hour",
+        "team_bridge.screening.ambient_budget_per_hour",
+        "team_bridge.screening.sender_budget_per_hour",
+    ]
+    for row in rows:
+        assert row.maximum == SCREENING_BUDGET_MAX_READ, row.key
 
 
 def test_supplements_registry_bounds_are_honoured_by_the_reader() -> None:

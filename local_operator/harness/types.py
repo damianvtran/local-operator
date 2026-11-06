@@ -1272,7 +1272,7 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     invisibly, until the attach frame crosses its 1 MiB socket line limit again
     (review round 1, MINOR 2).
     """
-    for field in ("at_ms", "billing_basis", "openai_service_tier"):
+    for field in ("at_ms", "billing_basis", "openai_service_tier", "account_ref"):
         if data.get(field) is None:
             data.pop(field, None)
     if not data.get("openai_long_context"):
@@ -1338,6 +1338,10 @@ class Usage(BaseModel):
     # Durable per-call credential provenance: a provider can serve both plan and
     # API-key traffic, so consumers cannot reconstruct this from its id later.
     billing_basis: str | None = None
+    # Opaque, non-secret id of the ACCOUNT that served this call (see
+    # ``providers.account_ref``). Same legacy/unknown-means-omitted rule as
+    # ``billing_basis``; never an email, org name, or raw IdP id.
+    account_ref: str | None = None
 
     # Only the actual public adapter can assert this per-call pricing tier;
     # unknown legacy/gateway receipts stay false. Omitted when false to avoid

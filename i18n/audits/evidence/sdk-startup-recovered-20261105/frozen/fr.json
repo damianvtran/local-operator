@@ -1,0 +1,6 @@
+{
+  "wire.errors.sdk_startup.attach_hosting_unconfigured": "aucun runtime actif ne sert {resume}, et cette racine ne peut en démarrer un : {error} Configurez la plateforme d’hébergement de cette racine (son config.yml), puis démarrez l’identifiant avec spawn_session()/deliver() et rattachez-vous dès qu’un runtime existe.",
+  "wire.errors.sdk_startup.attach_runtime_missing": "aucun runtime actif ne sert {resume} ; ouvrez-le avec mode=''own'' pour l’exécuter dans ce processus, ou démarrez-le d’abord avec spawn_session()/deliver(), puis rattachez-vous dès qu’un runtime existe.",
+  "wire.errors.sdk_startup.profile_attach_failed": "Impossible de rattacher le profil {profile}",
+  "wire.errors.sdk_startup.tool_inventory_mismatch": "spec.tools {spec_tools} et ApprovalPolicy.declared({policy_tools}) désignent des inventaires différents ; ne déclarez la portée de l’exécution qu’une seule fois"
+}

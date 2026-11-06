@@ -71,3 +71,51 @@ async def test_the_agent_messages_section_appears_only_after_an_eligible_read() 
             view._manager.config_dir, visible=False, state="unavailable", checked_at=2.0
         )
         assert "team_bridge" not in _section_names(view)
+
+
+@pytest.mark.asyncio
+async def test_every_screening_row_explains_itself_at_eighty_by_twenty_four() -> None:
+    """THE DETAIL BAND IS NEVER BLANK (design round 1, D1) — at 80x24, the default.
+
+    The band is the only place the page shows a row's help, and the four
+    screening ceilings carry long sentences. The agent-messages ladder used to
+    end at the WRAP rung, and `_wrap_cells` returns `None` for a sentence that
+    needs a third row — so at 80 columns 21 of 32 locale x row combinations
+    painted NOTHING: no help, and no `…` to say it had been cut. Every other row
+    already falls through to a truncating floor; this test pins that these four
+    do too, in each of the three shapes that matter:
+
+    * help that fits beside the key (one row),
+    * help that needs two rows (the wrap rung),
+    * help that needs THREE rows, or cannot break at a space at all (the cut,
+      which shows a visible `…`). The space-free case is the zh-CN limit the
+      guide records rather than a wrapper change.
+    """
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        await pilot.pause()
+        view = app.query_one(SettingsView)
+        availability.record(view._manager.config_dir, visible=True, state="ready", checked_at=1.0)
+        view._repaint()
+
+        keys = [
+            row.setting.key
+            for row in view._rows
+            if row.setting is not None and row.setting.key.startswith("team_bridge.screening.")
+        ]
+        assert len(keys) == 4, keys
+        painted: dict[str, str] = {}
+        for key in keys:
+            view._select_setting_row(key)
+            view._repaint()
+            painted[key] = view._detail_text.plain.replace("\n", " ").strip()
+
+        for key, text in painted.items():
+            assert text, f"{key} painted an EMPTY detail band at 80x24"
+        # At least one of the shipped English sentences needs more room than the
+        # band has, so the floor is exercised, not merely present: its cut is
+        # MARKED (the `…` is what separates "trimmed" from "broken").
+        assert any(text.endswith("…") for text in painted.values()), painted

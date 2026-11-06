@@ -1,0 +1,227 @@
+{
+  "record_version": 1,
+  "kind": "independent_context_delta_confirmation",
+  "audit_id": "fr2cd-3fb9e3fb",
+  "locale": "fr",
+  "reader": "fr-reader2",
+  "namespace": "wire.errors.sdk_startup",
+  "mode": "context_delta_confirmation_only",
+  "audit_date": "2026-11-03",
+  "key_count": 4,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "3fb9e3fb5be6",
+    "model": "radient/auto",
+    "requested_route": "Radient Auto (radient/auto)",
+    "served_underlying_model": "UNKNOWN",
+    "actual_model_source": {
+      "kind": "session_model_header_only",
+      "value": "radient/auto",
+      "opaque_label": true,
+      "underlying_model_known": false,
+      "header_is_primary_not_served_proof": true,
+      "execution_proof_present": false
+    },
+    "fallback": "UNKNOWN",
+    "fallback_note": "No fallback identity was exposed by this run; none inferred, no NONE invented.",
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder_session": "not named in this run (core PR #3378 author session); no coder record read",
+    "independence_statement": "No source, context, translation or repo file was authored or edited here. No new parallel reader report was read; only the two prior FR audit records, for compatibility."
+  },
+  "dependency": {
+    "pr": "https://github.com/damianvtran/local-operator/pull/3378",
+    "head": "0066245ce4f90109933c59e74f1ad21b86d647bd",
+    "merged": false,
+    "shipped_claim": false,
+    "source_inspection": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/sdk.py",
+      "sha256": "be133837cbc28e50a77213c24759de890e2aae0adf49a8961ec7bcfca65c7621",
+      "lines": "601 (render locale=startup_refusal_locale()), 603-632 (startup_cause_text: exact type + catalogued-EN equality gate, else str(error) verbatim), 660-666 (frame render + raise)",
+      "execution": "NOT RUN - read-only inspection"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/en.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "bytes": 772,
+      "original_path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "matches_binding": true
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+      "bytes": 2298,
+      "original_path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "matches_binding": true
+    },
+    "target": {
+      "locale": "fr",
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/sdk-startup-followon/fr.json",
+      "sha256": "82b61a755a8580e7cb4e4f86ae64a428fc83232fac92b22fa72f09d77b5f781d",
+      "bytes": 933,
+      "original_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-sdk-startup-0e7cde33/wire.errors.sdk_startup.json",
+      "matches_binding": true
+    }
+  },
+  "stale_value_control": {
+    "executed": true,
+    "path": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/candidates/es/context.json",
+    "sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+    "is_current_context": false,
+    "note": "Retained inventory copy ee0bbde5... is NOT the current context; ee0bbde5 was not used as a source. Current-frozen and inventory inputs/current-context.json both hash 82f193fd..., confirming the context delta is real bytes, not a chat typo."
+  },
+  "delta": {
+    "new_context_sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e",
+    "changed_context_entries": [
+      "wire.errors.sdk_startup.attach_hosting_unconfigured"
+    ],
+    "unchanged_context_entries": [
+      "attach_runtime_missing",
+      "profile_attach_failed",
+      "tool_inventory_mismatch"
+    ],
+    "unchanged_check": "parsed-dict equality per key, not textual similarity",
+    "en_unchanged_vs_prior_audits": true,
+    "fr_unchanged_vs_prior_audits": true,
+    "substance": "The single changed note withdraws the absolute claim that {error} is always opaque producer text and that the namespace is English-only: for the product's own not-configured hosting error (exact type + published sentence) the caller substitutes the separately localized cause sentence, so the frame must contain no English cause wording of its own; foreign producers' reasons stay opaque and verbatim.",
+    "old_context_sha256": "ee0bbde5e99de22c04368e6bbfedf913d758ef6ba5075984ddf7d795b1ee7822",
+    "context_changed_vs_prior_audits": true
+  },
+  "prior_audits": [
+    {
+      "ref": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/audit/fr/fr-sdk-startup-0e7cde33-first/record.json",
+      "sha256": "42b929680e88328d06b3bbc9e64240e40b6eeb169c57dee47c1098e6cf57cb6c",
+      "verdict": "passed",
+      "unresolved_blocker_major": 0
+    },
+    {
+      "ref": "/Users/damian/.local-operator/sessions/22958863edd6/scratchpad/sdk-startup-inventory-20261103/audit/fr/fr-second-sdk-startup-0e7cde33/record.json",
+      "sha256": "b86620e30db7f073d4b3f05b394c92800fad4b217e06fe3b57d4259be57cf22d",
+      "verdict": "passed",
+      "unresolved_blocker_major": 0,
+      "findings": "F1 MINOR bare reflective se rattacher; O1 out-of-scope English cause observation"
+    }
+  ],
+  "mechanics": {
+    "valid_json": true,
+    "key_sets_equal_en_context_fr": true,
+    "keys_added_or_dropped": 0,
+    "placeholders_equal_name_type_order": {
+      "attach_hosting_unconfigured": [
+        "resume",
+        "error"
+      ],
+      "attach_runtime_missing": [
+        "resume"
+      ],
+      "profile_attach_failed": [
+        "profile"
+      ],
+      "tool_inventory_mismatch": [
+        "spec_tools",
+        "policy_tools"
+      ]
+    },
+    "icu_plural_select_nodes": 0,
+    "cldr_categories_owed": "none - no plural/select in source or target, so no CLDR category set applies to these four messages",
+    "literal_tokens_equal": [
+      "config.yml",
+      "spawn_session()",
+      "deliver()",
+      "mode=''own''",
+      "spec.tools",
+      "ApprovalPolicy.declared("
+    ],
+    "typography": "U+202F before : and ; in all three prose cases; U+2019 apostrophes; straight quotes only inside ICU-escaped mode=''own''",
+    "sidecar_fields": [
+      "note",
+      "role",
+      "tone"
+    ],
+    "maxCells_or_maxChars_present": false,
+    "validator": "NOT RUN - forbidden by the strict source-only constraint of this task",
+    "method": "stdlib json/hashlib/difflib/unicodedata only; no process, subprocess, project import, renderer, browser or network"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "MINOR",
+      "origin": "retained from prior FR audits",
+      "blocks_merge": false,
+      "keys": [
+        "wire.errors.sdk_startup.attach_hosting_unconfigured",
+        "wire.errors.sdk_startup.attach_runtime_missing"
+      ],
+      "current_text": "… puis/et rattachez-vous dès qu’un runtime existe.",
+      "problem": "Bare reflective se rattacher without its complement; corpus otherwise supplies one. Meaning survives; unchanged text, not re-scored.",
+      "suggested": "… puis rattachez-vous à la session dès qu’un runtime existe."
+    },
+    {
+      "id": "N1",
+      "severity": "NIT",
+      "origin": "new, delta-specific",
+      "blocks_merge": false,
+      "keys": [
+        "wire.errors.sdk_startup.attach_hosting_unconfigured"
+      ],
+      "problem": "Under the new contract the substituted cause is now French, so the composed frame repeats « plateforme d’hébergement » in two adjacent sentences (cause + remedy). Composition of two independently owned strings; not a mistranslation.",
+      "suggested": "Optional only, and would need translator re-authoring this task forbids: « Configurez-la pour cette racine (son config.yml) ».",
+      "action_requested": "none"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "F1",
+      "N1"
+    ]
+  },
+  "gaps_explicit": {
+    "rendered_fit": "NOT RUN - no cell budget invented; sidecar has no maxCells/maxChars",
+    "pseudo_locale": "NOT RUN",
+    "rtl": "not applicable to fr",
+    "runtime_or_ui_rendering": "NOT RUN - this is not runtime or whole-frame clearance",
+    "sdk_guards_live_requests": "NOT RUN",
+    "repo_validator_or_generate_check": "NOT RUN - source-only constraint",
+    "lengths_chars_en_to_fr": {
+      "attach_hosting_unconfigured": [
+        210,
+        262
+      ],
+      "attach_runtime_missing": [
+        173,
+        202
+      ],
+      "profile_attach_failed": [
+        34,
+        43
+      ],
+      "tool_inventory_mismatch": [
+        123,
+        160
+      ]
+    }
+  },
+  "audit_notes_not_execution_log": {
+    "note": "Native judgments and source inspection are notes, not execution. The only executed operations were stdlib hashing/JSON parsing and file writes in this session's scratchpad.",
+    "no_translation_edits": true,
+    "no_ledger_row": true,
+    "no_pr_comment": true
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/3fb9e3fb5be6/scratchpad/fr-reader2-sdk-startup-context-delta-20261103/report.md",
+      "sha256": "cfa36327e214ab0ff6ae7caa13eaa7df3be6fc7001d6744f75c628e1c7aa41d8",
+      "bytes": 10645
+    }
+  ],
+  "retention": {
+    "state": "own session scratch only; not promoted, no tracked bundle claimed",
+    "canonical_root_suggestion": "i18n/audits/evidence/fr/wire.errors.sdk_startup/fr2cd-3fb9e3fb/",
+    "ledger_written": false,
+    "prior_bundles_untouched": true,
+    "repo_untouched": true
+  }
+}

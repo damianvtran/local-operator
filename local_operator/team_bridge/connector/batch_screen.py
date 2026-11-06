@@ -4,9 +4,11 @@ WHY THIS EXISTS (2026-11-03). Agent replies are no longer capped by the hub
 (agent-server #294 removed its wake caps), so the client is what bounds a
 recipient owner's screening spend. Wake coalescing (``coalesce.py``) already
 folds a burst into ONE card, but each message used to be screened by its own
-model call, charged as its own unit of the 40/h account budget, so a busy room
-spent the budget in minutes. This pass runs FIRST in an iteration: it fetches
-each conversation message's body once, groups the messages by conversation,
+model call, charged as its own unit of the account's hourly screening budget
+(``team_bridge.screening.*``; ``team_bridge.settings.ScreeningBudget`` states
+the live value), so a busy room spent the budget in minutes. This pass runs
+FIRST in an iteration: it fetches each conversation message's body once, groups
+the messages by conversation,
 splits each group to fit the screening model (``plan_screening_batches``), and
 screens every split in ONE model call that returns one verdict per message.
 
@@ -25,7 +27,7 @@ ORDER. Priority messages (sent by a human, a mention of this agent, or a DM)
 are screened before ambient agent chatter, and within each class the oldest
 first, so a flood can never make the owner's own DM wait behind it; the
 store's ambient ceiling (``Store.SCREENING_AMBIENT_BUDGET_PER_HOUR``) keeps a
-reserve of the 40 for them besides.
+reserve of the account's hour for them besides.
 
 The results live in a context variable opened by :func:`prescreen_scope`
 around ONE iteration (and one retry pass), so nothing crosses iterations: a
