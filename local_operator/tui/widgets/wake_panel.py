@@ -427,7 +427,20 @@ class WakePanel(Container):
         elif idle:
             label = "idle"
         elif isinstance(due, int) and not isinstance(due, bool):
-            label = format_wake_time(due)
+            if not live_clocks and due <= now_ms:
+                # A PUBLISHED DUE TIME IS A PROMISE ONLY UNTIL IT ARRIVES (design
+                # round 2, D6; review R2-MINOR-1). The owner advances
+                # ``next_due_at`` on every quiet tick without publishing (§10.2),
+                # so once the published instant has passed it is the owner's
+                # last statement, not its next check — and `1:01 PM EST` painted
+                # at 1:13 reads as a stall. ``armed`` is the header's own word and
+                # true of the published row. The next due is deliberately NOT
+                # extrapolated from the interval: that would assert ticks this
+                # process cannot see. The label is part of the fingerprint, so
+                # the band's 1 Hz sync repaints within a second of the deadline.
+                label = "armed"
+            else:
+                label = format_wake_time(due)
         else:
             label = "waiting"
 

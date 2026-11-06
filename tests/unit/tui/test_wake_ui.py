@@ -495,16 +495,23 @@ _VIEWER_NOW_MS = 1_762_430_400_000
 
 
 class _FrozenTime:
-    """``time`` as ``wake_panel`` sees it, stopped at ``_VIEWER_NOW_MS``.
+    """``time`` as ``wake_panel`` sees it, stopped at ``now_ms``.
 
     Only ``time()`` stops; every other attribute is the real module's, so
     Textual's own clocks (``monotonic``, ``perf_counter``) keep running.
     Patching the global ``time.time`` instead would freeze them for the whole
     process, underneath an app the test is booting.
+
+    ``now_ms`` is settable so a test can step the band's clock ACROSS an
+    instant and watch one mounted panel repaint, which is the 1 Hz sync's real
+    path (design round 2, D6).
     """
 
+    def __init__(self, now_ms: int = _VIEWER_NOW_MS) -> None:
+        self.now_ms = now_ms
+
     def time(self) -> float:
-        return _VIEWER_NOW_MS / 1000
+        return self.now_ms / 1000
 
     def __getattr__(self, name: str) -> Any:
         return getattr(time, name)
@@ -974,9 +981,12 @@ class TestMonitorBandOnTheViewerHost:
     """
 
     @pytest.fixture(autouse=True)
-    def _frozen_band_clock(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Fixture and panel share ``_VIEWER_NOW_MS`` (QA round 1, Q1)."""
-        monkeypatch.setattr(wake_panel_module, "time", _FrozenTime())
+    def _frozen_band_clock(self, monkeypatch: pytest.MonkeyPatch) -> _FrozenTime:
+        """Fixture and panel share ``_VIEWER_NOW_MS`` (QA round 1, Q1); a test
+        that must cross an instant takes this clock and steps it."""
+        clock = _FrozenTime()
+        monkeypatch.setattr(wake_panel_module, "time", clock)
+        return clock
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("size", [(100, 30), (100, 48)])
@@ -1211,6 +1221,48 @@ class TestMonitorBandOnTheViewerHost:
         assert "armed" not in out, out
         assert "BLIND" not in out and "- m2 blind" not in out, out
         assert _monitor_inks(viewer) == ["warning", "warning"]
+
+    @pytest.mark.asyncio
+    async def test_a_published_due_time_gives_way_to_armed_once_it_passes(
+        self, tmp_path: Path, _frozen_band_clock: _FrozenTime
+    ) -> None:
+        """Design round 2, D6 (review R2-MINOR-1): both sides of the deadline.
+
+        One mounted panel, synced twice with the band's clock stepped across
+        the published due time: the 1 Hz sync's path, through the equality
+        guard. Before the instant the slot states it. After it, a published
+        time is the owner's last statement rather than its next check (quiet
+        ticks do not publish), so it read as a stall; the slot says ``armed``.
+        Neither side is warning ink, and nothing is extrapolated.
+        """
+        from local_operator.wakes.display import format_wake_time
+
+        due = _VIEWER_NOW_MS + 30_000
+        viewer = _viewer(
+            tmp_path,
+            [_monitor_state("m1", "watch the deploy queue", next_due_at=due, checks=3)],
+        )
+        app = _PanelHost()
+        async with app.run_test(size=(100, 30)) as pilot:
+            panel = app.query_one(WakePanel)
+            panel.sync(viewer)
+            await pilot.pause()
+            before, before_inks = str(panel._body.content), _monitor_inks(viewer)
+            _frozen_band_clock.now_ms = due + 1_000
+            panel.sync(viewer)
+            await pilot.pause()
+            after, after_inks = str(panel._body.content), _monitor_inks(viewer)
+        assert f"- m1 {format_wake_time(due)}" in before, before
+        assert "- m1 armed" not in before, before
+        assert "- m1 armed" in after, after
+        assert format_wake_time(due) not in after, after
+        assert "warning" not in before_inks + after_inks
+
+    def test_an_id_less_row_is_neither_painted_nor_answered(self, tmp_path: Path) -> None:
+        """Review round 2, R2-NIT-1: NIT-1's regression pin."""
+        viewer = _viewer(tmp_path, [_monitor_state("", "ghost"), _monitor_state("m1", "watch")])
+        assert [row[0] for row in WakePanel()._monitor_rows(viewer)] == ["m1"]
+        assert viewer.monitor_scheduler.runtime("") is None
 
     @pytest.mark.asyncio
     async def test_an_armed_but_empty_viewer_still_hides_the_band(self, tmp_path: Path) -> None:
