@@ -164,6 +164,10 @@ def merge_metadata(items: list[Any]) -> Any:
     sender_label = newest.sender_label if len(labels) == 1 else "several members"
     attachments = sum(int(item.attachments or 0) for item in items)
     note = next((item.attachments_note for item in reversed(items) if item.attachments_note), None)
+    # Files coalesce the same way: the count is a sum, and one withheld line rides the
+    # whole card because the agent reads every message of the group.
+    files = sum(int(item.files or 0) for item in items)
+    files_note = next((item.files_note for item in reversed(items) if item.files_note), None)
     return replace(
         newest,
         mention=any(item.mention for item in items),
@@ -171,6 +175,8 @@ def merge_metadata(items: list[Any]) -> Any:
         sender_label=sender_label,
         attachments=attachments,
         attachments_note=note,
+        files=files,
+        files_note=files_note,
         coalesced_message_ids=tuple(item.message_id for item in items),
         # B4b: one released message in the burst puts the provenance line on the
         # whole card, because the agent reads every message of the group.
