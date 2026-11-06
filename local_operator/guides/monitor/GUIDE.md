@@ -284,7 +284,10 @@ on it). If the session goes cold, monitors go dormant and resume with it.
 A tool that is momentarily **unreachable** (an MCP server reconnecting or
 asking for a re-auth) is not a failed check: the monitor waits on its backoff
 ladder without counting failures, and if that lasts longer than 30 minutes you
-are told once, with a matching "running again" when it recovers. The waiting
+are told once, with a matching "running again" when it recovers. An MCP server
+that dropped is retried automatically on a capped cool-down (1 minute, doubling
+to 15), so the watch waits without strikes and resumes with one delta when the
+server answers. The waiting
 is bounded: an MCP tool that never resolves does not wait forever — after 24
 hours the monitor disables itself with the same truthful notice, and because
 `unavailable_since` is persisted, re-hosting the session across wakes does not
