@@ -28,13 +28,28 @@ ship: MANIFEST.in
 ship: Makefile
 ship: local_operator/**
 ship: packaging/**
+# Workflows that can publish, sign or deploy something — the release pipeline
+# itself and every lane that reaches a store or an environment. Listed one by
+# one on purpose: a workflow joins the shipping pipeline through its trigger,
+# secrets and permissions, not by being named, so there is no
+# `.github/workflows/**` harness glob for a NEW workflow to hide behind.
 ship: .github/workflows/publish.yml
 ship: .github/workflows/release-gate.yml
 ship: .github/workflows/ci.yml
+ship: .github/workflows/chrome-web-store.yml
+ship: .github/workflows/chrome-web-store-promote.yml
+ship: .github/workflows/extension.yml
+ship: .github/workflows/mobile-web.yml
+ship: .github/workflows/helpdesk.yml
+# Scheduled `actions: write` on every queued run: it can cancel a release run.
+ship: .github/workflows/reap-superseded.yml
 
 # Harness: paths that never reach the wheel or the published release.
 harness: scripts/**
 harness: benchmarks/**
 harness: evals/**
 harness: fixtures/**
-harness: .github/workflows/**
+# The only workflow here, and by EXACT filename: a verifier with no secrets, no
+# publish step and no environment. The proof rejects any wildcard harness glob
+# under `.github/` (exit 2), so an unlisted — hence new — workflow is product.
+harness: .github/workflows/windows-anchor.yml

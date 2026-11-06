@@ -105,10 +105,16 @@ R..H takes no `### Agent review — round N` when
 modified, deleted, both sides of a rename, mode) under a `harness:` glob; nothing
 ship-reachable. That proves the one invariant: *no byte the shipping pipeline
 consumes differs between R and H*. Instead, ONE `### Harness delta check — R..H`
-at the merge gate by an independent reviewer reading only for gate weakening
-(deleted or loosened assertions, skips, widened tolerances, `continue-on-error`, a
-probe that cannot fail), plus the script output the merger re-runs; QA is
-retained, shipped bytes unchanged. A failing condition is a normal delta round.
+at the merge gate by an independent reviewer reading for gate weakening (deleted
+or loosened assertions, skips, widened tolerances, `continue-on-error`, a probe
+that cannot fail) AND for any harness change that runs with release triggers,
+secrets, signing or publishing, plus the script output the merger re-runs; QA
+retained, shipped bytes unchanged. Anything unreadable, unresolvable or
+unclassifiable is a round or exit 2, never a pass.
+
+Honest yield: it exempts only manifest-declared harness files nothing in the ship
+closure names — a reachability classifier made safe by failing closed, not a proof
+that a harness change cannot alter behaviour.
 
 **Split when the harness outgrows the feature.** At each review request compare
 added lines under harness globs with all others (`--split` prints both); harness
@@ -165,12 +171,13 @@ correctness, security or regression risk. MINOR/NIT do not force another round.
   main (`scripts/rebase_proof.py`) keeps rounds fresh on its proof, and so does
   a harness-only delta (`scripts/harness_delta_proof.py`, above) — that is the
   ONLY extra exemption. A clean stream is NOT re-run when the delta misses its
-  surface: a CI-fix or comment-only commit after clean rounds gets at most a
-  delta code check, no QA/design/UX round. `tests/` is product here: a test
-  change that the deliverable's manifest does not declare harness opens a
-  delta round, because weakening a test weakens the gate. Executable code needs
-  a delta round plus QA re-testing prior FAIL rows and the surfaces it moved;
-  other rows stay `retained (<sha>)`.
+  surface: a test-only, docs-only, CI-fix or comment-only commit after clean
+  rounds gets at most a delta code check, no QA/design/UX round. `tests/` is
+  product here, so a test change never takes the harness-only carve-out —
+  weakening a test weakens the gate — and it still needs only that delta code
+  check, not a numbered round. Executable code needs a delta round plus QA
+  re-testing prior FAIL rows and the surfaces it moved; other rows stay
+  `retained (<sha>)`.
 - **Hygiene.** Rounds only on pushed heads; one comment per stream per round; no
   `re-pin`/`addendum` comments. Amend your own round (`gh api -X PATCH`) only
   for provenance/typos, before any remediation reply; never change `Scope:`.

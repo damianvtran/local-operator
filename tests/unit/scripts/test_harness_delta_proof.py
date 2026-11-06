@@ -31,7 +31,7 @@ MANIFEST = """\
 harness: scripts/ci/**
 harness: src/testing/**
 harness: e2e/**
-harness: .github/workflows/**
+harness: .github/workflows/native.yml
 ship: .github/workflows/release.yml
 ship: app/**
 ship: src/**
@@ -299,3 +299,255 @@ def test_split_numbers_on_known_fixture(tmp_path: Path) -> None:
     result = _run(repo, reviewed, head, "--split")
     assert "Added lines vs merge-base: product 3, harness 4" in result.stdout
     assert "SPLIT" in result.stdout and "NO SPLIT" not in result.stdout
+
+
+# --- round-1 findings: each attack reproduced first, then refused -------------
+# Every case below is a constructor the proof must not read as "harness only".
+# They fail closed by design: an input the proof cannot classify with certainty
+# is a round, and an input it cannot read at all is exit 2 (never a pass).
+
+GITHUB_EXACT = MANIFEST.replace(
+    "harness: .github/workflows/native.yml", "harness: .github/workflows/native.yml"
+)
+
+
+def test_gitlink_bump_under_a_ship_path_opens_a_round(tmp_path: Path, monkeypatch) -> None:
+    """R1: `.gitmodules ignore = all` used to hide the whole diff entry."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    sub = "1111111111111111111111111111111111111111"
+    _commit(
+        repo,
+        {
+            ".github/harness-paths": MANIFEST,
+            "src/lib.ts": "export const x = 1;\n",
+            ".gitmodules": '[submodule "src/vendor"]\n\tpath = src/vendor\n\tignore = all\n',
+        },
+        "base",
+    )
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{sub},src/vendor")
+    _git(repo, "commit", "-q", "-m", "add gitlink")
+    reviewed = _git(repo, "rev-parse", "HEAD")
+    bumped = "2222222222222222222222222222222222222222"
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{bumped},src/vendor")
+    _git(repo, "commit", "-q", "-m", "bump gitlink")
+    head = _git(repo, "rev-parse", "HEAD")
+    assert _git(repo, "diff", "--name-only", reviewed, head) == ""  # the trap
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "src/vendor" in result.stdout and "gitlink" in result.stdout
+
+
+def test_ship_file_with_a_newline_in_its_path_still_names_payload(tmp_path: Path) -> None:
+    """R2: `cat-file --batch` keyed by path misparses a newline and failed open."""
+    repo, reviewed = _setup(tmp_path)
+    reviewed = _commit(
+        repo,
+        {"src/a\nb.py": "open('scripts/payload.sh').read()\n", "scripts/payload.sh": "echo 1\n"},
+        "feat: newline path",
+    )
+    head = _commit(repo, {"scripts/payload.sh": "echo 2\n"}, "chore: payload")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "scripts/payload.sh" in result.stdout
+
+
+def test_ship_symlink_to_a_harness_directory_pulls_its_contents(tmp_path: Path) -> None:
+    """R3: a ship symlink into a harness directory hid every file under it."""
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(
+        repo,
+        {"fixtures/zzpay/PAYLOAD.md": "p1\n", "src/lib.ts": "export const x = 2;\n"},
+        "feat: fixture",
+    )
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "zzpay").symlink_to("../fixtures/zzpay")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "feat: ship symlink")
+    reviewed = _git(repo, "rev-parse", "HEAD")
+    head = _commit(repo, {"fixtures/zzpay/PAYLOAD.md": "p2\n"}, "chore: payload")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "fixtures/zzpay/PAYLOAD.md" in result.stdout
+
+
+def test_ship_symlink_that_escapes_the_repo_opens_a_round(tmp_path: Path) -> None:
+    repo, _ = _setup(tmp_path)
+    (repo / "src" / "escape").symlink_to("/etc/hosts")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "feat: escaping symlink")
+    reviewed = _git(repo, "rev-parse", "HEAD")
+    head = _commit(repo, {"e2e/probe.ts": "p\n"}, "test: probe")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "symlink" in result.stdout
+
+
+def test_wildcard_harness_glob_under_github_is_rejected(tmp_path: Path) -> None:
+    """Q1/M3: a new workflow must not be exemptable by a wildcard."""
+    repo, reviewed = _setup(
+        tmp_path,
+        manifest=MANIFEST.replace(
+            "harness: .github/workflows/native.yml", "harness: .github/workflows/**"
+        ),
+    )
+    head = _commit(repo, {"e2e/probe.ts": "p\n"}, "test: probe")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert ".github" in result.stderr and "exact" in result.stderr
+
+
+def test_added_workflow_is_product_with_exact_filenames(tmp_path: Path) -> None:
+    repo, reviewed = _setup(tmp_path)
+    head = _commit(
+        repo,
+        {".github/workflows/new-release.yml": "on: release\npermissions:\n  contents: write\n"},
+        "ci: new workflow",
+    )
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert ".github/workflows/new-release.yml" in result.stdout
+
+
+def test_harness_test_file_guarding_ship_code_is_product(tmp_path: Path) -> None:
+    """Q-M1: a test under a harness glob that asserts on shipped code is product."""
+    repo, reviewed = _setup(tmp_path)
+    head = _commit(
+        repo,
+        {"e2e/lib.spec.ts": "import { x } from '../src/lib';\nexpect(x).toBe(1);\n"},
+        "test(e2e): assert ship code",
+    )
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "e2e/lib.spec.ts" in result.stdout
+    # A harness test that names nothing shipped stays exempt. Branch from the
+    # reviewed head, not from `head`: a delta measured from `reviewed` would
+    # still carry `lib.spec.ts`, which is product by the rule under test.
+    _git(repo, "checkout", "-q", "--detach", reviewed)
+    clean = _commit(repo, {"e2e/plain.spec.ts": "expect(1).toBe(1);\n"}, "test(e2e): plain")
+    assert _run(repo, reviewed, clean).returncode == 0
+
+
+def test_tsconfig_alias_reference_is_ship_reachable(tmp_path: Path) -> None:
+    """M1/Q3: `@/testing/x` resolves through tsconfig paths, not the token."""
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(
+        repo,
+        {
+            "tsconfig.json": '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}\n',
+            "src/boot.ts": "import { h } from '@/testing/helper';\nexport const b = h;\n",
+        },
+        "feat: alias import",
+    )
+    head = _commit(repo, {"src/testing/helper.ts": "export const h = 2;\n"}, "test: tweak")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "src/testing/helper.ts" in result.stdout
+
+
+def test_alias_specifier_matches_by_suffix_without_tsconfig(tmp_path: Path) -> None:
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(
+        repo,
+        {
+            "src/boot2.ts": "const m = await import('@/testing/helper');\nexport default m;\n",
+            "src/testing/helper.ts": "export const h = 1;\n",
+        },
+        "feat: suffix import",
+    )
+    head = _commit(repo, {"src/testing/helper.ts": "export const h = 2;\n"}, "test: tweak")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "src/testing/helper.ts" in result.stdout
+
+
+def test_python_absolute_import_of_harness_module_is_ship_reachable(tmp_path: Path) -> None:
+    """M2: `import helper` reaches a harness `helper.py` conservatively."""
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(
+        repo,
+        {"src/app.py": "import helper\n\nprint(helper)\n", "src/testing/helper.py": "v = 1\n"},
+        "feat: absolute import",
+    )
+    head = _commit(repo, {"src/testing/helper.py": "v = 2\n"}, "chore: tweak")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "src/testing/helper.py" in result.stdout
+
+
+def test_dot_directory_reference_and_directory_spelling_are_matched(tmp_path: Path) -> None:
+    """Q2/R4: `raw.strip('./')` turned `.ci/probe.sh` into `ci/probe.sh`."""
+    repo, _ = _setup(
+        tmp_path,
+        manifest=MANIFEST + "harness: .ci/**\nship: .ci/probe.sh\n",
+    )
+    reviewed = _commit(
+        repo,
+        {"src/runner.py": "CMD = '.ci/probe.sh'\n", ".ci/probe.sh": "echo 1\n"},
+        "feat: dot dir",
+    )
+    head = _commit(repo, {".ci/probe.sh": "echo 2\n"}, "chore: dot dir probe")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert ".ci/probe.sh" in result.stdout
+
+    (tmp_path / "b").mkdir()
+    repo2, _ = _setup(tmp_path / "b", manifest=MANIFEST + "harness: .ci/**\n")
+    reviewed2 = _commit(
+        repo2,
+        {"src/runner2.py": "CMD = 'bash .ci/'\n", ".ci/probe.sh": "echo 1\n"},
+        "feat: dot dir",
+    )
+    head2 = _commit(repo2, {".ci/probe.sh": "echo 2\n"}, "chore: dot dir probe")
+    result2 = _run(repo2, reviewed2, head2)
+    assert result2.returncode == 1, result2.stdout + result2.stderr
+    assert ".ci/probe.sh" in result2.stdout
+
+
+def test_gitlab_manifest_path_is_found(tmp_path: Path) -> None:
+    repo, reviewed = _setup(tmp_path, manifest=None)
+    _commit(repo, {".gitlab/harness-paths": MANIFEST}, "chore: gitlab manifest")
+    reviewed = _commit(repo, {"src/lib.ts": "export const x = 4;\n"}, "feat: product")
+    head = _commit(repo, {"e2e/probe.ts": "p\n"}, "test: probe")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ".gitlab/harness-paths" in result.stdout
+
+
+def test_output_states_the_invariant_and_the_fail_closed_rules(tmp_path: Path) -> None:
+    repo, reviewed = _setup(tmp_path)
+    head = _commit(repo, {"e2e/probe.ts": "p\n"}, "test: probe")
+    out = _run(repo, reviewed, head).stdout
+    assert "no byte the shipping pipeline consumes differs" in out
+    assert "fail-closed" in out.lower()
+
+
+def test_deleted_harness_test_is_judged_not_crashed(tmp_path: Path) -> None:
+    """A deletion carries the all-zero object id on the head side.
+
+    Reading that id made the proof exit 2 ("object 000… is missing") instead of
+    returning a verdict — found replaying PR #156 rounds 27 and 36. A deleted
+    test that guarded shipped code is product; one that guarded nothing is
+    harness.
+    """
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(
+        repo,
+        {
+            "e2e/guarded.spec.ts": "import { x } from '../src/lib';\nexpect(x).toBe(1);\n",
+            "e2e/plain.spec.ts": "expect(1).toBe(1);\n",
+        },
+        "test(e2e): two specs",
+    )
+    head = _commit(repo, {"e2e/guarded.spec.ts": None}, "test(e2e): drop the guard")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "guards ship file" in result.stdout
+
+    (tmp_path / "b").mkdir()
+    repo2, reviewed2 = _setup(tmp_path / "b")
+    reviewed2 = _commit(repo2, {"e2e/plain.spec.ts": "expect(1).toBe(1);\n"}, "test(e2e): plain")
+    head2 = _commit(repo2, {"e2e/plain.spec.ts": None}, "test(e2e): drop plain")
+    result2 = _run(repo2, reviewed2, head2)
+    assert result2.returncode == 0, result2.stdout + result2.stderr
