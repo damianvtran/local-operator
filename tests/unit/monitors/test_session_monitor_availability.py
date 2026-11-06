@@ -13,6 +13,7 @@ session is the shared ``make_session`` fixture.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -494,6 +495,29 @@ async def test_a_manager_whose_discovery_did_not_complete_is_unavailable(tmp_pat
         assert outcome["error"] == MCP_DISCOVERY_FAILED_DETAIL
     finally:
         await session.dispose()
+
+
+def test_the_discovery_failed_remedy_names_only_commands_that_exist() -> None:
+    """The sentence is the operator's only route out, so every command it names
+    must be one the surface accepts. Review round 2 caught the first version
+    sending the operator to ``/mcp reload``, which the terminal answers with
+    "unknown mcp subcommand": ``/mcp`` has no such verb. The copy must also
+    survive the stall notice's clip whole, or the remedy is the part cut off.
+    """
+    from local_operator.monitors.delivery import NOTICE_ERROR_CHARS
+    from local_operator.session.frontend_state import MCP_SUBCOMMANDS
+    from local_operator.slash_commands import SLASH_COMMANDS
+
+    detail = MCP_DISCOVERY_FAILED_DETAIL
+    registered = {command.name for command in SLASH_COMMANDS}
+    named = re.findall(r"(?<![\w/])/(\w+)(?: (\w+))?", detail)
+    assert named, "the remedy must name a command, not only a cause"
+    for command, verb in named:
+        assert command in registered, f"/{command} is not a registered slash command"
+        if command == "mcp":
+            assert verb in MCP_SUBCOMMANDS, f"/mcp {verb} is not a verb /mcp accepts"
+    assert "/mcp reload" not in detail
+    assert len(detail) < NOTICE_ERROR_CHARS
 
 
 @pytest.mark.asyncio

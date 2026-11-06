@@ -3319,13 +3319,25 @@ MCP_NOT_READY_DETAIL = (
 #: itself: ``discover_and_connect`` runs once per manager, and the raise in
 #: ``mcp/__init__.py`` returns before ``_connect_round`` assigns ``_configs``.
 #: (The other writer, ``connect_configured_server``, fills one entry on an
-#: explicit login and runs no round.) What can end this state is an explicit
-#: ``manager.reload()`` — the desktop MCP panel's reload, or the reconnect after
-#: ``/mcp add``/``/mcp remove`` — or a relaunch that discovers afresh; when the
-#: record itself is refreshed is the KNOWN LIMIT on
+#: explicit login and runs no round.)
+#:
+#: It names ONLY routes that re-run discovery for THIS session. The app's Reload
+#: (a row control on its Settings → Integrations page) runs ``manager.reload()``
+#: on the owner's live manager (``MCPDesktop``, behind
+#: ``POST /v1/desktop/sessions/{id}/mcp``), wherever the session is hosted.
+#: ``/reload`` relaunches the terminal with ``--resume``, which rediscovers only
+#: when that terminal OWNS the session: a viewer of a session hosted elsewhere
+#: relaunches itself and leaves the owner's manager untouched ("runtime work
+#: continues"), hence the qualifier. There is no ``/mcp reload`` verb
+#: (``MCP_SUBCOMMANDS``), and a headless runtime has no command for this. When
+#: the record itself is refreshed is the KNOWN LIMIT on
 #: ``Session._mcp_discovery_incomplete``. Telling the operator to wait would be
-#: a promise no code keeps.
-MCP_DISCOVERY_FAILED_DETAIL = "MCP discovery failed at startup — run /mcp reload to retry it"
+#: a promise no code keeps. Well under the stall notice's 200-character clip
+#: (``monitors.delivery.NOTICE_ERROR_CHARS``), so the remedy is never cut off.
+MCP_DISCOVERY_FAILED_DETAIL = (
+    "MCP discovery failed at startup — retry it with Reload in the app "
+    "(Settings → Integrations), or /reload if this session runs in your terminal"
+)
 
 
 class Session:
