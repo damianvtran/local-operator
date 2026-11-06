@@ -1466,10 +1466,13 @@ class AttachedSession:
         self.wake_scheduler = SnapshotWakeScheduler()
         #: The band's monitor half reads this exactly like the live scheduler
         #: (``.monitors`` / ``.runtime(id).counters``); the runtime's scheduler
-        #: is in-process only, so a viewer answers from the canonical rows the
-        #: owner publishes. Without it the band finds no scheduler, reports no
-        #: monitors, and hides — an armed watch looking absent on the one
-        #: surface built to show it.
+        #: is in-process only, so a viewer — and the TUI opens every session as
+        #: one (``cli.py``'s ``viewer_factory``) — answers from the canonical
+        #: rows the owner publishes. Without it the band finds no scheduler,
+        #: reports no monitors, and hides: an armed watch looking absent on the
+        #: one surface built to show it. The snapshot also declares
+        #: ``clocks_are_published``, so the band paints what the owner reported
+        #: instead of judging a frozen deadline against its own clock.
         self.monitor_scheduler = SnapshotMonitorScheduler()
         self.mcp_manager = SnapshotMcpManager()
         # The full-page subagent view's hierarchy keys read this facade; built

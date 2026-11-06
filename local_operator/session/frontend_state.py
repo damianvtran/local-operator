@@ -5820,7 +5820,23 @@ class SnapshotMonitorScheduler:
     A row the snapshot does not hold gets ``None`` from :meth:`runtime`, exactly
     as the live scheduler answers for an unknown id: inventing counters here
     would let a viewer paint health the owner never reported.
+
+    ``clocks_are_published`` is the second half of that honesty, and it is the
+    fix for agent review round 1's MAJOR: a reader must not judge these rows
+    against its own clock. The owner republishes a row only on a change event
+    (§10.2 — a 30 s monitor would otherwise rewrite the index 2,880×/day), so
+    ``next_due_at``, ``checks`` and ``last_check_at`` here are the values as of
+    that event, while the viewer's clock keeps moving. Comparing them to ``now``
+    once called a healthy quiet watch ``idle`` in warning ink minutes after
+    arming, and could raise a ``never checked`` the owner never reported.
     """
+
+    #: TRUE: every row this facade serves is a PUBLISHED copy, so a deadline in
+    #: it is the last statement the owner made rather than something this
+    #: process can compare to ``now``. Declared as a capability on the facade
+    #: (not inferred from the class name) so the band's reader asks the object
+    #: that knows; see ``WakePanel._monitor_rows``.
+    clocks_are_published = True
 
     def __init__(self, values: Iterable[MonitorState] = ()) -> None:
         self.replace(values)
@@ -5831,8 +5847,14 @@ class SnapshotMonitorScheduler:
         # (``WakePanel._monitor_fingerprint``). A narrower dict would silently
         # drop the health keys — ``blind``, ``consecutive_failures`` — that live
         # only in counters, turning a stalled watch into a quiet one.
-        rows = [value.model_dump() for value in values]
-        self._rows: dict[str, dict[str, Any]] = {str(row.get("id", "")): row for row in rows}
+        #
+        # AN ID-LESS ROW IS DROPPED rather than painted: the paint path keys on
+        # ``id`` (``- <id> …``), and keying ``_rows`` by the empty string would
+        # let one such row answer ``runtime()`` for another (agent review round
+        # 1, NIT-1). The arm path cannot produce one; a future field shape
+        # could.
+        rows = [row for row in (value.model_dump() for value in values) if str(row.get("id", ""))]
+        self._rows: dict[str, dict[str, Any]] = {str(row["id"]): row for row in rows}
         self.monitors = [SimpleNamespace(**row) for row in rows]
 
     def runtime(self, monitor_id: str) -> Any | None:

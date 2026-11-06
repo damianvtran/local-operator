@@ -29,6 +29,7 @@ from local_operator.session.frontend_state import (
     MonitorState,
 )
 from local_operator.tui.glyphs import tool_icon
+from local_operator.tui.widgets import wake_panel as wake_panel_module
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import (
     COLLAPSE_HINT,
@@ -485,22 +486,46 @@ async def _paint(
         return bool(panel.display), str(panel._body.content)
 
 
+#: THE ONE INSTANT the viewer-band tests run at (QA round 1, Q1). The fixtures
+#: used to stamp ``time.time()`` while the panel read its own ``time.time()``
+#: after an app boot, so a row's distance from its deadline depended on host
+#: load. Both read this value now: the fixtures directly, the panel through
+#: ``_FrozenTime`` (``TestMonitorBandOnTheViewerHost._frozen_band_clock``).
+_VIEWER_NOW_MS = 1_762_430_400_000
+
+
+class _FrozenTime:
+    """``time`` as ``wake_panel`` sees it, stopped at ``_VIEWER_NOW_MS``.
+
+    Only ``time()`` stops; every other attribute is the real module's, so
+    Textual's own clocks (``monotonic``, ``perf_counter``) keep running.
+    Patching the global ``time.time`` instead would freeze them for the whole
+    process, underneath an app the test is booting.
+    """
+
+    def time(self) -> float:
+        return _VIEWER_NOW_MS / 1000
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
 def _monitor_state(monitor_id: str, name: str, **fields: Any) -> MonitorState:
     """One canonical monitor row, as the runtime publishes it on the wire.
 
-    Built from the SAME projection the owner's scheduler produces
-    (``MonitorScheduler.index_rows``: the spec's identity joined with its
-    health counters), which is what makes this a fixture of the wire and not
-    of the panel's hopes.
+    The key set of ``MonitorScheduler.index_rows`` (the spec's identity joined
+    with its health counters). Hand-built, so it pins the HOP and not the
+    projection: ``_PublishingOwner`` takes a real scheduler's rows through the
+    owner's publish path (agent review round 1, MINOR-2).
     """
-    now = int(time.time() * 1000)
     row: dict[str, Any] = {
         "id": monitor_id,
         "name": name,
         "tool": "mcp__slack_read_channel",
         "every_ms": 30_000,
-        "next_due_at": now + 30_000,
-        "last_check_at": now - 1_000,
+        "created_at": _VIEWER_NOW_MS - 120_000,
+        "next_due_at": _VIEWER_NOW_MS + 30_000,
+        "last_check_at": _VIEWER_NOW_MS - 1_000,
         "checks": 1,
         "deliveries": 1,
     }
@@ -508,12 +533,23 @@ def _monitor_state(monitor_id: str, name: str, **fields: Any) -> MonitorState:
     return MonitorState.model_validate(row)
 
 
+def _monitor_inks(session: Any) -> list[str]:
+    """The ink of each monitor row the band paints for ``session``.
+
+    Read from ``WakePanel._monitor_rows`` — the fingerprint the paint is built
+    from — so "no warning ink" is asserted on the row itself, not inferred from
+    the header's wording. Pure: no app is booted.
+    """
+    return [row[4] for row in WakePanel()._monitor_rows(session)]
+
+
 def _viewer(tmp_path: Path, monitors: list[MonitorState] | None = None) -> AttachedSession:
     """The host object the TUI really holds: a VIEWER facade.
 
-    `lop` binds a viewer for every local user (``ViewerSessionProtocol``), never
-    the runtime ``Session`` that owns the monitor scheduler. Building the
-    panel's session any other way tests a host production does not construct.
+    The TUI opens every session as one (``cli.py``'s ``viewer_factory``: "a
+    VIEWER, never an owner"); the runtime ``Session`` and its scheduler live in
+    another process. Building the panel's session any other way tests a host
+    the TUI does not construct.
     """
 
     async def never() -> None:
@@ -840,14 +876,89 @@ class TestMonitorBand:
             assert panel._shown is first  # same object — no repaint happened
 
 
+class _PublishingOwner:
+    """A REAL ``MonitorScheduler`` and exactly what its owner publishes.
+
+    A viewer never reads the owner's scheduler: it holds what the owner
+    PUBLISHED, which is the full state it receives on attach plus one row set
+    per ``on_change`` (§10.2). Both are recorded here through
+    ``frontend_state._monitor_state`` — literally the call
+    ``refresh_from_session`` fills canonical ``monitors`` with — so a viewer
+    built from ``published[-1]`` sees what a real one sees: everything an
+    event did, nothing a quiet tick did (agent review round 1, MINOR-2:
+    hand-built rows pin the hop, never the publish path).
+
+    One check per ``tick``, five minutes apart so the unavailable retry ladder
+    is always due, on a fake clock that ends before ``_VIEWER_NOW_MS``.
+    """
+
+    def __init__(self, tmp_path: Path) -> None:
+        from local_operator.monitors.scheduler import MonitorScheduler
+        from local_operator.monitors.settings import MonitorSettings
+        from local_operator.monitors.spec import MonitorSpec
+        from local_operator.session.frontend_state import _monitor_state as project
+
+        self._project = project
+        self._scripted: list[dict[str, Any]] = []
+        self.now = _VIEWER_NOW_MS - 3_600_000
+        self.published: list[list[MonitorState]] = []
+        self.scheduler = MonitorScheduler(
+            now=lambda: self.now,
+            config_dir=tmp_path / "owner-cfg",
+            # A FRESH session id per owner: the counters file is per session, and
+            # a second owner in one tmp_path would load the first one's later due
+            # stamps and run no tick (measured: ``unavailable_since == 0``).
+            session_id=f"owner-{time.time_ns()}",
+            settings=MonitorSettings(),
+            validate=lambda tool, args: None,
+            run_check=self._check,
+            deliver=self._no_op,
+            persist=self._no_op,
+            on_change=self._publish,
+            uniform=lambda low, high: low,
+        )
+        self.scheduler.load(
+            [
+                MonitorSpec(
+                    id="m1",
+                    name="watch the deploy queue",
+                    tool="bash",
+                    arguments={"command": "true"},
+                    every_ms=30_000,
+                    created_at=self.now,
+                )
+            ]
+        )
+        self._publish()  # what a viewer receives when it attaches
+
+    @staticmethod
+    async def _no_op(*_: Any, **__: Any) -> None:
+        return None
+
+    async def _check(self, _spec: Any) -> Any:
+        return self._scripted.pop(0)
+
+    def _publish(self) -> None:
+        self.published.append(self._project(self.scheduler))
+
+    async def tick(self, outcome: dict[str, Any]) -> None:
+        from tests.unit.monitors.support import drain_checks
+
+        self._scripted.append(outcome)
+        self.now += 300_000
+        await self.scheduler.pump()
+        await drain_checks(self.scheduler)
+        assert not self._scripted, "the tick ran no check"
+
+
 class TestMonitorBandOnTheViewerHost:
     """The band on the object the TUI actually holds — the shipped defect.
 
     Design rounds measured it three times: with a monitor armed, ticking AND
     delivering, the band painted no monitor row at 100x30 or 100x48, in three
-    different sessions. The cause is the HOST, not the row builder: `lop`
-    binds a viewer facade (``AttachedSession``) to the TUI for every local
-    user, the monitor scheduler is in-process only, so
+    different sessions. The cause is the HOST, not the row builder: the TUI
+    opens every session as a viewer facade (``AttachedSession``, built by
+    ``cli.py``'s ``viewer_factory``), the monitor scheduler is in-process only, so
     ``getattr(session, "monitor_scheduler", None)`` answered ``None`` and the
     band hid the watch it exists to show.
 
@@ -855,7 +966,17 @@ class TestMonitorBandOnTheViewerHost:
     ``monitor_scheduler`` — a host production never builds — which is why the
     monitor section could read as covered while the shipped band painted
     nothing. These drive the real facade, so the hop itself is under test.
+
+    THE SECOND HALF is that the published row is not a live reading: the owner
+    writes it on a change event and never on a quiet tick (§10.2), so a viewer
+    must paint what was published rather than judge it against its own clock
+    (agent review round 1, MAJOR-1). Both directions are pinned below.
     """
+
+    @pytest.fixture(autouse=True)
+    def _frozen_band_clock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fixture and panel share ``_VIEWER_NOW_MS`` (QA round 1, Q1)."""
+        monkeypatch.setattr(wake_panel_module, "time", _FrozenTime())
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("size", [(100, 30), (100, 48)])
@@ -871,19 +992,225 @@ class TestMonitorBandOnTheViewerHost:
     @pytest.mark.asyncio
     async def test_a_row_appears_before_the_first_delivery(self, tmp_path: Path) -> None:
         """A monitor armed a minute ago is exactly the row a user is looking
-        for, so it must not wait for a delivery to become visible."""
+        for, so it must not wait for a delivery to become visible — and it may
+        NOT claim "never checked": ``checks == 0`` in a published row says no
+        check had been PUBLISHED, which is not the same fact, and the owner's
+        next quiet tick moves it without publishing anything (MAJOR-1)."""
         viewer = _viewer(
             tmp_path,
             [
                 _monitor_state(
-                    "m1", "watch the deploy queue", checks=0, deliveries=0, last_check_at=0
+                    "m1",
+                    "watch the deploy queue",
+                    # Armed ten minutes ago and published once, AT the arm: the
+                    # baseline and every quiet tick since publish nothing, so
+                    # this is the row a viewer holds for a healthy quiet watch.
+                    created_at=_VIEWER_NOW_MS - 600_000,
+                    next_due_at=_VIEWER_NOW_MS - 598_000,
+                    checks=0,
+                    deliveries=0,
+                    last_check_at=0,
                 )
             ],
         )
         displayed, out = await _paint_host(viewer)
         assert displayed is True
-        assert "m1" in out, out
-        assert "never checked" in out, out
+        assert "m1" in out and "watch the deploy queue" in out, out
+        assert "never checked" not in out, out
+        assert "needs attention" not in out, out
+        assert "warning" not in _monitor_inks(viewer)
+
+    @pytest.mark.asyncio
+    async def test_a_published_row_past_its_deadline_is_not_called_idle(
+        self, tmp_path: Path
+    ) -> None:
+        """MAJOR-1's reproduction, inverted.
+
+        ``next_due_at`` is advanced by EVERY tick and published only on a
+        change event, so on the viewer it falls behind the wall clock by
+        arithmetic: ``is_idle`` fires at ``max(2×every, 5 min)``. Before this
+        fix the row below painted ``Monitors · 1 of 1 needs attention`` and
+        ``- m1 idle`` in warning ink for a watch that was ticking normally.
+        """
+        stale = _VIEWER_NOW_MS - 600_000
+        viewer = _viewer(
+            tmp_path,
+            [
+                _monitor_state(
+                    "m1",
+                    "watch the deploy queue",
+                    next_due_at=stale,
+                    last_check_at=stale,
+                    checks=12,
+                    deliveries=1,
+                )
+            ],
+        )
+        displayed, out = await _paint_host(viewer)
+        assert displayed is True
+        assert "needs attention" not in out, out
+        assert "idle" not in out, out
+        assert "m1" in out and "watch the deploy queue" in out, out
+        assert "warning" not in _monitor_inks(viewer)
+
+    @pytest.mark.asyncio
+    async def test_a_stale_quiet_row_paints_its_counts_not_an_alarm(self, tmp_path: Path) -> None:
+        """The healthy quiet watch — the row the frame in the PR shows.
+
+        ``0 deliveries`` is the ordinary state of a watch on something that has
+        not changed, so the shared hint is NEUTRAL (muted) by design; the old
+        clock comparison replaced it with ``idle`` and turned the header into
+        ``1 of 1 needs attention``.
+        """
+        stale = _VIEWER_NOW_MS - 600_000
+        viewer = _viewer(
+            tmp_path,
+            [
+                _monitor_state(
+                    "m1",
+                    "watch the deploy queue",
+                    next_due_at=stale,
+                    last_check_at=stale,
+                    checks=12,
+                    deliveries=0,
+                )
+            ],
+        )
+        displayed, out = await _paint_host(viewer)
+        assert displayed is True
+        assert "12 checks, 0 deliveries" in out, out
+        assert "needs attention" not in out, out
+        assert "idle" not in out, out
+        # The neutral hint keeps its MUTED ink: present, legible, not an alarm.
+        assert _monitor_inks(viewer) == ["muted"]
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_published_row_still_paints_its_health(self, tmp_path: Path) -> None:
+        """The other direction: declining the clock must not silence the facts
+        the owner DID publish. A fresh row keeps its health sentence."""
+        viewer = _viewer(
+            tmp_path,
+            [
+                _monitor_state(
+                    "m1",
+                    "watch the deploy queue",
+                    next_due_at=_VIEWER_NOW_MS + 30_000,
+                    checks=12,
+                    deliveries=0,
+                )
+            ],
+        )
+        _, out = await _paint_host(viewer)
+        assert "12 checks, 0 deliveries" in out, out
+        assert "needs attention" not in out, out
+        assert _monitor_inks(viewer) == ["muted"]
+
+    @pytest.mark.asyncio
+    async def test_a_stale_failure_count_is_history_not_an_alarm(self, tmp_path: Path) -> None:
+        """``consecutive_failures`` is reset by the first quiet success and
+        publishes nothing on either move, so a viewer's copy can be a recovery
+        behind. The row keeps the count it was given and stops calling it a
+        live alarm (MAJOR-1: the band must not claim what it cannot see move).
+        The ladder's TERMINAL state publishes as an event and keeps its ink."""
+        viewer = _viewer(
+            tmp_path,
+            [
+                _monitor_state(
+                    "m1",
+                    "watch the deploy queue",
+                    next_due_at=_VIEWER_NOW_MS + 30_000,
+                    checks=9,
+                    deliveries=3,
+                    consecutive_failures=2,
+                )
+            ],
+        )
+        _, out = await _paint_host(viewer)
+        assert "2 failed" in out, out
+        assert "needs attention" not in out, out
+        assert _monitor_inks(viewer) == ["muted"]
+
+    @pytest.mark.asyncio
+    async def test_a_blind_watch_crosses_the_publish_path(self, tmp_path: Path) -> None:
+        """MINOR-2: a REAL scheduler's row, through the owner's publish path,
+        paints the owner's own state word on the viewer."""
+        owner = _PublishingOwner(tmp_path)
+        await owner.tick({"text": "A", "error": None})  # the baseline publishes nothing
+        await owner.tick({"error": "its full result is gone", "kind": "blind"})
+        assert len(owner.published) == 2, "the attach state, then the blind event"
+        viewer = _viewer(tmp_path, owner.published[-1])
+        displayed, out = await _paint_host(viewer)
+        assert displayed is True and "- m1 blind" in out, out
+        assert _monitor_inks(viewer) == ["warning"]
+
+    @pytest.mark.asyncio
+    async def test_a_stall_paints_from_its_opening_edge_until_its_closing_edge(
+        self, tmp_path: Path
+    ) -> None:
+        """A stall reaches the viewer by its two EDGES, and only by them.
+
+        ``unavailable_since`` is written on a tick and a tick publishes nothing
+        (§10.2), so before the scheduler published the edges a viewer's row
+        said the watch was fine for the whole 24 h episode. At 88a6e285673 this
+        fails on the first ``published`` count: the opening edge never left the
+        owner. The repeat tick publishes nothing; the first success clears it.
+        """
+        owner = _PublishingOwner(tmp_path)
+        await owner.tick({"text": "A", "error": None})
+        await owner.tick({"error": "no such tool", "kind": "unavailable"})
+        await owner.tick({"error": "no such tool", "kind": "unavailable"})
+        assert len(owner.published) == 2, "the opening edge, and no tick"
+        stalled = _viewer(tmp_path, owner.published[-1])
+        _, out = await _paint_host(stalled)
+        assert "- m1 stalled" in out, out
+        assert _monitor_inks(stalled) == ["warning"]
+
+        await owner.tick({"text": "A", "error": None})
+        assert len(owner.published) == 3, "the closing edge"
+        assert owner.published[-1][0].unavailable_since == 0
+        recovered = _viewer(tmp_path, owner.published[-1])
+        _, out = await _paint_host(recovered)
+        assert "stalled" not in out, out
+        assert "warning" not in _monitor_inks(recovered)
+
+    @pytest.mark.asyncio
+    async def test_an_expired_watch_is_not_painted_as_an_armed_one(self, tmp_path: Path) -> None:
+        """``until_at`` is the one deadline a viewer may judge with its own
+        clock: it never moves, and past it the owner never checks again.
+        Declining it along with the moving counters painted a finished watch as
+        an armed one due at a past time. Its word stays ``idle`` (QA round 1,
+        Q2, deferred); pinned here is that it is NOT drawn as a healthy watch,
+        and that expiry still outranks blind (F5) although the store, holding
+        no clock for a published row, kept the blind sentence."""
+        ended = _VIEWER_NOW_MS - 3_600_000
+        viewer = _viewer(
+            tmp_path,
+            [
+                _monitor_state(
+                    "m1",
+                    "watch the deploy queue",
+                    until_at=ended,
+                    next_due_at=ended,
+                    checks=12,
+                    deliveries=0,
+                ),
+                _monitor_state(
+                    "m2",
+                    "watch the release thread",
+                    until_at=ended,
+                    next_due_at=ended,
+                    checks=12,
+                    deliveries=0,
+                    blind=True,
+                    blind_reason="its full result is gone",
+                ),
+            ],
+        )
+        displayed, out = await _paint_host(viewer)
+        assert displayed is True
+        assert "armed" not in out, out
+        assert "BLIND" not in out and "- m2 blind" not in out, out
+        assert _monitor_inks(viewer) == ["warning", "warning"]
 
     @pytest.mark.asyncio
     async def test_an_armed_but_empty_viewer_still_hides_the_band(self, tmp_path: Path) -> None:

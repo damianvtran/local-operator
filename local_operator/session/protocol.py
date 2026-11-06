@@ -838,9 +838,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     the queued-ask rung, 149 once the TUI's retirement notice needed
     ``pending_move_cwd`` — a cwd move restarts the session elsewhere, and the
     facade is the only side holding the destination at that instant, 150 once
-    the band's monitor half needed ``monitor_scheduler`` — the TUI binds a
-    viewer for every local user, so the owner-only scheduler read left an armed
-    watch painting nothing at all), so
+    the band's monitor half needed ``monitor_scheduler`` — the TUI opens every
+    session as a viewer (``cli.py``'s ``viewer_factory``), so an owner-only
+    scheduler read left an armed watch painting nothing at all), so
     recompute it
     rather
     than adjusting it by the size of your own change.
@@ -1972,11 +1972,14 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
         Declared for the same reason ``wake_scheduler`` is — the band reads it
         off whichever host object it was handed — and the omission was a defect
-        rather than a tidy one: `lop` hands the TUI a VIEWER for every local
-        user, so an owner-only member read as "this session holds no monitors"
-        and the band hid the watch it exists to show. The viewer's answer is
+        rather than a tidy one: the TUI opens every session as a VIEWER
+        (``cli.py``'s ``viewer_factory`` — "a VIEWER, never an owner"; the
+        runtime ``Session`` and its scheduler live in a separate process), so an
+        owner-only member read as "this session holds no monitors" and the band
+        hid the watch it exists to show. The viewer's answer is
         ``SnapshotMonitorScheduler`` over canonical ``monitors``: the spec's
-        identity joined with the health counters the row paints from.
+        identity joined with the health counters the row paints from, marked
+        ``clocks_are_published`` so no reader judges them against its own clock.
         """
         ...
 
