@@ -386,10 +386,16 @@ def _pin_request(url: str, pinned_ip: str | None) -> tuple[str, dict[str, str], 
     if not pinned_ip:
         return url, {}, {}
     parsed = urlparse(url)
-    hostname = parsed.hostname or ""
+    origin = httpx.URL(url)
+    # Host and SNI carry the ASCII (IDNA 2008) name httpx builds the request with
+    # — the same name :func:`validate_public_url` resolved. HTTP and TLS are ASCII
+    # on the wire, so the Unicode spelling ``urlparse`` returns for an IDN host
+    # (``café.test``) could never be sent: it failed the header encode and made
+    # every IDN link unfetchable.
+    hostname = _request_host(origin)
     # httpx.URL.copy_with(host=...) brackets IPv6 literals automatically and
     # preserves scheme/port/path/query, so the request targets the IP verbatim.
-    pinned_url = str(httpx.URL(url).copy_with(host=pinned_ip))
+    pinned_url = str(origin.copy_with(host=pinned_ip))
     # Host carries the port when the original URL did, matching what the server
     # would have seen without pinning.
     host_header = hostname
@@ -476,6 +482,16 @@ def _resolve_host_ips(hostname: str) -> list[str]:
         pass
     try:
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+    except UnicodeError as exc:
+        # getaddrinfo IDNA-encodes a ``str`` host BEFORE it sends anything, and an
+        # empty or over-long label (``a..b``, ``.``) raises here rather than
+        # answering. No DNS can ever hold such a name, so it is the same permanent
+        # policy answer as ``EAI_NONAME`` — and refusing it here, where every
+        # lookup happens, covers the page, every redirect hop and the icon/image
+        # sub-fetches at once instead of one handler per caller.
+        raise PolicyRefusal(
+            f"refusing host {hostname!r}: not a name DNS can hold ({exc})", reason="host"
+        ) from exc
     except socket.gaierror as exc:
         # ONLY a permanent "no such name" is a POLICY answer. No amount of
         # waiting changes what DNS knows about a name that does not exist, so
@@ -531,6 +547,37 @@ def url_has_credentials(url: str) -> bool:
     return parts.username is not None or parts.password is not None
 
 
+def _request_host(origin: httpx.URL) -> str:
+    """The ASCII host httpx will put on the wire for ``origin``.
+
+    ``raw_host`` is httpx's IDNA 2008 encoding (``xn--caf-dma.test``); an ASCII
+    host and an IP literal come back as themselves. It is the ONE spelling the
+    lookup, the ``Host`` header and SNI all use — Python's own ``idna`` codec is
+    IDNA 2003, which maps ``faß.de`` to a different name than httpx sends.
+    """
+    return origin.raw_host.decode("ascii")
+
+
+def _parse_request_url(url: str) -> httpx.URL:
+    """Parse ``url`` with the parser the request is built with, or refuse it.
+
+    ``urlparse`` accepts spellings httpx then refuses while building the request:
+    a soft hyphen or fullwidth letters in the host (Python's IDNA 2003 codec maps
+    them, httpx's IDNA 2008 does not), an octal IPv4 (``0177.0.0.1``, which macOS
+    and glibc even resolve to different addresses), a NUL anywhere, a lone
+    surrogate. Each used to cost a real DNS lookup and then raise
+    ``httpx.InvalidURL``/``UnicodeEncodeError`` — an exception no caller expected,
+    so a link preview answered 500 and the tool fell into its defensive arm.
+    Parsing here, before the lookup, makes it the guard's own ``host`` refusal.
+    """
+    try:
+        return httpx.URL(url)
+    except (httpx.InvalidURL, UnicodeError) as exc:
+        raise PolicyRefusal(
+            f"refusing {url!r}: no request can be built from this URL ({exc})", reason="host"
+        ) from None
+
+
 def validate_public_url(url: str, *, allow_private: bool) -> str | None:
     """Validate ``url``'s target and return the vetted IP to PIN the connection to.
 
@@ -570,12 +617,15 @@ def validate_public_url(url: str, *, allow_private: bool) -> str | None:
     hostname = parsed.hostname
     if not hostname:
         raise PolicyRefusal(f"refusing {url!r}: no host in URL", reason="host")
+    # Judged even under ``allow_private``: a URL httpx cannot build a request from
+    # fails either way, and a coded refusal beats an exception out of the send.
+    lookup_host = _request_host(_parse_request_url(url))
     if allow_private:
         # The escape hatch turns off IP judgement entirely, so there is nothing
         # to pin to and no rebinding threat model to defend (the operator opted
         # into local targets knowingly). Let httpx resolve as usual.
         return None
-    resolved = _resolve_host_ips(hostname)
+    resolved = _resolve_host_ips(lookup_host)
     vetted: str | None = None
     for ip_str in resolved:
         try:

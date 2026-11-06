@@ -271,14 +271,14 @@ async def _resolve_origin(
         return _absent(_policy_reason(refusal.reason))
     except FetchError as error:
         return _error(retryable=_retryable(error))
-    except (UnicodeError, ValueError):
-        # THE FLOOR UNDER THE PARSE-ERROR GUARANTEE: a URL shape the guard above
-        # did not anticipate (a redirect hop's spelling, a host only the resolver
-        # re-encodes) must still never reach the renderer as a 500, because the UI
-        # maps 5xx to a Retry control that cannot help. Nothing was learned about
-        # the host, so it is a coded absence and NOT cached as a verdict on it.
-        logger.debug("link preview refused an unparsable target", exc_info=True)
-        return _absent("blocked-host")
+    # NO BROAD FLOOR HERE, deliberately (review R1-3). A spelling no request can be
+    # built from, or a host the resolver cannot encode, is refused at its source —
+    # ``validate_public_url`` raises ``PolicyRefusal("host")`` for it on the page,
+    # every redirect hop and both decoration sub-fetches — and lands in the arm
+    # above as a ``blocked-host`` that is CACHED like any other refusal, because
+    # it is a property of the URL and asking again changes nothing. A blanket
+    # ``except ValueError`` would also swallow a real bug in the fetcher as a
+    # silent, cached absence; that must stay a visible failure instead.
 
     # A refusal or a broken origin is not a page. 4xx can be a WAF challenge and
     # 5xx can be a rolling deploy, so the class decides whether another try could
@@ -518,6 +518,14 @@ async def _store_artifact(
     return stored, raster
 
 
+#: The characters ``urlsplit`` deletes from a URL before parsing it (WHATWG URL
+#: parsing; the stdlib's ``_UNSAFE_URL_BYTES_TO_REMOVE``, private, so restated).
+_STRIPPED_BY_URLSPLIT = ("\t", "\r", "\n")
+
+#: RFC 1035's limit on a whole name in presentation form, trailing dot excluded.
+_MAX_HOST_OCTETS = 253
+
+
 def _target_refusal(target: str) -> AbsentReason | None:
     """Why ``target`` cannot be previewed as an absolute URL, or ``None`` if it can.
 
@@ -547,6 +555,14 @@ def _target_refusal(target: str) -> AbsentReason | None:
     """
     if not target:
         return "no-metadata"
+    if any(character in target for character in _STRIPPED_BY_URLSPLIT):
+        # ``urlsplit`` silently deletes these (WHATWG), so ``https:\t//host`` would
+        # pass the checks below as ``https://host`` — while the fetcher's
+        # collapsed-scheme repair reads the same string as ``https:`` plus
+        # ``\t//host`` and builds a URL with no host, a retryable error whose
+        # Retry never works (security S-3). Refusing the raw spelling keeps the
+        # guard and the fetcher judging one string; no real link contains them.
+        return "blocked-host"
     try:
         parts = urlsplit(target)
         scheme = parts.scheme.lower()
@@ -564,10 +580,14 @@ def _target_refusal(target: str) -> AbsentReason | None:
     if not host:
         return "blocked-host"
     try:
-        host.encode("idna")
-    except (UnicodeError, ValueError):
+        encoded = host.encode("idna")
+    except UnicodeError:
         # ``.`` or an over-long label: the resolver's own encode would raise the
         # same way after a lookup was already attempted.
+        return "blocked-host"
+    if len(encoded.rstrip(b".")) > _MAX_HOST_OCTETS:
+        # The codec checks each label (<= 63) but not the total, so five legal
+        # labels would still cost a lookup for a name DNS cannot hold (S-4).
         return "blocked-host"
     return None
 

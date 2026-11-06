@@ -141,6 +141,98 @@ def test_credentials_in_the_url_are_refused_before_any_lookup(
     assert "hunter2" not in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://ex\u00adample.com/",  # soft hyphen: Python's IDNA 2003 maps it, httpx refuses
+        "https://\uff25\uff38\uff21\uff2d\uff30\uff2c\uff25.com/",  # fullwidth letters
+        "http://0177.0.0.1/",  # octal IPv4: macOS reads 177.0.0.1, glibc 127.0.0.1
+        "https://example.com/page#x\x00",  # NUL: not a character a request can carry
+        "https://example.com/#\udcff",  # lone surrogate: not encodable at all
+    ],
+)
+def test_a_url_no_request_can_be_built_from_is_a_host_refusal_before_any_lookup(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard parses with the SAME parser the request is built with (httpx).
+
+    Each of these passed ``urlparse`` and got a real DNS lookup, then raised
+    ``httpx.InvalidURL`` (or ``UnicodeEncodeError``) while the request was built
+    — an exception no caller expected, so the link preview answered 500 and the
+    agent tool crashed. It is now the guard's own refusal, before the lookup.
+    """
+
+    def _must_not_resolve(*args: object, **kwargs: object) -> object:
+        raise AssertionError(f"{url!r} reached the resolver")
+
+    monkeypatch.setattr(service.socket, "getaddrinfo", _must_not_resolve)
+    with pytest.raises(service.PolicyRefusal) as caught:
+        validate_public_url(url, allow_private=False)
+    assert caught.value.reason == "host"
+
+
+@pytest.mark.parametrize("host", ["a..b", ".", "a" * 64 + ".example"])
+def test_a_name_the_resolver_cannot_encode_is_a_host_refusal(
+    host: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``getaddrinfo`` IDNA-encodes a ``str`` host and raises ``UnicodeError``
+    (``label empty or too long``) for these — before any packet, measured with the
+    real resolver. That was an unhandled exception out of the fetcher; it is a
+    name that cannot exist, which is exactly what ``reason="host"`` means.
+    """
+
+    def _encoding_resolver(name: str, *args: object, **kwargs: object) -> object:
+        name.encode("idna")  # what the real getaddrinfo does first
+        raise AssertionError(f"{name!r} should not have encoded")
+
+    monkeypatch.setattr(service.socket, "getaddrinfo", _encoding_resolver)
+    with pytest.raises(service.PolicyRefusal) as caught:
+        validate_public_url(f"https://{host}/x", allow_private=False)
+    assert caught.value.reason == "host"
+
+
+def test_an_idn_host_is_looked_up_as_the_punycode_the_request_carries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One name for the lookup, the ``Host`` header and SNI: httpx's IDNA 2008 form.
+
+    Python's own codec is IDNA 2003, which maps ``faß.de`` to ``fass.de`` while
+    httpx sends ``xn--fa-hia.de``; resolving one and presenting the other would pin
+    the socket to a different name's address than the certificate is checked for.
+    """
+    looked_up: list[str] = []
+
+    def _resolve(hostname: str) -> list[str]:
+        looked_up.append(hostname)
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(service, "_resolve_host_ips", _resolve)
+    validate_public_url("https://fa\u00df.de/x", allow_private=False)
+    validate_public_url("https://caf\u00e9.test/x", allow_private=False)
+    assert looked_up == ["xn--fa-hia.de", "xn--caf-dma.test"]
+
+
+@pytest.mark.asyncio
+async def test_an_idn_host_is_pinned_with_an_ascii_host_header_and_sni(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url_host"] = request.url.host
+        captured["host_header"] = request.headers.get("host")
+        captured["sni"] = request.extensions.get("sni_hostname")
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    await _service(httpx.MockTransport(handler)).fetch("https://caf\u00e9.test/p")
+    assert captured == {
+        "url_host": "93.184.216.34",
+        "host_header": "xn--caf-dma.test",
+        "sni": "xn--caf-dma.test",
+    }
+
+
 def test_validate_allow_private_bypasses(monkeypatch: pytest.MonkeyPatch) -> None:
     # With allow_private, DNS is not even consulted — the switch is the escape.
     validate_public_url("http://localhost:3000/", allow_private=True)

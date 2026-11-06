@@ -404,29 +404,25 @@ async def test_a_non_http_scheme_is_absent_without_a_request(
 def _spy_dns(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Record every name the address guard asks DNS about; return the log.
 
-    Replaces the pinned fixture for one test. It mirrors the two halves of the
-    production resolver that matter here WITHOUT touching the network: an IP
-    literal short-circuits (no lookup is recorded, exactly as
-    ``_resolve_host_ips`` skips ``getaddrinfo`` for one), and a name is IDNA
-    encoded first, which is what ``socket.getaddrinfo`` does to a ``str`` host
-    before it sends anything — so ``.`` raises the same ``UnicodeError`` QA
-    measured against real DNS for ``./notes/plan.md`` (it became a 500).
+    Replaces the pinned fixture for one test by putting the PRODUCTION
+    ``_resolve_host_ips`` back and spying one layer lower, on
+    ``socket.getaddrinfo`` — so the resolver's own handling (the IP-literal
+    short-circuit, the gaierror split, the undecodable-name refusal) is what runs,
+    and only the network is replaced. The spy IDNA-encodes a ``str`` host first,
+    which is what the real ``getaddrinfo`` does before it sends anything: ``.`` or
+    ``a..b`` raises the same ``UnicodeError`` QA measured against real DNS (it
+    used to become a 500).
     """
-    import ipaddress
-
     looked_up: list[str] = []
 
-    def _resolve(hostname: str) -> list[str]:
-        try:
-            ipaddress.ip_address(hostname)
-            return [hostname]
-        except ValueError:
-            pass
-        looked_up.append(hostname)
-        hostname.encode("idna")
-        return ["93.184.216.34"]
+    def _getaddrinfo(host: str, port: object, *args: object, **kwargs: object) -> list[Any]:
+        looked_up.append(host)
+        host.encode("idna")
+        address = "10.0.0.7" if host == "private.test" else "93.184.216.34"
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 0))]
 
-    monkeypatch.setattr(fetch_service, "_resolve_host_ips", _resolve)
+    monkeypatch.setattr(fetch_service, "_resolve_host_ips", _RESOLVE_HOST_IPS_REAL)
+    monkeypatch.setattr(fetch_service.socket, "getaddrinfo", _getaddrinfo)
     return looked_up
 
 
@@ -455,6 +451,17 @@ _REFUSED_TARGETS = [
     # spelling of "guess what the operator meant". The renderer already shows the
     # original text, so nothing is lost but a fetcher-shaped reinterpretation.
     ("https:/preview.test/x", "blocked-host"),
+    # A TAB, CR OR LF ANYWHERE in the target is refused (security S-3): ``urlsplit``
+    # strips them (WHATWG), so the guard saw ``preview.test``, but the fetcher's
+    # collapsed-scheme repair saw ``https:`` + ``\t//...`` and built a URL with no
+    # host — a retryable error whose Retry could never work. Refusing the raw
+    # spelling makes the guard and the fetcher read one string the same way.
+    ("https:\t//preview.test/x", "blocked-host"),
+    ("https://pre\nview.test/x", "blocked-host"),
+    # A host over DNS's 253-octet total, though every label is a legal 63 (S-4):
+    # the per-label IDNA check passes it, so only a total-length check keeps it
+    # from costing a lookup.
+    ("https://" + ".".join(["a" * 63] * 5) + "/x", "blocked-host"),
 ]
 
 
@@ -483,6 +490,10 @@ async def test_a_non_absolute_url_is_a_coded_absence_with_no_lookup_or_fetch(
         ("https://preview.test/caf\u00e9/notes", ["preview.test"]),
         # A public IP literal is a real host; it is judged directly, with no DNS.
         ("http://93.184.216.34/page", []),
+        # A Unicode (IDN) host is looked up AS the punycode the request will carry
+        # (QA Q2): it used to be looked up in Unicode and then crash encoding the
+        # Host header, so it could never preview.
+        ("https://caf\u00e9.test/p", ["xn--caf-dma.test"]),
     ],
 )
 async def test_an_absolute_http_url_with_a_host_is_still_resolved(
@@ -505,6 +516,127 @@ async def test_an_absolute_http_url_with_a_host_is_still_resolved(
     assert result["preview"]["title"] == "Fixture"
     assert looked_up == lookups
     assert len(seen) >= 1
+
+
+#: Absolute http(s) URLs that pass the preview's own spelling guard but that no
+#: request can be built from: httpx (the parser the request is built with) refuses
+#: the host, or a character in the URL. Each used to escape every handler as
+#: ``httpx.InvalidURL`` — a 500 the UI maps to a Retry that can never succeed
+#: (security S-1). The fetcher now refuses them as ``PolicyRefusal("host")`` BEFORE
+#: the lookup, so each is a coded absence that cost no DNS and no request.
+_UNBUILDABLE_TARGETS = [
+    "https://ex\u00adample.com/",  # a soft hyphen inside the host
+    "https://\uff25\uff38\uff21\uff2d\uff30\uff2c\uff25.com/",  # fullwidth letters
+    "http://0177.0.0.1/",  # octal IPv4: platforms disagree on what it means
+    "https://preview.test/page#x\x00",  # a NUL in the fragment
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", _UNBUILDABLE_TARGETS)
+async def test_a_url_no_request_can_be_built_from_is_blocked_host_with_no_lookup(
+    url: str, monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(monkeypatch, lambda request: httpx.Response(200, content=_html("")))
+    async with _client() as client:
+        response = await _post(client, {"url": url, "index": 0, "expected_account_id": ACCOUNT})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert looked_up == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_an_idn_host_carries_its_punycode_in_the_host_header(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The name that is looked up, sent as ``Host`` and used for SNI is ONE name.
+
+    HTTP and TLS carry ASCII only, so the Unicode spelling could never be sent;
+    and resolving one spelling (Python's IDNA 2003 codec) while presenting another
+    (httpx's IDNA 2008) would pin the socket to one name's address and verify the
+    certificate against a different name.
+    """
+    _spy_dns(monkeypatch)
+    hosts: list[tuple[str | None, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append((request.headers.get("host"), request.extensions.get("sni_hostname")))
+        return httpx.Response(
+            200, headers={"content-type": "text/html"}, content=_html("<title>Café</title>")
+        )
+
+    _route_transport(monkeypatch, handler)
+    async with _client() as client:
+        response = await _post(
+            client,
+            {"url": "https://caf\u00e9.test/p", "index": 0, "expected_account_id": ACCOUNT},
+        )
+    assert response.json()["result"]["kind"] == "ready"
+    assert hosts == [("xn--caf-dma.test", "xn--caf-dma.test")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decoration",
+    [
+        '<link rel="icon" href="https://a..b/x.ico">',
+        '<meta property="og:image" content="https://./x.png">',
+        '<meta property="og:image" content="https://ex\u00adample.com/x.png">',
+    ],
+)
+async def test_a_malformed_icon_or_image_host_drops_the_decoration_not_the_card(
+    decoration: str, monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The page author writes the icon and image URLs, so they are hostile input.
+
+    A host the resolver cannot even encode (``a..b``, ``.``) or that no request can
+    be built from (a soft hyphen) used to raise past ``_store_artifact`` and turn
+    every reader's card for that page into a 500 (review R1-1, security S-1). It
+    is now the fetcher's own ``PolicyRefusal``, which the sub-fetch already drops.
+    """
+    _spy_dns(monkeypatch)
+    page = _html("<title>Decorated</title>" + decoration)
+    _route_transport(
+        monkeypatch,
+        lambda request: httpx.Response(200, headers={"content-type": "text/html"}, content=page),
+    )
+    async with _client() as client:
+        response = await _post(
+            client, {"url": "https://preview.test/page", "index": 0, "expected_account_id": ACCOUNT}
+        )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["kind"] == "ready", result
+    assert result["preview"]["title"] == "Decorated"
+    assert "favicon" not in result["preview"]
+    assert "image" not in result["preview"]
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_to_a_malformed_host_is_a_cached_blocked_host(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """An unusable host is a DELIBERATELY cached absence (review R1-2, S-2, QA Q1).
+
+    It is the fetcher's ``PolicyRefusal("host")`` now — the same class as a name
+    that does not exist — so it takes the same 30-minute negative-cache path: the
+    spelling is a property of the origin's redirect, and asking again changes
+    nothing. A second resolve is a cache hit that costs the origin no request.
+    """
+    _spy_dns(monkeypatch)
+    seen = _route_transport(
+        monkeypatch,
+        lambda request: httpx.Response(302, headers={"location": "https://a..b/next"}),
+    )
+    body = {"url": "https://preview.test/moved", "index": 0, "expected_account_id": ACCOUNT}
+    async with _client() as client:
+        first = await _post(client, body)
+        second = await _post(client, body)
+    assert first.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert second.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert seen == ["/moved"]
 
 
 @pytest.mark.asyncio
