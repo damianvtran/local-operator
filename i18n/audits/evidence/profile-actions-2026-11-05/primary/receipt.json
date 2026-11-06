@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "audit_id": "primary-36011595-context-complete",
+  "auditor": {
+    "agent": "qa-tester / primary independent i18n-auditor",
+    "session": "36011595d4e0",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session model header on original run and resumed context-completion run",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independence": "No authorship or remediation of audited catalogue/context bytes; no other auditor judgments read."
+  },
+  "verdict": "PASS — primary bounded copy audit",
+  "files": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/report.md",
+      "sha256": "7093b3ef49c538e5a5b84de1e1f624c381e46affc7d10c2f1473cf6938ca1a6d"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/context-check.log",
+      "sha256": "69404070f6cfd183beb3d2248814d04f642618892e8e988afce13983da836fd1"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/audit.log",
+      "sha256": "d892777b46a925501159602743b9f522902d7daad6ce1066f74fac7227bb25c9"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/guarded-reads.json",
+      "sha256": "35becdd8114448b99567b7ebbf9ab72b8d715d4e4ad32314d800bca7e8c510a7"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/semantic-notes.json",
+      "sha256": "796f4e3b28a5ccc612dcfecc0d861524ddd213415189712565166e8a35a483e3"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/key-coverage.json",
+      "sha256": "6964b2d1efbda5c858e3c675f5cbb1a0f465a8a9b40e9d8171903ba3617976aa"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/checks.py.txt",
+      "sha256": "9f72a070e7a20fee6e7f554abcff40a5abefc22c519f9920dfd1c510f7f20ff3"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/receipt.json",
+      "sha256": "a216c5a9652361a290d383ab5b18db0cb998a62e7759a2a01abd9517efe89de7"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/en/record.json",
+      "sha256": "8f9841e56fce2c2e7eeeef378ae24f8fc68303501a94d1853d2968cbbd51e7de"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/fr/record.json",
+      "sha256": "778361b00197894304b52219f42c81e89dd096ed195efab976b3c7711a43e132"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/es/record.json",
+      "sha256": "06c393f0423a28f6a34cae8724621186797edd5b579b40c3921d33665ba82188"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/zh-CN/record.json",
+      "sha256": "992c85bda89a83694a58506c0aee943f239140835013bda16d6e183968b2896a"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/ru/record.json",
+      "sha256": "9528ebb6419bc7edcfa06ceff36082eeff5c39608e2fe1dcdef1a01b22af417c"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/vi/record.json",
+      "sha256": "e94f761b0211b008ac641bcf4214d9b1b78aab50f8a35ce63142200a4ecf8830"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/ur/record.json",
+      "sha256": "f3d4a5e9d114e0a567c5bee7419fb6d0d462d747d360deea925160146e88bfb3"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/hi/record.json",
+      "sha256": "5fa713ff07b191537951f358da5bd83b9b739188a40db7627ccfe7290e1f6ddb"
+    }
+  ]
+}

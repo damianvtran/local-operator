@@ -72,6 +72,37 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: declared one: a new same-shape call fails until a reviewer bumps the
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
+    (
+        "local_operator/definition_transaction.py::_durable_json",
+        "os.replace",
+        "Publishes the O_EXCL-created regular JSON temp file; "
+        "os.replace rejects a directory target.",
+    ),
+    (
+        "local_operator/definition_transaction.py::_durable_json",
+        "<path>.unlink",
+        "Removes only this call's O_EXCL temporary JSON file; unlink rejects directories.",
+    ),
+    (
+        "local_operator/definition_transaction.py::atomic_edit",
+        "<path>.unlink",
+        "Rearms only a successfully read JSON journal FILE; read_text/unlink reject directories.",
+    ),
+    (
+        "local_operator/profile_scope.py::update_profile_backup",
+        "<path>.replace",
+        "Publishes the generated backup JSON temp FILE; replace rejects directory targets.",
+    ),
+    (
+        "local_operator/profile_scope.py::save_profile_backup",
+        "os.replace",
+        "Publishes only the mkstemp .json regular FILE; replace rejects directory targets.",
+    ),
+    (
+        "local_operator/profile_scope.py::save_profile_backup",
+        "<path>.unlink",
+        "Cleans only this call's mkstemp .json FILE; unlink rejects directories.",
+    ),
     # Browser network telemetry keeps its one sensitive artefact in the SESSION
     # SCRATCHPAD, as a mkstemp REGULAR FILE whose name it generated one line
     # earlier (`network-request-*.body`). Unlinking it removes that file and

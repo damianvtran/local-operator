@@ -1988,6 +1988,20 @@ AskUserFn = Callable[[list[AskQuestion]], Awaitable[dict[str, list[str]] | None]
 
 
 @dataclass(frozen=True)
+class QueuedProfileWrite:
+    """Host-filed durable request, explicitly NOT a grant or a denial."""
+
+    approval_id: str
+    request_digest: str
+    expires_at: float
+    receipt_id: str
+    profile_kind: str
+    profile_name: str
+    changes: tuple[str, ...] = ()
+    diff: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class DurableWriteIntent:
     """One TOOL-proposed write that would change the user's ACCOUNT store.
 
@@ -2015,12 +2029,31 @@ class DurableWriteIntent:
     #: ``promote`` is the verb that copies a CONVERSATION definition into the
     #: account (LOH-9 S4): the tool may propose it, and only the user's own
     #: surface can authorise it, which is exactly what the seam answers.
-    operation: Literal["create", "update", "delete", "install", "reset", "sync", "promote"]
+    #: ``revert`` restores a row from the backup a granted save took; it is an
+    #: account write like any other, so it goes through the same seam.
+    operation: Literal[
+        "create", "update", "delete", "install", "reset", "sync", "promote", "revert"
+    ]
     name: str
     #: Always ``global`` today: a conversation-scoped write never asks. Kept
     #: explicit so a future scope cannot be read as "no consent needed" by
     #: omission.
     scope: Literal["global"] = "global"
+    #: The fields this call would change, in the tool's vocabulary, and a short
+    #: human diff summary of them. DESCRIPTION ONLY, like the rest of this type:
+    #: the seam renders them on the approval card so the person approves the
+    #: exact change rather than a bare name. Empty for the seed/sync operations,
+    #: whose payload is a packaged starter rather than caller-chosen fields.
+    changes: tuple[str, ...] = ()
+    summary: str = ""
+    #: The definition revision the change was computed against (``None`` for a
+    #: create). The tool re-checks it under the registry's write lock, so an
+    #: approval of this card can never land on a row that moved meanwhile.
+    base_revision: str | None = None
+    #: Internal executable values, never a tool-wire authority flag. The host
+    #: binds session/anchor/expiry when filing the signed operation request.
+    proposal: dict[str, Any] | None = None
+    tool_call_id: str = ""
 
 
 class ToolContext(BaseModel):
@@ -2248,9 +2281,13 @@ class ToolContext(BaseModel):
     #
     # Off the tool wire, like every other host-owned presence field here: a
     # callback is a capability, never payload a provider may see.
-    authorize_durable_write: Callable[[DurableWriteIntent], Awaitable[str | None]] | None = Field(
-        default=None, exclude=True, repr=False
+    # Host-only receipt registration; never populated from model/transcript data.
+    register_profile_action: Callable[..., dict[str, Any]] | None = Field(
+        default=None, exclude=True
     )
+    authorize_durable_write: (
+        Callable[[DurableWriteIntent], Awaitable[str | QueuedProfileWrite | None]] | None
+    ) = Field(default=None, exclude=True, repr=False)
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process

@@ -17,7 +17,7 @@ import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, overload
 from unittest.mock import patch
 
 import pytest
@@ -36,6 +36,7 @@ from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import ConversationName
 from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
+from local_operator.session.session import Session
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import (
     BOOT_LAYOUT_CLASS,
@@ -807,7 +808,17 @@ class FakeSession:
             handler(event)
 
 
-async def _factory(session: FakeSession) -> FakeSession:
+@overload
+async def _factory(session: FakeSession) -> FakeSession: ...
+
+
+@overload
+async def _factory(session: Session) -> Session: ...
+
+
+async def _factory(session: FakeSession | Session) -> FakeSession | Session:
+    # Fake subclasses intentionally supply narrow presentation-only model doubles;
+    # retain that family's historical base contract without erasing real Sessions.
     return session
 
 

@@ -46,6 +46,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -62,6 +63,10 @@ from typing import (
     cast,
 )
 
+from local_operator.profile_actions import (
+    ProfileActionReply,
+    ProfileActionStatusCapability,
+)
 from local_operator.session.runtime.types import (
     JOURNAL_ORDER_CAPABILITY,
     JOURNAL_ORDER_EVENT,
@@ -2234,7 +2239,10 @@ class SessionHandle(Protocol):
     async def slash(self, command: str, args: str) -> str: ...
     async def new_conversation(self) -> str: ...
     async def resume_session(self, session_id: str) -> str: ...
-    async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str: ...
+
+    async def approval_answer(
+        self, request_id: str, approved: bool, remember: bool
+    ) -> str | ProfileActionReply: ...
     async def ask_answer(  # noqa: E301
         self, request_id: str, value: str, question_index: int | None = None
     ) -> str: ...
@@ -8249,7 +8257,7 @@ class RuntimeServer:
         conn: _ClientConn,
         *,
         deliver: Callable[[str], None] | None = None,
-    ) -> str | AckDetail:
+    ) -> str | AckDetail | ProfileActionReply:
         """``_dispatch`` with THIS connection's authority, for a seam that takes it.
 
         The probe rather than a plain call for the reason ``_accepts_kw`` exists:
@@ -8279,7 +8287,7 @@ class RuntimeServer:
         authority: _ConnectionAuthority = _LOCAL_AUTHORITY,
         *,
         deliver: Callable[[str], None] | None = None,
-    ) -> str | AckDetail:
+    ) -> str | AckDetail | ProfileActionReply:
         """Run one control op and return its receipt.
 
         ``authority`` is the CONNECTION's, carried into the payload seam so a gate
@@ -8354,6 +8362,14 @@ class RuntimeServer:
 
                     raise DocumentCarriageUnsupported()
                 fields["files"] = requested_files
+            if authority.locality != "local" and "owner_typed" in parameters:
+                # A REMOTE prompt (mesh ``drive`` member, a peer's ``sessions
+                # send``, the relayed phone) is the user's turn but not the owner
+                # typing on this machine: it must never authorize a card-free
+                # account profile save — those go to the approval card, which
+                # the operator's own devices can still answer with their
+                # capability. Local attaches keep the default.
+                fields["owner_typed"] = False
             return await h.prompt(frame["text"], **fields)
         if op == "steer":
             fields = {"images": frame.get("images")}
@@ -8384,6 +8400,9 @@ class RuntimeServer:
 
                     raise DocumentCarriageUnsupported()
                 fields["files"] = requested_files
+            if authority.locality != "local" and "owner_typed" in parameters:
+                # Same rule as the prompt op above.
+                fields["owner_typed"] = False
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()
@@ -8571,6 +8590,16 @@ class RuntimeServer:
             return await h.new_conversation()
         if op == "resume_session":
             return await h.resume_session(str(frame.get("session_id", "")))
+        if op == "profile_action_status":
+            if not isinstance(h, ProfileActionStatusCapability):
+                raise ValueError("this owner cannot verify profile actions")
+            return await h.profile_action_status(
+                action_id=frame["action_id"],
+                receipt_id=frame["receipt_id"],
+                profile_kind=frame["profile_kind"],
+                profile_name=frame["profile_name"],
+                tool_call_id=frame["tool_call_id"],
+            )
         if op == "approval_answer":
             return await h.approval_answer(
                 frame["request_id"],
@@ -8747,6 +8776,22 @@ class RuntimeServer:
             # weight off the happy path, and the common frame never carries the
             # field at all.
             custom_type = frame.get("custom_type")
+            if custom_type == "profile_save_result":
+                # This carrier is an INTERNAL hint, not a third peer provenance
+                # kind. Only the dedicated verifier may consume it; an old or
+                # reduced handle must never fall back to model/peer delivery.
+                receipt_id = frame.get("message_id")
+                if (
+                    frame.get("mode") != "mailbox"
+                    or frame.get("wake") is not False
+                    or not isinstance(receipt_id, str)
+                    or re.fullmatch(r"[A-Za-z0-9_-]{1,160}", receipt_id) is None
+                ):
+                    raise ValueError("invalid non-waking profile receipt hint")
+                notify = getattr(h, "receive_profile_save_result", None)
+                if not callable(notify):
+                    raise ValueError("this owner cannot verify profile receipt hints")
+                return await cast(Callable[[str], Awaitable[str]], notify)(receipt_id)
             if custom_type is not None:
                 from local_operator.harness.message_types import (
                     PEER_DELIVERABLE_CUSTOM_TYPES,

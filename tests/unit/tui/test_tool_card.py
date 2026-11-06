@@ -1248,67 +1248,40 @@ def test_click_expands_then_collapses_back_to_one_row() -> None:
     assert "\n" not in card._build_content(80).plain
 
 
-def test_on_click_drives_the_toggle() -> None:
-    """The mouse path, not just the method: a click is the whole affordance."""
-
-    class _Click:
-        # `x`/`y` because a real `Click` always carries the cell it landed on,
-        # and `on_click` reads them to ask whether a URL was under the pointer
-        # (`TranscriptBlock.link_at`) before it treats the click as a toggle.
-        # A double without them is not a stand-in for the event, it is a
-        # stand-in for an event that cannot exist.
-        def __init__(self, x: int = 0, y: int = 0) -> None:
-            self.stopped = False
-            self.x = x
-            self.y = y
-
-        def stop(self) -> None:
-            self.stopped = True
-
-    card = ToolCard("t", "bash", {"command": "ls"})
-    card.mark_done("one\ntwo")
-    event = _Click()
-    card.on_click(event)
-    assert card.expanded is True
-    assert event.stopped is True
-
-    card.on_click(_Click())
-    assert card.expanded is False
+@pytest.mark.asyncio
+async def test_on_click_drives_the_toggle() -> None:
+    """Textual dispatches inherited handlers; calling just on_click is not a click."""
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 10)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("t", "bash", {"command": "ls"})
+        view.append_block(card)
+        card.mark_done("one\ntwo")
+        await pilot.pause()
+        await pilot.click(card, offset=(18, 0))
+        await pilot.pause()
+        assert card.expanded
+        await pilot.click(card, offset=(18, 0))
+        await pilot.pause()
+        assert not card.expanded
 
 
-def test_activating_an_inert_card_answers_instead_of_ignoring_the_click() -> None:
-    """No output means no expansion — but never silence, and never a swallow.
-
-    Silence is what the field report was: "when I click to expand these
-    lines, nothing happens". A row that offers itself as a target and then
-    absorbs the click is indistinguishable from a frozen app, so the row
-    answers in the hint slot. The event still bubbles, because the row did
-    not consume the click for a toggle and the transcript's own click
-    handling must not be starved by a row that had nothing to do.
-    """
-
-    class _Click:
-        # See the sibling double above: a real `Click` carries the cell it
-        # landed on, and `on_click` reads it before deciding what the click
-        # meant.
-        def __init__(self, x: int = 0, y: int = 0) -> None:
-            self.stopped = False
-            self.x = x
-            self.y = y
-
-        def stop(self) -> None:
-            self.stopped = True
-
-    card = ToolCard("t", "bash", {"command": "ls"})
-    card.mark_done("")  # a tool that returned nothing
-    assert card.can_expand() is False
-
-    event = _Click()
-    card.on_click(event)
-    assert card.expanded is False
-    assert event.stopped is False
-    assert NO_OUTPUT_NOTICE in card._build_row(80).plain
-    assert card.toggle_expanded() is False
+@pytest.mark.asyncio
+async def test_activating_an_inert_card_answers_instead_of_ignoring_the_click() -> None:
+    """An inherited mouse handler must still answer an empty row without expanding."""
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(80, 10)) as pilot:
+        view = app.query_one(TranscriptView)
+        card = ToolCard("t", "bash", {"command": "ls"})
+        view.append_block(card)
+        card.mark_done("")
+        await pilot.pause()
+        assert not card.can_expand()
+        await pilot.click(card, offset=(18, 0))
+        await pilot.pause()
+        assert not card.expanded
+        assert NO_OUTPUT_NOTICE in card._build_row(80).plain
+        assert not card.toggle_expanded()
 
 
 def test_an_unfinished_card_says_it_is_still_running_not_that_it_is_empty() -> None:

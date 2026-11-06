@@ -97,6 +97,7 @@ from typing import Any
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
+from textual.message import Message
 from textual.timer import Timer
 
 from local_operator.ansi import strip_control_sequences
@@ -106,11 +107,13 @@ from local_operator.harness.types import INTERRUPTED_FAULTS
 # i18n: this card's search/fetch row copy is user-facing, extracted so a
 # locale can carry it; `_t` is bound BELOW the whole import block so no
 # later import reads as not-at-top (E402, the earlier slice's CI failure).
+from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import tr, tr_record
 from local_operator.tui import bindings
 from local_operator.tui import imagegen as imagegen_mod
 from local_operator.tui.glyphs import display_name, tool_icon
+from local_operator.tui.i18n_status import localized_display
 from local_operator.tui.widgets.transcript import (
     TOOL_NAME_COL,
     TOOL_NAME_COL_MAX,
@@ -135,6 +138,7 @@ from local_operator.web_fetch.failure import (
 )
 
 _t = tr("tui.small")
+_profile_copy = tr_record("tui.profile_actions")
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
 #: headless renderer needs the identical behaviour and must not import a
@@ -1557,6 +1561,62 @@ class ToolCard(ExpandableActionBlock):
     action and Up/Down walk the ledger from there.
     """
 
+    class ProfileActionCheck(Message):
+        def __init__(self, card):
+            self.card = card
+            super().__init__()
+
+    class ProfileRevertRequested(Message):
+        def __init__(self, card):
+            self.card = card
+            self.action = card._profile_action
+            super().__init__()
+
+    def set_profile_action_state(self, state: str) -> None:
+        if state not in {"available", "pending", "succeeded", "stale", "failed", "unavailable"}:
+            state = "unavailable"
+        if state == "available" and self._profile_activation_inflight:
+            state = "pending"
+        self._profile_action_state = state
+        self._profile_action_checked = True
+        self._refresh_row()
+
+    def _request_profile_revert(self) -> None:
+        if self._profile_action is None:
+            return
+        if self._profile_action_state == "pending":
+            if self._profile_activation_inflight:
+                return
+            self.post_message(self.ProfileActionCheck(self))
+        elif self._profile_action_state == "available":
+            # Latch BEFORE posting: two presses in the same input batch cannot
+            # dispatch two requests. Transport loss stays pending until a live
+            # status read reconciles it; it is never a failure/automatic retry.
+            self._profile_activation_inflight = True
+            self.set_profile_action_state("pending")
+            self.post_message(self.ProfileRevertRequested(self))
+
+    def on_click(self, event) -> None:
+        if (
+            self._profile_action is not None
+            and event.button == 1
+            and event.style.meta.get("profile_revert")
+        ):
+            event.stop()
+            event.prevent_default()
+            self._request_profile_revert()
+            return
+        # Textual dispatches the inherited handler itself for non-control hits.
+        # Calling super here would toggle the same row a second time.
+
+    def on_key(self, event) -> None:
+        if self._profile_action is not None and self.has_focus and event.key.lower() == "r":
+            event.stop()
+            event.prevent_default()
+            self._request_profile_revert()
+            return
+        super().on_key(event)
+
     #: Shared by every expandable action row; naming it here lets the base
     #: toggle expansion without knowing this subclass's CSS selector.
     EXPANDED_CLASS = "tool-expanded"
@@ -1582,6 +1642,12 @@ class ToolCard(ExpandableActionBlock):
         #: converted to an AGE once (:func:`monotonic_from_epoch`) and every
         #: tick after that is taken from here.
         self._clock = clock
+        self._profile_action = None
+        self._profile_action_state = "unavailable"
+        self._profile_action_checked = False
+        self._profile_activation_inflight = False
+        self._profile_action_source = None
+        self._profile_action_live = None
         self.tool_call_id = tool_call_id
         self.internal_work_job_id: str | None = None
         self.internal_work_job_ids: tuple[str, ...] = ()
@@ -2588,6 +2654,8 @@ class ToolCard(ExpandableActionBlock):
         event, or a replayed batch) is constructed running and mounted after,
         and ``__init__`` has no message pump to schedule against.
         """
+        if self._profile_action is not None:
+            self.post_message(self.ProfileActionCheck(self))
         if self._state in ("running", "composing"):
             self._start_clock()
 
@@ -3180,6 +3248,24 @@ class ToolCard(ExpandableActionBlock):
         # the fetch presentation without re-inspecting details every repaint.
         self._is_fetch_card = bool(fetch_output)
         self._output = search_output or fetch_output or self._clean_output(result_text)
+        from local_operator.profile_actions import ProfileAction
+
+        raw = details.get("profile_action") if isinstance(details, Mapping) else None
+        try:
+            action = ProfileAction.model_validate(dict(raw)) if isinstance(raw, Mapping) else None
+        except ValueError:
+            action = None
+        self.set_class(action is not None, "profile-action-card")
+        if action != self._profile_action:
+            self._profile_action = action
+            self._profile_action_state = "unavailable"
+            self._profile_action_checked = False
+            self._profile_action_source = None
+            self._profile_action_live = None
+        # Persisted descriptors/verified flags are display data, not live proof.
+        if action is not None and self.is_mounted:
+            self.post_message(self.ProfileActionCheck(self))
+
         diff = details.get("diff") if isinstance(details, Mapping) else None
         # Canonical follower details are immutable sequences, not concrete
         # lists. They still carry the same unified diff as the live executor.
@@ -3452,6 +3538,52 @@ class ToolCard(ExpandableActionBlock):
                 width = FALLBACK_WIDTH
                 detached = True
         content = self._build_content(width)
+        if self._profile_action is not None:
+            state = self._profile_action_state
+            message = {
+                "available": _pa.available(shortcut="R"),
+                "unavailable": _pa.unavailable(),
+                "stale": _pa.stale(),
+                "failed": _pa.failed(),
+                "succeeded": _pa.reverted(),
+            }.get(state, _pa.unavailable())
+            if not self._profile_action_checked:
+                message = _pa.checking()
+            elif state == "pending":
+                message = (
+                    _pa.reverting()
+                    if self._profile_activation_inflight
+                    else _pa.check_status(shortcut="R")
+                )
+            record = _profile_copy(message)
+            label = localized_display(
+                record.text, source_locale=record.source_locale, technical_literals=("R",)
+            ).plain
+            content.append("\n    ")
+            content.append(
+                label,
+                Style(
+                    meta={"profile_revert": self._profile_action.action_id},
+                    bold=state == "available",
+                    underline=state == "available",
+                ),
+            )
+        if self._profile_action is not None:
+            reason = {
+                "unavailable": _pa.unavailable_reason(),
+                "stale": _pa.stale_reason(),
+                "failed": _pa.failed_reason(),
+            }.get(self._profile_action_state)
+            if reason and self._profile_action_checked:
+                # Fit raw text first; isolate each painted Urdu line afterward
+                # so wrapping never strands an unmatched bidi control.
+                record = _profile_copy(reason)
+                for line in wrap_cells(record.text, max(1, width - 4)):
+                    content.append("\n    ")
+                    content.append(
+                        localized_display(line, source_locale=record.source_locale).plain,
+                        style=bindings.style("tool.row.chip_settled"),
+                    )
         self._row_count = max(1, len(content.plain.splitlines()))
         if detached:
             return
@@ -3509,6 +3641,16 @@ class ToolCard(ExpandableActionBlock):
             # the plain-output branch below (no diff was produced) and keeps
             # its argument block: there the args are the only account of what
             # was attempted, and the error only makes sense next to them.
+            if self.tool_name.lower() in {"agent", "team"}:
+                # Profile receipts are not file edits: their status, per-field
+                # summary and exact revert call are part of the result, not
+                # duplicate input. Keep them visible above the diff, wrapping
+                # each authored line so the backup id cannot be clipped away.
+                line_width = max(1, width - 2 - OUTPUT_INDENT)
+                receipt_style = bindings.style("tool.row.chip_settled")
+                for source in self._output:
+                    for line in wrap_cells(source, line_width):
+                        row.append("\n" + " " * OUTPUT_INDENT + line, style=receipt_style)
             self._append_diff_body(row, width)
         elif self._bridge_view is not None and self._state in ("success", "error"):
             self._append_bridge_body(row, width)

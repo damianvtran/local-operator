@@ -1,0 +1,13 @@
+{
+  "tui.profile_actions.available": "[ 还原 ({shortcut}) ]",
+  "tui.profile_actions.check_status": "[ 查看状态 ({shortcut}) ]",
+  "tui.profile_actions.checking": "[ 正在检查还原操作… ]",
+  "tui.profile_actions.failed": "[ 还原未完成 ]",
+  "tui.profile_actions.failed_reason": "未能完成还原。请求其他更改前，先检查当前配置。",
+  "tui.profile_actions.reverted": "[ 已还原 ]",
+  "tui.profile_actions.reverting": "[ 正在还原… ]",
+  "tui.profile_actions.stale": "[ 还原 · 配置已更改 ]",
+  "tui.profile_actions.stale_reason": "此次保存后，配置已发生更改。先检查当前版本；此操作不会撤销后续更改。",
+  "tui.profile_actions.unavailable": "[ 无法还原 ]",
+  "tui.profile_actions.unavailable_reason": "当前会话无法验证此操作。请求其他更改前，先检查当前配置。"
+}

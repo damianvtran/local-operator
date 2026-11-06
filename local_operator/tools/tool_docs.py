@@ -192,6 +192,13 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "account row is refused (delete it from the user surfaces)."
                 ),
             ),
+            ToolDocOp(
+                op="revert",
+                blurb=(
+                    "Undo an account save by the backup_id its receipt named; "
+                    "refused if the row was edited since."
+                ),
+            ),
         ),
         notes=(
             "Detail moved off the wire in the slimming wave (audit item 2):\n"

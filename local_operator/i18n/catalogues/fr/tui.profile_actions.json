@@ -1,0 +1,13 @@
+{
+  "tui.profile_actions.available": "[ Restaurer ({shortcut}) ]",
+  "tui.profile_actions.check_status": "[ Vérifier l’état ({shortcut}) ]",
+  "tui.profile_actions.checking": "[ Vérification de la restauration… ]",
+  "tui.profile_actions.failed": "[ Restauration inachevée ]",
+  "tui.profile_actions.failed_reason": "La restauration n’a pas pu être terminée. Vérifiez le profil actuel avant de demander une autre modification.",
+  "tui.profile_actions.reverted": "[ Version précédente restaurée ]",
+  "tui.profile_actions.reverting": "[ Restauration… ]",
+  "tui.profile_actions.stale": "[ Restaurer · profil modifié ]",
+  "tui.profile_actions.stale_reason": "Le profil a changé depuis cet enregistrement. Vérifiez sa version actuelle ; cette action n’annulera pas les modifications ultérieures.",
+  "tui.profile_actions.unavailable": "[ Restauration indisponible ]",
+  "tui.profile_actions.unavailable_reason": "Cette session ne peut pas vérifier cette action. Vérifiez le profil actuel avant de demander une autre modification."
+}

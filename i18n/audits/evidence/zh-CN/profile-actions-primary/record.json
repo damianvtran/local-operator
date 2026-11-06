@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "audit_id": "primary-36011595-context-complete",
+  "audit_kind": "bounded_namespace_independent_semantic_audit",
+  "locale": "zh-CN",
+  "namespace": "tui.profile_actions",
+  "audit_date": "2026-11-05",
+  "audited_revision": "00542c8b657ec7b72482b8fd7bf9932c193d3814",
+  "key_count": {
+    "en": 11,
+    "target": 11,
+    "context": 11
+  },
+  "auditor": {
+    "agent": "qa-tester / primary independent i18n-auditor",
+    "session": "36011595d4e0",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session model header on original run and resumed context-completion run",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independence": "No authorship or remediation of audited catalogue/context bytes; no other auditor judgments read."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.profile_actions.json",
+      "sha256": "8179f383fc12faa9fd44fa815c1a61bebe7fa1d07f0283a874a1146216e849e1"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.profile_actions.context.json",
+      "sha256": "b674415c6f1a6cadb2df0b91fdb78b31b8e6e93b5bf5da5de54e1cc2b14c60a8"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.profile_actions.json",
+      "sha256": "b08f40e4a739e17d87e0bacf74924c6b0675da244640b4fd1308be0044310073"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "deferred_non_gating_finding_ids": [
+      "N1"
+    ]
+  },
+  "semantic_reason": "还原 consistently names restoring the preceding profile configuration; 查看状态 asks to inspect status. 无法验证此操作 limits verification to the session; 不会撤销后续更改 explicitly protects later edits. 未能完成 does not guarantee zero changes. 配置 denotes the profile configuration in this control context.",
+  "context_comparison": "passed; see ../report.md and ../context-check.log",
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/report.md",
+      "sha256": "7093b3ef49c538e5a5b84de1e1f624c381e46affc7d10c2f1473cf6938ca1a6d"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/context-completion/context-check.log",
+      "sha256": "69404070f6cfd183beb3d2248814d04f642618892e8e988afce13983da836fd1"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/audit.log",
+      "sha256": "d892777b46a925501159602743b9f522902d7daad6ce1066f74fac7227bb25c9"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/guarded-reads.json",
+      "sha256": "35becdd8114448b99567b7ebbf9ab72b8d715d4e4ad32314d800bca7e8c510a7"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/semantic-notes.json",
+      "sha256": "796f4e3b28a5ccc612dcfecc0d861524ddd213415189712565166e8a35a483e3"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/key-coverage.json",
+      "sha256": "6964b2d1efbda5c858e3c675f5cbb1a0f465a8a9b40e9d8171903ba3617976aa"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/checks.py.txt",
+      "sha256": "9f72a070e7a20fee6e7f554abcff40a5abefc22c519f9920dfd1c510f7f20ff3"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/36011595d4e0/scratchpad/profile-copy-primary/receipt.json",
+      "sha256": "a216c5a9652361a290d383ab5b18db0cb998a62e7759a2a01abd9517efe89de7"
+    }
+  ],
+  "limitations": "Linguistic/copy audit only; no native rendered-flow/paint-isolation/engine proof; second independent audit not claimed."
+}

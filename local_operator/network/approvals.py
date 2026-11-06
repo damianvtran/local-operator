@@ -92,10 +92,12 @@ KIND_LOCAL_AUTHORITY = "local_authority"
 #: device certificate. Its own kind rather than ``device_onboard``: it carries a device
 #: block but installs nothing over SSH and runs no steps, and the two must not be reachable
 #: from each other's runner or card text.
+KIND_PROFILE_SAVE = "profile_save"
 KIND_OPERATOR_DEVICE_PAIR = "operator_device_pair"
 KINDS: tuple[str, ...] = (
     KIND_DEVICE_ONBOARD,
     KIND_LOCAL_AUTHORITY,
+    KIND_PROFILE_SAVE,
     enrollment.KIND,
     KIND_OPERATOR_DEVICE_PAIR,
 )
@@ -109,6 +111,8 @@ _SUBJECT_BLOCKS: dict[str, str] = {
     enrollment.KIND: "device",
     KIND_OPERATOR_DEVICE_PAIR: "device",
     KIND_LOCAL_AUTHORITY: "machine",
+    # A profile save names a LOCAL target (row id, name, scope), not a device.
+    KIND_PROFILE_SAVE: "machine",
 }
 
 STATE_REQUESTED = "requested"

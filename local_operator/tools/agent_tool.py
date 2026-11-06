@@ -55,7 +55,9 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import hashlib
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -86,6 +88,7 @@ from local_operator.agent_profiles import (
     seed_origin,
     seed_tags,
 )
+from local_operator.definition_transaction import DefinitionTransactionConflict
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -100,6 +103,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.hub_sync.definition import DefinitionRevisionMismatch
 from local_operator.profile_scope import Scope
 from local_operator.projects import truncate_row
 from local_operator.tools.builtin import (
@@ -137,6 +141,7 @@ class AgentParams(BaseModel):
         "sync",
         "delete",
         "promote",
+        "revert",
         "org_list",
         "org_pull",
     ] = Field(description="The op to run.")
@@ -146,10 +151,7 @@ class AgentParams(BaseModel):
     # spaced name authors a profile the user cannot invoke from that surface.
     name: str | None = Field(
         default=None,
-        description=(
-            "Role or specialist name (all ops but search); no spaces — it doubles "
-            "as the /agent slash-command argument."
-        ),
+        description=("Role/specialist name (except search); no spaces; also the /agent argument."),
     )
     label: str | None = Field(
         default=None,
@@ -166,9 +168,8 @@ class AgentParams(BaseModel):
     instructions: str | None = Field(
         default=None,
         description=(
-            "create/update: standing guidance prepended to every run of the "
-            "profile. Imperative and short — it is billed on each of that "
-            "profile's turns. Teams layer briefs on top without rewriting it."
+            "create/update: short imperatives prepended and billed each turn; "
+            "team briefs add, never replace."
         ),
     )
     tools: list[str] | None = Field(
@@ -288,6 +289,10 @@ class AgentParams(BaseModel):
     # name this module then has to translate.
     as_name: str | None = Field(
         default=None, description="promote: copy it under this name (default: its own)."
+    )
+    backup_id: str | None = Field(
+        default=None,
+        description="revert: the backup_id an account save's receipt returned.",
     )
     # ONE field, not ``replace`` + ``confirm_replace``: on this op the flag IS the
     # confirmation (the desktop body and the TUI's typed ``yes`` carry the same
@@ -505,7 +510,9 @@ def _class_label(value: object) -> str:
     return "reactive"
 
 
-def _instruction_diff(mine: str, packaged: str) -> tuple[str, bool]:
+def _instruction_diff(
+    mine: str, packaged: str, *, fromfile: str = "yours", tofile: str = "packaged"
+) -> tuple[str, bool]:
     """``(rendered, is_diff)`` for two instruction bodies.
 
     The flag is returned rather than inferred by the caller so the heading can
@@ -527,8 +534,8 @@ def _instruction_diff(mine: str, packaged: str) -> tuple[str, bool]:
         difflib.unified_diff(
             (mine or "").strip().splitlines(),
             packaged_lines,
-            fromfile="yours",
-            tofile="packaged",
+            fromfile=fromfile,
+            tofile=tofile,
             lineterm="",
             n=1,
         )
@@ -1496,6 +1503,99 @@ def write_profile(
     expected_definition_revision: str | None = None,
     context: ToolContext | None = None,
     consent_checked: bool = False,
+    before_write: Callable[[], None] | None = None,
+    after_write: Callable[[], None] | None = None,
+) -> tuple[str, str, str]:
+    """Keep CAS, metadata, instructions and backup within one authored edit.
+
+    The raw registry writers share this cross-process boundary. Journaling and
+    rollback prevent a prompt-write fault from silently leaving new metadata
+    beside old instructions; no provider/approval kind is enabled by this API.
+    """
+    from local_operator.definition_transaction import (
+        agent_image,
+        atomic_edit,
+        definition_lock,
+        restore_agent_image,
+    )
+    from local_operator.profile_scope import _ScopedAgentWrites, row_scope, scope_store
+
+    if registry is None:
+        raise ValueError("no agent registry attached to this session; cannot save roles.")
+    with definition_lock(Path(registry.config_dir)):
+        # Composite reads can be interval-cached. Refresh both owners before
+        # choosing the row/store and before CAS or a backup callback runs.
+        for store in (
+            getattr(registry, "global_registry", registry),
+            getattr(registry, "session_registry", None),
+        ):
+            if store is not None:
+                store._refresh_agents_metadata()
+        name = str(params.name or "").strip()
+        existing = registry.get_agent_by_name(name)
+        if expected_definition_revision is not None:
+            from local_operator.hub_sync.definition import definition_revision
+
+            if existing is None or expected_definition_revision != definition_revision(
+                "agent", str(existing.id), registry.definition_revision_fields(str(existing.id))
+            ):
+                raise DefinitionRevisionMismatch("the definition changed since it was read")
+        target = row_scope(registry, existing) if existing is not None else scope
+        adapter = scope_store(registry, target)
+        # Only the known composite adapter is unwrapped: a similarly named
+        # attribute on an arbitrary SDK registry is not a definition owner.
+        store = adapter._store if isinstance(adapter, _ScopedAgentWrites) else adapter
+        # THE CHANGE'S OWN IDENTITY names the journal, so a retry of THIS save
+        # cannot become a second write and a dead attempt cannot be replayed as
+        # a fresh grant. It is derived from the host's authorization string,
+        # which is per-grant and never anything a model can choose.
+        # HTTP editors/session-local writes have no tool grant; independent
+        # edits must not all collide on the empty string. A real tool grant is
+        # also bound to the exact proposal and base, not just a name mention.
+        save_identity = (
+            hashlib.sha256(
+                (
+                    f"save|{authorized_by}|{name}|{target}|{expected_definition_revision}|"
+                    + params.model_dump_json(exclude_unset=True)
+                ).encode("utf-8")
+            ).hexdigest()[:32]
+            if authorized_by
+            else None
+        )
+        with atomic_edit(
+            Path(store.config_dir),
+            owner=store,
+            read=lambda: agent_image(store, name),
+            restore=lambda image: restore_agent_image(store, name, image),
+            backup=(lambda image: before_write()) if before_write is not None else None,
+            transaction_id="save-" + save_identity if save_identity else None,
+        ):
+            result = _write_profile_locked(
+                registry,
+                params,
+                creating=creating,
+                scope=scope,
+                authorized_by=authorized_by,
+                expected_definition_revision=expected_definition_revision,
+                context=context,
+                consent_checked=consent_checked,
+            )
+            if after_write is not None:
+                after_write()
+            return result
+
+
+def _write_profile_locked(
+    registry: Any,
+    params: AgentParams,
+    *,
+    creating: bool,
+    scope: "Scope",
+    authorized_by: str | None = None,
+    expected_definition_revision: str | None = None,
+    context: ToolContext | None = None,
+    consent_checked: bool = False,
+    preview: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[str, str, str]:
     """Shared tool/HTTP mutation; preserve omitted policy fields and provenance.
 
@@ -1769,6 +1869,12 @@ def write_profile(
                 if text.lower().startswith(marker_prefix):
                     tags.append(text)
                     break
+    # Wording edits must not reorder or normalize unrelated policy tags.
+    if existing is not None and all(
+        getattr(params, field) is None
+        for field in ("tools", "effort", "delegate", "action_class", "saver")
+    ):
+        tags = list(existing.tags or [])
     categories = ["role"] if kind == "role" else ["specialist"]
 
     # Every field is spelled out (``AgentEditFields`` is validated in strict
@@ -1832,6 +1938,28 @@ def write_profile(
         )
         raise ValueError(durable_write_refusal(intent))
 
+    if preview is not None:
+        from local_operator.display_labels import default_label, normalize_label
+
+        preview(
+            {
+                "id": str(existing.id) if existing is not None else "pending",
+                "name": name,
+                "label": (
+                    (normalize_label(params.label) or default_label(name))
+                    if params.label is not None
+                    else (str(existing.label) if existing is not None else default_label(name))
+                ),
+                "description": profile.description,
+                "tags": tags,
+                "categories": categories,
+                "model": existing.model if existing is not None else "",
+                "instructions": instructions
+                or (registry.get_agent_system_prompt(existing.id) if existing is not None else ""),
+            }
+        )
+        return name, kind, action_class
+
     if existing is None:
         agent = scope_store(registry, scope).create_agent(
             _fields(
@@ -1868,6 +1996,433 @@ def write_profile(
     if instructions:
         registry.set_agent_system_prompt(agent.id, instructions)
     return name, kind, action_class
+
+
+#: The fields an account save can change, in the tool's own vocabulary, and the
+#: definition-revision key each one is read back from (``None``: not a
+#: definition field, so the diff can only say it was set).
+_SAVE_FIELDS: tuple[tuple[str, str | None], ...] = (
+    ("label", "label"),
+    ("description", "description"),
+    ("instructions", "instructions"),
+    ("effort", "effort"),
+    ("tools", "tools"),
+    ("delegate", "delegate"),
+    ("action_class", "action_class"),
+    ("saver", "saver"),
+)
+
+
+@dataclass
+class _AccountSave:
+    """What one tool-issued ACCOUNT save proposes, computed before consent.
+
+    The same value feeds the approval card (``DurableWriteIntent.changes`` /
+    ``summary``), the CAS-bound write (``base_revision``) and the receipt, so
+    what the person approved, what is written and what is reported cannot
+    drift apart.
+    """
+
+    agent_id: str | None
+    changes: tuple[str, ...]
+    summary: str
+    base_revision: str | None
+    before: dict[str, Any]
+    backup_id: str | None = None
+    backup_payload: dict[str, Any] | None = None
+    after_image: dict[str, Any] | None = None
+    post_revision: str | None = None
+
+
+def _queued_profile_receipt(tool_call_id: str, tool_name: str, queued: Any) -> ToolResult:
+    from local_operator.profile_scope import profile_diff_summary
+
+    return _text(
+        tool_call_id,
+        tool_name,
+        f"Queued {queued.profile_kind} {queued.profile_name!r} for durable approval "
+        f"({queued.approval_id}). No profile or backup was changed. "
+        "The signed approval continuation applies it; do not retry this tool call."
+        + ("\n" + profile_diff_summary("\n".join(queued.diff)) if queued.diff else ""),
+        details={
+            "status": "queued",
+            "fields": list(queued.changes),
+            "diff": list(queued.diff),
+            "approval_id": queued.approval_id,
+            "request_digest": queued.request_digest,
+            "expires_at": queued.expires_at,
+            "receipt_id": queued.receipt_id,
+            "profile_kind": queued.profile_kind,
+            "profile_name": queued.profile_name,
+            "scope": "global",
+        },
+    )
+
+
+def _agent_proposal(
+    registry: Any, params: AgentParams, creating: bool, scope: Any
+) -> dict[str, Any]:
+    import uuid
+
+    from local_operator.profile_approval import AgentImage
+
+    before_row = registry.get_agent_by_name(str(params.name))
+    before = None
+    if before_row is not None:
+        raw = before_row.model_dump(mode="json")
+        before = {key: raw[key] for key in AgentImage.model_fields if key != "instructions"}
+        before["instructions"] = registry.get_agent_system_prompt(before_row.id)
+    images = []
+    _write_profile_locked(registry, params, creating=creating, scope=scope, preview=images.append)
+    after = images[0]
+    if before is None:
+        after["id"] = str(uuid.uuid4())
+    return {
+        "profile_kind": "agent",
+        "operation": "create" if creating else "update",
+        "target_id": after["id"],
+        "name": after["name"],
+        "before": before,
+        "after": after,
+    }
+
+
+def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _AccountSave:
+    """Diff the proposed fields against the stored row (``existing`` may be None)."""
+    from local_operator.hub_sync.definition import definition_revision
+
+    before: dict[str, Any] = {}
+    base_revision: str | None = None
+    agent_id = str(existing.id) if existing is not None else None
+    if existing is not None:
+        before = dict(registry.definition_revision_fields(str(existing.id)))
+        before["saver"] = profile_from_agent(registry, existing).saver
+        base_revision = definition_revision("agent", str(existing.id), before)
+    changes = tuple(field for field, _key in _SAVE_FIELDS if getattr(params, field) is not None)
+    lines: list[str] = []
+    for field, key in _SAVE_FIELDS:
+        new = getattr(params, field)
+        if new is None:
+            continue
+        if field == "instructions":
+            rendered, is_diff = _instruction_diff(
+                str(before.get("instructions") or ""),
+                str(new or ""),
+                fromfile="before",
+                tofile="after",
+            )
+            # ``_instruction_diff`` falls back to the whole body when a diff
+            # would not be shorter; say so, or a reader cannot tell a full new
+            # text from a two-line diff.
+            heading = "instructions" if is_diff else "instructions (replaced; new text)"
+            lines.append(f"{heading}:\n{rendered}")
+            continue
+        old = before.get(key) if key is not None else None
+        # THE POLICY FIELDS ARE NAMED EXPLICITLY (operator requirement): a
+        # change to the model/effort pin, the tool allowlist or the class must
+        # never hide inside a generic "fields changed" line.
+        label = {
+            "effort": "model/effort",
+            "tools": "tools",
+            "action_class": "class",
+        }.get(field, field)
+        lines.append(f"{label}: {_format_field(old)} -> {_format_field(new)}")
+    return _AccountSave(
+        agent_id=agent_id,
+        changes=changes,
+        summary="\n".join(lines),
+        base_revision=base_revision,
+        before=before,
+    )
+
+
+def _take_backup(
+    context: ToolContext | None,
+    registry: Any,
+    existing: Any,
+    plan: _AccountSave,
+    authorized_by: str | None,
+) -> str | None:
+    """Snapshot the row the approved save will replace; a refusal string or None.
+
+    Read, then re-checked against the APPROVED revision: if the row moved
+    between the card and here, nothing is written and the backup is not kept.
+    The write itself is CAS-bound to the same revision, so a move after this
+    point refuses the write instead. Mutates nothing but the backup file.
+    """
+    from local_operator.hub_sync.definition import definition_revision
+    from local_operator.profile_scope import save_profile_backup
+
+    agent_id = str(existing.id)
+    row = registry.get_agent(agent_id)
+    instructions = registry.get_agent_system_prompt(agent_id) or ""
+    current = definition_revision("agent", agent_id, registry.definition_revision_fields(agent_id))
+    if current != plan.base_revision:
+        return (
+            f"{existing.name!r} changed after this save was approved, so nothing was "
+            "written. Show the user the current profile and propose the change again."
+        )
+    dump = getattr(row, "model_dump", None)
+    payload = {
+        "kind": "agent",
+        "name": str(existing.name),
+        "id": agent_id,
+        "scope": "global",
+        "row": dump(mode="json") if callable(dump) else dict(vars(row)),
+        "instructions": instructions,
+        "definition_fields": plan.before,
+        "base_revision": plan.base_revision,
+        "authorized_by": authorized_by,
+    }
+    session_dir = getattr(context, "session_dir", None) if context is not None else None
+    backup_id = save_profile_backup(
+        session_dir, payload, on_saved=lambda body: setattr(plan, "backup_payload", body)
+    )
+    plan.backup_id = backup_id
+    return None
+
+
+def _capture_saved_profile(registry: Any, plan: _AccountSave) -> None:
+    """Called under the shared write lock, before a later writer can land."""
+    from local_operator.hub_sync.definition import definition_revision
+    from local_operator.profile_approval import snapshot
+
+    if plan.agent_id is not None:
+        plan.after_image = snapshot(Path(registry.config_dir), "agent", plan.agent_id)
+        plan.post_revision = definition_revision(
+            "agent", plan.agent_id, registry.definition_revision_fields(plan.agent_id)
+        )
+
+
+def _backups_present(context: ToolContext | None) -> bool:
+    """Whether this session still has a backup folder to revert from.
+
+    Retention collects session directories independently of the config-root
+    journals a save is keyed on, so the two can legitimately disagree; the
+    refusal says which one is gone rather than calling an aged-out folder a
+    conflict.
+    """
+    from local_operator.profile_scope import PROFILE_BACKUPS_DIRNAME
+
+    session_dir = getattr(context, "session_dir", None) if context is not None else None
+    if not session_dir:
+        return False
+    return Path(session_dir, PROFILE_BACKUPS_DIRNAME).is_dir()
+
+
+def _require_backup(context: Any, registry: Any, existing: Any, plan: Any, origin: Any) -> None:
+    refusal = _take_backup(context, registry, existing, plan, origin)
+    if refusal is not None:
+        raise DefinitionRevisionMismatch(refusal)
+
+
+def _account_save_receipt(
+    context: ToolContext | None,
+    registry: Any,
+    name: str,
+    plan: _AccountSave,
+    details: dict[str, Any],
+    tool_call_id: str = "",
+) -> str:
+    """Fill the receipt card's details and return the text's revert sentence.
+
+    The card the operator asked for: profile, changed fields, a diff summary,
+    explicit policy-field lines, the backup and the exact revert call. No UI
+    button is claimed — the surfaces render ``details.revert`` as text today.
+    """
+    from local_operator.hub_sync.definition import definition_revision
+    from local_operator.profile_scope import profile_diff_summary, update_profile_backup
+
+    details["fields"] = list(plan.changes)
+    details["diff"] = plan.summary.splitlines()
+    revision: str | None = plan.post_revision
+    try:
+        row = registry.get_agent_by_name(name)
+        if row is not None and revision is None:
+            revision = definition_revision(
+                "agent", str(row.id), registry.definition_revision_fields(str(row.id))
+            )
+    except Exception:  # noqa: BLE001 — the receipt is best effort after a landed save
+        logger.debug("post-save revision read failed", exc_info=True)
+    details["revision"] = revision
+    details["backup_id"] = plan.backup_id
+    if not plan.backup_id:
+        return "\n" + profile_diff_summary(plan.summary)
+    session_dir = getattr(context, "session_dir", None) if context is not None else None
+    update_profile_backup(session_dir, plan.backup_id, saved_revision=revision)
+    details["revert"] = {"op": "revert", "backup_id": plan.backup_id}
+    register = getattr(context, "register_profile_action", None)
+    if (
+        register is not None
+        and session_dir is not None
+        and plan.backup_payload is not None
+        and plan.after_image is not None
+    ):
+        from local_operator.definition_transaction import commitment
+        from local_operator.profile_approval import AgentImage
+
+        raw = plan.backup_payload["row"]
+        inverse = {key: raw[key] for key in AgentImage.model_fields if key != "instructions"}
+        inverse["instructions"] = plan.backup_payload["instructions"]
+        body = dict(plan.backup_payload, saved_revision=revision)
+        descriptor = register(
+            root=Path(registry.config_dir),
+            profile_kind="agent",
+            profile_name=name,
+            target_id=str(raw["id"]),
+            tool_call_id=tool_call_id,
+            receipt_id=plan.backup_id,
+            before=inverse,
+            after=plan.after_image,
+            backup_path=Path(session_dir) / "profile-backups" / (plan.backup_id + ".json"),
+            backup_commitment=commitment(body),
+        )
+        details["profile_action"] = descriptor
+
+    return (
+        "\n"
+        + profile_diff_summary(plan.summary)
+        + f"\nRevert with agent(op='revert', backup_id='{plan.backup_id}')."
+    )
+
+
+async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: str) -> ToolResult:
+    """Restore an account row from the backup a granted save took.
+
+    REFUSES TO CLOBBER: the row must still be at the revision recorded right
+    after that save, so a later edit (by anyone, on any surface) is never
+    silently undone. Goes through the same consent seam as the save — the user
+    asking "revert the reviewer" is the owner-prompt path because it names the
+    profile; anything else is the approval card.
+    """
+    from local_operator.hub_sync.definition import definition_revision
+    from local_operator.profile_scope import (
+        durable_write_decision,
+        durable_write_refusal,
+        load_profile_backup,
+    )
+
+    registry = _registry(context)
+    session_dir = getattr(context, "session_dir", None) if context is not None else None
+    record = load_profile_backup(session_dir, backup_id)
+    if registry is None or record is None or record.get("kind") != "agent":
+        return _error(tool_call_id, "agent", f"no agent backup {backup_id!r} in this conversation.")
+    agent_id = str(record.get("id") or "")
+    name = str(record.get("name") or "")
+    saved = record.get("saved_revision")
+    try:
+        fields = registry.definition_revision_fields(agent_id)
+    except Exception:  # noqa: BLE001 — a deleted row cannot be reverted in place
+        return _error(tool_call_id, "agent", f"{name!r} no longer exists; nothing to revert.")
+    if str(fields.get("name") or "") != name:
+        return _error(
+            tool_call_id,
+            "agent",
+            "backup identity does not match the target agent; nothing was written.",
+        )
+    if not saved or definition_revision("agent", agent_id, fields) != saved:
+        return _error(
+            tool_call_id,
+            "agent",
+            f"{name!r} was edited after that save, so reverting would undo the later "
+            "change too; nothing was written. Show the user the current profile instead.",
+        )
+    row = dict(record.get("row") or {})
+    if str(row.get("id") or "") != agent_id or str(row.get("name") or "") != name:
+        return _error(
+            tool_call_id,
+            "agent",
+            "backup identity does not match the target agent; nothing was written.",
+        )
+    fields["saver"] = profile_from_agent(registry, registry.get_agent(agent_id)).saver
+    before = dict(record.get("definition_fields") or {})
+    if not before or before.get("name") != name:
+        return _error(
+            tool_call_id,
+            "agent",
+            "backup definition does not match the target agent; nothing was written.",
+        )
+    changes = tuple(
+        key for key, _ in _SAVE_FIELDS if key in before and before[key] != fields.get(key)
+    )
+    from local_operator.profile_scope import profile_field_label
+
+    summary_lines: list[str] = []
+    for key in changes:
+        if key == "instructions":
+            rendered, _ = _instruction_diff(
+                str(fields.get(key) or ""),
+                str(before.get(key) or ""),
+                fromfile="before",
+                tofile="after",
+            )
+            summary_lines.append(f"instructions:\n{rendered}")
+        else:
+            summary_lines.append(
+                f"{profile_field_label(key)}: {_format_field(fields.get(key))} -> "
+                f"{_format_field(before.get(key))}"
+            )
+    from local_operator.profile_approval import AgentImage
+
+    before_image = {
+        key: registry.get_agent(agent_id).model_dump(mode="json")[key]
+        for key in AgentImage.model_fields
+        if key != "instructions"
+    }
+    before_image["instructions"] = registry.get_agent_system_prompt(agent_id)
+    after_image = {key: row[key] for key in AgentImage.model_fields if key != "instructions"}
+    after_image["instructions"] = str(record.get("instructions") or "")
+    intent = DurableWriteIntent(
+        kind="agent",
+        operation="revert",
+        name=str(fields["name"]),
+        changes=changes,
+        summary="\n".join(summary_lines),
+        base_revision=str(saved),
+        proposal={
+            "profile_kind": "agent",
+            "operation": "revert",
+            "target_id": agent_id,
+            "name": name,
+            "before": before_image,
+            "after": after_image,
+        },
+        tool_call_id=tool_call_id,
+    )
+    authorized_by, reason = await durable_write_decision(context, intent)
+    if reason == "queued":
+        return _queued_profile_receipt(tool_call_id, "agent", authorized_by)
+    if authorized_by is None:
+        return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
+
+    # Both the typed receipt gesture and this already-authorized tool path use
+    # the same exact inverse/CAS transaction, not a second metadata/prompt write.
+    from local_operator.profile_actions import restore_bound_profile
+
+    try:
+        restore_bound_profile(
+            Path(registry.config_dir), "agent", agent_id, before_image, after_image
+        )
+    except DefinitionRevisionMismatch:
+        return _error(
+            tool_call_id,
+            "agent",
+            f"{name!r} was edited after that save; nothing was written.",
+        )
+    return _text(
+        tool_call_id,
+        "agent",
+        f"reverted agent {identifier_text(context, repr(name))} in your account to its state "
+        f"before backup {backup_id}.",
+        details={
+            "name": name,
+            "scope": "global",
+            "authorized_by": authorized_by,
+            "reverted_backup_id": backup_id,
+            "fields": list(changes),
+            "diff": "\n".join(summary_lines).splitlines(),
+        },
+    )
 
 
 #: The org-hub surface on this tool's schema: removed whole when the gate is closed.
@@ -2134,15 +2689,29 @@ async def _op_write(
     # and cannot act on.
     writable_here = existing is None or is_role(existing) or is_specialist(existing)
     authorized_by: str | None = None
+    account_save: _AccountSave | None = None
     if target == "global" and writable_here and needs_durable_consent(registry, params.scope):
         # THE ASK HAPPENS HERE, before any mutation, and only where the target is
         # known. ``write_profile`` re-checks the RESULT of this answer under the
         # write lock, so a row that changed owner between the two calls cannot
         # slip an unconsented account write through.
+        try:
+            account_save = _plan_account_save(registry, existing, params)
+        except Exception as error:  # noqa: BLE001 — an unreadable row is a refusal
+            return _error(tool_call_id, "agent", f"could not read {name!r}: {error}")
         intent = DurableWriteIntent(
-            kind="agent", operation="update" if not creating else "create", name=name
+            kind="agent",
+            operation="update" if not creating else "create",
+            name=name,
+            changes=account_save.changes,
+            summary=account_save.summary,
+            base_revision=account_save.base_revision,
+            proposal=_agent_proposal(registry, params, creating, scope),
+            tool_call_id=tool_call_id,
         )
         authorized_by, reason = await durable_write_decision(context, intent)
+        if reason == "queued":
+            return _queued_profile_receipt(tool_call_id, "agent", authorized_by)
         if authorized_by is None:
             return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
     try:
@@ -2152,6 +2721,19 @@ async def _op_write(
             creating=creating,
             scope=scope,  # type: ignore[arg-type]
             authorized_by=authorized_by,
+            expected_definition_revision=(
+                account_save.base_revision if account_save is not None else None
+            ),
+            before_write=(
+                (lambda: _require_backup(context, registry, existing, account_save, authorized_by))
+                if account_save is not None and existing is not None
+                else None
+            ),
+            after_write=(
+                (lambda: _capture_saved_profile(registry, account_save))
+                if account_save is not None and existing is not None
+                else None
+            ),
             context=context,
             # The tool layer already ran the decision: it either got an origin or
             # the host has no conversation store, where an omitted scope is the
@@ -2160,6 +2742,30 @@ async def _op_write(
         )
     except ValueError as error:
         return _error(tool_call_id, "agent", str(error))
+    except DefinitionTransactionConflict as error:
+        # A granted change whose own record is missing, interrupted or already
+        # applied. The remedy is a NEW decision from the person, never a retry:
+        # a retry would replay an operation whose outcome is not proven.
+        remedy = (
+            "Nothing was written. Ask the user to ask for this change again"
+            " (their own message naming the profile is the authorization)."
+        )
+        if account_save is not None and not _backups_present(context):
+            # Journals live in the config root while backups live in the session
+            # directory, which retention may already have collected. Say so, so
+            # a legitimately aged-out backup is not reported as a conflict.
+            remedy += (
+                " This conversation's backup folder is no longer on disk, so that record "
+                "cannot be reverted; approve the change again from scratch."
+            )
+        return _error(tool_call_id, "agent", str(error) + " " + remedy)
+    except DefinitionRevisionMismatch:
+        return _error(
+            tool_call_id,
+            "agent",
+            f"{name!r} changed after this save was approved, so nothing was written. "
+            "Show the user the current profile and propose the change again.",
+        )
     verb = "created" if creating else "updated"
     if kind == "role":
         how = f"launch with task(agent={identifier_text(context, repr(name))})"
@@ -2188,18 +2794,24 @@ async def _op_write(
     # say WHO authorized an account write without parsing prose.
     from local_operator.profile_scope import scope_words
 
+    details: dict[str, Any] = {
+        "name": name,
+        "kind": kind,
+        "class": action_class,
+        "scope": target,
+        "authorized_by": authorized_by,
+    }
+    receipt = ""
+    if account_save is not None and authorized_by:
+        receipt = _account_save_receipt(
+            context, registry, name, account_save, details, tool_call_id
+        )
     return _text(
         tool_call_id,
         "agent",
-        f"{verb} {kind} {identifier_text(context, repr(name))} "
-        f"in {scope_words(target)}; {how}.{class_clause}",
-        details={
-            "name": name,
-            "kind": kind,
-            "class": action_class,
-            "scope": target,
-            "authorized_by": authorized_by,
-        },
+        f"{verb} agent {identifier_text(context, repr(name))} "
+        f"in {scope_words(target)}; {how}.{class_clause}{receipt}",
+        details=details,
     )
 
 
@@ -2365,6 +2977,10 @@ async def execute_agent(
         return _error(tool_call_id, "agent", f"op={params.op!r} needs 'name'.")
     if params.op == "search" and not (params.query or "").strip():
         return _error(tool_call_id, "agent", "op='search' needs 'query'.")
+    if params.op == "revert":
+        if not (params.backup_id or "").strip():
+            return _error(tool_call_id, "agent", "op='revert' needs 'backup_id'.")
+        return await _op_revert(context, tool_call_id, str(params.backup_id).strip())
 
     if params.op == "list":
         return await _op_list(context, tool_call_id)

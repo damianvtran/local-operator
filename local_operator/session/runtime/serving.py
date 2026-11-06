@@ -78,6 +78,7 @@ from local_operator.harness.types import (
     SubagentStartEvent,
 )
 from local_operator.harness.wire import bound_agent_end_for_wire
+from local_operator.profile_actions import ProfileActionReply
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 
 if TYPE_CHECKING:
@@ -581,6 +582,17 @@ def _question_prose(question: Any) -> str:
     return str(getattr(question, "question", "") or "the agent is asking")
 
 
+#: The sender stamp a spooled owner line carries when its prompt came from a
+#: REMOTE connection. ``Session._run_spooled_owner_prompt`` reads it back so a
+#: prompt spooled across a runtime update keeps the provenance it would have
+#: had live (it never authorizes a card-free account profile save).
+REMOTE_ORIGIN_SENDER_KEY = "remote_origin"
+
+
+def _owner_sender(owner_typed: bool) -> dict[str, Any]:
+    return {} if owner_typed else {REMOTE_ORIGIN_SENDER_KEY: True}
+
+
 @dataclass
 class _PromptCommand:
     command_id: str
@@ -618,6 +630,8 @@ class _PromptCommand:
     #: ``Message.user(..., documents=...)``. Resolved from ``Prompt.files`` in
     #: the synchronous prelude, so nothing here touches the store again.
     documents: list["DocumentContent"] | None = None
+    #: False for a prompt from a remote connection (see ``prompt``).
+    owner_typed: bool = True
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -1414,8 +1428,12 @@ class ServingSessionHandle(SessionHandle):
             # Full-auto: the owner's saved default is to approve every tier,
             # exactly as the TUI adopts ``tool_approval_mode: auto`` at boot
             # (see OperatorApp._load_approvals_default). Answer inline so the
-            # turn never stalls on a card no front end would present.
-            if self._auto_approve:
+            # turn never stalls on a card no front end would present. An
+            # account profile save is the exception: auto-approve is not
+            # consent to rewriting account-wide agents (``never_auto_approved``).
+            from local_operator.harness.approval import never_auto_approved
+
+            if self._auto_approve and not never_auto_approved(tool_name):
                 return True
             if self._gates_closed_for_exit:
                 # Leaving on a signal: nobody will be asked before the exit, and
@@ -3937,8 +3955,14 @@ class ServingSessionHandle(SessionHandle):
         wait_complete: bool = False,
         harness_injected: bool = False,
         wait_for_turn: bool = True,
+        owner_typed: bool = True,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``owner_typed=False`` is set by the control server for a prompt from a
+        REMOTE connection (``RuntimeServer._dispatch``): it rides to
+        ``Session.prompt`` (and onto a spooled line's sender) so the row never
+        authorizes a card-free account profile save.
 
         ``input_mode``/``input_path`` are the silent input metadata the
         desktop composer sends for a dictation (see ``Message.input_mode``).
@@ -4121,7 +4145,7 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender={},
+                    sender=_owner_sender(owner_typed),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -4172,7 +4196,7 @@ class ServingSessionHandle(SessionHandle):
                         text,
                         mode="mailbox",
                         wake=True,
-                        sender={},
+                        sender=_owner_sender(owner_typed),
                         source=SOURCE_USER,
                         command_id=command_id,
                         harness_injected=harness_injected,
@@ -4209,6 +4233,7 @@ class ServingSessionHandle(SessionHandle):
             input_path=input_path,
             audio=audio_blocks_decoded,
             documents=document_blocks_decoded,
+            owner_typed=owner_typed,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -4583,7 +4608,7 @@ class ServingSessionHandle(SessionHandle):
         await reconcile()
 
     @_on_session_loop
-    async def run_headless_prompt(self, text: str) -> bool:
+    async def run_headless_prompt(self, text: str, *, owner_typed: bool = True) -> bool:
         """Submit through the owner queue so live viewers cannot race exec.
 
         Returns whether the turn completed, rather than raising on failure. A
@@ -4596,7 +4621,9 @@ class ServingSessionHandle(SessionHandle):
         """
         self._last_prompt_failure = ""
         try:
-            await self.prompt(text, command_id=str(uuid.uuid4()), wait_complete=True)
+            await self.prompt(
+                text, command_id=str(uuid.uuid4()), wait_complete=True, owner_typed=owner_typed
+            )
             return True
         except RuntimeError:
             logger.debug("headless turn did not complete", exc_info=True)
@@ -5101,6 +5128,8 @@ class ServingSessionHandle(SessionHandle):
                         # keyword's whole job is to stamp a marker those hosts
                         # never read.
                         fields["harness_injected"] = command.harness_injected
+                    if "owner_typed" in parameters and not command.owner_typed:
+                        fields["owner_typed"] = False
                     if "input_mode" in parameters:
                         fields["input_mode"] = command.input_mode
                     if "input_path" in parameters:
@@ -5192,7 +5221,9 @@ class ServingSessionHandle(SessionHandle):
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
         files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
+        owner_typed: bool = True,
     ) -> str:
+        # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
         # Bounded BEFORE the reservation, deliberately: the bound is a thread
@@ -5255,6 +5286,7 @@ class ServingSessionHandle(SessionHandle):
                     document_blocks=document_blocks_decoded,
                     carries_attachments=carries_attachments,
                     harness_injected=harness_injected,
+                    owner_typed=owner_typed,
                 )
             )
             receipt, raise_successor = await self._await_steer_admission(admission)
@@ -5332,6 +5364,7 @@ class ServingSessionHandle(SessionHandle):
         document_blocks: list[Any],
         carries_attachments: bool,
         harness_injected: bool,
+        owner_typed: bool = True,
     ) -> tuple[str, bool]:
         """The admission half of :meth:`steer`, once its blocks are decoded.
 
@@ -5368,7 +5401,7 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender={},
+                    sender=_owner_sender(owner_typed),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -5412,7 +5445,7 @@ class ServingSessionHandle(SessionHandle):
                     text,
                     mode="mailbox",
                     wake=True,
-                    sender={},
+                    sender=_owner_sender(owner_typed),
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
@@ -5458,6 +5491,8 @@ class ServingSessionHandle(SessionHandle):
         # session that predates the keyword never receives it.
         if "harness_injected" in parameters:
             fields["harness_injected"] = harness_injected
+        if "owner_typed" in parameters and not owner_typed:
+            fields["owner_typed"] = False
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:
@@ -6738,7 +6773,37 @@ class ServingSessionHandle(SessionHandle):
         raise ValueError("pick the session from the session list instead")
 
     @_on_session_loop
-    async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
+    async def receive_profile_save_result(self, receipt_id: str) -> str:
+        """A hint confers no provenance: reverify the signed local result first."""
+        self._session.queue_profile_save_result(receipt_id)
+        return "profile receipt queued for verification"
+
+    @_on_session_loop
+    async def profile_action_status(
+        self,
+        *,
+        action_id: str,
+        receipt_id: str,
+        profile_kind: str,
+        profile_name: str,
+        tool_call_id: str,
+    ) -> ProfileActionReply:
+        return self._session._profile_actions.status(
+            action_id=action_id,
+            receipt_id=receipt_id,
+            profile_kind=profile_kind,
+            profile_name=profile_name,
+            tool_call_id=tool_call_id,
+        )
+
+    @_on_session_loop
+    async def approval_answer(
+        self, request_id: str, approved: bool, remember: bool
+    ) -> str | ProfileActionReply:
+        if request_id.startswith("prv_") and hasattr(self._session, "_profile_actions"):
+            return self._session._profile_actions.activate(
+                request_id, approved=approved, remember=remember
+            )
         await self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 
@@ -12186,6 +12251,10 @@ async def spawn_owned_session(
         agent_registry,
         has_ui=False,
         cwd=cwd,
+        # The runtime behind the TUI, desktop and phone: the person's own typed
+        # request may save an account profile, and anything else is asked on
+        # this runtime's approval card (``Session._authorize_account_profile_write``).
+        owner_prompt_consent=True,
         # MCP WIRING RIDES THE RECORD, NOT THE BOOT PATH. Everything this
         # session does before ``RecordPublisher`` runs (``process.amain``:
         # spawn_owned_session -> _drain_inbox_into -> async_init ->

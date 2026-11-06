@@ -322,6 +322,10 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         # added to stop, arriving as a wrong answer rather than as a refusal.
         if "aside_instruction" in frame and not isinstance(frame.get("aside_instruction"), bool):
             raise ValueError("aside_instruction must be a boolean")
+    elif op == "profile_action_status":
+        for key in ("action_id", "receipt_id", "profile_kind", "profile_name", "tool_call_id"):
+            if not isinstance(frame.get(key), str) or not 0 < len(frame[key]) <= 160:
+                raise ValueError(f"{key} must be a bounded non-empty string")
     elif op == "approval_answer":
         if not isinstance(frame.get("request_id"), str) or not frame["request_id"]:
             raise ValueError("request_id must be a non-empty string")
@@ -539,6 +543,7 @@ ControlOp = Literal[
     "complete_aside",  # {turns, aside_instruction?: false} — off-record request
     "new_conversation",  # {} — the TUI's /new
     "resume_session",  # {session_id} — rebind the runtime to another transcript
+    "profile_action_status",  # read-only, bound receipt identity; no inverse values
     "approval_answer",  # {request_id, approved, remember}
     # {request_id, value} — the LEGACY per-question answer. For one release it
     # also carries a mirrored queued ask's synthetic id ``"<ask_id>.<qidx>"``,

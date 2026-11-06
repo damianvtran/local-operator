@@ -16768,6 +16768,7 @@ async def create_session(
     *,
     has_ui: bool = False,
     defer_mcp_wiring: bool = False,
+    owner_prompt_consent: bool = False,
 ):
     """Build a wired harness session for interactive/headless use.
 
@@ -16786,6 +16787,7 @@ async def create_session(
         agent_registry,
         has_ui=has_ui,
         defer_mcp_wiring=defer_mcp_wiring,
+        owner_prompt_consent=owner_prompt_consent,
     )
 
 
@@ -16853,7 +16855,11 @@ async def _run_headless_repl(
         logging.getLogger(_noisy).setLevel(logging.WARNING)
 
     console = Console(stderr=True, highlight=False)
-    session = await create_session(args, config_manager, agent_registry, has_ui=False)
+    # The headless REPL has the person at its prompt: their own typed request
+    # may save an account profile (``Session._authorize_account_profile_write``).
+    session = await create_session(
+        args, config_manager, agent_registry, has_ui=False, owner_prompt_consent=True
+    )
     renderer = PrintRenderer(stream_text=True)
     unsubscribe = renderer.attach(session)
     console.print(
