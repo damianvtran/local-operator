@@ -212,14 +212,13 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
         # absence means "no level held" and the two "already <level>" paths
         # fall through to the plain no-op.
         "chosen_effort",
-        # The monitor scheduler is IN-PROCESS only (contract §10.4): a viewer
-        # holds no scheduler to project, and the stop-path reader
-        # (`_mark_own_monitors_dormant`) sits in `_stop_local_session`, which
-        # returns early unless the session owns its runtime — a viewer's
-        # `/stop` is a control op whose OWNER stamps the dormant marker on the
-        # control rung (`_mark_monitors_dormant`). Any projected scheduler is
-        # a slice-4 surface question, not a viewer-path degradation today.
-        "monitor_scheduler",
+        # ``monitor_scheduler`` USED TO SIT HERE, excused as "in-process only
+        # (§10.4): a viewer holds no scheduler to project". The scheduler is
+        # in-process only; the READ was not owner-gated, and this entry is what
+        # made its absence legal — the dock band read it off the viewer, got
+        # None, and hid an armed watch. The viewer now provides
+        # ``SnapshotMonitorScheduler`` over canonical ``monitors``, so the gap
+        # is closed and the excuse must not stay behind it.
         # The naming errand's Tier-1 fit check: an OWNER-only provider seam
         # (the session factory wires it over the owner's shared classification
         # service). A viewer never names — its `owns_runtime` is False, both

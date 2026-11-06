@@ -876,7 +876,11 @@ class TestMonitorBandOnTheViewerHost:
         for, so it must not wait for a delivery to become visible."""
         viewer = _viewer(
             tmp_path,
-            [_monitor_state("m1", "watch the deploy queue", checks=0, deliveries=0, last_check_at=0)],
+            [
+                _monitor_state(
+                    "m1", "watch the deploy queue", checks=0, deliveries=0, last_check_at=0
+                )
+            ],
         )
         displayed, out = await _paint_host(viewer)
         assert displayed is True
