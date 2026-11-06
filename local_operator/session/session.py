@@ -91,6 +91,7 @@ from local_operator.compaction.marker import (
     with_capture_elision_frontier,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
+from local_operator.divergence import DivergenceJudge, origin_parent_session_id
 from local_operator.harness import chrome_prompts as _chrome_prompts
 from local_operator.harness.approval import ApprovalGate, ask_approval
 from local_operator.harness.comms import SubagentComms
@@ -113,6 +114,7 @@ from local_operator.harness.message_types import (
     ASK_RELAY_MESSAGE_TYPE,
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
+    DIVERGENCE_NOTICE_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
     PEER_DELIVERABLE_CUSTOM_TYPES,
     PEER_FAMILY_INPUT_TYPES,
@@ -3626,6 +3628,25 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # The divergence observer (``local_operator/divergence.py``) is
+        # SESSION-scoped, and that is the whole reason it is built here: "fire
+        # once per novel root" and "escalate on a second turn" are facts about a
+        # session, so a run-scoped instance would re-announce the same root on
+        # every loop pass. Its notice callback paints the transcript row; the
+        # audit row is written by the judge itself.
+        #
+        # OBSERVATION ONLY. Nothing this object returns can deny, approve or
+        # delay a call — the loop invokes it after the result exists and wraps
+        # every failure. See ``harness/loop.py``'s ``_observe_divergence``.
+        self._divergence_judge = DivergenceJudge(
+            session_id=self._session_id,
+            # The constructor value when the host passed one, else the durable
+            # marker on disk: a child resumed by id has no live parent handle,
+            # and ``origin.json`` is written once by whoever created the
+            # directory — the only place that knows.
+            parent_session_id=parent_session_id or origin_parent_session_id(transcript.directory),
+            on_notice=self._record_divergence_notice,
+        )
         # Tool contexts are rebuilt per turn; presence belongs to the Session
         # so both transition updates and the serving heartbeat read one fact.
         self._waiting_on = 0
@@ -19770,6 +19791,7 @@ class Session:
                 capture_prepared_write=(
                     self._capture_prepared_write if self._prepared_capture_enabled else None
                 ),
+                divergence_judge=self._divergence_judge,
                 model=self._model,
                 # Re-read per provider call, so a ``set_model`` landing while
                 # this turn is running reaches its NEXT call instead of
@@ -21180,6 +21202,38 @@ class Session:
             effort=effort,
             model_selector=model,
         )
+
+    def _record_divergence_notice(self, payload: dict[str, Any]) -> None:
+        """Paint a divergence notice into the transcript, from the judge's callback.
+
+        Called SYNCHRONOUSLY from inside a live tool call (``divergence.
+        DivergenceJudge.observe_turn`` runs on the turn's own path), so it hands
+        the transcript write to the session's background group rather than
+        awaiting it there. The row is the operator's visible half of the
+        observation; the durable half is the audit row the judge already wrote.
+
+        A MESSAGE entry carrying a ``CustomMessage`` — not ``append_custom`` —
+        for the reason ``_record_gate_timeout`` names: ``build_llm_history``
+        ignores custom ENTRIES by design, so a row written the other way would
+        reach no viewer that replays the history. It stays out of the MODEL's
+        context on its own merits: ``DIVERGENCE_NOTICE_MESSAGE_TYPE`` is absent
+        from ``harness/render.py``'s injection tuple, which drops unlisted
+        custom types as bookkeeping.
+        """
+
+        async def _append() -> None:
+            try:
+                await self._transcript.append_message(
+                    CustomMessage(
+                        custom_type=DIVERGENCE_NOTICE_MESSAGE_TYPE,
+                        attribution="system",
+                        details=payload,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - a notice must never break a turn
+                logger.debug("could not record the divergence notice", exc_info=True)
+
+        self._spawn_background(_append())
 
     def _capture_prepared_write(self, call: ToolCall, result: ToolResult) -> None:
         """Private exact executed bytes; never persisted or passed to a provider.
