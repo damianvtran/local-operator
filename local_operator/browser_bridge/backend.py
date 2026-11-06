@@ -774,9 +774,26 @@ _CAPABILITY_HOST_REMEDY = {
 #: `copy`, which that very build predated.
 #:
 #: Record a measured value here (as ``CAPABILITY_MIN_EXTENSION_VERSION`` does for
-#: the extension) and both the floor sentence and the remedy follow from it with
-#: no second edit.
+#: the extension) and the floor sentence names it, comparing it against the
+#: app's own reported version, with no copy edit. The update wording itself stays
+#: in ``_CAPABILITY_HOST_REMEDY``.
 _CAPABILITY_MIN_APP_VERSION: dict[str, str] = {}
+
+#: Where a refused desktop-only method sends the reader when updating cannot help.
+#:
+#: "Update the desktop app, then retry" is a loop when the latest release does
+#: not serve the method either, and on 2026-11-06 that loop ended with an API key
+#: photographed off the screen. So `copy` names the way out that does not depend
+#: on any build: the service's own API or a download. Worded conditionally ("if
+#: the latest desktop app still refuses it") so it stays true after the app half
+#: ships. Methods without an entry keep the generic close.
+_CAPABILITY_APP_EXIT: dict[str, str] = {
+    "copy": (
+        "if the latest desktop app still refuses it, take the value from the service's "
+        "API or a download instead, never from the screen. Every other browser action "
+        "still works."
+    ),
+}
 
 
 def capability_refusal(
@@ -943,18 +960,24 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
         # claiming the app is the only one that can would send the caller away from
         # a host that works.
         minimum = _CAPABILITY_MIN_APP_VERSION.get(method)
-        floor = (
-            f"The first desktop-app version that serves it is {minimum}. "
-            if minimum
-            else f"No desktop-app version floor is recorded for '{method}', so aim at the "
-            "latest release rather than a version number. "
-        )
         scope = ", and only that host serves it" if method in DESKTOP_ONLY_METHODS else ""
-        return (
-            f"the Local Operator desktop app's browser host does not provide '{method}' — "
-            f"the app that answered was built before this action existed{scope}. {floor}"
-            f"Please {remedy}; every other browser action still works."
+        close = _CAPABILITY_APP_EXIT.get(method, "every other browser action still works.")
+        head = f"the Local Operator desktop app's browser host does not provide '{method}'{scope}"
+        if minimum and not extension_older(peer, minimum):
+            # A recorded floor the app already meets (or a version we cannot
+            # parse): "update" would be the misdiagnosis the extension arm's
+            # `extension_older` check exists to avoid, so offer only the exit.
+            return (
+                f"{head}. This app reports version {peer or 'unknown'}, and '{method}' "
+                f"first shipped in {minimum}, so updating is not the fix; {close}"
+            )
+        floor = (
+            f"this app ({peer}) predates {minimum}, the first desktop-app version that " "serves it"
+            if minimum
+            else "the app that answered was built before this action existed, and no "
+            "desktop-app version floor is recorded for it"
         )
+        return f"{head} — {floor}. Please {remedy}; {close}"
     if str(error.data.get("method") or "") in (error.data.get("disabled") or []):
         # The OPERATOR'S consent, not a version: this build serves the method and
         # the switch is off. Named by its own label and located, because a refusal

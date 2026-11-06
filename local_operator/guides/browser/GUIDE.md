@@ -696,18 +696,20 @@ button is broken.
 - **`copy` is served by the desktop app's browser host only.** The Chrome
 extension has no main process to write the clipboard from and cmux has no
 page-script read, so both refuse it with a typed message naming the desktop app.
-- **The page's own Copy button is main-frame only.** In a driven page a Copy
-button inside a same-process CHILD frame (an iframe) is refused. The host serves
-that write itself rather than granting the page a permission, and it decides the
-click was a real gesture by reading `navigator.userActivation.isActive` in an
-isolated world the page cannot patch — but a child frame's isolated activation
-reading mirrors the TOP frame's, so admitting children would let any frame
-borrow the top frame's activation. The value inside an iframe is not lost: use
-the `copy` ACTION against that element. `copy` reads it in an isolated world
-(the class `read` uses) and writes from the app's main process, so the frame's
-own button is not involved.
-- **If the host refuses `copy`, the page's own Copy button is dead on that build
-too.** The app half ships separately from this runtime, so a machine can hold
+- **A value inside an iframe is out of reach of both clipboard routes.** On a
+desktop app that serves the page's clipboard write, the page's own Copy button
+works in the TOP-LEVEL document only: a button inside a same-process child frame
+is refused. The host serves that write itself rather than granting the page a
+permission, and it decides the click was a real gesture by reading
+`navigator.userActivation.isActive` in an isolated world the page cannot patch —
+but a child frame's isolated activation reading mirrors the TOP frame's, so
+admitting children would let any frame borrow the top frame's activation. The
+`copy` action cannot reach it either: it resolves its selector in the top
+document, and selectors cannot cross frames. The way out is the frame's own
+document — if the iframe's `src` is a page this session can `goto`, open it
+top-level and copy there; otherwise use the API or download route below.
+- **If the desktop app refuses `copy`, the page's own Copy button is dead on that
+build too**, in every frame. The app half ships separately from this runtime, so a machine can hold
 one without the other: an app build that predates the action advertises no
 `copy`, and the capability gate refuses it before a command is sent — the
 refusal names the method, the host that serves it and the version story. Do not
