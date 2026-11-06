@@ -253,14 +253,21 @@ def test_row2_the_owner_is_asked_once_and_the_doctor_row_is_untouched(
     assert item["key"] == f"mesh-repair:{rig.network_id}:{MCP_KEY}:g0"
     assert item["read"] is False and item["dismissed"] is False
     assert item["priority"] == "high"
-    assert item["title"] == "Run `/mcp login <name>` on this device"
-    assert item["body_md"] == render_repair_notice(_b_name(rig), MCP_KEY)
+    # D2: the body's quoting in the title, not the CLI's backticks.
+    # D3/U5: an MCP key this device cannot NAME says which server it is.
+    assert item["title"] == "Run '/mcp login <name>' on this device (mcp.repair.test)"
+    # D5/N2: a list, so two askers do not run together in the pane.
+    assert item["body_md"] == "\n".join(
+        [f"- {render_repair_notice(_b_name(rig), MCP_KEY)}", "", f"`{MCP_KEY[4:]}`"]
+    )
     assert item["session_title"] == "/network"
     # No token material: the item is a key name, a device name and a command.
     assert "synthetic" not in item["title"] + item["body_md"]
     repairs = _doctor_repairs(rig)
     assert len(repairs) == 1, repairs
     assert repairs[0]["detail"] == render_repair_notice(_b_name(rig), MCP_KEY)
+    # The doctor row is a CLI surface: its remedy keeps the CLI's backticks.
+    assert repairs[0]["remedies"] == ["run `/mcp login <name>` on this device"]
     assert repairs[0]["remedies"] == ["run `/mcp login <name>` on this device"]
 
 
@@ -350,10 +357,12 @@ def test_row4_a_second_peer_updates_the_same_item(
     (second,) = _items(rig)
     assert second["id"] == first["id"]
     assert second["revision"] == first["revision"] + 1
-    assert second["body_md"] == "\n\n".join(
+    assert second["body_md"] == "\n".join(
         [
-            render_repair_notice(_b_name(rig), MCP_KEY),
-            render_repair_notice("device-c", MCP_KEY),
+            f"- {render_repair_notice(_b_name(rig), MCP_KEY)}",
+            f"- {render_repair_notice('device-c', MCP_KEY)}",
+            "",
+            f"`{MCP_KEY[4:]}`",
         ]
     )
     # NOT ``high``: the ladder banners a high revision, and the operator was already
@@ -437,7 +446,7 @@ def test_row6_a_401_whose_owner_probe_finds_the_grant_dead_asks_the_owner(
     assert reports[-1]["detail"]["sub"] == rig.borrower
     _owner_tick(rig)
     (item,) = _items(rig)
-    assert item["body_md"] == render_repair_notice(_b_name(rig), MCP_KEY)
+    assert item["body_md"].startswith(f"- {render_repair_notice(_b_name(rig), MCP_KEY)}")
     assert item["priority"] == "high"
 
 
@@ -464,8 +473,8 @@ def test_row7_a_provider_grant_the_idp_refused_asks_the_owner(rig: Any, gates_op
     assert reports[-1]["detail"]["sub"] == rig.borrower
     _owner_tick(rig)
     (item,) = _items(rig)
-    assert item["title"] == f"Run `/login {STUB_PROVIDER}` on this device"
-    assert item["body_md"] == render_repair_notice(_b_name(rig), STUB_PROVIDER)
+    assert item["title"] == f"Run '/login {STUB_PROVIDER}' on this device"
+    assert item["body_md"] == f"- {render_repair_notice(_b_name(rig), STUB_PROVIDER)}"
     assert rig.idp.posts == [], "a dead grant cost a token POST"
 
 
@@ -572,9 +581,10 @@ def test_row8d_notifications_off_raises_no_item_and_keeps_the_doctor_row(
 
     assert _items(rig) == []
     assert len(_doctor_repairs(rig)) == 1
-    # While the switch stays off a tick is one stat, like an idle one: no re-arm.
+    # While the switch stays off the pass is OWED but derives nothing (m1/Q1's fix):
+    # one stat, a gate check, no derivation, no store.
     before = dict(repair_inbox.COUNTERS)
-    assert repair_inbox.tick(rig.a) == "idle"
+    assert repair_inbox.tick(rig.a) == "gated"
     assert repair_inbox.COUNTERS["derivations"] == before["derivations"]
     # The positive control: the SAME dead login, the switch back on, and the peer's
     # next attempt (it asks again within its refusal window) raises the item.
@@ -721,6 +731,10 @@ def test_row9_five_minutes_of_the_real_cadence_idle(
         return original_write(self, body, what)
 
     monkeypatch.setattr(NotificationStore, "_write", counting_write)
+    # THE RELAY'S OWN SYNCER THREAD IS STOPPED for the measurement: it ticks on its
+    # own clock (15 s, or a rig override), so leaving it running would let the test's
+    # stat count move for reasons this cell is not measuring.
+    definitions.stop_syncer(rig.a)
     syncer = definitions.DefinitionsSyncer(rig.a)
     rig.a.audit.flush()
     audit_path = rig.a.root / "network" / "audit.jsonl"
@@ -827,3 +841,294 @@ def test_an_operator_dismissal_holds_for_the_episode(tmp_path: Any) -> None:
     assert store.list_items(state="all", session_id=repair_inbox.SESSION_ID)[0] == []
     (kept,) = store.list_items(state="dismissed", session_id=repair_inbox.SESSION_ID)[0]
     assert kept["dismissed_via"] == "explicit"
+
+
+# ---------------------------------------------------------------------------
+# round 1 remediation: M1, m1/Q1, m2, m3, U1
+# ---------------------------------------------------------------------------
+
+
+def test_M1_a_dismissed_episode_does_not_come_back_after_a_restart(tmp_path: Any) -> None:
+    """M1: the generation floor counts DISMISSED rows, so a restart cannot re-banner.
+
+    The reviewer's probe: raise at ``g7``, the operator dismisses it, the relay
+    restarts with the episode's grant aged out of the window (the token reads
+    ``g0``), and a fresh ``publish`` with an empty episode memo runs.
+    """
+    episodes: dict[Any, Any] = {}
+    repair_inbox.publish_notices(tmp_path, _planned("g7"), [], episodes=episodes)
+    store = NotificationStore(tmp_path)
+    (item,) = store.list_items(state="all", session_id=repair_inbox.SESSION_ID)[0]
+    store.apply("dismiss", ids=[(item["id"], int(item["revision"]))], via="explicit")
+
+    # A RESTART: no in-process memo, the same content, the grant row gone from view.
+    after = repair_inbox.publish_notices(tmp_path, _planned("g0"), [], episodes={})
+
+    assert (after.created, after.updated, after.reopened) == (0, 0, 0), after
+    assert store.list_items(state="all", session_id=repair_inbox.SESSION_ID)[0] == []
+    (kept,) = store.list_items(state="dismissed", session_id=repair_inbox.SESSION_ID)[0]
+    assert kept["dismissed_via"] == "explicit", "the operator's dismissal was overwritten"
+
+
+def test_M1_a_new_asker_on_a_dismissed_episode_is_absorbed_silently(tmp_path: Any) -> None:
+    """M1's other half: content changes land on the DISMISSED row, which absorbs them."""
+    episodes: dict[Any, Any] = {}
+    repair_inbox.publish_notices(tmp_path, _planned("g0"), [], episodes=episodes)
+    store = NotificationStore(tmp_path)
+    (item,) = store.list_items(state="all", session_id=repair_inbox.SESSION_ID)[0]
+    store.apply("dismiss", ids=[(item["id"], int(item["revision"]))], via="explicit")
+
+    result = repair_inbox.publish_notices(tmp_path, _planned("g0", "- two asked"), [], episodes={})
+
+    assert result.created == 0, result
+    assert store.list_items(state="all", session_id=repair_inbox.SESSION_ID)[0] == []
+
+
+def test_m1_q1_a_repair_made_while_notifications_were_off_still_closes_the_item(
+    rig: Any, gates_open: None, no_mcp_discovery: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m1 = Q1: the gated pass is OWED, so the switch coming back on closes it.
+
+    QA's repro: item open → switch off → the owner signs in and the peer's borrow
+    succeeds → gated tick → switch on → the item must close WITHOUT another grant.
+    """
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+
+    _seed_mcp(rig, expired=True)
+    _share_mcp(rig)
+    assert isinstance(_borrow(rig), BrokerError)
+    _owner_tick(rig)
+    assert len(_items(rig)) == 1
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
+    auth = _auth(rig)
+    try:
+        asyncio.run(
+            McpTokenStorage(MCP_URL, auth).set_tokens(
+                OAuthToken.model_validate(
+                    {
+                        "access_token": "-".join(("synthetic", "fresh", "access")),
+                        "refresh_token": "-".join(("synthetic", "fresh", "refresh")),
+                        "expires_in": 3600,
+                    }
+                )
+            )
+        )
+    finally:
+        auth.close()
+    assert isinstance(_borrow(rig), Grant)
+    assert repair_inbox.tick(rig.a) == "gated"
+
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS")
+    _owner_tick(rig)  # NO further borrow: the owed pass alone must close it
+
+    assert _items(rig) == []
+    (closed,) = _items(rig, state="dismissed")
+    assert closed["dismissed_via"] == "mesh_repair"
+
+
+def test_U1_the_owners_own_sign_in_closes_the_item_and_the_doctor_row(
+    rig: Any, gates_open: None, no_mcp_discovery: None
+) -> None:
+    """U1: signing in here is the repair the item asks for, so it must be visible.
+
+    No peer borrow after the sign-in at all — the operator's own ``/mcp login``
+    writes the auth store and no audit row, so the tick's login doorbell is what
+    sees it.
+    """
+    from mcp.shared.auth import OAuthToken
+
+    from local_operator.mcp.auth import McpTokenStorage
+
+    _seed_mcp(rig, expired=True)
+    _share_mcp(rig)
+    assert isinstance(_borrow(rig), BrokerError)
+    _owner_tick(rig)
+    assert len(_items(rig)) == 1 and len(_doctor_repairs(rig)) == 1
+
+    auth = _auth(rig)
+    try:
+        asyncio.run(
+            McpTokenStorage(MCP_URL, auth).set_tokens(
+                OAuthToken.model_validate(
+                    {
+                        "access_token": "-".join(("synthetic", "signin", "access")),
+                        "refresh_token": "-".join(("synthetic", "signin", "refresh")),
+                        "expires_in": 3600,
+                    }
+                )
+            )
+        )
+    finally:
+        auth.close()
+
+    _owner_tick(rig)
+
+    assert _items(rig) == [], "the sign-in did not clear the item"
+    assert _doctor_repairs(rig) == [], "the sign-in did not clear the doctor row"
+    (closed,) = _items(rig, state="dismissed")
+    assert closed["dismissed_via"] == "mesh_repair"
+
+
+def test_U1_a_provider_sign_in_closes_it_too(rig: Any, gates_open: None) -> None:
+    """U1, provider class: ``/login meshtest`` rewrites the row and clears the tombstone."""
+    _share(rig)
+    _pull(rig)
+    _tombstone_provider(rig)
+    assert isinstance(_borrow(rig, STUB_PROVIDER, STUB_PROVIDER), BrokerError)
+    _owner_tick(rig)
+    assert len(_items(rig)) == 1
+
+    # What /login persists: the same provider row, rewritten, tombstone cleared.
+    auth = _auth(rig)
+    try:
+        auth.upsert_credential(
+            STUB_PROVIDER,
+            {
+                "type": "oauth",
+                "access": "-".join(("synthetic", "fresh", "access")),
+                "expires": int(time.time() * 1000) + 3_600_000,
+                "refresh": "-".join(("synthetic", "fresh", "refresh")),
+                "email": "owner@example.test",
+            },
+        )
+        row = auth.list_credentials(STUB_PROVIDER)[0]
+        assert not auth.grant_is_dead(row.id)
+    finally:
+        auth.close()
+
+    _owner_tick(rig)
+
+    assert _items(rig) == []
+    assert _doctor_repairs(rig) == []
+
+
+def test_m3_a_healthy_sibling_grant_does_not_close_a_provider_repair(rig: Any) -> None:
+    """m3: on a multi-login provider, the DEAD row keeps the repair open.
+
+    The reviewer's scenario: the dead row sits beside a live one, and a borrow
+    served from the live row writes a ``credential.grant`` for the same provider
+    key. Per-key closure would read that as repaired; the dead row still needs the
+    sign-in. Once that row is signed in again, the repair closes.
+    """
+    from local_operator.network import store as net_store
+    from local_operator.network.audit import AuditEvent
+    from local_operator.network.credentials.repair import repair_notices
+
+    _share(rig)
+    _pull(rig)
+    auth = _auth(rig)
+    try:
+        auth.upsert_credential(
+            STUB_PROVIDER,
+            {
+                "type": "oauth",
+                "access": "-".join(("synthetic", "second", "access")),
+                "expires": int(time.time() * 1000) + 3_600_000,
+                "refresh": "-".join(("synthetic", "second", "refresh")),
+                "email": "second@example.test",
+            },
+        )
+        rows = auth.list_credentials(STUB_PROVIDER)
+        assert len(rows) >= 2, [r.id for r in rows]
+        assert auth._mark_grant_dead(rows[0].id, rejected_refresh_token=None)  # noqa: SLF001
+    finally:
+        auth.close()
+    rig.a.audit.record(
+        AuditEvent(
+            event="credential.report",
+            actor=rig.owner,
+            network_id=rig.network_id,
+            subject=rig.borrower,
+            detail={
+                "credential_key": STUB_PROVIDER,
+                "act": rig.owner,
+                "sub": rig.borrower,
+                "failure": "reauth_required",
+            },
+        )
+    )
+    # A grant for the same key, served from the HEALTHY row.
+    rig.a.audit.record(
+        AuditEvent(
+            event="credential.grant",
+            actor=rig.owner,
+            network_id=rig.network_id,
+            subject=rig.borrower,
+            detail={"credential_key": STUB_PROVIDER, "act": rig.owner, "sub": rig.borrower},
+        )
+    )
+    rig.a.audit.flush()
+    records = rig.a.audit.tail(500)
+    record = next(r for r in net_store.list_networks(rig.a.root) if r.network_id == rig.network_id)
+
+    assert [n.key for n in repair_notices(record, records)] == [
+        STUB_PROVIDER
+    ], "a sibling's grant closed a repair whose own row is still dead"
+
+    # The remedy: that row signed in again (a fresh row, no tombstone anywhere).
+    auth = _auth(rig)
+    try:
+        for row in auth.list_credentials(STUB_PROVIDER):
+            data = dict(row.data)
+            data.pop("grant_dead_at", None)
+            data["access"] = "-".join(("synthetic", "renewed", str(row.id)))
+            auth.upsert_credential(STUB_PROVIDER, data)
+        assert not any(auth.grant_is_dead(row.id) for row in auth.list_credentials(STUB_PROVIDER))
+    finally:
+        auth.close()
+
+    assert repair_notices(record, records) == []
+
+
+def test_m2_a_failing_store_says_so_once_and_stops_the_re_derivation(
+    rig: Any,
+    gates_open: None,
+    no_mcp_discovery: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: Any,
+) -> None:
+    """m2: a store that keeps failing is reported ONCE and not re-derived every tick.
+
+    Before the fix the tick logged at debug (so a regression left no trace) while
+    ``publish_notices`` logged a traceback per pass and the doorbell re-armed to
+    ``full`` — one full derivation and one traceback per member per tick.
+    """
+    import logging
+
+    _seed_mcp(rig, expired=True)
+    _share_mcp(rig)
+    assert isinstance(_borrow(rig), BrokerError)
+
+    original_notify = NotificationStore.notify
+
+    def refusing(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the store is unreadable")
+
+    monkeypatch.setattr(NotificationStore, "notify", refusing)
+    monkeypatch.setattr(repair_inbox, "BACKOFF_BASE_S", 60.0)
+    caplog.set_level(logging.DEBUG, logger="local_operator.network.credentials.repair_inbox")
+
+    assert repair_inbox.tick(rig.a) == "failed"
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert "the store is unreadable" in warnings[0].getMessage()
+
+    # Backed off: five more member calls derive nothing and say nothing new.
+    before = dict(repair_inbox.COUNTERS)
+    for _ in range(5):
+        assert repair_inbox.tick(rig.a) == "backoff"
+    after = dict(repair_inbox.COUNTERS)
+    assert after["derivations"] == before["derivations"]
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == warnings
+
+    # The store comes back: the next pass after the backoff publishes and resets.
+    # (Not ``monkeypatch.undo()``: pytest shares ONE instance per test with the
+    # fixtures, so undoing here would also close ``gates_open``'s gates.)
+    monkeypatch.setattr(NotificationStore, "notify", original_notify)
+    bell = repair_inbox._doorbell_for(rig.a.root / "network" / "audit.jsonl")  # noqa: SLF001
+    bell.retry_at = 0.0
+    assert repair_inbox.tick(rig.a) == "published"
+    assert len(_items(rig)) == 1

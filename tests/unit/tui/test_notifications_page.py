@@ -83,6 +83,11 @@ async def _tick_items(app: Any, pilot: Any, *, timeout_s: float = 5.0) -> None:
             return
 
 
+def _conversation(root: Path, session_id: str) -> None:
+    """A session directory, which is the evidence `o`/`a` are offered on (#3522 D1)."""
+    (root / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
+
+
 def _page(app: Any) -> Any:
     """The mounted page, asserted present before a test reads its state."""
     view = app._notifications_view
@@ -442,6 +447,9 @@ async def test_the_wide_pane_takes_the_keys_and_esc_returns_them(
     gesture meanwhile, and the pane carries the ▸ marker.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # A REAL conversation for S1: `o`/`a` are offered on the evidence that there is
+    # one (#3522 D1/U2 — a row with no conversation directory offers neither).
+    _conversation(tmp_path, S1)
     store = NotificationStore(tmp_path)
     item = store.notify(S1, title="a tall one", body_md="x", priority="high")
     # A SECOND row: opening the first marks it read, and on the default Unread
@@ -1759,3 +1767,89 @@ def test_the_eighty_column_row_never_drops_the_primary_action() -> None:
     # The tail is what pays: the browse-only keys go first, the volume keys last.
     assert "f" not in kept and "o" not in kept, kept
     assert "e" in kept and "E" in kept, kept
+
+
+# -- #3522 D1/U2: an item with no conversation behind it ----------------------
+
+
+_D1_REPAIR = "network-credentials"
+_D1_NETWORK = "n_0123456789abcdef01234567"
+_D1_MCP = "mcp:https://mcp.repair.test/mcp"
+
+
+def _seed_repair_item(root: Path) -> Any:
+    """One owner credential-repair item, written through the slice's own publisher."""
+    from local_operator.network.credentials import repair_inbox
+
+    plan = {
+        (_D1_NETWORK, _D1_MCP): repair_inbox.PlannedItem(
+            network_id=_D1_NETWORK,
+            key=_D1_MCP,
+            generation="g0",
+            title="Run '/mcp login <name>' on this device (mcp.repair.test)",
+            body=(
+                "- device-b needs '/mcp login <name>' here - "
+                "its borrowed credential cannot be refreshed"
+            ),
+        )
+    }
+    return repair_inbox.publish_notices(root, plan, [])
+
+
+@pytest.mark.asyncio
+async def test_the_repair_item_offers_network_not_a_dead_conversation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """D1/U2: `o` says `/network` on a repair item and neither `o` nor `a` is a lie.
+
+    This item is filed under a pseudo-session that has no conversation directory,
+    so the pre-fix page closed itself and printed "This conversation is no longer
+    available" — untrue, and it threw away the operator's place on the one item
+    that asks them to act.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    assert _seed_repair_item(tmp_path).created == 1
+    NotificationStore(tmp_path).notify(S1, title="an ordinary row", priority="normal")
+    app = _app()
+    async with app.run_test(size=(140, 32)) as pilot:
+        await _settle(pilot)
+        app._open_notifications_view()
+        await _page_idle(app, pilot)
+        view = _page(app)
+        rows = [str(r["id"]) for r in view.rows]
+        repair_row = next(
+            r for r in view.rows if str((r.get("session") or {}).get("id")) == _D1_REPAIR
+        )
+        view._move_to(rows.index(str(repair_row["id"])))
+        await _page_idle(app, pilot)
+        hints = dict((key, label) for key, label in view._hint_labels())
+        assert hints.get("o") == "/network", hints
+        assert "a" not in hints, "`a` answers in a conversation this row has none of"
+        await pilot.press("o")
+        # The page CLOSES on `o` (by design), so wait on turns, not on the page.
+        await _settle(pilot, 20)
+        from local_operator.tui.widgets.network_panel import NetworkScreen
+
+        assert app._notifications_view is None, "the page stays open behind the panel"
+        assert isinstance(app.screen, NetworkScreen), type(app.screen)
+
+
+@pytest.mark.asyncio
+async def test_a_row_with_no_conversation_hides_o_and_a(tmp_path: Path, monkeypatch) -> None:
+    """Any OTHER row whose session has no directory offers no `o` (nor `a`) at all."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    store = NotificationStore(tmp_path)
+    orphan = store.notify(S3, title="no conversation here", priority="normal")
+    store.notify(S1, title="still unread", priority="normal")
+    app = _app()
+    async with app.run_test(size=(140, 32)) as pilot:
+        await _settle(pilot)
+        app._open_notifications_view()
+        await _page_idle(app, pilot)
+        view = _page(app)
+        rows = [str(r["id"]) for r in view.rows]
+        view._move_to(rows.index(orphan.item_id))
+        await _page_idle(app, pilot)
+        hints = dict((key, label) for key, label in view._hint_labels())
+        assert "o" not in hints and "a" not in hints, hints
+        assert "e" in hints, "dismiss still works on a row with no conversation"

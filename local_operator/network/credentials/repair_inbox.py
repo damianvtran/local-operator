@@ -46,12 +46,14 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from local_operator.network.credentials.repair import (
     REPAIR_TAIL_ROWS,
+    OwnerLogins,
     RepairNotice,
     repair_notices,
     repaired_keys,
@@ -136,27 +138,67 @@ class PlannedItem:
     body: str
 
 
+def _server_host(notice: RepairNotice) -> str:
+    """The MCP server's host, for a key this device cannot NAME (#3522 D3/U5).
+
+    ``/mcp login <name>`` is a form, not a command, when the local config no longer
+    maps the URL to a name — and then nothing on the item said WHICH server died,
+    so two such keys rendered as two identical rows. The host is a technical
+    identifier (no catalogue key); a named login needs nothing added.
+    """
+    if not notice.key.startswith("mcp:") or notice.login_name:
+        return ""
+    from urllib.parse import urlsplit
+
+    from local_operator.network.credentials.types import mcp_url_from_key
+
+    try:
+        return urlsplit(mcp_url_from_key(notice.key)).hostname or ""
+    except ValueError:
+        return ""
+
+
 def render_title(notice: RepairNotice) -> str:
-    """The doctor row's remedy, as a headline: the action, the same for every asker."""
-    remedy = notice.remedy
-    return remedy[:1].upper() + remedy[1:]
+    """The doctor row's remedy, as a headline: the action, the same for every asker.
+
+    QUOTED AS THE BODY QUOTES IT (#3522 D2/N1): the remedy wraps the command in
+    backticks for the CLI, but a title is drawn as plain text — in the reel, the
+    pane header and the OS banner — so the backticks showed literally beside a
+    body that says ``'/login openai'``. Same words, the body's quoting.
+    """
+    remedy = notice.remedy.replace("`", "'")
+    title = remedy[:1].upper() + remedy[1:]
+    host = _server_host(notice)
+    return f"{title} ({host})" if host else title
 
 
 def render_body(askers: Iterable[tuple[str, str]], notice: RepairNotice) -> str:
-    """One producer sentence per asker, sorted by name, capped.
+    """One producer sentence per asker, sorted by name, capped — as a Markdown list.
+
+    A LIST, because the pane collapses a blank line and two wrapped sentences then
+    read as one block (#3522 D5/N2); the sentences themselves stay byte-identical
+    to ``render_repair_notice``. An MCP key with no local name ends with its URL
+    (see :func:`_server_host`).
 
     STABLE FACTS ONLY — device names and the key's command, no timestamps and no
     counters — so a retry renders byte-identical text, the store's content hash
     answers ``unchanged``, and nothing is written.
     """
     labels = sorted({name or device for device, name in askers}, key=lambda s: (s.casefold(), s))
-    lines = [notice.sentence(label) for label in labels[:NAMED_ASKERS_MAX]]
+    lines = [f"- {notice.sentence(label)}" for label in labels[:NAMED_ASKERS_MAX]]
     if len(labels) > NAMED_ASKERS_MAX:
-        lines.append(OVERFLOW_MARK)
-    return "\n\n".join(lines)
+        lines.append(f"- {OVERFLOW_MARK}")
+    if _server_host(notice):
+        from local_operator.network.credentials.types import mcp_url_from_key
+
+        lines.append("")
+        lines.append(f"`{mcp_url_from_key(notice.key)}`")
+    return "\n".join(lines)
 
 
-def plan_items(root: Path, records: list[Mapping[str, Any]]) -> dict[tuple[str, str], PlannedItem]:
+def plan_items(
+    root: Path, records: list[Mapping[str, Any]], *, logins: OwnerLogins | None = None
+) -> dict[tuple[str, str], PlannedItem]:
     """Every item this device should hold now, keyed ``(network, credential key)``.
 
     A STRONGER BAR THAN THE DOCTOR ROW, deliberately: a pull surface may list any
@@ -171,7 +213,7 @@ def plan_items(root: Path, records: list[Mapping[str, Any]]) -> dict[tuple[str, 
 
     plan: dict[tuple[str, str], PlannedItem] = {}
     for record in store.list_networks(root):
-        notices = repair_notices(record, records)
+        notices = repair_notices(record, records, logins=logins)
         if not notices:
             continue
         document = PlacementDocument.load(
@@ -205,6 +247,8 @@ class PublishResult:
     closed: int = 0
     #: ``""`` on a completed pass; else why it stopped (``busy``/``refused``/``failed``).
     stopped: str = ""
+    #: The exception's type and text when ``stopped == "failed"``.
+    error: str = ""
 
 
 def publish_notices(
@@ -251,10 +295,18 @@ def publish_notices(
     try:
         notifications = NotificationStore(config_dir)
         standing = _standing_items(notifications)
+        # THE FLOOR ALSO COUNTS DISMISSED ROWS (#3522 round 1, M1). Without them a
+        # restart with the episode's grant aged out of the window read ``g0``, found
+        # no live row (the operator had dismissed it) and raised a NEW high item and
+        # a banner for an episode they had already said they know about. With the
+        # dismissed row's token as the floor, the raise lands on that row: same
+        # content → ``unchanged``, new asker → ``absorbed`` silently (contract §1.3).
+        dismissed = _standing_items(notifications, state="dismissed") if plan else {}
         for (network_id, key), item in plan.items():
             rows = standing.get((network_id, key), [])
             generation = item.generation
             known = [gen for gen, _ in rows]
+            known.extend(gen for gen, _ in dismissed.get((network_id, key), []))
             remembered = episodes.get((network_id, key))
             if remembered is not None:
                 known.append(remembered[0])
@@ -295,24 +347,32 @@ def publish_notices(
         for stale in [k for k in episodes if k not in plan and k not in standing]:
             episodes.pop(stale, None)
     except NotifyRefused:
-        logger.info("credential repair inbox: the store refused a new item (hourly cap)")
+        logger.debug("credential repair inbox: the store refused a new item (hourly cap)")
         result.stopped = "refused"
     except NotificationStoreBusy:
         logger.debug("credential repair inbox: the store was busy; retrying next tick")
         result.stopped = "busy"
-    except Exception:  # noqa: BLE001 — a lost item must never cost a tick or a borrow
-        logger.warning("credential repair inbox: publication failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a lost item must never cost a tick or a borrow
+        # Debug here: the cadence says it ONCE per failure episode (``_failed``).
+        logger.debug("credential repair inbox: publication failed", exc_info=True)
         result.stopped = "failed"
+        result.error = f"{type(exc).__name__}: {exc}"
     return result
 
 
-def _standing_items(notifications: Any) -> dict[tuple[str, str], list[tuple[str, dict[str, Any]]]]:
-    """The NOT-dismissed repair items, grouped ``(network, key) → [(generation, row)]``."""
+def _standing_items(
+    notifications: Any, state: str = "all"
+) -> dict[tuple[str, str], list[tuple[str, dict[str, Any]]]]:
+    """The repair items in ``state``, grouped ``(network, key) → [(generation, row)]``.
+
+    ``all`` is the NOT-dismissed rows (the store's own meaning); ``dismissed`` is
+    read only for the generation floor in :func:`publish_notices`.
+    """
     grouped: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
     cursor: str | None = None
     for _ in range(_STANDING_PAGES_MAX):
         rows, cursor = notifications.list_items(
-            state="all", session_id=SESSION_ID, cursor=cursor, limit=100
+            state=state, session_id=SESSION_ID, cursor=cursor, limit=100
         )
         for row in rows:
             parts = _split_item_key(str(row.get("key") or ""))
@@ -397,6 +457,17 @@ class _Doorbell:
     published: tuple[Any, ...] | None = None
     episodes: dict[tuple[str, str], tuple[str, str, str]] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    #: A derivation is OWED: a pass consumed the doorbell's change and did not finish
+    #: (gated, busy, refused, failed). Without this the offset had already moved past
+    #: the closing grant and a repair made while notifications were off stayed open
+    #: (#3522 round 1, m1/Q1). Cleared only by a completed publication.
+    pending: bool = False
+    #: ``auth.db``/``-wal`` stat fingerprint taken before the last derivation, kept
+    #: only while an item is open: the owner's own sign-in writes no audit row (U1).
+    login_fp: tuple[Any, ...] | None = None
+    #: Consecutive failed passes, and the monotonic time before which none is retried.
+    failures: int = 0
+    retry_at: float = 0.0
 
 
 #: One doorbell per audit file (two relays in one process — the test rig — are two
@@ -406,7 +477,20 @@ _DOORBELLS_LOCK = threading.Lock()
 
 #: Counters the idle-cost evidence reads (stats taken, derivations run, passes that
 #: touched the store). Process-wide and monotonic; tests diff them.
-COUNTERS: dict[str, int] = {"stats": 0, "scans": 0, "derivations": 0, "publications": 0}
+COUNTERS: dict[str, int] = {
+    "stats": 0,
+    "scans": 0,
+    "login_stats": 0,
+    "derivations": 0,
+    "publications": 0,
+}
+
+#: Backoff for a pass that keeps failing (a corrupt ``notifications.db``, a
+#: regression in the derivation): 15 s, doubling, capped at 15 min. Before this a
+#: failing store re-derived (75-110 ms) and logged a traceback on every member call
+#: of every tick (#3522 round 1, m2). Contention (``busy``) is not a failure.
+BACKOFF_BASE_S = 15.0
+BACKOFF_MAX_S = 900.0
 
 
 def _doorbell_for(path: Path) -> _Doorbell:
@@ -472,17 +556,64 @@ def _last_line_end(path: Path, size: int) -> int:
     return base + end + 1 if end >= 0 else base
 
 
+def _login_fingerprint() -> tuple[Any, ...]:
+    """``(mtime_ns, size)`` of this device's ``auth.db`` and its ``-wal``.
+
+    The owner's own ``/login`` or ``/mcp login`` writes the auth store and no audit
+    row, so the audit doorbell alone could not see the one action the item asks for
+    (#3522 round 1, U1). Two stats, taken only while an item is open. Any other
+    write to the store (a routine token refresh) also moves it; that costs one
+    derivation on the next tick, only while an item is open.
+    """
+    from local_operator.providers.auth_store import default_db_path
+
+    out: list[Any] = []
+    for path in (default_db_path(), Path(f"{default_db_path()}-wal")):
+        COUNTERS["login_stats"] += 1
+        try:
+            stat = os.stat(path)
+            out.append((stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+def _owe(bell: _Doorbell) -> None:
+    bell.pending = True
+    bell.published = None
+
+
+def _failed(bell: _Doorbell, what: str, error: str = "") -> str:
+    """Record a failed pass: owed, backed off, and said ONCE per failure episode."""
+    _owe(bell)
+    bell.failures += 1
+    delay = min(BACKOFF_BASE_S * 2 ** (bell.failures - 1), BACKOFF_MAX_S)
+    bell.retry_at = time.monotonic() + delay
+    if bell.failures == 1:
+        logger.warning(
+            "credential repair inbox: %s (%s); retrying with backoff up to %.0f s",
+            what,
+            error or "no detail",
+            BACKOFF_MAX_S,
+        )
+    else:
+        logger.debug("credential repair inbox: %s again (%s)", what, error)
+    return "failed"
+
+
 def tick(server: "RelayServer") -> str:
     """One pass of the owner's asking channel, for the credentials cadence. NEVER RAISES.
 
-    Answers a word for the debug log: ``idle`` (nothing new in the audit file),
-    ``gated`` (notifications are off, or this process is a rig under a foreign
-    HOME — the banner ladder's own two refusals, ``delivery.gates_refuse``),
+    Answers a word for the debug log: ``idle`` (nothing to do), ``gated``
+    (notifications are off, or this process is a rig under a foreign HOME — the
+    banner ladder's own two refusals, ``delivery.gates_refuse``), ``backoff``,
     ``same`` (re-derived, nothing to change), ``published`` or a stop reason.
     """
     try:
         return _tick(server)
     except Exception:  # noqa: BLE001 — a cadence reports; it never raises into the tick
+        # Only reachable before a doorbell exists (resolving the server's paths);
+        # everything after is accounted for, owed and backed off inside ``_tick``.
         logger.debug("credential repair inbox: tick failed", exc_info=True)
         return "failed"
 
@@ -500,39 +631,70 @@ def _tick(server: "RelayServer") -> str:
         # Another member's step in this tick is already deriving; it covers this one.
         return "busy"
     try:
-        change = _relevant_change(path, bell)
-        if change == "none" or (change == "grant" and not bell.episodes):
-            # A grant can only close an item, and none is open: nothing can move.
-            return "idle"
-        from local_operator.notifications.delivery import gates_refuse
-
-        if gates_refuse():
-            # Not published, and nothing re-armed: a device with the switch off pays the
-            # same one stat per tick as an idle one. The derivation is stateless (it
-            # re-reads the window), so the next relevant row — a failing peer asks
-            # again within its 300 s refusal window — raises the item once the switch
-            # is back on; the doctor row never depended on any of this.
-            bell.published = None
-            return "gated"
-        records = log.tail(REPAIR_TAIL_ROWS)
-        COUNTERS["derivations"] += 1
-        plan = plan_items(root, records)
-        repaired = repaired_keys(records)
-        fingerprint = (tuple(sorted(plan.items())), tuple(sorted(repaired)))
-        if fingerprint == bell.published:
-            return "same"
-        COUNTERS["publications"] += 1
-        result = publish_notices(root, plan, repaired, episodes=bell.episodes)
-        if result.stopped in ("busy", "failed"):
-            # Contention clears in seconds: re-arm, so the next tick derives again.
-            bell.inode, bell.offset = -1, -1
-            return result.stopped
-        if result.stopped == "refused":
-            # The store's hourly cap: retried on the next relevant row, not every
-            # tick. Items raised before the refusal are in ``episodes`` and skipped.
-            return result.stopped
-        bell.published = fingerprint
-        logger.debug("credential repair inbox: %s", result)
-        return result.stopped or "published"
+        return _locked_tick(log, root, path, bell)
+    except Exception as exc:  # noqa: BLE001 — owed and backed off, never raised
+        logger.debug("credential repair inbox: pass raised", exc_info=True)
+        return _failed(bell, "a pass raised", f"{type(exc).__name__}: {exc}")
     finally:
         bell.lock.release()
+
+
+def _locked_tick(log: Any, root: Path, path: Path, bell: _Doorbell) -> str:
+    change = _relevant_change(path, bell)
+    login_moved = False
+    if bell.episodes and bell.login_fp is not None:
+        login_moved = _login_fingerprint() != bell.login_fp
+    wanted = (
+        bell.pending
+        or login_moved
+        or change in ("report", "full")
+        or (change == "grant" and bool(bell.episodes))
+    )
+    if not wanted:
+        # Nothing new, or only grants while no item is open (a grant can only close).
+        return "idle"
+    if bell.failures and time.monotonic() < bell.retry_at:
+        _owe(bell)
+        return "backoff"
+    from local_operator.notifications.delivery import gates_refuse
+
+    if gates_refuse():
+        # OWED, not dropped (#3522 round 1, m1/Q1): the doorbell has already moved
+        # past whatever rang it, so the pass that finds the gate open again must
+        # derive from scratch. While owed, a tick costs this gate check and no
+        # derivation; the doctor row never depended on any of this.
+        _owe(bell)
+        return "gated"
+    fingerprint_before = _login_fingerprint()
+    records = log.tail(REPAIR_TAIL_ROWS)
+    COUNTERS["derivations"] += 1
+    logins = OwnerLogins()
+    try:
+        plan = plan_items(root, records, logins=logins)
+        repaired = repaired_keys(records, logins=logins)
+    finally:
+        logins.close()
+    fingerprint = (tuple(sorted(plan.items())), tuple(sorted(repaired)))
+    if fingerprint != bell.published:
+        COUNTERS["publications"] += 1
+        result = publish_notices(root, plan, repaired, episodes=bell.episodes)
+        if result.stopped == "busy":
+            # Contention clears in seconds: owed, retried next tick, no backoff.
+            _owe(bell)
+            return "busy"
+        if result.stopped:
+            # ``failed`` (anything the store raised) or ``refused`` (its hourly cap):
+            # owed, and backed off so a store that keeps failing is not re-derived
+            # and re-reported on every member call of every tick.
+            _failed(bell, f"publication {result.stopped}", result.error)
+            return result.stopped
+        logger.debug("credential repair inbox: %s", result)
+        outcome = "published"
+    else:
+        outcome = "same"
+    if bell.failures:
+        logger.info("credential repair inbox: recovered after %d failed pass(es)", bell.failures)
+    bell.failures, bell.retry_at, bell.pending = 0, 0.0, False
+    bell.published = fingerprint
+    bell.login_fp = fingerprint_before if bell.episodes else None
+    return outcome

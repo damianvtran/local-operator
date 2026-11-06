@@ -478,6 +478,7 @@ from local_operator.tui.widgets.notifications_view import (
     NotificationsViewCountsChanged,
     NotificationsViewDismissed,
     NotificationsViewOpenConversation,
+    NotificationsViewOpenNetwork,
 )
 from local_operator.tui.widgets.org_chart_messages import OrgChartViewDismissed
 from local_operator.tui.widgets.projects_send import (
@@ -40149,6 +40150,17 @@ class OperatorApp(App[None]):
         self._close_notifications_view()
         if message.session_id and message.session_id != getattr(self._session, "session_id", ""):
             self._select_sidebar_session(message.session_id)
+
+    def on_notifications_view_open_network(self, message: NotificationsViewOpenNetwork) -> None:
+        """``o`` on an owner credential-repair item: the ``/network`` panel (#3522 D1).
+
+        The item's full repair rows (every key, every asker, the command) are
+        painted there, and the row's source label already reads ``/network``. The
+        page closes first, exactly as ``o`` does for a conversation.
+        """
+        message.stop()
+        self._close_notifications_view()
+        self._open_network_screen("ls")
 
     def _paint_notifications_total(self, counts: dict[str, int] | None) -> None:
         """``notifications N`` on the sidebar footer: the cross-surface badge figure.
