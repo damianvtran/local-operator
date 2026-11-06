@@ -3315,12 +3315,16 @@ MCP_NOT_READY_DETAIL = (
 #: look a name up in. Distinct from :data:`MCP_NOT_READY_DETAIL` (no manager at
 #: all) and, like it, no strike is charged: nothing was removed.
 #:
-#: The copy names the CAUSE and the REMEDY, not a wait, because nothing retries
-#: by itself: ``discover_and_connect`` runs once per manager, and the raise in
-#: ``mcp/__init__.py`` returns before ``_connect_round`` — the only thing that
-#: fills ``_configs`` — so only an explicit ``/mcp reload`` (``manager.reload``)
-#: can clear this state. Telling the operator to wait would be a promise no
-#: code keeps.
+#: The copy names the CAUSE and a RETRY, not a wait, because nothing retries by
+#: itself: ``discover_and_connect`` runs once per manager, and the raise in
+#: ``mcp/__init__.py`` returns before ``_connect_round`` assigns ``_configs``.
+#: (The other writer, ``connect_configured_server``, fills one entry on an
+#: explicit login and runs no round.) What can end this state is an explicit
+#: ``manager.reload()`` — the desktop MCP panel's reload, or the reconnect after
+#: ``/mcp add``/``/mcp remove`` — or a relaunch that discovers afresh; when the
+#: record itself is refreshed is the KNOWN LIMIT on
+#: ``Session._mcp_discovery_incomplete``. Telling the operator to wait would be
+#: a promise no code keeps.
 MCP_DISCOVERY_FAILED_DETAIL = "MCP discovery failed at startup — run /mcp reload to retry it"
 
 
@@ -30713,10 +30717,12 @@ class Session:
           session has no MCP manager yet at all. That state was ``gone`` and
           charged a real strike (measured live on m4, 2026-11-05: a wake
           re-hosted a cold session, the tick beat the lazy connect, and the
-          tool was absent only for that instant). It is the ONLY such state:
-          every session-path assignment of ``mcp_manager`` happens after the
-          connect round (``attach_mcp_dispose``), so a non-None manager already
-          means the load finished, and its silence is a real answer.
+          tool was absent only for that instant). It is the only such state
+          bar one, an attached manager whose discovery FAILED before it read
+          its config (``_mcp_discovery_incomplete``): every session-path
+          assignment of ``mcp_manager`` happens after the connect round
+          (``attach_mcp_dispose``), so a non-None manager otherwise means the
+          load finished, and its silence is a real answer.
         - the server needs a re-auth, or its reconnect is suspended: it will
           NOT heal by itself, but the fix is a one-line operator action, so
           this stalls immediately (a notice naming ``/mcp reauth``) rather
@@ -30834,17 +30840,24 @@ class Session:
           ``configured`` (both read the same manager state), so this narrows
           that corner without touching the raise shape above.
 
-        KNOWN LIMIT: ``mcp_startup`` is a BOOT snapshot that no later path
-        rewrites, so a successful ``/mcp reload`` does not clear this record.
-        After a failing boot, a reload that connects the watched server
-        resolves the name directly and never reaches this question; a reload
-        that leaves the name unconfigured still reads as "the boot round
-        failed" and waits the unavailable window out instead of walking the
-        ladder in five ticks. Both outcomes are bounded (24 h) and neither
-        can disable a watch over a server that was actually there, so this is
-        a diagnosis that is older than the truth rather than a wrong one —
-        narrowing it needs a signal the record does not carry (review NIT-1,
-        accepted as deferred).
+        KNOWN LIMIT, as narrow as the code makes it: after the gate snapshot,
+        the record is rewritten only by the settle re-report
+        (``_on_startup_settled``), which the manager fires when the last server
+        a round deferred past its 250 ms gate settles (``_settle_deferred``,
+        from ``_finish_pending``). The wiring installs that sink on this shape
+        too — the wrapper returns the manager, so it runs to completion — and
+        ``reload()`` runs a fresh round, so a reload that defers at least one
+        server refreshes the record and this answers False from then on (QA
+        round 1 on #3510 measured ``configured ["datadog"], failures {}``). A
+        round that defers NOTHING never fires the sink and leaves the boot
+        failure in place, as does ``connect_configured_server``, which fills
+        ``_configs`` without a round. Even then a name the refreshed roster
+        mints never reaches this question (it resolves, or its server's status
+        answers); only a name it does NOT mint still reads as "the boot round
+        failed" and waits out the 24 h bound instead of walking the ladder in
+        five ticks. That can never disable a watch over a server that was
+        there, and narrowing it further needs a signal the record does not
+        carry.
         """
         outcome = self.mcp_startup
         failures = getattr(outcome, "failures", None) or {}
