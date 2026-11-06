@@ -1052,10 +1052,13 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     assert "has no node" in tooling["detail"]
     # The remedy is a COMMAND for that device (2026-11-05), not "ask Local Operator":
     # the peer's stub PATH carries the manager its own platform owns, so the row
-    # names that device's one-liner.
+    # names that device's one-liner. The PACKAGE differs with the manager because
+    # the recipes say so: Debian/Ubuntu ship node as `nodejs`, Homebrew's formula
+    # is `node` — a Linux runner reading `install -y node` here would be pinning a
+    # command that resolves to nothing.
     if sys.platform.startswith("linux"):
         expected_remedy = (
-            f"on {server_b.identity.name}, run `sudo apt-get install -y node` "
+            f"on {server_b.identity.name}, run `sudo apt-get install -y nodejs` "
             "to install node there, then re-check"
         )
     else:
