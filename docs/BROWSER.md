@@ -111,7 +111,7 @@ mapping (the full list is the docstring of `BROWSER_ACTIONS`).
 | `network_clear` | Drop the buffer and its counters | not available (typed refusal) |
 | `record_start` | Record the owned tab's video to an `.mp4` | not available (typed refusal) |
 | `record_stop` | Stop and save the recording | not available (typed refusal) |
-| `copy` | Write ONE element's text to the OS clipboard and report a receipt (chars, a sha256 prefix, the element identity) — the text itself is never returned. Desktop app host only; the recipe that keeps it out of the transcript is in `guide://browser` | not available (typed refusal) |
+| `copy` | Write ONE element's text (named by `selector`) to the OS clipboard and report a receipt — `chars`, the first 16 hex of the sha256 of the bytes, and whether the host's readback matched. The text itself is never returned, and the receipt carries no page-supplied strings. Desktop app only (cmux and the extension refuse it, naming the app); the recipe that keeps the value out of the transcript is in `guide://browser` | not available (typed refusal) |
 
 One surface per session, owned by the `Session` and injected into every rebuilt
 `ToolContext` as `ToolContext.browser`. `open` called a second time navigates

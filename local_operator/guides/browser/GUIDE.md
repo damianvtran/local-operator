@@ -681,12 +681,14 @@ another tool.
 strips the trailing newline a page may have written, and that newline would
 become part of the stored secret — every later use of it then fails in a way
 that looks exactly like a wrong key.
-- **A page can never read the clipboard.** The desktop app grants pages a
-clipboard WRITE only (for the page's own Copy button) and `clipboard-read` stays
-denied for every page, so the clipboard is a one-way street out of the page: the
-site being driven cannot take anything off it. Treat `copy` as a write, never as
-a way to move a secret INTO a page — `secret_ref` on `type` is how a credential
-gets in.
+- **A page is never given clipboard access, and cannot read the clipboard.** A
+driven page is granted no clipboard permission at all: when its own Copy button
+asks, the host performs that write on the page's behalf from the app's main
+process and never grants — or implements — a read, so `clipboard-read` stays
+denied for every page and `readText()` keeps rejecting. The clipboard is a
+one-way street out of the page: the site being driven cannot take anything off
+it. Treat `copy` as a write, never as a way to move a secret INTO a page —
+`secret_ref` on `type` is how a credential gets in.
 - Where the page HAS a working Copy button, clicking it is equally fine — the
 same `pbpaste` recipe follows. `copy` is the fallback that needs no affordance on
 the page at all, which is what makes a one-time key recoverable from a page whose
@@ -694,9 +696,12 @@ button is broken.
 - **`copy` is served by the desktop app's browser host only.** The Chrome
 extension has no main process to write the clipboard from and cmux has no
 page-script read, so both refuse it with a typed message naming the desktop app.
-- The value sits on this machine's clipboard after the call, where any process
-that can read the clipboard can still see it. Store it, then move on rather than
-leaving it there for the rest of the turn.
+- **Hygiene, once the value is confirmed stored: clear the clipboard.**
+`printf '' | pbcopy` — after `lop secret describe … --fingerprint` has shown the
+value landed, not before. Not a requirement of the recipe (the store is what
+matters), just the difference between a value sitting on this machine's
+clipboard for the rest of the turn and one that is gone; anything that can read
+the clipboard can see it until then.
 
 ### Typing a credential: use `secret_ref`, never `text`
 

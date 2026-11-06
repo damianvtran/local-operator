@@ -35,6 +35,7 @@ import os
 import secrets
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -174,6 +175,30 @@ def test_pre_copy_desktop_app_refuses_copy_and_names_the_update() -> None:
     assert client.calls == []
 
 
+@pytest.mark.asyncio
+async def test_cmux_refuses_copy_naming_only_the_desktop_app(monkeypatch) -> None:
+    """One host, not "either non-cmux host".
+
+    The generic cmux sentence ends with `_non_cmux_host_hint`, which offers the
+    extension as an alternative — and the extension refuses `copy` too, because a
+    clipboard write needs a main process it does not have. Offering it sends the
+    agent to a second dead end (review R1-2).
+    """
+    monkeypatch.setattr(builtin, "ui_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "ui_browser_reachable", AsyncMock(return_value=True))
+    holder = BrowserSurface()
+    holder.surface_id = "surface:cmux-open"
+    result = await builtin.execute_browser(
+        "t", {"action": "copy", "selector": "#key"}, None, None, ToolContext(browser=holder)
+    )
+    assert result.is_error
+    assert "not supported on the cmux backend" in result.text
+    assert "desktop app's browser host" in result.text
+    # The wording that would send it to a host which cannot serve it either.
+    assert "browser extension" not in result.text
+    assert "either" not in result.text
+
+
 def test_current_desktop_app_receives_the_selector_and_nothing_else() -> None:
     client = _Host(
         host=HOST_UI,
@@ -222,8 +247,11 @@ def test_the_receipt_carries_no_copied_text() -> None:
     assert result.details["chars"] == len(POISON)
     assert result.details["sha256"] == "0a1b2c3d4e5f6071"
     assert result.details["verified"] is True
-    assert result.details["element"] == {"tag": "input", "id": "key", "name": "key"}
+    # No `element` at all: the receipt names the element from the CALLER's
+    # selector, so there is no page-supplied string in it (review R1-1).
+    assert "element" not in result.details
     assert result.details["selector"] == "#key"
+    assert "'#key'" in result.text
     # And it must say where the value IS, because it is nowhere in this result.
     assert "pbpaste" in result.text and "lop secret set" in result.text
 
@@ -251,15 +279,16 @@ def test_wrongly_typed_fields_are_dropped_not_coerced() -> None:
     assert result.details["chars"] == 0
     assert result.details["sha256"] == ""
     assert result.details["verified"] is False
-    assert result.details["element"] == {}
+    assert "element" not in result.details
     # Unverified and unmeasured must read as unconfirmed, not as a copy.
     assert "unconfirmed" in result.text or "could not confirm" in result.text
 
 
-def test_a_real_element_identity_survives_the_grammar() -> None:
-    # The control for the test above: a page's own id/name is what the label is
-    # for, dashes included, so the check must not strip every identity and leave
-    # every receipt naming `<element>`.
+def test_the_element_is_named_by_the_callers_selector() -> None:
+    # The label is the selector the caller typed, which is the only element name
+    # the receipt is allowed to carry: a real page id (`secret-key`, `api_key`)
+    # is indistinguishable from a token-shaped secret, so no host-supplied string
+    # is rendered at all (review R1-1).
     client = _Host(
         host=HOST_UI,
         methods=("copy",),
@@ -270,9 +299,24 @@ def test_a_real_element_identity_survives_the_grammar() -> None:
             "element": {"tag": "input", "id": "secret-key"},
         },
     )
+    result = _run(client, selector="#api-key-field")
+    assert "'#api-key-field'" in result.text
+    assert "secret-key" not in result.text
+    assert "secret-key" not in json.dumps(result.details, default=str)
+
+
+def test_an_uppercase_digest_is_normalised_not_silently_dropped() -> None:
+    # The prefix contract is a sha256 spelling, not a field case: an uppercase
+    # producer spelled the same digest differently, and losing the field would
+    # read to the caller as "the host reported no digest" (review R1-4).
+    client = _Host(
+        host=HOST_UI,
+        methods=("copy",),
+        reply={"chars": 4, "sha256": "AB12CD34EF56AB78", "verified": True},
+    )
     result = _run(client)
-    assert result.details["element"] == {"tag": "input", "id": "secret-key"}
-    assert '<input id="secret-key">' in result.text
+    assert result.details["sha256"] == "ab12cd34ef56ab78"
+    assert "ab12cd34ef56ab78" in result.text
 
 
 def test_a_digest_that_is_not_a_prefix_is_not_reported_as_one() -> None:
@@ -346,7 +390,13 @@ def test_guide_carries_the_secret_store_recipe() -> None:
     # The two properties a future edit must not quietly drop: the value never
     # enters the transcript, and the page cannot read the clipboard.
     assert "never enters the transcript" in flat
-    assert "page can never read the clipboard" in flat
+    assert "cannot read the clipboard" in flat
+    # The correction that must not regress: pages are granted NO clipboard
+    # permission, and the host performs the write itself (there is no
+    # write-only grant to describe).
+    assert "granted no clipboard permission at all" in flat
+    assert "never grants — or implements — a read" in flat
+    assert "printf '' | pbcopy" in flat
     # `copy` is named as the fallback that needs no page affordance, and as
     # desktop-host-only.
     assert "`copy` is the fallback" in flat
@@ -442,7 +492,7 @@ def test_the_real_client_sends_copy_and_the_receipt_crosses_the_wire(
     details = result.details or {}
     assert details["chars"] == len(POISON)
     assert details["sha256"] == "ab12cd34ef56ab78"
-    assert details["element"] == {"tag": "input", "id": "key"}
+    assert "element" not in details
     assert POISON not in result.text
     assert POISON not in json.dumps(details, default=str)
 

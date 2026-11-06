@@ -21800,9 +21800,8 @@ class BrowserParams(BaseModel):
         description="CSS selector, snapshot ref, or a11y locator for the "
         'click/type/hover/select target (role=checkbox[name="Active"], label=…, text=…) '
         "resolved against the a11y tree, so it survives framework ids. Also the "
-        "read/snapshot scope, query CSS, scroll element, 'press' focus target, "
-        "download/upload control, or the element whose text 'copy' writes to the "
-        "clipboard.",
+        "read/snapshot scope, query CSS, scroll element, 'press' focus target or "
+        "download/upload control.",
     )
     # The snapshot window. Three fields rather than a page token, because the
     # three questions an agent asks a cut tree are different: "give me the next
@@ -25071,128 +25070,46 @@ def _host_of_client(client: Any) -> str:
     return HOST_BRIDGE_PREFIX
 
 
-#: The ONLY fields a `copy` receipt may carry.
+#: The exact shape of the sha256 prefix in a receipt: 16 hex chars, either case.
 #:
-#: An ALLOWLIST, and deliberately not a list of fields to strip. The action exists
-#: because a value shown once must reach the clipboard; forwarding the host's
-#: payload verbatim would put that value in the transcript the moment a host —
-#: current, future or hostile — was generous with its result. So the receipt is
-#: BUILT from these keys rather than filtered down to them, which is what makes
-#: "the value cannot reach the tool result" a property of the code instead of a
-#: promise about the peer. `element` has its own allowlist, and deliberately no
-#: `href`: a URL can carry a query value, and no copied value may travel.
-_COPY_ELEMENT_KEYS = ("tag", "id", "name")
-
-#: The exact shape of the digest prefix in a receipt: 16 lowercase hex chars.
-#: The contract is a PREFIX of the sha256 of the copied bytes (a full digest is
-#: 64 chars, and a constant that long is not worth spending in every result).
-#: MATCHED rather than length-capped: a cap alone would accept whatever a peer put
-#: in the field as long as it was short, and "short arbitrary string" is exactly
-#: what a truncated copy of the value looks like.
-_COPY_SHA_PREFIX_RE = re.compile(r"^[0-9a-f]{16}$")
-
-#: The longest legitimate string in a receipt: an element id or name. A field
-#: longer than this is not one, so it is DROPPED (never truncated — a truncated
-#: secret is still secret material, and `chars`/`sha256` already say what was
-#: copied).
-_COPY_FIELD_MAX_CHARS = 64
-
-#: The grammar an element's IDENTITY may have, which is not free text.
-#:
-#: A tag is an HTML tag name (custom elements keep their dash); an id or name is
-#: an identifier a framework wrote. Neither may contain whitespace, quotes or
-#: markup — which is what keeps a rendered `<input id="…">` a label instead of a
-#: channel. Stated as a grammar rather than a length cap because the two answer
-#: different questions: the cap bounds how much can travel, the grammar bounds
-#: WHAT, and `chars` already tells the caller how big the value was.
-_COPY_TAG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,31}$")
-# Dashes ARE allowed here (`api-key`, `secret-key` are ordinary ids); what is not
-# is whitespace, a quote, a newline or markup.
-_COPY_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+#: The contract is a PREFIX of the sha256 of the copied bytes (a full digest is 64
+#: chars, and a constant that long is not worth spending in every result). MATCHED
+#: rather than length-capped — a cap alone accepts whatever a peer put in the field
+#: as long as it was short, and "short arbitrary string" is exactly what a truncated
+#: copy of the value looks like. Case-INSENSITIVE and normalised to lowercase on the
+#: way in: an uppercase producer is a producer that spelled the same digest
+#: differently, not one whose receipt should silently lose the field.
+_COPY_SHA_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{12,64}$")
 
 
-#: Which grammar each element field must satisfy. `tag` is checked as a tag and
-#: `id`/`name` as identifiers, so a field that swaps them is dropped rather than
-#: rendered — a sentence pasted into `tag` is not a tag name.
-_COPY_ELEMENT_PATTERNS = {
-    "tag": _COPY_TAG_RE,
-    "id": _COPY_NAME_RE,
-    "name": _COPY_NAME_RE,
-}
+def _browser_copy_receipt(raw: Mapping[str, Any]) -> dict[str, object]:
+    """The whole receipt: `chars`, `sha256`, `verified` — and nothing page-controlled.
 
+    THREE SCALARS, BUILT ONE BY ONE. There is no `**result`, no `dict(result)` and
+    no passthrough of unknown fields anywhere on this path, and an earlier version
+    also carried the element's `{tag, id, name}` — dropped after review found that
+    any grammar loose enough to accept real ids (`api-key`, `secret_key`) is also
+    loose enough to accept a token-shaped secret, so an ELEMENT IDENTITY IS STILL A
+    CHANNEL. The element is now named by the caller's own `selector`, which the
+    caller typed and already knows, so the receipt carries no host-supplied string
+    at all: a page cannot influence a byte of it.
 
-def _copy_receipt_field(raw: Any, *, limit: int = _COPY_FIELD_MAX_CHARS) -> str:
-    """One receipt string, or ``""`` when the host sent something else.
-
-    Type-checked before it is used, because this is the boundary the whole
-    allowlist rests on: `str(raw)` on an unexpected object built from page
-    content would be a stringifying bug away from leaking it.
+    `chars` and `verified` are type-checked rather than coerced: `bool("…")` is
+    TRUE, and a string in `chars` IS the copied text under the wrong name. A
+    digest that is not hex is reported as absent (the caller then reads the copy as
+    unverified) rather than as a digest-shaped guess.
     """
-    if not isinstance(raw, str):
-        return ""
-    value = raw.strip()
-    return value if value and len(value) <= limit else ""
-
-
-def _copy_element_field(key: str, raw: Any) -> str:
-    """One element-identity field, or ``""`` when it is not shaped like one.
-
-    Grammar-checked, not just capped: see `_COPY_ELEMENT_PATTERNS` for why an
-    identity is a narrower thing than a string. A rejected field is DROPPED — the
-    receipt then names the element by whatever is left, which is why
-    `_copy_element_label` degrades to `<element>` rather than rendering an empty
-    `<…>`.
-    """
-    value = _copy_receipt_field(raw)
-    return value if value and _COPY_ELEMENT_PATTERNS[key].match(value) else ""
-
-
-def _browser_copy_receipt(result: Mapping[str, Any]) -> dict[str, Any]:
-    """The receipt a ``copy`` call may report, and NOTHING else.
-
-    Keys are transcribed one by one; there is no `**result`, no `dict(result)` and
-    no passthrough of unknown fields anywhere on this path (a test feeds this a
-    result carrying the copied text in extra keys and in the wrong-typed keys and
-    asserts the built receipt holds none of it). `chars` and `verified` are
-    type-checked rather than coerced for the same reason: a string in `chars` is
-    the copied text under the wrong name, and `bool("...")` is True.
-
-    A receipt with an EMPTY `sha256` means the host reported no digest, which is
-    reported as unverified rather than as a copy of nothing.
-    """
-    raw_element = result.get("element")
-    element_source: Mapping[str, Any] = raw_element if isinstance(raw_element, Mapping) else {}
-    combined = {
-        **{key: _copy_element_field(key, element_source.get(key)) for key in _COPY_ELEMENT_KEYS},
-        # `href` is deliberately NOT in the element allowlist: a URL can carry a
-        # query value, and this action's whole contract is that no copied value
-        # travels. `verified` is `is True` so a truthy string from a peer cannot
-        # claim a readback happened.
-        "verified": result.get("verified") is True,
-        "chars": result.get("chars") if type(result.get("chars")) is int else 0,
-        "sha256": _copy_receipt_field(result.get("sha256"), limit=16),
-    }
-    if not _COPY_SHA_PREFIX_RE.match(combined["sha256"]):
-        combined["sha256"] = ""
-    chars = combined["chars"]
-    if not isinstance(chars, int) or chars < 0:
-        combined["chars"] = 0
+    chars = raw.get("chars")
+    digest = raw.get("sha256")
     return {
-        "chars": combined["chars"],
-        "sha256": combined["sha256"],
-        "verified": combined["verified"],
-        "element": {key: combined[key] for key in _COPY_ELEMENT_KEYS if combined[key]},
+        "chars": chars if type(chars) is int and chars >= 0 else 0,
+        "sha256": (
+            digest.strip().lower()
+            if isinstance(digest, str) and _COPY_SHA_PREFIX_RE.match(digest.strip())
+            else ""
+        ),
+        "verified": raw.get("verified") is True,
     }
-
-
-def _copy_element_label(element: Mapping[str, Any]) -> str:
-    """`<input id="key">`, or as much of the identity as the host reported."""
-    tag = str(element.get("tag") or "element")
-    for attribute in ("id", "name"):
-        value = str(element.get(attribute) or "")
-        if value:
-            return f"<{tag} {attribute}={json.dumps(value)}>"
-    return f"<{tag}>"
 
 
 def _browser_copy_result(
@@ -25208,6 +25125,9 @@ def _browser_copy_result(
     remedy is named instead (`pbpaste`, then straight into `lop secret set`), and
     the guide carries the full recipe.
 
+    The element is named by the SELECTOR the caller supplied, never by anything the
+    page reported (see `_browser_copy_receipt`).
+
     `verified: false` is reported rather than hidden: the host's compare-only
     readback is the only proof the bytes reached the OS clipboard, and a caller
     that skipped a copy it believed in is the exact failure this action exists to
@@ -25216,15 +25136,21 @@ def _browser_copy_result(
     selector = params.selector.strip()
     receipt = _browser_copy_receipt(result)
     details: dict[str, Any] = {"selector": selector, **receipt}
-    label = _copy_element_label(receipt["element"])
     chars = receipt["chars"]
+    assert isinstance(chars, int)
     if chars:
-        text = f"Copied {chars} character{'s' if chars != 1 else ''} from {label} to the clipboard"
+        text = (
+            f"Copied {chars} character{'s' if chars != 1 else ''} from {selector!r} "
+            "to the clipboard"
+        )
     else:
         # The host reports `empty_element_text` as a typed failure, so this is
         # only reachable from a host that reported success with no length — and
-        # claiming a copy here would be the lie the error code exists to avoid.
-        text = f"The clipboard write from {label} reported no length, so treat it as unconfirmed"
+        # claiming a copy here would be the lie that code exists to avoid.
+        text = (
+            f"The clipboard write from {selector!r} reported no length, so treat it "
+            "as unconfirmed"
+        )
     if receipt["sha256"]:
         text += f" (sha256 {receipt['sha256']}…)"
     text += "."
@@ -29511,6 +29437,20 @@ async def _execute_browser(
     # Degrade with a clear, actionable error naming both non-cmux hosts rather
     # than faking a partial scroll or an empty log list.
     if action in CMUX_UNSUPPORTED_BROWSER_ACTIONS:
+        if action == "copy":
+            # Its own sentence rather than the generic list plus
+            # `_non_cmux_host_hint`: that hint offers "either non-cmux host", and
+            # the extension then refuses `copy` too (a clipboard write needs a MAIN
+            # process it does not have), so the caller would be sent to a second
+            # host that cannot help and would have to find out the hard way. Name
+            # the one host that serves it.
+            return _error(
+                tool_call_id,
+                "browser",
+                "'copy' is not supported on the cmux backend — it needs the desktop app's "
+                "browser host, which reads the element and writes the clipboard from that "
+                "app's own main process. Open the page with backend='ui' and retry." + demotion,
+            )
         return _error(
             tool_call_id,
             "browser",
@@ -29791,7 +29731,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "in by hand, so this reaches authenticated pages no throwaway browser can. "
             "A fresh 'open' creates one NEW session-owned tab; reuse it, later opens "
             "navigate it. Call 'close' before your final response unless a pending "
-            "interaction needs it; 'tabs' lists every tab (redacted handles) and 'close' "
+            "interaction needs it; 'tabs' lists every tab (handles redacted) and 'close' "
             "ends only your own tab. "
             "An unapproved site fails with origin_not_allowed: call 'request_access', "
             "NOTIFY the operator, then 'await_access' before retrying. "
