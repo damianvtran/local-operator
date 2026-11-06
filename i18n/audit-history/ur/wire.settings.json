@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "ca03cbfbb4e895d1d3cec1b8622539e1219adbdd78ce286fceb3f27867a63d72",
+  "history_sha256": "8ea9e8f4481878a04edad7cdb9ed997be27fba4622126607d69f101c72e1f2cd",
   "entries": [
     {
       "locale": "ur",
@@ -69,6 +69,46 @@
           "wire.settings.guardrails_rules_dir.help": "wire.guardrails.rules_dir.help"
         }
       }
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "55e4545f2bbd8a698b792d04b1f9f4285898247028316a3611e948304bacd9d5",
+      "translator": {
+        "agent": "translator specialist (local-operator subagent 3d08e8f11bb3)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator subagent i18n-auditor)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 6,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Re-read at the pushed head: the only change since the first pass is sender.help, now naming the account ceiling explicitly for 'half', so the default can no longer read as half of the share; keys sorted, 2-space/UTF-8/trailing newline intact, 8 insertions and 0 deletions, no digits or bidi controls, catalogue checker at 0 problems. Remaining MINOR is documentation only (ceiling reads 'حد' in labels and 'بالائی حد' in helps because the long form is 30/29/33/31 cells against the 29-cell cap), plus 4 accepted nits ('غیر مخاطب' and 'مشترکہ کمرے' first-use terms judged best available and defined by the help; 'بات چیت' for chatter; 'سیشنز' the established loan)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "0ec165e369c36fbc415811610fa3beb1ad8be89f090b1cc28a8b16ca671dae29",
+      "translator": {
+        "agent": "translator specialist (local-operator subagent 885f5e3989a0); model radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator subagent i18n-auditor); model radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Delta re-audit of the ambient help. Carve-out correct: the parent is the unaddressed ceiling and 'اس سے … کبھی اضافہ نہیں ہوتا' scopes the never-adds claim to this slice rather than asserting it absolutely. T1 (a 194-cell layout regression that cut the 94-cell band) resolved in this wave by adopting the auditor's own replacement (drop 'آپس کی'): 187 cells, two rows [93, 93] at 94. T2 remains the pre-existing block-wide 74-cell band limit, shared with the other three ur bridge helps and with the English at 60 columns. No bidi controls, ZWNJ/ZJ, numerals or ICU."
     }
   ]
 }
