@@ -869,7 +869,7 @@ async def test_a_new_failure_does_not_drag_its_neighbours_back() -> None:
 
     Keyed by ``(session, whole outcome)``, a later round that ADDS a failure
     changed the key, so the loop re-emitted EVERY failure in the outcome \u2014
-    including ones already in the transcript. Reachable via ``/mcp reload``,
+    including ones already in the transcript. Reachable via ``reload()``,
     which re-enters ``_connect_round`` and re-arms the settle. Keyed per
     ``(session, server, error)``, each distinct failure lands once per session
     and the new one arrives alone.
