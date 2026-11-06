@@ -63,7 +63,12 @@ from local_operator.team_bridge.link_preview.models import (
 )
 from local_operator.team_bridge.link_preview.store import PreviewStore
 from local_operator.web_fetch.models import FetchBytes, WebFetchSettings
-from local_operator.web_fetch.service import FetchError, PolicyRefusal, WebFetchService
+from local_operator.web_fetch.service import (
+    FetchError,
+    PolicyRefusal,
+    WebFetchService,
+    url_has_credentials,
+)
 
 if TYPE_CHECKING:
     # Annotation only: this module rides ``server.app``'s import path, and the
@@ -153,6 +158,28 @@ async def resolve_preview(
     scheme_refusal = _scheme_refusal(target)
     if scheme_refusal is not None:
         return _absent(scheme_refusal)
+
+    # A URL CARRYING CREDENTIALS IS REFUSED HERE, ON THE RAW SPELLING, BEFORE THE
+    # KEY IS BUILT (QA Q2-1). ``canonical_url`` DROPS userinfo — that is what
+    # keeps a credential out of a key that outlives the request — so
+    # ``https://user:secret@host/x`` and ``https://host/x`` are ONE key. Refusing
+    # only in the fetcher therefore has two holes this early return closes, and
+    # both were measured:
+    #
+    # * the credentialed URL could be answered ``ready`` from the plain spelling's
+    #   already-cached card, because a hit never reaches the fetcher at all — a
+    #   card for a URL this contract refuses to resolve;
+    # * worse, the credentialed URL's ``blocked-host`` was written back under that
+    #   SHARED key and then served to the legitimate plain URL as a negative
+    #   answer for the full half-hour ``NEGATIVE_TTL_S``, with no fetch — one
+    #   sender's malformed link denying the card everyone else is entitled to.
+    #
+    # The refusal costs a parse and no request, and it is deliberately NOT cached:
+    # nothing is learned here that a later caller may not learn on its own terms.
+    # The engine-level refusal in ``validate_public_url`` stays as the depth
+    # defence — it re-checks every redirect hop, which this parse never sees.
+    if url_has_credentials(target):
+        return _absent("blocked-host")
 
     key = key_for(scope, target)
     cached = cache.get(key)
@@ -468,9 +495,15 @@ def _policy_reason(reason: str) -> AbsentReason:
 
     ``host`` is three refusals sharing one code, and each is a dead end rather
     than a blip: no host to judge, credentials carried in the URL (never
-    forwarded as an ``Authorization`` header), and a name that does not resolve.
+    forwarded as an ``Authorization`` header), and a name that does not EXIST.
     All three are ``blocked-host``, which is the one code the renderer draws as
     "this link could not be used" instead of offering a retry.
+
+    A lookup that failed rather than found nothing is deliberately NOT in that
+    list: ``EAI_AGAIN`` and the other transient codes arrive as an ordinary
+    :class:`~local_operator.web_fetch.service.FetchError` classified retryable
+    (review R2-1), because a resolver under load is a blip and answering it with
+    this code would park a live host behind the half-hour negative cache.
     """
     if reason == "scheme":
         return "unsupported-scheme"
@@ -484,9 +517,12 @@ def _retryable(error: FetchError) -> bool:
 
     An unclassified ``FetchError`` (a redirect chain that never landed) is
     treated as retryable: the card did not resolve, and the honest answer to
-    "could this work later" is that we do not know. A host with no address does
-    NOT arrive here any more — the guard refuses it as ``reason="host"``, which
-    becomes ``blocked-host`` and is cached as a negative answer.
+    "could this work later" is that we do not know. A host that does not EXIST
+    does not arrive here — the guard refuses it as ``reason="host"``, which
+    becomes ``blocked-host`` and is cached as a negative answer. A host whose
+    lookup merely FAILED does, and answers retryable (review R2-1): the fetcher
+    classifies ``EAI_AGAIN`` and its siblings as a transport failure, so the one
+    bad second is never cached as a half-hour verdict on the host.
     """
     failure = getattr(error, "failure", None)
     if failure is None:

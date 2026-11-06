@@ -70,22 +70,55 @@ def test_validate_allows_public_target(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_name_with_no_address_is_a_host_refusal_not_a_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``socket.gaierror`` is a POLICY answer: waiting changes nothing about DNS.
+    """``EAI_NONAME`` is a POLICY answer: waiting changes nothing about DNS.
 
     Classified as the guard's own refusal rather than a bare transport error so a
     caller that caches outcomes (a link preview's negative cache) can tell "this
     host does not exist" from "this host timed out" — while every existing catcher
     still sees a ``FetchError`` by inheritance.
+
+    The code is spelled ``socket.EAI_NONAME``, not a literal ``-2``: the errno
+    values are platform-specific (macOS uses ``8`` for "no such name"), and a test
+    that hard-codes glibc's is a test of the wrong number (review R2-1).
     """
 
     def _no_such_name(*args: object, **kwargs: object) -> object:
-        raise service.socket.gaierror(-2, "Name or service not known")
+        raise service.socket.gaierror(service.socket.EAI_NONAME, "Name or service not known")
 
     monkeypatch.setattr(service.socket, "getaddrinfo", _no_such_name)
     with pytest.raises(service.PolicyRefusal) as caught:
         validate_public_url("http://nowhere.invalid/x", allow_private=False)
     assert caught.value.reason == "host"
     assert isinstance(caught.value, FetchError)
+
+
+def test_a_transient_resolver_failure_is_retryable_not_a_host_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``EAI_AGAIN`` means "ask again", so it must never become ``blocked-host``.
+
+    Folding every ``gaierror`` into the policy refusal (review R2-1) parked a live
+    host behind a 30-minute negative-cache entry for one bad second: the resolver
+    says "try again" under load, and that is exactly what a retry decision needs to
+    hear. Asserted rather than described: the RAISED TYPE is the contract, because
+    ``PolicyRefusal`` is what the preview turns into an uncached-for-a-half-hour
+    ``blocked-host`` while a classified ``FetchError`` stays retryable.
+    """
+
+    def _ask_again(*args: object, **kwargs: object) -> object:
+        raise service.socket.gaierror(
+            service.socket.EAI_AGAIN, "Temporary failure in name resolution"
+        )
+
+    monkeypatch.setattr(service.socket, "getaddrinfo", _ask_again)
+    with pytest.raises(FetchError) as caught:
+        validate_public_url("http://busy.example/x", allow_private=False)
+    assert not isinstance(caught.value, service.PolicyRefusal)
+    # The fetcher's own retry decision reads this, so it is the load-bearing half:
+    # a failure with no classification is re-raised at once as though it were a
+    # policy refusal, which is how a transient lookup would escape retrying.
+    assert caught.value.failure is not None
+    assert caught.value.failure.retryable is True
 
 
 def test_credentials_in_the_url_are_refused_before_any_lookup(

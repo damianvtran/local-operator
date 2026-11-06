@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sqlite3
 import threading
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -420,7 +422,7 @@ async def test_a_redirect_to_a_private_address_is_re_validated_at_the_hop(
 async def test_credentials_in_the_url_are_refused_before_a_single_request(
     monkeypatch: pytest.MonkeyPatch, signed_in: None
 ) -> None:
-    """URL [redacted] would become ``Authorization: Basic`` on the wire.
+    """URL userinfo would become ``Authorization: Basic`` on the wire.
 
     httpx turns it into a header, so honouring such a URL would send a credential
     the MESSAGE AUTHOR chose to a third party — in a request this process signs.
@@ -1025,6 +1027,129 @@ async def test_the_cache_reports_the_bytes_it_holds(
         stats = preview_cache_for_test.stats()
         assert stats.hits == 1
         assert stats.resolutions == 1
+        # The bytes are held ONCE, and a HIT must not add or drop a byte: this is
+        # the post-hit half of the resident-size assertion (review R2-7 restored it
+        # after the previous delta dropped it).
+        assert stats.resident_bytes == len(PNG)
+
+
+def _write_half_written_owner_row(config_dir: Path) -> None:
+    """A committed enrollment row as a crashed writer leaves it: an int column NULL.
+
+    Written straight to the store's own path with NO ``NOT NULL`` on
+    ``credential_id``, because that is the shape that reaches the decoder:
+    ``_owner_from_row`` does ``int(row["credential_id"])``, and ``int(None)``
+    raises ``TypeError`` out of ``active_owner_readonly`` (which only wraps what
+    SQLite itself raises, as ``StoreRefused``). Reviewer R2-2 measured that as a
+    500 on both routes; the scope is supposed to degrade to the account alone.
+    """
+    path = Path(config_dir) / "team_bridge" / "state.sqlite3"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE enrollments (owner_key TEXT PRIMARY KEY, credential_id INTEGER, "
+            "account_id TEXT, tenant_id TEXT, endpoint_id TEXT, canonical_base_url TEXT, "
+            "enrollment_generation INTEGER, consent_version TEXT, consent_ref TEXT, "
+            "designated_session TEXT, state TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO enrollments VALUES (?,?,?,?,?,?,?,?,?,?,'committed')",
+            (
+                "half-written-owner",
+                None,
+                ACCOUNT,
+                "tenant-partial",
+                "endpoint-partial",
+                "https://hub.preview.test",
+                1,
+                None,
+                None,
+                None,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_a_half_written_owner_row_cannot_500_either_route(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None, _plane: ConfigManager
+) -> None:
+    """A damaged owner row narrows the scope to the account; it never fails a route.
+
+    The tenant is the SECOND fence, so losing it must leave the account fence
+    intact — resolve still answers its normal resolution and artifact still
+    answers 404 for an id it holds no blob for. Reviewer R2-2 reproduced 500s on
+    BOTH before this: the ``sqlite3.Error`` arm caught nothing (the store already
+    wraps those) while the ``TypeError`` the real corruption raises escaped.
+    """
+    _write_half_written_owner_row(Path(_plane.config_dir))
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        resolved = await _post(client, _resolve_body())
+        artifact = await client.get(_artifact_path("a" * 32))
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["result"]["kind"] == "ready", resolved.text
+    # The fetch really ran: the degraded scope fetched instead of short-circuiting.
+    assert seen == ["/page", "/favicon.png"]
+    assert artifact.status_code == 404, artifact.text
+
+
+@pytest.mark.asyncio
+async def test_a_credentialed_url_is_refused_even_when_the_plain_card_is_fresh(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The refusal runs on the RAW url, BEFORE the key is built (QA Q2-1).
+
+    ``canonical_url`` drops the userinfo pair so a credential never enters a
+    long-lived key, which makes the credentialed spelling and the plain one ONE
+    key. With the refusal only in the fetcher, a cache HIT never reaches the
+    fetcher at all — so a credentialed URL was answered from the plain spelling's
+    fresh card. Measured here: the card is cached FIRST, and the refusal must
+    still be a refusal, with no request at all.
+    """
+
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        plain = await _post(client, _resolve_body())
+        assert plain.json()["result"]["kind"] == "ready", plain.text
+        fetched = len(seen)
+
+        credentialed = await _post(
+            client, _resolve_body("http://someone:hunter2@preview.test/page")
+        )
+    assert credentialed.status_code == 200, credentialed.text
+    assert credentialed.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert len(seen) == fetched, "the refusal must cost no request at all"
+
+
+@pytest.mark.asyncio
+async def test_a_credentialed_refusal_does_not_poison_the_plain_spelling(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None, preview_cache_for_test: PreviewCache
+) -> None:
+    """The refusal must not answer for the URL others are entitled to (QA Q2-1).
+
+    Because the two spellings share one canonical key, a ``blocked-host`` written
+    under it would be served to the plain URL as a negative answer for the whole
+    ``NEGATIVE_TTL_S`` with no fetch — one message's malformed link denying every
+    later reader of the same page its card. The refusal returns BEFORE the cache,
+    so nothing is stored; the plain URL then fetches for itself.
+    """
+
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        credentialed = await _post(
+            client, _resolve_body("http://someone:hunter2@preview.test/page")
+        )
+        assert credentialed.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+        assert seen == [], "the refusal must not reach the origin"
+
+        plain = await _post(client, _resolve_body())
+        assert plain.json()["result"]["kind"] == "ready", plain.text
+    # One entry, written by the plain resolve: the refusal stored nothing.
+    assert preview_cache_for_test.stats().entries == 1
 
 
 @pytest.mark.asyncio
@@ -1191,12 +1316,15 @@ async def test_a_name_with_no_address_is_a_blocked_host_and_is_not_retried(
 ) -> None:
     """A permanently dead link must not be re-resolved on every scroll.
 
-    ``socket.gaierror`` is a POLICY answer — the name has no address, and no retry
-    changes that — so it surfaces as ``blocked-host`` and is remembered as a
-    NEGATIVE entry, reused for the whole negative TTL before one more lookup is
-    allowed. A DNS TIMEOUT is a different animal: it stays a retryable ``error``
-    (see ``test_the_total_deadline_answers_instead_of_hanging``), because a slow
-    resolver is not a dead host.
+    A gaierror meaning "no such name" (``EAI_NONAME``) is a POLICY answer — the
+    name has no address, and no retry changes that — so it surfaces as
+    ``blocked-host`` and is remembered as a NEGATIVE entry, reused for the whole
+    negative TTL before one more lookup is allowed. The OTHER gaierrors are not:
+    ``EAI_AGAIN`` is a resolver asking to be asked again and stays a retryable
+    ``error``, as does a DNS TIMEOUT — see
+    ``test_a_transient_lookup_failure_stays_retryable_and_is_never_cached`` and
+    ``test_the_total_deadline_answers_instead_of_hanging`` (review R2-1) — because
+    a slow or busy resolver is not a dead host.
     """
     # The autouse fixture pins every name; this test is about the resolver's own
     # answer, so the production resolver goes back in and only DNS itself is faked.
@@ -1232,6 +1360,40 @@ async def test_a_name_with_no_address_is_a_blocked_host_and_is_not_retried(
         assert lookups == ["nowhere.invalid", "nowhere.invalid"]
     assert seen == [], "a refused name reached the transport"
     assert preview_cache_for_test.stats().entries == 1
+
+
+@pytest.mark.asyncio
+async def test_a_transient_lookup_failure_stays_retryable_and_is_never_cached(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None, preview_cache_for_test: PreviewCache
+) -> None:
+    """``EAI_AGAIN`` is a blip, NOT a verdict on the host (review R2-1).
+
+    The negative cache is what makes this more than a wording preference: a
+    transient resolver failure classified as ``blocked-host`` would be remembered
+    for the whole 30-minute ``NEGATIVE_TTL_S``, so one bad second at the resolver
+    would hide a live page from every later reader. Measured across two resolves:
+    both answer retryable, the transport is never reached, and nothing is written
+    to the cache — so the next scroll asks the resolver again.
+    """
+    monkeypatch.setattr(fetch_service, "_resolve_host_ips", _RESOLVE_HOST_IPS_REAL)
+    lookups: list[str] = []
+
+    def _ask_again(hostname: str, *args: Any, **kwargs: Any) -> Any:
+        lookups.append(hostname)
+        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _ask_again)
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    body = _resolve_body("http://busy.invalid/page")
+    async with _client() as client:
+        first = await _post(client, body)
+        second = await _post(client, body)
+    assert first.json()["result"] == {"kind": "error", "retryable": True}, first.text
+    # The second resolve looked the name up AGAIN: no negative entry was written.
+    assert second.json()["result"] == first.json()["result"]
+    assert len(lookups) > 1, lookups
+    assert seen == [], "a failed lookup reached the transport"
+    assert preview_cache_for_test.stats().entries == 0
 
 
 @pytest.mark.asyncio

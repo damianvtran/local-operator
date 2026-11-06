@@ -232,8 +232,10 @@ class PolicyRefusal(FetchError):
 
     ``reason`` is a small closed vocabulary, deliberately not the exception's own
     prose: ``scheme`` (not http/https), ``host`` (no host to judge, credentials
-    carried in the URL, or a name with no address), ``private`` (resolves to a
-    loopback/private/reserved address).
+    carried in the URL, or a name that does not exist), ``private`` (resolves to a
+    loopback/private/reserved address). A lookup that FAILED rather than found
+    nothing — ``EAI_AGAIN`` and the other transient codes — is deliberately not a
+    refusal: it raises a plain :class:`FetchError` classified retryable.
 
     Raised for the initial URL AND for every redirect hop, because
     :func:`validate_public_url` is the single address check the redirect loop
@@ -425,6 +427,17 @@ def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return False
 
 
+#: The gaierror codes that mean "this name does not exist" rather than "the
+#: lookup did not answer": the only ones a caller may treat as permanent.
+#: ``EAI_NODATA`` is absent from some platforms (glibc hides it unless
+#: ``_GNU_SOURCE``), so it is collected rather than spelled inline.
+_NO_SUCH_HOST_ERRNOS = frozenset(
+    code
+    for code in (getattr(socket, "EAI_NONAME", None), getattr(socket, "EAI_NODATA", None))
+    if code is not None
+)
+
+
 def _resolve_host_ips(hostname: str) -> list[str]:
     """Resolve ``hostname`` to every A/AAAA address, or raise :class:`FetchError`.
 
@@ -443,26 +456,54 @@ def _resolve_host_ips(hostname: str) -> list[str]:
     try:
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        # A name with no address is a POLICY answer, not a transport hiccup: no
-        # amount of waiting or retrying changes what DNS knows, and callers that
-        # cache outcomes (a link preview's negative cache) must be able to tell
-        # "this host does not exist" from "this host timed out". Raised as the
-        # guard's own refusal — still a ``FetchError`` by inheritance, so every
-        # existing catcher, message and retry decision is unchanged.
-        raise PolicyRefusal(f"could not resolve host {hostname!r}: {exc}", reason="host") from exc
+        # ONLY a permanent "no such name" is a POLICY answer. No amount of
+        # waiting changes what DNS knows about a name that does not exist, so
+        # that one is the guard's own refusal: callers that cache outcomes (a
+        # link preview's negative cache) must be able to tell "this host does not
+        # exist" from "this host timed out", and it is refused as ``reason="host"``
+        # — still a ``FetchError`` by inheritance, so every existing catcher,
+        # message and retry decision is unchanged.
+        #
+        # EVERY OTHER gaierror IS TRANSIENT AND MUST STAY RETRYABLE (review R2-1).
+        # ``EAI_AGAIN`` is the resolver saying "ask again", and servers under load
+        # answer exactly that; folding it into the permanent refusal would park a
+        # live host behind a 30-minute negative-cache entry for one bad second.
+        # Classified ``transport``/retryable — the same shape the DNS timeout
+        # below uses, because both say "the lookup did not answer", not "there is
+        # nothing there".
+        if exc.errno in _NO_SUCH_HOST_ERRNOS:
+            raise PolicyRefusal(
+                f"could not resolve host {hostname!r}: {exc}", reason="host"
+            ) from exc
+        raise FetchError(
+            f"could not resolve host {hostname!r}: {exc}",
+            failure=FetchFailure(
+                kind="transport",
+                retryable=True,
+                detail=f"the lookup for {hostname!r} failed transiently: {exc}",
+            ),
+        ) from exc
     # info[4] is the sockaddr; its first element is the address string for both
     # AF_INET and AF_INET6. str() guards the type checker against the union the
     # stdlib stubs give sockaddr elements.
     return list({str(info[4][0]) for info in infos})
 
 
-def _url_has_credentials(url: str) -> bool:
+def url_has_credentials(url: str) -> bool:
     """Whether ``url`` carries userinfo (``scheme://user:secret@host/...``).
 
     A pure parse — no DNS, no socket — so a refusal on this costs nothing. An
     EMPTY userinfo (``http://@host/``) counts: httpx still treats it as
     credentials, and the point of the check is that this process never sends an
     ``Authorization`` header a link text chose for it.
+
+    PUBLIC, not module-private, because it is the ONE definition of "carries
+    credentials" and the check runs in two places for two different jobs:
+    :func:`validate_public_url` refuses the target it is about to connect to (and
+    re-checks every redirect hop), while the link-preview service refuses the RAW
+    URL before it is canonicalised into a cache key. A second parse there would be
+    two answers to one question — and the key function drops userinfo, so a
+    credentialed spelling and its plain twin are one key once canonicalised.
     """
 
     parts = urlparse(url)
@@ -501,7 +542,7 @@ def validate_public_url(url: str, *, allow_private: bool) -> str | None:
     # connect, so refusing costs no DNS and no socket, and it runs on every
     # redirect hop for the same reason the rest of this function does. The URL is
     # deliberately absent from the message: it carries the credential itself.
-    if _url_has_credentials(url):
+    if url_has_credentials(url):
         raise PolicyRefusal(
             "refusing a URL carrying credentials: userinfo is never forwarded", reason="host"
         )

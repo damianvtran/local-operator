@@ -102,10 +102,11 @@ class ResolveRequest(BaseModel):
 class LinkPreviewCacheStats(BaseModel):
     """What the preview cache holds, in numbers that cannot name a page.
 
-    camelCased on the wire (``residentBytes``) because the renderer's own contract
-    reads it that way, for the same reason ``siteName`` carries a
-    ``serialization_alias`` in ``link_preview.models``: the alias is the boundary,
-    not a second vocabulary.
+    camelCased on the wire (``residentBytes``) to match the alias boundary the
+    card's own model sets (``siteName`` in ``link_preview.models``), NOT because
+    any renderer contract declares a cache shape — none does. This is a
+    diagnostics surface: the alias keeps the desktop wire's one spelling
+    convention rather than inventing a second one beside it.
     """
 
     entries: int
@@ -184,21 +185,28 @@ def _scope_for(config_dir: Path, account_id: str) -> PreviewScope:
     with no fence at all.
 
     An install with no committed owner row has no tenant, and the account alone is
-    then the whole scope: a missing tenant must narrow nothing. The same applies
-    to a store that cannot be read — the tenant is the SECOND fence, and losing it
-    must not fail a preview the account scope still isolates. ``sqlite3.Error`` is
-    caught alongside ``StoreRefused`` for exactly that reason (the pair
-    ``desktop_team_bridge._locally_enrolled`` catches): a malformed or half-written
-    owner row must narrow the scope, never 500 the route.
-    """
-    import sqlite3
+    then the whole scope: a missing tenant must narrow nothing. The same applies to
+    a store that cannot be read — the tenant is the SECOND fence, and losing it
+    must not fail a preview the account scope still isolates.
 
+    WHICH FAILURES THAT COVERS, EXACTLY (review R2-2). ``active_owner_readonly``
+    already wraps what SQLite raises while reading as ``StoreRefused`` (its
+    read-only connection wraps the caller's read), so catching a raw
+    ``sqlite3.Error`` here caught nothing. What DOES escape is the row decoder:
+    ``_owner_from_row`` calls ``int()`` on the id and generation columns and then
+    ``OwnerSnapshot.validated()``, so a HALF-WRITTEN committed row raises
+    ``TypeError`` (a ``NULL`` where an int belongs) or ``ValueError``
+    (``TeamBridgeTypeError`` is a ``ValueError``; an empty tenant or a relative
+    base URL lands there). Those are precisely the case this docstring promises to
+    degrade, and catching only the store's own refusal answered them with a 500 on
+    both routes.
+    """
     from local_operator.team_bridge.store import Store, StoreRefused
 
     owner = None
     try:
         owner = Store(config_dir).active_owner_readonly()
-    except (StoreRefused, sqlite3.Error):
+    except (StoreRefused, TypeError, ValueError):
         owner = None
     tenant_id = "" if owner is None else str(getattr(owner, "tenant_id", "") or "")
     return PreviewScope(account_id=account_id, tenant_id=tenant_id)
@@ -254,8 +262,11 @@ async def link_preview_cache_stats():
     disk, no lock), which is why it runs on the loop instead of in a thread like
     the store's file work does.
 
-    Enveloped in the surface's usual ``CRUDResponse`` so the renderer's one client
-    helper parses it like every sibling GET.
+    Enveloped in the surface's usual ``CRUDResponse`` so the one desktop client
+    helper parses it like every sibling GET. That is a wire-convention choice, not
+    a renderer contract: this is the surface's DIAGNOSTIC endpoint — what an
+    operator or a test reads to see the cache move — and no renderer draws it, so
+    there is no cache shape in any renderer contract to keep in step.
     """
     stats = preview_cache.get_preview_cache().stats()
     return CRUDResponse(
