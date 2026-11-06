@@ -2823,9 +2823,11 @@ def _shareable_servers(self_device: str, *, self_name: str = "") -> list[dict[st
                 f" (run on {self_name or 'this device'}, which holds the login)"
             )
         elif dead:
-            remedy = readiness_mod.MCP_DEAD_LOGIN_REMEDY
+            # The runnable command needs the server NAME, which is the row's own
+            # key here — never the URL (review R1-1).
+            remedy = readiness_mod.mcp_dead_login_remedy(name=str(server.get("name") or ""))
         elif login_here is False:
-            remedy = readiness_mod.mcp_login_remedy(url)
+            remedy = readiness_mod.mcp_login_remedy(url, name=str(server.get("name") or ""))
         else:
             remedy = ""
         rows.append(
@@ -3467,9 +3469,10 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             from local_operator.network import readiness as readiness_mod
 
             payload["login_dead"] = True
+            dead_name = readiness_mod.mcp_server_name_for_url(_config_dir(), mcp_url_from_key(key))
             lines.append(
                 "note: this device's login is no longer valid — "
-                f"{readiness_mod.MCP_DEAD_LOGIN_REMEDY}"
+                f"{readiness_mod.mcp_dead_login_remedy(name=dead_name)}"
             )
     if verb == "share" and github_mod.is_github_key(key):
         # The disclosure names the ARM that will serve (§3.4): only the App is
@@ -3791,9 +3794,17 @@ def _require_local_credential(key: str, provider: str) -> None:
         raise MeshRefusal("no_local_credential", github_mod.no_source_message())
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
+        # THE REMAINDER IS THE NAME, RESOLVED FROM THIS DEVICE'S OWN CONFIG. The
+        # share verb knows only the ``mcp:<url>`` key, so the name is read back
+        # from the file the writers target rather than dropped: a URL in that
+        # position is a command ``/mcp login`` refuses (review R1-1). When this
+        # device has no user-scope entry for the URL, the clause names no command
+        # and the reader gets the form instead of a dead paste.
+        login_name = readiness_mod.mcp_server_name_for_url(_config_dir(), url)
         raise MeshRefusal(
             "no_local_credential",
-            f"this device has no MCP login for {url}; {readiness_mod.mcp_login_remedy(url)}",
+            f"this device has no MCP login for {url}; "
+            f"{readiness_mod.mcp_login_remedy(url, name=login_name)}",
         )
     raise MeshRefusal(
         "no_local_credential",

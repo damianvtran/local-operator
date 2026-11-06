@@ -12,6 +12,7 @@ a fake callback alone would pin only our side of the contract.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
@@ -718,3 +719,205 @@ def _choice(question_id: str, choice: str) -> Any:
         output_tokens=10,
         cost_usd=0.00002,
     )
+
+
+# ---------------------------------------------------------------------------
+# A JSON envelope over a record log: a new message is an ADDED record line
+# ---------------------------------------------------------------------------
+
+_SLACK_CHANNEL = "Channel: #product-feedback (C06TXN4AD9R)"
+
+#: What the watch is FOR, in the words the gate judges a delta against.
+WATCH_DESCRIPTION = (
+    "New messages and thread replies in #product-feedback: any new record is a "
+    "feedback item that needs triage, so tell me what it says."
+)
+
+
+def _slack_record(
+    body: str,
+    *,
+    user: str = "U058BN13Q0Y",
+    ts: str = "1762400000.000100",
+    thread: str | None = None,
+) -> str:
+    """One message block as ``mcp__slack_read_channel`` renders it."""
+    block = (
+        f"=== Message from Gong Support Bot ({user}) at 2026-11-05T20:10:00Z ==="
+        f"\nMessage TS: {ts}\n{body}"
+    )
+    if thread is not None:
+        block = f"{block}\nThread: {thread}"
+    return block
+
+
+def _slack_result(*blocks: str) -> str:
+    """The measured MCP shape: the whole message log in ONE JSON-escaped string.
+
+    This is the 2026-11-05 defect in one line — a new message could only REPLACE
+    the envelope line, and the gate was handed a ~200-char window of escaped
+    bookkeeping (a ``Message TS``, a cursor) instead of the message: two real
+    messages, ``deliveries: 0``, ``suppressed.non_material_metadata: 2``.
+    """
+    payload = "\n\n".join([_SLACK_CHANNEL, *blocks]) + "\n"
+    return json.dumps({"messages": payload})
+
+
+def _slack_spec() -> MonitorSpec:
+    return spec(
+        name="product-feedback",
+        tool="mcp__slack_read_channel",
+        arguments={"channel_id": "C0PEP", "limit": 20},
+        description=WATCH_DESCRIPTION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_new_message_in_a_channel_read_is_delivered_without_asking_the_gate(
+    harness: Harness,
+) -> None:
+    """The acceptance case: an appended record line, so no verdict can swallow it."""
+    harness.script.append(NON_MATERIAL_METADATA)  # would suppress, if it were asked
+    harness.scheduler.load([_slack_spec()])
+    first = _slack_record("Victor: the first note")
+    second = _slack_record("Mike: acknowledged", ts="1762400100.000200")
+    harness.results.extend(
+        [
+            {"text": _slack_result(first, second)},
+            {
+                "text": _slack_result(
+                    _slack_record(
+                        "Victor: the risk assessment report needs a second look",
+                        ts="1762400200.000300",
+                    ),
+                    first,
+                    second,
+                )
+            },
+        ]
+    )
+    await harness.ripe()  # baseline
+    await harness.ripe()  # the new message
+
+    assert harness.states == [], "the gate was asked about an appended record"
+    assert len(harness.deliveries) == 1
+    delta = harness.deliveries[0].delta_text
+    assert delta.split("\n")[0] == "+1/-0 changed lines", delta
+    assert "needs a second look" in delta, delta
+    # No envelope in the delta: the preview is a record, not escaped JSON.
+    assert '"messages"' not in delta and "\\n" not in delta
+    assert harness.counters()["suppressed"]["non_material_metadata"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_shifted_channel_window_is_delivered_without_asking_the_gate(
+    harness: Harness,
+) -> None:
+    """A record log's delta is not gate-judged — the whole point of the split.
+
+    A newest-first window ALWAYS shifts (new record prepended, oldest dropped),
+    so the delta is ``+1/-1`` and never a pure addition. The gate exists to
+    separate signal from bookkeeping in OPAQUE text; the record view has already
+    done that separation, so asking it anyway is how QA round 1 lost 5 of 6 real
+    messages and a thread reply entirely (Q-1/Q-2, measured on live traffic).
+    """
+    harness.script.append(NON_MATERIAL_METADATA)  # would suppress, if asked
+    harness.scheduler.load([_slack_spec()])
+    newest = _slack_record("Sara: newest", ts="1762400300.000400")
+    older = _slack_record("Mike: older", ts="1762400200.000300")
+    oldest = _slack_record("Victor: oldest", ts="1762400100.000200")
+    harness.results.extend(
+        [
+            {"text": _slack_result(newest, older, oldest)},
+            {
+                "text": _slack_result(
+                    _slack_record(
+                        "Victor: the risk assessment report needs a second look",
+                        ts="1762400400.000500",
+                    ),
+                    newest,
+                    older,
+                )
+            },
+        ]
+    )
+    await harness.ripe()  # baseline
+    await harness.ripe()  # the shifted window
+
+    assert harness.states == [], "the gate was asked about a record log"
+    assert len(harness.deliveries) == 1
+    delta = harness.deliveries[0].delta_text
+    lines = delta.split("\n")
+    assert lines[0] == "+1/-1 changed lines", delta
+    added = [line for line in lines if line.startswith("+ ")]
+    removed = [line for line in lines if line.startswith("- ")]
+    assert len(added) == 1 and "needs a second look" in added[0], delta
+    assert len(removed) == 1 and "oldest" in removed[0], delta
+    assert harness.counters()["suppressed"]["non_material_metadata"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_thread_reply_on_a_record_is_delivered_without_asking_the_gate(
+    harness: Harness,
+) -> None:
+    """Q-2: the parent's ``Thread: N replies`` change must reach the wake.
+
+    A reply is invisible in a channel read except as that field, so this is the
+    only signal there is: the record's line changes, the delta carries the new
+    count, and the gate is not asked.
+    """
+    harness.script.append(NON_MATERIAL_METADATA)  # would suppress, if asked
+    harness.scheduler.load([_slack_spec()])
+    parent = _slack_record("Victor: the report", user="U0VICTOR", ts="1762400100.000200")
+    harness.results.extend(
+        [
+            {"text": _slack_result(parent)},
+            {
+                "text": _slack_result(
+                    _slack_record(
+                        "Victor: the report",
+                        user="U0VICTOR",
+                        ts="1762400100.000200",
+                        thread="1 replies (latest: 2026-11-05 23:48:11 EST)",
+                    )
+                )
+            },
+        ]
+    )
+    await harness.ripe()
+    await harness.ripe()
+
+    assert harness.states == []
+    assert len(harness.deliveries) == 1
+    assert "Thread: 1 replies" in harness.deliveries[0].delta_text
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_record_log_tick_delivers_nothing_and_asks_nothing(
+    harness: Harness,
+) -> None:
+    """Skipping the gate must not turn a quiet tick into a delivery."""
+    harness.scheduler.load([_slack_spec()])
+    text = _slack_result(
+        _slack_record("unchanged"), _slack_record("also unchanged", ts="1762400100.0")
+    )
+    harness.results.extend([{"text": text}, {"text": text}])
+    await harness.ripe()
+    await harness.ripe()
+    assert harness.deliveries == []
+    assert harness.states == []
+    assert harness.counters()["checks"] == 2
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_text_source_still_asks_the_gate(harness: Harness) -> None:
+    """The record-view skip is scoped to record logs: opaque text is still judged."""
+    harness.script.append(NON_MATERIAL_METADATA)
+    harness.scheduler.load([spec(name="build-log", tool="bash", description=LOG_PURPOSE)])
+    harness.results.extend([{"text": "1| a"}, {"text": "1| a\n2| b"}, {"text": "1| a2\n2| b"}])
+    await harness.ripe()  # baseline
+    await harness.ripe()  # append: delivered without asking
+    await harness.ripe()  # edit: the gate is asked, and suppresses
+    assert len(harness.states) == 1
+    assert len(harness.deliveries) == 1
+    assert harness.counters()["suppressed"]["non_material_metadata"] == 1

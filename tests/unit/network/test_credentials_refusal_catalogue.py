@@ -52,5 +52,7 @@ def test_an_mcp_key_is_told_the_mcp_verb() -> None:
         key=f"mcp:{url}",
         owner_name="damian-mbp",
     )
-    assert f"/mcp login {url}" in rendered, rendered
+    # The argument is a server NAME; without a config entry the sentence keeps
+    # the form rather than pasting a URL the verb refuses (review R1/R2).
+    assert "/mcp login <name>" in rendered, rendered
     assert "lop login" not in rendered, rendered

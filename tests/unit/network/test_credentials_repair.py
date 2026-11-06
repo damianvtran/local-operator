@@ -122,8 +122,37 @@ def test_an_open_report_becomes_the_check_row_the_surfaces_read(root: Path) -> N
     assert row["device_name"] == "laptop"
     # The wire diagnostic's own wording, recomposed for the owner's operator.
     assert row["detail"] == render_repair_notice("laptop", MCP_KEY)
-    assert f"/mcp login {MCP_KEY[4:]}" in row["detail"]
-    assert row["remedies"] == [f"run `/mcp login {MCP_KEY[4:]}` on this device"]
+    # THE COMMAND NAMES A SERVER, NOT A URL (review R1/R2). This root declares no
+    # ``mcp.json`` entry for the URL, so the clause keeps the FORM — the same
+    # answer every surface gives when this device has no name to offer.
+    assert "/mcp login <name>" in row["detail"]
+    assert MCP_KEY[4:] not in row["detail"]
+    assert row["remedies"] == ["run `/mcp login <name>` on this device"]
+
+
+def test_the_repair_command_names_this_devices_server(root: Path) -> None:
+    """R2-1/Q2-1 on the repair surface: the name resolves HERE, never a URL.
+
+    ``lop network doctor``'s remedy runs on this device, so the argument must be
+    the name THIS device lists — the peer's name for the same server would be
+    refused here exactly as a URL is.
+    """
+    from local_operator.paths import config_dir
+
+    config = config_dir()
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"linear-work": {"type": "http", "url": MCP_KEY[4:]}}}),
+        encoding="utf-8",
+    )
+    record = _record()
+    log = audit_mod.AuditLog(root)
+    _report(log)
+
+    rows = repair_mod.repair_checks(record, log=log)
+
+    assert rows[0]["remedies"] == ["run `/mcp login linear-work` on this device"]
+    assert "linear-work" in rows[0]["detail"]
 
 
 def test_a_later_grant_closes_the_row(root: Path) -> None:
@@ -300,5 +329,5 @@ def test_the_doctor_summary_degrades_without_failing_the_link_for_an_open_repair
     # The human line carries the sentence WHOLE — the detail is prose, and
     # ``doctor_detail_words`` passes prose through rather than tokenising it.
     assert "FAIL credential_repair" in human
-    assert "laptop needs '/mcp login https://mcp.example.com'" in human
+    assert "laptop needs '/mcp login <name>'" in human
     assert "its borrowed credential cannot be refreshed" in human
