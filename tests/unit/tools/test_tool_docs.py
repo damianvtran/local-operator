@@ -461,8 +461,20 @@ MEASURED_TOKENS: dict[str, int] = {
     #   `guide://browser` ("Reading layout: rects and computed styles").
     # - `inspect_ownership` and `network_stop` are shortened to one clause each;
     #   `download` says "private dir".
+    # 2134 -> 2118 (-16, the CI context-budget fix): this doc RENDERS the
+    # `BrowserParams` field descriptions, so trimming those to get the tools-array
+    # schema back under `bench_context_budget.py`'s budget shortened the doc too —
+    # the safe direction, and the reason the number moves here rather than in a
+    # prose edit. What left the model's copy: the two field helps lose the
+    # rationale clauses "so it survives framework ids" and "a select option's
+    # label or value" (both still stated in `guide://browser`), and `retain`'s
+    # "the reason for" becomes "reason". Every meaning the model needs stays: the
+    # `text` help still names 'type' (text to enter) and 'setvalue' (the value),
+    # and `selector` still names 'setvalue' with its CSS/ref/`role=`/`label=`/
+    # `text=` forms. Measured: 8,089 chars against the 8,192 cap — headroom up
+    # from 4 to 103.
     # Nothing else about any other tool moved.
-    "browser": 2134,
+    "browser": 2118,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

@@ -21818,10 +21818,9 @@ class BrowserParams(BaseModel):
     selector: str = Field(
         default="",
         description="CSS selector, snapshot ref, or a11y locator for the "
-        'click/type/hover/select/setvalue target (role=checkbox[name="Active"], label=…, text=…) '
-        "resolved against the a11y tree, so it survives framework ids. Also the "
-        "read/snapshot scope, query CSS, scroll element, 'press' focus target or "
-        "download/upload control.",
+        "click/type/hover/select/setvalue target (role=checkbox[name=…], label=…, text=…), "
+        "resolved against the a11y tree. Also the read/snapshot scope, query CSS, scroll "
+        "element, 'press' focus or file control.",
     )
     # The snapshot window. Three fields rather than a page token, because the
     # three questions an agent asks a cut tree are different: "give me the next
@@ -21845,9 +21844,9 @@ class BrowserParams(BaseModel):
     )
     text: str = Field(
         default="",
-        description="'type': text to enter; 'setvalue': the value to set (a select "
-        "option's label or value, an input/textarea value, ISO date/time; '' clears); "
-        "the reason for 'retain'. NEVER a credential: only 'type' takes 'secret_ref'.",
+        description="'type': text to enter; 'setvalue': the value (select option, "
+        "input/textarea, ISO date/time; '' clears); 'retain': reason. NEVER a credential: "
+        "'secret_ref' is 'type'-only.",
     )
     secret_ref: str = Field(
         default="",
