@@ -1588,6 +1588,10 @@ async def test_the_focused_pane_names_the_gestures_that_still_fire(
     and `esc back` was the only cue left.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # A REAL conversation for S1, because `o`/`a` are only offered when there is one
+    # (#3522 D1/U2): without it the pane would name neither, and this cell is about
+    # the keys that DO fire.
+    _conversation(tmp_path, S1)
     store = _seed(tmp_path, 4)
     # A tall item, so the pane can actually scroll: the marker's whole point is
     # that it stays visible when the pane's content does not.

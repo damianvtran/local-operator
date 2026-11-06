@@ -168,7 +168,26 @@ def _share_mcp(rig: Any) -> None:
 
 
 def _borrow(rig: Any, key: str = MCP_KEY, provider: str = "mcp-oauth") -> Any:
-    return _borrower_client(rig).request_grant_sync(key, provider=provider, session_id="sess-1")
+    """Borrow through the product's own client, once the second relay leg is up.
+
+    RIG SEQUENCING, NOT A PRODUCT CHANGE: the borrower dials the owner on demand, and
+    the ``credential_placement`` pull this file issues just before the first borrow
+    dials the same owner concurrently. A borrow issued in that window can lose to the
+    pull's own handshake under load and answer ``owner_offline`` — measured here at
+    roughly one run in six before this wait, with the same cell passing on the
+    previous head. The wait is bounded and always satisfied by a healthy rig; it only
+    stops two concurrent dials from racing for the same link.
+    """
+    client = _borrower_client(rig)
+    link, _reason = rig.b._ensure_link_with_reason(rig.owner)  # noqa: SLF001 — the dial seam
+    if link is None:
+        import time as _time
+
+        deadline = _time.monotonic() + 20.0
+        while link is None and _time.monotonic() < deadline:
+            _time.sleep(0.25)
+            link, _reason = rig.b._ensure_link_with_reason(rig.owner)  # noqa: SLF001
+    return client.request_grant_sync(key, provider=provider, session_id="sess-1")
 
 
 def _owner_tick(rig: Any) -> str:
