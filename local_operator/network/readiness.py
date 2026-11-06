@@ -499,13 +499,22 @@ def repository_fact(
 #: inventory lets a planner read all of it BEFORE it starts.
 TOOLING_TOOLS: tuple[str, ...] = ("gh", "glab", "node", "npm", "make", "docker")
 
-#: The package managers a remedy may name a command for, in probe order. A
+#: The package managers a remedy may name a command for. A
 #: remedy has to be a command the reader can PASTE ON THAT DEVICE (2026-11-05),
 #: and which command that is depends on the device: a Homebrew Mac and a Debian
 #: node take different lines for the same tool. The probe asks the same
 #: ``_resolve_program`` seam the tools themselves use, so it is read-only and a
-#: test can pin it the same way.
+#: test can pin it the same way. The order here is the macOS-and-unknown-host
+#: order; :func:`_package_manager_order` reorders it per platform.
 TOOLING_PACKAGE_MANAGERS: tuple[str, ...] = ("brew", "apt-get", "dnf", "pacman", "winget")
+
+#: The managers that SHIP WITH the operating system, asked before any user-space
+#: one on the same host. A Debian box with Linuxbrew installed answers ``brew`` if
+#: the order above is read literally — and this build has no ``("linux", "brew")``
+#: recipe, so the reader got the description instead of the ``sudo apt-get
+#: install`` line that works there. macOS is untouched by the reorder: it has no
+#: distribution manager to find, so ``brew`` still resolves first there.
+_DISTRIBUTION_PACKAGE_MANAGERS: tuple[str, ...] = ("apt-get", "dnf", "pacman")
 
 #: The install RECIPE per (platform, manager): the command template, the package
 #: each tool comes from, and any tool the manager does not carry. ONLY the two
@@ -644,7 +653,21 @@ def _gh_auth_fact(home: Path) -> dict[str, Any]:
     return fact
 
 
-def _package_manager_fact() -> dict[str, Any]:
+def _package_manager_order(platform: str) -> tuple[str, ...]:
+    """The probe order for ``platform``: its own managers first, the rest after.
+
+    ``platform`` is ``sys.platform`` at the call site and a parameter here so a
+    test can read both a Linux host and a macOS host without rewriting the
+    process's platform.
+    """
+    if not platform.startswith("linux"):
+        return TOOLING_PACKAGE_MANAGERS
+    return _DISTRIBUTION_PACKAGE_MANAGERS + tuple(
+        name for name in TOOLING_PACKAGE_MANAGERS if name not in _DISTRIBUTION_PACKAGE_MANAGERS
+    )
+
+
+def _package_manager_fact(platform: str | None = None) -> dict[str, Any]:
     """Which package manager THIS device would install a tool with, or empty.
 
     The remedy must name a command that device can actually run, and the same
@@ -653,8 +676,14 @@ def _package_manager_fact() -> dict[str, Any]:
     is what the viewer needs to pick a command, nothing about the machine's
     package state. An unprobeable name is ``""``, never a guess, and the row's
     fallback sentence then names the tools without inventing a manager.
+
+    The probe order follows the platform (:func:`_package_manager_order`), not
+    the fixed tuple: a tool's presence says nothing about which manager OWNS the
+    system, and on Linux that is the distribution's — Linuxbrew sits beside apt
+    on hosts where only apt has a recipe here.
     """
-    for name in TOOLING_PACKAGE_MANAGERS:
+    host = sys.platform if platform is None else platform
+    for name in _package_manager_order(host):
         try:
             found = _resolve_program(name)
         except Exception as exc:  # noqa: BLE001 — a broken probe is a fact, not a crash
@@ -2697,22 +2726,67 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
     )
 
 
-def _same_repository_path(requested: str, answered: str) -> bool:
+def _repository_path_form(path: str) -> str:
+    """``path`` without the trailing slashes a person types or a tool appends.
+
+    Comparison only: ``/home/peer/`` and ``/home/peer`` name one directory, and
+    ``~/`` and ``~`` name one home. A root keeps its single slash so no path
+    ever compares equal to the empty string.
+    """
+    text = path.strip()
+    stripped = text.rstrip("/")
+    return stripped or ("/" if text.startswith("/") else "")
+
+
+def _peer_home_dir(facts: Mapping[str, Any]) -> str:
+    """The peer's home directory as its own facts state it, or ``""``.
+
+    A home-relative request can only be checked against the peer's answer by
+    resolving it ON THE PEER, and the peer's home is the one thing neither side
+    spells out for this purpose: the tooling fact reports ``~/.local/bin`` (the
+    directory its PATH remedy names), which is the home's only appearance on the
+    wire. A peer that reports no such directory — an older build with no tooling
+    fact, or a bin directory this build did not derive from a home — leaves the
+    home unknown, and the row then cannot verify a home-relative request at all.
+    """
+    tooling = facts.get("tooling")
+    if not isinstance(tooling, Mapping):
+        return ""
+    suffix = "/.local/bin"
+    local_bin = _repository_path_form(str(tooling.get("local_bin_dir") or ""))
+    if not local_bin.endswith(suffix):
+        return ""
+    home = local_bin[: -len(suffix)]
+    return home if home.startswith("/") else ""
+
+
+def _same_repository_path(requested: str, answered: str, *, peer_home: str = "") -> bool:
     """Whether the peer's answer is about the path the caller named.
 
-    The request may be written the way a person writes it — ``~/local-operator``
-    or a path relative to that device's home — while the peer always answers with
-    the absolute path it resolved. Comparing the two literally would call every
-    such request a mismatch, so the peer-side form is matched on its tail; only
-    an absolute request is compared exactly.
+    The request may be written the way a person writes it — ``~/local-operator``,
+    ``~`` for the device's home, or a path relative to that home — while the peer
+    always answers with the absolute path it resolved. A home-relative request is
+    therefore matched against THE PEER'S HOME plus the request's own tail, never
+    against the answer's tail alone: the tail carries no evidence of the home, so
+    a one-component ``~/api`` used to match ``/srv/other/api`` — an ``ok`` about a
+    working copy nobody named. ``peer_home`` is what the peer's facts report
+    (see :func:`_peer_home_dir`); without it the request cannot be resolved, and
+    nothing is claimed to match — a claim this row makes only when it can. An
+    absolute request names one path on the peer and is compared exactly.
     """
-    if requested == answered:
+    want = _repository_path_form(requested)
+    have = _repository_path_form(answered)
+    if want == have:
         return True
-    tail = requested[2:] if requested.startswith("~/") else requested
-    tail = tail.strip("/")
-    if not tail or requested.startswith("/"):
+    if not want or want.startswith("/"):
         return False
-    return answered.rstrip("/").endswith("/" + tail)
+    home = _repository_path_form(peer_home)
+    if not home.startswith("/"):
+        return False
+    if want == "~":
+        return home == have
+    tail = want[2:] if want.startswith("~/") else want
+    return _repository_path_form(f"{home}/{tail}") == have
 
 
 def repository_row(
@@ -2779,7 +2853,11 @@ def repository_row(
     # builds derived the path from their install). Comparing the two is the only
     # way the caller can tell an answer about ITS repository from an answer
     # about somebody else's: same-shaped row, different question.
-    if requested_path and path and not _same_repository_path(requested_path, path):
+    if (
+        requested_path
+        and path
+        and not _same_repository_path(requested_path, path, peer_home=_peer_home_dir(facts))
+    ):
         return _capability_row(
             **common,
             ok=False,
@@ -2952,9 +3030,7 @@ def _tooling_install_remedy(
     platform = _safe_text(fact.get("platform") or "", limit=40)
     manager = fact.get("package_manager")
     manager_name = (
-        _safe_text(manager.get("name") or "", limit=40)
-        if isinstance(manager, Mapping)
-        else ""
+        _safe_text(manager.get("name") or "", limit=40) if isinstance(manager, Mapping) else ""
     )
     recipe = TOOLING_INSTALL_RECIPES.get((platform, manager_name))
     if not recipe:
@@ -2975,7 +3051,7 @@ def _tooling_install_remedy(
             separate.append(command)
         elif not package and not command:
             unclaimed.append(name)
-    commands = ([str(recipe["template"]).format(packages=" ".join(packages))] if packages else [])
+    commands = [str(recipe["template"]).format(packages=" ".join(packages))] if packages else []
     commands.extend(separate)
     if not commands:
         return (
@@ -3115,9 +3191,7 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
         remedy += " (work can use that path directly meanwhile)"
         remedies.append(remedy)
     if login == "absent":
-        remedies.append(
-            f"on {peer_label}, run `gh auth login` to sign the GitHub CLI in there"
-        )
+        remedies.append(f"on {peer_label}, run `gh auth login` to sign the GitHub CLI in there")
     if unknown or login == "unknown":
         remedies.append(f"check the tooling on {peer_label} and re-check")
     return _capability_row(
@@ -4974,9 +5048,7 @@ def _peer_checks(
     rows[restart_index] = peer_restart_row(member, facts, record=record, peer_label=peer_label)
     rows.append(operator_row(member, facts, peer_label=peer_label))
     rows.append(git_row(member, facts, peer_label=peer_label))
-    rows.append(
-        repository_row(member, facts, peer_label=peer_label, repository=repository)
-    )
+    rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
     selected = facts.get("selected_model_access")

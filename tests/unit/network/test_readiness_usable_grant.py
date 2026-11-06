@@ -606,7 +606,12 @@ def test_a_dead_owner_login_reads_the_same_on_ledger_viewer_and_share(
     finally:
         viewer.close()
     assert "holds a login" not in rows[0]["detail"], rows[0]
-    assert rows[0]["remedies"] == [f"{remedy}; then share it with peer"]
+    # The row names the share COMMAND and the device that runs it (2026-11-05):
+    # the shared dead-login sentence, then the verb, spelled once by the module.
+    assert rows[0]["remedies"] == [
+        f"{remedy}, then on this device run `{readiness.mcp_share_command(URL, 'peer')}` "
+        "(the share runs where the login is, not on peer)"
+    ]
 
     # 3. The share still succeeds (the repair path) and its receipt says the same.
     record = net_store.load(NETWORK, root)

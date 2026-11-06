@@ -454,6 +454,87 @@ def test_repository_row_is_unchanged_when_the_answer_matches() -> None:
     assert f"git clone {_REPOSITORY_URL} /home/peer/gomni" in row["remedies"][0]
 
 
+def test_repository_row_resolves_a_home_relative_request_against_the_peers_home() -> None:
+    """``~`` names the peer's home, so its answer about that home MATCHES (R1-1).
+
+    The previous rule matched a ``~`` request on its tail, which for ``~``/``~/``
+    was empty, so the row reported the inverse of the bug it fixes: a request the
+    fact resolves happily came back as "answered about /home/peer, not the
+    requested ~".
+    """
+    tooling = _tooling_section(absent=[], local_bin_dir="/home/peer/.local/bin")
+    for requested in ("~", "~/"):
+        row = readiness.repository_row(
+            _member(),
+            _facts(
+                tooling=tooling,
+                repository={"path": "/home/peer", "url": "", "state": "checkout"},
+            ),
+            peer_label="cloud-node-1",
+            repository={"path": requested},
+        )
+        assert row["ok"] is True, requested
+        assert row["observed"] == {"path": "/home/peer", "state": "checkout"}
+
+
+def test_repository_row_will_not_match_a_home_relative_request_on_its_tail_alone() -> None:
+    """A ``~`` request must match the peer's home plus its tail, not just the tail.
+
+    Tail matching accepted ``~/api`` against ``/srv/other/api`` and ``~/work/api``
+    against ``/srv/other/work/api`` — an ``ok`` about a working copy nobody named.
+    The peer's home is what makes the two distinguishable, so without it the row
+    claims nothing, and a one-component tail can never stand in for a home.
+    """
+    tooling = _tooling_section(absent=[], local_bin_dir="/home/peer/.local/bin")
+    for requested in ("~/api", "api", "~/work/api"):
+        row = readiness.repository_row(
+            _member(),
+            _facts(
+                tooling=tooling,
+                repository={"path": "/srv/other/api", "url": "", "state": "checkout"},
+            ),
+            peer_label="cloud-node-1",
+            repository={"path": requested},
+        )
+        assert row["ok"] is False, requested
+        assert row["code"] == readiness.CODE_UNKNOWN
+        assert "/srv/other/api" in row["detail"] and requested in row["detail"]
+    # The home the peer does report still matches the same relative request.
+    row = readiness.repository_row(
+        _member(),
+        _facts(
+            tooling=tooling,
+            repository={"path": "/home/peer/work/api", "url": "", "state": "checkout"},
+        ),
+        peer_label="cloud-node-1",
+        repository={"path": "~/work/api"},
+    )
+    assert row["ok"] is True
+
+
+def test_the_path_matcher_is_exact_per_request_form() -> None:
+    """The comparison rule in one place, spelled out cell by cell.
+
+    ``peer_home`` is the peer's own home: a home-relative request cannot be
+    resolved without it, and the tail alone cannot tell ``~/api`` from a path
+    that merely ends in ``api``. An absolute request is compared exactly.
+    """
+    match = readiness._same_repository_path
+    assert match("~", "/home/peer", peer_home="/home/peer") is True
+    assert match("~/", "/home/peer/", peer_home="/home/peer") is True
+    assert match("~/local-operator", "/home/peer/local-operator", peer_home="/home/peer") is True
+    assert match("local-operator", "/home/peer/local-operator", peer_home="/home/peer") is True
+    assert match("~/api", "/srv/other/api", peer_home="/home/peer") is False
+    assert match("api", "/srv/other/api", peer_home="/home/peer") is False
+    assert match("~/work/api", "/srv/other/work/api", peer_home="/home/peer") is False
+    assert match("~/work/api", "/home/peer/work/other", peer_home="/home/peer") is False
+    assert match("/srv/team/api", "/srv/other/api", peer_home="/home/peer") is False
+    assert match("/srv/team/api", "/srv/team/api", peer_home="/home/peer") is True
+    # No home to resolve against: nothing is claimed to match.
+    assert match("~/local-operator", "/home/peer/local-operator") is False
+    assert match("~", "/home/peer") is False
+
+
 def test_repository_row_is_inserted_after_git_identity_only() -> None:
     assert readiness.PEER_SIDE_CHECKS == (
         readiness.CAPABILITY_OPERATOR_AUTHORITY,
@@ -1740,6 +1821,7 @@ def _tooling_section(
     reason: str = "",
     platform: str = "linux",
     package_manager: str = "apt-get",
+    local_bin_dir: str = "/home/x/.local/bin",
 ) -> dict[str, Any]:
     """A ``tooling`` fact section, state by state, the way the collector ships it."""
     absent = absent or []
@@ -1765,11 +1847,13 @@ def _tooling_section(
     return {
         "tools": tools,
         "gh_auth": gh_auth,
-        "local_bin_dir": "/home/x/.local/bin",
+        "local_bin_dir": local_bin_dir,
         "platform": platform,
-        "package_manager": {"name": package_manager, "path": f"/usr/bin/{package_manager}"}
-        if package_manager
-        else {"name": "", "path": ""},
+        "package_manager": (
+            {"name": package_manager, "path": f"/usr/bin/{package_manager}"}
+            if package_manager
+            else {"name": "", "path": ""}
+        ),
     }
 
 
@@ -1878,9 +1962,7 @@ def test_the_install_remedy_names_the_devices_own_command() -> None:
     debian = readiness.tooling_row(
         _member(),
         _facts(
-            tooling=_tooling_section(
-                absent=absent, platform="linux", package_manager="apt-get"
-            )
+            tooling=_tooling_section(absent=absent, platform="linux", package_manager="apt-get")
         ),
         peer_label="cloud-node-1",
     )
@@ -1893,9 +1975,7 @@ def test_the_install_remedy_names_the_devices_own_command() -> None:
     fedora = readiness.tooling_row(
         _member(),
         _facts(
-            tooling=_tooling_section(
-                absent=["gh", "glab"], platform="linux", package_manager="dnf"
-            )
+            tooling=_tooling_section(absent=["gh", "glab"], platform="linux", package_manager="dnf")
         ),
         peer_label="cloud-node-1",
     )
@@ -1911,6 +1991,50 @@ def test_the_install_remedy_names_the_devices_own_command() -> None:
         assert readiness.onboarding_failures([row]) == []
 
 
+def test_the_probe_prefers_the_distributions_manager_over_a_user_space_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Debian host with Linuxbrew installed still resolves apt-get (R1-4, round 1).
+
+    Both managers are present here, and the fixed ``brew``-first order used to
+    report Linuxbrew — for which this build has no recipe, so the row fell to the
+    generic "that device's own package manager" sentence even though
+    ``sudo apt-get install`` works on that host. The presence of a user-space
+    manager says nothing about which manager owns the system. macOS keeps
+    resolving ``brew``: it has no distribution manager to find.
+    """
+    installed = {"brew": "/home/linuxbrew/.linuxbrew/bin/brew", "apt-get": "/usr/bin/apt-get"}
+    monkeypatch.setattr(readiness, "_resolve_program", lambda name, path=None: installed.get(name))
+
+    assert readiness._package_manager_fact("linux") == {
+        "name": "apt-get",
+        "path": "/usr/bin/apt-get",
+    }
+    assert readiness._package_manager_fact("darwin") == {
+        "name": "brew",
+        "path": "/home/linuxbrew/.linuxbrew/bin/brew",
+    }
+
+    # End to end on the row: the fact the probe now reports is the one that
+    # renders a command the operator can paste there.
+    absent = ["gh", "glab"]
+    row = readiness.tooling_row(
+        _member(),
+        _facts(
+            tooling=_tooling_section(
+                absent=absent,
+                platform="linux",
+                package_manager=readiness._package_manager_fact("linux")["name"],
+            )
+        ),
+        peer_label="cloud-node-1",
+    )
+    assert row["remedies"][0] == (
+        "on cloud-node-1, run `sudo apt-get install -y gh glab` to install gh and glab "
+        "there, then re-check"
+    )
+
+
 def test_an_on_path_gap_names_the_export_to_fix_it() -> None:
     row = readiness.tooling_row(
         _member(),
@@ -1920,7 +2044,7 @@ def test_an_on_path_gap_names_the_export_to_fix_it() -> None:
 
     assert row["remedies"][0] == (
         "on cloud-node-1, node is installed at /Users/x/.nvm/versions/node/bin/node but "
-        'not on its PATH: put that directory on the PATH there (`export '
+        "not on its PATH: put that directory on the PATH there (`export "
         'PATH="/Users/x/.nvm/versions/node/bin:$PATH"` in the shell that runs the work, '
         "or the same line in that device's shell profile) (work can use that path "
         "directly meanwhile)"

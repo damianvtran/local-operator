@@ -8749,8 +8749,12 @@ def _cmd_ready(args: argparse.Namespace) -> int:
         "path": str(getattr(args, "repository_path", "") or ""),
         "url": str(getattr(args, "repository_url", "") or ""),
     }
-    # Omission preserves the installed-project default and the older request
-    # shape. Never infer the viewer's checkout/cwd as a peer repository path.
+    # NO REQUEST, NO REPOSITORY CLAIM: with neither flag the context carries no
+    # repository, so the peer reports the row as unasked (``unrequested`` /
+    # ``unknown``) rather than answering about whatever project IT is installed
+    # from — the installed-project default this build removed. The viewer's
+    # checkout and cwd are never inferred as substitutes: neither is a path on
+    # the peer.
     context: dict[str, Any] = {"repository": repository} if any(repository.values()) else {}
     live = _relay_call(
         "peer_readiness",

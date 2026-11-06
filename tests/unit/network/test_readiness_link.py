@@ -24,6 +24,7 @@ import json
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -905,7 +906,12 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     # same live link.
     tool_bin = tmp_path / "tool-bin"
     tool_bin.mkdir()
-    for tool in (*readiness.TOOLING_TOOLS, "brew"):
+    # Both managers are present, because which one the peer's row names is a
+    # question about ITS platform, not about this test runner's package state:
+    # the probe prefers the distribution's own manager on Linux and brew on
+    # macOS (readiness._package_manager_order). The assertion below follows the
+    # same rule, so a Linux runner and a macOS one both read a real command.
+    for tool in (*readiness.TOOLING_TOOLS, "brew", "apt-get"):
         executable = tool_bin / tool
         executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         executable.chmod(0o755)
@@ -952,9 +958,8 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
         "path": str(home / "local-operator"),
         "state": "missing",
     }
-    assert (
-        f"git clone {REPOSITORY_URL} {home / 'local-operator'}"
-        in " ".join(repository_row["remedies"])
+    assert f"git clone {REPOSITORY_URL} {home / 'local-operator'}" in " ".join(
+        repository_row["remedies"]
     )
     # AND THE ROW IS ABOUT THE REQUESTED REPOSITORY, NOT THIS INSTALL: the same
     # live report WITHOUT the flags says so instead of inventing one.
@@ -1046,11 +1051,19 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     assert tooling["state"] == readiness.ROW_STATE_WARN  # the row's own cell, stamped by ready
     assert "has no node" in tooling["detail"]
     # The remedy is a COMMAND for that device (2026-11-05), not "ask Local Operator":
-    # the peer's stub PATH carries brew, so the row names its own one-liner.
-    assert tooling["remedies"][0] == (
-        f"on {server_b.identity.name}, run `brew install node` to install node there, "
-        "then re-check"
-    )
+    # the peer's stub PATH carries the manager its own platform owns, so the row
+    # names that device's one-liner.
+    if sys.platform.startswith("linux"):
+        expected_remedy = (
+            f"on {server_b.identity.name}, run `sudo apt-get install -y node` "
+            "to install node there, then re-check"
+        )
+    else:
+        expected_remedy = (
+            f"on {server_b.identity.name}, run `brew install node` "
+            "to install node there, then re-check"
+        )
+    assert tooling["remedies"][0] == expected_remedy
     assert rc == 0 and payload["ok"] is True
     server_b.stop()
 
