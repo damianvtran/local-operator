@@ -445,8 +445,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # 0.5-0.7 GB of RAM), so the note states the RAM cost and the tested
     # playback instead. Measured by this test's own print; the doc is 8190 chars against
     # the 8192 cap.
-    # No other tool's entry moved.
-    "browser": 2114,
+    # 2116 -> 2130 (+14, the `setvalue` action): one new op row plus the
+    # `setvalue` arm of the `text`/`selector` parameter descriptions. The doc sat
+    # at 8190 chars against an 8192 cap, so that row could not be added for free:
+    # the network note/op, the geometry note and the download note lose wording
+    # their own neighbouring rows already carry, and the net token cost below is
+    # what this test prints on the finished tree. MEASURED, not summed.
+    "browser": 2130,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

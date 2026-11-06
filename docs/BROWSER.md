@@ -24,7 +24,8 @@ the per-host clients in `local_operator/browser_bridge/backend.py` and
 Tests: `tests/unit/tools/test_browser_tool.py`,
 `tests/unit/browser_bridge/test_tool_selection.py`,
 `tests/unit/tools/test_browser_file_transfer.py`,
-`tests/unit/test_browser_files.py`, and the capability gate in
+`tests/unit/test_browser_files.py`, the `setvalue` contract in
+`tests/unit/browser_bridge/test_setvalue.py`, and the capability gate in
 `tests/unit/browser_bridge/test_capability_gate.py`.
 
 ## Site approval scopes
@@ -102,6 +103,7 @@ mapping (the full list is the docstring of `BROWSER_ACTIONS`).
 | `screenshot` | PNG to a path (verified before it is reported) | `browser --surface <s> screenshot --out <p>` |
 | `click` | Click a CSS selector or a snapshot ref | `browser --surface <s> click --selector <sel>` |
 | `type` | Replace the value of a field | `browser --surface <s> fill --selector <sel> --text <t>` |
+| `setvalue` | Set a form control's value: a native `<select>` option by label/value, or an `<input>`/`<textarea>` (date/time take ISO) | not available (typed refusal) |
 | `close` | Close the surface and drop the handle | `close-surface --surface <s>` |
 | `download` | Save what the page offers into the session's download directory | not available (typed refusal) |
 | `upload` | Attach local files to a `<input type=file>` | not available (typed refusal) |
@@ -194,6 +196,49 @@ limitation honestly. No match uses existing `element_not_found` with
 (capped at 50 entries, strings capped at 120 characters). The harness renders that
 correction list, so agents need not hallucinate labels. Older hosts refuse before
 send with `capability_unsupported`. `select` stays write-tier like click/type.
+
+## Setting a value
+
+`setvalue` is the one action that WRITES a control's value through the DOM rather
+than through pointer or keyboard input, and it exists because a native
+`<select>` is otherwise unreachable on this host: `select` drives the option
+model, `type` cannot move a native select, and clicking an option node fails when
+the list is browser chrome rather than page DOM.
+
+Wire contract, which both hosts implement identically:
+
+- Params `{tab, selector, text}` — no new parameter and no new method beside
+  `setvalue` itself. `selector` resolves exactly as `click`/`select` do (CSS,
+  snapshot ref, `role=`/`label=`/`text=` locator); `text` is the value.
+- Result `{value, kind?, verified?, url, title}`, where `value` is what the
+  control HOLDS after the dispatch — a native select maps a label onto its own
+  option value, and the harness renders that read-back rather than echoing the
+  request. `verified:false` (or an absent `value`) makes the tool say
+  `value unverified` instead of reporting an empty read as success.
+- Native `<select>`: an option is matched by trimmed label, then option value,
+  exact before case-insensitive; `multiple` requires exactly one match. No match
+  (or an ambiguous one) is `element_not_found` with `data.reason` written the way
+  `select` writes it and `data.available:[{index,label,value}]`, so the harness
+  can print the same correction list.
+- `<input>`/`<textarea>`: the value is set through the prototype setter, then
+  `input` and `change` are dispatched, in that order. `date`, `time`,
+  `datetime-local`, `month` and `week` take the ISO string.
+- Refused, typed, before any mutation: a target that is not a form control
+  (a `contenteditable` is `type`'s, a page-owned ARIA listbox is `select`'s), a
+  disabled/inert/read-only control, and a file input (`upload`).
+
+The page program is a FIXED generated source string (`geometry-sources.gen.ts`
+style, one per driver function), so a caller supplies data and never source: no
+expression, no `eval`, no cross-origin escalation beyond what a selector can
+address, no navigation and no network request. It runs in the resolved element's
+own frame of the session's own tab, through the existing surface registry and
+frame plumbing.
+
+Host coverage: **desktop app only**. The extension neither serves nor advertises
+`setvalue` (it is in `DESKTOP_ONLY_METHODS`), so it answers with the sentence
+naming the desktop app; cmux is unsupported for the same reason as the other
+page-program actions. The harness refuses an unadvertised method from the
+discovery record, before any socket dial.
 
 ## Network telemetry
 

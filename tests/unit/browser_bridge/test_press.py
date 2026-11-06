@@ -96,7 +96,15 @@ def test_press_protocol_remains_registered_and_legacy_keys_unchanged() -> None:
     # Local vocabulary order only; the desktop host may append new methods in
     # a different order. Method names, not table positions, travel on the wire.
     offset = METHODS.index("click")
-    assert METHODS[offset : offset + 6] == ("click", "type", "press", "hover", "select", "close")
+    assert METHODS[offset : offset + 7] == (
+        "click",
+        "type",
+        "press",
+        "hover",
+        "select",
+        "setvalue",
+        "close",
+    )
     assert "press" in CAPABILITY_GATED_METHODS
     assert "press" in DESKTOP_ONLY_METHODS
     assert COMMAND_TIMEOUTS["press"] == 25.0

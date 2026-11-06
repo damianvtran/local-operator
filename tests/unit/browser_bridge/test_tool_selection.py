@@ -127,6 +127,11 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
             # Trusted pointer movement is owned-page CDP input on the desktop host.
             "hover",
             "select",
+            # setvalue runs one FIXED page program in the tab the host owns, the
+            # same property that keeps the read actions off cmux: a cmux session
+            # has no such primitive, so silently doing nothing is the only
+            # alternative to this refusal.
+            "setvalue",
             "scroll",
             "logs",
             "tabs",

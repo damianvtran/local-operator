@@ -371,8 +371,16 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="select",
                 blurb=(
-                    "Choose options by label/value or zero-based index in selector=; "
-                    "native or ARIA (desktop); extension native only. [] clears native multiples."
+                    "Choose options by label/value or index in selector=; native or "
+                    "ARIA (desktop), extension native only. [] clears native multiples."
+                ),
+            ),
+            ToolDocOp(
+                op="setvalue",
+                blurb=(
+                    "Set selector='s value: select option by label/value, "
+                    "input/textarea (ISO for date/time); returns the read-back. "
+                    "Desktop app only."
                 ),
             ),
             ToolDocOp(op="scroll", blurb="Move the viewport."),
@@ -407,10 +415,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="tabs", blurb="List agent-driven tabs."),
             ToolDocOp(
                 op="inspect_ownership",
-                blurb=(
-                    "Read-only extension ownership snapshot; "
-                    "no recovery, allocation or approval changes."
-                ),
+                blurb="Read-only ownership snapshot; changes nothing.",
             ),
             ToolDocOp(
                 op="request_access",
@@ -421,13 +426,13 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="network_start",
                 blurb=(
-                    "Begin recording THIS tab's requests (method, safe URL, "
-                    "status, timing, size, redirect links). Metadata only; "
-                    "url= + include_request_body= + approved= opt one exact "
-                    "origin+path's request bodies into a private file."
+                    "Begin recording this tab's requests (method, URL, status, "
+                    "timing, size, redirects). Metadata only; url= + "
+                    "include_request_body= + approved= opt one origin+path's "
+                    "bodies into a file."
                 ),
             ),
-            ToolDocOp(op="network_stop", blurb="Stop recording; the buffer stays readable."),
+            ToolDocOp(op="network_stop", blurb="Stop; the buffer stays readable."),
             ToolDocOp(
                 op="network_read",
                 blurb=(
@@ -454,26 +459,24 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "- 'scroll', 'logs', 'tabs' and the geometry reads need a non-cmux "
             "host (cmux says so).\n"
             "- 'download' saves what the page offers into this session's "
-            "private directory; 'upload' attaches local files to a file input "
+            "private dir; 'upload' attaches local files to a file input "
             "(both non-cmux).\n"
             "- The geometry reads answer numbers, not pictures, bounded at the "
-            "source: 'styles' up to 5 matches (rect + computed styles + inline "
-            "`--*` tokens); 'hit_test' the stack at (x, y), topmost first; "
-            "'ancestors' the chain up to `<html>`. A selector matching nothing "
-            "is the typed element-not-found, never an empty success.\n"
+            "source: 'styles' up to 5 matches; 'hit_test' the stack at (x, y), "
+            "topmost first; 'ancestors' the chain to `<html>`. A selector matching "
+            "nothing is the typed element-not-found, never an empty success.\n"
             "- Tab ownership: 'tabs' lists every agent-driven tab including "
             "other sessions', and a redacted handle is "
             "not yours to drive.\n"
-            "- Network capture is the desktop app's host only: "
-            "'network_start' then read with 'network_read'. Bodies are opt-in "
-            "per exact origin+path and land in a private session file, never in "
-            "this transcript.\n"
-            "- 'record_start'/'record_stop' make an MP4 of this tab (default AV1: "
-            "QuickTime only; quality='high' is sharper H.264, played in Chromium, "
-            "~0.5-0.7 GB more RAM); path= is approved first, never overwritten. "
-            "width=/height= go together (area <= 3840x2160). A default clip over "
-            "64 MiB (32 in a scratchpad) is discarded: 4K ~150 s worst case, 75 s "
-            "there. Desktop host only.\n"
+            "- Network capture is the desktop app's host only (no standing "
+            "debugger session in the extension): 'network_start', then "
+            "'network_read'. Bodies are opt-in per exact origin+path, into a "
+            "private file, never this transcript.\n"
+            "- 'record_start'/'record_stop' make an MP4 (default AV1: QuickTime "
+            "only; quality='high' is sharper H.264, ~0.5-0.7 GB more RAM); path= "
+            "is approved first, never overwritten. width=/height= go together "
+            "(area <= 3840x2160). A default clip over 64 MiB (32 in a scratchpad) "
+            "is discarded: 4K ~150 s, 75 s there. Desktop host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),
