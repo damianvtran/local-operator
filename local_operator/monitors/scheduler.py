@@ -59,6 +59,7 @@ from local_operator.monitors.diff import (
     content_hash,
     has_line_difference,
     is_pure_addition,
+    is_record_log,
     normalize,
     render_delta,
 )
@@ -211,6 +212,10 @@ class _Change:
     #: live failure was the gate calling the only visible difference (a spill
     #: footer's char count) non-material metadata.
     hidden: bool = False
+    #: The watched result is a RECORD LOG (see
+    #: :func:`~local_operator.monitors.diff.is_record_log`), so the record view
+    #: has already separated records from bookkeeping: the gate is skipped.
+    record_view: bool = False
 
 
 @dataclass
@@ -861,6 +866,11 @@ class MonitorScheduler:
         counters = entry.counters
         old_last_check = int(counters.get("last_check_at") or 0)
         skipped = _skipped_checks_since(old_last_check, spec.every_ms, now)
+        # Whether this source is a RECORD LOG decides the gate, not a setting:
+        # the record view has already separated records from bookkeeping, which
+        # is the separation the gate would otherwise be asked to make from
+        # opaque text (§8, and see ``_classify_change``).
+        record_view = is_record_log(text)
         normalized = normalize(
             text,
             sort_lines=spec.sort_lines,
@@ -903,37 +913,41 @@ class MonitorScheduler:
 
         # The baseline's comparison BASIS is part of the baseline. A blob the
         # CURRENT pipeline would restate differently was captured under an
-        # earlier normalizer, so diffing it against today's output reports the
-        # change of shape as a change in the watched source: on the 2026-11-05
-        # record split, one envelope line became one line per message, and
-        # every live MCP watch would have fired that rewrite as a delta (or had
-        # it suppressed as metadata). The text decides, not the tag alone: a
-        # plain-text snapshot is byte-identical under both pipelines, so it
-        # keeps diffing normally — re-baselining it would swallow a real change
-        # to fix a problem it does not have. A clipped blob cannot be checked,
-        # so it counts as changed.
-        basis_changed = (
+        # earlier normalizer, so diffing the stored text directly against
+        # today's output reports the change of SHAPE as a change in the watched
+        # source: on the 2026-11-05 record split one envelope line became one
+        # line per message, and every live MCP watch would have fired that
+        # rewrite as a delta (or had it suppressed as metadata).
+        #
+        # So a legacy blob is RESTATED by today's pipeline and used as the diff
+        # base: the stored text is the old shape of the same content, which
+        # keeps a change that landed during the upgrade deliverable instead of
+        # adopting a fresh baseline and dropping it (review MIN-3). A plain-text
+        # blob restates to itself, so nothing changes for it at all. Only a
+        # CLIPPED legacy blob has no comparable old side — it is re-established
+        # silently, which is the one upgrade case that reports nothing.
+        restated: str | None = None
+        unreadable_basis = False
+        if (
             blob is not None
             and monitor_state.snapshot_normalizer(blob) != monitor_state.NORMALIZER_TAG
-            and (
-                truncated
-                or normalize(
+        ):
+            if truncated:
+                unreadable_basis = True
+            else:
+                restated = normalize(
                     blob_text,
                     sort_lines=spec.sort_lines,
                     ignore=spec.ignore,
                     normalize_timestamps=self._settings.normalize_timestamps,
                 )
-                != blob_text
-            )
-        )
 
         diff_base: str | None
         if not old_hash:
-            if blob is None or truncated or basis_changed:
-                # No baseline at all (first check, or both files lost), a
-                # clipped prefix with no hash to rebuild it from, or a baseline
-                # captured under a different normalizer: the baseline is
-                # established SILENTLY — never a full-dump delivery.
+            if blob is None or truncated:
+                # No baseline at all (first check, or both files lost), or a
+                # clipped prefix with no hash to rebuild it from: the baseline
+                # is established SILENTLY — never a full-dump delivery.
                 self._establish_baseline(
                     spec,
                     counters,
@@ -942,7 +956,7 @@ class MonitorScheduler:
                     handle=handle,
                     note=(
                         "baseline re-established (record-view)"
-                        if basis_changed
+                        if unreadable_basis
                         else (
                             "baseline re-established"
                             if old_last_check or truncated
@@ -952,8 +966,9 @@ class MonitorScheduler:
                 )
                 return None
             # A full stored snapshot with a lost hash is still complete
-            # content: diff against it, exactly as before.
-            diff_base = blob_text
+            # content: diff against it, exactly as before — restated first when
+            # an earlier normalizer wrote it.
+            diff_base = restated if restated is not None else blob_text
         else:
             # The diff's old side is the FULL previous result. The stored
             # snapshot is clipped at ``snapshotMaxChars``; diffing against that
@@ -963,12 +978,13 @@ class MonitorScheduler:
             # whole body, so it is preferred; the snapshot is the fallback only
             # when there is no usable handle.
             diff_base = self._previous_result(spec, counters, old_hash)
-            if diff_base is None and blob is not None and not truncated:
-                if basis_changed:
-                    # The stored text cannot be reproduced by today's pipeline
-                    # and no handle reproduced the stored hash either: there is
-                    # no comparable old side, so the honest move is to adopt a
-                    # fresh baseline rather than to diff across the change.
+            if diff_base is None:
+                if restated is not None:
+                    diff_base = restated
+                elif unreadable_basis:
+                    # A clipped legacy blob cannot be restated and no handle
+                    # reproduced the hash: there is no comparable old side, so
+                    # the baseline is re-captured rather than guessed at.
                     self._establish_baseline(
                         spec,
                         counters,
@@ -978,7 +994,8 @@ class MonitorScheduler:
                         note="baseline re-established (record-view)",
                     )
                     return None
-                diff_base = blob_text
+                elif blob is not None and not truncated:
+                    diff_base = blob_text
 
         # The bound applies to EVERY baseline source (review round 2, F1). It
         # used to sit inside the ``old_hash`` branch, so the recovery path —
@@ -1049,6 +1066,7 @@ class MonitorScheduler:
             at_ms=now,
             pure_addition=pure_addition,
             hidden=delta_hidden,
+            record_view=record_view,
         )
 
     async def _classify_change(self, change: _Change) -> str | None:
@@ -1078,6 +1096,18 @@ class MonitorScheduler:
                 "monitor %s delta preview hides its change; delivering without the gate",
                 change.spec.id,
             )
+            return None
+        if change.record_view:
+            # A record log's delta is already sorted: one line per record, with
+            # the envelope's paging bookkeeping removed and timestamps scrubbed.
+            # The gate exists to separate signal from bookkeeping in OPAQUE
+            # text, and that separation has happened structurally, so a record
+            # appearing (or its thread count changing) is material by the
+            # gate's own rubric. Asking anyway is not a tuning problem: on real
+            # Slack traffic the live gate answered non-material-metadata 5
+            # times out of 6 and swallowed a thread reply entirely (QA round 1
+            # Q-1/Q-2, 2026-11-05). Noise control for a record watch is
+            # ``ignore``, ``limit`` and the hourly delivery cap — not a model.
             return None
         if change.pure_addition:
             # Appended content is new information, never "bookkeeping that

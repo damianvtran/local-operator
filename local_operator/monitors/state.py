@@ -56,11 +56,14 @@ STATE_SCHEMA = 1
 #:
 #: Bump this whenever ``normalize()``'s output for the SAME input changes
 #: (line splitting, ordering, what counts as a line — not a change inside the
-#: hashing or the rendering). A mismatch makes the scheduler re-establish the
-#: baseline silently instead of diffing across the change of basis.
+#: hashing or the rendering). A mismatch makes the scheduler re-read the stored
+#: text through TODAY's pipeline and diff against that restatement, so a change
+#: that landed during the upgrade is still delivered; a CLIPPED legacy blob
+#: cannot be restated and is re-established silently instead.
 #:
 #: History: ``record-view-1`` — a JSON envelope holding a text record log is
-#: unpacked into one line per record (2026-11-05).
+#: unpacked into one line per record (2026-11-05), with a message's body kept
+#: on its record line and the envelope's paging fields dropped.
 NORMALIZER_TAG = "record-view-1"
 
 #: What a blob written before the tag existed was produced with: the pipeline

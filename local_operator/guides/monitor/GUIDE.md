@@ -109,39 +109,51 @@ envelope:
 ```
 monitor({op:"create", name:"product-feedback-watch",
          tool:"mcp__slack_read_channel",
-         arguments:{"channel_id":"C06TXN4AD9R", "limit":50},
+         arguments:{"channel_id":"C06TXN4AD9R", "limit":25},
          every:"5m",
          description:"new messages and thread replies in #product-feedback — "
                      "each new record is a feedback item to triage and report"})
 ```
 
-- `limit` is the window: pick a value that covers a busy day (roughly one
-  record line per message). The delivery carries the delta, not the channel.
-- **A new message is an appended record line**, so the delta reads
-  `+1/-0 changed lines` and the added line IS the message (author, `Message
-  TS`, body). Appends are delivered as-is — the materiality gate is never
-  asked, so nothing can file a new message as bookkeeping.
-- **A full window shifts**, and a shifted window is `+1/-1`: the new record
-  added, the oldest one dropped, so *that* delta IS judged by the materiality
-  gate. Both sides are legible records (the new message and the one that
-  aged out), which is what the gate reads. Raise `limit` if you see this
-  often, and write the `description` as the instruction you want followed
-  when it fires.
+- **`limit` must fit the stored baseline.** The snapshot holds 32,768
+  characters and a rich record (author, id, body, links) runs 800–1,600, so
+  25 is a safe ceiling and 15–20 is comfortable. Past that the stored baseline
+  is a clipped prefix and every tick depends on the spilled full body; if that
+  is evicted the watch goes `blind` and reports nothing.
+- **A new message is a record line**: added at the top when the window is not
+  full (`+1/-0`), or added while the oldest drops out (`+1/-1`) once it is —
+  the steady state for a busy channel is the second. Either way the added line
+  IS the message: author, a readable clock (`at 2026/11/05 22:37 EST`) and the
+  message id (`1793908014.147179`), so `mcp__slack_read_thread` can be called
+  straight from the wake.
+- **A record watch does not go through the materiality gate.** That gate
+  separates signal from bookkeeping in opaque text; the record view has
+  already done it structurally — one line per record, the reply's paging
+  fields dropped, timestamps scrubbed. On real traffic the gate still called 5
+  of 6 genuine changes `non-material-metadata` and swallowed a thread reply
+  outright, so a record log's delta is delivered unjudged by design. The noise
+  controls that remain are `ignore`, `limit` and the hourly delivery cap.
 - **Thread replies** surface on the parent message's record line as its
-  `Thread: N replies (latest: …)` field changing — that is a changed line.
-  Read the parent's ts from that line and follow up with
-  `mcp__slack_read_thread`; do not re-read the whole channel to answer.
-- **Your own echo**: `ignore` drops matching LINES, and a record is one line,
-  so `ignore: ["<your own user id regex>"]` removes just the messages you
-  posted. (On the unsplit envelope that regex would have matched the single
-  line carrying every record.)
+  `Thread: N replies (latest: …)` field changing — a CHANGED line, not an
+  added one, which is exactly why a thread watch must not be gate-judged. Read
+  the parent's id from that line and follow up with `mcp__slack_read_thread`.
+- **Do not `ignore` your own user id.** A reply to your message rides YOUR
+  parent record, so that pattern silences the replies the watch exists for
+  (and on a channel where you post, it can silence the channel). `ignore` a
+  bot author that never receives replies instead — on a Gong-fed channel the
+  bot is most of the volume.
+- **A multi-paragraph message is still one record.** Its body stays on the
+  line that carries the author and the id; a blank line inside a message does
+  not split it, so `ignore` and the delta both see one record.
 - **Ownership**: this watch only ticks while its session is hosted. A cold
   session's watch is dormant — `lop monitor status` marks the row `idle` — so
   a channel watch belongs to a session that stays open. Record where it lives
   when you arm it.
-- **Other fields in the reply** (a cursor, a `has_more` flag) are lines of
-  their own too, so `ignore: ["^next_cursor:"]` drops one that churns
-  without touching the messages beside it.
+- **A watch armed before the record split** keeps working: its stored
+  baseline is re-read in the new shape, so a message that landed during the
+  upgrade is still delivered. The exception is a baseline the old cap had
+  clipped — that one is re-captured on the first tick (no delivery), then
+  normal service.
 - **A quiet watch is not a working one**: the row reads `N changes
   suppressed as non-material (M checks, 0 deliveries)` when the gate filed a
   change as bookkeeping. Check that before concluding a channel had nothing to
@@ -168,7 +180,9 @@ default keep "difference" honest:
   `description` leaves the gate guessing, and it will call a counter tick or a
   status line "bookkeeping" and suppress it. **Appended content is never
   gated**: a delta that only adds lines (a log tail, a new row) is delivered
-  as-is. Suppressions are counted (`suppressed.*` in the monitor's state file)
+  as-is, and **a record log is never gated at all** — one line per record has
+  already done the separation the gate is asked to make (see the channel
+  recipe above). Suppressions are counted (`suppressed.*` in the monitor's state file)
   and logged at INFO, and the listing says so: a row with checks, no deliveries
   and suppressions reads `N changes suppressed as non-material (M checks, 0
   deliveries) — the call may have changed without telling you`, not `nothing
@@ -182,7 +196,9 @@ default keep "difference" honest:
   metadata — the 2026-10-20 Slack monitor lost seven replies that way. A long
   changed line now shows a window around the first differing character, and if
   a preview still hides the difference the gate is skipped and the change is
-  delivered (fail open, by design).
+  delivered (fail open, by design). An ADDED line is not clipped at 200
+  characters at all: it gets whatever the delivery budget has left, because for
+  a record log the added line is the news itself.
 - **Long results are compared in full — up to a bound.** A result over the
   tool-output limit is spilled to disk and the model sees a head+tail
   projection; the monitor reads the FULL stored body back for its comparison,

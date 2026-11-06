@@ -734,12 +734,21 @@ WATCH_DESCRIPTION = (
 )
 
 
-def _slack_record(body: str, *, user: str = "U058BN13Q0Y", ts: str = "1762400000.000100") -> str:
+def _slack_record(
+    body: str,
+    *,
+    user: str = "U058BN13Q0Y",
+    ts: str = "1762400000.000100",
+    thread: str | None = None,
+) -> str:
     """One message block as ``mcp__slack_read_channel`` renders it."""
-    return (
+    block = (
         f"=== Message from Gong Support Bot ({user}) at 2026-11-05T20:10:00Z ==="
         f"\nMessage TS: {ts}\n{body}"
     )
+    if thread is not None:
+        block = f"{block}\nThread: {thread}"
+    return block
 
 
 def _slack_result(*blocks: str) -> str:
@@ -801,18 +810,18 @@ async def test_a_new_message_in_a_channel_read_is_delivered_without_asking_the_g
 
 
 @pytest.mark.asyncio
-async def test_a_shifted_channel_window_shows_the_new_record_as_a_legible_line(
+async def test_a_shifted_channel_window_is_delivered_without_asking_the_gate(
     harness: Harness,
 ) -> None:
-    """A fixed ``limit`` drops the oldest record too, so the delta is ``+1/-1``.
+    """A record log's delta is not gate-judged — the whole point of the split.
 
-    That shape is NOT a pure addition, so the gate DOES see it — the record
-    split does not change that, and this test does not claim it does. What it
-    changes is what the gate is shown: the new message as its own line and the
-    dropped message as its own line, instead of two ~200-char windows of the
-    same escaped envelope. Whether the live gate calls that material is a
-    measurement for QA on a real channel, not an assertion here.
+    A newest-first window ALWAYS shifts (new record prepended, oldest dropped),
+    so the delta is ``+1/-1`` and never a pure addition. The gate exists to
+    separate signal from bookkeeping in OPAQUE text; the record view has already
+    done that separation, so asking it anyway is how QA round 1 lost 5 of 6 real
+    messages and a thread reply entirely (Q-1/Q-2, measured on live traffic).
     """
+    harness.script.append(NON_MATERIAL_METADATA)  # would suppress, if asked
     harness.scheduler.load([_slack_spec()])
     newest = _slack_record("Sara: newest", ts="1762400300.000400")
     older = _slack_record("Mike: older", ts="1762400200.000300")
@@ -835,7 +844,7 @@ async def test_a_shifted_channel_window_shows_the_new_record_as_a_legible_line(
     await harness.ripe()  # baseline
     await harness.ripe()  # the shifted window
 
-    assert len(harness.states) == 1, "a +1/-1 window is not an append; the gate sees it"
+    assert harness.states == [], "the gate was asked about a record log"
     assert len(harness.deliveries) == 1
     delta = harness.deliveries[0].delta_text
     lines = delta.split("\n")
@@ -844,4 +853,71 @@ async def test_a_shifted_channel_window_shows_the_new_record_as_a_legible_line(
     removed = [line for line in lines if line.startswith("- ")]
     assert len(added) == 1 and "needs a second look" in added[0], delta
     assert len(removed) == 1 and "oldest" in removed[0], delta
-    assert '"messages"' not in delta and "\\n" not in delta
+    assert harness.counters()["suppressed"]["non_material_metadata"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_thread_reply_on_a_record_is_delivered_without_asking_the_gate(
+    harness: Harness,
+) -> None:
+    """Q-2: the parent's ``Thread: N replies`` change must reach the wake.
+
+    A reply is invisible in a channel read except as that field, so this is the
+    only signal there is: the record's line changes, the delta carries the new
+    count, and the gate is not asked.
+    """
+    harness.script.append(NON_MATERIAL_METADATA)  # would suppress, if asked
+    harness.scheduler.load([_slack_spec()])
+    parent = _slack_record("Victor: the report", user="U0VICTOR", ts="1762400100.000200")
+    harness.results.extend(
+        [
+            {"text": _slack_result(parent)},
+            {
+                "text": _slack_result(
+                    _slack_record(
+                        "Victor: the report",
+                        user="U0VICTOR",
+                        ts="1762400100.000200",
+                        thread="1 replies (latest: 2026-11-05 23:48:11 EST)",
+                    )
+                )
+            },
+        ]
+    )
+    await harness.ripe()
+    await harness.ripe()
+
+    assert harness.states == []
+    assert len(harness.deliveries) == 1
+    assert "Thread: 1 replies" in harness.deliveries[0].delta_text
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_record_log_tick_delivers_nothing_and_asks_nothing(
+    harness: Harness,
+) -> None:
+    """Skipping the gate must not turn a quiet tick into a delivery."""
+    harness.scheduler.load([_slack_spec()])
+    text = _slack_result(
+        _slack_record("unchanged"), _slack_record("also unchanged", ts="1762400100.0")
+    )
+    harness.results.extend([{"text": text}, {"text": text}])
+    await harness.ripe()
+    await harness.ripe()
+    assert harness.deliveries == []
+    assert harness.states == []
+    assert harness.counters()["checks"] == 2
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_text_source_still_asks_the_gate(harness: Harness) -> None:
+    """The record-view skip is scoped to record logs: opaque text is still judged."""
+    harness.script.append(NON_MATERIAL_METADATA)
+    harness.scheduler.load([spec(name="build-log", tool="bash", description=LOG_PURPOSE)])
+    harness.results.extend([{"text": "1| a"}, {"text": "1| a\n2| b"}, {"text": "1| a2\n2| b"}])
+    await harness.ripe()  # baseline
+    await harness.ripe()  # append: delivered without asking
+    await harness.ripe()  # edit: the gate is asked, and suppresses
+    assert len(harness.states) == 1
+    assert len(harness.deliveries) == 1
+    assert harness.counters()["suppressed"]["non_material_metadata"] == 1

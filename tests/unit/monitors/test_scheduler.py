@@ -1488,12 +1488,27 @@ def _record(body: str, *, user: str = "U058BN13Q0Y", ts: str = "1762400000.00010
     )
 
 
-def _simulate_legacy_store(harness: Harness, legacy_text: str) -> None:
+def _legacy_normalized(text: str, monkeypatch: pytest.MonkeyPatch) -> str:
+    """What the PRE-record-view pipeline stored for ``text`` (review MIN-5).
+
+    That pipeline is this one minus the record split, so the legacy fixture is
+    produced by running today's ``normalize`` with the split disabled — not by
+    storing the raw envelope, which would make "the basis changed" true for
+    timestamp reasons alone and let the test pass without the split existing.
+    """
+    monkeypatch.setattr(monitor_diff, "unpack_records", lambda value: value)
+    try:
+        return monitor_diff.normalize(text)
+    finally:
+        monkeypatch.undo()
+
+
+def _simulate_legacy_store(harness: Harness, legacy_text: str, *, truncated: bool = False) -> None:
     """Rewrite the monitor's state as a pre-record-view store left it.
 
     That store held an envelope as ONE escaped line and hashed it that way, and
-    its blob carried no ``normalizer`` tag at all — so the next tick would
-    compare today's record lines against a basis that no longer exists.
+    its blob carried no ``normalizer`` tag at all — so the next tick compares
+    today's record lines against a basis that no longer exists.
     """
     monitor_state.snapshot_path(harness.config_dir, "sess", "m1").write_text(
         json.dumps(
@@ -1501,7 +1516,7 @@ def _simulate_legacy_store(harness: Harness, legacy_text: str) -> None:
                 "schema": 1,
                 "monitor_id": "m1",
                 "snapshot": legacy_text,
-                "snapshot_truncated": False,
+                "snapshot_truncated": truncated,
             }
         ),
         encoding="utf-8",
@@ -1514,47 +1529,71 @@ def _simulate_legacy_store(harness: Harness, legacy_text: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_snapshot_from_an_earlier_normalizer_re_establishes_silently(
-    harness: Harness,
+async def test_a_snapshot_from_an_earlier_normalizer_still_delivers_the_change(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A change of comparison basis is not a change in the watched source.
+    """A change of comparison basis must not swallow a change (review MIN-3).
 
-    The measured upgrade shape: the stored blob is one escaped envelope line and
-    the next tick returns the same log plus a new message. Diffing across the
-    split would report the whole envelope rewrite as the delta (or have it
-    suppressed as metadata), so the baseline is re-captured and NOTHING is
-    delivered — one quiet tick, then normal service.
+    The legacy blob is the OLD pipeline's text of the same content, so today's
+    pipeline can restate it: the tick diffs the restatement against the new
+    result and the message that landed during the upgrade is delivered. A
+    silent re-capture here would drop exactly the delta this PR exists to
+    deliver.
     """
     first = _record("first")
     second = _record("new", user="U2", ts="1762400200.000200")
     harness.scheduler.load([spec()])
     harness.results.append({"text": _envelope(first), "error": None})
     await harness.pump_ripen()
-    _simulate_legacy_store(harness, _envelope(first))  # the pre-split single line
+    _simulate_legacy_store(harness, _legacy_normalized(_envelope(first), monkeypatch))
 
     harness.results.append({"text": _envelope(second, first), "error": None})
     await harness.pump_ripen()
 
-    assert harness.deliveries == [], "a changed comparison basis must not deliver"
+    assert len(harness.deliveries) == 1, "the upgrade swallowed a real change"
+    delta = harness.deliveries[0].delta_text
+    assert "new" in delta
     counters = harness.counters()
-    assert counters["last_note"] == "baseline re-established (record-view)"
-    # The baseline advanced to the NEW pipeline's hash, so the next change diffs
+    assert counters["last_note"] != "baseline re-established (record-view)"
+    # The committed baseline is today's pipeline's text, so the NEXT tick diffs
     # against a comparable basis.
     assert counters["content_hash"] == monitor_diff.content_hash(
         monitor_diff.normalize(_envelope(second, first))
     )
 
-    # ... and the following new message is delivered normally, as a record line.
-    third = _record("third", user="U3", ts="1762400300.000300")
-    harness.results.append({"text": _envelope(third, second, first), "error": None})
-    await harness.pump_ripen()
-    assert len(harness.deliveries) == 1
-    assert "third" in harness.deliveries[0].delta_text
+
+@pytest.mark.asyncio
+async def test_a_truncated_legacy_snapshot_re_establishes_silently(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one upgrade case that reports nothing (NIT-4, stated in the guide).
+
+    A clipped legacy blob has no comparable old side and no full body to
+    restate, so the baseline is re-captured rather than guessed at.
+    """
+    settings = dataclasses.replace(MonitorSettings(), snapshot_max_chars=120)
+    harness = Harness(tmp_path, settings=settings)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": _envelope(_record("first")), "error": None})
+        await harness.pump_ripen()
+        legacy = _legacy_normalized(_envelope(_record("first")), monkeypatch)
+        assert len(legacy) > 120
+        _simulate_legacy_store(harness, legacy[:120], truncated=True)
+
+        second = _record("second", ts="1762400200.0")
+        harness.results.append({"text": _envelope(second, _record("first")), "error": None})
+        await harness.pump_ripen()
+
+        assert harness.deliveries == []
+        assert harness.counters()["last_note"] == "baseline re-established (record-view)"
+    finally:
+        harness.scheduler.dispose()
 
 
 @pytest.mark.asyncio
 async def test_a_legacy_snapshot_whose_text_restates_identically_still_delivers(
-    harness: Harness,
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A plain-text baseline is the same text under both pipelines.
 
@@ -1564,7 +1603,7 @@ async def test_a_legacy_snapshot_whose_text_restates_identically_still_delivers(
     harness.scheduler.load([spec()])
     harness.results.append({"text": "A", "error": None})
     await harness.pump_ripen()
-    _simulate_legacy_store(harness, "A")
+    _simulate_legacy_store(harness, _legacy_normalized("A", monkeypatch))
 
     harness.results.append({"text": "A\nB", "error": None})
     await harness.pump_ripen()

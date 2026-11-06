@@ -352,10 +352,29 @@ def test_ignore_drops_a_whole_record_for_the_watchers_own_echo() -> None:
     assert "U0OTHER" in kept and "U0SELF" not in kept
 
 
-def test_timestamps_inside_unpacked_records_are_scrubbed() -> None:
-    normalized = diff.normalize(_channel_envelope(_message_block("body")))
-    assert "2026-11-05T20:10:00Z" not in normalized
+def test_a_records_clock_and_message_id_survive_scrubbing() -> None:
+    """The wake must say WHEN and WHAT, or it cannot be acted on (design D1).
+
+    A record log's own clock is content, not the churn class the timestamp rule
+    exists for: the operator's report was a timing report. The record clock is
+    rendered in a readable slash form (outside the ISO churn pattern) and a
+    dotted ``<epoch>.<fraction>`` id is an IDENTIFIER, so both survive while a
+    bare epoch in the body is still scrubbed.
+    """
+    normalized = diff.normalize(
+        _channel_envelope(_message_block("row 1759003200 was written", ts="1793908014.147179"))
+    )
+    record = _record_lines(normalized)[0]
+    assert "at 2026/11/05 20:10:00Z" in record, normalized
+    assert "Message TS: 1793908014.147179" in record, normalized
+    # A bare 10-digit epoch in the body is still the churn class: scrubbed.
+    assert "1759003200" not in normalized
     assert "<ts>" in normalized
+
+
+def test_a_non_record_source_still_scrubs_its_timestamps() -> None:
+    """The clock exemption is scoped to record lines, not to normalize()."""
+    assert diff.normalize("updated 2026-11-05 14:46:54 EST") == "updated <ts> EST"
 
 
 def test_a_plain_text_result_is_returned_unchanged() -> None:
@@ -392,17 +411,37 @@ def test_a_compact_json_document_of_message_objects_is_not_unpacked() -> None:
     assert "\n" not in diff.normalize(raw)
 
 
-def test_envelope_fields_that_are_not_record_logs_render_as_key_value_lines() -> None:
+def test_envelope_bookkeeping_never_reaches_the_compared_text() -> None:
+    """A page cursor is page state, and it churned a line on every tick (Q-1)."""
     raw = _channel_envelope(
-        _message_block("body"), extra={"has_more": True, "next_cursor": "", "count": 3}
+        _message_block("body"),
+        extra={
+            "pagination_info": "There are more messages available. cursor: `bmV4dF90`\n",
+            "next_cursor": "bmV4dF90",
+            "has_more": True,
+            "count": 3,
+        },
     )
     normalized = diff.normalize(raw)
-    assert normalized.split("\n")[-3:] == ["has_more: true", "next_cursor:", "count: 3"]
-    # Bookkeeping fields are their own lines now, so a churning cursor can be
-    # ignored without touching the records it sits beside.
-    kept = diff.normalize(raw, ignore=("^next_cursor:", "^has_more:"))
-    assert "next_cursor" not in kept and "has_more" not in kept
-    assert "body" in kept
+    assert "pagination_info" not in normalized
+    assert "cursor" not in normalized and "has_more" not in normalized
+    assert "bmV4dF90" not in normalized
+    # A non-bookkeeping field keeps its key and its own line.
+    assert normalized.split("\n")[-1] == "count: 3"
+    assert "body" in normalized
+
+
+def test_an_envelope_of_single_line_fields_is_not_a_record_log() -> None:
+    """The trigger needs a BLANK LINE (review MIN-1/Q-1, design D2).
+
+    A prose field ends in one newline; treating it as a record split a sentence
+    into records and dropped the key. Such an envelope keeps the previous
+    behaviour exactly — one line, compared as text.
+    """
+    raw = json.dumps({"messages": "a\n", "note": "one line\nof prose"})
+    assert diff.is_record_log(raw) is False
+    assert diff.unpack_records(raw) == raw
+    assert diff.normalize(raw) == raw
 
 
 def test_a_container_field_renders_as_compact_json_with_sorted_keys() -> None:
@@ -456,3 +495,82 @@ def test_a_shifted_window_shows_the_new_and_dropped_records_separately() -> None
     assert len(previews) == 2, rendered.text
     assert previews[0].startswith("+ ") and "newest feedback" in previews[0]
     assert previews[1].startswith("- ") and "first" in previews[1]
+
+
+def test_a_multi_paragraph_message_stays_one_record() -> None:
+    """A message body with blank lines is still ONE record (design D2).
+
+    Measured on real traffic: a message split into a header plus four
+    unattributed fragments (``+2/-7`` where one message had arrived), which also
+    defeated ``ignore`` — the fragment carrying the author id was dropped and
+    the prose survived.
+    """
+    body = (
+        "*Recap* for the week\n\nWe shipped the faster feed searches.\n\n"
+        "| | 2h before | 3h after |\n\n*Cleanup:* the worktrees are removed."
+    )
+    raw = _channel_envelope(
+        _message_block(body, user="U0POSTER"),
+        _message_block("a second message", user="U0OTHER", ts="1762400100.0"),
+    )
+    records = _record_lines(diff.normalize(raw))
+    assert len(records) == 2, records
+    assert records[0].startswith("=== Message from Gong Support Bot (U0POSTER)")
+    assert "*Recap* for the week" in records[0]
+    assert "*Cleanup:* the worktrees are removed." in records[0]
+    assert "| | 2h before | 3h after |" in records[0]
+
+
+def test_a_payload_without_a_repeated_lead_keeps_the_block_behaviour() -> None:
+    """No repeated record prefix: blocks stay lines (the documented fallback)."""
+    raw = json.dumps({"log": "alpha one\n\nbeta two\n\ngamma three"})
+    assert diff.normalize(raw) == "alpha one\nbeta two\ngamma three"
+
+
+def test_a_long_added_record_is_delivered_whole_not_clipped_at_200() -> None:
+    """The added line IS the wake: it gets the budget, not a 200-char clip.
+
+    Measured (design D1/MAJ-1): an 823-char record was delivered as a link
+    preamble and a ``…``, so the actual feedback never arrived.
+    """
+    body = ":telephone_receiver: *Call with Certn* — *Recap*: " + (
+        "the report needs a second look. " * 24
+    )
+    assert len(body) > 700
+    old = diff.normalize(_channel_envelope(_message_block("older", ts="1762400100.0")))
+    new = diff.normalize(
+        _channel_envelope(
+            _message_block(body, ts="1762400200.0", user="U0VICTOR"),
+            _message_block("older", ts="1762400100.0"),
+        )
+    )
+    rendered = diff.render_delta(old, new, max_delta_lines=12, delta_max_chars=1200)
+    assert rendered.text.split("\n")[0] == "+1/-0 changed lines"
+    assert "*Recap*" in rendered.text and rendered.text.rstrip().endswith("look.")
+    assert len(rendered.text) <= 1200
+
+
+def test_a_long_added_record_is_cut_at_the_budget_it_has_left() -> None:
+    """Bounded, not dropped: a record past the budget arrives as a marked cut."""
+    body = "x" * 2000
+    old = "a"
+    new = "a\n" + body
+    rendered = diff.render_delta(old, new, max_delta_lines=12, delta_max_chars=300)
+    assert len(rendered.text) <= 300
+    assert rendered.text.split("\n")[1].startswith("+ ")
+    assert rendered.text.split("\n")[1].endswith("…")
+
+
+def test_an_indentation_only_change_is_still_a_change() -> None:
+    """``rstrip`` per field, not ``strip``: leading indentation is content (MIN-2).
+
+    A line-mode envelope (``{"stdout": …}``) re-indenting a block used to
+    normalize identically, so the change never surfaced.
+    """
+    before = json.dumps({"stdout": "def f():\n    indent 4\n\ndef g():\n    indent 4"})
+    after = json.dumps({"stdout": "def f():\n    indent 4\n\ndef g():\n        indent 8"})
+    assert diff.normalize(before) != diff.normalize(after)
+    # The indentation must survive INSIDE the record line: ``strip()`` removed
+    # it, so a re-indent normalised identically and the change never surfaced.
+    assert diff.normalize(after).count("\n") == 1
+    assert f"{diff._RECORD_FIELD_SEPARATOR}        indent 8" in diff.normalize(after)
