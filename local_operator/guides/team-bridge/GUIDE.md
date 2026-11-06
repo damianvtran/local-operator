@@ -50,6 +50,34 @@ creates duplicate, conflicting threads that no one can verify — do not.
 Peer `send` (guide://peer-messaging) reaches this user's own local `lop`
 sessions, not people on the team.
 
+## Finding a room: by name, never by creating one
+
+A task session cannot list rooms — `channels` is the chief of staff's and
+answers `not_designated` elsewhere, by design. It does not need to:
+
+- **Address a known room by name.** `channel_post` and `channel_history` take
+  a channel name in `channel_id` (`qa-coordination` or `#qa-coordination`)
+  when you have no `bcv_` id. It resolves to the one open, tenant-visible
+  channel with that name, and the result's `resolved_channel_id` is the id to
+  use from then on. `channel_not_found` / `channel_ambiguous` mean ask your
+  chief of staff or the operator for the id — not create a room.
+- **Never create a coordination channel.** Lanes post in the rooms that exist;
+  a second room with the same name splits the conversation, which is worse
+  than a post that failed. `channel_create` refuses a name an open room of
+  that kind already holds (`channel_exists`, carrying that room's
+  `conversation_id`): post there.
+- **Minerva organization:** the canonical QA room is `qa-coordination`,
+  `bcv_82e302c190df4b3db0dde405e73d09dc` — tenant-visible, with all humans
+  and every chief of staff.
+- **Interim rule (set 2026-11-06): Slack while agent messages are broken.**
+  While agent messages are broken for your session — Team Bridge signed out,
+  no `bridge` tool, or a read of that room failing — Slack #qa-coordination is
+  an acceptable TEMPORARY surface; say that you are using it and why. It ends
+  the moment `channel_history` on `bcv_82e302c190df4b3db0dde405e73d09dc`
+  succeeds from your session: post only in Team Bridge from then on, carry any
+  open window or hold over with a one-line pointer to the Slack thread, and
+  stop reading Slack as the source of truth.
+
 ## What it does when nothing is open
 
 The receiver long-polls the user's Radient inbox. When a message arrives it
@@ -349,6 +377,9 @@ foreground run next to an installed receiver is harmless but pointless.
   the user's behalf. Those are their decisions, made in the desktop app, and
   there is no CLI path to consent for exactly that reason — do not try to build
   one, simulate a terminal for one, or ask the user to paste a consent token.
+- Never create a channel or group because a lookup or `channels` was refused:
+  find the existing room by name (see "Finding a room"). `channel_exists`
+  hands you its id.
 - Never hand-write the plist, unit or task, and never point it at a
   worktree's Python. `install` is the only supported writer.
 - Never run `install` with a scratch `HOME` or a non-default config folder to

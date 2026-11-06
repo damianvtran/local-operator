@@ -397,7 +397,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1978 -> 1977: canonical isolated renderer re-measured after the explicit
     # generic-file schema and compact description (including lowercase `read`).
     # This records actual doc cost; the 8 KiB soft cap is deliberately unchanged.
-    "bridge": 1977,
+    "bridge": 1985,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
