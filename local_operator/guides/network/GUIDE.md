@@ -306,8 +306,11 @@ For work in a particular repository, add `--repository-path <PEER_PATH>` and/or
 paths resolve under that peer's home, never the viewer's cwd. Quote `~/...` in
 the local shell so that shell does not expand it before the CLI receives it.
 A URL alone lets
-the existing peer probe derive its destination name. Omitting both preserves
-the installed-project default. This is a read-only check, not a clone or grant;
+the existing peer probe derive its destination name. Omitting both names NO
+repository: the row then reports `unknown` and says so, rather than answering
+about whichever checkout the peer happens to hold (its own install was the old
+default, and it made a report about one repository read as another's). This is a
+read-only check, not a clone or grant;
 when no relay answers, the existing fallback says the peer was not asked and
 does not check the viewer's local checkout as a substitute.
 
@@ -1131,8 +1134,10 @@ and creates nothing on either device). Live, from the E2E node: `cloud-node-1
 has no glab, node, npm, make and docker on its PATH or in ~/.local/bin; has gh
 installed but not on its PATH; has no stored GitHub CLI login: offloaded work
 that needs them will fail there` — with one remedy line per gap (an install, a
-PATH fix, a sign-in; each runs on the node, and the product asks before
-changing anything there). The row reads `warn` on purpose: missing tooling does
+PATH fix, a sign-in), each naming the command to run ON THAT NODE, in that
+device's own package-manager terms (`brew install …` on a Mac, `sudo apt-get
+install …` on a Debian node) rather than a description of one. The row reads
+`warn` on purpose: missing tooling does
 not make a device less onboarded — it makes lanes that need it fail there.
 
 ### The build gates the machinery

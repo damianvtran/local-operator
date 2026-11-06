@@ -391,35 +391,6 @@ def git_identity_fact(home: Path | None = None) -> dict[str, Any]:
     return {"user_name": value("name"), "user_email": value("email")}
 
 
-def _default_repository_identity(home: Path) -> dict[str, str]:
-    """The installed project's name and clone URL, without a machine-specific path.
-
-    A readiness request may name the repository the session will use. With no
-    such identity, the installed distribution is the one default every peer is
-    guaranteed to share: its package name supplies ``~/<name>`` and its declared
-    project URL supplies the clone source. In particular, the relay's cwd is NOT
-    a fallback — a supervised relay commonly starts in HOME or `/`, so checking
-    there would answer about a directory the session was never going to use.
-    """
-    from importlib.metadata import PackageNotFoundError, distribution
-
-    try:
-        metadata = distribution("local-operator").metadata
-    except (OSError, PackageNotFoundError):
-        return {"path": "", "url": ""}
-    name = str(metadata.get("Name") or "").strip()
-    urls: dict[str, str] = {}
-    for entry in metadata.get_all("Project-URL") or ():
-        label, separator, value = str(entry).partition(",")
-        if separator and value.strip():
-            urls[label.strip().lower()] = value.strip()
-    url = next(
-        (urls[key] for key in ("repository", "source", "homepage") if urls.get(key)),
-        "",
-    )
-    return {"path": str(home / name) if name else "", "url": url}
-
-
 def _checkout_git_dir(path: Path) -> Path | None:
     """The git directory at ``path``, including a linked worktree's indirection."""
     marker = path / ".git"
@@ -477,28 +448,37 @@ def repository_fact(
     ``repository.path`` is a path ON THE PEER (absolute, ``~/...`` or relative
     to its home), never the viewer's checkout path. ``repository.url`` alone is
     also a sufficient identity: its final path component names the peer-side
-    destination. With neither, ``_default_repository_identity`` supplies the
-    installed project's identity. The fact is names and state only.
+    destination.
+
+    NO REQUEST NAMES NO REPOSITORY (2026-11-05). This used to fall back to the
+    installed distribution's own name and project URL, so a readiness answer
+    about ANY repository was written in the context of ``~/local-operator``: a
+    peer reported ``ok`` for a checkout the caller never asked about, and the
+    caller read that ``ok`` as an answer about the repository it DID mean. The
+    cwd is not a fallback either — a supervised relay commonly starts in HOME
+    or ``/``, so probing there would answer about a directory no session was
+    going to use. With nothing named this fact says so (``state:
+    unrequested``) and claims nothing about the filesystem. The fact is names
+    and state only.
     """
     root = home if home is not None else Path.home()
     request = repository if isinstance(repository, Mapping) else {}
     raw_path = str(request.get("path") or "").strip()
     url = str(request.get("url") or "").strip()
-    default = _default_repository_identity(root)
-    if raw_path in ("", "~"):
-        path_text = default["path"] if not raw_path else str(root)
+    if not raw_path and not url:
+        return {"path": "", "url": "", "state": "unrequested"}
+    if raw_path == "~":
+        path_text = str(root)
     elif raw_path.startswith("~/"):
         path_text = str(root / raw_path[2:])
-    else:
+    elif raw_path:
         candidate = Path(raw_path).expanduser()
         path_text = str(candidate if candidate.is_absolute() else root / candidate)
-    if not raw_path and url:
+    else:
         # A URL is a repository identity too. Derive its natural destination
-        # instead of pairing it with the package's potentially unrelated name.
+        # instead of pairing it with a package name nobody asked about.
         name = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
         path_text = str(root / name) if name else ""
-    if not url and (not raw_path or path_text == default["path"]):
-        url = default["url"]
     path = Path(path_text) if path_text else None
     if path is None:
         state = "unidentified"
@@ -518,6 +498,57 @@ def repository_fact(
 #: was present but not on PATH and not signed in — only mid-task; this
 #: inventory lets a planner read all of it BEFORE it starts.
 TOOLING_TOOLS: tuple[str, ...] = ("gh", "glab", "node", "npm", "make", "docker")
+
+#: The package managers a remedy may name a command for, in probe order. A
+#: remedy has to be a command the reader can PASTE ON THAT DEVICE (2026-11-05),
+#: and which command that is depends on the device: a Homebrew Mac and a Debian
+#: node take different lines for the same tool. The probe asks the same
+#: ``_resolve_program`` seam the tools themselves use, so it is read-only and a
+#: test can pin it the same way.
+TOOLING_PACKAGE_MANAGERS: tuple[str, ...] = ("brew", "apt-get", "dnf", "pacman", "winget")
+
+#: The install RECIPE per (platform, manager): the command template, the package
+#: each tool comes from, and any tool the manager does not carry. ONLY the two
+#: rows this fleet actually runs are stated: ``brew`` on macOS and ``apt-get`` on
+#: Debian/Ubuntu. Formula and package names were checked against the live
+#: indexes (``brew info`` on this machine; Debian 'trixie' and Ubuntu 'noble'
+#: carry ``gh`` and ``glab``) rather than guessed — a remedy naming a package
+#: that does not exist is worse than the vague sentence it replaces, so every
+#: other manager falls back to naming the tools and the device instead of
+#: inventing a command for a distribution this module cannot see.
+#:
+#: ``npm`` rides the ``node`` package (``brew install npm`` resolves to the node
+#: formula, and node ships npm), so one package installs both and the row says
+#: so. macOS's ``make`` comes from the developer tools, not from Homebrew — the
+#: ``make`` formula installs GNU make as ``gmake``, which the probe would still
+#: read as absent, so it gets its own command.
+TOOLING_INSTALL_RECIPES: Mapping[tuple[str, str], Mapping[str, Any]] = {
+    ("darwin", "brew"): {
+        "template": "brew install {packages}",
+        "packages": {
+            "gh": "gh",
+            "glab": "glab",
+            "node": "node",
+            "npm": "node",
+            "docker": "docker",
+        },
+        "separate": {"make": "xcode-select --install"},
+        "covers": {"npm": "node"},
+    },
+    ("linux", "apt-get"): {
+        "template": "sudo apt-get install -y {packages}",
+        "packages": {
+            "gh": "gh",
+            "glab": "glab",
+            "node": "nodejs",
+            "npm": "npm",
+            "make": "make",
+            "docker": "docker.io",
+        },
+        "separate": {},
+        "covers": {},
+    },
+}
 
 #: How much of ``hosts.yml`` the structural scan may read. gh's file is a few
 #: hundred bytes; the bound exists so a pathological file cannot make a report
@@ -613,6 +644,26 @@ def _gh_auth_fact(home: Path) -> dict[str, Any]:
     return fact
 
 
+def _package_manager_fact() -> dict[str, Any]:
+    """Which package manager THIS device would install a tool with, or empty.
+
+    The remedy must name a command that device can actually run, and the same
+    tool installs differently on each platform: ``brew install gh`` here,
+    ``apt-get install gh`` there. Only the NAME and path are reported — the fact
+    is what the viewer needs to pick a command, nothing about the machine's
+    package state. An unprobeable name is ``""``, never a guess, and the row's
+    fallback sentence then names the tools without inventing a manager.
+    """
+    for name in TOOLING_PACKAGE_MANAGERS:
+        try:
+            found = _resolve_program(name)
+        except Exception as exc:  # noqa: BLE001 — a broken probe is a fact, not a crash
+            return {"name": "", "path": "", "reason": _probe_reason(exc)}
+        if found:
+            return {"name": name, "path": _safe_text(found, limit=300)}
+    return {"name": "", "path": ""}
+
+
 def tooling_fact(home: Path | None = None) -> dict[str, Any]:
     """What command-line tooling a lane would find here, as facts. Names only.
 
@@ -630,6 +681,11 @@ def tooling_fact(home: Path | None = None) -> dict[str, Any]:
         "tools": {name: _tool_location(name, local_bin) for name in TOOLING_TOOLS},
         "gh_auth": _gh_auth_fact(root),
         "local_bin_dir": _safe_text(str(local_bin), limit=300),
+        # ADDITIVE ON THE WIRE: a viewer built before these keys ignores them,
+        # and this build reads their absence as "manager unknown" — the remedy
+        # then names the tools rather than a command it cannot stand behind.
+        "platform": _safe_text(sys.platform, limit=40),
+        "package_manager": _package_manager_fact(),
     }
 
 
@@ -795,6 +851,30 @@ def mcp_login_remedy(url: str) -> str:
     sentences outright, so those sites are debt, never an exemption.
     """
     return "sign in here first"
+
+
+def mcp_share_command(url: str, peer_label: str) -> str:
+    """The command the login's OWNER runs to lend it to ``peer_label``.
+
+    ONE spelling for every readiness row that means "share this login": the key
+    is the ``mcp:<url>`` form the share verb accepts (``lop network credential
+    share <provider|mcp:<url>> --with <device>``, ``cli``'s own usage line), and
+    the target is the peer this report is about. The row adds WHICH DEVICE runs
+    it — the one holding the login, by name — because the command is refused on
+    any other (2026-11-05: the sentence named the command but not the machine,
+    and an operator read it as a step to run on the peer).
+    """
+    return f"lop network credential share mcp:{url} --with {peer_label}"
+
+
+def _self_label(server: Any) -> str:
+    """This device's own name, for a remedy that must be run HERE."""
+    identity = getattr(server, "identity", None)
+    label = _safe_text(getattr(identity, "name", "") or "", limit=120)
+    if label:
+        return label
+    device_id = _safe_text(getattr(identity, "device_id", "") or "", limit=80)
+    return f"this device ({device_id})" if device_id else "this device"
 
 
 def _server_refs(
@@ -2617,9 +2697,64 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
     )
 
 
-def repository_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
-    """Does the peer have the working copy an offloaded session would edit?"""
+def _same_repository_path(requested: str, answered: str) -> bool:
+    """Whether the peer's answer is about the path the caller named.
+
+    The request may be written the way a person writes it — ``~/local-operator``
+    or a path relative to that device's home — while the peer always answers with
+    the absolute path it resolved. Comparing the two literally would call every
+    such request a mismatch, so the peer-side form is matched on its tail; only
+    an absolute request is compared exactly.
+    """
+    if requested == answered:
+        return True
+    tail = requested[2:] if requested.startswith("~/") else requested
+    tail = tail.strip("/")
+    if not tail or requested.startswith("/"):
+        return False
+    return answered.rstrip("/").endswith("/" + tail)
+
+
+def repository_row(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    peer_label: str,
+    repository: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Does the peer have the working copy an offloaded session would edit?
+
+    ``repository`` is what the CALLER named (``lop network ready
+    --repository-path …``).
+    The row is about that working copy and no other: with nothing named it says
+    so instead of reporting whatever checkout the peer happens to hold — the
+    peer's own install directory answered ``ok`` for a question nobody asked,
+    which is how a report about repository X came back describing Y.
+    """
     fact = facts.get("repository")
+    requested_path = str((repository or {}).get("path") or "").strip()
+    requested_url = str((repository or {}).get("url") or "").strip()
+    if not requested_path and not requested_url:
+        # THE QUESTION WAS NOT ASKED, so no answer about the filesystem is
+        # rendered — including a peer's own answer, which its build derives
+        # from its install and which predates this report's request.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_REPOSITORY,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                "no repository was named for this report, so which working copy "
+                f"offloaded work would use on {peer_label} is not known"
+            ),
+            remedies=[
+                "re-check naming the repository: `lop network ready --repository-path "
+                "<its path on that device> --repository-url <clone URL>`"
+            ],
+            source=SOURCE_UNKNOWN,
+            observed={"path": "", "state": "unrequested"},
+        )
     if not isinstance(fact, Mapping):
         return _capability_row(
             device_id=member.device_id,
@@ -2640,6 +2775,24 @@ def repository_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
         "source": SOURCE_PEER,
         "observed": {"path": path, "state": state},
     }
+    # A PEER THAT IGNORED THE REQUEST ANSWERS ABOUT ITS OWN DIRECTORY (old
+    # builds derived the path from their install). Comparing the two is the only
+    # way the caller can tell an answer about ITS repository from an answer
+    # about somebody else's: same-shaped row, different question.
+    if requested_path and path and not _same_repository_path(requested_path, path):
+        return _capability_row(
+            **common,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"{peer_label} answered about {path}, not the requested "
+                f"{requested_path}: nothing here says whether that working copy exists"
+            ),
+            remedies=[
+                "update the build on "
+                f"{peer_label}, or check {requested_path} there by hand, then re-check"
+            ],
+        )
     if state == "checkout" and path:
         return _capability_row(
             **common,
@@ -2777,6 +2930,72 @@ def _tool_cell(entry: Any) -> tuple[str, str]:
     return state, _bounded(entry.get("path") or "", 300)
 
 
+def _tooling_install_remedy(
+    names: Sequence[str], fact: Mapping[str, Any], *, peer_label: str
+) -> str:
+    """The command that installs ``names`` ON THE PEER — not a description of one.
+
+    The 2026-11-05 complaint: every tooling remedy read "ask Local Operator to
+    install gh, glab, node, npm, make and docker on <peer>", which names neither
+    a command nor a way to run one — a reader had to work out the install
+    themselves on a machine they were not sitting at. The peer reports which
+    package manager it has (:func:`_package_manager_fact`), so the row names
+    that device's own one-liner and the tools it covers.
+
+    Several absent tools collapse into ONE command where the manager installs
+    them together (``brew install gh glab node``), because that is what a person
+    would actually type; ``npm`` rides node's formula, and macOS's ``make``
+    belongs to the developer tools rather than the package manager. A peer whose
+    manager this build cannot name keeps an honest sentence — the tools, and the
+    device to run them on — rather than a command that might not exist there.
+    """
+    platform = _safe_text(fact.get("platform") or "", limit=40)
+    manager = fact.get("package_manager")
+    manager_name = (
+        _safe_text(manager.get("name") or "", limit=40)
+        if isinstance(manager, Mapping)
+        else ""
+    )
+    recipe = TOOLING_INSTALL_RECIPES.get((platform, manager_name))
+    if not recipe:
+        return (
+            f"on {peer_label}, install {_name_list(names)} with that device's own package "
+            "manager (for example `brew install` on macOS or `sudo apt-get install` on "
+            "Debian/Ubuntu), then re-check"
+        )
+    packages: list[str] = []
+    separate: list[str] = []
+    unclaimed: list[str] = []
+    for name in names:
+        package = (recipe.get("packages") or {}).get(name)
+        command = (recipe.get("separate") or {}).get(name)
+        if package and package not in packages:
+            packages.append(package)
+        elif command and command not in separate:
+            separate.append(command)
+        elif not package and not command:
+            unclaimed.append(name)
+    commands = ([str(recipe["template"]).format(packages=" ".join(packages))] if packages else [])
+    commands.extend(separate)
+    if not commands:
+        return (
+            f"on {peer_label}, install {_name_list(names)} with that device's own package "
+            "manager, then re-check"
+        )
+    sentence = (
+        f"on {peer_label}, run `{commands[0]}`"
+        + "".join(f", then `{command}`" for command in commands[1:])
+        + f" to install {_name_list(names)} there"
+    )
+    covers = recipe.get("covers") or {}
+    shipped = [f"{name} ships with {covers[name]}" for name in names if name in covers]
+    if shipped:
+        sentence += " (" + "; ".join(shipped) + ")"
+    if unclaimed:
+        sentence += f"; {_name_list(unclaimed)} needs its own install route there"
+    return sentence + ", then re-check"
+
+
 def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
     """(g) What command-line tooling would a lane find on this peer?
 
@@ -2878,25 +3097,26 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
         code = CODE_NOT_AUTHENTICATED
     else:
         code = CODE_UNKNOWN
-    local_bin = _bounded(fact.get("local_bin_dir") or "", 300)
     remedies: list[str] = []
     if absent:
-        remedies.append(
-            f"ask Local Operator to install {_name_list(absent)} on {peer_label} — or, if "
-            "one is already installed off its PATH there, to put it on the PATH (it asks "
-            "before changing anything there)"
-        )
+        remedies.append(_tooling_install_remedy(absent, fact, peer_label=peer_label))
     for name in off_path:
-        remedy = f"on {peer_label}, {name} is installed at {cells[name][1]} but not on its PATH"
-        if local_bin:
-            remedy += f" — ask Local Operator to add {local_bin} to the PATH there"
+        where = cells[name][1]
+        directory = os.path.dirname(where) if where else ""
+        remedy = f"on {peer_label}, {name} is installed at {where} but not on its PATH"
+        if directory:
+            remedy += (
+                ": put that directory on the PATH there (`export "
+                f'PATH="{directory}:$PATH"` in the shell that runs the work, or the '
+                "same line in that device's shell profile)"
+            )
         else:
-            remedy += " — ask Local Operator to put its folder on the PATH there"
+            remedy += ": put its directory on the PATH there"
         remedy += " (work can use that path directly meanwhile)"
         remedies.append(remedy)
     if login == "absent":
         remedies.append(
-            f"gh on {peer_label} is not signed in — ask Local Operator to sign it in there"
+            f"on {peer_label}, run `gh auth login` to sign the GitHub CLI in there"
         )
     if unknown or login == "unknown":
         remedies.append(f"check the tooling on {peer_label} and re-check")
@@ -3278,6 +3498,7 @@ def mcp_credential_rows(
     *,
     viewer: Viewer,
     peer_label: str,
+    viewer_label: str = "",
 ) -> list[dict[str, Any]]:
     """(f) Per user-scope server: does the peer hold what it needs to run it?
 
@@ -3347,6 +3568,7 @@ def mcp_credential_rows(
             server=server,
             viewer=viewer,
             peer_label=peer_label,
+            viewer_label=viewer_label,
         )
         if isinstance(server.get("auth_diagnostics"), Mapping):
             row["observed"] = {
@@ -3479,6 +3701,7 @@ def _mcp_credential_row(
     server: Mapping[str, Any],
     viewer: Viewer,
     peer_label: str,
+    viewer_label: str = "",
 ) -> dict[str, Any]:
     # A row without a grant the runtime would use is NO row: the runtime goes
     # straight to the borrow, so the verdict must reach the holder/borrow branch
@@ -3669,6 +3892,8 @@ def _mcp_credential_row(
             observed={"server": name, "url": url},
         )
     if owner and not peer_is_holder:
+        owner_label = _owner_label(placement, fallback="the device that owns the login")
+        share = mcp_share_command(url, peer_label)
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -3681,11 +3906,12 @@ def _mcp_credential_row(
             ),
             remedies=[
                 (
-                    f"share it with {peer_label} (run here)"
+                    f"on {viewer_label or 'this device'}, run `{share}` — the login is held "
+                    f"here, so the share runs here, not on {peer_label}"
                     if owner == viewer.device_id
                     else (
-                        f"ask the device that owns the login for {name} to add "
-                        f"{peer_label} as a holder"
+                        f"on {owner_label} (which holds the login for {name}), run `{share}` "
+                        f"— the share runs where the login is, not on {peer_label}"
                     )
                 )
             ],
@@ -3708,7 +3934,11 @@ def _mcp_credential_row(
                 f"this device's login for {name} is no longer valid and is not shared "
                 f"with {peer_label}"
             ),
-            remedies=[f"{MCP_DEAD_LOGIN_REMEDY}; then share it with {peer_label}"],
+            remedies=[
+                f"{MCP_DEAD_LOGIN_REMEDY}, then on {viewer_label or 'this device'} run "
+                f"`{mcp_share_command(url, peer_label)}` (the share runs where the login is, "
+                f"not on {peer_label})"
+            ],
             source=SOURCE_LOCAL,
             observed={"server": name, "url": url},
         )
@@ -3723,7 +3953,11 @@ def _mcp_credential_row(
                 f"this device holds a login for {name} but does not share it with "
                 f"{peer_label}, so nothing would reach it"
             ),
-            remedies=[f"share it with {peer_label} (run here)"],
+            remedies=[
+                f"on {viewer_label or 'this device'}, run "
+                f"`{mcp_share_command(url, peer_label)}` — the login is held here, so the "
+                f"share runs here, not on {peer_label}"
+            ],
             source=SOURCE_LOCAL,
             observed={"server": name, "url": url},
         )
@@ -3752,7 +3986,11 @@ def _mcp_credential_row(
             ok=False,
             code=CODE_NO_CREDENTIAL,
             detail=f"this device has no MCP login for {url}; {mcp_login_remedy(url)}",
-            remedies=[f"{mcp_login_remedy(url)}, then share it with {peer_label}"],
+            remedies=[
+                f"{mcp_login_remedy(url)}, then on {viewer_label or 'this device'} run "
+                f"`{mcp_share_command(url, peer_label)}` (the share runs where the login is, "
+                f"not on {peer_label})"
+            ],
             source=SOURCE_LOCAL,
             observed={"server": name, "url": url},
         )
@@ -4736,7 +4974,9 @@ def _peer_checks(
     rows[restart_index] = peer_restart_row(member, facts, record=record, peer_label=peer_label)
     rows.append(operator_row(member, facts, peer_label=peer_label))
     rows.append(git_row(member, facts, peer_label=peer_label))
-    rows.append(repository_row(member, facts, peer_label=peer_label))
+    rows.append(
+        repository_row(member, facts, peer_label=peer_label, repository=repository)
+    )
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
     selected = facts.get("selected_model_access")
@@ -4758,7 +4998,15 @@ def _peer_checks(
     rows.append(tooling_row(member, facts, peer_label=peer_label))
     rows.append(resilience_row(member, facts, peer_label=peer_label))
     rows.append(serve_daemon_row(member, facts, peer_label=peer_label))
-    rows.extend(mcp_credential_rows(member, facts, viewer=viewer, peer_label=peer_label))
+    rows.extend(
+        mcp_credential_rows(
+            member,
+            facts,
+            viewer=viewer,
+            peer_label=peer_label,
+            viewer_label=_self_label(server),
+        )
+    )
     return rows
 
 
