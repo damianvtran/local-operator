@@ -284,6 +284,30 @@ def _stream_id(value: Any) -> str | None:
 _MAX_SERVED_PROVIDER_CHARS = 64
 
 
+def _bounded_wire_label(value: Any, limit: int) -> str | None:
+    """The ONE gate for a provider-controlled label carried off the wire.
+
+    A value either comes back byte-for-byte or is refused outright: nothing is
+    normalized, truncated or stripped of control characters, because every
+    transform here would invent a label the provider never reported. Length and
+    control characters are the two things a hostile or broken upstream can use
+    to poison downstream state, so those are refusals; everything else is
+    passed through unchanged.
+
+    Shared by ``_served_provider_name`` and ``_served_model_slug`` so the two
+    cannot drift: they are the same discipline with different bounds.
+    """
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    if not trimmed or len(trimmed) > limit:
+        return None
+    # ``Cc`` covers NUL, ESC, both newline forms and the C1 8-bit range.
+    if any(unicodedata.category(char) == "Cc" for char in trimmed):
+        return None
+    return trimmed
+
+
 def _served_provider_name(value: Any) -> str | None:
     """Validate the host name an aggregator reports, or refuse it.
 
@@ -303,16 +327,40 @@ def _served_provider_name(value: Any) -> str | None:
     stripping would invent a name the host never reported and pin to it. The
     repo already refuses to trust provider-supplied text elsewhere (see
     ``_attributed_relay_message`` and its hostile-``provider_name`` tests).
+
+    The gate itself is ``_bounded_wire_label``, shared with
+    ``_served_model_slug``: one discipline, two bounds.
     """
-    if not isinstance(value, str):
-        return None
-    trimmed = value.strip()
-    if not trimmed or len(trimmed) > _MAX_SERVED_PROVIDER_CHARS:
-        return None
-    # ``Cc`` covers NUL, ESC, both newline forms and the C1 8-bit range.
-    if any(unicodedata.category(char) == "Cc" for char in trimmed):
-        return None
-    return trimmed
+    return _bounded_wire_label(value, _MAX_SERVED_PROVIDER_CHARS)
+
+
+#: Longest upstream model slug we will carry as served-model provenance.
+#:
+#: Longer than ``_MAX_SERVED_PROVIDER_CHARS`` on purpose: a provider display name
+#: is a short label ("Google AI Studio"), while a model slug carries an org
+#: prefix plus a checkpoint suffix (``deepseek-ai/DeepSeek-V4.1-Flash-1017`` is
+#: 33, ``meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`` is 49) and vendor
+#: revisions keep lengthening it. 128 is >2x the longest slug observed in the
+#: provider listings, which is headroom for a rename rather than a tight fit.
+_MAX_SERVED_MODEL_CHARS = 128
+
+
+def _served_model_slug(value: Any) -> str | None:
+    """Validate the model slug a provider says actually served this turn.
+
+    The served model and the requested one are DIFFERENT FACTS: the request
+    carries the route this harness chose (``radient/auto``), and an aggregator may
+    answer that route with any family. Only the provider's own stream names what
+    answered, which is why this is read off the wire verbatim and never derived
+    from ``model_id`` -- deriving it would silently answer the incident question
+    ("which family actually served this?") with the thing it is asking about.
+
+    Stored per call, so the same gate as ``_served_provider_name`` applies: this
+    is provider-controlled text that a ledger keeps. It does NOT ride in a
+    request body (unlike the provider name, which is re-sent as ``provider.order``),
+    so the bound here guards the record rather than the wire.
+    """
+    return _bounded_wire_label(value, _MAX_SERVED_MODEL_CHARS)
 
 
 def _reported_token_count(raw: Mapping[str, Any], key: str) -> bool:
@@ -3678,6 +3726,14 @@ class OpenAICompatClient:
         #: ``StreamEndEvent.served_provider`` for why the display name is kept
         #: verbatim and why this is not part of ``provider_payload``.
         served_provider: str | None = None
+        #: The model the UPSTREAM says actually answered, read from the chunk's
+        #: ``model`` field and carried on the end event for the per-call ledger
+        #: record. Distinct from ``request.model.model_id`` (the route this
+        #: harness requested): an aggregator can answer an ``auto`` route with any
+        #: family, and the record has to name the family that answered. Captured
+        #: with the same rules as ``served_provider``: last carrier wins, a refused
+        #: value leaves the previous one standing, ``None`` when never sent.
+        served_model: str | None = None
         direct_deepseek = request.model.provider == "deepseek"
         done_received = False
         # Only a finish chunk or its later usage trailer can identify the
@@ -3927,6 +3983,12 @@ class OpenAICompatClient:
                     candidate = _served_provider_name(chunk.get("provider"))
                     if candidate:
                         served_provider = candidate
+                    # Same discipline for the served MODEL: a non-aggregator wire
+                    # repeats the same slug on every chunk, an aggregator's last
+                    # chunk names the upstream checkpoint that finished the turn.
+                    model_candidate = _served_model_slug(chunk.get("model"))
+                    if model_candidate:
+                        served_model = model_candidate
         except Exception:
             # A provider error or a dropped connection ends the turn here:
             # release what is still held before the error, or the partial prose
@@ -4036,6 +4098,7 @@ class OpenAICompatClient:
             provider_payload=provider_payload,
             error=error,
             served_provider=served_provider,
+            served_model=served_model,
             retryable_interruption=retryable_interruption,
         )
 
@@ -4091,6 +4154,11 @@ class OpenAICompatClient:
         tool_call_count = 0
         terminal_stop: str | None = None
         terminal_error: str | None = None
+        #: The model the upstream says actually answered (``response.model``), read
+        #: off frames this loop already parses. Same contract as the chat wire's
+        #: capture: the last carrier wins and a refused value leaves the previous
+        #: one standing, so ``None`` means the wire never named one.
+        served_model: str | None = None
         # Refusal prose streams in its own event type (``response.refusal.delta``)
         # and is collected, not yielded as text: it is not an answer, and the
         # transcript must not read as if the model replied normally.
@@ -4232,6 +4300,11 @@ class OpenAICompatClient:
                     yield StreamStartEvent(
                         response_id=_stream_id((payload.get("response") or {}).get("id"))
                     )
+                    created_model = _served_model_slug(
+                        (payload.get("response") or {}).get("model")
+                    )
+                    if created_model:
+                        served_model = created_model
                 # Reasoning remains invisible here, but plaintext deltas still
                 # consume the shared output envelope BEFORE this opaque skip.
                 # Charging later in the dispatcher is unreachable for this family.
@@ -4302,6 +4375,11 @@ class OpenAICompatClient:
                     response_obj = payload.get("response") or {}
                     if response_obj.get("id"):
                         provider_payload = {"id": response_obj["id"]}
+                    # The terminal frame is the last carrier of the served slug, so
+                    # it supersedes whatever ``response.created`` named.
+                    completed_model = _served_model_slug(response_obj.get("model"))
+                    if completed_model:
+                        served_model = completed_model
                     expected_call_positions = set(output_call_indexes)
                     explicit_output = "output" in response_obj
                     if not explicit_output:
@@ -4510,6 +4588,7 @@ class OpenAICompatClient:
             usage=usage,
             provider_payload=provider_payload,
             error=terminal_error,
+            served_model=served_model,
         )
 
 
@@ -5612,6 +5691,11 @@ class AnthropicClient:
         native_blocks: dict[int, dict[str, Any]] = {}
         tool_json: dict[int, list[str]] = {}
         visible_text: list[str] = []
+        #: The model the API says served this turn (``message.model`` on
+        #: ``message_start``). Captured for the per-call ledger record because the
+        #: request names the ROUTE the harness asked for, never the checkpoint
+        #: that answered; last carrier wins, ``None`` when the wire never sends it.
+        served_model: str | None = None
 
         async with self._open_messages_stream(
             url,
@@ -5675,6 +5759,9 @@ class AnthropicClient:
                         cache_miss_type=miss_type,
                         cache_missed_tokens=missed_tokens,
                     )
+                    start_model = _served_model_slug((event.get("message") or {}).get("model"))
+                    if start_model:
+                        served_model = start_model
                     raw_usage = (event.get("message") or {}).get("usage") or {}
                     input_reported = _reported_token_count(raw_usage, "input_tokens")
                     usage.input_tokens = int(raw_usage.get("input_tokens", usage.input_tokens))
@@ -5781,6 +5868,7 @@ class AnthropicClient:
             stop_reason=mapped,
             usage=usage,
             error=error,
+            served_model=served_model,
             provider_payload=_anthropic_native_payload(
                 request.model,
                 self._base_url,
@@ -6067,6 +6155,10 @@ class GoogleClient:
         native_parts: list[dict[str, Any]] = []
         visible_text: list[str] = []
         replay_calls: list[dict[str, Any]] = []
+        #: The model the API says served this turn (``modelVersion``, which Gemini
+        #: puts on its response chunks). Same contract as the other wires: the last
+        #: carrier wins and ``None`` means it was never named.
+        served_model: str | None = None
 
         async with self._http.stream(
             "POST", url, json=self._build_body(request, scope=scope), headers=headers
@@ -6090,6 +6182,9 @@ class GoogleClient:
                     # indeterminate acceptance (which is the documented contract).
                     started = True
                     yield StreamStartEvent(response_id=None)
+                version = _served_model_slug(chunk.get("modelVersion"))
+                if version:
+                    served_model = version
                 for candidate in chunk.get("candidates") or []:
                     for part in (candidate.get("content") or {}).get("parts") or []:
                         # Keep signature-only chunks and the exact original
@@ -6188,6 +6283,7 @@ class GoogleClient:
             stop_reason=stop_reason,
             usage=usage,
             error=error,
+            served_model=served_model,
             provider_payload=(
                 native_payload(
                     request.model,
