@@ -476,6 +476,7 @@ def _node_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     mesh.refresh_posted = client_mod.MeshCredentialClient.refresh_posted.__get__(mesh)
     mesh.refresh_invalid_grant = client_mod.MeshCredentialClient.refresh_invalid_grant.__get__(mesh)
     mesh.report_family_moved = client_mod.MeshCredentialClient.report_family_moved.__get__(mesh)
+    mesh._owns_delegation = client_mod.MeshCredentialClient._owns_delegation.__get__(mesh)
     monkeypatch.setattr(refresh, "anchor_spki_for", lambda root: _SPKI.get("value"))
     return mesh
 
@@ -803,6 +804,7 @@ def test_invalid_grant_stops_wipes_and_reports(
     mesh.refresh_fence = MeshCredentialClient.refresh_fence.__get__(mesh)
     mesh.refresh_invalid_grant = MeshCredentialClient.refresh_invalid_grant.__get__(mesh)
     mesh.report_family_moved = MeshCredentialClient.report_family_moved.__get__(mesh)
+    mesh._owns_delegation = MeshCredentialClient._owns_delegation.__get__(mesh)
 
     local = AuthStore(config_dir=tmp_path)
     row_id = _delegated_row(local)
@@ -972,3 +974,182 @@ def test_the_owner_applies_a_family_moved_report_only_from_the_delegatee(tmp_pat
         assert dict(local.get_credential(row.id).data).get("refresh_family_moved") is not None
     finally:
         broker.close()
+
+
+def test_the_watch_never_touches_a_row_that_is_not_delegated(
+    tmp_path: Path, monkeypatch, stub_provider: str, operator_key, operator_spki
+) -> None:
+    """R2-1 — an ORDINARY login must survive a family-moved watch.
+
+    The watch is installed on any device holding a delegation document or a
+    delegated row, and the store calls it for every row it refreshes. Without the
+    delegation guard the first `invalid_grant` on an unrelated account wiped that
+    account's secrets and stamped it family-moved — data loss on rows §3.5 never
+    scoped, reported to the operator as "refreshed on another device".
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from local_operator.providers.auth_store import AuthStore
+
+    _SPKI["value"] = operator_spki
+    monkeypatch.setattr(refresh, "anchor_spki_for", lambda root: _SPKI.get("value"))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    local = AuthStore(config_dir=tmp_path)
+    ordinary = local.upsert_credential(
+        STUB_PROVIDER,
+        {"access": "keep-access", "refresh": "keep-refresh", "expires": 1},
+    )
+    # A live delegation exists on this device — for a DIFFERENT key — which is what
+    # installs the fence and makes the watch reachable for this row too.
+    _, statement = _grant(operator_key, key="otherkey")
+    refresh.install(
+        NETWORK, tmp_path, recipient=NODE, statement=statement, operator_spki=operator_spki
+    )
+
+    mesh = SimpleNamespace(
+        network_id=NETWORK,
+        self_device=NODE,
+        root=tmp_path,
+        _auth_store=lambda: local,
+        serve_report=lambda key, **fields: {"kind": "ack"},
+        owner_of=lambda key: OWNER,
+        _audit_refresh=lambda *a, **k: None,
+        _self_membership_active=lambda: True,
+        _policy=lambda: HeldPolicy(NETWORK, NODE, tmp_path),
+    )
+    for name in (
+        "refresh_fence",
+        "refresh_invalid_grant",
+        "report_family_moved",
+        "_owns_delegation",
+    ):
+        setattr(mesh, name, getattr(MeshCredentialClient, name).__get__(mesh))
+
+    before = dict(local.get_credential(ordinary.id).data)
+    result = mesh.refresh_invalid_grant(ordinary.id, before)
+
+    after = dict(local.get_credential(ordinary.id).data)
+    assert result["stopped"] is False and result["reason"] == "not_delegated"
+    assert after["access"] == "keep-access" and after["refresh"] == "keep-refresh"
+    assert "refresh_family_moved" not in after
+    # And the delegation for the OTHER key is untouched by this row's failure.
+    assert (refresh.load(NETWORK, tmp_path, recipient=NODE) or {}).get("state") == "active"
+
+
+def test_the_watch_ignores_a_delegated_row_for_a_grant_the_document_no_longer_holds(
+    tmp_path: Path, monkeypatch, stub_provider: str, operator_key, operator_spki
+) -> None:
+    """R2-1's second condition: stopping a family this node no longer owns is not a stop.
+
+    A row stamped by an earlier delegation can outlive it (a new mint replaces the
+    document). Wiping that row on the old grant's failure would destroy material the
+    CURRENT delegation is responsible for; the guard requires the row's grant to be
+    the one the document holds.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from local_operator.providers.auth_store import AuthStore
+
+    _SPKI["value"] = operator_spki
+    monkeypatch.setattr(refresh, "anchor_spki_for", lambda root: _SPKI.get("value"))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    local = AuthStore(config_dir=tmp_path)
+    row_id = _delegated_row(local, grant_id="rd_superseded")
+    _, statement = _grant(operator_key)  # the document's grant is rd_0007
+    refresh.install(
+        NETWORK, tmp_path, recipient=NODE, statement=statement, operator_spki=operator_spki
+    )
+
+    mesh = SimpleNamespace(
+        network_id=NETWORK,
+        self_device=NODE,
+        root=tmp_path,
+        _auth_store=lambda: local,
+        serve_report=lambda key, **fields: {"kind": "ack"},
+        owner_of=lambda key: OWNER,
+        _audit_refresh=lambda *a, **k: None,
+        _self_membership_active=lambda: True,
+        _policy=lambda: HeldPolicy(NETWORK, NODE, tmp_path),
+    )
+    for name in (
+        "refresh_fence",
+        "refresh_invalid_grant",
+        "report_family_moved",
+        "_owns_delegation",
+    ):
+        setattr(mesh, name, getattr(MeshCredentialClient, name).__get__(mesh))
+
+    result = mesh.refresh_invalid_grant(row_id, dict(local.get_credential(row_id).data))
+    data = dict(local.get_credential(row_id).data)
+    assert result["stopped"] is False and result["reason"] == "not_delegated"
+    assert data.get("refresh") == "refresh-0" and "refresh_family_moved" not in data
+    assert (refresh.load(NETWORK, tmp_path, recipient=NODE) or {}).get("state") == "active"
+
+
+def test_the_rows_provenance_comes_from_the_verified_grant(
+    tmp_path: Path, monkeypatch, stub_provider: str, operator_key, operator_spki
+) -> None:
+    """R2-2 — an answer that omits ``grant_id`` must not create a row that reads as a copy.
+
+    The row's ``mesh_origin.grant_id`` is what distinguishes a delegation from a sync
+    copy — for the fence AND for the watch. Taking it from the answer's unsigned
+    envelope meant an owner (or a build) that renamed or dropped the field landed a
+    real delegated row which every later reader treated as an ordinary copy, i.e.
+    outside the fence. The value now comes from the statement that was verified.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from local_operator.providers.auth_store import AuthStore
+
+    _SPKI["value"] = operator_spki
+    monkeypatch.setattr(refresh, "anchor_spki_for", lambda root: _SPKI.get("value"))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    _, statement = _grant(operator_key)  # grant id is rd_0007
+    local = AuthStore(config_dir=tmp_path)
+    mesh = SimpleNamespace(
+        network_id=NETWORK,
+        self_device=NODE,
+        root=tmp_path,
+        _auth_store=lambda: local,
+        owner_of=lambda key: OWNER,
+        entry=lambda key: SimpleNamespace(provider=STUB_PROVIDER),
+        install_refresh_fence=lambda: True,
+        _audit_refresh=lambda *a, **k: None,
+        _self_membership_active=lambda: True,
+        _policy=lambda: HeldPolicy(NETWORK, NODE, tmp_path),
+        # The envelope deliberately carries NO grant_id — the pre-fix source.
+        _ask_owner_directly=lambda owner, frame, required_capability="": {
+            "op": "ack",
+            "detail": {
+                "kind": "refresh_take",
+                "ok": True,
+                "statement": statement,
+                "refresh": "refresh-0",
+                "access": "access-0",
+                "expires": int(time.time() * 1000) + 3_600_000,
+                "provider": STUB_PROVIDER,
+            },
+        },
+    )
+    for name in ("refresh_take", "_write_delegated_row", "refresh_fence"):
+        setattr(mesh, name, getattr(MeshCredentialClient, name).__get__(mesh))
+
+    taken = mesh.refresh_take(KEY)
+
+    assert taken["ok"], taken
+    # The verified statement is the source, so the row is a DELEGATION.
+    assert taken["grant_id"] == "rd_0007"
+    rows = [
+        row
+        for row in local.list_credentials(STUB_PROVIDER, include_disabled=True)
+        if (row.data.get("mesh_origin") or {}).get("grant_id")
+    ]
+    assert len(rows) == 1
+    assert rows[0].data["mesh_origin"]["grant_id"] == "rd_0007"
+    assert local.delegated_credential_ids() == [rows[0].id]

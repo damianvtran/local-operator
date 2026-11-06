@@ -1596,11 +1596,24 @@ class MeshCredentialClient:
             )
         except (refresh_mod.RefreshRefused, refresh_mod.RefreshUnknown) as exc:
             return self._refresh_refusal(key, "grant_invalid", str(exc))
+        # THE ROW'S PROVENANCE COMES FROM THE VERIFIED STATEMENT (R2-2), never from
+        # the answer's envelope: ``detail["grant_id"]`` is unsigned, so an answer
+        # that omitted or renamed it would land a real delegated row that reads as
+        # a sync copy ever after — and a copy is precisely what the fence does not
+        # guard. `install` returned the verified grant it wrote, so the row and the
+        # document agree by construction.
+        verified = refresh_mod.read_statement_grant(
+            str(installed.get("statement") or ""), root=self.root
+        )
+        if verified is None:
+            return self._refresh_refusal(
+                key, "grant_invalid", "the installed delegation could not be re-read"
+            )
         row_written = self._write_delegated_row(
             key,
             owner=owner,
             provider=str(detail.get("provider") or label),
-            grant_id=str(detail.get("grant_id") or ""),
+            grant_id=verified.grant_id,
             epoch=int(installed.get("epoch") or 0),
             data=detail,
         )
@@ -1614,13 +1627,13 @@ class MeshCredentialClient:
             credential_key=key,
             act=self.self_device,
             sub=owner,
-            grant_id=str(detail.get("grant_id") or ""),
+            grant_id=verified.grant_id,
             epoch=int(installed.get("epoch") or 0),
         )
         return {
             "ok": True,
             "key": key,
-            "grant_id": str(detail.get("grant_id") or ""),
+            "grant_id": verified.grant_id,
             "epoch": int(installed.get("epoch") or 0),
             "code": "",
             "message": "",
@@ -1819,6 +1832,21 @@ class MeshCredentialClient:
         origin = (data or {}).get("mesh_origin")
         key = str((origin or {}).get("key") or "")
         grant_id = str((origin or {}).get("grant_id") or "")
+        # THE GUARD ITS SIBLINGS ALREADY HAD (R2-1). The store calls this watch for
+        # EVERY row once a fence is installed, and a fence is installed on any
+        # device that holds a delegation document or a delegated row — so without
+        # this check an ordinary local login lost both its secrets and gained a
+        # family-moved marker that told the operator to sign in again. "Cannot
+        # tell" resolves to STOP (§3.5); it never resolves to destroying a login
+        # this delegation was never about.
+        #
+        # Two conditions, and the second is the one that makes the marker
+        # meaningful: the row must be delegation-sourced AND its grant must be the
+        # one the document currently holds — otherwise this node has moved on (a
+        # new delegation, or none), and stopping would be a stop for a family it
+        # no longer owns.
+        if not self._owns_delegation(origin, key, grant_id):
+            return {"stopped": False, "reported": False, "reason": "not_delegated"}
         self._auth_store().wipe_delegated_material(credential_id)
         try:
             refresh_mod.stop(
@@ -1843,6 +1871,34 @@ class MeshCredentialClient:
         else:
             report = {"reported": False, "reason": "no_key"}
         return {"stopped": True, **report}
+
+    def _owns_delegation(self, origin: Any, key: str, grant_id: str) -> bool:
+        """Whether this row is the delegation the document on disk currently holds.
+
+        ONE predicate for the watch's two destructive arms, so a future third
+        caller cannot re-derive it and forget half. ``grant_id`` is what separates a
+        delegated row from a sync COPY (``sync`` writes ``mesh_origin`` without a
+        grant), which is the same discriminator the fence uses.
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+
+        if not key or not grant_id:
+            return False
+        try:
+            document = refresh_mod.load(self.network_id, self.root, recipient=self.self_device)
+        except refresh_mod.RefreshUnknown:
+            # Unprovable evidence is not permission to destroy: the fence already
+            # refuses every POST in this state, so there is nothing here to stop.
+            return False
+        if document is None:
+            return False
+        try:
+            held = refresh_mod.read_statement_grant(
+                str(document.get("statement") or ""), root=self.root
+            )
+        except Exception:  # noqa: BLE001 — an unreadable statement is not this grant
+            return False
+        return held is not None and held.grant_id == grant_id and held.key == key
 
     def report_family_moved(self, key: str) -> dict[str, Any]:
         """Tell the owner the family moved, and say whether it was told.

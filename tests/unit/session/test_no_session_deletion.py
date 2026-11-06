@@ -139,21 +139,6 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
             "artifact-id pattern; a stray file a human left there is skipped."
         ),
     ),
-    # THE REFRESH DELEGATION DOCUMENT (mesh-refresh-delegation §3.7d). Its path is
-    # ``<config>/network/credentials/<network_id>/refresh.json`` — the per-network
-    # credentials directory ``placement`` owns, never a session directory and never
-    # a transcript, and by design NOT copyable with a session: a copied delegation
-    # would hand another device a second refresher. ``wipe`` also refuses a
-    # caller-supplied name (``refresh_path`` validates the network id first).
-    (
-        "local_operator/network/credentials/refresh.py::wipe",
-        "<path>.unlink",
-        (
-            "Removes this device's own delegation document on handback or a failed "
-            "family; one fixed file name under the per-network credentials dir, "
-            "called only from the refresh module's own lifecycle."
-        ),
-    ),
     # The bridge connector's registration file, on all three receivers the
     # cross-platform install added (the original entry covered macOS only). Each
     # path is FIXED by the platform helper, never caller-supplied: ``plist_path()``

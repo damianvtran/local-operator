@@ -475,24 +475,26 @@ def stop(
     return stopped
 
 
-def wipe(network_id: str, root: Path | None = None) -> None:
-    """Remove the delegation document entirely (handback/failure).
+def read_statement_grant(
+    statement: str, *, root: Path | None = None, operator_spki: Any = None
+) -> Any:
+    """The VERIFIED grant a stored statement carries, or ``None``. Never raises.
 
-    Best-effort and idempotent: a node that already lost the file has nothing to
-    wipe, and reporting that as an error would make a completed handback look
-    failed. The material itself is removed by the caller through its own row.
+    One reader for "which grant is this document actually about", because the two
+    callers that ask have opposite jobs — one decides whether a row may be wiped
+    (R2-1), the other stamps a row's provenance (R2-2) — and a second spelling of
+    the question is how the two would drift. Verification, not parsing: an
+    unverifiable statement names no grant this device may act on.
     """
-    path = refresh_path(network_id, root)
-    with (
-        store._write_lock(path),
-        placement._cross_process_lock(
-            path.with_name(LOCK_FILENAME), root=placement._config_root(root)
-        ),
-    ):
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            return
+    from local_operator.operator.verify import verify_refresh_grant
+
+    if not statement:
+        return None
+    spki = operator_spki if operator_spki is not None else anchor_spki_for(root)
+    try:
+        return verify_refresh_grant(statement, operator_spki=spki, now=time.time())
+    except Exception:  # noqa: BLE001 — unprovable is "no grant", never a raise
+        return None
 
 
 def note_deny(
