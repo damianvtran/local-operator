@@ -26,11 +26,11 @@ from typing import Any
 import pytest
 
 from local_operator.network.credentials.healing import (
+    CAUSE_BY_CODE,
     CAUSE_GRANT,
     CAUSE_OWNER_LOGIN,
     CAUSE_UNKNOWN,
     CAUSE_UNREACHABLE,
-    CAUSE_BY_CODE,
     HealOutcome,
     cause_for_code,
     cause_for_evidence,
@@ -279,7 +279,10 @@ def test_a_refused_mcp_borrow_records_the_cause_durably(tmp_path: pathlib.Path) 
     """
     from local_operator.network.credentials import mcp_state
     from local_operator.network.credentials.mcp_bearer import BrokeredBearerAuth
-    from local_operator.network.credentials.types import BrokerError, credential_key_for_mcp
+    from local_operator.network.credentials.types import (
+        BrokerError,
+        credential_key_for_mcp,
+    )
 
     url = "https://mcp.example.test/mcp"
     key = credential_key_for_mcp(url)
