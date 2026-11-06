@@ -396,11 +396,13 @@ def test_envelope_fields_that_are_not_record_logs_render_as_key_value_lines() ->
     raw = _channel_envelope(
         _message_block("body"), extra={"has_more": True, "next_cursor": "", "count": 3}
     )
-    assert diff.normalize(raw).split("\n")[-3:] == [
-        "has_more: true",
-        "next_cursor:",
-        "count: 3",
-    ]
+    normalized = diff.normalize(raw)
+    assert normalized.split("\n")[-3:] == ["has_more: true", "next_cursor:", "count: 3"]
+    # Bookkeeping fields are their own lines now, so a churning cursor can be
+    # ignored without touching the records it sits beside.
+    kept = diff.normalize(raw, ignore=("^next_cursor:", "^has_more:"))
+    assert "next_cursor" not in kept and "has_more" not in kept
+    assert "body" in kept
 
 
 def test_a_container_field_renders_as_compact_json_with_sorted_keys() -> None:

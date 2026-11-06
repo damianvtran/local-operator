@@ -140,7 +140,10 @@ monitor({op:"create", name:"product-feedback-watch",
   session's watch is dormant — `lop monitor status` marks the row `idle` — so
   a channel watch belongs to a session that stays open. Record where it lives
   when you arm it.
-- A quiet watch is not a working one: the listing reads `N checks, 0
+- **Other fields in the reply** (a cursor, a `has_more` flag) are lines of
+  their own too, so `ignore: ["^next_cursor:"]` drops one that churns
+  without touching the messages beside it.
+- **A quiet watch is not a working one**: the listing reads `N checks, 0
   deliveries` with the suppression count when the gate filed changes as
   non-material. Check that before concluding a channel had nothing to say.
 
