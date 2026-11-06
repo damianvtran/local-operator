@@ -2884,18 +2884,27 @@ def _attachment_query(
     return (tenants[0] if tenants else None), expected[0]
 
 
-def _upload_query(request: Request) -> tuple[str | None, str, str]:
-    """The upload route's closed query: the attachment table plus ``mode``.
+def _closed_mode(request: Request) -> Literal["image", "file"]:
+    """The byte routes' ``mode`` query, closed to ``image`` (default) and ``file``.
 
-    ``mode`` is closed to ``image`` (the default when absent) and ``file``; a
-    repeated or unknown value is refused, never mapped to the image path, so a
-    renderer that asked for file mode can never silently stage an image.
+    A repeated or unknown value is refused, never mapped to the image lane, so a
+    caller that asked for the file lane can never silently land on the image one.
     """
 
     modes = request.query_params.getlist("mode")
     if len(modes) > 1 or (modes and modes[0] not in ("image", "file")):
         _raise_read("invalid_request")
-    mode = modes[0] if modes else "image"
+    return "file" if modes and modes[0] == "file" else "image"
+
+
+def _upload_query(request: Request) -> tuple[str | None, str, str]:
+    """The upload route's closed query: the attachment table plus ``mode``.
+
+    ``mode`` is closed by :func:`_closed_mode`, so a renderer that asked for file
+    mode can never silently stage an image.
+    """
+
+    mode = _closed_mode(request)
     tenant_id, expected = _attachment_query(request, frozenset({"mode"}))
     return tenant_id, expected, mode
 
@@ -2903,18 +2912,17 @@ def _upload_query(request: Request) -> tuple[str | None, str, str]:
 def _download_query(request: Request) -> tuple[str | None, str, Literal["image", "file"]]:
     """The member byte route's closed query: the attachment table plus ``mode``.
 
-    Same vocabulary as :func:`_upload_query`, for the same reason: the class is
-    STATED by the caller and never inferred from a body, so an image id asked
-    for as a file (or the reverse) is a request the far end must refuse rather
-    than a request whose class this route guessed. ``image`` is the default, so
-    every existing caller's wire is unchanged; a repeated or unknown value is
-    refused rather than mapped to the image lane.
+    ``mode`` never reaches the hub: the hub serves an attachment by its STORED
+    type (png/jpeg for an image, ``application/octet-stream`` for a generic file)
+    whatever the caller wanted. ``mode`` only selects which lane CORE accepts —
+    the served type, its bound and the ``Accept`` it sends — so an image id asked
+    for as a file (or the reverse) is refused by core's served-type check in
+    ``fetch_attachment`` (and again in the route), not by the hub. That check is
+    the class-mismatch refusal and must not be deleted as redundant. ``image`` is
+    the default, so every existing caller's wire is unchanged.
     """
 
-    modes = request.query_params.getlist("mode")
-    if len(modes) > 1 or (modes and modes[0] not in ("image", "file")):
-        _raise_read("invalid_request")
-    mode: Literal["image", "file"] = "file" if modes and modes[0] == "file" else "image"
+    mode = _closed_mode(request)
     tenant_id, expected = _attachment_query(request, frozenset({"mode"}))
     return tenant_id, expected, mode
 

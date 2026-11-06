@@ -1056,6 +1056,37 @@ def test_the_image_lane_keeps_its_pinned_type_and_bound(proxy):
     sent = _wire_headers(state)
     assert "image/png" in sent["accept"] and "octet-stream" not in sent["accept"]
 
+    # The BOUND, not just the type: one byte past the image cap is refused even
+    # though it is far inside the file cap, so this fails if the image lane were
+    # ever handed the file lane's 25 MiB limit.
+    state["serve"] = PNG + b"\0" * (routes._ATTACHMENT_MAX_BYTES + 1 - len(PNG))
+    over = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?tenant_id=org-a"))
+    assert over.status_code == 502, over.text
+    assert over.json()["detail"]["code"] == "attachment_too_large"
+
+
+def test_an_empty_file_is_served_but_an_empty_image_is_refused(proxy):
+    """The hub accepts and serves a zero-byte generic file; zero bytes are never
+    an image. The file lane hands the empty body on with the same fixed headers,
+    and the image lane keeps its empty-body refusal."""
+
+    client, _calls, state = proxy
+    state["serve"], state["serve_type"] = b"", "application/octet-stream"
+    served = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?{FILE_QUERY}"))
+    assert served.status_code == 200, served.text
+    assert served.content == b""
+    assert served.headers["content-type"] == "application/octet-stream"
+    assert served.headers["content-disposition"] == 'attachment; filename="attachment.bin"'
+    assert served.headers["x-content-type-options"] == "nosniff"
+    assert served.headers["content-security-policy"] == "default-src 'none'; sandbox"
+    assert served.headers["cache-control"] in {"private, no-store", "no-store"}
+
+    state["serve"], state["serve_type"] = b"", "image/png"
+    refused = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?tenant_id=org-a"))
+    assert refused.status_code == 502, refused.text
+    assert refused.json()["detail"]["code"] == "bridge_invalid_response"
+    assert "content-disposition" not in refused.headers
+
 
 @pytest.mark.parametrize(
     ("mode", "served"),
@@ -1071,14 +1102,12 @@ def test_a_class_mismatch_is_refused_and_never_returns_bytes(proxy, mode, served
     assert "content-disposition" not in response.headers
 
 
-@pytest.mark.parametrize(
-    "case",
-    ["another tenant", "a non-member", "revoked membership", "an expired file"],
-)
-def test_hub_refusals_are_surfaced_never_replaced_by_bytes(proxy, case):
-    """The hub owns tenant, membership and expiry, and answers all four alike.
+def test_the_hubs_uniform_refusal_is_surfaced_never_replaced_by_bytes(proxy):
+    """The hub owns tenant, membership and expiry, and answers every one of them
+    with the same ``404 attachment_not_found`` — so that single answer is all this
+    route ever sees, and one row covers it honestly.
 
-    This route's contract is to surface that one refusal unchanged — same status,
+    This route's contract is to surface that refusal unchanged — same status,
     same code, no attachment headers — rather than to substitute bytes, a local
     status, or an empty 200. The request really reached the hub, which is why the
     refusal is evidence of a decision and not of a local short-circuit.
@@ -1087,7 +1116,7 @@ def test_hub_refusals_are_surfaced_never_replaced_by_bytes(proxy, case):
     client, calls, state = proxy
     state["error"] = (404, "attachment_not_found")
     response = client.get(_owner(f"{BASE}/messages/{MID}/attachments/{AID}?{FILE_QUERY}"))
-    assert response.status_code == 404, f"{case}: {response.text}"
+    assert response.status_code == 404, response.text
     assert response.json()["detail"]["code"] == "attachment_not_found"
     assert "content-disposition" not in response.headers
     assert [call[0] for call in calls] == ["GET"]

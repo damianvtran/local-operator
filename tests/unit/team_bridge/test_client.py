@@ -10,6 +10,7 @@ so the owner-pin rules run against rows, not against a resolver stub.
 
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1509,3 +1510,48 @@ async def test_file_mode_refuses_a_second_type_knob_or_an_agent_lane(kwargs):
     client = _make_client(lambda request: pytest.fail("no request may be sent"))
     with pytest.raises(ValueError):
         await client.fetch_attachment(FILE_CID, FILE_MID, FILE_AID, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("mode", "served", "refused"),
+    [("file", "application/octet-stream", False), ("image", "image/png", True)],
+    ids=["an-empty-file-is-a-file", "an-empty-image-is-refused"],
+)
+async def test_an_empty_body_is_refused_on_the_image_lane_only(mode, served, refused):
+    """The hub accepts and serves a zero-byte GENERIC file, so the file lane must
+    hand it on; zero bytes are never a decodable image, so the image lane must not."""
+
+    client = _make_client(
+        lambda request: httpx.Response(200, content=b"", headers={"content-type": served})
+    )
+    if refused:
+        with pytest.raises(BridgeRefusal) as info:
+            await client.fetch_attachment(FILE_CID, FILE_MID, FILE_AID, mode=mode)
+        assert info.value.code == "bridge_invalid_response"
+        return
+    data, mime = await client.fetch_attachment(FILE_CID, FILE_MID, FILE_AID, mode=mode)
+    assert (data, mime) == (b"", "application/octet-stream")
+
+
+def test_file_mode_has_exactly_one_caller_the_desktop_route():
+    """``mode`` is the human save lane's switch; the agent lanes stay image-only.
+
+    The client refuses file mode alongside ``purpose``/``endpoint_id``, but a new
+    agent-side caller could still pass ``mode`` alone and read a 25 MiB body of an
+    unnamed type. Pinning the call sites makes that adoption a visible, reviewed
+    change to this test instead of a silent widening.
+    """
+
+    package = Path(tb_client.__file__).resolve().parents[1]
+    callers: set[str] = set()
+    for source in package.rglob("*.py"):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "fetch_attachment"
+                and any(keyword.arg == "mode" for keyword in node.keywords)
+            ):
+                callers.add(source.relative_to(package).as_posix())
+    assert callers == {"server/routes/desktop_team_bridge.py"}

@@ -5110,7 +5110,12 @@ class TeamBridgeClient:
         if response.status_code >= 400:
             raise _refusal(response)
         mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        if response.status_code != 200 or mime not in accepted or not response.content:
+        # An empty body is refused on the IMAGE lane only: zero bytes are never a
+        # decodable png/jpeg. A generic file may legitimately be empty — the hub
+        # accepts and serves a zero-byte file (agent-server classifier + its
+        # integration test) — so refusing it here would turn a real file into a 502.
+        empty_refused = mode == "image" and not response.content
+        if response.status_code != 200 or mime not in accepted or empty_refused:
             raise BridgeRefusal(
                 "bridge_invalid_response",
                 "Radient returned an invalid response.",  # i18n: ignore, no code
