@@ -1591,6 +1591,70 @@ def test_served_model_count_and_hash_are_recorded_and_migrated(tmp_path):
     store.close()
 
 
+def test_the_telemetry_columns_survive_a_db_missing_message_count(tmp_path):
+    """A DB whose ``message_count`` column is absent still lands the OTHER two
+    telemetry values in their OWN columns.
+
+    Why this needs its own test (round-1 review R1-5): the optional-column
+    contract drops an absent column from BOTH the insert SQL and the row tuple
+    (``_insert_indices``), and the failure that hides there is POSITIONAL. A
+    selector that dropped ``served_model`` or ``prompt_hash`` as well, or
+    shifted the selector by one, still writes a row and still returns 1 -- so
+    only reading the columns back proves the values did not slide into each
+    other's slots. Membership in ``_OPTIONAL_COLUMN_NAMES`` says nothing about
+    the index alignment that actually writes the row.
+    """
+    import dataclasses
+    import sqlite3
+
+    db = tmp_path / "no_message_count.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          {_REASONING_TOKENS_COLUMN} INTEGER, context_tokens INTEGER,
+          cost_micro INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 0,
+          {_PRE_IMAGES_COMPONENT_COLUMNS}
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    store._connect()  # runs the migration, which would normally add the column
+    # Drop what the migration just added, so the insert really hits a table that
+    # lacks it: flipping ``_present_optional`` alone would leave the column in
+    # place and a broken plan that still named it would succeed unnoticed.
+    conn = store._connect()
+    assert conn is not None
+    conn.execute("ALTER TABLE calls DROP COLUMN message_count")
+    conn.commit()
+    from local_operator.analytics.store import _OPTIONAL_COLUMN_NAMES
+
+    store._present_optional = _OPTIONAL_COLUMN_NAMES - {"message_count"}
+    store._rebuild_insert_plan()
+
+    stamped = dataclasses.replace(
+        _snap(),
+        served_model="deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        message_count=7,
+        prompt_hash="a" * 64,
+    )
+    assert store.record_batch([stamped]) == 1
+
+    conn = store._connect()
+    assert conn is not None
+    row = conn.execute("SELECT served_model, prompt_hash FROM calls").fetchone()
+    # No shift and no cross-contamination: each value is in its own column.
+    assert row == ("deepseek-ai/DeepSeek-V4.1-Flash-1017", "a" * 64)
+    store.close()
+
+
 def test_served_model_is_never_the_requested_route(tmp_path):
     """The two are different facts and the ledger keeps both: ``model_id`` is the
     route this harness requested, ``served_model`` is what the vendor said

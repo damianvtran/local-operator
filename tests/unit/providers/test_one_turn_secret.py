@@ -356,13 +356,20 @@ async def test_encoded_metadata_and_errors_fail_closed_with_noop_sink() -> None:
         StreamEndEvent(
             stop_reason="error",
             served_provider=encoded,
+            served_model=encoded,
             provider_payload={"native": canary},
             error="provider quoted " + canary,
             usage=Usage(provider=encoded, model_id=encoded),
         ),
     )
     assert isinstance(end_event, StreamEndEvent)
+    # Round-1 review R1-5: ``served_model`` rides the SAME path as the served
+    # host -- both are provider-controlled text carried off the wire -- so it
+    # must be scrubbed too. Without this assertion the scrub could be dropped
+    # from the end-of-stream update and a leaked provider slug would still reach
+    # the ledger with every other test here green.
     assert end_event.served_provider is None
+    assert end_event.served_model is None
     assert end_event.provider_payload is None
     assert (
         end_event.usage is not None
@@ -371,6 +378,21 @@ async def test_encoded_metadata_and_errors_fail_closed_with_noop_sink() -> None:
     )
     assert end_event.error is not None
     assert canary not in end_event.error and encoded not in end_event.error
+
+    # The OTHER direction, so the gate is not simply "drop every model name":
+    # metadata with no secret in it must survive untouched, or the observability
+    # this change exists for would be gone on every one-turn call.
+    clean_event = _one_turn_scrub_stream_event(
+        request,
+        StreamEndEvent(
+            stop_reason="stop",
+            served_provider="Anthropic",
+            served_model="deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        ),
+    )
+    assert isinstance(clean_event, StreamEndEvent)
+    assert clean_event.served_provider == "Anthropic"
+    assert clean_event.served_model == "deepseek-ai/DeepSeek-V4.1-Flash-1017"
 
 
 async def _one_turn_metadata_driver(

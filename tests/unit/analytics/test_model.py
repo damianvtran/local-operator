@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 
@@ -777,7 +778,10 @@ def test_request_fingerprint_changes_when_prompt_context_changes() -> None:
         {"system_blocks": ["persona EDITED", "## Available tools\ntools", "env", "<skills/>"]},
         {"messages": [Message(role="user", content=[TextContent(text="goodbye")])]},
         {"tools": []},
-        {"model": ModelSpec(provider="radient", model_id="deepseek-v4.1-flash")},
+        # The route is NOT on this list any more: as of form version 2 the digest
+        # means "this context", not "this context on this route" (round-1 review
+        # R1-2), so a different ``ModelSpec`` must NOT move it. That direction is
+        # pinned by ``test_request_fingerprint_is_blind_to_the_route_that_serves_it``.
     ):
         assert request_fingerprint(base.model_copy(update=changed))[0] != (
             request_fingerprint(base)[0]
@@ -787,9 +791,7 @@ def test_request_fingerprint_changes_when_prompt_context_changes() -> None:
 def test_request_fingerprint_ignores_routing_and_sampling_knobs() -> None:
     """``prompt_cache_key``, the host pin, sampling and effort choose HOW the
     same context is served. Folding them in would make two calls over identical
-    context hash differently and defeat the comparison. (There is no
-    ``provider_payload`` on a request at all — it lives on the response end
-    event, so it cannot affect this hash by construction.)"""
+    context hash differently and defeat the comparison."""
     base = _fingerprint_request()
     variant = base.model_copy(
         update={
@@ -855,6 +857,143 @@ def test_request_fingerprint_summarises_media_without_hashing_bytes() -> None:
         ]
     )
     assert request_fingerprint(other_bytes)[0] == request_fingerprint(one)[0]
+
+
+def test_request_fingerprint_is_blind_to_the_route_that_serves_it() -> None:
+    """Round-1 review R1-2: the digest means "this context", never "this context
+    on this route".
+
+    ``provider`` / ``model_id`` left the canonical form at version 2 because the
+    comparison this column exists for IS the failover one: identical context
+    served from a different provider must compare equal, with the route left
+    legible in the row's own ``provider`` / ``model_id`` / ``served_model``
+    columns. Before the change these two requests hashed differently.
+    """
+    base = _fingerprint_request()
+    failover = base.model_copy(
+        update={"model": ModelSpec(provider="openrouter", model_id="deepseek/deepseek-v4.1")}
+    )
+    assert request_fingerprint(failover) == request_fingerprint(base)
+
+
+def test_request_fingerprint_sees_a_tool_error_flag() -> None:
+    """Round-1 review R1-1: ``is_error`` reaches the wire -- the Anthropic client
+    sends ``is_error: true`` on the ``tool_result`` block -- so it changes what
+    the model reads. The record omitted it while the docstring claimed it was
+    covered; the two now agree."""
+    ok = _fingerprint_request(
+        messages=[Message(role="tool", tool_call_id="c1", content=[TextContent(text="boom")])]
+    )
+    failed = _fingerprint_request(
+        messages=[
+            Message(
+                role="tool",
+                tool_call_id="c1",
+                is_error=True,
+                content=[TextContent(text="boom")],
+            )
+        ]
+    )
+    assert request_fingerprint(failed)[0] != request_fingerprint(ok)[0]
+
+
+def test_request_fingerprint_sees_where_media_sits_among_text() -> None:
+    """R1-1: ORDER matters, not just membership. The old record collected the
+    texts and collapsed media into a sorted count, so these two messages -- the
+    same two text blocks and the same single image, interleaved differently --
+    hashed alike."""
+    media_between = _fingerprint_request(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="before"),
+                    ImageContent(data="aGVsbG8=", mime_type="image/png"),
+                    TextContent(text="after"),
+                ],
+            )
+        ]
+    )
+    media_last = _fingerprint_request(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="before"),
+                    TextContent(text="after"),
+                    ImageContent(data="aGVsbG8=", mime_type="image/png"),
+                ],
+            )
+        ]
+    )
+    assert request_fingerprint(media_between)[0] != request_fingerprint(media_last)[0]
+
+
+def test_request_fingerprint_covers_the_native_replay_substrate() -> None:
+    """R1-1: replayed native items ARE request context -- all four wire builders
+    splice them back into the outgoing body -- so a rebuild that drops the
+    payload changes what the model is given and must move the digest.
+
+    It must stay BOUNDED while doing so: the items are the response's own bytes
+    (one reasoning block can outweigh the whole visible turn) and this runs on
+    the event loop, so the summary covers item type/id and the true count, never
+    the content. The collisions that trade accepts are pinned below.
+    """
+
+    def _with_items(items: list[dict[str, Any]]) -> Any:
+        return _fingerprint_request(
+            messages=[
+                Message(
+                    role="assistant",
+                    content=[TextContent(text="done")],
+                    provider_payload={"native_replay": {"items": items}},
+                )
+            ]
+        )
+
+    carried = _with_items(
+        [
+            {"type": "reasoning", "id": "rs_1", "content": "x" * 100_000},
+            {"type": "message", "id": "msg_1"},
+        ]
+    )
+    dropped = _fingerprint_request(
+        messages=[Message(role="assistant", content=[TextContent(text="done")])]
+    )
+    assert request_fingerprint(carried)[0] != request_fingerprint(dropped)[0]
+    # Stable across a recomposition of the same context -- the one property the
+    # column is worth anything for.
+    assert request_fingerprint(carried) == request_fingerprint(
+        _with_items(
+            [
+                {"type": "reasoning", "id": "rs_1", "content": "x" * 100_000},
+                {"type": "message", "id": "msg_1"},
+            ]
+        )
+    )
+    # Content is NOT covered (a different reasoning body under the same item
+    # types/ids collides). Stated here so nobody reads that as a bug later.
+    assert (
+        request_fingerprint(
+            _with_items(
+                [
+                    {"type": "reasoning", "id": "rs_1", "content": "y" * 100_000},
+                    {"type": "message", "id": "msg_1"},
+                ]
+            )
+        )[0]
+        == request_fingerprint(carried)[0]
+    )
+    # Truncation cannot collide with a genuinely shorter list: the true count is
+    # recorded beside the capped marker prefix.
+    assert (
+        request_fingerprint(
+            _with_items([{"type": "message", "id": f"m{index}"} for index in range(32)])
+        )[0]
+        != request_fingerprint(
+            _with_items([{"type": "message", "id": f"m{index}"} for index in range(33)])
+        )[0]
+    )
 
 
 def test_request_fingerprint_never_raises_on_a_hostile_tool_schema() -> None:

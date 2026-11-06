@@ -7528,12 +7528,23 @@ class SessionStreamFn:
 
         Latency contract: recording happens ONLY after the stream is fully
         consumed (``async for`` completes), so it adds nothing to the response
-        the caller is awaiting. The single piece of event-loop work — reading
-        the request's component character lengths — is done up front into a
-        scalar snapshot because the transcript mutates the messages after the
-        call returns; tokenising, apportioning, and the SQLite write all happen
-        on the recorder's background thread. Everything is wrapped so a failure
-        in analytics can never break a turn.
+        the caller is awaiting. TWO pieces of event-loop work happen up front,
+        into a scalar snapshot, because the transcript mutates the messages
+        after the call returns: reading the request's component character
+        lengths, and the canonical context digest
+        (:func:`local_operator.analytics.request_fingerprint` — JSON
+        canonicalisation plus one sha256). Tokenising, apportioning, and the
+        SQLite write all happen on the recorder's background thread. Everything
+        is wrapped so a failure in analytics can never break a turn.
+
+        The digest's cost is MEASURED, not assumed: at the 291k-token scale
+        (1.16 MB of context) it is 3.5 ms of event-loop time per call and 2.4 MB
+        of peak Python allocation — bounded, linear in the context, and accepted
+        deliberately rather than moved off the loop. Deferring it to the writer
+        thread would be the worse trade it looks like a fix for: the transcript
+        is mutated after this returns, so a later read would fingerprint a
+        DIFFERENT context and the column would quietly stop describing what was
+        sent.
         """
         started_at = time.monotonic()
         request_id = uuid.uuid4().hex
@@ -7579,7 +7590,10 @@ class SessionStreamFn:
         # sub-millisecond even on a very large context) and safe to hand a
         # background thread, unlike the live message objects.
         try:
-            from local_operator.analytics import request_fingerprint, snapshot_component_chars
+            from local_operator.analytics import (
+                request_fingerprint,
+                snapshot_component_chars,
+            )
 
             component_chars = snapshot_component_chars(request)
             # Beside the component lengths and for the same reason: both are read

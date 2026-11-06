@@ -6301,9 +6301,7 @@ async def test_the_last_chunk_naming_a_served_model_wins() -> None:
                 {"model": "vendor/second-host", "choices": [{"delta": {}, "index": 0}]},
                 {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
             ],
-        ).stream(
-            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]), "sk-test"
-        )
+        ).stream(ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]), "sk-test")
     )
     assert next(e for e in events if isinstance(e, StreamEndEvent)).served_model == (
         "vendor/second-host"
@@ -6320,9 +6318,7 @@ async def test_served_model_is_none_when_the_wire_does_not_name_one() -> None:
                 {"id": "gen-1", "choices": [{"delta": {"content": "ok"}, "index": 0}]},
                 {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
             ],
-        ).stream(
-            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]), "sk-test"
-        )
+        ).stream(ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]), "sk-test")
     )
     end = next(e for e in events if isinstance(e, StreamEndEvent))
     assert end.served_model is None
@@ -6352,9 +6348,7 @@ async def test_a_hostile_served_model_is_refused_not_recorded(hostile: str) -> N
                 {"model": hostile, "choices": [{"delta": {"content": "o"}, "index": 0}]},
                 {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
             ],
-        ).stream(
-            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]), "sk-test"
-        )
+        ).stream(ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]), "sk-test")
     )
     # The refused value leaves the previous good slug standing: the turn WAS
     # served by whoever the earlier chunk named.

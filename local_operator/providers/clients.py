@@ -287,12 +287,15 @@ _MAX_SERVED_PROVIDER_CHARS = 64
 def _bounded_wire_label(value: Any, limit: int) -> str | None:
     """The ONE gate for a provider-controlled label carried off the wire.
 
-    A value either comes back byte-for-byte or is refused outright: nothing is
-    normalized, truncated or stripped of control characters, because every
-    transform here would invent a label the provider never reported. Length and
+    Two things are refused outright -- leading/trailing whitespace is dropped
+    first, then an empty or over-length result and any control character are
+    rejected -- and everything else is passed through unchanged. (The earlier
+    "byte-for-byte" wording promised more than the code did: ``str.strip``
+    removes surrounding whitespace on the way in. Nothing else is rewritten, and
+    that is the property worth keeping — no case folding and no truncation,
+    because either would invent a label the provider never reported.) Length and
     control characters are the two things a hostile or broken upstream can use
-    to poison downstream state, so those are refusals; everything else is
-    passed through unchanged.
+    to poison downstream state, so those are refusals.
 
     Shared by ``_served_provider_name`` and ``_served_model_slug`` so the two
     cannot drift: they are the same discipline with different bounds.
@@ -4300,9 +4303,7 @@ class OpenAICompatClient:
                     yield StreamStartEvent(
                         response_id=_stream_id((payload.get("response") or {}).get("id"))
                     )
-                    created_model = _served_model_slug(
-                        (payload.get("response") or {}).get("model")
-                    )
+                    created_model = _served_model_slug((payload.get("response") or {}).get("model"))
                     if created_model:
                         served_model = created_model
                 # Reasoning remains invisible here, but plaintext deltas still
