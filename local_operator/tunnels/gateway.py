@@ -278,26 +278,33 @@ TERMINAL_DETAIL = {
     # not a billing event. The PHONE copy above keeps its link because a phone
     # has no billing block to read it from.
     #
-    # LENGTH: 138 cells, two rendered rows at 80 columns as the indented
-    # continuation `lop tunnel status` prints (140 cells with that two-cell
-    # indent, which is how QA round 1's Q1 counted it). Deliberately NOT trimmed
-    # on the round-2 pass, and the reason is what the sentence has to carry for
-    # readers that have no other line: the CAUSE (a Radient login that is no
-    # longer valid), the CONSEQUENCE that makes this a park rather than a retry
-    # (it stopped and will not retry by itself — the incident's own shape, and the
-    # one clause a reader cannot recover from any other surface once the
-    # connector has exited), and the REMEDY's shape (signing in again starts it
-    # again on its own, i.e. no restart command is needed). It is also the copy
-    # `state.json` persists and `DESKTOP_API.md` forwards as `connector.detail`,
-    # so a shorter sentence here is a shorter sentence everywhere. What D2 fixed
-    # was the WELDING — this sentence is now its own indented continuation row
-    # under a ONE-ROW state line, wrapping in the terminal the way prose does,
-    # rather than being the third clause of a 317-cell paragraph that buried the
-    # command. A future trim should weigh those three clauses against each other
-    # rather than against the row count.
+    # LENGTH: 134 cells, two rendered rows at 80 columns as the indented
+    # continuation `lop tunnel status` prints (136 cells with that two-cell
+    # indent, which is how QA round 1's Q1 counted it). It carries, for readers
+    # that have no other line: the CAUSE (a Radient login that is no longer
+    # valid), the CONSEQUENCE that makes this a park rather than a retry (it
+    # stopped instead of retrying — the incident's own shape, and the one clause
+    # a reader cannot recover from any other surface once the connector has
+    # exited), and the REMEDY's shape, which is CONDITIONAL and has to be: a
+    # sign-in to the SAME account re-points the tunnel at the new credential row
+    # and restarts it (`install.heal_pin_after_login`), so it needs no command —
+    # while a sign-in to a DIFFERENT account must never move that pin, and saying
+    # so here is what stops the sentence promising what the identity check
+    # refuses to do. The 2026-11-06 incident is the reason that distinction is in
+    # the copy at all: the previous clause promised "signing in again starts it
+    # again on its own" unconditionally, nothing re-bound the pin, and the
+    # promise was false in the one case an operator was reading it from. It is
+    # also the copy `state.json` persists and `DESKTOP_API.md` forwards as
+    # `connector.detail`, so a shorter sentence here is a shorter sentence
+    # everywhere. What D2 fixed was the WELDING — this sentence is its own
+    # indented continuation row under a ONE-ROW state line, wrapping in the
+    # terminal the way prose does, rather than being the third clause of a
+    # 317-cell paragraph that buried the command. A future trim should weigh
+    # those three clauses against each other rather than against the row count,
+    # and the remedy clause may not go back to being unconditional.
     LOGIN_REQUIRED: (
-        "The connector's Radient login is no longer valid, so it stopped and will not "
-        "retry by itself. Signing in again starts it again on its own."
+        "The connector's Radient login is no longer valid, so it stopped instead of "
+        "retrying. Only signing in to that same account restarts it."
     ),
 }
 
