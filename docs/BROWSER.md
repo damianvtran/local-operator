@@ -203,7 +203,8 @@ state marker:
 ```
 - combobox "Environment" [e12] [collapsed] = "Production"
 - textbox "App name" [e13] = "release-bot"
-- slider "Volume" [e14] = "Medium"
+- slider "Volume" [e14] = "3"
+- textbox "Password" [e15]
 ```
 
 `<role> "<name>" [<ref>] [<state>]… = "<value>"` is the whole shape, and the
@@ -217,26 +218,37 @@ because a value exists.
   carries a value in the accessibility tree too — it duplicates the name, so
   printing it would lengthen every line and, because `snapshot --search` matches
   the rendered line, silently change what a search term returns.
-- **The page's own rendering wins**: the `valuetext` accessibility property is
-  preferred over the raw value, so a control that renders `Medium` for a numeric
-  `3` shows `Medium`. Measured caveat on Electron 44.3.0 (Chromium 142):
-  `valuetext` is populated for native `<input type=range|number>` and **not** for
-  `aria-valuetext` on an ARIA `div[role=slider]`, where the numeric value is what
-  prints.
+- **A password field never reports a value**, not even its length. Chromium masks
+  a password's value before the driver sees it — one U+2022 BULLET per character
+  (measured on Chromium 152.0.7977.78, this repository's Electron 44.3.0, and on
+  Chrome 156.0.8078.81: a 14-character password arrives as 14 bullets) — and the
+  projection refuses a masked value outright, so the line stops at the ref:
+  `textbox "Password" [e15]`. The `protected` accessibility property
+  is honoured the same way for a browser that starts sending it (this one does
+  not). The alternative signal, the DOM's `type="password"`, is unavailable here
+  by construction: this projection is a pure function of the AX payload and holds
+  no node handle.
 - **Nothing is invented**: an absent or empty value, and a value identical to the
   accessible name, print nothing at all. Whitespace is collapsed, and the value is
-  quoted and clipped at 40 characters with a trailing `…`.
+  quoted and clipped at 40 **code points** (not UTF-16 units, so a clip can never
+  orphan half of an emoji) with a trailing `…`.
 
 The value comes from the AX tree the snapshot already fetched — no extra protocol
 round trip and no page script. Measured on a real page: a native `<select>` puts
 the selected option's text on the combobox node (`value` `"Production"`, with
-`expanded: false`, hence `[collapsed]` beside it), a `<textarea>`'s newlines and
-indentation collapse to single spaces on the line, `option` nodes carry no value
-of their own (only a `selected` bool), and a **password field's value is redacted
-by the browser before the driver sees it** — `"••••••••••••••"` for a
-14-character password. Nothing in this path prints password text, and there is no
-`protected` property to detect such a field by, so that masking is Chromium's
-guarantee rather than the projection's.
+`expanded: false`, hence `[collapsed]` beside it), a `<textarea>`'s text collapses
+to one line with the whitespace runs squeezed, `option` nodes carry no value of
+their own (only a `selected` bool), and a native `<input type=range>` carries a
+`valuetext` property whose text **equals** its numeric value.
+
+`valuetext` is preferred over the raw value where a Chromium supplies one, and
+that is future-proofing rather than an observable difference today: measured on
+Chromium 152 (this repository's Electron) and Chrome 156, the property appears
+only on native `range`/`number` inputs
+and never differs from the number, while an author's `aria-valuetext` **never**
+reaches it — a `div[role=slider]` with `aria-valuetext="Medium"` prints `= "3"`.
+A browser that starts rendering `Medium` there gets it printed with no code
+change.
 
 ## Network telemetry
 

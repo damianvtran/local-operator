@@ -364,12 +364,23 @@ test("a long value clips at 40 characters and marks the cut with an ellipsis", a
   const exact = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Exact" }, value: { value: forty }, childIds: [] });
   assert.ok(exact.includes(` = "${forty}"`), exact);
   assert.ok(!exact.includes("…"), exact);
+
+  // The clip counts CODE POINTS, not UTF-16 units: 39 "a"s followed by emoji put
+  // the 40th code point inside a surrogate PAIR. Slicing units there orphans a
+  // high surrogate, and JSON.stringify prints it as the six ASCII characters
+  // `\ud83d` — which an agent reads as the field's actual content rather than as
+  // a truncation.
+  const emoji = "a".repeat(39) + "😀".repeat(3);
+  const straddled = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Emoji" }, value: { value: emoji }, childIds: [] });
+  assert.ok(straddled.includes(` = "${"a".repeat(39)}😀…"`), straddled);
+  assert.ok(!straddled.includes("\\ud83d"), straddled);
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(straddled), "no lone surrogate in the rendered line");
 });
 
 test("valuetext outranks the raw value when Chromium sends one", async () => {
   // Measured: a native `<input type=range|number>` carries a `valuetext`
   // property; an ARIA `div[role=slider]` with aria-valuetext does NOT get one
-  // (Chromium 142 drops it), so the numeric fallback is what prints there.
+  // (Chromium 152 drops it), so the numeric fallback is what prints there.
   const rendered = await renderValue({
     nodeId: "2", backendDOMNodeId: 1, role: { value: "slider" }, name: { value: "Volume" }, value: { value: 3 },
     properties: [{ name: "valuetext", value: { value: "Medium" } }], childIds: [],
@@ -383,18 +394,41 @@ test("valuetext outranks the raw value when Chromium sends one", async () => {
   assert.ok(fallback.includes('slider "Quality" [e1] = "3"'), fallback);
 });
 
-test("only the roles an agent acts on carry a value, and a mask stays a mask", async () => {
+test("only the roles an agent acts on carry a value", async () => {
   // A button's "value" duplicates its name; printing it would lengthen every
   // line and (since `search` matches the rendered line) change search results.
   const button = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "button" }, name: { value: "Save" }, value: { value: "Save" }, childIds: [] });
   assert.ok(!button.includes("="), button);
-
-  // Measured on `<input type=password value="hunter2-SECRET">`: Chromium hands
-  // over BULLETS (`••••••••••••••`), never the text, and exposes no `protected`
-  // property to detect the field by. This assertion pins that the projection
-  // adds nothing of its own — if a future Chromium stops masking, this is the
-  // test that goes red.
-  const password = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "" }, value: { value: "••••••••••••••" }, childIds: [] });
-  assert.ok(!password.includes("hunter2"), password);
-  assert.ok(password.includes('textbox [e1] = "••••••••••••••"'), password);
 });
+
+test("a password field yields no value segment at all, not even its length", async () => {
+  // Measured on `<input type=password value="hunter2-SECRET">` against Chromium
+  // 152 and Chrome 156: the browser hands over a BULLET RUN (one U+2022 per character),
+  // never the text, and this Chromium's AX payload carries no `protected`
+  // property to identify the field by. Printing the run would publish the
+  // secret's exact length, so the projection refuses a masked value outright.
+  //
+  // The assertion is written to FAIL on any value segment whatsoever: no quote
+  // after an ` = `, no bullet, no secret. That is the property the operator
+  // asked for, and it is the only one a synthetic AX payload can prove — the
+  // masking itself is Chromium's, and only a real-path probe can cover it.
+  const masked = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Password" }, value: { value: "\u2022".repeat(24) }, childIds: [] });
+  assert.ok(!masked.includes(' = "'), masked);
+  assert.ok(!masked.includes("\u2022"), masked);
+  assert.ok(!/hunter2|secret/i.test(masked), masked);
+  assert.ok(masked.includes('textbox "Password" [e1]'), masked);
+
+  // The same refusal through the AX property a future Chromium may send.
+  const protectedField = await renderValue({
+    nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Password" },
+    value: { value: "hunter2-SECRET" }, properties: [{ name: "protected", value: { value: true } }], childIds: [],
+  });
+  assert.ok(!protectedField.includes(' = "'), protectedField);
+  assert.ok(!/hunter2|secret/i.test(protectedField), protectedField);
+
+  // And the refusal is TARGETED: an ordinary field with a real value still
+  // prints, so the mask rule cannot quietly mute every text box.
+  const ordinary = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Password hint" }, value: { value: "ask the operator" }, childIds: [] });
+  assert.ok(ordinary.includes('textbox "Password hint" [e1] = "ask the operator"'), ordinary);
+});
+

@@ -133,6 +133,10 @@ const VALUE_BEARING = new Set(["combobox", "option", "listbox", "textbox", "spin
  *  amount and a person's name intact. */
 const VALUE_CLIP = 40;
 
+/** A value that is nothing but bullets is Chromium's password MASK, not content
+ *  (see `valueSuffix`). */
+const MASK_ONLY = /^\u2022+$/u;
+
 /* One line's worth of a control's value.
  *
  * WHY IT IS APPENDED AFTER THE STATE MARKERS, and this is the constraint that
@@ -144,9 +148,34 @@ const VALUE_CLIP = 40;
  * option label containing `"` or a newline must not be able to forge a second
  * predicate on the line.
  *
- * `valuetext` outranks the raw value because it is the page's own rendering of
- * it: a slider with `aria-valuetext="Medium"` and a numeric value of 3 means
- * "Medium" to the person using the page, and that is the fact worth printing.
+ * A PASSWORD FIELD NEVER REPORTS A VALUE, and this is the one place the
+ * projection can enforce that. Chromium masks the value before the driver sees
+ * it — every character becomes U+2022 BULLET (measured on Chromium 152.0.7977.78,
+ * this repository's Electron 44.3.0, and on Chrome 156.0.8078.81: a 14-character
+ * password arrives as 14 bullets) — and printing that run would
+ * hand an agent the password's exact LENGTH, which is password-derived material
+ * that no snapshot carried before this projection existed. So a masked value
+ * emits no suffix: the line still says `textbox "Password" [e3]`, it just never
+ * says how long the secret is. `protected` is honoured too for a Chromium that
+ * starts sending it; it is absent from this payload (measured), so the mask
+ * shape is the signal that actually fires.
+ *
+ * WHY NOT READ `type="password"` OFF THE DOM, which is how `element-query.ts`
+ * protects the same field: this module is the PURE half of the path — both
+ * hosts vendor it and it is chrome.*- and DOM-free by construction — so it has
+ * no node handle to ask and stays total over the AX payload alone. The mask
+ * shape is available in every host against every Chromium, and errs the safe
+ * way: a page whose ordinary field genuinely holds only bullets loses a value
+ * line, where the alternative loses a secret.
+ *
+ * `valuetext` outranks the raw value where a Chromium supplies one. Measured on
+ * Chromium 152 (this repository's Electron) and Chrome 156: the property is
+ * populated only for native
+ * `range`/`number` inputs and its text always EQUALS the numeric value ("3"),
+ * while an author's `aria-valuetext` never reaches the property at all — a
+ * `div[role=slider]` with aria-valuetext="Medium" prints `= "3"`. The
+ * preference is future-proofing, not an observable benefit today: a browser
+ * that starts rendering "Medium" there gets it printed with no code change.
  *
  * A value identical to the accessible name is dropped: `<option
  * value="production">Production</option>` would print `Production` twice on one
@@ -155,6 +184,11 @@ function valueSuffix(node: AXNode, name: string): string {
   const role = String(node.role?.value ?? "");
   if (!VALUE_BEARING.has(role)) return "";
   const property = (propertyName: string) => node.properties?.find((entry) => entry.name === propertyName)?.value.value;
+  // The mask/protected refusal runs FIRST, before the value is even selected: a
+  // password must not be able to reach the clip, the name comparison or any
+  // branch that would render something derived from it.
+  const protectedField = property("protected");
+  if (protectedField === true || protectedField === "true") return "";
   const valuetext = property("valuetext");
   const preferred = typeof valuetext === "string" && valuetext.trim() ? valuetext : node.value?.value;
   // Numbers are real values (a `spinbutton` holds 3, not "3"); booleans are
@@ -165,8 +199,13 @@ function valueSuffix(node: AXNode, name: string): string {
   // would otherwise render as one enormous line and the clip would cut it in
   // the middle of the layout rather than the middle of the text.
   const collapsed = String(preferred).replace(/\s+/g, " ").trim();
-  if (!collapsed || collapsed === name.replace(/\s+/g, " ").trim()) return "";
-  const clipped = collapsed.length > VALUE_CLIP ? `${collapsed.slice(0, VALUE_CLIP)}…` : collapsed;
+  if (!collapsed || MASK_ONLY.test(collapsed)) return "";
+  if (collapsed === name.replace(/\s+/g, " ").trim()) return "";
+  // Clip by CODE POINT, not by UTF-16 unit: slicing units can cut an emoji in
+  // half and JSON.stringify then prints the orphaned half as the six ASCII
+  // characters `\ud83d`, which an agent reads as the field's literal content.
+  const points = Array.from(collapsed);
+  const clipped = points.length > VALUE_CLIP ? `${points.slice(0, VALUE_CLIP).join("")}…` : collapsed;
   return ` = ${JSON.stringify(clipped)}`;
 }
 
@@ -295,7 +334,8 @@ export interface SnapshotWindow {
 }
 
 export interface WindowOptions {
-  /** Case-insensitive substring; matched against the rendered line (role+name). */
+  /** Case-insensitive substring; matched against the rendered line (role, name
+   *  and value — see the note below `windowSnapshot`). */
   search?: string;
   /** 1-based first line to return (default 1). */
   start?: number;
@@ -305,9 +345,13 @@ export interface WindowOptions {
 
 /* Why the search matches the RENDERED line rather than the AX name: the line
  * is what the agent has in front of it, and an agent hunting a control knows
- * either its role ("checkbox") or its name ("Active"). Matching both means one
- * term finds `- checkbox "Active" [e12]` either way, and it cannot drift from
- * what the printed snapshot says because it is the same string.
+ * either its role ("checkbox"), its name ("Active") or the value it is set to
+ * ("Production"). Matching all of them means one term finds
+ * `- checkbox "Active" [e12]` or `- combobox "Environment" [e3] [collapsed] =
+ * "Production"` either way, and it cannot drift from what the printed snapshot
+ * says because it is the same string. A value therefore PARTICIPATES in the
+ * match, which is also why the projection withholds one for a masked password:
+ * a search for a secret must not be able to confirm it by returning its line.
  *
  * An empty/blank search is "no filter", not "match nothing": an agent that
  * passes search="" means the whole tree, and silently returning zero lines
