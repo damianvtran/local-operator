@@ -152,8 +152,17 @@ monitor({op:"create", name:"product-feedback-watch",
   not split it, so `ignore` and the delta both see one record.
 - **Ownership**: this watch only ticks while its session is hosted. A cold
   session's watch is dormant — `lop monitor status` marks the row `idle` — so
-  a channel watch belongs to a session that stays open. Record where it lives
-  when you arm it.
+  a channel watch belongs to a session that stays up. Record where it lives
+  when you arm it, and treat the host as part of the arming.
+- **Hosting a watch costs a turn — say so when you arm it.** A watch lives only
+  as long as its session is hosted, so a channel that must not be missed needs
+  a host that stays up: an app tab left open on the session, or a recurring wake
+  (say every 2h) that re-hosts it so the next tick can run. Each wake fire is
+  one short turn even when nothing moved, and the monitor then delivers ONE
+  consolidated delta for everything it missed while the session was down. That
+  is the price of a watch that cannot miss: a wake is what keeps a cold
+  session's watch alive, and a cheaper way to host an idle session does not
+  exist today.
 - **A watch armed before the record split** keeps working: its stored
   baseline is re-read in the new shape, so a message that landed during the
   upgrade is still delivered. The exception is a baseline the old cap had
@@ -163,6 +172,35 @@ monitor({op:"create", name:"product-feedback-watch",
   suppressed as non-material (M checks, 0 deliveries)` when the gate filed a
   change as bookkeeping. Check that before concluding a channel had nothing to
   say.
+
+## The snapshot must be at the granularity of the thing you watch
+
+A monitor compares ONE snapshot string per tick, and that string is the whole
+input to everything downstream: the diff, the materiality gate and `ignore` all
+judge the snapshot, never the thing you meant to watch. Get the granularity
+wrong and those three quietly judge the wrong object — a channel with new
+messages reads as "nothing changed", or as bookkeeping to suppress.
+
+Two worked examples from this guide:
+
+- **The Slack envelope.** `mcp__slack_read_channel` answers with a JSON
+  envelope holding a whole text log. The monitor splits it into one line per
+  record, so an added line IS one new message and the gate is skipped (a record
+  log has already done the separation the gate is asked to make). Watch the
+  same call collapsed onto one envelope line and every new message becomes a
+  change to one giant line: the gate sees opaque text, calls it metadata, and
+  the message is lost.
+- **A `read` of a growing file.** `read` numbers its lines and truncates at
+  ~8 KB with a `[truncated … N more lines]` footer, so the snapshot is a window,
+  not the file: a line appended past the window never appears, and once the
+  window fills the head shifts under you. Watch the counter instead
+  (`wc -l <file>`, `tail -n 20`) — a changed line is at least the right object.
+
+The test to apply before arming: **if one new item does not produce one new
+line, the watch is measuring something else.** Reshape the CALL — narrower
+arguments, a record-aware tool, a per-item listing — rather than arming it and
+tuning `ignore` afterwards; `ignore` cannot recover the items the snapshot
+never represented.
 
 ## What counts as material, and tuning noise
 
