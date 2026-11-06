@@ -7,6 +7,7 @@ boundary discipline :mod:`local_operator.web_search.models` keeps for search.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -82,6 +83,32 @@ class FetchResult(BaseModel):
     # only the sequence distinguishes them.
     profiles: list[str] = Field(default_factory=lambda: ["default"])
     retry_after_s: float | None = None  # honoured or reported Retry-After
+
+
+@dataclass(frozen=True)
+class FetchBytes:
+    """One raw fetch: the body bytes AS RECEIVED, plus the final hop's headers.
+
+    ``FetchResult`` carries TEXT — it decodes the body with
+    ``utf-8, errors="replace"`` — which is lossless for nothing and lossy in
+    exactly the two cases a byte-level caller has: a page declaring a non-UTF-8
+    charset arrives mojibake'd (every accented title in it), and a raster image
+    arrives destroyed. A link preview needs both, so it asks for the bytes and
+    decodes on its own terms (the declared charset), and it stores and serves an
+    image verbatim.
+
+    ``headers`` is the FINAL hop's, after redirects, because that is the hop whose
+    ``content-type`` (and its ``charset`` parameter) describes ``body``.
+    ``complete`` is False when ``max_bytes`` stopped the download mid-stream: a
+    caller capped at 256 KB must tell a 200 KB icon from a truncated 5 MB one.
+    """
+
+    url: str
+    final_url: str
+    status: int
+    headers: dict[str, str] = field(default_factory=dict)
+    body: bytes = b""
+    complete: bool = True
 
 
 class WebFetchSettings(BaseModel):

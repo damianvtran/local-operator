@@ -67,6 +67,47 @@ def test_validate_allows_public_target(monkeypatch: pytest.MonkeyPatch) -> None:
     validate_public_url("https://example.com/", allow_private=False)  # no raise
 
 
+def test_a_name_with_no_address_is_a_host_refusal_not_a_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``socket.gaierror`` is a POLICY answer: waiting changes nothing about DNS.
+
+    Classified as the guard's own refusal rather than a bare transport error so a
+    caller that caches outcomes (a link preview's negative cache) can tell "this
+    host does not exist" from "this host timed out" — while every existing catcher
+    still sees a ``FetchError`` by inheritance.
+    """
+
+    def _no_such_name(*args: object, **kwargs: object) -> object:
+        raise service.socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr(service.socket, "getaddrinfo", _no_such_name)
+    with pytest.raises(service.PolicyRefusal) as caught:
+        validate_public_url("http://nowhere.invalid/x", allow_private=False)
+    assert caught.value.reason == "host"
+    assert isinstance(caught.value, FetchError)
+
+
+def test_credentials_in_the_url_are_refused_before_any_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """httpx turns URL userinfo into ``Authorization: Basic``; it is never forwarded.
+
+    The refusal must cost no DNS and no socket, so the resolver is rigged to fail
+    the test if it is ever reached.
+    """
+
+    def _must_not_resolve(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a credentialed URL reached the resolver")
+
+    monkeypatch.setattr(service.socket, "getaddrinfo", _must_not_resolve)
+    with pytest.raises(service.PolicyRefusal) as caught:
+        validate_public_url("http://someone:hunter2@example.com/x", allow_private=False)
+    assert caught.value.reason == "host"
+    # The message must not repeat the credential back at whoever reads the error.
+    assert "hunter2" not in str(caught.value)
+
+
 def test_validate_allow_private_bypasses(monkeypatch: pytest.MonkeyPatch) -> None:
     # With allow_private, DNS is not even consulted — the switch is the escape.
     validate_public_url("http://localhost:3000/", allow_private=True)

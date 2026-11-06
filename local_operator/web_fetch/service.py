@@ -47,6 +47,7 @@ from local_operator.web_fetch.failure import (
 )
 from local_operator.web_fetch.models import (
     DEFAULT_WEB_FETCH_CONFIG,
+    FetchBytes,
     FetchResult,
     WebFetchSettings,
 )
@@ -216,6 +217,36 @@ class FetchError(Exception):
         self.failure = failure
         self.attempts = attempts
         self.profiles = list(profiles)
+
+
+class PolicyRefusal(FetchError):
+    """A refusal raised by :func:`validate_public_url` — the guard working.
+
+    Subclasses :class:`FetchError` so every existing catcher, every message and
+    every retry decision stays exactly as it was. What it adds is a machine
+    code: a caller that must turn a refusal into a stable outcome (a link
+    preview reports ``local-or-private`` for an intranet host and
+    ``unsupported-scheme`` for ``file:``) would otherwise have to string-match
+    an English sentence — and those messages are user-facing prose that is free
+    to change.
+
+    ``reason`` is a small closed vocabulary, deliberately not the exception's own
+    prose: ``scheme`` (not http/https), ``host`` (no host to judge, credentials
+    carried in the URL, or a name with no address), ``private`` (resolves to a
+    loopback/private/reserved address).
+
+    Raised for the initial URL AND for every redirect hop, because
+    :func:`validate_public_url` is the single address check the redirect loop
+    calls — a public URL that 302s to the metadata endpoint is refused at the hop
+    with ``reason="private"``, and one that 302s to a URL carrying credentials is
+    refused at the hop with ``reason="host"``. Nothing in the chain skips that
+    function: it runs on every hop, every retry and the escalated attempt, before
+    any lookup or connection.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def coerce_fetch_settings(raw: object) -> WebFetchSettings:
@@ -412,11 +443,30 @@ def _resolve_host_ips(hostname: str) -> list[str]:
     try:
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        raise FetchError(f"could not resolve host {hostname!r}: {exc}") from exc
+        # A name with no address is a POLICY answer, not a transport hiccup: no
+        # amount of waiting or retrying changes what DNS knows, and callers that
+        # cache outcomes (a link preview's negative cache) must be able to tell
+        # "this host does not exist" from "this host timed out". Raised as the
+        # guard's own refusal — still a ``FetchError`` by inheritance, so every
+        # existing catcher, message and retry decision is unchanged.
+        raise PolicyRefusal(f"could not resolve host {hostname!r}: {exc}", reason="host") from exc
     # info[4] is the sockaddr; its first element is the address string for both
     # AF_INET and AF_INET6. str() guards the type checker against the union the
     # stdlib stubs give sockaddr elements.
     return list({str(info[4][0]) for info in infos})
+
+
+def _url_has_credentials(url: str) -> bool:
+    """Whether ``url`` carries userinfo (``scheme://user:secret@host/...``).
+
+    A pure parse — no DNS, no socket — so a refusal on this costs nothing. An
+    EMPTY userinfo (``http://@host/``) counts: httpx still treats it as
+    credentials, and the point of the check is that this process never sends an
+    ``Authorization`` header a link text chose for it.
+    """
+
+    parts = urlparse(url)
+    return parts.username is not None or parts.password is not None
 
 
 def validate_public_url(url: str, *, allow_private: bool) -> str | None:
@@ -440,10 +490,24 @@ def validate_public_url(url: str, *, allow_private: bool) -> str | None:
     """
     parsed = urlparse(url)
     if parsed.scheme.lower() not in ("http", "https"):
-        raise FetchError(f"refusing {url!r}: only http:// and https:// are allowed")
+        raise PolicyRefusal(
+            f"refusing {url!r}: only http:// and https:// are allowed", reason="scheme"
+        )
+    # CREDENTIALS IN THE URL ARE REFUSED, NEVER FORWARDED. httpx turns URL
+    # userinfo into an ``Authorization: Basic`` header, so honouring
+    # ``http://user:secret@host/x`` would send those credentials to a third
+    # party in a request this process signs — and a previewed link is written by
+    # whoever sent the message, not by the reader. Checked BEFORE any lookup or
+    # connect, so refusing costs no DNS and no socket, and it runs on every
+    # redirect hop for the same reason the rest of this function does. The URL is
+    # deliberately absent from the message: it carries the credential itself.
+    if _url_has_credentials(url):
+        raise PolicyRefusal(
+            "refusing a URL carrying credentials: userinfo is never forwarded", reason="host"
+        )
     hostname = parsed.hostname
     if not hostname:
-        raise FetchError(f"refusing {url!r}: no host in URL")
+        raise PolicyRefusal(f"refusing {url!r}: no host in URL", reason="host")
     if allow_private:
         # The escape hatch turns off IP judgement entirely, so there is nothing
         # to pin to and no rebinding threat model to defend (the operator opted
@@ -457,9 +521,10 @@ def validate_public_url(url: str, *, allow_private: bool) -> str | None:
         except ValueError:
             continue
         if _ip_is_forbidden(ip):
-            raise FetchError(
+            raise PolicyRefusal(
                 f"refusing {url!r}: host resolves to a private/loopback/reserved "
-                f"address ({ip_str}). Set web_fetch.allow_private to fetch local targets."
+                f"address ({ip_str}). Set web_fetch.allow_private to fetch local targets.",
+                reason="private",
             )
         if vetted is None:
             vetted = ip_str
@@ -687,6 +752,12 @@ class WebFetchService:
     cheap per-call views of settings; the session-owned ``io`` retains bounded
     per-origin pools. Embedders without an owner use a temporary pool that is
     closed before returning, so no event-loop or connection lifetime is leaked.
+
+    ``trust_env`` is the one transport knob that is NOT a detail: httpx inherits
+    ``HTTP(S)_PROXY`` and honours ``NO_PROXY`` when it is on, so a caller that
+    must decide for itself where a request goes (the link-preview resolver, whose
+    targets arrive from other people's messages) pins it off. It defaults ON to
+    preserve what every existing caller already does.
     """
 
     def __init__(
@@ -695,10 +766,12 @@ class WebFetchService:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         io: WebReadIO | None = None,
+        trust_env: bool = True,
     ) -> None:
         self.settings = settings
         self.transport = transport
         self.io = io
+        self.trust_env = trust_env
 
     async def fetch(
         self,
@@ -722,6 +795,70 @@ class WebFetchService:
         owner = self.io or WebReadIO()
         try:
             return await self._fetch_owned(owner, normalized, ceiling, timeout, raw)
+        finally:
+            if self.io is None:
+                await owner.aclose()
+
+    async def fetch_bytes(
+        self,
+        url: str,
+        *,
+        max_bytes: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> FetchBytes:
+        """Fetch one URL and hand back the RAW body plus the final hop's headers.
+
+        This is the SAME engine as :meth:`fetch` — one ``_follow`` loop, so one
+        SSRF policy: every hop is re-validated by :func:`validate_public_url`
+        before we connect, every attempt is pinned to the vetted address, and
+        the retry/escalation budget is the same object. What differs is only the
+        last step: ``fetch`` renders the body to text (decoding it as UTF-8 with
+        replacement) while this returns the bytes and lets the caller decide.
+        A byte-level caller exists because both of its use cases are destroyed
+        by that decode: a page declaring a non-UTF-8 charset would arrive
+        mojibake'd, and a raster image would arrive unrecoverable.
+
+        Enrichment is deliberately NOT attempted. ``fetch`` tries ``.md`` twins
+        and content negotiation to save context on docs sites; a caller asking
+        for bytes wants the resource it named, not a substitute rendition, and a
+        preview must not describe a sibling document.
+
+        The whole call — every hop, every retry, the one escalation, and each
+        DNS lookup — shares ONE deadline, exactly as :meth:`fetch` does, so
+        ``timeout_seconds`` is a ceiling for the call and not for a request.
+        Raises :class:`FetchError` for policy refusals (a
+        :class:`PolicyRefusal` for the address/scheme guard), redirect-limit
+        breaches and transport failures, the same way :meth:`fetch` does.
+        """
+        normalized = normalize_url(url)
+        ceiling = max(max_bytes if max_bytes is not None else self.settings.max_bytes, 1)
+        timeout = timeout_seconds if timeout_seconds is not None else self.settings.timeout_seconds
+
+        owner = self.io or WebReadIO()
+        try:
+            budget = _Budget(
+                deadline=_now() + timeout,
+                total=timeout,
+                max_attempts=self.settings.max_attempts,
+                escalation_available=self.settings.blocked_retry,
+            )
+            final_url, status, headers, body, complete = await self._follow(
+                owner,
+                normalized,
+                ceiling,
+                budget,
+                _Telemetry(),
+                max_attempts=budget.max_attempts,
+                allow_escalation=True,
+            )
+            return FetchBytes(
+                url=normalized,
+                final_url=final_url,
+                status=status,
+                headers=headers,
+                body=body,
+                complete=complete,
+            )
         finally:
             if self.io is None:
                 await owner.aclose()
@@ -1084,11 +1221,17 @@ class WebFetchService:
                 origin.port,
                 budget.total,
                 id(self.transport),
+                # Part of the pool key, not just of the client: two services can
+                # share one owner and disagree about whether the environment may
+                # redirect their traffic, and a pooled client built under one
+                # answer must never serve the other.
+                self.trust_env,
             ),
             transport=self.transport,
             follow_redirects=False,
             timeout=budget.total,
             headers={"User-Agent": USER_AGENT},
+            trust_env=self.trust_env,
         ) as client:
             extra = BROWSER_PROFILE_HEADERS if profile == "browser" else None
             return await self._stream_once(
