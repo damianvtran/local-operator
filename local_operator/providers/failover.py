@@ -4159,6 +4159,12 @@ def _one_turn_scrub_stream_event(request: ChatRequest, event: StreamEvent) -> St
         update: dict[str, Any] = {
             "provider_payload": None,
             "served_provider": one_turn_public_text(request, event.served_provider),
+            # The served-model slug rides the same path as the served host: an
+            # aggregator's answer to "which family served this" is
+            # provider-controlled text, and dropping it here (or letting it bypass
+            # the sanitizer) would leave the one field this gate exists to protect
+            # unscrubbed while the ledger still records it.
+            "served_model": one_turn_public_text(request, event.served_model),
         }
         if event.usage is not None:
             update["usage"] = event.usage.model_copy(

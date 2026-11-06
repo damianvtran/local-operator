@@ -26,10 +26,14 @@ tokeniser touch — happens on the recorder's background thread.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
+
+logger = logging.getLogger("local_operator.analytics.model")
 
 # ---------------------------------------------------------------------------
 # Component taxonomy
@@ -275,6 +279,295 @@ class CallSnapshot:
     #: Opaque non-secret id of the account that served the call, or ``None``
     #: when unknown (legacy row, env credential, unstamped stream).
     account_ref: str | None = None
+    #: The upstream VENDOR's own slug for the checkpoint that actually answered
+    #: (Together's ``model`` chunk field: ``deepseek-ai/DeepSeek-V4.1-Flash-1017``),
+    #: or '' when no chunk named one.
+    #:
+    #: Deliberately NOT a refinement of ``model_id``: ``model_id`` stays the
+    #: REQUESTED route as this harness stamped it (``radient/auto``), while this
+    #: is the served model as the vendor reported it. Collapsing the two would
+    #: destroy the only evidence a post-mortem needs -- a request routed to an
+    #: aggregator's ``auto`` can be answered by any family, and the question
+    #: "which family actually answered?" is unanswerable from the requested id.
+    #: So it is captured verbatim from the wire (bounded and control-character
+    #: gated at the client, see ``providers.clients._served_model_slug``) and is
+    #: NEVER derived from ``model_id``.
+    served_model: str = ""
+    #: Messages in the composed request: ``len(system_blocks) + len(messages)``,
+    #: measured BEFORE any per-dialect wire adaptation, so one number means the
+    #: same thing on every wire and matches what ``prompt_hash`` covers. 0 means
+    #: NOT RECORDED (a legacy row, or a caller that never composed a request):
+    #: no real call composes zero messages.
+    message_count: int = 0
+    #: sha256 of the canonical context fingerprint -- see
+    #: :func:`request_fingerprint` for exactly what it covers and what it
+    #: deliberately does not. '' means not recorded (legacy rows). Its ONLY
+    #: purpose is comparison ("was this call sent the context I think it was?"),
+    #: never reconstruction: the digest is one-way and the column must never be
+    #: turned into a prompt-body log.
+    prompt_hash: str = ""
+
+
+#: Version of the canonical form :func:`request_fingerprint` hashes. A reader
+#: comparing two ``prompt_hash`` values taken across a change to this number is
+#: comparing different questions: bump it only when the FORM's meaning changes,
+#: and never silently.
+#:
+#: 2 at round-1 review (R1-1/R1-2): the form gained ``is_error``, an ORDERED
+#: per-part marker list and a native-replay summary, and LOST ``provider`` /
+#: ``model_id`` so the digest means "this context" rather than "this context on
+#: this route". No version-1 digest can equal a version-2 one, which is exactly
+#: why the number is in the form rather than implied by it.
+_PROMPT_FINGERPRINT_VERSION = 2
+
+
+def request_fingerprint(request: Any) -> tuple[str, int]:
+    """``(sha256 hex of the composed context, message count)`` for a request.
+
+    WHY THIS EXISTS. Nothing retained today records WHAT was sent to a provider:
+    the ledger has token counts and character lengths, the transcript has the
+    conversation, and no byte-exact assembled prompt exists anywhere afterwards.
+    So "was this call given the right context?" -- the first question after an
+    incident where a model answered from the wrong material -- could not be
+    answered at all. This is the cheap, privacy-preserving answer: a digest over
+    the composed request plus a count, both recomputable from the same request
+    and stable across two calls that compose the same context.
+
+    WHAT IT COVERS, exactly. ``{system_blocks, messages, tools}`` from the
+    composed :class:`ChatRequest` -- the CONTEXT, with no route in it --
+    serialised as UTF-8 JSON with sorted keys and compact separators, which is
+    what makes it canonical (dict order and insignificant whitespace cannot
+    move the digest; list order can, because message order IS the context).
+    Each message contributes ``(role, is_error, [text block, ...], [(call id,
+    name, arguments)], part markers, native replay)``. The part markers are an
+    ORDERED list holding one ``[kind]`` entry per content block, so
+    ``[Text, Image, Text]`` and ``[Text, Text, Image]`` do not collide; the
+    native replay entry is a bounded summary of that message's replayed
+    substrate (see :func:`_fingerprint_native_replay`). Each tool contributes
+    ``(name, description, parameters)``. This is dialect independent on
+    purpose: one meaning covers every wire.
+
+    WHAT IT DELIBERATELY DOES NOT COVER, and why:
+
+    * Credentials, tokens and API keys -- never sent in a request body, and a
+      digest that folded them in would leak their presence into a ledger.
+    * ``prompt_cache_key``, provider routing/affinity, ``temperature``,
+      ``max_tokens``, ``stop_sequences``, effort knobs and every other sampling
+      or routing field. Those change HOW the same context is served, not WHICH
+      context it is, and folding them in would make two calls over identical
+      context hash differently (defeating the whole comparison).
+    * The REQUESTED route -- ``provider`` and ``model_id`` -- for the same
+      reason, and as of form version 2 (round-1 review R1-2). A failover turn
+      that serves identical context from a different provider must compare
+      EQUAL to the turn it replaced; that is the comparison ``served_model``
+      was added to explain. CONSEQUENCE, so no reader over-reads a match: two
+      equal digests say the same CONTEXT was composed and say nothing about
+      which route carried it. The route is in the row's own ``provider``,
+      ``model_id`` and ``served_model`` columns.
+    * ``prompt_cache_key`` is the load-bearing example: it is per-session
+      bookkeeping for the vendor's cache and changes when a session is forked,
+      while the prefix it names is unchanged.
+    * Timestamps, durations, ids of the call itself -- they differ on every call
+      by construction.
+    * Whether the native replay substrate was ACTUALLY PUT ON THE WIRE. The
+      substrate the conversation still CARRIES is covered (the per-message
+      summary above), so a rebuild that drops ``provider_payload`` moves the
+      digest. What is not covered is the wire decision:
+      :func:`local_operator.providers.replay.replay_items` additionally requires
+      the CURRENT provider, model, endpoint, protocol and credential scope to
+      match the payload's, and those are client-side wire state that no
+      composed request carries. So a route change that silently declines to
+      replay leaves this digest unchanged while the served context differs --
+      the one replay-related difference a reader must prove from the ledger's
+      route columns, never from this digest.
+    * Image and other media BYTES -- an ordered ``[kind]`` marker only, never
+      the bytes. Digesting media on the caller's path (this runs on the event
+      loop, just before the provider stream is handed back) would copy megabytes
+      per call for a question presence already answers, and the bytes are
+      already recoverable from the transcript when they are actually needed.
+    * ``raw_arguments`` on a tool call, when the wire form is a string -- it is a
+      second encoding of the SAME ``arguments`` object, so including both would
+      make the digest depend on which client built the body.
+
+    REDACTION GUARANTEE. The result is a one-way sha256 digest: it reveals
+    nothing reversible about prompt content -- not a token, not a phrase, not
+    even the length of a message. It is safe to store per call, which is why it
+    can be a column. It must never be paired with a body log.
+
+    Never raises: a composed request that cannot be serialised (a non-JSON tool
+    schema, an exotic content block) renders those values as their type name --
+    stable, content-blind, and preferring a collision over an unstable digest.
+    Recording is best-effort by contract (see the package docstring), so a
+    fingerprint that raised would break a turn for a diagnostic.
+    """
+    blocks = getattr(request, "system_blocks", None) or []
+    messages = getattr(request, "messages", None) or []
+    tools = getattr(request, "tools", None) or []
+
+    canonical = {
+        # Bumped only if the canonical form itself changes meaning; a reader
+        # comparing two digests across versions must then know they differ.
+        "v": _PROMPT_FINGERPRINT_VERSION,
+        # No ``provider`` / ``model_id`` here, deliberately (R1-2): the route
+        # is not part of WHICH context this is, and the row stores it already.
+        "system_blocks": [block if isinstance(block, str) else str(block) for block in blocks],
+        "messages": [_fingerprint_message(message) for message in messages],
+        "tools": [
+            [
+                getattr(tool, "name", "") or "",
+                getattr(tool, "description", "") or "",
+                getattr(tool, "parameters", None) or {},
+            ]
+            for tool in tools
+        ],
+    }
+    try:
+        blob = json.dumps(
+            canonical,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=_non_json_placeholder,
+        )
+    except (TypeError, ValueError):
+        # Unreachable with the type-name fallback above, but a diagnostic must
+        # not be the thing that breaks a turn: an unhashable request records no
+        # fingerprint rather than raising into the stream path. The debug line is
+        # why this stays diagnosable -- without it an empty ``prompt_hash`` is
+        # indistinguishable from a legacy row that never had one (round-1 review
+        # R1-6); it is ``debug`` because the contract is best-effort, not lossless.
+        logger.debug("analytics: request fingerprint failed", exc_info=True)
+        return "", len(blocks) + len(messages)
+    return (
+        hashlib.sha256(blob.encode("utf-8")).hexdigest(),
+        len(blocks) + len(messages),
+    )
+
+
+#: How many native replay items per message the fingerprint summarises.
+#:
+#: The items are the provider's own response bytes and a long transcript can
+#: replay thousands of them, so the marker list is capped. The TRUE count is
+#: recorded beside the markers, which is what stops a truncated list from
+#: colliding with a genuinely shorter one.
+_MAX_NATIVE_ITEM_MARKERS = 32
+
+
+def _fingerprint_message(message: Any) -> list[Any]:
+    """One message as the canonical
+    ``[role, is_error, texts, calls, part markers, native replay]`` record.
+
+    Text blocks stay a LIST rather than being joined, because block boundaries
+    are what a provider reads: an empty separator block and a one-line block are
+    different requests, and joining them would hide that. The marker list is
+    what keeps their POSITION among the other parts: ``texts`` alone says which
+    text blocks exist, not where media sat between them, so ``[Text, Image,
+    Text]`` and ``[Text, Text, Image]`` would hash alike without it (round-1
+    review R1-1).
+
+    ``is_error`` IS covered, in its own field, because it reaches the wire: the
+    Anthropic client sends ``is_error: true`` on the ``tool_result`` block it
+    builds (``providers.clients``), so it changes what the model reads -- the
+    earlier docstring claimed coverage this record did not have. ``tool_call_id``
+    / ``tool_name`` are covered by ``texts`` plus the ordering position of the
+    message: they do not change what the model reads beyond what the tool result
+    and its call id already say. Message ids are not covered at all: ``Message``
+    carries no id, and a transcript row's storage id is not context.
+    """
+    texts: list[str] = []
+    # ONE ``[kind]`` entry per content block, in content order. A list of
+    # single-element lists rather than bare strings so every part has the same
+    # shape and the JSON cannot confuse a marker with a text block's own value.
+    parts: list[list[str]] = []
+    for part in getattr(message, "content", None) or []:
+        text = getattr(part, "text", None)
+        if isinstance(text, str):
+            texts.append(text)
+            parts.append(["text"])
+            continue
+        parts.append([getattr(part, "type", "") or ""])
+    calls = [
+        [
+            getattr(call, "id", "") or "",
+            getattr(call, "name", "") or "",
+            getattr(call, "arguments", None) or {},
+        ]
+        for call in getattr(message, "tool_calls", None) or []
+    ]
+    return [
+        getattr(message, "role", "") or "",
+        bool(getattr(message, "is_error", False)),
+        texts,
+        calls,
+        parts,
+        _fingerprint_native_replay(message),
+    ]
+
+
+def _fingerprint_native_replay(message: Any) -> list[Any] | None:
+    """Bounded, content-blind summary of one message's native replay substrate.
+
+    WHY IT IS HERE. ``provider_payload["native_replay"]["items"]`` is not
+    output-side history: all four wire builders splice it back into the outgoing
+    body (``providers.clients``), so it IS request context, and a transcript
+    rebuild that drops the payload changes what the model is given. Covering it
+    lets a reader tell "the history still carried its replay substrate" from
+    "the rebuild dropped it" -- which the exclusion this replaces denied
+    (round-1 review R1-1).
+
+    WHAT IT LEAVES OUT, deliberately: the item CONTENT. These are the response's
+    own bytes -- one reasoning block can outweigh the visible text of a whole
+    turn -- and this runs on the event loop. So each item contributes only the
+    provider-assigned ``type`` and ``id``, at most :data:`_MAX_NATIVE_ITEM_MARKERS`
+    of them, with the true count beside the markers so truncation cannot collide
+    with a shorter list. An item that is not a mapping contributes its type
+    name: the same collision-over-instability trade
+    :func:`_non_json_placeholder` makes.
+
+    ``None`` means "no replay substrate on this message". A payload that is
+    present but malformed still says so (``[True, 0, []]``): the shape is what
+    is covered, not the payload's honesty.
+    """
+    payload = getattr(message, "provider_payload", None)
+    if not isinstance(payload, dict):
+        return None
+    native = payload.get("native_replay")
+    if not isinstance(native, dict):
+        return None
+    items = native.get("items")
+    if not isinstance(items, list):
+        return [True, 0, []]
+    markers = [
+        (
+            [_text_or_empty(item.get("type")), _text_or_empty(item.get("id"))]
+            if isinstance(item, dict)
+            else [type(item).__name__]
+        )
+        for item in items[:_MAX_NATIVE_ITEM_MARKERS]
+    ]
+    return [True, len(items), markers]
+
+
+def _text_or_empty(value: Any) -> str:
+    """``value`` when it is a string, else ``""``.
+
+    Never ``str(value)``: a provider-controlled value that happens to be a huge
+    container would then be copied INTO the canonical form, which is unbounded
+    work and unbounded memory on the turn's own event loop.
+    """
+    return value if isinstance(value, str) else ""
+
+
+def _non_json_placeholder(value: Any) -> str:
+    """Stable, content-blind rendering of a value ``json.dumps`` refused.
+
+    The TYPE NAME, never ``repr``/``str`` of the value: an object's default repr
+    embeds its memory address, so a repr fallback would make the digest differ
+    between two calls that composed the same context -- the one property the
+    fingerprint exists to have. Two distinct non-JSON values of the same type
+    therefore collide, which is the correct trade for a diagnostic.
+    """
+    return f"<{type(value).__name__}>"
 
 
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:
