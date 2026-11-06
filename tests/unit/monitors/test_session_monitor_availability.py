@@ -27,7 +27,11 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.monitors.spec import MonitorSpec
-from local_operator.session.session import MCP_NOT_READY_DETAIL
+from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
+from local_operator.session.session import (
+    MCP_DISCOVERY_PENDING_DETAIL,
+    MCP_NOT_READY_DETAIL,
+)
 from tests.unit.session.test_session import ScriptedStream, make_session
 
 SERVER = "datadog"
@@ -461,6 +465,72 @@ async def test_a_manager_with_no_enabled_servers_is_gone_not_waiting(tmp_path: A
         outcome = await session._run_monitor_check(_spec())
         assert outcome.get("kind") is None
         assert "not in this session's tool set" in str(outcome["error"])
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_manager_whose_discovery_did_not_complete_is_unavailable(tmp_path: Any) -> None:
+    """Discovery RAISING leaves an ATTACHED manager with no roster at all.
+
+    MEASURED by the reviewer of #3506 against the real discovery wrapper: the
+    manager is built before the raise, so the session holds one with
+    ``_configs`` never populated — an empty roster that read as "nothing is
+    configured" and charged ``consecutive_failures: 1`` with "it is not in this
+    session's tool set". Nothing was removed: the config was never read. The
+    wiring records that raise on the session, and that record is the
+    difference between this shape and a real removal (the test below).
+    """
+    manager = FakeManager([], servers=[])
+    session = _session(tmp_path, manager)
+    session.mcp_startup = McpStartupOutcome(failures={MCP_DISCOVERY_KEY: "config layer exploded"})
+    try:
+        assert session._monitor_availability(mcp_name()) == (
+            "unavailable",
+            MCP_DISCOVERY_PENDING_DETAIL,
+        )
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome["kind"] == "unavailable"
+        assert outcome["error"] == MCP_DISCOVERY_PENDING_DETAIL
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_completed_discovery_with_an_empty_roster_is_still_gone(tmp_path: Any) -> None:
+    """CONTROL for the test above: the SAME empty roster with a COMPLETED round.
+
+    ``McpStartupOutcome()`` is what the factory writes when discovery ran and
+    found nothing configured — zero enabled servers, a real absence — so the
+    excuse must not extend to it. A session with NO record at all
+    (``mcp_startup is None``) is pinned one test up and answers ``gone`` too.
+    """
+    manager = FakeManager([], servers=[])
+    session = _session(tmp_path, manager)
+    session.mcp_startup = McpStartupOutcome()
+    try:
+        assert session._monitor_availability(mcp_name()) == ("gone", "")
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome.get("kind") is None
+        assert "not in this session's tool set" in str(outcome["error"])
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_name_outside_a_completed_rounds_roster_is_still_gone(tmp_path: Any) -> None:
+    """CONTROL, nearer corner: the discovery key is ALSO the collapse target
+    when every configured server failed for one setup reason (the MCP SDK
+    missing) — a COMPLETED round that knows its roster. A name that roster does
+    not mint is a stale name, not a discovery in flight, so the strike stays.
+    """
+    manager = FakeManager([], servers=[])
+    session = _session(tmp_path, manager)
+    session.mcp_startup = McpStartupOutcome(
+        configured=("datadog",), failures={MCP_DISCOVERY_KEY: "the MCP SDK is missing"}
+    )
+    try:
+        assert session._monitor_availability("mcp__retired_tool") == ("gone", "")
     finally:
         await session.dispose()
 
