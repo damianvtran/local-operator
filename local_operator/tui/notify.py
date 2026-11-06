@@ -133,10 +133,17 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; the sound module loads lazi
 
 from local_operator import terminals
 from local_operator.harness.rows import CLOSED_NOTICE_TEXT, RETIRED_NOTICE_TEXT
+from local_operator.i18n.keys import tui_chrome_banners as _x
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.proc import spawn_detached
 from local_operator.tui.settings import settings_get
 
 logger = logging.getLogger(__name__)
+
+#: The banner vocabulary's copy namespace. A resolver (not a per-call
+#: ``messages.render``) because this module resolves its constants ONCE at
+#: import and per-frame elsewhere, which is the split ``i18n.text`` measures.
+_t = tr("tui.chrome.banners")
 
 #: Environment kill switch, mirroring ``LOCAL_OPERATOR_NO_TERMINAL_TITLE`` and
 #: the shimmer/nerd-icon gates. Wanted by anything that records raw terminal
@@ -168,10 +175,10 @@ APP_NAME = "Local Operator"
 #: point of the toast is the STATE, which the user reads in under a second. The
 #: session name remains the title so several simultaneous sessions are distinct;
 #: cmux's subtitle carries the action category even when the body is truncated.
-CONTEXT_COMPLETE = "Complete"
-CONTEXT_INPUT_REQUIRED = "Input required"
-CONTEXT_ATTENTION = "Needs attention"
-CONTEXT_INTERRUPTED = "Interrupted"
+CONTEXT_COMPLETE = _t(_x.context_complete())
+CONTEXT_INPUT_REQUIRED = _t(_x.context_input_required())
+CONTEXT_ATTENTION = _t(_x.context_attention())
+CONTEXT_INTERRUPTED = _t(_x.context_interrupted())
 #: The retire-for-build arm's own category (2026-09-29; seed 7e797aaaf6e7).
 #: REQUIRED to be a distinct entry rather than a synonym for error's "Needs
 #: attention", for the two reasons CONTEXT_INTERRUPTED documents next door:
@@ -182,17 +189,17 @@ CONTEXT_INTERRUPTED = "Interrupted"
 #: MUST be registered: retired announces (a turn was cut and the user should
 #: know), and an unregistered kind resolves to "Complete"/"Task complete" —
 #: a lie, which is the defect class this whole vocabulary exists to avoid.
-CONTEXT_RETIRED = "Retired"
-BODY_COMPLETE = "Task complete"
-BODY_APPROVAL = "Waiting for approval"
-BODY_ASK = "Waiting for your answer"
-BODY_ERROR = "Stopped with an error"
-BODY_INTERRUPTED = "Stopped before finishing"
+CONTEXT_RETIRED = _t(_x.context_retired())
+BODY_COMPLETE = _t(_x.body_complete())
+BODY_APPROVAL = _t(_x.body_approval())
+BODY_ASK = _t(_x.body_ask())
+BODY_ERROR = _t(_x.body_error())
+BODY_INTERRUPTED = _t(_x.body_interrupted())
 #: An inbox item's banner body when ``display.notification_session_name`` is
 #: off (contract §1.5): the house sentence that replaces the model-written
 #: body, so a lock screen learns only that something wants the operator. Same
 #: tier as the completion bodies beside it (unextracted banner literals).
-BODY_UPDATE = "An agent flagged an update"
+BODY_UPDATE = _t(_x.body_update())
 #: The retire-for-build row's sentence, shared verbatim with ``rows.py`` (the
 #: module that owns this row on both surfaces) so the banner cannot drift
 #: from the row it stands for. Warning-tier in the row; the banner's own
@@ -236,7 +243,7 @@ CONTEXTS: dict[str, str] = {
 #: session's kind to its category, and "mixed" is a property of a SET, not a
 #: kind any session can have. Keeping it out means no call site can accidentally
 #: resolve a single completion to it.
-CONTEXT_MIXED = "Mixed outcomes"
+CONTEXT_MIXED = _t(_x.context_mixed())
 
 
 def digest_subtitle(kinds: Sequence[str]) -> str:
@@ -293,6 +300,59 @@ BODIES: dict[str, str] = {
     "retired": BODY_RETIRED,
 }
 
+
+def _reload_copy() -> None:
+    """Re-resolve the banner vocabulary after a live language switch.
+
+    These are module-level constants because non-TUI callers import them by
+    value (``notifications.compose``, the desktop feed, the mobile push
+    payload), so they must stay plain ``str``. A constant built once at import
+    does not follow ``set_active_locale`` on its own — the trade ``i18n.text``
+    documents — so this rebinds them in place and the derived maps below with
+    them. Callers that captured a value before the switch keep the words they
+    already read; every one of them reads again on its next notify.
+    """
+    global CONTEXT_COMPLETE, CONTEXT_INPUT_REQUIRED, CONTEXT_ATTENTION
+    global CONTEXT_INTERRUPTED, CONTEXT_RETIRED, CONTEXT_MIXED
+    global BODY_COMPLETE, BODY_APPROVAL, BODY_ASK, BODY_ERROR, BODY_INTERRUPTED
+    global BODY_UPDATE, BACKGROUND_FALLBACK_TITLE, BODY_BACKGROUND_DIGEST
+    global BODY_BACKGROUND
+    CONTEXT_COMPLETE = _t(_x.context_complete())
+    CONTEXT_INPUT_REQUIRED = _t(_x.context_input_required())
+    CONTEXT_ATTENTION = _t(_x.context_attention())
+    CONTEXT_INTERRUPTED = _t(_x.context_interrupted())
+    CONTEXT_RETIRED = _t(_x.context_retired())
+    CONTEXT_MIXED = _t(_x.context_mixed())
+    BODY_COMPLETE = _t(_x.body_complete())
+    BODY_APPROVAL = _t(_x.body_approval())
+    BODY_ASK = _t(_x.body_ask())
+    BODY_ERROR = _t(_x.body_error())
+    BODY_INTERRUPTED = _t(_x.body_interrupted())
+    BODY_UPDATE = _t(_x.body_update())
+    BACKGROUND_FALLBACK_TITLE = _t(_x.fallback_title())
+    BODY_BACKGROUND_DIGEST = _t(_x.body_background_digest())
+    BODY_BACKGROUND = _t(_x.body_background())
+    CONTEXTS.update(
+        {
+            "complete": CONTEXT_COMPLETE,
+            "approval": CONTEXT_INPUT_REQUIRED,
+            "ask": CONTEXT_INPUT_REQUIRED,
+            "error": CONTEXT_ATTENTION,
+            "interrupted": CONTEXT_INTERRUPTED,
+            "retired": CONTEXT_RETIRED,
+        }
+    )
+    BODIES.update(
+        {
+            "complete": BODY_COMPLETE,
+            "approval": BODY_APPROVAL,
+            "ask": BODY_ASK,
+            "error": BODY_ERROR,
+            "interrupted": BODY_INTERRUPTED,
+        }
+    )
+
+
 #: Title for a background completion whose session has no STORED name, and the
 #: sentence the routing design specifies for exactly this case.
 #:
@@ -302,7 +362,7 @@ BODIES: dict[str, str] = {
 #: OUT of session names — two different meanings in one frame (design round 1,
 #: D2). It also contradicted the sidebar, which paints these same rows as
 #: ``Untitled conversation``.
-BACKGROUND_FALLBACK_TITLE = "A session finished"
+BACKGROUND_FALLBACK_TITLE = _t(_x.fallback_title())
 
 # --- a park on ANOTHER device ---------------------------------------------
 #
@@ -534,7 +594,10 @@ def background_digest_title(total: int) -> str:
     several sessions, so naming one would be wrong on its own terms, and nothing
     on this leg consults :func:`session_names_in_notifications`.
     """
-    return f"{total} sessions finished" if total != 1 else "1 session finished"
+    # ICU groups a NUMBER slot ("9,999") where the shipped banner printed raw
+    # digits, so the count is plural-SELECTED as a number and PRINTED as a
+    # string. Same split `tui.small.draft.attachment_count` records.
+    return _t(_x.digest_title(total=total, count=str(total)))
 
 
 #: The digest's body: where to go, since the banner itself cannot take you.
@@ -558,7 +621,7 @@ def background_digest_title(total: int) -> str:
 #: route that always exists. 45 characters, inside the ~43-char title clip that
 #: matters for the TITLE; bodies wrap rather than clip in Notification Centre,
 #: and the rendered captures confirm it lands whole.
-BODY_BACKGROUND_DIGEST = "Open the session sidebar (Ctrl+B) to see them"
+BODY_BACKGROUND_DIGEST = _t(_x.body_background_digest())
 
 #: The observer path's body line when nothing better can be said, and the
 #: FALLBACK the snippet path below degrades to. Keyed by ROUTE rather than by
@@ -583,7 +646,9 @@ BODY_BACKGROUND_DIGEST = "Open the session sidebar (Ctrl+B) to see them"
 #: every case where no snippet may be shown or none exists, because it reveals
 #: nothing about the conversation: it is exactly what a user who opted OUT of
 #: session text in banners is entitled to see, and it is still true.
-BODY_BACKGROUND = "You were in another session"
+BODY_BACKGROUND = _t(_x.body_background())
+
+register_refresh(_reload_copy)
 
 #: How much of a finished session's last reply a banner may carry.
 #:

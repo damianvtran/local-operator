@@ -45,9 +45,16 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator.i18n.keys import tui_chrome_bindings as _x
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.transcript import wrap_cells
+
+#: Keys-card copy. Only the DESCRIPTIONS resolve through it: the key column
+#: (``f9``, ``esc``, ``ctrl+a`` …) is a chord the terminal delivers, never prose,
+#: so it stays Latin in every locale.
+_t = tr("tui.chrome.bindings")
 
 #: Horizontal padding cells, mirroring the ``padding: 1 2`` the stylesheet pins
 #: on ``KeysLegend``. Textual sizes BORDER-BOX, so every width/height pinned in
@@ -67,18 +74,45 @@ KEYS_SQUEEZE_ROWS = 10
 #: Cells between the key column and its description column.
 KEY_GAP = 2
 
+
+def _hint_segments() -> tuple[str, ...]:
+    """The card's own footer segments, re-resolved the same way as its rows."""
+    return (
+        _t(_x.legend_hint_scroll()),
+        _t(_x.legend_hint_close()),
+        _t(_x.legend_hint_reopen()),
+        _t(_x.legend_hint_typing()),
+    )
+
+
 #: The hint row's segments, in paint order. The reopen route leads with the
 #: typed `/keys` — the unconditional one — and marks `?` as its conditional
 #: sibling rather than naming it bare (UX round 1, U2: the card's own footer
 #: advertised `?` flatly, and `?` types wherever a typist can claim it, so a
 #: reader who follows the footer from a composer gets a stray character in
 #: their draft instead of the card). `/keys` has no such state.
-_HINT_SEGMENTS: tuple[str, ...] = (
-    "↑↓ scroll",
-    "esc close",
-    "/keys reopens",
-    "? when not typing",
-)
+_HINT_SEGMENTS: tuple[str, ...] = _hint_segments()
+
+
+def _reload_copy() -> None:
+    """Re-resolve the card's prose after a live language switch.
+
+    ``LEGEND_SECTIONS`` and ``_HINT_SEGMENTS`` are module-level constants built
+    at import, so unlike a per-frame ``tr`` call they do not follow
+    ``set_active_locale`` on their own — the trade ``i18n.text`` documents for
+    constants. Rebinding them here keeps the exported shapes the builder tests
+    assert against, and a visible card reads the new spec on its next paint,
+    which is the same re-resolution point ``projects_view`` uses.
+    """
+    global LEGEND_SECTIONS, _HINT_SEGMENTS
+    LEGEND_SECTIONS = _legend_sections()
+    _HINT_SEGMENTS = _hint_segments()
+
+
+#: Register the re-resolution point once, after both constants exist. Placed
+#: here rather than beside the builders so the import stays a plain module load
+#: with no side effect before the spec the card reads is fully built.
+register_refresh(_reload_copy)
 
 
 @dataclass(frozen=True)
@@ -103,44 +137,55 @@ class LegendSection:
 #: kept beside ``ctrl+k`` rather than folded into it because f10 is the
 #: compatibility route that still works and may still be the one a returning
 #: user has in muscle memory; the description marks it as the alternate.
-LEGEND_SECTIONS: tuple[LegendSection, ...] = (
-    LegendSection(
-        heading="the sessions list (f9)",
-        rows=(
-            ("f9", "enter the list; f9 again returns"),
-            ("esc", "return to the composer"),
-            ("enter", "open the row under the cursor"),
-            ("up/down", "move the cursor; pageup/pagedown, home/end jump"),
-            ("ctrl+a", "show or hide the ⌥ subagent runs"),
-            ("ctrl+o", "jump to the first subagent run"),
-            ("ctrl+k", "pin or unpin the row"),
-            ("f10", "pin or unpin (compatibility)"),
+def _legend_sections() -> tuple[LegendSection, ...]:
+    """The card's spec, with its prose resolved in the ACTIVE locale.
+
+    A factory rather than a bare literal because a live language switch must
+    re-resolve every description (see :func:`_reload_copy`). The KEY COLUMN and
+    the ROW ORDER do not vary by locale, so they are restated per section beside
+    the prose they label rather than derived.
+    """
+    return (
+        LegendSection(
+            heading=_t(_x.legend_sessions_heading()),
+            rows=(
+                ("f9", _t(_x.legend_sessions_f9())),
+                ("esc", _t(_x.legend_sessions_esc())),
+                ("enter", _t(_x.legend_sessions_enter())),
+                ("up/down", _t(_x.legend_sessions_up_down())),
+                ("ctrl+a", _t(_x.legend_sessions_ctrl_a())),
+                ("ctrl+o", _t(_x.legend_sessions_ctrl_o())),
+                ("ctrl+k", _t(_x.legend_sessions_ctrl_k())),
+                ("f10", _t(_x.legend_sessions_f10())),
+            ),
         ),
-    ),
-    LegendSection(
-        heading="the app",
-        rows=(
-            # The two rows a stuck user reaches for FIRST, ahead of the
-            # navigation set. /help's "esc stop the agent" row is outside
-            # this card's two scopes only because /help is a different
-            # surface: a card answering "what can I press" that cannot stop a
-            # runaway turn is missing its most load-bearing chord (design
-            # round 1, D7 / UX round 1, U4). `ctrl+c`'s first press interrupts
-            # the turn (and clears a draft); a second press within the window
-            # leaves — `action_interrupt`, which is the truth the words
-            # carry.
-            ("esc", "stop the agent"),
-            ("ctrl+c", "interrupt the turn; twice exits"),
-            ("f8", "open an aside"),
-            ("ctrl+b", "show or hide the sessions list"),
-            ("ctrl+t", "expand or collapse the todo panel"),
-            ("ctrl+g", "cycle the subagent panel"),
-            ("ctrl+l", "clear the transcript (history stays)"),
-            ("ctrl+home/end", "jump to the transcript top or end"),
-            ("ctrl+n/ctrl+s", "start a new session / resume one"),
+        LegendSection(
+            heading=_t(_x.legend_app_heading()),
+            rows=(
+                # The two rows a stuck user reaches for FIRST, ahead of the
+                # navigation set. /help's "esc stop the agent" row is outside
+                # this card's two scopes only because /help is a different
+                # surface: a card answering "what can I press" that cannot stop a
+                # runaway turn is missing its most load-bearing chord (design
+                # round 1, D7 / UX round 1, U4). `ctrl+c`'s first press interrupts
+                # the turn (and clears a draft); a second press within the window
+                # leaves — `action_interrupt`, which is the truth the words
+                # carry.
+                ("esc", _t(_x.legend_app_esc())),
+                ("ctrl+c", _t(_x.legend_app_ctrl_c())),
+                ("f8", _t(_x.legend_app_f8())),
+                ("ctrl+b", _t(_x.legend_app_ctrl_b())),
+                ("ctrl+t", _t(_x.legend_app_ctrl_t())),
+                ("ctrl+g", _t(_x.legend_app_ctrl_g())),
+                ("ctrl+l", _t(_x.legend_app_ctrl_l())),
+                ("ctrl+home/end", _t(_x.legend_app_ctrl_home_end())),
+                ("ctrl+n/ctrl+s", _t(_x.legend_app_ctrl_n_ctrl_s())),
+            ),
         ),
-    ),
-)
+    )
+
+
+LEGEND_SECTIONS: tuple[LegendSection, ...] = _legend_sections()
 
 
 #: Rows whose key is the DEFAULT of a remappable action, mapped to the keymap

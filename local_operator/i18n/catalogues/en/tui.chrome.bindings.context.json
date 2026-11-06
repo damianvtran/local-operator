@@ -1,0 +1,140 @@
+{
+  "tui.chrome.bindings.legend_sessions_heading": {
+    "role": "The `?` keys-legend card's first section heading, qualifying which surface its rows belong to",
+    "tone": "lowercase, plain, noun phrase naming a surface",
+    "maxCells": 30,
+    "note": "EN-only context sidecar. Names the sessions list and the chord that opens it. Lowercase on purpose: it is a section qualifier inside a card, not a title. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_app_heading": {
+    "role": "The `?` keys-legend card's second section heading, for app-wide chords",
+    "tone": "lowercase, plain",
+    "maxCells": 12,
+    "note": "EN-only context sidecar. Deliberately bare: the rows under it are the chords that work anywhere, so any longer gloss would repeat them. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_sessions_f9": {
+    "role": "Keys-legend row description for the f9 chord on the sessions list",
+    "tone": "lowercase, telegraphic; one clause pair separated by a semicolon",
+    "maxCells": 40,
+    "note": "EN-only context sidecar. States both directions of the same toggle: f9 enters the list and f9 again leaves it. The row's own key column already shows f9, so the description never repeats the chord name. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_sessions_esc": {
+    "role": "Keys-legend row description for esc while the sessions list owns focus",
+    "tone": "lowercase, telegraphic",
+    "maxCells": 30,
+    "note": "EN-only context sidecar. Scoped to the list section: the same esc key has a different meaning under the app section (stop the agent), which is exactly why the card keeps two sections. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_sessions_enter": {
+    "role": "Keys-legend row description for enter on the sessions list",
+    "tone": "lowercase, telegraphic",
+    "maxCells": 32,
+    "note": "EN-only context sidecar. `the row under the cursor` is the list's own vocabulary for the highlighted session. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_sessions_up_down": {
+    "role": "Keys-legend row description for cursor movement on the sessions list",
+    "tone": "lowercase, telegraphic; two clauses",
+    "maxCells": 56,
+    "note": "EN-only context sidecar. Names the arrows first, then the page/home jumps that move the same cursor. `pageup/pagedown` and `home/end` are literal terminal key names and stay Latin. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_sessions_ctrl_a": {
+    "role": "Keys-legend row description for ctrl+a on the sessions list",
+    "tone": "lowercase, telegraphic",
+    "maxCells": 34,
+    "note": "EN-only context sidecar. `⌥` is the Option/Alt glyph and marks the subagent rows the toggle reveals; it is a platform glyph, not a word, so it stays as-is in every locale. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_sessions_ctrl_o": {
+    "role": "Keys-legend row description for ctrl+o on the sessions list",
+    "tone": "lowercase, telegraphic",
+    "maxCells": 32,
+    "note": "EN-only context sidecar. Moves the cursor to the first subagent run rather than opening it. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_sessions_ctrl_k": {
+    "role": "Keys-legend row description for ctrl+k on the sessions list",
+    "tone": "lowercase, telegraphic",
+    "maxCells": 22,
+    "note": "EN-only context sidecar. `pin` is the product's own verb for keeping a session at the top of the list. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_sessions_f10": {
+    "role": "Keys-legend row description for the f10 compatibility alias of the pin chord",
+    "tone": "lowercase, telegraphic; bracketed qualifier",
+    "maxCells": 30,
+    "note": "EN-only context sidecar. Kept as its own row because f10 still works and may be a returning user's muscle memory; `(compatibility)` marks it as the alternate route to the chord above. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_app_esc": {
+    "role": "Keys-legend row description for esc at app scope",
+    "tone": "lowercase, imperative verb phrase",
+    "maxCells": 20,
+    "note": "EN-only context sidecar. The first press interrupts the running turn; this row is the one a stuck user reaches for first. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_app_ctrl_c": {
+    "role": "Keys-legend row description for ctrl+c at app scope",
+    "tone": "lowercase, telegraphic; two clauses separated by a semicolon",
+    "maxCells": 32,
+    "note": "EN-only context sidecar. `twice exits` is the second press inside the interrupt window; both facts belong to this one chord, so they stay in one row. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_app_f8": {
+    "role": "Keys-legend row description for f8 at app scope",
+    "tone": "lowercase, telegraphic",
+    "maxCells": 16,
+    "note": "EN-only context sidecar. `aside` is the product's own noun for a side conversation and is not translated as a generic word. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_app_ctrl_b": {
+    "role": "Keys-legend row description for ctrl+b at app scope",
+    "tone": "lowercase, telegraphic",
+    "maxCells": 34,
+    "note": "EN-only context sidecar. The same toggle the sessions section describes from inside the list; here it is app-wide because ctrl+b also works from the composer. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_app_ctrl_t": {
+    "role": "Keys-legend row description for ctrl+t at app scope",
+    "tone": "lowercase, telegraphic",
+    "maxCells": 34,
+    "note": "EN-only context sidecar. `todo panel` is the product's panel name. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_app_ctrl_g": {
+    "role": "Keys-legend row description for ctrl+g at app scope",
+    "tone": "lowercase, telegraphic",
+    "maxCells": 26,
+    "note": "EN-only context sidecar. Cycles between subagent panels rather than toggling one, which is why the verb is `cycle`. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_app_ctrl_l": {
+    "role": "Keys-legend row description for ctrl+l at app scope",
+    "tone": "lowercase, telegraphic; bracketed qualifier",
+    "maxCells": 40,
+    "note": "EN-only context sidecar. The bracketed clause is load-bearing: clearing the screen does NOT erase the conversation, and a reader who thinks it does will avoid the key. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_app_ctrl_home_end": {
+    "role": "Keys-legend row description for the transcript top/end jumps",
+    "tone": "lowercase, telegraphic",
+    "maxCells": 36,
+    "note": "EN-only context sidecar. `ctrl+home/end` in the key column is one chord pair; the description must not imply the jump moves the cursor. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_app_ctrl_n_ctrl_s": {
+    "role": "Keys-legend row description for the new/resume session chord pair",
+    "tone": "lowercase, telegraphic; slash separates the two halves",
+    "maxCells": 36,
+    "note": "EN-only context sidecar. Two different chords share one row because they are the two ways into a session; the slash pair in the description mirrors the slash pair in the key column. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_hint_scroll": {
+    "role": "Keys-legend card footer segment telling the reader the arrows scroll the card",
+    "tone": "telegraphic glyph-plus-verb; no sentence punctuation",
+    "maxCells": 12,
+    "note": "EN-only context sidecar. One of four segments the card joins with a separator, so it must stay short and carry no leading or trailing space. `↑↓` are arrow glyphs, not words. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_hint_close": {
+    "role": "Keys-legend card footer segment naming esc as the way out",
+    "tone": "telegraphic",
+    "maxCells": 12,
+    "note": "EN-only context sidecar. Key name then verb, matching its sibling segments; no leading or trailing space. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_hint_reopen": {
+    "role": "Keys-legend card footer segment naming the typed command that reopens the card",
+    "tone": "telegraphic",
+    "maxCells": 16,
+    "note": "EN-only context sidecar. `/keys` is a typed slash command and is a literal command token: it must NEVER be translated. It leads because it is the unconditional route. No ICU arguments."
+  },
+  "tui.chrome.bindings.legend_hint_typing": {
+    "role": "Keys-legend card footer segment qualifying when the `?` chord opens the card",
+    "tone": "telegraphic; condition first, chord last",
+    "maxCells": 22,
+    "note": "EN-only context sidecar. The qualifier is the point: `?` types a character wherever a text field has focus, so the card advertises it only for the states where nothing is typing. No ICU arguments."
+  }
+}
