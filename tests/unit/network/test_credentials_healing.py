@@ -36,7 +36,12 @@ from local_operator.network.credentials.healing import (
     cause_for_evidence,
     repair_for,
 )
-from local_operator.network.credentials.types import BROKER_ERROR_CODES, BrokerError
+from local_operator.network.credentials.types import (
+    BROKER_ERROR_CODES,
+    BrokerError,
+    CredentialRef,
+    Grant,
+)
 from tests.unit.network.test_credentials_owner import (  # noqa: F401 — fixtures by import
     STUB_PROVIDER,
     idp,
@@ -403,9 +408,123 @@ def test_repair_asks_only_borrowable_keys_of_its_own_network(
         classmethod(lambda cls, *args, **kwargs: fake),
     )
 
-    outcomes = network_cli._repair_borrowed(
+    outcomes, skipped = network_cli._repair_borrowed(  # noqa: SLF001 — the seam under test
         "d_self", "node-a"
-    )  # noqa: SLF001 — the function under test
+    )
 
     assert asked == ["meshtest"], asked
     assert outcomes and outcomes[0]["cause"] == CAUSE_GRANT, outcomes
+    # AND EVERY KEY IT DID NOT ASK IS NAMED WITH ITS REASON (QA round 3): a repair
+    # that prints nothing is indistinguishable from one that repaired nothing.
+    reasons = {row["credential_name"]: row["reason"] for row in skipped}
+    assert "owned here" in reasons["openai"], reasons
+    assert "in network 'n_other'" in reasons["anthropic"], reasons
+
+
+def test_repair_with_nothing_askable_says_so(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No placement rows at all must produce a REASON, not silence.
+
+    QA round 3's finding: ``lop network credentials --repair`` with a live refusal
+    in hand printed its network summary and exited 0 — no repair line, no skip, and
+    nothing to tell "no key was askable" from "the selection missed one". This is the
+    empty case (nothing shared with this device in this network), which is the one an
+    operator with only a durable refusal record hits.
+    """
+    from local_operator.network import cli as network_cli
+
+    class FakeClient:
+        network_id = "n_first"
+        self_device = "d_self"
+
+        def forget_refusal(self, key):  # pragma: no cover - no key is asked
+            raise AssertionError("no key should have been asked")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(network_cli, "_placement_documents", lambda: [])
+    monkeypatch.setattr(
+        "local_operator.network.credentials.client.MeshCredentialClient.for_this_device",
+        classmethod(lambda cls, *args, **kwargs: FakeClient()),
+    )
+
+    outcomes, skipped = network_cli._repair_borrowed("d_self", "node-a")  # noqa: SLF001
+
+    assert outcomes == [], outcomes
+    assert len(skipped) == 1, skipped
+    assert skipped[0]["credential_name"] == "", skipped
+    assert "no placement rows in 'n_first'" in skipped[0]["reason"], skipped
+
+
+def test_repair_still_repairs_the_borrowable_key(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The speaking path must not turn into a reporting-only path.
+
+    A holder key that is not already working is still ASKED, and a grant from the
+    owner is still reported as ``recovered`` (review round 3's second half: fixing
+    the silence must not cost the repair).
+    """
+    from local_operator.network import cli as network_cli
+    from local_operator.network.credentials.placement import PlacementDocument
+
+    document = PlacementDocument("n_first", root=tmp_path, written_by="d_self")
+    document.declare(
+        "meshtest",
+        owner_device="d_owner",
+        owner_device_name="owner-b",
+        provider="meshtest",
+        identity_label="owner@example.test",
+        by="d_owner",
+    )
+    document.grant("meshtest", "d_self", scope="session", by="d_owner")
+    document.save()
+
+    asked: list[str] = []
+
+    class FakeClient:
+        network_id = "n_first"
+        self_device = "d_self"
+
+        def forget_refusal(self, key):
+            return None
+
+        def owner_of(self, key):
+            return "d_owner"
+
+        def owner_label(self, key):
+            return "owner-b"
+
+        async def grant_async(self, key, **kwargs):
+            asked.append(key)
+            return Grant(
+                access_token="bearer-for-the-test",
+                kind="bearer",
+                token_expires_at_ms=0,
+                grant_expires_at_ms=0,
+                credential_ref=CredentialRef(
+                    owner_device="d_owner",
+                    owner_device_name="owner-b",
+                    provider="meshtest",
+                    kind="oauth",
+                    credential_id=1,
+                ),
+                served_by="d_owner",
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(network_cli, "_placement_documents", lambda: [document])
+    monkeypatch.setattr(
+        "local_operator.network.credentials.client.MeshCredentialClient.for_this_device",
+        classmethod(lambda cls, *args, **kwargs: FakeClient()),
+    )
+
+    outcomes, skipped = network_cli._repair_borrowed("d_self", "node-a")  # noqa: SLF001
+
+    assert asked == ["meshtest"], asked
+    assert [row["recovered"] for row in outcomes] == [True], outcomes
+    assert skipped == [], skipped
