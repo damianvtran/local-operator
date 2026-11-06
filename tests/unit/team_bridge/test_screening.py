@@ -885,8 +885,18 @@ def test_early_holds_are_durable(tmp_path) -> None:
         elif kind == "template-mismatch":
             policy.template_sha256 = "0" * 64
         else:
-            for _ in range(Store.SCREENING_BUDGET_PER_HOUR):
-                store.reserve_screening_attempt(owner, message_id="m", fingerprint="f")
+            # Attributed fillers: the ceiling under test is the ACCOUNT one.
+            # Unattributed rows are bounded by the per-sender ceiling too
+            # (#3199), which would refuse long before the account is full and
+            # make this trip an unrelated fence.
+            for n in range(Store.SCREENING_BUDGET_PER_HOUR):
+                store.reserve_screening_attempt(
+                    owner,
+                    message_id=f"m{n}",
+                    fingerprint="f",
+                    sender_account_id=f"acct_fill{n}",
+                    sender_kind="agent",
+                )
         result = _run(owner, path, Runner(), policy=policy)
         assert result.disposition == "hold", kind
         assert store.screening_hold(owner, "bmsg_1") is not None, kind

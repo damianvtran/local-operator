@@ -459,6 +459,11 @@ class Envelope:
     #: no files. Public (a hash the hub publishes), and bound into the admission digest
     #: so a verdict reached without these files cannot be reused as a file grant.
     files_hash: str | None = None
+    #: The sender CLASS the recipient's gated body read stated, and the only
+    #: thing that makes :attr:`sender_account` a verified identity (#3199
+    #: residual). Empty is unknown provenance — an account with no stated kind
+    #: is not attributable, and must never be charged as one.
+    sender_kind: str = ""
 
     def private_images(self) -> ScreeningAttachments | None:
         """The image set for the single dispatch, or ``None`` (text-only)."""
@@ -576,6 +581,38 @@ def validate_envelope(
         sender_account = ""
     if not isinstance(sender_account, str) or len(sender_account) > _ENVELOPE_LABEL_MAX:
         return None, "envelope_malformed"
+    # ALLOCATION identity comes from the server's stored message participant,
+    # never from the top-level display sender above: the pair DTO freezes
+    # AccountID/EndpointID from m.Sender (agent-server bridge_read_service.go)
+    # while a label is free text. Conversations build this participant ONLY
+    # from the gated classification body read, so this is the same read whose
+    # body is screened — a hub-verified claim, not client metadata. KIND is
+    # what completes it: without it the account is unknown provenance, and an
+    # older server omits it (agent-server #327 adds ``sender_account_id``).
+    participant = message.get("sender")
+    participant = participant if isinstance(participant, Mapping) else {}
+    sender_kind = participant.get("kind", "")
+    if not sender_kind and participant.get("endpoint_id"):
+        # The pair DTO states an endpoint instead of a kind: an endpoint sender
+        # is another agent, which is the class the person reserve must exclude.
+        sender_kind = "agent"
+    account = participant.get("account_id", "")
+    if not isinstance(account, str) or len(account) > _ENVELOPE_LABEL_MAX:
+        return None, "envelope_malformed"
+    if sender_kind not in ("", "human", "agent"):
+        return None, "envelope_malformed"
+    if not account or not sender_kind:
+        # BOTH or NEITHER: a half-stated identity is unknown, never a sender
+        # with a defaulted class — the class decides a reserve, so guessing it
+        # would let a caller choose its own pool.
+        sender_kind = ""
+    if participant:
+        # A participant BLOCK is this item's allocation identity and decides the
+        # envelope's sender outright (empty means unknown, never the label). An
+        # item WITHOUT one — the pair lane, whose stored sender arrives in the
+        # top-level block above — keeps the identity it already had, so an
+        # existing pair-lane digest does not move.
+        sender_account = account if sender_kind else ""
     sender_name = sender.get("name")
     if sender_name is None or sender_name == "":
         sender_display = sender_account
@@ -700,6 +737,7 @@ def validate_envelope(
         envelope_digest=hashlib.sha256(digest_payload.encode("utf-8")).hexdigest(),
         attachments_hash=attachments.attachments_hash if attachments is not None else None,
         files_hash=files.files_hash if files is not None else None,
+        sender_kind=sender_kind,
     )
     # Private carrier: never a field, so repr/asdict/JSON stay content-free.
     object.__setattr__(envelope, "_private_body", body_text)
@@ -1570,6 +1608,13 @@ def _screen_prepare(
         "message": message_id,
         "tenant": owner.tenant_id,
         "logical": fingerprint,
+        # The verified allocation identity, pinned in the SAME registration the
+        # dispatch digest covers: ``_input_proof_mismatch`` refuses a bind whose
+        # job states a different sender, so the sender a message is charged to
+        # is the one that was screened. Both keys are ALWAYS written (empty
+        # meaning unknown) so the registered field set stays closed.
+        "sender_account_id": envelope.sender_account if envelope.sender_kind else "",
+        "sender_kind": envelope.sender_kind,
     }
 
     return _Prepared(
@@ -1579,6 +1624,9 @@ def _screen_prepare(
         fingerprint=fingerprint,
         input_proof=input_proof,
         provider=_canonical_provider,
+        # B4b's work-scope decision row, NOT the screening charge: the charge is
+        # the envelope's VERIFIED identity (``_screen_spend``), because this hint
+        # is client-stamped and nothing downstream re-derived it.
         sender_account_id=screening_allocation(item)[1],
         conversation_id=_conversation_of(item),
     )
@@ -1609,7 +1657,7 @@ async def _screen_core(
     prepared = _screen_prepare(owner, item, config_dir=config_dir, policy=policy, runner=runner)
     if isinstance(prepared, ScreenResult):
         return prepared
-    tier, sender = screening_allocation(item)
+    tier, _hint_sender = screening_allocation(item)
     return await _screen_spend(
         owner,
         prepared,
@@ -1619,7 +1667,24 @@ async def _screen_core(
         nonce=nonce,
         turn=turn,
         tier=tier,
-        sender_account_id=sender,
+    )
+
+
+def _is_input_refusal(failure: BaseException) -> bool:
+    """Whether the PROVIDER rejected this submission's content, not the route.
+
+    Two sources, both production's own and both a typed boolean rather than
+    prose: the wire guard's scrub result (``model_boundary._scrub_wire_failure``
+    decides it on the raw failure before sanitizing, and keeps only the flag),
+    and ``providers.failover.is_input_refusal`` for a failure that never met
+    the guard. A 400 for a malformed image or an oversized body is NOT this
+    class — the predicate is narrow by design, so the breaker keeps those.
+    """
+
+    from local_operator.providers.failover import ProviderError, is_input_refusal
+
+    return getattr(failure, "tb_input_refusal", False) is True or (
+        isinstance(failure, ProviderError) and is_input_refusal(failure)
     )
 
 
@@ -1668,7 +1733,6 @@ async def _screen_spend(
     nonce: str | None,
     turn: str,
     tier: int,
-    sender_account_id: str,
 ) -> ScreenResult:
     """Steps 9-14 for ONE message: reserve, mint, render, dispatch, commit."""
 
@@ -1687,7 +1751,12 @@ async def _screen_spend(
             fingerprint=fingerprint,
             input_proof=input_proof,
             tier=tier,
-            sender_account_id=sender_account_id,
+            # The VERIFIED identity of the envelope this screen validated, never
+            # the item's allocation hint: that hint was a client-stamped claim
+            # nothing re-derived, so charging it let a caller spend against a
+            # sender that was never the dispatch.
+            sender_account_id=envelope.sender_account if envelope.sender_kind else "",
+            sender_kind=envelope.sender_kind,
         )
     except StoreRefused as failure:
         code = _HOLD_FOR_SCHEMA.get(failure.code)
@@ -1732,6 +1801,8 @@ async def _screen_spend(
         revision=snapshot.admission_revision,
         epoch=int(epoch),
         turn=turn,
+        sender_account_id=envelope.sender_account if envelope.sender_kind else "",
+        sender_kind=envelope.sender_kind,
     )
     fingerprint = job.digest
     try:
@@ -1898,7 +1969,14 @@ async def _screen_spend(
             return ScreenResult("hold", hold_code=answered)
 
         failure_class = screening_failure_class(failure)
-        retry_at = _record_failure(store, owner, failure_class=failure_class)
+        # An input refusal is THIS submission, not a sick route: it still holds
+        # and still charges, but it must not open the account breaker and park
+        # every other inbound message for the retry window (#3199 residual).
+        retry_at = (
+            None
+            if _is_input_refusal(failure)
+            else _record_failure(store, owner, failure_class=failure_class)
+        )
         # A 402 is its own owner-visible reason (an empty balance only a
         # top-up clears), still a route failure for the breaker.
         from local_operator.team_bridge.model_boundary import provider_hold_code
@@ -3271,7 +3349,12 @@ async def _screen_batch_core(
         {
             "message_id": prepared.envelope.message_id,
             "input_proof": prepared.input_proof,
-            "sender_account_id": screening_allocation(items[index])[1],
+            # The message's OWN verified identity, so a call charges each
+            # participating sender exactly as its own single screen would.
+            "sender_account_id": (
+                prepared.envelope.sender_account if prepared.envelope.sender_kind else ""
+            ),
+            "sender_kind": prepared.envelope.sender_kind,
         }
         for index, prepared in pending
     ]
@@ -3393,7 +3476,8 @@ async def _screen_batch_core(
             return _finish()
         from local_operator.team_bridge.model_boundary import provider_hold_code
 
-        _record_failure(store, owner, failure_class=failure_class)
+        if not _is_input_refusal(failure):
+            _record_failure(store, owner, failure_class=failure_class)
         _commit_each(provider_hold_code(failure), failure_class=failure_class)
         return _finish()
 
@@ -3492,4 +3576,6 @@ def _job_for(entry: "tuple[int, _Prepared, str, str]", *, owner: OwnerSnapshot, 
         revision=snapshot.admission_revision,
         epoch=int(prepared.epoch),
         turn=turn,
+        sender_account_id=envelope.sender_account if envelope.sender_kind else "",
+        sender_kind=envelope.sender_kind,
     )

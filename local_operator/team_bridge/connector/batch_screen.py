@@ -223,13 +223,19 @@ async def prescreen_conversation_refs(
             # batch unit spent on them would buy a receipt nothing admits.
             continue
         allocation = allocation_for(ref, fetched.display)
+        try:
+            sender = _conversation._allocation_sender(fetched.display)
+        except ValueError:
+            # The single handler records the malformed read (``sender_malformed``)
+            # without spend; batching it would charge a unit for a hold.
+            continue
         item = _conversation._screening_item(
             owner=owner,
             conversation_id=ref.conversation_id,
             message_id=ref.message_id,
             body=fetched.body,
             body_hash=fetched.body_hash,
-            sender={},
+            sender=sender,
         )
         item["allocation"] = allocation
         candidates.append((ref, fetched, item))

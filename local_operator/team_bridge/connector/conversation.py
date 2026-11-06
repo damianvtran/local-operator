@@ -360,6 +360,31 @@ def _one_line(value: Any, *, limit: int = 200) -> str:
     return " ".join(value.split())[:limit]
 
 
+def _allocation_sender(display: Mapping[str, Any]) -> dict[str, str]:
+    """The budget identity of one message, from the GATED body read ONLY.
+
+    ``display`` is the classification response's transient display block, and
+    its ``sender_account_id`` is the hub's STORED participant (agent-server
+    #327), so this is a verified claim rather than a label or client metadata.
+    Both fields or neither: an account with no stated kind is unknown
+    provenance, and an older server sends neither — the pair is then empty and
+    the message is budgeted conservatively instead of being attributed.
+
+    Raises ``ValueError`` on a malformed pair so the caller records a typed
+    hold; defaulting a sender here is the failure this helper exists to stop.
+    """
+
+    account = display.get("sender_account_id", "")
+    kind = display.get("sender_kind", "")
+    if not isinstance(account, str) or len(account) > 256 or kind not in ("", "human", "agent"):
+        raise ValueError("invalid classification sender")
+    return {
+        "account_id": account if kind in ("human", "agent") else "",
+        "kind": kind if account else "",
+        "display_label": display.get("sender_label", ""),
+    }
+
+
 def _screening_item(
     *,
     owner: Any,
@@ -385,6 +410,14 @@ def _screening_item(
             "type": "note",
             "body": {"text": body},
             "body_hash": body_hash,
+            # The participant block is the ALLOCATION identity the store
+            # verifies (#3199 residual): ``validate_envelope`` takes the
+            # charged sender and its class from here, never from the display
+            # sender below, and pins both into the input proof.
+            "sender": {
+                "account_id": str(sender.get("account_id") or ""),
+                "kind": str(sender.get("kind") or ""),
+            },
             "recipient": {
                 "account_id": owner.account_id,
                 "endpoint_id": owner.endpoint_id,
@@ -1418,7 +1451,6 @@ async def handle_conversation_available(
         # A durable ref is only a locator. No person-membership read or legacy
         # cached name can supply display provenance. Failed admission must not
         # post even a metadata-only card: that would still wake the recipient.
-        sender: Mapping[str, Any] = {}
 
         # The iteration's batch pass may already hold this message's body
         # read (connector/batch_screen.py); reuse it rather than a second GET.
@@ -1428,6 +1460,13 @@ async def handle_conversation_available(
             # the hold rather than treating a weaker history read as authority.
             return await held("body_unavailable")
         body_text, body_hash, display = fetched.body, fetched.body_hash, fetched.display
+        # ONLY this gated classification read supplies allocation identity.
+        # An older server omits it: keep unknown provenance (conservative
+        # budget), never recover it from a durable ref or a display label.
+        try:
+            sender: Mapping[str, Any] = _allocation_sender(display)
+        except ValueError:
+            return await held("sender_malformed")
         if fetched.attachments is None:
             # Descriptors the hub sent but this build cannot validate: never
             # screen a guessed subset of the images; keep it retryable.

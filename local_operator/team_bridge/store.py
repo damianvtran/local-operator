@@ -764,6 +764,15 @@ def _canonical_proof_digest(registered: Any, attempt_id: Any, turn: Any) -> str 
             registered.get("revision"),
             registered.get("epoch"),
             turn,
+            # Provenance rides the derivation ONLY when an account was recorded:
+            # an empty pair is byte-identical to the pre-provenance encoding, so
+            # a proof registered by an older build keeps verifying instead of
+            # reading as damage (the same rule AdmissionJob.digest states).
+            *(
+                [registered["sender_account_id"], registered.get("sender_kind", "")]
+                if registered.get("sender_account_id")
+                else []
+            ),
         ]
     )
 
@@ -801,6 +810,14 @@ def _canonical_job_digest(job: Any) -> str:
             getattr(job, "revision", None),
             getattr(job, "epoch", None),
             getattr(job, "turn", None),
+            # Mirrors AdmissionJob.digest and the retained-proof derivation
+            # above, on the same both-or-neither rule, so the three encoders
+            # cannot drift apart.
+            *(
+                [job.sender_account_id, job.sender_kind]
+                if getattr(job, "sender_account_id", "")
+                else []
+            ),
         ]
     )
 
@@ -830,8 +847,26 @@ def _decode_bound_proof(raw: Any) -> tuple[str, dict[str, Any]]:
         raise StoreRefused("proof_corrupt", "registered input proof is unreadable") from error
     if not isinstance(registered, dict):
         raise StoreRefused("proof_corrupt", "registered input proof is not a mapping")
-    if set(registered) != set(_PROOF_FIELDS):
+    fields = set(registered)
+    # Operators upgrade mid-flight: a proof registered before provenance was
+    # carried has only ``_PROOF_FIELDS``, and it must stay decodable. Anything
+    # else — an extra, a missing, or half a provenance pair — is damage.
+    if fields not in (
+        set(_PROOF_FIELDS),
+        set(_PROOF_FIELDS) | {"sender_account_id", "sender_kind"},
+    ):
         raise StoreRefused("proof_corrupt", "registered input proof has an unexpected field set")
+    account = registered.get("sender_account_id", "")
+    kind = registered.get("sender_kind", "")
+    if (
+        not isinstance(account, str)
+        or not isinstance(kind, str)
+        or bool(account) != (kind in ("human", "agent"))
+    ):
+        # The registered identity is what the charge is re-derived from, so a
+        # half-stated or mistyped pair refuses here rather than becoming an
+        # allowance:
+        raise StoreRefused("proof_corrupt", "registered sender provenance is invalid")
     for field in _PROOF_FIELDS:
         value = registered[field]
         if field == "approved":
@@ -898,6 +933,12 @@ def _input_proof_mismatch(registered: Any, fingerprint: str, job: Any) -> str | 
         return "dispatch job approved map does not match the registered input proof"
     if registered.get("epoch") != int(getattr(job, "epoch", -1)):
         return "dispatch job epoch does not match the registered input proof"
+    # THE provenance check: the sender the registration pinned is the sender the
+    # dispatch states. A body that claims one sender and a job that would be
+    # charged to another is exactly the allowance-laundering this refuses.
+    for field in ("sender_account_id", "sender_kind"):
+        if registered.get(field, "") != getattr(job, field, ""):
+            return "dispatch sender attribution changed after registration"
     # NOTE: the registered "logical" value is the PACKED pre-job fingerprint;
     # the ``fingerprint`` argument is the job digest this bind CREATES. The
     # digest is the product of the bind, not an input to compare — comparing
@@ -4746,15 +4787,18 @@ class Store:
         """Add the per-call allocation columns to a ledger that predates them.
 
         ``batch_id`` groups the logical rows of ONE screening call (the budget
-        unit), ``priority`` is the call's tier (``SCREENING_TIER_*``), and
-        ``sender_account_id`` is the verified sender a row is charged to.
+        unit), ``priority`` is the call's tier (``SCREENING_TIER_*``),
+        ``sender_account_id`` is the verified sender a row is charged to, and
+        ``sender_kind`` is what MAKES it verified (``human``/``agent`` from the
+        hub's stored participant; anything else is unattributed).
 
         ADDITIVE AND NULLABLE, so no schema stamp moves (the rule of
         :meth:`_ensure_hold_failure_class_column`): an older binary sharing the
         file never names them, and a pre-upgrade row reads NULL — its own unit,
         counted at the ADDRESSED tier (so it still counts against the account
-        ceiling and can never let a lower tier past its own fence) and charged
-        to no sender.
+        ceiling and can never let a lower tier past its own fence) and, having
+        no verified provenance, charged against EVERY sender's allowance until
+        it ages out (see :meth:`_check_budget`).
         Not in ``_V3_COLUMNS``: a ledger without them is not damaged.
         """
 
@@ -4763,6 +4807,7 @@ class Store:
             ("batch_id", "TEXT"),
             ("priority", "INTEGER"),
             ("sender_account_id", "TEXT"),
+            ("sender_kind", "TEXT"),
         ):
             if column not in columns:
                 conn.execute(f"ALTER TABLE screening_attempts ADD COLUMN {column} {kind}")
@@ -4798,11 +4843,30 @@ class Store:
                 raise StoreRefused(
                     "unaddressed_exhausted", f"{kind} unaddressed units/hour exhausted"
                 )
-        for sender in {s for s in senders if s}:
+        for sender in set(senders):
+            # FAIL CLOSED ON UNATTRIBUTED SPEND (#3199 residual). This loop used
+            # to read ``{s for s in senders if s}``, which DROPPED an empty
+            # sender — so a caller with no verified provenance was exempt from
+            # the per-sender ceiling entirely, and the exemption was the wrong
+            # default in both directions it could be read:
+            #   * an unattributed NEW message must not get a fresh allowance:
+            #     with no sender it sees ALL spend, so losing provenance can
+            #     never buy capacity (``? = ''``);
+            #   * an unattributed EXISTING row must not be a free unit: it
+            #     counts against EVERY sender's allowance (the COALESCE arms),
+            #     which is what makes the sender ceiling hold for a busy sender
+            #     whose own rows are attributable.
+            # Rows whose kind is not a verified class are unattributed for the
+            # same reason, so a pre-upgrade row (NULL kind) is conservative
+            # until it ages out rather than invisible. A unit counts ONCE
+            # however many rows ride it (DISTINCT coalesce), so a batch never
+            # spends its senders' allowance more than the one call it made.
             spent = conn.execute(
                 "SELECT COUNT(DISTINCT COALESCE(batch_id, attempt_id)) FROM screening_attempts "
-                "WHERE account_scope = ? AND kind = ? AND at > ? AND sender_account_id = ?",
-                (scope, kind, now - 3600.0, sender),
+                "WHERE account_scope = ? AND kind = ? AND at > ? AND "
+                "(? = '' OR sender_account_id = ? OR COALESCE(sender_account_id, '') = '' "
+                "OR COALESCE(sender_kind, '') NOT IN ('human', 'agent'))",
+                (scope, kind, now - 3600.0, sender, sender),
             ).fetchone()[0]
             if int(spent) >= self.screening_budget.sender:
                 # The sender id never leaves this refusal's caller: it is the
@@ -4959,6 +5023,7 @@ class Store:
         fingerprint: str | None,
         tier: int = 3,
         sender_account_id: str = "",
+        sender_kind: str = "",
     ) -> str:
         """Durably charge ONE attempt of ``kind`` BEFORE its I/O.
 
@@ -4974,7 +5039,7 @@ class Store:
         return self._reserve_units(
             owner,
             kind=kind,
-            entries=[(message_id, fingerprint, sender_account_id)],
+            entries=[(message_id, fingerprint, sender_account_id, sender_kind)],
             tier=tier,
             batch=False,
         )[0]
@@ -4984,7 +5049,7 @@ class Store:
         owner: OwnerSnapshot,
         *,
         kind: str,
-        entries: Sequence[tuple[str | None, str | None, str]],
+        entries: Sequence[tuple[str | None, str | None, str, str]],
         tier: int,
         batch: bool,
     ) -> list[str]:
@@ -5013,16 +5078,16 @@ class Store:
                     kind,
                     now,
                     tier=tier,
-                    senders=[sender for _, _, sender in entries],
+                    senders=[sender for _, _, sender, _ in entries],
                 )
                 ids: list[str] = []
-                for message_id, fingerprint, sender in entries:
+                for message_id, fingerprint, sender, sender_kind in entries:
                     attempt_id = str(uuid.uuid4())
                     conn.execute(
                         "INSERT INTO screening_attempts "
                         "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, "
-                        "at, batch_id, priority, sender_account_id) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        "at, batch_id, priority, sender_account_id, sender_kind) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             attempt_id,
                             kind,
@@ -5034,6 +5099,9 @@ class Store:
                             batch_id,
                             int(tier),
                             sender or None,
+                            # BOTH or NEITHER: an account with no verified class is
+                            # unattributed (NULL), never a sender charged by default.
+                            (sender_kind or None) if sender else None,
                         ),
                     )
                     ids.append(attempt_id)
@@ -5051,14 +5119,14 @@ class Store:
     ) -> list[str]:
         """The LOGICAL charge for ONE batched screening call: one unit, N rows.
 
-        Each entry is ``{message_id, input_proof, sender_account_id}``; the
-        proof is registered exactly as :meth:`reserve_screening_attempt`
+        Each entry is ``{message_id, input_proof, sender_account_id, sender_kind}``;
+        the proof is registered exactly as :meth:`reserve_screening_attempt`
         registers it, so ``bind_attempt_fingerprint`` and every later fence
         see a row indistinguishable from a single-message reservation — only
         the shared ``batch_id`` differs. Returns the attempt ids in order.
         """
 
-        rows: list[tuple[str | None, str | None, str]] = []
+        rows: list[tuple[str | None, str | None, str, str]] = []
         for entry in entries:
             proof = entry.get("input_proof")
             stored = (
@@ -5071,6 +5139,7 @@ class Store:
                     str(entry["message_id"]),
                     stored if isinstance(stored, str) else None,
                     str(entry.get("sender_account_id") or ""),
+                    str(entry.get("sender_kind") or ""),
                 )
             )
         return self._reserve_units(owner, kind="logical", entries=rows, tier=tier, batch=True)
@@ -5084,16 +5153,19 @@ class Store:
         input_proof: Mapping[str, Any] | None = None,
         tier: int = 3,
         sender_account_id: str = "",
+        sender_kind: str = "",
     ) -> str:
         """The LOGICAL screening charge, optionally bound to message + tuple.
 
-        ``tier`` / ``sender_account_id`` place the unit in its pool and charge
-        it to a verified sender (see the budget constants). The defaults —
-        the top tier (fenced only by the account ceiling), no sender — are what
-        a DIRECT caller that predates the split gets, so none of them is fenced
-        by a pool it never knew about. The screening pipeline never relies on
-        them: it always passes the item's tier (``screening_allocation``),
-        whose own no-hint default is agent-addressed, never the top tier.
+        ``tier`` / ``sender_account_id`` / ``sender_kind`` place the unit in its
+        pool and charge it to a verified sender (see the budget constants). The
+        defaults — the top tier (fenced only by the account ceiling), no
+        sender — are what a DIRECT caller that predates the split gets, so none
+        of them is fenced by a pool it never knew about; an unattributed unit
+        is bounded by the sender ceiling as unattributed work (see
+        :meth:`_check_budget`), never exempt from it. The screening pipeline
+        never relies on the defaults: it passes the item's tier and the
+        envelope's verified provenance.
 
         The pipeline ALWAYS binds (message + full policy fingerprint); the
         unbound form exists for budget accounting talk (QA probes, breaker
@@ -5119,6 +5191,7 @@ class Store:
             fingerprint=stored,
             tier=tier,
             sender_account_id=sender_account_id,
+            sender_kind=sender_kind,
         )
 
     def reserve_http_attempt(
