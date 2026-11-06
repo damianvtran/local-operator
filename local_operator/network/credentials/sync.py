@@ -2371,6 +2371,16 @@ def credentials_sync_step(step_server: "RelayServer", device_id: str) -> str | N
     hold the op is skipped with a named outcome and NO wire traffic.
     """
     server = step_server
+    # THE OWNER'S ASKING CHANNEL RIDES THIS TICK (owner-relogin design §3.4): a
+    # credential this device lends that only a fresh sign-in HERE can repair becomes
+    # one inbox item for this operator. FIRST, and independent of which member this
+    # call is for, because the item is about this device's own logins; per call it
+    # costs one ``stat`` of the audit file while nothing relevant changed (see
+    # ``repair_inbox``), and it never raises into the tick. Never on the borrow
+    # path: a borrow must not gain a SQLite write that can fail.
+    from local_operator.network.credentials import repair_inbox
+
+    repair_inbox.tick(server)
     document_engine = sync_for_relay(server)
     if document_engine is None:
         return None

@@ -1,0 +1,538 @@
+"""The owner's inbox item for an open credential repair — the ASKING half.
+
+WHY THIS EXISTS (owner-relogin design, §0/§3). When a borrowed credential dies and
+no refresh can save it, the one repair is a fresh sign-in ON THE OWNER. The
+borrower already reads a sentence naming the owner and the command; the owner's
+operator was never asked. ``credentials/repair.py`` derives "is a repair open, and
+for which key" from the audit log, but its two surfaces — the ``credential_repair``
+row of ``lop network doctor`` and the ``/network`` panel — are PULL surfaces: seen
+only by somebody already looking. This module turns that same derivation into ONE
+durable ``notifications.db`` item per open ``(network, key)``, the place the
+operator already looks for "something needs me", with ``high`` priority on its
+first raise so the existing banner ladder (``notifications/delivery.py``) tells
+them once.
+
+WHAT IT IS NOT. No wire frame, op or field; no signature or approval; no new store
+(the item lives in ``notifications.db`` and its revival token comes from the audit
+log); no token material anywhere — the item is built from a key NAME, device names
+and the repair command. It grants nothing: the repair restores the owner's own
+login, and the peer's next borrow is authorised by the placement row that already
+authorised the last one.
+
+WHERE IT RUNS, AND WHAT IT COSTS IDLE. :func:`tick` is called from the credentials
+cadence (``sync.credentials_sync_step``), once per member per 15 s tick, NEVER from
+the borrow path: ``notify`` is a SQLite write that can raise, and a borrow must not
+gain a way to fail. The cost is bounded in three layers: an ``os.stat`` doorbell on
+the live audit file (unchanged → nothing else happens, so N members cost N stats);
+a byte scan of only the APPENDED tail for the two event names the derivation folds
+(other traffic — placement pulls, sync rows — rings the doorbell but never pays for
+a derivation, and grant rows, which every successful borrow writes, pay for one only
+while an item is open for a grant to close); and an in-process memo of the last
+published plan and of every item's raised text, so a derivation that changes nothing
+touches no store. Measured on the two-relay rig: 20 idle ticks cost 20 stats, no
+scan, no derivation and no store write; one derivation of a full 8.6 MB audit file
+costs 75-110 ms of CPU, which is what the scan exists to avoid paying per tick.
+
+COPY. The title and body are built ONLY from the derivation's own sentences —
+``RepairNotice.remedy`` (the doctor row's remedy) and ``RepairNotice.sentence``
+(``messages.render_repair_notice``) — so the doctor row, the panel and the item
+cannot drift, and no new English enters the product. The overflow mark is a bare
+ellipsis for the same reason; the session label is the ``/network`` command, a
+technical identifier, which is where the full repair rows are.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
+
+from local_operator.network.credentials.repair import (
+    REPAIR_TAIL_ROWS,
+    RepairNotice,
+    repair_notices,
+    repaired_keys,
+)
+
+if TYPE_CHECKING:
+    from local_operator.network.relay import RelayServer
+
+logger = logging.getLogger(__name__)
+
+#: The owner-scoped pseudo-session every repair item is filed under. Not a
+#: conversation: no session directory exists, so the reel falls back to
+#: :data:`SESSION_TITLE` (``items.SessionFacts.get``) and offers only read/dismiss.
+SESSION_ID = "network-credentials"
+
+#: The label the reel shows for :data:`SESSION_ID` — the in-app command that shows
+#: the full repair rows. A command is a technical identifier (exempt from the copy
+#: catalogue by AGENTS.md's i18n rule), so the label adds no untranslated prose.
+SESSION_TITLE = "/network"
+
+#: The item key's namespace: ``mesh-repair:<network>:<credential key>:<generation>``.
+KEY_PREFIX = "mesh-repair"
+
+#: ``dismissed_via`` for an item THIS module closed because the window shows the
+#: repair (a later ``credential.grant``). The store's column is free text; the
+#: value is what distinguishes "repaired" from "the operator dismissed it".
+DISMISSED_VIA = "mesh_repair"
+
+#: How many askers the body names, sorted by name. More are marked by a bare
+#: ellipsis rather than an "and N more" sentence (no new copy, see the docstring);
+#: the action — the title — is the same however many devices asked.
+NAMED_ASKERS_MAX = 3
+OVERFLOW_MARK = "…"
+
+#: The byte spellings of the two events :func:`repair.open_reports` folds. The
+#: audit writer renders ``"event": "<name>"`` with ``json.dumps`` defaults, so a
+#: row carrying either event contains one of these exactly.
+_REPORT_EVENT = b'"credential.report"'
+_GRANT_EVENT = b'"credential.grant"'
+
+#: How many standing items one pass will page through. One item per open key, so
+#: a real owner holds a handful; the bound only stops a damaged store from
+#: turning a tick into an unbounded scan.
+_STANDING_PAGES_MAX = 5
+
+
+def item_key(network_id: str, key: str, generation: str) -> str:
+    """The item's collapse key: one row per ``(network, credential key, episode)``."""
+    return f"{KEY_PREFIX}:{network_id}:{key}:{generation}"
+
+
+def _generation_rank(generation: str) -> int:
+    """``g<seq>`` as an orderable int; anything else ranks below every real token."""
+    digits = generation[1:] if generation.startswith("g") else ""
+    return int(digits) if digits.isdigit() else -1
+
+
+def _split_item_key(value: str) -> tuple[str, str, str] | None:
+    """``(network, credential key, generation)`` back out of an item key, or ``None``.
+
+    The credential key may itself contain ``:`` (``mcp:https://…``), so the network
+    is split off the front and the generation off the back.
+    """
+    if not value.startswith(KEY_PREFIX + ":"):
+        return None
+    rest = value[len(KEY_PREFIX) + 1 :]
+    network_id, _, tail = rest.partition(":")
+    key, _, generation = tail.rpartition(":")
+    if not network_id or not key or _generation_rank(generation) < 0:
+        return None
+    return network_id, key, generation
+
+
+@dataclass(frozen=True)
+class PlannedItem:
+    """One item this device's operator should be holding, fully rendered."""
+
+    network_id: str
+    key: str
+    generation: str
+    title: str
+    body: str
+
+
+def render_title(notice: RepairNotice) -> str:
+    """The doctor row's remedy, as a headline: the action, the same for every asker."""
+    remedy = notice.remedy
+    return remedy[:1].upper() + remedy[1:]
+
+
+def render_body(askers: Iterable[tuple[str, str]], notice: RepairNotice) -> str:
+    """One producer sentence per asker, sorted by name, capped.
+
+    STABLE FACTS ONLY — device names and the key's command, no timestamps and no
+    counters — so a retry renders byte-identical text, the store's content hash
+    answers ``unchanged``, and nothing is written.
+    """
+    labels = sorted({name or device for device, name in askers}, key=lambda s: (s.casefold(), s))
+    lines = [notice.sentence(label) for label in labels[:NAMED_ASKERS_MAX]]
+    if len(labels) > NAMED_ASKERS_MAX:
+        lines.append(OVERFLOW_MARK)
+    return "\n\n".join(lines)
+
+
+def plan_items(root: Path, records: list[Mapping[str, Any]]) -> dict[tuple[str, str], PlannedItem]:
+    """Every item this device should hold now, keyed ``(network, credential key)``.
+
+    A STRONGER BAR THAN THE DOCTOR ROW, deliberately: a pull surface may list any
+    open report, but a push that asks the operator to sign in must be about a login
+    THIS device owns (its placement entry names it as owner) and must name only
+    devices that still hold the share. A key owned elsewhere, or a report whose
+    every asker has since lost the share, raises nothing; the doctor row is not
+    touched by this filter.
+    """
+    from local_operator.network import store
+    from local_operator.network.credentials.placement import PlacementDocument
+
+    plan: dict[tuple[str, str], PlannedItem] = {}
+    for record in store.list_networks(root):
+        notices = repair_notices(record, records)
+        if not notices:
+            continue
+        document = PlacementDocument.load(
+            record.network_id, root, self_device=record.self_device_id
+        )
+        for notice in notices:
+            entry = document.entry(notice.key)
+            if entry is None or entry.owner_device != record.self_device_id:
+                continue
+            askers = [(device, name) for device, name in notice.askers if entry.is_holder(device)]
+            if not askers:
+                continue
+            plan[(notice.network_id, notice.key)] = PlannedItem(
+                network_id=notice.network_id,
+                key=notice.key,
+                generation=notice.generation,
+                title=render_title(notice),
+                body=render_body(askers, notice),
+            )
+    return plan
+
+
+@dataclass
+class PublishResult:
+    """What one publication pass did, for the caller's log and the tests."""
+
+    created: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    reopened: int = 0
+    closed: int = 0
+    #: ``""`` on a completed pass; else why it stopped (``busy``/``refused``/``failed``).
+    stopped: str = ""
+
+
+def publish_notices(
+    config_dir: Path | str,
+    plan: Mapping[tuple[str, str], PlannedItem],
+    repaired: Iterable[str],
+    *,
+    episodes: dict[tuple[str, str], tuple[str, str, str]] | None = None,
+) -> PublishResult:
+    """Make ``notifications.db`` hold exactly ``plan``'s items. NEVER RAISES.
+
+    ``repaired`` is :func:`repair.repaired_keys` — the keys the window shows
+    repaired; a standing item for one of them is dismissed with
+    ``dismissed_via=mesh_repair``, leaving the unread reel and staying readable
+    under ``state="dismissed"`` as the record. An item for a key that merely left
+    the window is left alone: closing needs positive evidence.
+
+    ``episodes`` is the caller's memory, per key with a live item, of the
+    ``(generation, title, body)`` it last raised (``""`` text for an item a previous
+    process raised). Two jobs. An item already raised with exactly this text is
+    not handed to the store again — ``notify`` takes a write transaction even to
+    answer ``unchanged``. And GENERATIONS ONLY MOVE FORWARD while a key stays
+    open: the token is the seq of the grant before the episode, and that grant can
+    age out of the 500-row window while the episode is still open, which would
+    otherwise read as ``g0`` — a NEW item for an old episode, a second banner, and
+    the first item stranded. A token lower than the one already raised (in ``episodes`` or on a
+    standing row) is that aging, never a new episode, because a grant cannot
+    un-happen; a HIGHER token is a real repair-then-break, and the older standing
+    row is closed as repaired.
+
+    ``NotifyRefused`` (the store's hourly new-item cap) and
+    ``NotificationStoreBusy`` stop the pass with a named outcome; anything else is
+    logged and swallowed. A cadence reports; it never raises into the tick.
+    """
+    from local_operator.notifications.store import (
+        NotificationStore,
+        NotificationStoreBusy,
+        NotifyRefused,
+    )
+
+    result = PublishResult()
+    episodes = episodes if episodes is not None else {}
+    repaired_set = set(repaired)
+    try:
+        notifications = NotificationStore(config_dir)
+        standing = _standing_items(notifications)
+        for (network_id, key), item in plan.items():
+            rows = standing.get((network_id, key), [])
+            generation = item.generation
+            known = [gen for gen, _ in rows]
+            remembered = episodes.get((network_id, key))
+            if remembered is not None:
+                known.append(remembered[0])
+            newest = max(known, key=_generation_rank, default="")
+            if newest and _generation_rank(generation) < _generation_rank(newest):
+                generation = newest
+            for gen, row in rows:
+                if _generation_rank(gen) < _generation_rank(generation):
+                    result.closed += _close(notifications, row)
+            if remembered == (generation, item.title, item.body):
+                result.unchanged += 1
+                continue
+            action = _raise(notifications, item, generation)
+            episodes[(network_id, key)] = (generation, item.title, item.body)
+            if action == "created":
+                result.created += 1
+            elif action == "reopened":
+                result.reopened += 1
+            elif action in ("updated", "revived"):
+                result.updated += 1
+            else:
+                result.unchanged += 1
+        for (network_id, key), rows in standing.items():
+            if (network_id, key) in plan:
+                continue
+            if key in repaired_set:
+                for _, row in rows:
+                    result.closed += _close(notifications, row)
+                episodes.pop((network_id, key), None)
+            else:
+                # Standing but no longer open in the window (it aged out, or a
+                # previous process raised it): remembered, so that the grant which
+                # eventually repairs it still wakes a derivation (see ``_tick``).
+                newest = max((gen for gen, _ in rows), key=_generation_rank)
+                episodes.setdefault((network_id, key), (newest, "", ""))
+        # Nothing to close and nothing open: forgotten, so a lingering key cannot keep
+        # every later grant row paying for a derivation.
+        for stale in [k for k in episodes if k not in plan and k not in standing]:
+            episodes.pop(stale, None)
+    except NotifyRefused:
+        logger.info("credential repair inbox: the store refused a new item (hourly cap)")
+        result.stopped = "refused"
+    except NotificationStoreBusy:
+        logger.debug("credential repair inbox: the store was busy; retrying next tick")
+        result.stopped = "busy"
+    except Exception:  # noqa: BLE001 — a lost item must never cost a tick or a borrow
+        logger.warning("credential repair inbox: publication failed", exc_info=True)
+        result.stopped = "failed"
+    return result
+
+
+def _standing_items(notifications: Any) -> dict[tuple[str, str], list[tuple[str, dict[str, Any]]]]:
+    """The NOT-dismissed repair items, grouped ``(network, key) → [(generation, row)]``."""
+    grouped: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+    cursor: str | None = None
+    for _ in range(_STANDING_PAGES_MAX):
+        rows, cursor = notifications.list_items(
+            state="all", session_id=SESSION_ID, cursor=cursor, limit=100
+        )
+        for row in rows:
+            parts = _split_item_key(str(row.get("key") or ""))
+            if parts is None:
+                continue
+            network_id, key, generation = parts
+            grouped.setdefault((network_id, key), []).append((generation, row))
+        if cursor is None:
+            break
+    return grouped
+
+
+def _close(notifications: Any, row: Mapping[str, Any]) -> int:
+    """Dismiss one standing item as REPAIRED, token-bound (``store.apply``).
+
+    The ``(id, revision)`` pair is the store's optimistic token, so an operator's
+    concurrent read or dismiss is never overwritten blindly: a stale token is
+    skipped, and the next pass sees the row's new state.
+    """
+    applied = notifications.apply(
+        "dismiss", ids=[(str(row["id"]), int(row["revision"]))], via=DISMISSED_VIA
+    )
+    return len(applied.changed)
+
+
+def _raise(notifications: Any, item: PlannedItem, generation: str) -> str:
+    """Create or update one item; ``high`` only when the operator has not been told.
+
+    A FIRST raise is ``high`` — the banner ladder's one banner for it. A later
+    revision (a second asker joined) is ``normal``: the reel and the badge carry
+    it, and the operator is not bannered again for the same dead login. A retry
+    with the same text keeps the row's own priority, so the content hash matches
+    and the store writes nothing.
+    """
+    key = item_key(item.network_id, item.key, generation)
+    existing = notifications.get_by_key(SESSION_ID, key)
+    repaired_before = existing is not None and (
+        existing.get("dismissed") and str(existing.get("dismissed_via") or "") == DISMISSED_VIA
+    )
+    if existing is None or repaired_before:
+        priority = "high"
+    elif existing.get("title") == item.title and existing.get("body_md") == item.body:
+        priority = str(existing.get("priority") or "normal")
+    else:
+        priority = "normal"
+    outcome = notifications.notify(
+        SESSION_ID,
+        title=item.title,
+        body_md=item.body,
+        priority=priority,
+        key=key,
+        session_title=SESSION_TITLE,
+    )
+    if repaired_before and outcome.action == "absorbed":
+        # A key this module closed as repaired is open again under the SAME token
+        # (only possible for ``g0``, once the closing grant has itself left the
+        # window): a new episode, so the row comes back — undismissed and unread,
+        # the way ``notifications/remote_park._reopen`` revives a second park.
+        notifications.apply(
+            "undismiss", ids=[(outcome.item_id, outcome.revision)], via=DISMISSED_VIA
+        )
+        if outcome.read:
+            notifications.apply(
+                "unread", ids=[(outcome.item_id, outcome.revision)], via=DISMISSED_VIA
+            )
+        return "reopened"
+    return str(outcome.action)
+
+
+# ---------------------------------------------------------------------------
+# The cadence: doorbell, memo, gates
+
+
+@dataclass
+class _Doorbell:
+    """One audit file's last-seen shape, the last plan published, and the episodes."""
+
+    inode: int = -1
+    offset: int = -1
+    #: The plan (and repaired set) the store was last brought in line with; a
+    #: derivation that reproduces it writes nothing.
+    published: tuple[Any, ...] | None = None
+    episodes: dict[tuple[str, str], tuple[str, str, str]] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+#: One doorbell per audit file (two relays in one process — the test rig — are two
+#: files), created on first use and never dropped: one small object per relay root.
+_DOORBELLS: dict[str, _Doorbell] = {}
+_DOORBELLS_LOCK = threading.Lock()
+
+#: Counters the idle-cost evidence reads (stats taken, derivations run, passes that
+#: touched the store). Process-wide and monotonic; tests diff them.
+COUNTERS: dict[str, int] = {"stats": 0, "scans": 0, "derivations": 0, "publications": 0}
+
+
+def _doorbell_for(path: Path) -> _Doorbell:
+    with _DOORBELLS_LOCK:
+        return _DOORBELLS.setdefault(str(path), _Doorbell())
+
+
+def _relevant_change(path: Path, bell: _Doorbell) -> str:
+    """What the audit file gained since the last pass: ``none``, ``grant``, ``report``, ``full``.
+
+    One ``stat`` when nothing changed. When it grew, read ONLY the appended bytes and
+    look for the two folded event names — a relay writes many other rows (sync,
+    placement, links), and none of them can move a repair. ``grant`` means grant rows
+    and no report row: those can only CLOSE an item, so the caller derives on them
+    only while something is open. A new inode, a shrunk file or a first pass is
+    ``full`` (everything is re-derived); a missing file is ``none``. The offset only
+    advances past complete lines, so a row the writer is midway through is read whole
+    next time.
+    """
+    COUNTERS["stats"] += 1
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return "none"
+    if stat.st_ino == bell.inode and stat.st_size == bell.offset:
+        return "none"
+    if stat.st_ino != bell.inode or stat.st_size < bell.offset or bell.offset < 0:
+        # First pass, a rotation or a re-arm: derive from scratch, and resume the
+        # cheap scan from the last COMPLETE line the derivation could have read.
+        bell.inode, bell.offset = stat.st_ino, _last_line_end(path, stat.st_size)
+        return "full"
+    COUNTERS["scans"] += 1
+    with path.open("rb") as handle:
+        handle.seek(bell.offset)
+        chunk = handle.read(stat.st_size - bell.offset)
+    complete = chunk.rfind(b"\n") + 1
+    if not complete:
+        return "none"
+    appended = chunk[:complete]
+    bell.offset += complete
+    if _REPORT_EVENT in appended:
+        return "report"
+    return "grant" if _GRANT_EVENT in appended else "none"
+
+
+def _last_line_end(path: Path, size: int) -> int:
+    """The offset just past the last newline at or before ``size`` (0 for none).
+
+    Audit rows are small (``MAX_DETAIL_BYTES`` caps the variable part), so the last
+    64 KiB always holds a line end on a file that has one; a writer's half-appended
+    batch past it is scanned whole on the next pass.
+    """
+    if size <= 0:
+        return 0
+    base = max(0, size - 65536)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(base)
+            chunk = handle.read(size - base)
+    except OSError:
+        return 0
+    end = chunk.rfind(b"\n")
+    return base + end + 1 if end >= 0 else base
+
+
+def tick(server: "RelayServer") -> str:
+    """One pass of the owner's asking channel, for the credentials cadence. NEVER RAISES.
+
+    Answers a word for the debug log: ``idle`` (nothing new in the audit file),
+    ``gated`` (notifications are off, or this process is a rig under a foreign
+    HOME — the banner ladder's own two refusals, ``delivery.gates_refuse``),
+    ``same`` (re-derived, nothing to change), ``published`` or a stop reason.
+    """
+    try:
+        return _tick(server)
+    except Exception:  # noqa: BLE001 — a cadence reports; it never raises into the tick
+        logger.debug("credential repair inbox: tick failed", exc_info=True)
+        return "failed"
+
+
+def _tick(server: "RelayServer") -> str:
+    from local_operator.network.store import audit_path
+
+    log = getattr(server, "audit", None)
+    if log is None:
+        return "no_audit"
+    root = Path(server.root)
+    path = audit_path(root)
+    bell = _doorbell_for(path)
+    if not bell.lock.acquire(blocking=False):
+        # Another member's step in this tick is already deriving; it covers this one.
+        return "busy"
+    try:
+        change = _relevant_change(path, bell)
+        if change == "none" or (change == "grant" and not bell.episodes):
+            # A grant can only close an item, and none is open: nothing can move.
+            return "idle"
+        from local_operator.notifications.delivery import gates_refuse
+
+        if gates_refuse():
+            # Not published, and nothing re-armed: a device with the switch off pays the
+            # same one stat per tick as an idle one. The derivation is stateless (it
+            # re-reads the window), so the next relevant row — a failing peer asks
+            # again within its 300 s refusal window — raises the item once the switch
+            # is back on; the doctor row never depended on any of this.
+            bell.published = None
+            return "gated"
+        records = log.tail(REPAIR_TAIL_ROWS)
+        COUNTERS["derivations"] += 1
+        plan = plan_items(root, records)
+        repaired = repaired_keys(records)
+        fingerprint = (tuple(sorted(plan.items())), tuple(sorted(repaired)))
+        if fingerprint == bell.published:
+            return "same"
+        COUNTERS["publications"] += 1
+        result = publish_notices(root, plan, repaired, episodes=bell.episodes)
+        if result.stopped in ("busy", "failed"):
+            # Contention clears in seconds: re-arm, so the next tick derives again.
+            bell.inode, bell.offset = -1, -1
+            return result.stopped
+        if result.stopped == "refused":
+            # The store's hourly cap: retried on the next relevant row, not every
+            # tick. Items raised before the refusal are in ``episodes`` and skipped.
+            return result.stopped
+        bell.published = fingerprint
+        logger.debug("credential repair inbox: %s", result)
+        return result.stopped or "published"
+    finally:
+        bell.lock.release()
