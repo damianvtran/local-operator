@@ -396,6 +396,14 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="query",
                 blurb="Read-only DOM query: CSS in, element descriptors out.",
             ),
+            # The clipboard write's one-line meaning, and the ONE property a model
+            # must not have to discover by experiment: the receipt is not the text.
+            # The recipe (and why a page still cannot read the clipboard) is in
+            # `guide://browser`; this doc has a char cap and the guide has none.
+            ToolDocOp(
+                op="copy",
+                blurb="One element's text to the clipboard; receipt only. Desktop host.",
+            ),
             ToolDocOp(op="tabs", blurb="List agent-driven tabs."),
             ToolDocOp(
                 op="inspect_ownership",
@@ -454,10 +462,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "'ancestors' the chain up to `<html>`. A selector matching nothing "
             "is the typed element-not-found, never an empty success.\n"
             "- Tab ownership: 'tabs' lists every agent-driven tab including "
-            "other sessions' (handles are redacted), and a redacted handle is "
+            "other sessions', and a redacted handle is "
             "not yours to drive.\n"
-            "- Network capture is the desktop app's host only (the extension "
-            "attaches its debugger per action and has no standing session): "
+            "- Network capture is the desktop app's host only: "
             "'network_start' then read with 'network_read'. Bodies are opt-in "
             "per exact origin+path and land in a private session file, never in "
             "this transcript.\n"

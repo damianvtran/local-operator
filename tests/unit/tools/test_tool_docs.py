@@ -446,7 +446,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # playback instead. Measured by this test's own print; the doc is 8190 chars against
     # the 8192 cap.
     # No other tool's entry moved.
-    "browser": 2116,
+    "browser": 2114,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

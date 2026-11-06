@@ -21422,6 +21422,16 @@ BROWSER_ACTIONS = (
     # returns no attributes, `snapshot` returns an AX tree, and `eval` is not a
     # surface to expose. It never mutates, so it is safe where eval is not.
     "query",
+    # Clipboard WRITE of one element's text, desktop host only. A page's own Copy
+    # button can be refused by the host (a page's `navigator.clipboard.writeText`
+    # needs a permission its origin holds), and a key shown exactly once with no
+    # working affordance is lost — so the harness needs a route that does not
+    # depend on the page's button at all. The write happens in the desktop app's
+    # MAIN process, never through a page permission, and the result is a receipt
+    # (`chars`, a sha256 prefix, and whether the readback matched) — never the text,
+    # and never a page-supplied string either: the element is named by the caller's
+    # selector. See DESKTOP_ONLY_METHODS for why the extension cannot serve it.
+    "copy",
     # tabs lists every live agent-owned tab (all sessions', read-only
     # awareness) so parallel agents can see what is being driven and know which
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
@@ -21512,6 +21522,11 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
         "hit_test",
         "ancestors",
         "query",
+        # copy needs a page-script read of the element AND a main process to
+        # write the clipboard from; cmux offers neither, so it degrades with the
+        # typed "use a non-cmux host" refusal rather than reporting a copy it
+        # never made (which would send an agent to `pbpaste` for a stale value).
+        "copy",
         "network_start",
         "network_stop",
         "network_read",
@@ -23512,6 +23527,13 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
         # already refused a locator here, because a locator resolves a TARGET
         # while a query asks the DOM a question.
         return _validate_selector(params.selector, "query")
+    if action == "copy":
+        # One element, named by a selector, and nothing else: "copy whatever is
+        # focused" would put a value on the clipboard that the caller never
+        # named, and the receipt could not say which element it came from. The
+        # flag-shaped check matters here too — this selector reaches a page
+        # script.
+        return _validate_selector(params.selector, "copy")
     if action in ("styles", "ancestors"):
         # Both name one element, so the selector is mandatory and the same
         # refusal click/type use keeps the copy consistent. The flag-shaped
@@ -25047,6 +25069,102 @@ def _host_of_client(client: Any) -> str:
     if str(getattr(client, "host", "")) == HOST_UI_PREFIX:
         return HOST_UI_PREFIX
     return HOST_BRIDGE_PREFIX
+
+
+#: The exact shape of the sha256 prefix in a receipt: 16 hex chars, either case.
+#:
+#: The contract is a PREFIX of the sha256 of the copied bytes (a full digest is 64
+#: chars, and a constant that long is not worth spending in every result). MATCHED
+#: rather than length-capped — a cap alone accepts whatever a peer put in the field
+#: as long as it was short, and "short arbitrary string" is exactly what a truncated
+#: copy of the value looks like. Case-INSENSITIVE and normalised to lowercase on the
+#: way in: an uppercase producer is a producer that spelled the same digest
+#: differently, not one whose receipt should silently lose the field.
+_COPY_SHA_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{12,64}$")
+
+
+def _browser_copy_receipt(raw: Mapping[str, Any]) -> dict[str, object]:
+    """The whole receipt: `chars`, `sha256`, `verified` — and nothing page-controlled.
+
+    THREE SCALARS, BUILT ONE BY ONE. There is no `**result`, no `dict(result)` and
+    no passthrough of unknown fields anywhere on this path, and an earlier version
+    also carried the element's `{tag, id, name}` — dropped after review found that
+    any grammar loose enough to accept real ids (`api-key`, `secret_key`) is also
+    loose enough to accept a token-shaped secret, so an ELEMENT IDENTITY IS STILL A
+    CHANNEL. The element is now named by the caller's own `selector`, which the
+    caller typed and already knows, so the receipt carries no host-supplied string
+    at all: a page cannot influence a byte of it.
+
+    `chars` and `verified` are type-checked rather than coerced: `bool("…")` is
+    TRUE, and a string in `chars` IS the copied text under the wrong name. A
+    digest that is not hex is reported as absent (the caller then reads the copy as
+    unverified) rather than as a digest-shaped guess.
+    """
+    chars = raw.get("chars")
+    digest = raw.get("sha256")
+    return {
+        "chars": chars if type(chars) is int and chars >= 0 else 0,
+        "sha256": (
+            digest.strip().lower()
+            if isinstance(digest, str) and _COPY_SHA_PREFIX_RE.match(digest.strip())
+            else ""
+        ),
+        "verified": raw.get("verified") is True,
+    }
+
+
+def _browser_copy_result(
+    tool_call_id: str,
+    params: BrowserParams,
+    result: Mapping[str, Any],
+) -> ToolResult:
+    """Render a ``copy`` receipt in words, and NEVER render the copied bytes.
+
+    The one sentence that has to be unmistakable is what is NOT here: an agent
+    that reads "Copied 44 characters" and then assumes it can see the value will
+    look in its own transcript for a key that was deliberately left out. The
+    remedy is named instead (`pbpaste`, then straight into `lop secret set`), and
+    the guide carries the full recipe.
+
+    The element is named by the SELECTOR the caller supplied, never by anything the
+    page reported (see `_browser_copy_receipt`).
+
+    `verified: false` is reported rather than hidden: the host's compare-only
+    readback is the only proof the bytes reached the OS clipboard, and a caller
+    that skipped a copy it believed in is the exact failure this action exists to
+    prevent.
+    """
+    selector = params.selector.strip()
+    receipt = _browser_copy_receipt(result)
+    details: dict[str, Any] = {"selector": selector, **receipt}
+    chars = receipt["chars"]
+    assert isinstance(chars, int)
+    if chars:
+        text = (
+            f"Copied {chars} character{'s' if chars != 1 else ''} from {selector!r} "
+            "to the clipboard"
+        )
+    else:
+        # The host reports `empty_element_text` as a typed failure, so this is
+        # only reachable from a host that reported success with no length — and
+        # claiming a copy here would be the lie that code exists to avoid.
+        text = (
+            f"The clipboard write from {selector!r} reported no length, so treat it "
+            "as unconfirmed"
+        )
+    if receipt["sha256"]:
+        text += f" (sha256 {receipt['sha256']}…)"
+    text += "."
+    if not receipt["verified"]:
+        text += (
+            " The host could not confirm the clipboard holds it (its readback did not "
+            "match) — check with 'pbpaste' before relying on it."
+        )
+    text += (
+        " The text is deliberately absent from this result: read it where it landed "
+        "(`printf '%s' \"$(pbpaste)\" | lop secret set NAME`, never echoed)."
+    )
+    return _text(tool_call_id, "browser", text, details=details)
 
 
 async def _bridge_call(
@@ -27866,6 +27984,14 @@ async def _bridge_action(
         wire["selector"] = params.selector.strip()
         if params.limit is not None:
             wire["limit"] = params.limit
+    elif action == "copy":
+        # Only the selector: the host reads THAT element and nothing else, so
+        # there is no second target to send and no text field to accept. The
+        # action is desktop-only, so the extension and cmux never reach this
+        # branch — `_capability_problem` refuses an unadvertised `copy` before
+        # the request is built, and that is the ONE place that decides who
+        # serves it (a second host check here would be a second answer).
+        wire["selector"] = params.selector.strip()
     elif action in ("click", "type"):
         wire["selector"] = params.selector.strip()
         if action == "type":
@@ -27936,6 +28062,11 @@ async def _bridge_action(
             state.surface_id = ""
         return problem
     assert result is not None
+    if action == "copy":
+        # Before `details` is filled with url/title: a copy reports a receipt and
+        # nothing else, and the receipt builder is the only reader of the host's
+        # payload on this path (see `_browser_copy_receipt`).
+        return _browser_copy_result(tool_call_id, params, result)
     href = str(result.get("url", ""))
     title = str(result.get("title", ""))
     details: dict[str, Any] = {"surface_id": surface}
@@ -29307,6 +29438,20 @@ async def _execute_browser(
     # Degrade with a clear, actionable error naming both non-cmux hosts rather
     # than faking a partial scroll or an empty log list.
     if action in CMUX_UNSUPPORTED_BROWSER_ACTIONS:
+        if action == "copy":
+            # Its own sentence rather than the generic list plus
+            # `_non_cmux_host_hint`: that hint offers "either non-cmux host", and
+            # the extension then refuses `copy` too (a clipboard write needs a MAIN
+            # process it does not have), so the caller would be sent to a second
+            # host that cannot help and would have to find out the hard way. Name
+            # the one host that serves it.
+            return _error(
+                tool_call_id,
+                "browser",
+                "'copy' is not supported on the cmux backend — it needs the desktop app's "
+                "browser host, which reads the element and writes the clipboard from that "
+                "app's own main process. Open the page with backend='ui' and retry." + demotion,
+            )
         return _error(
             tool_call_id,
             "browser",
@@ -29587,7 +29732,7 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "in by hand, so this reaches authenticated pages no throwaway browser can. "
             "A fresh 'open' creates one NEW session-owned tab; reuse it, later opens "
             "navigate it. Call 'close' before your final response unless a pending "
-            "interaction needs it; 'tabs' lists every tab (redacted handles) and 'close' "
+            "interaction needs it; 'tabs' lists every tab (handles redacted) and 'close' "
             "ends only your own tab. "
             "An unapproved site fails with origin_not_allowed: call 'request_access', "
             "NOTIFY the operator, then 'await_access' before retrying. "
@@ -29605,6 +29750,12 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         # host — it is NOT the protection. The protection is the policy in
         # `local_operator/browser_files.py`, which runs unconditionally, plus this
         # describer naming what the call will do.
+        #
+        # `copy` deliberately stays on the ordinary write tier: it writes the OS
+        # clipboard on this machine and moves nothing between hosts, so it does not
+        # earn upload's per-call `exec` escalation — and a value shown exactly once
+        # is the case where an extra prompt costs the user the value. What protects
+        # it is the receipt (the text never travels back), not the tier.
         approval_tier="write",
         # Inspection is a true read: the harness must not ask for a write
         # approval before it can reach the admittedly effect-free dispatcher.
