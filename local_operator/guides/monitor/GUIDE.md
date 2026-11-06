@@ -291,7 +291,12 @@ server answers. The waiting
 is bounded: an MCP tool that never resolves does not wait forever — after 24
 hours the monitor disables itself with the same truthful notice, and because
 `unavailable_since` is persisted, re-hosting the session across wakes does not
-reset that clock. Only a genuine failure walks the disable ladder, and the
+reset that clock. An MCP watch whose tool is missing because discovery
+**failed at startup** is that same kind of wait: it charges no failures, up to
+that 24-hour bound, and discovery is retried when the session restarts; a
+watch whose tool cannot be resolved against a completed discovery still
+disables itself — through the ladder, or through that 24-hour bound — rather
+than waiting forever. Only a genuine failure walks the disable ladder, and the
 monitor's departure is always announced: a disable, a stall and a recovery
 each arrive as a message naming the monitor, the cause, its delivery count and
 how to reactivate it. Nothing stops silently.

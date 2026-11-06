@@ -2202,7 +2202,9 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",
         "<path>.replace",
         "facade .replace() on in-memory state",
-        4,
+        # jobs/comms (one call), wakes, monitors, mcp_servers: the fifth arrived
+        # with the band's monitor snapshot, beside the wake scheduler's.
+        5,
     ),
     (
         "local_operator/evaluation/runner/provider_client.py::ProviderModelClient._maybe_compact",
@@ -2866,6 +2868,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     (
         "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
+        "<path>.replace",
+        "in-memory .replace",
+    ),
+    (
+        # The monitor band's viewer twin of the row above: ``__init__`` delegates
+        # to ``replace``, which rebuilds two in-memory collections from canonical
+        # ``monitors`` rows and holds no path at all.
+        "local_operator/session/frontend_state.py::SnapshotMonitorScheduler.__init__",
         "<path>.replace",
         "in-memory .replace",
     ),
@@ -4416,6 +4426,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/runtime/stop_ledger.py::_append",
         "local_operator/session/frontend_state.py::SnapshotJobs.__init__",  # str.replace
         "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
+        "local_operator/session/frontend_state.py::SnapshotMonitorScheduler.__init__",
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
         "local_operator/session/frontend_state.py::SnapshotMcpManager.__init__",
         # Same receiver, same reason: the local publication installs an accepted

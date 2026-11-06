@@ -768,7 +768,7 @@ class Grant:
     #: :func:`_bounded_narrowing`.
     narrowing: dict[str, Any] = dataclasses.field(default_factory=dict)
     #: THIS process served the grant from its own memory because the owner did not
-    #: answer (``MeshCredentialClient._held_grant``). Never on the wire: ``to_detail``
+    #: answer (``MeshCredentialClient._held_or``). Never on the wire: ``to_detail``
     #: and ``from_detail`` name their fields explicitly and this is not one of them,
     #: so an owner can never tell a borrower its grant is "held". It only lets
     #: ``effective.note_resolution`` say ``held_offline`` instead of claiming a fresh

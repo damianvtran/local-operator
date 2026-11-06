@@ -2190,7 +2190,7 @@ class McpManager:
         return await self._connect_round(configs, sources)
 
     async def reload(self) -> McpLoadResult:
-        """Re-discover and reconnect in place (``/mcp reload`` semantics).
+        """Re-discover and reconnect in place (session-route ``reload``, ``/mcp add|remove``).
 
         Bumps the epoch so in-flight reconnects and gate continuations die,
         cancels pending reconnects, tears down every live connection, drops
@@ -2332,7 +2332,7 @@ class McpManager:
                 # ``auth-required`` nor revalidatable. Fast is the COMMON case
                 # after the first failure, not the exotic one — a tombstoned
                 # grant short-circuits before any POST and endpoint discovery is
-                # cached process-wide, so every later ``/mcp reload`` and ``/new``
+                # cached process-wide, so every later ``reload()`` and ``/new``
                 # fails warm (measured ~15 ms), and a stdio server with a missing
                 # command fails in microseconds.
                 self._block_on_auth(name, attempts[name].marker)

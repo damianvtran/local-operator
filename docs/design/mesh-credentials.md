@@ -711,11 +711,78 @@ class MeshCredentialBroker:
 | Concern | Value | Where enforced | Why |
 |---|---|---|---|
 | Owner's answer for a token with remaining life ≥ 120 s | Served from the existing row, `refreshed: false` | `_needs_refresh`, `auth_store.py:68-80` | No gratuitous POSTs. Never refresh what is alive. |
-| Requester's copy of the bearer | `expires_at = min(token_expires_at_ms, now + grant_ttl_s)`; re-ask at `expires_at - 120 s` | `MeshAwareAuthStore` | 120 s > the owner's own 60 s skew, deliberately: the requester must not be the thing that discovers expiry. |
+| Requester's copy of the bearer — **for provider keys, see the as-built note below: this row no longer describes how a bearer is served** | `expires_at = min(token_expires_at_ms, now + grant_ttl_s)`; re-ask at `expires_at - 120 s` | `MeshAwareAuthStore` | 120 s > the owner's own 60 s skew, deliberately: the requester must not be the thing that discovers expiry. |
 | `grant_ttl_s` default | **900 s** (15 min) | `network.credentials.grant_ttl_s` in `config.yml` | Bounds the window in which a revoked peer still holds a live bearer (§3.7). |
-| Requester's local coalescing | one `asyncio.Future` per `(provider, session_id)` | `MeshAwareAuthStore._grant_futures` | A single turn issues several provider calls; they must share one grant. |
+| Requester's local coalescing — **as built: overlapping resolves only, see the as-built note below** | one `asyncio.Future` per `(provider, session_id)` | `MeshAwareAuthStore._grant_futures` | A single turn issues several provider calls; they must share one grant. |
 | Owner's refresh scheduling with several askers | one POST per `(credential_id, force)` per `_join_window_s`; the existing lease for the rest | §3.4 | N peers ⇒ 1 POST, not N. |
 | Proactive top-up (`/usage` style) | Not added. A borrow is demand-driven. | — | A background refresher on the owner would be a second scheduler for something the lease already bounds; the demand path is sufficient. |
+
+#### As-built note (2026-11-06): when the requester serves a cached bearer
+
+The "Requester's copy of the bearer" and "Requester's local coalescing" rows
+above state the design as first written, and are kept because their reasoning
+still governs the TTL. Two things they imply no longer hold for provider keys:
+that a borrower serves its own copy of the bearer until `expires_at - 120 s`,
+and that one turn's provider calls share one grant. Reading them as as-built is
+the divergence this note closes.
+
+**In normal operation, every provider resolve dials the owner.**
+`request_grant_sync` (`local_operator/network/credentials/client.py`) reads the
+grant cache ahead of the dial only behind `if is_github_key(key)`, so a rotation
+or a logout on the owner is picked up by the next resolve. The grant that comes
+back is still cached per `(key, session_id)`, its expiry capped at
+`now + grant_ttl_s` (`_bounded`), for the case below.
+
+**When the owner is unreachable, the cached grant is served.** A dial answered
+`owner_offline` or `owner_unreachable`, or one with no relay to go through,
+reaches `_held_or`, which serves that session's cached grant marked
+`held_offline` while it is still live (`Grant.usable_at`: until
+`grant_expires_at_ms`, with no re-ask margin). It does so only for an unforced
+resolve, and only while this device is still a member and a holder and the
+policy generation the grant was cached under is still current. MCP keys, the
+`github` key and device-bound providers never take this path.
+
+**Coalescing is per resolve, not per turn.** Overlapping resolves for the same
+(key, session, force) share one dial (`_borrow`'s in-flight future). Sequential
+provider calls each dial, and that per-request round trip is the accepted cost
+described in this note. The future lives in `MeshAwareAuthStore._grants`, keyed
+`(key, session_id, force_refresh)`; the `_grant_futures` the table names does not
+exist.
+
+**Where a cached grant is served without a dial.** The `github` key
+(`is_github_key` is `key == "github"`: no other forge key) and MCP bearers
+(`mcp_bearer._live_bearer`, which does no I/O) serve a cached grant until 120 s
+before its window ends (`GrantCache.get`). The gate is keyed on the key, not on
+how the owner sourced the token. `458a1474a4b` gave the reason for an App
+installation token — freshly minted and narrowed, not a provider login
+generation — but the owner's own token from the `token` or `gh` arm of the
+GitHub source ladder (`owner._grant_from_owner_token`) takes the same path.
+Neither path avoids the problem below: both accept it, for at most the grant
+window.
+
+**Why providers dial** (`0385927ab94`, "fix(mesh): resolve native borrowed auth
+in running sessions"). A grant TTL is not an upstream credential generation. A
+rotation or a logout does not rewrite the *borrower's* placement document — the
+owner's login state is invisible to it — so a provider bearer served from the
+cache would outlive the login it represents for up to `grant_ttl_s`, and would
+reach a turn the owner should have been asked about and would have refused. The
+held path above accepts that risk, and only while the owner cannot be asked at
+all.
+
+**So `grant_ttl_s` is still load-bearing.** It caps the expiry the owner hands
+out (`min(token_exp, now + grant_ttl_s)`) and the borrower's own copy of it. That
+one cap bounds how long a revoked peer holds a live bearer (§3.7), how long a
+provider bearer is held while its owner is unreachable, and how long the
+`github` and MCP paths serve a bearer without asking.
+
+**The test that holds the line.**
+`tests/unit/network/test_native_hot_access.py::test_live_grant_and_old_login_refusal_do_not_short_circuit_owner`
+plants a live grant and a cached refusal, then asserts that two resolves produce
+two owner dials (`len(calls) == 2`). It is parametrised over the first resolve's
+`force_refresh`; the second resolve is always unforced. Widening the
+`is_github_key` gate to providers turns it red. It drives `MeshCredentialClient`
+directly and never reaches `_borrow`, so a `_borrow` future kept past its borrow
+— a turn-level cache — is invisible to it.
 
 ### 3.6 The code seams (exact names)
 
@@ -853,10 +920,21 @@ does not surface, add it as a purely additive method there (§8 Q2).
 - **A malicious holder can spend the operator's quota.** `holders` is a real
   capability increase and is granted explicitly. Least authority is the
   defence: `scope: "session"` by default, `api-key-static` default-off.
-- **The owner is a single point of failure for the borrower.** When the owner
-  is offline, a borrower with no local login has no model access. That is
-  R14's intended trade (spending a rotating token off-device is worse), and
-  §4.1 gives the operator a one-command remedy.
+- **The owner is a single point of failure for the borrower.** As designed,
+  when the owner is offline a borrower with no local login has no model
+  access. That is R14's intended trade (spending a rotating token off-device
+  is worse), and §4.1 gives the operator a one-command remedy.
+  **As built, a bounded hold comes first** (§3.5's as-built note). While the
+  owner is unreachable, a provider borrow is served this session's still-live
+  cached grant, marked `held_offline`: never under `force_refresh`, and never
+  for MCP, `github` or device-bound keys. The hold ends at the grant's own
+  expiry, at most `grant_ttl_s` after the owner last served it. If the owner
+  is still unreachable then, `_held_or` drops the grant and returns the
+  owner's refusal (`owner_offline` or `owner_unreachable`), and the session
+  store returns no credential for that provider. From there the design's
+  statement holds: a borrower with no local login has none until the owner
+  answers again. The hold lives in process memory only (`GrantCache` has no
+  serializer), so a process restarted during the outage has nothing to hold.
 - **A pool must not persist a bearer.** §6.3 makes the pool's grant in-memory
   and expiry-bounded, and forbids the pool from declaring credentials at all.
 

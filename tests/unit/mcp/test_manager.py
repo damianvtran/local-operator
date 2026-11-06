@@ -3884,7 +3884,7 @@ class TestMcpRecoveryNotice:
     ) -> None:
         """One notice per announced failure, not one per connect.
 
-        A server that keeps reconnecting cleanly (a ``/mcp reload`` habit, a
+        A server that keeps reconnecting cleanly (a reload habit, a
         transport that re-establishes) must not re-announce: the model was
         told once and corrected once.
         """
@@ -6155,7 +6155,7 @@ class TestAuthBlockClearsWhereverAServerHeals:
     that justified it is the exact defect this feature exists to fix. Clearing
     it only at the user-initiated sites (``connect_configured_server``,
     ``reconnect_server``, ``_drop_removed_servers``) missed the route users
-    actually take — ``/mcp reload`` — leaving a server ``connected`` while still
+    actually take — ``reload()`` — leaving a server ``connected`` while still
     blocked. Its next disconnect for an ORDINARY reason (server process died, a
     network blip) was then abandoned by the ``_schedule_reconnect`` guard, and
     ``revalidate_auth_blocked`` could never rescue it: the grant is valid, so
@@ -6184,7 +6184,7 @@ class TestAuthBlockClearsWhereverAServerHeals:
     async def test_a_reload_heal_leaves_no_block_and_the_next_drop_reconnects(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The full sequence: auth failure -> /mcp reload -> ordinary drop."""
+        """The full sequence: auth failure -> reload() -> ordinary drop."""
         from local_operator.mcp.auth import McpAuthRequiredError
 
         self._project(tmp_path)

@@ -281,7 +281,7 @@ from local_operator.session.credential_binding import (
     CredentialBinding,
 )
 from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
-from local_operator.session.mcp_status import McpStartupOutcome
+from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
 
 # ONE implementation of "what dial does this row state", shared with the
 # runtime-less cold frame so the pane and the first turn cannot disagree.
@@ -3308,6 +3308,44 @@ def _monitor_comparable_text(text: str, details: Any) -> tuple[str | None, str |
 #: (see ``_monitor_availability``).
 MCP_NOT_READY_DETAIL = (
     "MCP servers are not connected in this session yet — the runtime is still starting"
+)
+
+#: The one sentence for "this session's MCP discovery FAILED", i.e. a manager
+#: that IS attached but whose configs were never read, so it has no roster to
+#: look a name up in. Distinct from :data:`MCP_NOT_READY_DETAIL` (no manager at
+#: all) and, like it, no strike is charged: nothing was removed.
+#:
+#: The copy names the CAUSE and WHEN it is retried, never "wait": nothing
+#: retries discovery inside a running session. ``discover_and_connect`` runs
+#: once per manager, and the raise in ``mcp/__init__.py`` returns before
+#: ``_connect_round`` assigns ``_configs``. (The other writer,
+#: ``connect_configured_server``, fills one entry on an explicit login and runs
+#: no round.)
+#:
+#: "When the session restarts" is the one retry every host has: a fresh process
+#: builds the session through ``create_session``, whose deferred-boot and
+#: synchronous paths both run ``wire_mcp_into_session`` with a fresh manager —
+#: a wake re-hosting it, or the next engage after an idle runtime retires on a
+#: ``lop-update``.
+#:
+#: Routes checked and found NOT to retry discovery for this state. Do not name
+#: one here again without re-verifying it against a fresh runtime:
+#:
+#: - the app's Reload: the catalog rows the app shows never carry ``reload``
+#:   (``mcp.catalog._row``), and the app's own ``/reload`` reattaches;
+#: - ``/mcp reload``: there is no such verb (``MCP_SUBCOMMANDS``);
+#: - ``/reload``: viewer-only in shipped builds. ``lop``'s ``viewer_factory``
+#:   only ever returns an ``AttachedSession`` (cli.py, "THE OWNER PATH IS GONE"),
+#:   so it relaunches the terminal and reattaches to the same live runtime —
+#:   review round 4 reproduced it with 0 spawn attempts.
+#:
+#: When the record itself is refreshed is the KNOWN LIMIT on
+#: ``Session._mcp_discovery_incomplete``. Well under the stall notice's
+#: 200-character clip (``monitors.delivery.NOTICE_ERROR_CHARS``); the exact
+#: sentence is pinned by
+#: ``test_the_discovery_failed_copy_is_the_verified_sentence``.
+MCP_DISCOVERY_FAILED_DETAIL = (
+    "MCP discovery failed at startup; it is retried when the session restarts"
 )
 
 
@@ -30700,10 +30738,12 @@ class Session:
           session has no MCP manager yet at all. That state was ``gone`` and
           charged a real strike (measured live on m4, 2026-11-05: a wake
           re-hosted a cold session, the tick beat the lazy connect, and the
-          tool was absent only for that instant). It is the ONLY such state:
-          every session-path assignment of ``mcp_manager`` happens after the
-          connect round (``attach_mcp_dispose``), so a non-None manager already
-          means the load finished, and its silence is a real answer.
+          tool was absent only for that instant). It is the only such state
+          bar one, an attached manager whose discovery FAILED before it read
+          its config (``_mcp_discovery_incomplete``): every session-path
+          assignment of ``mcp_manager`` happens after the connect round
+          (``attach_mcp_dispose``), so a non-None manager otherwise means the
+          load finished, and its silence is a real answer.
         - the server needs a re-auth: it will NOT heal by itself, but the fix
           is a one-line operator action, so the detail names ``/mcp reauth``
           rather than striking;
@@ -30737,6 +30777,13 @@ class Session:
             return ("unavailable", MCP_NOT_READY_DETAIL)
         server = self._monitor_server_for(name)
         if server is None:
+            if self._mcp_discovery_incomplete():
+                # The one attached-manager shape whose empty roster is NOT an
+                # answer: discovery raised inside the wrapper, so the manager
+                # was built but never got `_configs`. See the helper for the
+                # evidence (the failure the same wiring recorded) and the
+                # constant for why the sentence names a retry, not a wait.
+                return ("unavailable", MCP_DISCOVERY_FAILED_DETAIL)
             # NOT excused: a manager exists (so its connect round finished) and
             # does not name this server's prefix, which means the name is not
             # configured at all -- a typo, a server removed from the config, or
@@ -30795,6 +30842,64 @@ class Session:
             # nothing can run.
             logger.debug("monitor availability probe failed for %s", name, exc_info=True)
             return ("gone", "")
+
+    def _mcp_discovery_incomplete(self) -> bool:
+        """Whether this session's MCP discovery is recorded as NOT completed.
+
+        This is the DISCRIMINATOR, not a second source of truth:
+        ``session.mcp_startup`` is what the composition root writes on every
+        path that wires MCP into a session (``session_factory``'s
+        ``wire_mcp_into_session``, gate snapshot and settle re-report alike),
+        so "the round did not run to completion" is already on the session.
+
+        The shape that needs it: discovery RAISING inside the wrapper
+        (``local_operator/mcp/__init__.py``) builds the manager first, so the
+        session ends up with an ATTACHED manager whose ``_configs`` were never
+        populated — a roster of ``[]`` that says "nothing is configured" about
+        a machine whose config was simply never read, and that used to charge
+        five strikes and disable a watch over a server that was still there.
+        The same wiring records that raise under ``MCP_DISCOVERY_KEY``.
+
+        Two conditions, both required, because both are evidence rather than
+        convenience:
+
+        - the discovery key is PRESENT in ``failures``. No record at all
+          (``mcp_startup is None``: a bare embedder, a reduced test host) is
+          not proof the round failed, and an outcome without that failure is a
+          COMPLETED round that found nothing configured — a real removal that
+          must keep walking the ladder.
+        - ``configured`` is EMPTY. The discovery key is also the collapse
+          target when every configured server failed for one setup reason (the
+          MCP SDK missing), and there the round DID complete with the roster
+          known: a name that roster does not name is a stale name, not a
+          failed round. An empty roster can only arrive with an empty
+          ``configured`` (both read the same manager state), so this narrows
+          that corner without touching the raise shape above.
+
+        KNOWN LIMIT, as narrow as the code makes it: after the gate snapshot,
+        the record is rewritten only by the settle re-report
+        (``_on_startup_settled``), which the manager fires when the last server
+        a round deferred past its 250 ms gate settles (``_settle_deferred``,
+        from ``_finish_pending``). The wiring installs that sink on this shape
+        too — the wrapper returns the manager, so it runs to completion — and
+        ``reload()`` runs a fresh round, so a reload that defers at least one
+        server refreshes the record and this answers False from then on (QA
+        round 1 on #3510 measured ``configured ["datadog"], failures {}``). A
+        round that defers NOTHING never fires the sink and leaves the boot
+        failure in place, as does ``connect_configured_server``, which fills
+        ``_configs`` without a round. Even then a name the refreshed roster
+        mints never reaches this question (it resolves, or its server's status
+        answers); only a name it does NOT mint still reads as "the boot round
+        failed" and waits out the 24 h bound instead of walking the ladder in
+        five ticks. That can never disable a watch over a server that was
+        there, and narrowing it further needs a signal the record does not
+        carry.
+        """
+        outcome = self.mcp_startup
+        failures = getattr(outcome, "failures", None) or {}
+        if MCP_DISCOVERY_KEY not in failures:
+            return False
+        return not getattr(outcome, "configured", None)
 
     def _monitor_server_for(self, name: str) -> str | None:
         """The MCP server that mints ``name``, by registry meta then by prefix.
