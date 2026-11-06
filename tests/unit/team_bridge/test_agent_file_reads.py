@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1125,3 +1126,149 @@ async def test_an_unreleased_carrier_without_a_set_hash_still_holds(
     out = await _deliver_files(owner, ref, tmp_path, wire)
     assert out["action"] == "hold" and out["code"] == "files_unbound", out
     assert cards == [] and wire.admits == []
+
+
+# ---------------------------------------------------------------------------
+# R4-1: the inline-data bound must cost the FILE its tail, never the page
+# ---------------------------------------------------------------------------
+
+DEPLOY_NOTE_WITH_TOKEN = (
+    b"# deploy notes\nembed: data:image/png;base64,iVBORw0KGgo\nrun: make deploy\n"
+)
+DEPLOY_NOTE = b"# deploy notes\nrun: make deploy\n"
+
+
+def _four_message_page(file_text: bytes) -> tuple[dict[str, Any], FileDescriptor]:
+    """A 4-message page whose LAST message carries one text file."""
+
+    descriptor = _descriptor(file_id="batt_deploy001", data=file_text)
+    page: dict[str, Any] = {
+        "messages": [
+            {"id": "bcmsg_00000001", "seq": 1, "sender": {"kind": "human"}, "body": "one"},
+            {"id": "bcmsg_00000002", "seq": 2, "sender": {"kind": "agent"}, "body": "two"},
+            {"id": "bcmsg_00000003", "seq": 3, "sender": {"kind": "human"}, "body": "three"},
+            {
+                "id": MID,
+                "seq": 4,
+                "sender": {"display_label": "peer", "kind": "human"},
+                "body": "four",
+                "files": [_row(descriptor)],
+                "file_count": 1,
+            },
+        ]
+    }
+    return page, descriptor
+
+
+async def _drive_history(monkeypatch: pytest.MonkeyPatch, wire: Any) -> tuple[str, Any]:
+    """Run the real ``channel_history`` op; return ``(model text, ToolResult)``."""
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.team_bridge import host as host_mod
+    from local_operator.team_bridge.store import OwnerSnapshot
+    from local_operator.team_bridge.tool import BridgeRuntime, build_bridge_tool
+
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
+    monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
+    runtime = BridgeRuntime(
+        client=wire,  # type: ignore[arg-type]
+        config_dir=".",
+        tenant_id="tnt_1",
+        owner=OwnerSnapshot(
+            credential_id=1,
+            account_id="acc_1",
+            tenant_id="tnt_1",
+            endpoint_id="bep_1",
+            canonical_base_url="https://hub.example",
+            enrollment_generation=1,
+        ),
+        session_id="sess_1",
+    )
+    tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
+    assert tool is not None
+    result = await tool.execute(
+        "call_1", {"op": "channel_history", "channel_id": CID}, None, None, ToolContext()
+    )
+    first = result.content[0]
+    assert isinstance(first, TextContent), type(first).__name__
+    return first.text, result
+
+
+def _page_of(text: str) -> dict[str, Any]:
+    """The history page a model parses out of the model copy, or ``None``."""
+
+    start = text.index("{")
+    page, _end = json.JSONDecoder().raw_decode(text[start:])
+    return page
+
+
+@pytest.mark.asyncio
+async def test_a_file_that_mentions_a_data_uri_costs_only_its_own_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4-1: a benign note about embedding loses its tail, not the whole page."""
+
+    page, descriptor = _four_message_page(DEPLOY_NOTE_WITH_TOKEN)
+    wire = _ToolWire(page, {descriptor.id: DEPLOY_NOTE_WITH_TOKEN})
+    text, _result = await _drive_history(monkeypatch, wire)
+
+    parsed = _page_of(text)
+    assert len(parsed["messages"]) == 4, "every row of the page survives"
+    assert [m["body"] for m in parsed["messages"]] == ["one", "two", "three", "four"]
+    assert f"file {descriptor.id}" in text, "the file block itself is still named"
+    assert "run: make deploy" not in text.split("--- file 1:")[1], "the tail is withheld"
+    # The marker counts the FILE BLOCK, never page + files: the page alone is ~600
+    # characters, so a four-digit count is the signature of the old defect.
+    markers = re.findall(r"(\d+) characters in this message", text)
+    assert markers, "the withheld statement is present"
+    assert max(int(count) for count in markers) < 600, markers
+
+
+@pytest.mark.asyncio
+async def test_a_file_text_without_the_token_is_byte_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: no marker in the file, byte-identical to the unbounded path."""
+
+    page, descriptor = _four_message_page(DEPLOY_NOTE)
+    wire = _ToolWire(page, {descriptor.id: DEPLOY_NOTE})
+    text, _result = await _drive_history(monkeypatch, wire)
+
+    assert "characters in this message" not in text
+    assert DEPLOY_NOTE.decode() in text
+    parsed = _page_of(text)
+    assert len(parsed["messages"]) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_dual_content_row_keeps_the_page_marker_and_the_file_text_apart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 64 KB inline blob and a fetched file in ONE read: each stays in its lane."""
+
+    blob = "data:image/png;base64," + ("A" * 64_000)
+    file_bytes = DEPLOY_NOTE
+    descriptor = _descriptor(file_id="batt_dual00001", data=file_bytes)
+    page: dict[str, Any] = {
+        "messages": [
+            {
+                "id": MID,
+                "seq": 1,
+                "sender": {"display_label": "peer", "kind": "human"},
+                "body": f"please look at {blob}",
+                "files": [_row(descriptor)],
+                "file_count": 1,
+            }
+        ]
+    }
+    wire = _ToolWire(page, {descriptor.id: file_bytes})
+    text, result = await _drive_history(monkeypatch, wire)
+
+    assert "characters in this message" in text, "the blob is withheld for the model"
+    assert "run: make deploy" in text, "and the file text still reaches the model"
+    assert "AAAA" not in text, "no prefix of the payload survives"
+    # details keeps the RAW page a human renderer reads: blob intact, no file bytes.
+    details = result.details or {}
+    assert blob[22:60] in json.dumps(details), "details keeps the raw blob"
+    assert "run: make deploy" not in json.dumps(details), "file bytes never ride details"
+    assert [call["purpose"] for call in wire.calls] == ["context"]

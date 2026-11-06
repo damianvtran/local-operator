@@ -2724,11 +2724,22 @@ def _with_files(content: str, blocks: list[str]) -> str:
     Every block carries its OWN untrusted clause (see ``_file_provenance``), so the
     clause leads both the page and the file text rather than only the first of them —
     the ordering the bridge's model boundary depends on.
+
+    WHY EACH BLOCK IS BOUNDED *HERE*, BEFORE THE JOIN. ``_execute`` still applies
+    ``bound_inline_data_uris`` to the whole model copy as the one choke point, but that
+    function truncates at ``min(512, marker position)`` measured from the START of the
+    string it is given. Handed the joined text, a fetched file that merely MENTIONS
+    ``;base64,`` — a note about embedding images, a log line, a page of our own docs —
+    would cut the PAGE at 512 characters: every row of the history lost, the marker
+    reporting page-plus-files length as if one body had been withheld. Bounding each
+    block first means the marker can only ever cost that file its own tail, and the
+    page never contains the token by the time the choke point sees it. A false positive
+    is a false positive about ONE file, which is what its docstring promises.
     """
 
     if not blocks:
         return content
-    return "\n\n".join([content, *blocks])
+    return "\n\n".join([content, *(bound_inline_data_uris(block) for block in blocks)])
 
 
 def _screener_sees_images(runtime: BridgeRuntime) -> bool:
