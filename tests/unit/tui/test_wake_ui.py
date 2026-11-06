@@ -22,6 +22,12 @@ from textual.selection import Selection
 
 from local_operator.harness.types import WakeDeliveredEvent
 from local_operator.harness.wake import WakeSchedule
+from local_operator.session.attached import AttachedSession
+from local_operator.session.frontend_state import (
+    FrontendSessionState,
+    FrontendUpdate,
+    MonitorState,
+)
 from local_operator.tui.glyphs import tool_icon
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import (
@@ -479,6 +485,59 @@ async def _paint(
         return bool(panel.display), str(panel._body.content)
 
 
+def _monitor_state(monitor_id: str, name: str, **fields: Any) -> MonitorState:
+    """One canonical monitor row, as the runtime publishes it on the wire.
+
+    Built from the SAME projection the owner's scheduler produces
+    (``MonitorScheduler.index_rows``: the spec's identity joined with its
+    health counters), which is what makes this a fixture of the wire and not
+    of the panel's hopes.
+    """
+    now = int(time.time() * 1000)
+    row: dict[str, Any] = {
+        "id": monitor_id,
+        "name": name,
+        "tool": "mcp__slack_read_channel",
+        "every_ms": 30_000,
+        "next_due_at": now + 30_000,
+        "last_check_at": now - 1_000,
+        "checks": 1,
+        "deliveries": 1,
+    }
+    row.update(fields)
+    return MonitorState.model_validate(row)
+
+
+def _viewer(tmp_path: Path, monitors: list[MonitorState] | None = None) -> AttachedSession:
+    """The host object the TUI really holds: a VIEWER facade.
+
+    `lop` binds a viewer for every local user (``ViewerSessionProtocol``), never
+    the runtime ``Session`` that owns the monitor scheduler. Building the
+    panel's session any other way tests a host production does not construct.
+    """
+
+    async def never() -> None:
+        raise AssertionError("no takeover expected")
+
+    viewer = AttachedSession(config_dir=tmp_path, session_id="band-session", takeover_factory=never)
+    viewer._install_frontend(
+        FrontendSessionState(session_id="band-session", epoch="1", monitors=list(monitors or []))
+    )
+    return viewer
+
+
+async def _paint_host(
+    session: Any, *, size: tuple[int, int] = (100, 30)
+) -> tuple[bool, str]:
+    """``_paint`` for a caller that owns the whole session object."""
+    app = _PanelHost()
+    async with app.run_test(size=size) as pilot:
+        panel = app.query_one(WakePanel)
+        panel.sync(session)
+        await pilot.pause()
+        return bool(panel.display), str(panel._body.content)
+
+
 class TestWakePanel:
     @pytest.mark.asyncio
     async def test_hidden_when_no_wakes(self) -> None:
@@ -781,6 +840,72 @@ class TestMonitorBand:
             first = panel._shown
             panel.sync(session)
             assert panel._shown is first  # same object — no repaint happened
+
+
+class TestMonitorBandOnTheViewerHost:
+    """The band on the object the TUI actually holds — the shipped defect.
+
+    Design rounds measured it three times: with a monitor armed, ticking AND
+    delivering, the band painted no monitor row at 100x30 or 100x48, in three
+    different sessions. The cause is the HOST, not the row builder: `lop`
+    binds a viewer facade (``AttachedSession``) to the TUI for every local
+    user, the monitor scheduler is in-process only, so
+    ``getattr(session, "monitor_scheduler", None)`` answered ``None`` and the
+    band hid the watch it exists to show.
+
+    Every test above hands the panel a FAKE session that carries
+    ``monitor_scheduler`` — a host production never builds — which is why the
+    monitor section could read as covered while the shipped band painted
+    nothing. These drive the real facade, so the hop itself is under test.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("size", [(100, 30), (100, 48)])
+    async def test_an_armed_monitor_paints_a_row_on_the_real_viewer(
+        self, tmp_path: Path, size: tuple[int, int]
+    ) -> None:
+        viewer = _viewer(tmp_path, [_monitor_state("m1", "watch the deploy queue")])
+        displayed, out = await _paint_host(viewer, size=size)
+        assert displayed is True
+        assert "Monitors · 1 monitor armed" in out, out
+        assert "m1" in out and "watch the deploy queue" in out, out
+
+    @pytest.mark.asyncio
+    async def test_a_row_appears_before_the_first_delivery(self, tmp_path: Path) -> None:
+        """A monitor armed a minute ago is exactly the row a user is looking
+        for, so it must not wait for a delivery to become visible."""
+        viewer = _viewer(
+            tmp_path,
+            [_monitor_state("m1", "watch the deploy queue", checks=0, deliveries=0, last_check_at=0)],
+        )
+        displayed, out = await _paint_host(viewer)
+        assert displayed is True
+        assert "m1" in out, out
+        assert "never checked" in out, out
+
+    @pytest.mark.asyncio
+    async def test_an_armed_but_empty_viewer_still_hides_the_band(self, tmp_path: Path) -> None:
+        """The hide-when-empty rule survives the fix: no wakes AND no
+        monitors is still no band."""
+        displayed, out = await _paint_host(_viewer(tmp_path))
+        assert displayed is False
+        assert out == ""
+
+    @pytest.mark.asyncio
+    async def test_the_snapshot_follows_a_monitors_delta(self, tmp_path: Path) -> None:
+        """Arming a watch mid-session arrives as a canonical DELTA, so the
+        band's monitor half must move on one — not on the next full frame."""
+        viewer = _viewer(tmp_path)
+        viewer._on_frontend_update(
+            FrontendUpdate(
+                epoch="1",
+                sequence=1,
+                changes={"monitors": [_monitor_state("m1", "watch the queue").model_dump()]},
+            ).model_dump(mode="json")
+        )
+        displayed, out = await _paint_host(viewer)
+        assert displayed is True
+        assert "m1" in out, out
 
 
 class TestMonitorDeltaBlock:

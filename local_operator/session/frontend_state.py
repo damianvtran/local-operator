@@ -5804,6 +5804,44 @@ class SnapshotWakeScheduler:
         self.schedules = [SimpleNamespace(**value.model_dump()) for value in values]
 
 
+class SnapshotMonitorScheduler:
+    """An armed-monitor reader rebuilt from a viewer's canonical ``monitors``.
+
+    The runtime's ``MonitorScheduler`` is IN-PROCESS only (monitor contract
+    §10.4) and cannot cross a socket, yet every fact the TUI band's monitor half
+    paints is already on the wire: canonical state carries ``monitors`` straight
+    from ``MonitorScheduler.index_rows()`` — the spec's identity joined with its
+    health counters (§10.2) — which is the same projection the live object is
+    read through. So this facade answers the SAME two reads by name
+    (``.monitors``, ``.runtime(id).counters``), which is what lets a viewer's
+    band paint monitor rows instead of finding no scheduler at all and
+    collapsing the whole band as if the session held no watches.
+
+    A row the snapshot does not hold gets ``None`` from :meth:`runtime`, exactly
+    as the live scheduler answers for an unknown id: inventing counters here
+    would let a viewer paint health the owner never reported.
+    """
+
+    def __init__(self, values: Iterable[MonitorState] = ()) -> None:
+        self.replace(values)
+
+    def replace(self, values: Iterable[MonitorState]) -> None:
+        # The row IS spec-plus-counters, so the dump doubles as the ``counters``
+        # mapping a band reader merges OVER the spec's own fields
+        # (``WakePanel._monitor_fingerprint``). A narrower dict would silently
+        # drop the health keys — ``blind``, ``consecutive_failures`` — that live
+        # only in counters, turning a stalled watch into a quiet one.
+        rows = [value.model_dump() for value in values]
+        self._rows: dict[str, dict[str, Any]] = {
+            str(row.get("id", "")): row for row in rows
+        }
+        self.monitors = [SimpleNamespace(**row) for row in rows]
+
+    def runtime(self, monitor_id: str) -> Any | None:
+        row = self._rows.get(str(monitor_id))
+        return None if row is None else SimpleNamespace(counters=dict(row))
+
+
 class SnapshotSubagentComms:
     """A follower's read-only job-graph facade, rebuilt from canonical jobs.
 

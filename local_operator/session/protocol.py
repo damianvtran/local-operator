@@ -757,7 +757,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 149 public members and a POSITIVE
+    than stylistic. This protocol carries 150 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -837,7 +837,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     not on the owner-side protocol, one member on
     the queued-ask rung, 149 once the TUI's retirement notice needed
     ``pending_move_cwd`` — a cwd move restarts the session elsewhere, and the
-    facade is the only side holding the destination at that instant), so
+    facade is the only side holding the destination at that instant, 150 once
+    the band's monitor half needed ``monitor_scheduler`` — the TUI binds a
+    viewer for every local user, so the owner-only scheduler read left an armed
+    watch painting nothing at all), so
     recompute it
     rather
     than adjusting it by the size of your own change.
@@ -1961,6 +1964,20 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     @property
     def wake_scheduler(self) -> Any:
         """Armed wakes: the live scheduler, or the runtime's snapshot."""
+        ...
+
+    @property
+    def monitor_scheduler(self) -> Any:
+        """Armed monitors: the live scheduler, or the runtime's snapshot.
+
+        Declared for the same reason ``wake_scheduler`` is — the band reads it
+        off whichever host object it was handed — and the omission was a defect
+        rather than a tidy one: `lop` hands the TUI a VIEWER for every local
+        user, so an owner-only member read as "this session holds no monitors"
+        and the band hid the watch it exists to show. The viewer's answer is
+        ``SnapshotMonitorScheduler`` over canonical ``monitors``: the spec's
+        identity joined with the health counters the row paints from.
+        """
         ...
 
     @property

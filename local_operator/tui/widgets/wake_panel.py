@@ -290,6 +290,12 @@ class WakePanel(Container):
         disabled reason, the failure count the auto-disable ladder walks), and
         the index is only rewritten on change events, so a cold reader would
         paint stale health on the surface that exists to make it visible.
+        On a viewer — which is what `lop` binds to the TUI for every local user
+        — the same two reads are answered by ``SnapshotMonitorScheduler`` over
+        the canonical ``monitors`` rows the owner publishes, so this hop needs
+        no branch on which kind of host it holds. Branching here instead is how
+        the band came to paint nothing for an armed watch: the owner-only member
+        read as "no monitors" and the hide-when-empty rule did the rest.
         Defensive like the rest of ``sync``: any failure yields no monitor
         rows rather than taking the band down.
         """
