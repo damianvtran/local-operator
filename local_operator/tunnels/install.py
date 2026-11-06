@@ -9,6 +9,7 @@ task on Windows. All three record the store the connector serves
 from __future__ import annotations
 
 import json
+import logging
 import os
 import plistlib
 import shutil
@@ -22,6 +23,8 @@ from typing import Any
 from local_operator import launchd, procname, procstate, supervisors
 from local_operator.paths import CONFIG_DIR_ENV, config_dir
 from local_operator.tunnels import config, gateway, state
+
+logger = logging.getLogger(__name__)
 
 LABEL = "com.local-operator.tunnel"
 
@@ -689,7 +692,10 @@ def heal_pin_after_login(*, provider: str, credential_id: int) -> str:
         if value.get("stopped"):
             return ""
         pin = value.get("credential_id")
-        if pin == credential_id:
+        # A pin that is not a plain row id (absent, hand-edited, or a string from
+        # an older build) names no row a sign-in could have superseded, so there
+        # is nothing to heal — and the receipt below records an `int` old id.
+        if not isinstance(pin, int) or isinstance(pin, bool) or pin == credential_id:
             return ""
         record = value.get("record")
         owner = record.get("owner_account_id") if isinstance(record, dict) else None
@@ -702,7 +708,12 @@ def heal_pin_after_login(*, provider: str, credential_id: int) -> str:
         tunnel_id = current.get("tunnel_id")
     except Exception:  # noqa: BLE001 — a login must not fail over a tunnel repair
         return ""
-    _record_heal_receipt(old=pin, new=credential_id, tunnel_id=tunnel_id, account_id=owner)
+    try:
+        _record_heal_receipt(old=pin, new=credential_id, tunnel_id=tunnel_id, account_id=owner)
+    except Exception:  # noqa: BLE001 — the audit write must not fail the sign-in
+        # `_record_heal_receipt` already absorbs the unwritable-directory case;
+        # this is the docstring's "never raises" for anything else (review R3-n1).
+        logger.warning("could not record the tunnel re-bind receipt")
     note = f"Tunnel re-pointed from credential {pin} to {credential_id} (same Radient account)."
     if not _rearm_allowed():
         return note
