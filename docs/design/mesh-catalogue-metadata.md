@@ -107,3 +107,38 @@ scope/local-only/member/epoch refusal, revoke during refresh/fetch, old-peer
 unsupported, malicious request fields and malformed/oversized/foreign/secret-
 shaped metadata. Actual remote-node deployment, live provider discovery, slice B,
 credential-copy/refresh handoff and UI changes are outside this slice.
+
+## Normal consumers (slice B)
+
+`ProviderController.shared_catalogue` is a metadata-only alternative to
+`listing_credential`, not a replacement credential store. Ordinary catalogue
+reads try it only after their actual local side and explicit key overrides.
+Mesh-aware virtual rows are not mistaken for local native logins. Explicit
+provider collections (including the phone's persisted admission list) never
+acquire this alternate source, even through discovery's lower cache reader.
+
+Only an explicit device-scoped holder can populate a machine-wide catalogue;
+session/derived shares require context this interface does not carry and are
+reported unsupported. The owner remains the authority for approved accounts,
+refresh and native Codex authentication. The borrower receives no new bearer,
+account header, refresh token or inference entitlement.
+
+Receipts live separately from native API-key listings under the profile's
+`network/catalogues` directory. One current document per network/owner/provider/
+purpose route prevents orphan or older-account documents from being unioned.
+Its account/incarnation/revisions/validator also bind model-info memo keys.
+Readers recheck current local membership, trust, placement, epoch, lifetime and
+known lifecycle observations. A fresh owner refusal fences a formerly positive
+receipt rather than letting its remaining TTL override that refusal.
+
+Cold model mutation/birth paths prepare metadata off the owner event loop with
+bounded waits; ordinary inference does not refresh this catalogue. The existing
+broker's account selection, quota and grant checks remain authoritative and
+unchanged. Native local credentials/overrides retain precedence; opaque receipt
+scopes are never passed as OAuth account IDs or secret-selection inputs.
+
+An unavailable owner is a model-listing failure, not an instruction to sign in
+locally. Existing generic listing-failure copy is reused. These consumer states
+still need their own independent real-path and rendered UX/design validation;
+transport-only slice A evidence does not certify the picker or a live-node
+rollout. No delegated refresh handoff is introduced here.

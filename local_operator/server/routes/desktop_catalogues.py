@@ -249,6 +249,21 @@ async def models(
         # report `credentials_known: true` beside a filter that ran on a
         # different (or failed) read. Still on the loop thread (D18 above).
         usable = controller.usable_providers()
+        if usable is not None:
+            # The authoring catalogue already offers a model from an approved
+            # machine share; filtering it out here made the picker say "no models
+            # are signed in" while `/v1/models` offered it. Add only the provider
+            # id whose CURRENT receipt the same controller eligibility proves.
+            #
+            # ASK DEFENSIVELY: this route serves every controller the app is
+            # handed, including stand-ins that predate the capability, and a
+            # hard reference turned each of them into a 500 on this page. An
+            # optional capability is exactly that — its absence means "no
+            # share to union", which is the pre-feature behaviour.
+            shared_provider = getattr(controller, "shared_catalogue_provider", None)
+            shared = shared_provider() if callable(shared_provider) else None
+            if isinstance(shared, str) and shared:
+                usable = usable | {shared}
         credentials_known = usable is not None
         hidden = 0
         if scope == "usable":

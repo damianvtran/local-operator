@@ -5943,7 +5943,23 @@ class ServingSessionHandle(SessionHandle):
         # not propagate contextvars, so install the shared budget explicitly.
         resolution_deadline = time.monotonic() + _MODEL_SWITCH_RESOLVE_S
         async with _model_resolution_window(resolution_deadline):
+            from local_operator.providers.shared_catalogue import prepare_selection
+
+            # The SESSION's config root, never the ambient one: a session resumed
+            # under an explicit root carries its own native login/overrides, and
+            # reading the ambient store would miss them and reach the owner.
             warm_info = warm_model_info(provider, model_id)
+            await prepare_selection(
+                provider,
+                self._config_dir,
+                deadline=resolution_deadline,
+                # Caller-supplied "this pair already resolves locally", which
+                # preparation honours by returning before any owner RPC. It is
+                # inert for this provider today (warm_model_info answers None for
+                # it), so the explicit-override half stays deferred until a host
+                # can observe a store-instance override.
+                local_ready=warm_info is not None,
+            )
             if warm_info is not None:
                 spec = build_model_spec(provider, model_id, info=warm_info)
             else:
