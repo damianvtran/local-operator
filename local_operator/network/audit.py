@@ -183,6 +183,14 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # vocabulary mesh-credentials.md §1.4 names.
         "credential.grant",
         # Exact finite recovery, never future inheritance or credential material.
+        # The refresh delegation's six states (§3.7f): each is a state CHANGE a
+        # reader reconstructs a delegation from, and none carries material.
+        "credential.refresh_delegated",
+        "credential.refresh_taken",
+        "credential.refresh_returned",
+        "credential.refresh_refused",
+        "credential.refresh_revoked",
+        "credential.refresh_family_moved",
         "credential.finite_requested",
         "credential.finite_applied",
         # Operator-authored future-login permission (credentials/inheritance.py): the card
@@ -520,6 +528,28 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "anchored",
             "policy",
         }
+    ),
+    # -- the refresh delegation (mesh-refresh-delegation.md §3.7f) ------------
+    #
+    # Six records, one per state change the design names, and every allowlist is
+    # NON-MATERIAL BY CONSTRUCTION: ids, a key NAME, an epoch and a cause. The
+    # material never appears — not because an emitter is careful, but because the
+    # writer drops any key outside an event's allowlist AND drops FORBIDDEN_DETAIL_KEYS
+    # even if a future allowlist names one (T11 asserts both halves).
+    #
+    # `act` is the device that ACTED and `sub` the other device, matching
+    # `credential.grant`'s existing shape: a delegation is always about two devices,
+    # and a reader reconstructing one from the log needs to know which end each
+    # record is speaking from.
+    "credential.refresh_delegated": frozenset(
+        {"credential_key", "act", "sub", "grant_id", "epoch", "cause", "approval_id"}
+    ),
+    "credential.refresh_taken": frozenset({"credential_key", "act", "sub", "grant_id", "epoch"}),
+    "credential.refresh_returned": frozenset({"credential_key", "act", "sub", "grant_id", "epoch"}),
+    "credential.refresh_refused": frozenset({"credential_key", "act", "sub", "grant_id", "cause"}),
+    "credential.refresh_revoked": frozenset({"credential_key", "act", "sub", "grant_id", "epoch"}),
+    "credential.refresh_family_moved": frozenset(
+        {"credential_key", "act", "sub", "grant_id", "epoch", "cause"}
     ),
     "credential.finite_requested": frozenset(
         {"credential_key", "act", "sub", "scope", "approval_id"}

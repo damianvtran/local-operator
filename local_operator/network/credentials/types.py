@@ -81,9 +81,30 @@ BROKER_CAPABILITY = "broker_credential"
 #: ``unknown op``, which the client maps to ``unsupported`` rather than retrying.
 BROKER_CAP_STRING = "credential-broker-v1"
 
+#: Advertised BESIDE :data:`BROKER_CAP_STRING`, and it is an ADVERTISEMENT, never
+#: an authorisation (design §3.7b). It exists for one reason: an owner on the
+#: pre-delegation build answers an unknown kind with ``internal``
+#: (``owner.on_broker``'s else-branch), which the client classifies as
+#: *transient* — so a node that sent ``refresh_take`` blind would retry it forever
+#: and look like a flaky network. The client gates the whole feature on this
+#: string instead and never parses the reply to find out.
+REFRESH_CAP_STRING = "credential-refresh-v1"
+
 #: The ``kind`` discriminator on a :data:`PEER_BROKER_OP` frame.
-BrokerKind = Literal["grant", "report", "placement"]
-BROKER_KINDS: frozenset[str] = frozenset({"grant", "report", "placement"})
+#:
+#: ``refresh_take`` (node → owner) asks for the material under a signed
+#: delegation; ``refresh_return`` (node → owner, three frames) is the handback.
+#: Two kinds, no new op and no new capability row (§7.10's rule, unchanged).
+BrokerKind = Literal["grant", "report", "placement", "refresh_take", "refresh_return"]
+BROKER_KINDS: frozenset[str] = frozenset(
+    {"grant", "report", "placement", "refresh_take", "refresh_return"}
+)
+
+#: The three ``sub`` messages of the ordered handback (design §3.3 Rule A).
+#: Each is safe to lose: an intent carries no material, an ack is the owner's
+#: promise not to POST, and the last frame is the only one that moves the token —
+#: sent AFTER the node has wiped its own copy (wipe-then-send, never the reverse).
+REFRESH_RETURN_ACTS: tuple[str, ...] = ("intent", "ack", "done")
 
 # ---------------------------------------------------------------------------
 # Keys

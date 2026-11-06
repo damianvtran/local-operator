@@ -219,6 +219,36 @@ REFRESH_SEND_UNCONFIRMED_KEY = "refresh_send_unconfirmed"
 #: them) and the unit follows its writer's clock helper, ``_now_ms``.
 GRANT_DEAD_AT_KEY = "grant_dead_at"
 
+#: Payload key: an operator-signed delegation is IN FORCE for this login, so this
+#: device must not present its refresh token (design §3.2, Fence 1). Written by the
+#: owner's mint and cleared by its handback adoption or revoke.
+#:
+#: A ROW key rather than a process flag, for the reason F2 in
+#: ``network/credentials/owner.py`` states: the CLI is another process, and a
+#: delegation that one process knows about is one that every other process on this
+#: device would POST through. The value is the record named in the design
+#: (``device``, ``grant_id``, ``epoch``, ``issued_at``, ``not_after``, ``state``);
+#: :meth:`AuthStore._delegated` folds ``not_after`` to ``expired`` on read so a
+#: crashed delegation cannot wedge the login forever.
+#:
+#: The key is spelled here, in the provider store, because this is the only place
+#: a POST can happen — the record has to be readable from the seam that decides it,
+#: not through a second hop that a future edit could forget to take.
+REFRESH_DELEGATE_KEY = "refresh_delegate"
+
+#: Payload key: this login's family has MOVED — a delegated node reported that the
+#: family was refreshed somewhere this device cannot see (§3.5). A tombstone with
+#: the tombstone's semantics and its own NAME, so a surface can say "being refreshed
+#: by <node>" / "sign in here to take the login back" instead of "the provider
+#: refused". Value is the epoch milliseconds the report was recorded at, the same
+#: unit :data:`GRANT_DEAD_AT_KEY` uses on this row.
+REFRESH_FAMILY_MOVED_KEY = "refresh_family_moved"
+
+#: The record states that keep this device out of the POST path. ``recalled`` is
+#: the handback's middle state and is deliberately INCLUDED: the promise not to
+#: POST is made at message 2, while the token is still on the node.
+_REFRESH_DELEGATION_LIVE_STATES = frozenset({"active", "recalled"})
+
 #: How long an IN-DOUBT "presented but unacknowledged" send marker stays live
 #: (see :data:`REFRESH_SEND_UNCONFIRMED_KEY` and :data:`SEND_SHAPE_UNKNOWN`).
 #:
@@ -700,6 +730,30 @@ class RefreshUnconfirmedError(AuthStoreError):
     stored row, because a peer working is not a verdict about anything (see
     ``_served_while_contended``).
     """
+
+
+class RefreshDelegatedError(AuthStoreError):
+    """A refresh was NOT attempted because another device is authorised to do it.
+
+    Raised at the seam immediately before any path that could present this row's
+    refresh token, when :data:`REFRESH_DELEGATE_KEY` says an operator-signed
+    delegation for this login is in force (design §3.2). This is Fence 1: the
+    exclusivity is a STATE, not a race — while the delegation stands, exactly one
+    device holds authority to POST, and this one is not it.
+
+    Deliberately NOT a :class:`CredentialInvalidError`, for the same reason
+    :class:`RefreshUnconfirmedError` is not: nothing here says the login is bad.
+    The bearer this row still holds keeps being served (§3.2: the gate decides
+    only against PRESENTING a refresh token, never against serving a working
+    bearer), and the state ends by handback, revoke or expiry. The message says
+    which device holds it, because "your login is broken" would be false twice —
+    the login works, and the operator can take it back.
+    """
+
+    def __init__(self, message: str, *, device: str = "", not_after: float = 0.0) -> None:
+        super().__init__(message)
+        self.device = device
+        self.not_after = not_after
 
 
 @dataclasses.dataclass
@@ -1483,6 +1537,10 @@ class AuthStore:
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
         self._fallback_resolvers: dict[str, Callable[[str], str | None]] = {}
+        #: The mesh's PRE-POST fence, or ``None`` (see :meth:`set_refresh_fence`).
+        #: ``None`` is every ordinary construction site, and it is what keeps this
+        #: module's behaviour unchanged for a device that holds no delegation.
+        self._refresh_fence: Callable[[int, dict[str, Any]], str | None] | None = None
         self._store_uid: str | None = None
         self._sticky: dict[tuple[str, str], int] = {}
         self._round_robin: dict[str, int] = {}
@@ -1976,6 +2034,27 @@ class AuthStore:
             if secret:
                 keys.append(secret)
         return keys
+
+    def set_refresh_fence(self, fence: Callable[[int, dict[str, Any]], str | None] | None) -> None:
+        """Install the PRE-POST fence this store consults before presenting a token.
+
+        THE ONE SEAM THE NODE'S FENCE CAN RUN FROM. ``mesh-refresh-delegation.md``
+        §3.4 requires the node to re-evaluate a signed delegation, the network
+        deny stamp and the per-key deny watermark *before every POST*, not merely
+        when the material arrived — and this module is the only place a POST
+        happens. It therefore cannot import the mesh: the credentials package is
+        stdlib-only at import and the relay constructs it, so the direction is
+        one-way and the check has to be CALLED IN.
+
+        ``fence(credential_id, data)`` returns ``None`` to allow the POST or a
+        sentence to refuse it. Unset — every construction site but a node that
+        holds a delegated family — costs one attribute read on the refresh path
+        and changes nothing: no fence, no added work, byte-identical behaviour.
+
+        A fence that RAISES is a refusal, not a pass: the caller treats any
+        exception as "cannot tell", which §3.5 resolves to stop.
+        """
+        self._refresh_fence = fence
 
     def set_fallback_resolver(
         self, provider: str, resolver: Callable[[str], str | None] | None
@@ -3408,6 +3487,184 @@ class AuthStore:
 
         return self._update_payload(credential_id, write, moves_write_stamp=True)
 
+    # -- the refresh delegation record (mesh-refresh-delegation.md §3.2) -----
+
+    @staticmethod
+    def _delegated(creds: dict[str, Any], *, now_ms: int) -> dict[str, Any] | None:
+        """The LIVE delegation record on this row, or ``None``.
+
+        Tolerant on the same side as :meth:`_grant_dead_at` but with the opposite
+        conclusion, because the two markers are opposites: an unreadable
+        tombstone must not suppress a working refresh, while an unreadable
+        DELEGATION record must not be read as "no delegation" and re-open a POST
+        that a signature closed. So anything present but malformed counts as
+        live-until-``not_after``-or-forever, and only a genuinely absent record,
+        a non-active state, or a passed ``not_after`` answers ``None``.
+
+        ``not_after`` folds to ``expired`` here rather than being rewritten on
+        disk: the fold is a pure read (§3.2's "asks-store discipline"), so a
+        crashed delegation cannot wedge the login past its own ceiling and no
+        writer has to run for the state to be correct.
+        """
+        record = creds.get(REFRESH_DELEGATE_KEY)
+        if record is None:
+            return None
+        if not isinstance(record, dict):
+            # Presence without a readable record is STILL a delegation: returning
+            # None here would let a corrupt write authorise the POST the record
+            # exists to prevent.
+            return {"device": "", "state": "active", "not_after": 0.0}
+        # BOTH LIVE STATES BLOCK THE POST. ``recalled`` is the handback's middle
+        # step (§3.3 Rule A, message 2): the owner has written the transition and
+        # STILL MUST NOT POST, because the family is on the node until the last
+        # frame arrives. Treating only ``active`` as blocking would re-open the POST
+        # exactly in the window where the document is moving between machines.
+        state = record.get("state")
+        if isinstance(state, str) and state not in _REFRESH_DELEGATION_LIVE_STATES:
+            return None
+        not_after = record.get("not_after")
+        if isinstance(not_after, bool) or not isinstance(not_after, (int, float)):
+            # An unreadable ceiling is unbounded, not absent — see above. The
+            # delegation ends by handback, revoke, or an operator clearing the row.
+            return dict(record)
+        if int(not_after * 1000.0) <= now_ms:
+            return None
+        return dict(record)
+
+    @staticmethod
+    def _family_moved_at(creds: dict[str, Any]) -> int | None:
+        """The epoch-ms a family-moved marker was written, or ``None``.
+
+        Read exactly like :meth:`_grant_dead_at` because it is the same kind of
+        statement — a terminal verdict about this row's family — and surfaces
+        distinguish the two by the KEY, which is the whole reason it has its own
+        name.
+        """
+        marker = creds.get(REFRESH_FAMILY_MOVED_KEY)
+        if isinstance(marker, bool) or not isinstance(marker, (int, float)):
+            return None
+        return int(marker) if marker > 0 else None
+
+    def refresh_delegate_record(self, credential_id: int) -> dict[str, Any] | None:
+        """The delegation record in ANY state, for the handback's own protocol.
+
+        ``refresh_delegate_for`` answers only a LIVE record (that is what a surface
+        wants to show). The handback needs the record after it has been folded to
+        ``recalled`` — refusing to find it there would make message 3 unanswerable
+        and strand the family on the node, which is the failure §3.3 exists to
+        avoid.
+        """
+        row = self.get_credential(credential_id)
+        if row is None or not isinstance(row.data, dict):
+            return None
+        record = row.data.get(REFRESH_DELEGATE_KEY)
+        return dict(record) if isinstance(record, dict) else None
+
+    def refresh_delegate_for(self, credential_id: int) -> dict[str, Any] | None:
+        """The live delegation record for one row, for the owner's own surfaces."""
+        row = self.get_credential(credential_id)
+        if row is None or not isinstance(row.data, dict):
+            return None
+        return self._delegated(row.data, now_ms=self._now_ms())
+
+    def set_refresh_delegate(self, credential_id: int, record: dict[str, Any]) -> bool:
+        """Write the delegation record onto this row. The owner's mint's last step.
+
+        Under the same read-modify-write primitive the durability markers use, so
+        a concurrent rotation cannot be clobbered by a stale snapshot — and so the
+        record and the token it freezes are written by ONE code path.
+        """
+
+        def write(data: dict[str, Any]) -> bool:
+            data[REFRESH_DELEGATE_KEY] = dict(record)
+            return True
+
+        return self._update_payload(credential_id, write, moves_write_stamp=True)
+
+    def clear_refresh_delegate(self, credential_id: int) -> bool:
+        """Remove the delegation record (handback adopted, or revoked)."""
+
+        def write(data: dict[str, Any]) -> bool:
+            data.pop(REFRESH_DELEGATE_KEY, None)
+            return True
+
+        return self._update_payload(credential_id, write, moves_write_stamp=True)
+
+    def mark_family_moved(self, credential_id: int) -> bool:
+        """Record that this login's family moved outside this device (§3.5).
+
+        Tombstone semantics with its own key: nothing refreshes it again, and the
+        surface can say "sign in here to take it back" rather than "the provider
+        refused it", which are different causes with the same remedy.
+        """
+
+        def write(data: dict[str, Any]) -> bool:
+            data[REFRESH_FAMILY_MOVED_KEY] = self._now_ms()
+            # The delegation is over by definition: the family it authorised is
+            # gone from here, and leaving the record would keep this row refusing
+            # to POST for a family that no longer exists.
+            data.pop(REFRESH_DELEGATE_KEY, None)
+            return True
+
+        return self._update_payload(credential_id, write, moves_write_stamp=True)
+
+    def adopt_refresh_handback(
+        self,
+        credential_id: int,
+        *,
+        refresh: Any,
+        access: Any,
+        expires: Any,
+        incarnation: str = "",
+    ) -> bool:
+        """Adopt the family a delegated node hands back (§3.3 Rule A, message 3).
+
+        Written through the same read-modify-write primitive as the markers, and
+        compare-and-set on TWO things because a whole-payload write without them
+        would be the way a handback overwrites a live login:
+
+        * the **login incarnation** — a re-login on this device since the
+          delegation was minted means the handed-back family is a different
+          login's, so the material is NOT adopted (§3.3 Rule B's value, checked
+          again at the write);
+        * the **tombstone** — a family this device recorded as dead is never
+          resurrected by material from a node, exactly as a refresh's rotation is
+          never persisted after a tombstone.
+
+        ``refresh``/``access``/``expires`` are each optional: a handback carries
+        what the node last persisted, and a field the node could not report is
+        left as it was rather than blanked.
+        """
+
+        def write(data: dict[str, Any]) -> bool:
+            if incarnation and str(data.get("login_incarnation") or "") != incarnation:
+                logger.warning(
+                    "handback for %s was NOT adopted: the row's login incarnation moved "
+                    "(a sign-in happened here), so the material belongs to another family",
+                    credential_id,
+                )
+                return False
+            if self._grant_dead_at(data) is not None:
+                logger.warning(
+                    "handback for %s was NOT adopted: this row's grant is tombstoned, and "
+                    "material from a node must not resurrect it",
+                    credential_id,
+                )
+                return False
+            if refresh is not None:
+                data["refresh"] = refresh
+            if access is not None:
+                data["access"] = access
+            if expires is not None:
+                data["expires"] = expires
+            # The delegation is over the moment its material is back: the record
+            # would otherwise keep this row refusing to POST for its own token.
+            data.pop(REFRESH_DELEGATE_KEY, None)
+            data.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
+            return True
+
+        return self._update_payload(credential_id, write, moves_write_stamp=True)
+
     def _served_while_contended(
         self, row: StoredCredential, now_data: dict[str, Any]
     ) -> dict[str, Any]:
@@ -3490,6 +3747,31 @@ class AuthStore:
                 f"OAuth grant for '{row.provider}' was refused by the identity provider; "
                 f"run /login {row.provider} to sign in again"
             )
+        # FENCE 1, BEFORE `_needs_refresh` (design §3.2/§3.9): the delegation record
+        # decides against PRESENTING a refresh token, so it must be read before any
+        # path that can reach the POST — and after the served-bearer short-circuit
+        # below, so a still-live access token is still served (a different secret,
+        # unaffected by the delegation, exactly as the send-marker's rule states).
+        moved = self._family_moved_at(creds)
+        if moved is not None:
+            # The family moved outside this device's knowledge (§3.5). Tombstone
+            # semantics with its own name: nothing re-presents or refreshes it, and
+            # only an interactive login clears it.
+            raise CredentialInvalidError(
+                f"OAuth grant for '{row.provider}' was refreshed on another device, so this "
+                f"copy is no longer current; run /login {row.provider} to take it back"
+            )
+        delegated = self._delegated(creds, now_ms=self._now_ms())
+        if delegated is not None and self._needs_refresh(creds, force=force):
+            raise RefreshDelegatedError(
+                f"OAuth refresh for '{row.provider}' was not attempted: "
+                f"{delegated.get('device') or 'a paired device'} is authorised to refresh this "
+                "login under an operator-signed delegation, and two devices presenting one "
+                "rotating token invalidate the family. This clears when the delegation is "
+                "handed back, revoked or expires",
+                device=str(delegated.get("device") or ""),
+                not_after=float(delegated.get("not_after") or 0.0),
+            )
         if not self._needs_refresh(creds, force=force):
             return creds
         refresh = self._refresh_fn(row.provider)
@@ -3511,6 +3793,19 @@ class AuthStore:
                 )
             if not self._needs_refresh(fresh, force=force):
                 return fresh
+            # The same ask again under the lock, for the reason the tombstone ask is
+            # repeated: this process may have MINTED the delegation for a sibling
+            # node while we waited, and the row it just re-read is the only place
+            # that fact lives.
+            live = self._delegated(fresh, now_ms=self._now_ms())
+            if live is not None:
+                raise RefreshDelegatedError(
+                    f"OAuth refresh for '{row.provider}' was not attempted: "
+                    f"{live.get('device') or 'another device'} is authorised to refresh this "
+                    "login under an operator-signed delegation",
+                    device=str(live.get("device") or ""),
+                    not_after=float(live.get("not_after") or 0.0),
+                )
             if not self._try_refresh_lease(row.id):
                 # A peer holds the lease. Wait out a slice of it and re-read:
                 # POSTing the same rotating refresh token is how the loser
@@ -3584,6 +3879,25 @@ class AuthStore:
                         f"{self_clearing_window()}; sign in again only if it persists "
                         "past that"
                     )
+                if presented:
+                    # THE NODE'S PRE-POST FENCE (§3.4), and here rather than
+                    # earlier on purpose: this is the last statement before the
+                    # marker is armed and the token can be on the wire, so a
+                    # refusal here has presented nothing. It runs for a delegated
+                    # node only (no fence installed = no work), and a fence that
+                    # cannot answer stops the POST rather than guessing (§3.5).
+                    fence = self._refresh_fence
+                    if fence is not None:
+                        try:
+                            refusal = fence(row.id, fresh)
+                        except Exception as exc:  # noqa: BLE001 — cannot tell = stop
+                            refusal = (
+                                "the delegated refresh could not be re-checked before "
+                                f"presenting the token ({type(exc).__name__}), so it was not "
+                                "presented; nothing about the login has changed"
+                            )
+                        if refusal is not None:
+                            raise RefreshDelegatedError(str(refusal))
                 armed: dict[str, Any] | None = None
                 if presented:
                     # WRITE-AHEAD, and before the request can be on the wire: a
