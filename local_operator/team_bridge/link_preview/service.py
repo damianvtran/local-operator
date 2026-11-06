@@ -62,8 +62,17 @@ from local_operator.team_bridge.link_preview.models import (
     LinkPreviewResolution,
 )
 from local_operator.team_bridge.link_preview.store import PreviewStore
+from local_operator.team_bridge.link_preview.throttle import (
+    PreviewThrottled,
+    ResolveThrottle,
+)
 from local_operator.web_fetch.models import FetchBytes, WebFetchSettings
-from local_operator.web_fetch.service import FetchError, PolicyRefusal, WebFetchService
+from local_operator.web_fetch.service import (
+    FetchError,
+    PolicyRefusal,
+    WebFetchService,
+    url_has_credentials,
+)
 
 if TYPE_CHECKING:
     # Annotation only: this module rides ``server.app``'s import path, and the
@@ -125,6 +134,7 @@ async def resolve_preview(
     store: PreviewStore,
     cache: PreviewCache,
     fetcher: WebFetchService | None = None,
+    throttle: ResolveThrottle | None = None,
 ) -> LinkPreviewResolution:
     """Resolve ``url`` into a card for ``scope``, or say in one code why there is none.
 
@@ -140,7 +150,18 @@ async def resolve_preview(
     that must drive a fixture origin without a real socket; production passes
     ``None`` and :func:`preview_fetcher` builds one.
     """
-    # The cap is checked FIRST and returns before any parse, any DNS, any cache
+    # THE KILL SWITCH, FIRST — before the cap, before the URL is even looked at.
+    # ``web_fetch.enabled: false`` is what a privacy- or airgap-minded operator
+    # flips, and the setting's own documentation promises that "no fetching" means
+    # no fetching through ANY spelling (``web_fetch/tool.py`` re-checks it per
+    # call for exactly that reason). A preview is one of those spellings, so with
+    # the switch off it answers ``absent/disabled`` and issues ZERO requests — the
+    # round-1 security finding S-1, measured as two outbound fetches from a
+    # stranger's link on a switched-off install.
+    if not settings.enabled:
+        return _absent("disabled")
+
+    # The cap is checked next and returns before any parse, any DNS, any cache
     # read and any request: an over-cap index must cost nothing at all.
     if index < 0 or index >= PER_MESSAGE_CAP:
         return _absent("cap")
@@ -154,10 +175,43 @@ async def resolve_preview(
     if scheme_refusal is not None:
         return _absent(scheme_refusal)
 
+    # A URL CARRYING CREDENTIALS IS REFUSED HERE, ON THE RAW SPELLING, BEFORE THE
+    # KEY IS BUILT (QA Q2-1). ``canonical_url`` DROPS userinfo — that is what
+    # keeps a credential out of a key that outlives the request — so
+    # ``https://user:secret@host/x`` and ``https://host/x`` are ONE key. Refusing
+    # only in the fetcher therefore has two holes this early return closes, and
+    # both were measured:
+    #
+    # * the credentialed URL could be answered ``ready`` from the plain spelling's
+    #   already-cached card, because a hit never reaches the fetcher at all — a
+    #   card for a URL this contract refuses to resolve;
+    # * worse, the credentialed URL's ``blocked-host`` was written back under that
+    #   SHARED key and then served to the legitimate plain URL as a negative
+    #   answer for the full half-hour ``NEGATIVE_TTL_S``, with no fetch — one
+    #   sender's malformed link denying the card everyone else is entitled to.
+    #
+    # The refusal costs a parse and no request, and it is deliberately NOT cached:
+    # nothing is learned here that a later caller may not learn on its own terms.
+    # The engine-level refusal in ``validate_public_url`` stays as the depth
+    # defence — it re-checks every redirect hop, which this parse never sees.
+    if url_has_credentials(target):
+        return _absent("blocked-host")
+
     key = key_for(scope, target)
     cached = cache.get(key)
     if cached is not None:
         return cached
+
+    # THE TOKEN IS SPENT HERE, and only here — after the cache miss, before the
+    # flight. Charging at the HTTP boundary instead made a re-render of already
+    # cached links spend tokens it never used: seven messages × three links is
+    # twenty-one resolves on a purely WARM screen, which exhausted a burst of twenty
+    # and started refusing real work (code review round 2, minor). A cap refusal
+    # above returns before this line, so it costs nothing either. A stampede of N
+    # identical COLD requests does spend N tokens for one collapsed fetch — that is
+    # deliberate: a client hammering one URL is precisely what the bound exists for.
+    if throttle is not None and not throttle.allow(scope.account_id):
+        raise PreviewThrottled(throttle.retry_after_s(scope.account_id))
 
     async def _resolve_and_remember() -> LinkPreviewResolution:
         resolution = await _resolve_origin(
@@ -430,7 +484,7 @@ async def _store_artifact(
         # format's header survives, which is exactly why storing it would be a
         # silent lie (a card would draw a half-pixel strip and never notice).
         return None
-    raster = sniff_raster(fetched.body)
+    raster = await asyncio.to_thread(sniff_raster, fetched.body)
     if raster is None:
         return None
     # OFF THE EVENT LOOP, deliberately. ``PreviewStore.put`` writes a temporary
@@ -468,9 +522,15 @@ def _policy_reason(reason: str) -> AbsentReason:
 
     ``host`` is three refusals sharing one code, and each is a dead end rather
     than a blip: no host to judge, credentials carried in the URL (never
-    forwarded as an ``Authorization`` header), and a name that does not resolve.
+    forwarded as an ``Authorization`` header), and a name that does not EXIST.
     All three are ``blocked-host``, which is the one code the renderer draws as
     "this link could not be used" instead of offering a retry.
+
+    A lookup that failed rather than found nothing is deliberately NOT in that
+    list: ``EAI_AGAIN`` and the other transient codes arrive as an ordinary
+    :class:`~local_operator.web_fetch.service.FetchError` classified retryable
+    (review R2-1), because a resolver under load is a blip and answering it with
+    this code would park a live host behind the half-hour negative cache.
     """
     if reason == "scheme":
         return "unsupported-scheme"
@@ -484,9 +544,12 @@ def _retryable(error: FetchError) -> bool:
 
     An unclassified ``FetchError`` (a redirect chain that never landed) is
     treated as retryable: the card did not resolve, and the honest answer to
-    "could this work later" is that we do not know. A host with no address does
-    NOT arrive here any more — the guard refuses it as ``reason="host"``, which
-    becomes ``blocked-host`` and is cached as a negative answer.
+    "could this work later" is that we do not know. A host that does not EXIST
+    does not arrive here — the guard refuses it as ``reason="host"``, which
+    becomes ``blocked-host`` and is cached as a negative answer. A host whose
+    lookup merely FAILED does, and answers retryable (review R2-1): the fetcher
+    classifies ``EAI_AGAIN`` and its siblings as a transport failure, so the one
+    bad second is never cached as a half-hour verdict on the host.
     """
     failure = getattr(error, "failure", None)
     if failure is None:

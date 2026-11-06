@@ -11,12 +11,15 @@ the renderer talks to.
 from __future__ import annotations
 
 import asyncio
+import operator
 import socket
+import sqlite3
 import threading
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, SupportsIndex, overload
 
 import httpx
 import pytest
@@ -38,6 +41,7 @@ from local_operator.team_bridge.link_preview.store import (
     InvalidArtifactId,
     PreviewStore,
 )
+from local_operator.team_bridge.link_preview.throttle import ResolveThrottle
 from local_operator.web_fetch import service as fetch_service
 from local_operator.web_fetch.models import WebFetchSettings
 from local_operator.web_fetch.service import PolicyRefusal, WebFetchService
@@ -226,9 +230,20 @@ def _client(transport: httpx.MockTransport | None = None) -> httpx.AsyncClient:
     )
 
 
-def _artifact_path(artifact_id: str, account_id: str = ACCOUNT) -> str:
-    """The artifact route's URL, with the required receipt the route now demands."""
-    return f"{ARTIFACT}/{artifact_id}?expected_account_id={account_id}"
+def _artifact_path(artifact_id: str) -> str:
+    """The artifact route's URL. The account receipt is a HEADER, never a query.
+
+    S-3 of the security round is exactly this: a GET's URL is written down by every
+    intermediary on the way, so ``expected_account_id`` travels in
+    ``X-Link-Preview-Account``. A caller that puts it in the query string instead
+    gets a 422 from the header being absent, which the tests below pin.
+    """
+    return f"{ARTIFACT}/{artifact_id}"
+
+
+def _receipt(account_id: str = ACCOUNT) -> dict[str, str]:
+    """The account receipt header every artifact read carries."""
+    return {"X-Link-Preview-Account": account_id}
 
 
 # ---------------------------------------------------------------------------
@@ -280,13 +295,13 @@ async def test_a_page_resolves_into_a_card_and_the_artifact_route_serves_its_byt
         # The artifact route hands back the stored bytes under the SNIFFED mime,
         # never the label the origin claimed (that favicon said image/png and is
         # a GIF on the wire).
-        favicon = await client.get(_artifact_path(preview["favicon"]["id"]))
+        favicon = await client.get(_artifact_path(preview["favicon"]["id"]), headers=_receipt())
         assert favicon.status_code == 200
         assert favicon.headers["content-type"] == "image/gif"
         assert favicon.headers["x-content-type-options"] == "nosniff"
         assert favicon.content == GIF
 
-        image = await client.get(_artifact_path(preview["image"]["id"]))
+        image = await client.get(_artifact_path(preview["image"]["id"]), headers=_receipt())
         assert image.status_code == 200
         assert image.content == PNG
         assert image.headers["content-type"] == "image/png"
@@ -420,7 +435,7 @@ async def test_a_redirect_to_a_private_address_is_re_validated_at_the_hop(
 async def test_credentials_in_the_url_are_refused_before_a_single_request(
     monkeypatch: pytest.MonkeyPatch, signed_in: None
 ) -> None:
-    """URL [redacted] would become ``Authorization: Basic`` on the wire.
+    """URL userinfo would become ``Authorization: Basic`` on the wire.
 
     httpx turns it into a header, so honouring such a URL would send a credential
     the MESSAGE AUTHOR chose to a third party — in a request this process signs.
@@ -752,17 +767,72 @@ async def test_an_extra_body_field_is_refused(signed_in: None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_malformed_artifact_id_never_reaches_the_filesystem(signed_in: None) -> None:
+async def test_a_malformed_artifact_id_never_reaches_the_filesystem(
+    signed_in: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each shape answers for the RIGHT reason, and no store path is ever built.
+
+    The earlier version accepted 404 *or* 422 for every case, which cannot tell the
+    route's shape gate from the store's refusal — an id that reached
+    ``PreviewStore._path`` would have passed it. Two assertions per case do the job:
+    the exact status, and a spy proving ``_path`` (the only place an id becomes a
+    filename) was never called. The spy raises, so a regression fails on the id that
+    caused it rather than on a missing blob.
+    """
+    reached: list[str] = []
+
+    def _spy(self: PreviewStore, artifact_id: str) -> None:
+        reached.append(artifact_id)
+        raise AssertionError(f"artifact id reached the filesystem: {artifact_id!r}")
+
+    monkeypatch.setattr(PreviewStore, "_path", _spy)
+    cases = {
+        # Not the grammar at all: the path parameter is shaped, so FastAPI answers
+        # before a handler runs.
+        "not-a-hash": 422,
+        # An encoded traversal is decoded to a path the router does not match at
+        # all, so it is a 404 from the router rather than a 422 from the shape —
+        # either way it never reaches this handler.
+        "..%2F..%2Fetc%2Fpasswd": 404,
+        "A" * 32: 422,  # uppercase is not the pattern
+        "0" * 31: 422,  # too short
+        "0" * 33: 422,  # too long
+        "0" * 64: 422,
+        # WELL-SHAPED, and not an id this scope owns: the route's own refusal.
+        "0" * 32: 404,
+    }
     async with _client() as client:
-        for bad in ("not-a-hash", "..%2F..%2Fetc%2Fpasswd", "A" * 32, "0" * 31, "0" * 33, "0" * 64):
-            response = await client.get(_artifact_path(bad))
-            assert response.status_code in (404, 422), (bad, response.status_code)
+        for artifact_id, expected in cases.items():
+            response = await client.get(ARTIFACT + "/" + artifact_id, headers=_receipt())
+            assert response.status_code == expected, (
+                artifact_id,
+                response.status_code,
+                response.text,
+            )
+    assert reached == []
+
+
+@pytest.mark.asyncio
+async def test_the_account_receipt_is_not_accepted_in_the_query_string(signed_in: None) -> None:
+    """S-3: the receipt is a header, so the old query spelling must not work.
+
+    A GET's URL is what every intermediary records, so the account id may not travel
+    there. This pins the move in the direction that would otherwise regress
+    silently: the route ignores the query string and the header is what it reads.
+    """
+    async with _client() as client:
+        in_query_only = await client.get(
+            ARTIFACT + "/" + "a" * 32 + f"?expected_account_id={ACCOUNT}"
+        )
+        in_header = await client.get(ARTIFACT + "/" + "a" * 32, headers=_receipt())
+    assert in_query_only.status_code == 422
+    assert in_header.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_an_unknown_artifact_id_is_a_404(signed_in: None) -> None:
     async with _client() as client:
-        response = await client.get(_artifact_path("a" * 32))
+        response = await client.get(_artifact_path("a" * 32), headers=_receipt())
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "artifact_not_found"
 
@@ -881,12 +951,107 @@ def test_a_jpeg_size_is_read_from_its_start_of_frame_segment() -> None:
     assert (raster.width, raster.height) == (300, 200)
 
 
-def test_the_parser_is_bounded_and_survives_a_hostile_document() -> None:
-    markup = "<html><head>" + "<meta property='og:title' content='Nope'>" * 5000 + "</head></html>"
-    metadata = extract.extract_metadata(markup, base_url="http://preview.test/")
-    # The tag budget stopped the walk; whatever it collected is still a valid
-    # (empty) answer rather than an error or a hang.
-    assert isinstance(metadata.title, str)
+def test_the_parser_is_bounded_by_its_tag_budget() -> None:
+    """The bound is DETECTABLE: a marker past the budget must not be collected.
+
+    The earlier version asserted only that a hostile document did not raise, which a
+    parser with no bound at all also satisfies. Here the same ``og:title`` appears
+    once inside the budget (and IS collected) and once past ``_MAX_TAGS`` (and is
+    not): the pair proves the walk stops where the constant says it does.
+    """
+    inside = '<meta property="og:title" content="Collected">'
+    past = '<meta property="og:title" content="Should not be collected">'
+    filler = "<div></div>" * (extract._MAX_TAGS + 50)
+    metadata = extract.extract_metadata(
+        f"<html><head>{inside}</head><body>{filler}{past}</body></html>",
+        base_url="http://preview.test/",
+    )
+    assert metadata.title == "Collected"
+
+
+class _Audited(bytes):
+    """Bytes that record the furthest byte index anyone read from them.
+
+    A WALL-CLOCK ASSERTION CANNOT FAIL HERE. Code review round 2 measured the cap's
+    own cost at 0.07-0.2 s against a 0.3 s bound, so "it was fast" passed even when
+    the scan read the whole 2 MiB body. This counts the reads instead, so the test
+    fails the moment the bound is removed however fast the machine is.
+    """
+
+    def __new__(cls, data: bytes) -> "_Audited":
+        return super().__new__(cls, data)
+
+    def __init__(self, data: bytes) -> None:
+        self.furthest = -1
+
+    # The overloads mirror ``bytes.__getitem__`` exactly (``SupportsIndex`` and
+    # ``slice``), so this stays a real subclass of the type the sniffer is written
+    # against rather than a duck type that the guard could not run on.
+    @overload
+    def __getitem__(self, item: SupportsIndex) -> int: ...
+
+    @overload
+    def __getitem__(self, item: slice) -> bytes: ...
+
+    def __getitem__(self, item: SupportsIndex | slice) -> int | bytes:
+        if isinstance(item, slice):
+            self.furthest = max(self.furthest, item.stop if item.stop is not None else len(self))
+        else:
+            index = operator.index(item)
+            self.furthest = max(self.furthest, index if index >= 0 else len(self) + index)
+        return super().__getitem__(item)
+
+
+def _jpeg_with_sof_at(offset: int) -> bytes:
+    """A JPEG whose SOF header sits at ``offset`` bytes, with filler before it.
+
+    The filler is ``FF D0`` restart markers: a legal two-byte sequence with no
+    length field, so the walk steps over it two bytes at a time — the exact shape
+    that made the unbounded version slow, and the only way to place a header past a
+    64 KiB segment-length field.
+    """
+    units = max(0, (offset - 3) // 2)
+    sof0 = (
+        b"\xff\xc0"
+        + (17).to_bytes(2, "big")
+        + b"\x08"
+        + (200).to_bytes(2, "big")
+        + (300).to_bytes(2, "big")
+        + b"\x03"
+        + b"\x00" * 9
+    )
+    return b"\xff\xd8\xff" + b"\xff\xd0" * units + sof0 + b"\xff\xd9"
+
+
+def test_the_jpeg_walk_reads_no_further_than_its_cap() -> None:
+    """BYTES, not seconds: the hostile body is never walked past the bound.
+
+    The reviewer's exact body — ``FF D8 FF`` then repeated ``FF D0``, no SOF ever.
+    Bounded by :data:`extract._JPEG_SOF_SCAN_BYTES` because the walk is a Python loop
+    over attacker-supplied bytes (2 MiB of this measured 1.75 s before the cap).
+    Dimensions are optional in the contract, so "unknown" is the right answer.
+    """
+    hostile = _Audited(b"\xff\xd8\xff" + b"\xff\xd0" * (1024 * 1024))
+    raster = extract.sniff_raster(hostile)
+    assert raster is not None and raster.mime == "image/jpeg"
+    assert (raster.width, raster.height) == (None, None)
+    assert hostile.furthest <= extract._JPEG_SOF_SCAN_BYTES, hostile.furthest
+    assert hostile.furthest < len(hostile), "the walk read the whole body"
+
+
+def test_a_sof_past_the_cap_reports_unknown_and_a_sof_inside_it_reports_its_size() -> None:
+    """The pair that makes the cap DETECTABLE: same header, either side of the bound.
+
+    If the cap were removed (or raised past the second offset), the far case would
+    report 300x200 and this test would fail — which the wall-clock version could not
+    do. The far case is the documented EXIF limitation: unknown, never wrong.
+    """
+    near = extract.sniff_raster(_jpeg_with_sof_at(1024))
+    far_offset = extract._JPEG_SOF_SCAN_BYTES + 4096
+    far = extract.sniff_raster(_jpeg_with_sof_at(far_offset))
+    assert near is not None and (near.width, near.height) == (300, 200)
+    assert far is not None and far.mime == "image/jpeg"
+    assert (far.width, far.height) == (None, None)
 
 
 def test_a_relative_icon_resolves_against_the_served_url() -> None:
@@ -1025,6 +1190,129 @@ async def test_the_cache_reports_the_bytes_it_holds(
         stats = preview_cache_for_test.stats()
         assert stats.hits == 1
         assert stats.resolutions == 1
+        # The bytes are held ONCE, and a HIT must not add or drop a byte: this is
+        # the post-hit half of the resident-size assertion (review R2-7 restored it
+        # after the previous delta dropped it).
+        assert stats.resident_bytes == len(PNG)
+
+
+def _write_half_written_owner_row(config_dir: Path) -> None:
+    """A committed enrollment row as a crashed writer leaves it: an int column NULL.
+
+    Written straight to the store's own path with NO ``NOT NULL`` on
+    ``credential_id``, because that is the shape that reaches the decoder:
+    ``_owner_from_row`` does ``int(row["credential_id"])``, and ``int(None)``
+    raises ``TypeError`` out of ``active_owner_readonly`` (which only wraps what
+    SQLite itself raises, as ``StoreRefused``). Reviewer R2-2 measured that as a
+    500 on both routes; the scope is supposed to degrade to the account alone.
+    """
+    path = Path(config_dir) / "team_bridge" / "state.sqlite3"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE enrollments (owner_key TEXT PRIMARY KEY, credential_id INTEGER, "
+            "account_id TEXT, tenant_id TEXT, endpoint_id TEXT, canonical_base_url TEXT, "
+            "enrollment_generation INTEGER, consent_version TEXT, consent_ref TEXT, "
+            "designated_session TEXT, state TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO enrollments VALUES (?,?,?,?,?,?,?,?,?,?,'committed')",
+            (
+                "half-written-owner",
+                None,
+                ACCOUNT,
+                "tenant-partial",
+                "endpoint-partial",
+                "https://hub.preview.test",
+                1,
+                None,
+                None,
+                None,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_a_half_written_owner_row_cannot_500_either_route(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None, _plane: ConfigManager
+) -> None:
+    """A damaged owner row narrows the scope to the account; it never fails a route.
+
+    The tenant is the SECOND fence, so losing it must leave the account fence
+    intact — resolve still answers its normal resolution and artifact still
+    answers 404 for an id it holds no blob for. Reviewer R2-2 reproduced 500s on
+    BOTH before this: the ``sqlite3.Error`` arm caught nothing (the store already
+    wraps those) while the ``TypeError`` the real corruption raises escaped.
+    """
+    _write_half_written_owner_row(Path(_plane.config_dir))
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        resolved = await _post(client, _resolve_body())
+        artifact = await client.get(_artifact_path("a" * 32), headers=_receipt())
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["result"]["kind"] == "ready", resolved.text
+    # The fetch really ran: the degraded scope fetched instead of short-circuiting.
+    assert seen == ["/page", "/favicon.png"]
+    assert artifact.status_code == 404, artifact.text
+
+
+@pytest.mark.asyncio
+async def test_a_credentialed_url_is_refused_even_when_the_plain_card_is_fresh(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The refusal runs on the RAW url, BEFORE the key is built (QA Q2-1).
+
+    ``canonical_url`` drops the userinfo pair so a credential never enters a
+    long-lived key, which makes the credentialed spelling and the plain one ONE
+    key. With the refusal only in the fetcher, a cache HIT never reaches the
+    fetcher at all — so a credentialed URL was answered from the plain spelling's
+    fresh card. Measured here: the card is cached FIRST, and the refusal must
+    still be a refusal, with no request at all.
+    """
+
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        plain = await _post(client, _resolve_body())
+        assert plain.json()["result"]["kind"] == "ready", plain.text
+        fetched = len(seen)
+
+        credentialed = await _post(
+            client, _resolve_body("http://someone:hunter2@preview.test/page")
+        )
+    assert credentialed.status_code == 200, credentialed.text
+    assert credentialed.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert len(seen) == fetched, "the refusal must cost no request at all"
+
+
+@pytest.mark.asyncio
+async def test_a_credentialed_refusal_does_not_poison_the_plain_spelling(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None, preview_cache_for_test: PreviewCache
+) -> None:
+    """The refusal must not answer for the URL others are entitled to (QA Q2-1).
+
+    Because the two spellings share one canonical key, a ``blocked-host`` written
+    under it would be served to the plain URL as a negative answer for the whole
+    ``NEGATIVE_TTL_S`` with no fetch — one message's malformed link denying every
+    later reader of the same page its card. The refusal returns BEFORE the cache,
+    so nothing is stored; the plain URL then fetches for itself.
+    """
+
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        credentialed = await _post(
+            client, _resolve_body("http://someone:hunter2@preview.test/page")
+        )
+        assert credentialed.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+        assert seen == [], "the refusal must not reach the origin"
+
+        plain = await _post(client, _resolve_body())
+        assert plain.json()["result"]["kind"] == "ready", plain.text
+    # One entry, written by the plain resolve: the refusal stored nothing.
+    assert preview_cache_for_test.stats().entries == 1
 
 
 @pytest.mark.asyncio
@@ -1120,18 +1408,18 @@ async def test_one_accounts_card_is_never_served_into_anothers_session(
 
         # B asking for A's id gets a 404 — not the bytes, and not a 403 that would
         # confirm the id exists somewhere.
-        denied = await client.get(_artifact_path(a_favicon, OTHER_ACCOUNT))
+        denied = await client.get(_artifact_path(a_favicon), headers=_receipt(OTHER_ACCOUNT))
         assert denied.status_code == 404, denied.text
         assert denied.json()["detail"]["code"] == "artifact_not_found"
 
         # B's own id serves, and it is the same public bytes B's own fetch stored.
-        allowed = await client.get(_artifact_path(b_favicon, OTHER_ACCOUNT))
+        allowed = await client.get(_artifact_path(b_favicon), headers=_receipt(OTHER_ACCOUNT))
         assert allowed.status_code == 200, allowed.text
         assert allowed.content == PNG
 
         # The receipt is still checked before ownership: A's id under A's receipt
         # is refused on the identity, not answered with bytes.
-        mismatch = await client.get(_artifact_path(a_favicon, ACCOUNT))
+        mismatch = await client.get(_artifact_path(a_favicon), headers=_receipt(ACCOUNT))
         assert mismatch.status_code == 409
         assert mismatch.json()["detail"]["code"] == "account_mismatch"
 
@@ -1191,12 +1479,15 @@ async def test_a_name_with_no_address_is_a_blocked_host_and_is_not_retried(
 ) -> None:
     """A permanently dead link must not be re-resolved on every scroll.
 
-    ``socket.gaierror`` is a POLICY answer — the name has no address, and no retry
-    changes that — so it surfaces as ``blocked-host`` and is remembered as a
-    NEGATIVE entry, reused for the whole negative TTL before one more lookup is
-    allowed. A DNS TIMEOUT is a different animal: it stays a retryable ``error``
-    (see ``test_the_total_deadline_answers_instead_of_hanging``), because a slow
-    resolver is not a dead host.
+    A gaierror meaning "no such name" (``EAI_NONAME``) is a POLICY answer — the
+    name has no address, and no retry changes that — so it surfaces as
+    ``blocked-host`` and is remembered as a NEGATIVE entry, reused for the whole
+    negative TTL before one more lookup is allowed. The OTHER gaierrors are not:
+    ``EAI_AGAIN`` is a resolver asking to be asked again and stays a retryable
+    ``error``, as does a DNS TIMEOUT — see
+    ``test_a_transient_lookup_failure_stays_retryable_and_is_never_cached`` and
+    ``test_the_total_deadline_answers_instead_of_hanging`` (review R2-1) — because
+    a slow or busy resolver is not a dead host.
     """
     # The autouse fixture pins every name; this test is about the resolver's own
     # answer, so the production resolver goes back in and only DNS itself is faked.
@@ -1232,6 +1523,40 @@ async def test_a_name_with_no_address_is_a_blocked_host_and_is_not_retried(
         assert lookups == ["nowhere.invalid", "nowhere.invalid"]
     assert seen == [], "a refused name reached the transport"
     assert preview_cache_for_test.stats().entries == 1
+
+
+@pytest.mark.asyncio
+async def test_a_transient_lookup_failure_stays_retryable_and_is_never_cached(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None, preview_cache_for_test: PreviewCache
+) -> None:
+    """``EAI_AGAIN`` is a blip, NOT a verdict on the host (review R2-1).
+
+    The negative cache is what makes this more than a wording preference: a
+    transient resolver failure classified as ``blocked-host`` would be remembered
+    for the whole 30-minute ``NEGATIVE_TTL_S``, so one bad second at the resolver
+    would hide a live page from every later reader. Measured across two resolves:
+    both answer retryable, the transport is never reached, and nothing is written
+    to the cache — so the next scroll asks the resolver again.
+    """
+    monkeypatch.setattr(fetch_service, "_resolve_host_ips", _RESOLVE_HOST_IPS_REAL)
+    lookups: list[str] = []
+
+    def _ask_again(hostname: str, *args: Any, **kwargs: Any) -> Any:
+        lookups.append(hostname)
+        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _ask_again)
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    body = _resolve_body("http://busy.invalid/page")
+    async with _client() as client:
+        first = await _post(client, body)
+        second = await _post(client, body)
+    assert first.json()["result"] == {"kind": "error", "retryable": True}, first.text
+    # The second resolve looked the name up AGAIN: no negative entry was written.
+    assert second.json()["result"] == first.json()["result"]
+    assert len(lookups) > 1, lookups
+    assert seen == [], "a failed lookup reached the transport"
+    assert preview_cache_for_test.stats().entries == 0
 
 
 @pytest.mark.asyncio
@@ -1322,3 +1647,239 @@ async def test_the_previews_client_is_built_without_the_environment(
     assert fetched.status == 200
     assert captured, "the fetch never built a pooled client"
     assert captured[0]["trust_env"] is False
+
+
+# ---------------------------------------------------------------------------
+# Code review round 1 (majors): the kill switch, the sniff's thread, the flood
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_fetch_off_switch_stops_previews_with_zero_requests(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """``web_fetch.enabled: false`` must answer — and touch nothing.
+
+    Security round 1 (S-1) measured this surface happily making two outbound
+    requests while the operator's fetch switch was off. The switch is the one a
+    privacy- or airgap-minded user flips, and it must hold for EVERY spelling of
+    fetching, so the assertion is not the answer's shape but the request log's
+    length: zero.
+    """
+    monkeypatch.setattr(
+        desktop_link_preview,
+        "load_fetch_settings",
+        lambda manager: WebFetchSettings(enabled=False),
+    )
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        response = await _post(client, _resolve_body("http://preview.test/page"))
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"kind": "absent", "reason": "disabled"}
+    assert seen == [], f"a switched-off install still fetched: {seen}"
+
+
+@pytest.mark.asyncio
+async def test_the_resolver_itself_honours_the_off_switch(signed_in: None) -> None:
+    """The gate lives in the orchestration boundary, not only in the route.
+
+    Any other caller of ``resolve_preview`` (a future relay, a script) gets the same
+    refusal, which is the point of putting it below the HTTP surface.
+    """
+    asked: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        return httpx.Response(200, content=_html(CARD_HEAD), headers={"content-type": "text/html"})
+
+    resolution = await preview_service.resolve_preview(
+        url="http://preview.test/page",
+        index=0,
+        scope=PreviewScope(account_id=ACCOUNT, tenant_id=""),
+        settings=WebFetchSettings(enabled=False),
+        store=PreviewStore.from_config(Path("/tmp/link-preview-off-switch")),
+        cache=PreviewCache(),
+        fetcher=WebFetchService(
+            WebFetchSettings(enabled=False), transport=httpx.MockTransport(_handler)
+        ),
+    )
+    assert resolution.kind == "absent"
+    assert resolution.reason == "disabled"
+    assert asked == []
+
+
+@pytest.mark.asyncio
+async def test_the_sniff_never_runs_on_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """Both sniff sites run in a worker thread, measured by thread identity.
+
+    A byte-wise walk over attacker-supplied data on the loop stalls every other
+    renderer's resolve for the walk's duration (round 1 measured 1.75 s for a
+    hostile 2 MiB JPEG before the scan was capped). A wall-clock assertion would go
+    green again the moment the walk got cheap, so this pins the property directly:
+    the sniff must not execute on the loop's own thread, at either call site.
+    """
+    import threading
+
+    threads: list[str] = []
+    real = extract.sniff_raster
+
+    def _recording_sniff(body: bytes):
+        threads.append(threading.current_thread().name)
+        return real(body)
+
+    monkeypatch.setattr(extract, "sniff_raster", _recording_sniff)
+    monkeypatch.setattr(preview_service, "sniff_raster", _recording_sniff)
+    monkeypatch.setattr(desktop_link_preview, "sniff_raster", _recording_sniff)
+
+    page = _html(
+        '<title>Threads</title><link rel="icon" href="/favicon.png">'
+        '<meta property="og:image" content="/favicon.png">'
+    )
+    _route_transport(monkeypatch, _card_handler(page))
+    async with _client() as client:
+        resolved = await _post(client, _resolve_body("http://preview.test/page"))
+        assert resolved.status_code == 200, resolved.text
+        favicon_id = resolved.json()["result"]["preview"]["favicon"]["id"]
+        served = await client.get(_artifact_path(favicon_id), headers=_receipt())
+        assert served.status_code == 200
+
+    assert threads, "no sniff ran at all"
+    loop_thread = threading.main_thread().name
+    assert all(name != loop_thread for name in threads), threads
+
+
+@pytest.mark.asyncio
+async def test_a_burst_of_resolves_is_refused_by_the_account_bucket(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The server-side flood bound: past the burst, the route answers 429.
+
+    ``index < 3`` is the renderer's numbering, so a client that renumbers its links
+    gets an unbounded stream of resolves (round 1). This drives the bucket past its
+    depth with the clock pinned, asserts the refusal and its ``Retry-After``, and
+    proves the refused request cost no fetch.
+    """
+    # A pinned clock means no elapsed time, hence no refill, at any rate.
+    frozen = ResolveThrottle(burst=3, clock=lambda: 1_000.0)
+    monkeypatch.setattr(desktop_link_preview, "get_resolve_throttle", lambda: frozen)
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        answers = []
+        # DISTINCT urls, so every one of them is a cold miss and therefore spends a
+        # token. Three repeats of one url would be two cache hits and only one charge
+        # — which is the behaviour the next test pins.
+        for name in ("a1", "a2", "a3"):
+            answers.append(await _post(client, _resolve_body(f"http://preview.test/{name}")))
+        refused = await _post(client, _resolve_body("http://preview.test/b"))
+    assert [answer.status_code for answer in answers] == [200, 200, 200]
+    assert refused.status_code == 429
+    detail = refused.json()["detail"]
+    assert detail["code"] == "rate_limited"
+    assert detail["retryable"] is True
+    assert "Retry-After" in refused.headers
+    # The refused URL never reached the origin, and nothing else did for it either.
+    assert "/b" not in seen, seen
+
+
+@pytest.mark.asyncio
+async def test_a_warm_re_render_costs_no_tokens(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """A CACHE HIT IS FREE — the user-visible bug this round fixes.
+
+    The bucket used to be charged at the HTTP boundary, so re-rendering an already
+    cached screen (seven messages × three links = twenty-one resolves, all warm)
+    exhausted a burst of twenty and started refusing real work. The charge now lives
+    where a fetch does: one token for this throttled-to-1 bucket, spent by the FIRST
+    resolve, and the warm repeat must still answer.
+    """
+    starving = ResolveThrottle(burst=1, clock=lambda: 1_000.0)
+    monkeypatch.setattr(desktop_link_preview, "get_resolve_throttle", lambda: starving)
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        first = await _post(client, _resolve_body("http://preview.test/page"))
+        warm = await _post(client, _resolve_body("http://preview.test/page"))
+        cold = await _post(client, _resolve_body("http://preview.test/other"))
+    assert first.status_code == 200 and first.json()["result"]["kind"] == "ready"
+    assert warm.status_code == 200, warm.text
+    assert warm.json()["result"]["kind"] == "ready"
+    # The bucket held exactly one token: the warm repeat was free, the second COLD
+    # url was not.
+    assert cold.status_code == 429
+    assert seen.count("/page") == 1, seen
+
+
+@pytest.mark.asyncio
+async def test_a_cap_refusal_costs_no_token(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """Over-cap indexes are the renderer's numbering, not a fetch: they are free."""
+    starving = ResolveThrottle(burst=1, clock=lambda: 1_000.0)
+    monkeypatch.setattr(desktop_link_preview, "get_resolve_throttle", lambda: starving)
+    _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        over_cap = await _post(
+            client,
+            {
+                "url": "http://preview.test/page",
+                "index": 3,
+                "expected_account_id": ACCOUNT,
+            },
+        )
+        real = await _post(client, _resolve_body("http://preview.test/page"))
+    assert over_cap.json()["result"] == {"kind": "absent", "reason": "cap"}
+    assert real.status_code == 200 and real.json()["result"]["kind"] == "ready"
+
+
+def test_the_account_bucket_refills_and_stays_bounded() -> None:
+    """The bucket is a rate, not a lifetime quota, and its map cannot grow."""
+    now = {"t": 0.0}
+    throttle = ResolveThrottle(burst=2, refill_per_second=1.0, clock=lambda: now["t"])
+    assert throttle.allow("acc_a") and throttle.allow("acc_a")
+    assert not throttle.allow("acc_a")
+    # 1 s of refill buys exactly one more token.
+    now["t"] += 1.0
+    assert throttle.allow("acc_a")
+    assert not throttle.allow("acc_a")
+    assert 0.0 < throttle.retry_after_s("acc_a") <= 1.0
+
+    small = ResolveThrottle(burst=1, max_accounts=4, clock=lambda: now["t"])
+    for index in range(40):
+        small.allow(f"acc_{index}")
+    assert len(throttle._level) <= 1
+    assert len(small._level) <= 4
+
+
+def test_forgetting_an_account_never_refunds_a_spent_burst() -> None:
+    """Eviction may only drop an IDLE-FULL bucket, or it hands tokens back.
+
+    Dropping a DEPLETED bucket and recreating it later at full burst is a way to buy
+    tokens by being forgotten (round 2). So a full map of depleted buckets admits no
+    new account at all, and once a bucket has refilled itself it is safe to forget.
+    """
+    now = {"t": 0.0}
+    clock = lambda: now["t"]  # noqa: E731 - a one-line test clock
+    tight = ResolveThrottle(burst=2, refill_per_second=1.0, max_accounts=1, clock=clock)
+    assert clock() == 0.0
+    assert [tight.allow("acc_a") for _ in range(2)] == [True, True]
+    assert not tight.allow("acc_a"), "the bucket should be empty"
+    # A second account cannot buy its way in by evicting a depleted bucket.
+    assert not tight.allow("acc_b")
+    assert "acc_a" in tight._level
+    # S-4: reading the wait must not CREATE a bucket — a read that grew the map
+    # would be the same bug the eviction rule exists to prevent, and mutating this
+    # to ``setdefault`` used to leave the suite green.
+    # M1: the refusal is "the map is full", not "this account is empty", so the
+    # advertised wait is until a slot frees (acc_a needs its whole burst of 2 back
+    # at 1 token/s = 2 s), NOT the 0.05 s floor a missing bucket used to report.
+    assert "acc_b" not in tight._level
+    assert tight.retry_after_s("acc_b") == 2.0, "Retry-After must name the real wait"
+    assert "acc_b" not in tight._level
+    # Once acc_a has refilled to its whole burst, forgetting it changes nothing, so
+    # the slot may be handed over.
+    now["t"] += 10.0
+    assert tight.allow("acc_b")
+    assert "acc_a" not in tight._level
+    assert not tight.allow("acc_a"), "the evicted account must not return with a full burst"

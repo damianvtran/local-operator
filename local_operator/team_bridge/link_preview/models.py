@@ -39,6 +39,14 @@ AbsentReason = Literal[
     "too-large",
     "not-html",
     "cap",
+    # The operator's own kill switch: ``web_fetch.enabled`` is false, so this
+    # install does not fetch AT ALL. A preview is one of the spellings of fetching,
+    # and the switch a privacy- or airgap-minded user flips has to hold for every
+    # one of them — silently resolving past it was the round-1 security finding
+    # (S-1). Distinct from ``blocked-host`` on purpose: nothing was attempted and
+    # nothing was refused by an address rule, so a renderer must not show the
+    # "this link goes somewhere local" copy for it.
+    "disabled",
 ]
 
 

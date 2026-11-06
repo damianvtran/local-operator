@@ -1111,6 +1111,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``state`` under ``monitors/``: the per-monitor counters/snapshot directory",
     ),
     "local_operator/web_fetch/service.py": (1, "the fetched-page cache under the store root"),
+    "local_operator/team_bridge/link_preview/store.py": (
+        1,
+        "``STORE_DIRNAME`` ('link_preview_artifacts') is the link-preview ARTIFACT "
+        "cache, joined to the CONFIG root by ``PreviewStore.from_config`` exactly as "
+        "``web_fetch``'s cache is — it is never an entry of a session directory, so "
+        "no session copy carries it and ``EXCLUDED_ENTRIES`` (which names types a "
+        "session directory holds) must not claim it. Declaring rather than excluding "
+        "is also the honest direction: the bytes are derived state, rebuilt from the "
+        "origins that served them, so a per-account blob store is regenerable "
+        "content rather than something a move has to preserve.",
+    ),
     "local_operator/exec_mode.py": (1, "the exec job journal under the store root"),
     "local_operator/mcp/tool_cache.py": (1, "the MCP tool cache database"),
     # ---- the BROWSER surfaces (their own run directories) ----
