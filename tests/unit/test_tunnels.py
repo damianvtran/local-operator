@@ -68,7 +68,7 @@ def make_signing_key():
     return rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
-def make_connection(signing_key: object) -> dict:
+def make_connection(signing_key: rsa.RSAPrivateKey) -> dict[str, Any]:
     """The synthetic tunnel connection, shared with `test_tunnel_pin_heal.py`."""
     public = json.loads(RSAAlgorithm.to_jwk(signing_key.public_key()))
     public.update(kid="origin-1", alg="RS256")

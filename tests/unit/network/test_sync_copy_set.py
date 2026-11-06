@@ -286,6 +286,14 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/tunnels/install.py": (
+        1,
+        "``HEAL_RECEIPT_NAME`` ('login-heal.json'): the audit receipt a same-account "
+        "sign-in writes when it re-points the tunnel's pinned credential. It lives in "
+        "the per-DEVICE tunnel directory (<config>/tunnel/, beside config.json), never "
+        "inside a session directory -- so no session copy carries it. Device-local by "
+        "design: the credential row ids it names are local to this device's auth.db.",
+    ),
     "local_operator/network/credentials/refresh.py": (
         2,
         "``DOC_FILENAME`` ('refresh.json') and ``LOCK_FILENAME`` ('.refresh.lock') sit in "
