@@ -718,8 +718,50 @@ def tooling_fact(home: Path | None = None) -> dict[str, Any]:
     }
 
 
+def _secret_mesh_origin(root: Path | None, name: str) -> dict[str, Any] | None:
+    """The mesh-copy origin a stored secret carries, or ``None`` for "its own".
+
+    THE ONLY SOURCE THAT CAN ANSWER THIS (review NIT, R1-4). A credential's
+    provenance is written by the copy path into the RECEIVING store
+    (``sync.MESH_ORIGIN_KEY`` / the secret record's ``origin``); reading the
+    SHARER's placement documents answered a question about that device's books,
+    not about the store the credential actually sits in, and two devices can hold
+    different views of the same share.
+
+    ``None`` is "this store holds no origin marker", which is what a secret this
+    device created itself looks like. An unreadable store is also ``None`` here
+    because the caller cannot distinguish it — the ladder already refuses to
+    resolve an unreadable store into an arm, so this branch is never reached with
+    one that matters.
+    """
+    if root is None:
+        return None
+    record = None
+    try:
+        from local_operator.secrets import access
+        from local_operator.secrets.keys import store_path
+
+        if not store_path(root).exists():
+            return None
+        store = access.open_store(root)
+    except Exception:  # noqa: BLE001 — no store is no marker
+        return None
+    try:
+        record = store.describe(name)
+    except Exception:  # noqa: BLE001 — absent or unreadable: no marker either way
+        return None
+    origin = getattr(record, "origin", None)
+    if not isinstance(origin, Mapping) or not origin:
+        return None
+    return {
+        "owner_device": _safe_text(str(origin.get("owner_device") or ""), limit=80),
+        # No name rides the marker; the viewer names the device it knows.
+        "key": _safe_text(str(origin.get("key") or ""), limit=200),
+    }
+
+
 def github_fact(root: Path, home: Path | None = None) -> dict[str, Any]:
-    """Which arm of THIS device's GitHub ladder serves, and what it covers.
+    """Which arm of THIS device's GitHub ladder serves, what it covers, where it came from.
 
     The peer half of the row that has to tell a COPY from a BROKERED GRANT
     (2026-11-06). ``credentials.github.resolve_source`` is the ladder's own
@@ -730,9 +772,16 @@ def github_fact(root: Path, home: Path | None = None) -> dict[str, Any]:
     spelled by the module that owns the vocabulary rather than re-spelled here.
     ``permissions`` and ``repositories`` are sent for the APP arm only: it is the
     one arm whose coverage is knowable without a network call (the mint's
-    permissions are fixed and narrowed to the designated repositories). A token or
-    a gh login carries its scopes in the credential, which this report never reads,
-    so the viewer is told nothing rather than something flattering.
+    permissions are fixed and narrowed to the designated repositories), and
+    ``repositories: null`` states that the designated list could NOT be read — a
+    different answer from an empty list, which is "none designated" (review R1-3).
+    A token or a gh login carries its scopes in the credential, which this report
+    never reads, so the viewer is told nothing rather than something flattering.
+
+    ``origin`` is the mesh-copy marker from THIS device's own store, or ``null``
+    for a credential it created itself; the KEY is always present when an arm
+    resolves, so a viewer can tell "no marker" from "that peer did not say"
+    (review NIT: provenance read from the sharer's books was the wrong source).
 
     NAMES AND SHAPES ONLY, like every other fact in this payload: no token, no key,
     no path into either. Read-only — ``resolve_source`` reads the encrypted store's
@@ -759,6 +808,9 @@ def github_fact(root: Path, home: Path | None = None) -> dict[str, Any]:
             ]
         except Exception:  # noqa: BLE001 — an unreadable list is "not stated"
             fact["repositories"] = None
+        fact["origin"] = _secret_mesh_origin(root, github_mod.APP_SECRET_NAME)
+    elif source == github_mod.SOURCE_TOKEN:
+        fact["origin"] = _secret_mesh_origin(root, github_mod.TOKEN_SECRET_NAME)
     return fact
 
 
@@ -904,8 +956,36 @@ MCP_DEAD_LOGIN_REMEDY = (
 )
 
 
-def mcp_login_remedy(url: str) -> str:
-    """The ONE spelling of the "sign in here first" clause for an MCP server URL.
+def mcp_server_name_for_url(root: Path, url: str) -> str:
+    """The configured NAME of the user-scope server at ``url``, or ``""``.
+
+    ``/mcp login`` resolves a server NAME — ``tui/app.py`` hands the argument to
+    ``mcp.grants.resolve_server``, whose ``manager.get_server_config(name)`` is a
+    ``self._configs.get(name)`` lookup — so a remedy that pasted a URL there told
+    the operator to run a command that answers "MCP server '<url>' is not
+    configured" (agent review R1-1, reproduced against the real resolver).
+
+    The name is the KEY of ``<root>/mcp.json``, so it is read from the file the
+    writers target, the same one ``mcp_servers_fact`` reads. ``""`` is an honest
+    answer — a server configured only at project scope, or one whose entry moved
+    between the fact and this read — and every caller then words the action
+    without pretending to be a runnable command.
+    """
+    try:
+        document = json.loads((root / "mcp.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ""
+    entries = document.get("mcpServers") if isinstance(document, dict) else None
+    if not isinstance(entries, Mapping):
+        return ""
+    for name, raw in sorted(entries.items(), key=lambda pair: str(pair[0])):
+        if isinstance(raw, Mapping) and str(raw.get("url") or "") == url:
+            return _safe_text(str(name), limit=120)
+    return ""
+
+
+def mcp_login_remedy(url: str, *, name: str = "") -> str:
+    """The ONE spelling of the "sign in here first" clause for an MCP server.
 
     Three surfaces compose it — the share verb's refusal (``cli``'s
     ``_require_local_credential``), the readiness row's detail (this module), and
@@ -913,17 +993,40 @@ def mcp_login_remedy(url: str) -> str:
     exactly how one of them starts sending the operator to sign in somewhere other
     than "here".
 
-    THE CLAUSE NAMES THE EXACT COMMAND (2026-11-06). It used to be the bare
-    sentence "sign in here first", which told an operator outside a session WHICH
-    device was short a login but not what to do there: the URL the sentence already
-    carried was not in the action. ``/mcp login <url>`` is a SESSION command — the
-    product action, typed in the composer — not a terminal instruction, so §2.9's
-    rule (no failure/refusal/remedy may name a TERMINAL command) still holds; the
-    MCP toasts already render that same spelling as ``"<owner>: /mcp login <name>"``.
-    ``url`` is therefore in the signature for its original reason and this one: the
-    sentence names it, and so does the command.
+    THE COMMAND MUST BE RUNNABLE (agent review R1-1, 2026-11-06). The clause
+    names ``/mcp login <name>``: a SESSION command (the product action, typed in
+    the composer — not a terminal instruction, so §2.9's rule still holds) whose
+    argument is the server NAME, which is what ``mcp.grants.resolve_server``
+    looks up. An earlier revision pasted the URL there and produced a command
+    that always failed; the toasts have always spelled it as
+    ``"<owner>: /mcp login <name>"``.
+
+    WITHOUT A NAME THE CLAUSE NAMES NO COMMAND. ``name`` is empty when this
+    device has no user-scope entry for ``url`` (a project-scope server, a share
+    for a server another device hosts). Inventing a name would be the same class
+    of lie in the other direction, so the sentence teaches the form —
+    ``/mcp login <name>`` with the placeholder — instead of pretending to be a
+    command the reader can paste.
     """
-    return f"run `/mcp login {url}` here first"
+    if name:
+        return f"run `/mcp login {name}` here first"
+    return (
+        "sign in here first: `/mcp` lists this device's servers by name, and "
+        "`/mcp login <name>` signs one in"
+    )
+
+
+def mcp_dead_login_remedy(*, name: str = "") -> str:
+    """The action for a TOMBSTONED local login, with its command when it is known.
+
+    Same rule as :func:`mcp_login_remedy` (review R1-1): the sentence names an
+    action a reader can carry out. A tombstoned grant is the one case where the
+    command is ``/mcp reauth <name>`` — logout plus login as one grant — because a
+    plain login reuses the dead registration (``tui/app.py``'s reauth arm).
+    """
+    if name:
+        return f"{MCP_DEAD_LOGIN_REMEDY} (`/mcp reauth {name}` here)"
+    return MCP_DEAD_LOGIN_REMEDY
 
 
 def mcp_share_command(url: str, peer_label: str) -> str:
@@ -2702,72 +2805,53 @@ def _ssh_github_clause(facts: Mapping[str, Any], peer_label: str) -> str:
     )
 
 
-def _github_credential_entry(viewer: Any, name: str) -> Mapping[str, Any]:
-    """The placement entry for one GitHub credential name, or an empty mapping.
-
-    ``secrets`` are tracked by ``secret:<name>`` placement entries, and the
-    viewer's ``secret_placement`` is optional (the initialising viewer substrate
-    does not need it), so it is read defensively and an absent reader yields "no
-    entry known" rather than an exception on a report path.
-    """
-    lookup = getattr(viewer, "secret_placement", None)
-    if not callable(lookup):
-        return {}
-    try:
-        entry = lookup(name)
-    except Exception:  # noqa: BLE001 — a failed lookup is "no entry known"
-        return {}
-    return entry if isinstance(entry, Mapping) else {}
-
-
-def _github_copy_origin(viewer: Any, member: Any, name: str) -> str:
-    """The device a mesh COPY of ``name`` came from, or ``""`` for the peer's own.
-
-    THE DISTINCTION THE ROW EXISTS FOR (2026-11-06). A credential that arrived
-    as a mesh COPY sits in the peer's own store and keeps working after the
-    share is revoked; a brokered grant is minted per request and revoked with
-    it. Only the placement entry can tell them apart, so an absent or unreadable
-    entry answers ``""`` — the peer's own — without inventing a provenance.
-    """
-    entry = _github_credential_entry(viewer, name)
-    owner = str(entry.get("owner_device") or "")
-    device_id = str(getattr(member, "device_id", ""))
-    if not owner or owner == device_id or device_id not in _holder_names(entry):
-        return ""
-    # The name rides the SAME entry the copy came from: ``owner_label`` reads the
-    # github placement (a different document), which does not name the device that
-    # shared a secret.
-    return _safe_text(str(entry.get("owner_device_name") or ""), limit=120) or owner
-
-
 def _github_scope_clause(fact: Mapping[str, Any], peer_label: str) -> str:
     """What a peer-held GitHub credential covers, or an explicit "not knowable".
 
     Scopes are only knowable for the App arm, whose permissions are fixed
     (:data:`credentials.github.GITHUB_PERMISSIONS`) and narrowed to designated
-    repositories. A token or a gh login carries its scopes inside the
-    credential, which no report reads — so the sentence says that instead of
-    implying coverage the operator would have to discover by failing.
+    repositories. A token or a gh login carries its scopes inside the credential,
+    which no report reads — so the sentence says that instead of implying coverage
+    the operator would have to discover by failing.
+
+    THREE REPOSITORY CELLS, NOT TWO (review R1-3). ``null`` on the fact is "the
+    designated list could not be read there"; ``[]`` is "none is designated", which
+    is a mint that REFUSES. Collapsing the first into the second told an operator
+    with an unreadable config that their narrowing was empty — a definite claim
+    about a file this report never read.
     """
+    from local_operator.network.credentials import github as github_mod
+
+    permissions = fact.get("permissions")
+    stated = (
+        ", ".join(f"{name}: {level}" for name, level in sorted(permissions.items()))
+        if isinstance(permissions, Mapping) and permissions
+        # The constant, not a second literal: the mint's permissions are one fact
+        # owned by ``credentials.github`` (review NIT).
+        else ", ".join(
+            f"{name}: {level}" for name, level in sorted(github_mod.GITHUB_PERMISSIONS.items())
+        )
+    )
     if str(fact.get("source") or "") != "app":
         return (
             "this report cannot read the scopes that credential carries, so whether "
             "it covers a push is not knowable from here"
         )
-    permissions = fact.get("permissions")
-    stated = (
-        ", ".join(f"{name}: {level}" for name, level in sorted(permissions.items()))
-        if isinstance(permissions, Mapping) and permissions
-        else "contents: write, pull_requests: write"
-    )
+    if "repositories" not in fact:
+        return f"it mints {stated}; what that mint is narrowed to is not stated here"
     repositories = fact.get("repositories")
-    if isinstance(repositories, list) and repositories:
-        shown = _name_list([str(name) for name in repositories])
-        return f"it mints {stated}, narrowed to {shown}, which is what a push and a PR need"
-    return (
-        f"it mints {stated}, but no repository is designated there, so a mint would "
-        "refuse rather than widen"
-    )
+    if repositories is None:
+        return (
+            f"it mints {stated}, but the designated repositories could not be read "
+            "there, so what that mint would cover is not known"
+        )
+    if not repositories:
+        return (
+            f"it mints {stated}, but no repository is designated there, so a mint "
+            "would refuse rather than widen"
+        )
+    shown = _name_list([str(name) for name in repositories])
+    return f"it mints {stated}, narrowed to {shown}, which is what a push and a PR need"
 
 
 def _github_observed(fact: Any) -> dict[str, Any]:
@@ -2843,10 +2927,26 @@ def _github_push_clause(
 
     if source in arms:
         label, secret_name = arms[source]
-        copied_from = _github_copy_origin(viewer, member, secret_name) if secret_name else ""
-        held = (
-            f"a copy of {copied_from}'s {label}" if copied_from else f"{peer_label}'s own {label}"
-        )
+        if not secret_name:
+            # gh's login is the device's own by construction: a device-code sign-in
+            # on that machine creates it and no share can.
+            held = f"{peer_label}'s own {label}"
+        elif "origin" not in fact:
+            # A peer built before the provenance fact: "its own" would be a guess
+            # about a store this report cannot see, and a mesh copy of the same
+            # token looks identical from here.
+            held = f"a {label} on {peer_label} whose provenance this report cannot tell"
+        elif isinstance(fact.get("origin"), Mapping):
+            # The marker names the DEVICE the copy came from; no name rides it, so
+            # the id is what this report can honestly print.
+            origin_device = _safe_text(str(fact["origin"].get("owner_device") or ""), limit=80)
+            held = (
+                f"a copy of {origin_device}'s {label}"
+                if origin_device
+                else f"{peer_label}'s own {label}"
+            )
+        else:
+            held = f"{peer_label}'s own {label}"
         covered = _github_scope_clause(fact, peer_label)
         return (
             f"a push there uses {held}, not a brokered grant: the mesh does not revoke "
@@ -2854,11 +2954,29 @@ def _github_push_clause(
         )
     if placement_owner and device_id in _holder_names(placement):
         if placement_owner == str(getattr(viewer, "device_id", "")):
-            # This device is the owner: its OWN ladder decides what the grant
-            # carries, and an App arm is the one whose coverage is knowable.
+            # THE SHARE MUST BE FUNDED BY THIS DEVICE'S OWN LADDER (review R1-2).
+            # The placement says this device is the source; the share path refuses
+            # at ``no_source`` when ``github.source_present`` is False, so claiming
+            # a grant here without checking the ladder was the same lie the MCP
+            # branch had — with a sentence that read MORE confident than before.
             own_root = getattr(viewer, "root", None)
-            local = github_fact(own_root) if own_root is not None else {}
-            covered = _github_scope_clause(local if isinstance(local, Mapping) else {}, peer_label)
+            local = github_fact(own_root) if own_root is not None else None
+            source_here = (
+                str(local.get("source") or "") if isinstance(local, Mapping) else SOURCE_UNKNOWN
+            )
+            if source_here in (SOURCE_UNKNOWN, github_mod.SOURCE_UNREADABLE):
+                return (
+                    f"the share for github names this device as {peer_label}'s source, "
+                    "but this device's GitHub source could not be resolved, so whether "
+                    "that borrow could be served is not known"
+                )
+            if not source_here:
+                return (
+                    f"the share for github names this device as {peer_label}'s source, "
+                    "but this device holds no GitHub credential to lend: a push there "
+                    f"would be refused until one is set up here — {github_mod.no_source_arms()}"
+                )
+            covered = _github_scope_clause(local or {}, peer_label)
         else:
             covered = (
                 f"what that grant covers is decided on {owner_label(placement_owner)}, "
@@ -4006,6 +4124,10 @@ def _mcp_credential_row(
     peer_label: str,
     viewer_label: str = "",
 ) -> dict[str, Any]:
+    # THE ARGUMENT ``/mcp login`` TAKES IS THE NAME, NOT THE URL (review R1-1).
+    # ``mcp_credential_rows`` also falls back to the URL as a LABEL when a peer's
+    # fact carries no name, so the two are compared rather than assumed different.
+    login_name = name if name != url else ""
     # A row without a grant the runtime would use is NO row: the runtime goes
     # straight to the borrow, so the verdict must reach the holder/borrow branch
     # below instead of telling the operator to sign in on this peer.
@@ -4210,8 +4332,8 @@ def _mcp_credential_row(
                         "until this device signs in"
                     ),
                     remedies=[
-                        f"{mcp_login_remedy(url)} — the share already stands, and the "
-                        "borrow serves it once this device holds the login"
+                        f"{mcp_login_remedy(url, name=login_name)} — the share already "
+                        "stands, and the borrow serves it once this device holds the login"
                     ],
                     source=SOURCE_LOCAL,
                     observed={"server": name, "url": url, "shareable_here": False},
@@ -4234,8 +4356,8 @@ def _mcp_credential_row(
                         f"{peer_label} to sign in again here"
                     ),
                     remedies=[
-                        f"{MCP_DEAD_LOGIN_REMEDY}; the share stays in place, so the "
-                        "borrow works again once this device does"
+                        f"{mcp_dead_login_remedy(name=login_name)}; the share stays in place, "
+                        "so the borrow works again once this device does"
                     ],
                     source=SOURCE_LOCAL,
                     observed={"server": name, "url": url, "shareable_here": True},
@@ -4309,8 +4431,9 @@ def _mcp_credential_row(
                 f"with {peer_label}"
             ),
             remedies=[
-                f"{MCP_DEAD_LOGIN_REMEDY}, then on {viewer_label or 'this device'} run "
-                f"`{mcp_share_command(url, peer_label)}` (the share runs where the login is, "
+                f"{mcp_dead_login_remedy(name=login_name)}, then on "
+                f"{viewer_label or 'this device'} run `{mcp_share_command(url, peer_label)}` "
+                "(the share runs where the login is, "
                 f"not on {peer_label})"
             ],
             source=SOURCE_LOCAL,
@@ -4359,10 +4482,14 @@ def _mcp_credential_row(
             capability=CAPABILITY_MCP_CREDENTIAL,
             ok=False,
             code=CODE_NO_CREDENTIAL,
-            detail=f"this device has no MCP login for {url}; {mcp_login_remedy(url)}",
+            detail=(
+                f"this device has no MCP login for {url}; "
+                f"{mcp_login_remedy(url, name=login_name)}"
+            ),
             remedies=[
-                f"{mcp_login_remedy(url)}, then on {viewer_label or 'this device'} run "
-                f"`{mcp_share_command(url, peer_label)}` (the share runs where the login is, "
+                f"{mcp_login_remedy(url, name=login_name)}, then on "
+                f"{viewer_label or 'this device'} run `{mcp_share_command(url, peer_label)}` "
+                "(the share runs where the login is, "
                 f"not on {peer_label})"
             ],
             source=SOURCE_LOCAL,
@@ -4380,9 +4507,9 @@ def _mcp_credential_row(
         code=CODE_NO_CREDENTIAL,
         detail=(
             f"if the `{name}` server needs a sign-in, this device has no MCP login for {url} — "
-            f"{mcp_login_remedy(url)}"
+            f"{mcp_login_remedy(url, name=login_name)}"
         ),
-        remedies=[f"{mcp_login_remedy(url)}, then share it with {peer_label}"],
+        remedies=[f"{mcp_login_remedy(url, name=login_name)}, then share it with {peer_label}"],
         source=SOURCE_LOCAL,
         observed={"server": name, "url": url},
     )

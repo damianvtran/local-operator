@@ -1531,7 +1531,7 @@ def test_the_transport_only_pair_reads_complete_once_never_askable_addresses_are
             "ok": False,
             "detail": (
                 "this device has no MCP login for https://mcp.slack.com/mcp; "
-                "run `/mcp login https://mcp.slack.com/mcp` here first"
+                "run `/mcp login slack` here first"
             ),
             "remedies": [],
         }
@@ -1576,7 +1576,7 @@ def test_the_ready_row_state_cell_reddens_when_the_classification_is_forced_away
             "code": "no_credential",
             "detail": (
                 "this device has no MCP login for https://mcp.slack.com/mcp; "
-                "run `/mcp login https://mcp.slack.com/mcp` here first"
+                "run `/mcp login slack` here first"
             ),
             "remedies": [],
         },
@@ -2821,7 +2821,7 @@ def test_credentials_lists_the_shareable_ledger_per_server(
         "shared_with": [],
         # The clause names the exact command (2026-11-06), one spelling shared with
         # the share verb's refusal and the readiness row.
-        "remedy": f"run `/mcp login {NOTION_URL}` here first",
+        "remedy": "run `/mcp login notion` here first",
     }
     # The provider row: kind and label from the same classifier the share records
     # with, the held sentence's remedy, no share yet (nothing declares it).
@@ -2871,8 +2871,7 @@ def test_credentials_shareable_block_renders_login_states_and_shares(
     assert "      organization account — share only to your own devices" in out, out
     assert "      signed in as owner@example.test" in out, out
     assert (
-        "  notion  http  no login here yet — run `/mcp login https://mcp.notion.com/mcp` "
-        "here first"
+        "  notion  http  no login here yet — run `/mcp login notion` here first"
     ) in out, out
     assert "fs" not in out
 

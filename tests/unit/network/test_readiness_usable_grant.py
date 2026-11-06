@@ -146,7 +146,8 @@ def test_owner_share_with_no_login_in_the_store_is_not_a_borrow(
     assert row["ok"] is False, row
     assert row["code"] == readiness.CODE_NO_CREDENTIAL
     assert "a borrow there would be refused" in row["detail"]
-    assert f"run `/mcp login {URL}` here first" in row["remedies"][0]
+    # The command is the NAME the config lists, never the URL (agent review R1-1).
+    assert "run `/mcp login linear` here first" in row["remedies"][0]
     assert row["observed"]["shareable_here"] is False
     # The old sentence must be gone: it promised a borrow from a device with no row.
     assert "borrows the login" not in row["detail"]
@@ -272,7 +273,9 @@ def test_shareable_ledger_counts_only_a_usable_login(
 
     assert [row["login_here"] for row in rows] == [login_here]
     if not login_here:
-        assert rows[0]["remedy"] == readiness.mcp_login_remedy(URL)
+        # The ledger names the server by its config KEY, the argument ``/mcp
+        # login`` resolves (agent review R1-1).
+        assert rows[0]["remedy"] == readiness.mcp_login_remedy(URL, name=rows[0]["server"])
 
 
 @pytest.mark.parametrize(("shape", "offered"), [("registration-only", False), ("valid", True)])
@@ -374,9 +377,10 @@ def test_credential_here_and_shape_count_only_an_issued_grant(
     assert offers.shape_for_key(key, root) == ("mcp-rotating", "mcp-oauth", "")
 
 
-def test_share_verb_refuses_a_registration_only_row_with_sign_in_here_first(
+def test_share_verb_refuses_a_registration_only_row_with_the_runnable_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """R1-1: the refusal names a command that RESOLVES, and the same one everywhere."""
     from local_operator.network import cli as net_cli
     from local_operator.network.types import MeshRefusal
 
@@ -387,7 +391,52 @@ def test_share_verb_refuses_a_registration_only_row_with_sign_in_here_first(
             credential_key_for_mcp(URL), "mcp-oauth"
         )
     assert refused.value.code == "no_local_credential"
-    assert readiness.mcp_login_remedy(URL) in refused.value.sentence
+    # The server is configured here under the name "linear", so the command can
+    # name it. ``/mcp login`` resolves a NAME (``mcp.grants.resolve_server`` →
+    # ``manager.get_server_config``), never the URL (agent review R1-1).
+    assert "run `/mcp login linear` here first" in refused.value.sentence
+    # ONE spelling across the three surfaces (QA row 1): the share verb, the
+    # readiness row and the ledger all compose ``mcp_login_remedy``.
+    assert refused.value.sentence.endswith(readiness.mcp_login_remedy(URL, name="linear"))
+
+
+def test_the_sign_in_clause_is_one_string_on_all_three_surfaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA row 1, closed by construction: the share verb's refusal is captured and
+    compared with the ledger row and the readiness row for the SAME server.
+
+    Three surfaces compose ``mcp_login_remedy``; before this test nothing proved
+    they agreed, because the refusal text was never captured.
+    """
+    from local_operator.network import cli as net_cli
+    from local_operator.network.types import MeshRefusal
+
+    root = _holder_root(tmp_path, monkeypatch, placed=False)
+    _write_shape(root, "registration-only")
+    expected = readiness.mcp_login_remedy(URL, name="linear")
+
+    with pytest.raises(MeshRefusal) as refused:
+        net_cli._require_local_credential(  # noqa: SLF001 — the share verb's guard
+            credential_key_for_mcp(URL), "mcp-oauth"
+        )
+    assert refused.value.sentence.endswith(expected)
+
+    ledger = net_cli._shareable_servers(SELF)  # noqa: SLF001
+    assert [row["remedy"] for row in ledger] == [expected]
+
+    server = {"name": "linear", "url": URL, "transport": "http", "has_row": False}
+    viewer = readiness.ViewerFacts(root, device_id=SELF)
+    try:
+        rows = readiness.mcp_credential_rows(
+            SimpleNamespace(device_id=OWNER, name="peer"),
+            _facts(mcp={"servers": [server]}),
+            viewer=viewer,
+            peer_label="peer",
+        )
+    finally:
+        viewer.close()
+    assert rows[0]["remedies"][0].startswith(expected)
 
 
 @pytest.mark.parametrize(("shape", "granted"), [("registration-only", False), ("valid", True)])
@@ -653,7 +702,10 @@ def test_a_dead_owner_login_reads_the_same_on_ledger_viewer_and_share(
 
     root = _holder_root(tmp_path, monkeypatch, placed=False)
     _write_shape(root, "dead")
-    remedy = readiness.MCP_DEAD_LOGIN_REMEDY
+    # The one sentence plus the runnable repair for the server this device lists
+    # under that name (``/mcp reauth`` = logout + login as one grant).
+    remedy = readiness.mcp_dead_login_remedy(name="linear")
+    assert readiness.MCP_DEAD_LOGIN_REMEDY in remedy
 
     # 1. Ledger: not "login held", not "sign in here first".
     ledger = net_cli._shareable_servers(SELF)  # noqa: SLF001

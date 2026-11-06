@@ -1268,7 +1268,7 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         by_server["unreadable"]["ok"] is False
         and by_server["unreadable"]["code"] == readiness.CODE_UNKNOWN
     )
-    assert "run `/mcp login https://g.example/mcp` here first" in by_server["declared"]["detail"]
+    assert "run `/mcp login declared` here first" in by_server["declared"]["detail"]
     assert by_server["soft"]["detail"].startswith("if the `soft` server needs a sign-in")
     for row in by_server.values():
         assert row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL
@@ -1323,7 +1323,7 @@ def test_mcp_row_never_promises_a_borrow_this_device_cannot_fund() -> None:
     assert empty["ok"] is False, empty
     assert empty["code"] == readiness.CODE_NO_CREDENTIAL
     assert "a borrow there would be refused" in empty["detail"]
-    assert f"run `/mcp login {url}` here first" in empty["remedies"][0]
+    assert "run `/mcp login notion` here first" in empty["remedies"][0]
     assert empty["observed"]["shareable_here"] is False
     assert empty["source"] == readiness.SOURCE_LOCAL
 
@@ -1659,7 +1659,7 @@ def test_an_http_oauth_server_keeps_the_login_copy_even_with_literals() -> None:
     assert len(rows) == 1
     # The sign-in clause now names the exact command (2026-11-06) — the URL was
     # already in the sentence and belongs in the action.
-    assert "run `/mcp login https://dd.test/mcp` here first" in rows[0]["detail"]
+    assert "run `/mcp login dd` here first" in rows[0]["detail"]
     assert "--adopt" not in " ".join(rows[0]["remedies"])
 
 
@@ -4006,6 +4006,157 @@ def test_git_row_strips_terminal_controls_from_the_peers_identity() -> None:
     assert row["ok"] is True
     assert "commits as Dan <d@e.test>" in row["detail"]
     assert not any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in row["detail"])
+
+
+# ---------------------------------------------------------------------------
+# The GitHub push credential: copy vs brokered grant (review R1-2, R1-3, R1-4)
+# ---------------------------------------------------------------------------
+
+_GIT = {"user_name": "Pat Doe", "user_email": "pat@example.test"}
+
+
+class _GithubViewer(_FakeViewer):
+    """A viewer with a config root, so the owner branch can read THIS ladder."""
+
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        device_id: str = VIEWER,
+        placement: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(device_id=device_id, placement=placement)
+        self.root = root
+
+    def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
+        return dict(self._placement)
+
+
+def _github_row(facts_github: Any, *, viewer: Any, member: Any = None) -> dict[str, Any]:
+    facts: dict[str, Any] = {"git": _GIT}
+    if facts_github is not None:
+        facts["github"] = facts_github
+    return readiness.git_row(member or _member(), facts, peer_label="cloud-node-1", viewer=viewer)
+
+
+def test_git_row_attributes_a_copy_from_the_peers_own_marker() -> None:
+    """Provenance comes from the RECEIVING store's origin marker (review NIT)."""
+    copier = _github_row(
+        {"source": "token", "origin": {"owner_device": "d_owner", "key": "secret:GITHUB_TOKEN"}},
+        viewer=_GithubViewer(),
+    )
+    assert (
+        "a push there uses a copy of d_owner's GITHUB_TOKEN token, not a brokered grant"
+        in copier["detail"]
+    )
+
+    own = _github_row({"source": "token", "origin": None}, viewer=_GithubViewer())
+    assert "a push there uses cloud-node-1's own GITHUB_TOKEN token" in own["detail"]
+
+
+def test_git_row_says_provenance_is_unknown_when_the_peer_omits_the_marker() -> None:
+    """No marker field is not "its own": an older peer simply did not say."""
+    row = _github_row({"source": "token"}, viewer=_GithubViewer())
+    assert "whose provenance this report cannot tell" in row["detail"]
+    assert "its own" not in row["detail"]
+
+
+def test_git_row_claims_a_broker_only_when_this_device_can_fund_it(
+    tmp_path: Path,
+) -> None:
+    """R1-2: the share is a promise the OWNER has to be able to keep."""
+    root = tmp_path / "cfg"
+    root.mkdir()
+    placement = {
+        "owner_device": VIEWER,
+        "owner_device_name": "damian-mac",
+        "holders": [{"device": PEER, "scope": "device"}],
+    }
+    viewer = _GithubViewer(root, placement=placement)
+
+    unfunded = _github_row({"source": "", "has_local": False}, viewer=viewer)
+    assert "borrows a grant" not in unfunded["detail"]
+    assert "holds no GitHub credential to lend" in unfunded["detail"]
+    assert "would be refused until one is set up here" in unfunded["detail"]
+    # The ladder's own enumeration, not a second copy of it.
+    from local_operator.network.credentials import github as github_mod
+
+    assert github_mod.no_source_arms() in unfunded["detail"]
+
+    from local_operator.secrets import access
+
+    access.open_store(root, create=True).set("GITHUB_APP", b'{"app_id": "1"}')
+    funded = _github_row({"source": "", "has_local": False}, viewer=viewer)
+    assert "borrows a grant from damian-mac" in funded["detail"]
+    assert "it mints contents: write, pull_requests: write" in funded["detail"]
+
+
+def test_git_row_owner_with_an_unreadable_ladder_is_not_a_promise(tmp_path: Path) -> None:
+    """An unreadable store on the owner is "cannot tell", never "will borrow"."""
+    root = tmp_path / "cfg-unreadable"
+    root.mkdir()
+    (root / "secrets").mkdir()
+    (root / "secrets" / "store.db").write_bytes(b"not a database")
+    placement = {
+        "owner_device": VIEWER,
+        "owner_device_name": "damian-mac",
+        "holders": [{"device": PEER, "scope": "device"}],
+    }
+    row = _github_row(
+        {"source": "", "has_local": False}, viewer=_GithubViewer(root, placement=placement)
+    )
+    assert "borrows a grant" not in row["detail"]
+    assert "could not be resolved" in row["detail"]
+    assert "not known" in row["detail"]
+
+
+@pytest.mark.parametrize(
+    ("repositories", "expected", "forbidden"),
+    [
+        (None, "could not be read", "no repository is designated"),
+        ([], "no repository is designated", "could not be read"),
+        (["damianvtran/local-operator"], "narrowed to damianvtran/local-operator", "refuse"),
+    ],
+)
+def test_the_scope_clause_tells_unreadable_from_empty(
+    repositories: Any, expected: str, forbidden: str
+) -> None:
+    """R1-3: unreadable is "cannot tell"; empty is "a mint would refuse"."""
+    fact = {"source": "app", "repositories": repositories}
+    clause = readiness._github_scope_clause(fact, "cloud-node-1")  # noqa: SLF001
+    assert expected in clause
+    assert forbidden not in clause
+
+
+def test_the_scope_clause_uses_the_permissions_constant() -> None:
+    """Review NIT: one owner for the mint's permissions, not a second literal."""
+    from local_operator.network.credentials import github as github_mod
+
+    fact = {"source": "app", "repositories": []}
+    clause = readiness._github_scope_clause(fact, "peer")  # noqa: SLF001
+    for name, level in github_mod.GITHUB_PERMISSIONS.items():
+        assert f"{name}: {level}" in clause
+
+
+def test_git_row_brokers_from_another_owner_without_reading_their_config() -> None:
+    """The brokered branch, reached: another device owns it (QA follow-up)."""
+    placement = {
+        "owner_device": THIRD,
+        "owner_device_name": "macbook",
+        "holders": [{"device": PEER, "scope": "device"}],
+    }
+    row = _github_row({"source": "", "has_local": False}, viewer=_GithubViewer(placement=placement))
+    assert "a push there borrows a grant from macbook" in row["detail"]
+    assert "decided on macbook" in row["detail"]
+    assert "repositories" not in json.dumps(row.get("observed") or {})
+
+
+def test_git_row_with_no_github_fact_says_it_cannot_tell() -> None:
+    """An older peer: the row refuses to guess a copy or a grant."""
+    row = _github_row(None, viewer=_GithubViewer())
+    assert "not knowable from here" in row["detail"]
+    assert "does not report its GitHub source" in row["detail"]
+    assert row["observed"] == {"source": None}
 
 
 def test_compose_reports_this_devices_serve_daemon_unless_a_peer_was_named(
