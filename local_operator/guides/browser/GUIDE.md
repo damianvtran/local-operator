@@ -680,8 +680,12 @@ another tool.
 - **Take the ref before the value is in the field.** A snapshot reports a
 control's value on its line, so a one-time key already sitting in a field rides
 that line into the transcript and into every later result that quotes it. Snapshot
-first and paste second, or reach the element with a CSS `selector` instead of a
-ref when the value is already on the page.
+before the page shows the key, or reach the element with a CSS `selector` instead
+of a ref when the value is already on the page. Find that selector from markup you
+saw before the key appeared, or with `read`, which returns `textContent` and so
+leaves out an input's value (a key shown as plain text is still printed). Once the
+key is showing, never point `query`, `snapshot` or `screenshot` at that element:
+`query` returns an input's value and `snapshot` prints it.
 - **Use `printf '%s' "$(pbpaste)"`, not bare `pbpaste`.** Command substitution
 strips the trailing newline a page may have written, and that newline would
 become part of the stored secret — every later use of it then fails in a way
