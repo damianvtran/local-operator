@@ -113,6 +113,18 @@ _UNWORDED_CODES = frozenset(
         "approval_signing_unavailable",
         "approval_withdraw_conflict",
         "bad_request",
+        # Raised by the refresh delegation (owner.py) and by two pre-existing arms of
+        # the same module. Listed rather than left to the code-shape backstop so the
+        # vocabulary a reviewer reads is complete: `already_delegated` is the mint's
+        # single-live-record refusal, `interactive_required` is "a human must confirm
+        # this before authority exists", and `internal`/`not_authorised` are the
+        # broker's own pre-existing arms (they were already emitted at the base
+        # revision and unlisted, which is what left `test_every_refusal_code_is_known`
+        # red there).
+        "already_delegated",
+        "interactive_required",
+        "internal",
+        "not_authorised",
         "consent_action_refused",
         "consent_execution_missing",
         "consent_identity_invalid",
