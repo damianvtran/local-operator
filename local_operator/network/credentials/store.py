@@ -580,8 +580,21 @@ class MeshAwareAuthStore:
         THE FUTURE IS THE COALESCER: the first caller creates it, later callers in
         the same turn await the same one. The event loop is this session's own, so
         the future belongs to it; a borrow that is already finished is not cached
-        here — the CLIENT caches grants (15 min, in memory), which is where the TTL
-        belongs because it is a fact about the token rather than about the turn.
+        here.
+
+        A FINISHED BORROW IS NOT SERVED FROM THE CLIENT CACHE EITHER, unless the
+        key is a GitHub installation key. The CLIENT keeps a grant cache
+        (``grant_ttl_s``, in memory) and serves it for GitHub keys and MCP bearers
+        only: ``MeshCredentialClient.request_grant_sync`` gates the cache read
+        behind ``is_github_key``. A provider key re-resolves with the owner on
+        every request by design — a grant TTL is not an upstream credential
+        generation, and an owner logout does not rewrite THIS device's placement
+        document, so a cached provider bearer would outlive the login it
+        represents (0385927ab9 removed the unconditional short-circuit;
+        458a1474a4 restored it for forge keys only).
+        ``test_native_hot_access.test_live_grant_and_old_login_refusal_do_not_short_circuit_owner``
+        fails if that gate is widened to providers, so do not "optimise" the dial
+        back.
         """
         from local_operator.network.credentials.effective import (
             effective_access,
