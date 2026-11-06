@@ -3302,6 +3302,15 @@ def _monitor_comparable_text(text: str, details: Any) -> tuple[str | None, str |
     return "\n".join(lines), None, handle
 
 
+#: The one sentence for "the MCP layer has not connected in this session yet",
+#: i.e. a session that has no manager at all. No strike is charged on it: the
+#: layer connects lazily, so the next tick after the connect resolves the tool
+#: (see ``_monitor_availability``).
+MCP_NOT_READY_DETAIL = (
+    "MCP servers are not connected in this session yet — the runtime is still starting"
+)
+
+
 class Session:
     """The session facade. Satisfies ``SessionProtocol``."""
 
@@ -30687,14 +30696,22 @@ class Session:
 
         The states, and why each is unavailable rather than gone:
 
-        - the server is still settling at startup, or reports ``connecting``:
-          it may hand the tool over on its own;
+        - ``unavailable`` also covers the silence that is NOT a removal: the
+          session has no MCP manager yet at all. That state was ``gone`` and
+          charged a real strike (measured live on m4, 2026-11-05: a wake
+          re-hosted a cold session, the tick beat the lazy connect, and the
+          tool was absent only for that instant). It is the ONLY such state:
+          every session-path assignment of ``mcp_manager`` happens after the
+          connect round (``attach_mcp_dispose``), so a non-None manager already
+          means the load finished, and its silence is a real answer.
         - the server needs a re-auth, or its reconnect is suspended: it will
           NOT heal by itself, but the fix is a one-line operator action, so
           this stalls immediately (a notice naming ``/mcp reauth``) rather
           than striking;
-        - the server is connected but no longer lists the tool, or is
-          disconnected: not reachable now, retried on the ladder.
+        - the server is still settling at startup, or reports ``connecting``:
+          it may hand the tool over on its own;
+        - the server is connected but no longer hands out the tool, or is
+          disconnected: not available now, so it waits.
 
         Fail-closed for a manager that cannot answer (a fake or a snapshot
         without the status APIs): the tool is treated as gone, which is
@@ -30708,9 +30725,22 @@ class Session:
             return ("gone", "")
         manager = self.mcp_manager
         if manager is None:
-            return ("gone", "")
+            # MEASURED (m4, 2026-11-05): a scheduled wake re-hosted a cold
+            # session and the monitor's tick landed before the MCP layer
+            # connected. The tool really was absent -- calling it answered
+            # ``Tool not found`` -- but nothing had been removed: asking the
+            # server for a tool connects it lazily, and the next tick read the
+            # channel fine. Charging that instant is how five wake cycles
+            # silently disable a watch everyone believes is armed.
+            return ("unavailable", MCP_NOT_READY_DETAIL)
         server = self._monitor_server_for(name)
         if server is None:
+            # NOT excused: a manager exists (so its connect round finished) and
+            # does not name this server's prefix, which means the name is not
+            # configured at all -- a typo, a server removed from the config, or
+            # every entry disabled. Reporting "the runtime is still starting"
+            # there would be an untrue diagnosis for 24 hours, which is the
+            # class this method exists to remove, so the strike stays.
             return ("gone", "")
         detail = f'"{server}"'
         try:
@@ -30734,7 +30764,13 @@ class Session:
                     "unavailable",
                     f'MCP server {detail} is connected but no longer lists "{name}"',
                 )
-            return ("unavailable", f"MCP server {detail} is disconnected")
+            if status == "disconnected":
+                return ("unavailable", f"MCP server {detail} is disconnected")
+            # ``get_connection_status`` has exactly four answers, so anything
+            # else means a manager that does not implement the contract (a
+            # fake, a snapshot). Waiting is the safe reading, but the detail
+            # names what it actually said rather than claiming "disconnected".
+            return ("unavailable", f'MCP server {detail} reported status "{status}"')
         except Exception:  # noqa: BLE001 — fail CLOSED, and the states are the reason
             # A manager that cannot answer is not proof of absence, so this does
             # NOT invent "unavailable" (which would suspend the strike ladder

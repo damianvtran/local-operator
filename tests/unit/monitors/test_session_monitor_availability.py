@@ -27,6 +27,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.monitors.spec import MonitorSpec
+from local_operator.session.session import MCP_NOT_READY_DETAIL
 from tests.unit.session.test_session import ScriptedStream, make_session
 
 SERVER = "datadog"
@@ -412,5 +413,85 @@ async def test_a_declared_inventory_still_bounds_the_fallback(tmp_path: Any) -> 
         assert session._resolve_monitor_tool(mcp_name()) is None
         session._declared_tools = None
         assert session._resolve_monitor_tool(mcp_name()) is not None
+    finally:
+        await session.dispose()
+
+
+# --- The lazy-MCP window (mcp__ names only) -------------------------------
+#
+# Every test below pins the same distinction: an MCP tool that is absent
+# because the session has not STARTED yet is not the same thing as a tool that
+# is gone. The first class cost a real strike in production (m4, 2026-11-05).
+
+
+@pytest.mark.asyncio
+async def test_a_session_without_its_mcp_layer_is_unavailable_not_a_strike(tmp_path: Any) -> None:
+    """MEASURED (m4, 2026-11-05): a scheduled wake re-hosted a cold session, the
+    monitor's tick landed before the MCP layer connected, and the absent tool
+    charged ``consecutive_failures: 1`` with "it is not in this session's tool
+    set". Nothing had been removed — calling the tool answered ``Tool not
+    found``, and after the server was asked for a tool (which connects it
+    lazily) the same session read the channel — so the tick must WAIT, or five
+    wake cycles silently disable a watch everyone believes is armed.
+    """
+    session = _session(tmp_path, None)
+    assert session.mcp_manager is None
+    try:
+        assert session._monitor_availability(mcp_name()) == ("unavailable", MCP_NOT_READY_DETAIL)
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome["kind"] == "unavailable"
+        assert outcome["error"] == MCP_NOT_READY_DETAIL
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_manager_with_no_enabled_servers_is_gone_not_waiting(tmp_path: Any) -> None:
+    """The excuse above is scoped to a session with NO manager, and this is the
+    boundary. A manager exists only after ``attach_mcp_dispose``, which runs
+    after the connect round, so a manager with an empty registry means zero
+    ENABLED servers (disabled entries never reach it) — a real absence, not a
+    load in progress. Calling that "the runtime is still starting" would be an
+    untrue diagnosis for 24 hours, which is the class this method removes.
+    """
+    manager = FakeManager([], servers=[])
+    session = _session(tmp_path, manager)
+    try:
+        assert session._monitor_availability(mcp_name()) == ("gone", "")
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome.get("kind") is None
+        assert "not in this session's tool set" in str(outcome["error"])
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_non_mcp_tool_that_is_gone_still_charges_a_strike(tmp_path: Any) -> None:
+    """CONTROL for the two tests above: the excuse is scoped to ``mcp__`` names.
+    A builtin whose absence is real (a settings flip, a pruned tool) keeps the
+    ordinary ladder, and the outcome carries no ``kind`` — which is what makes
+    the scheduler charge the strike.
+    """
+    session = _session(tmp_path, None)
+    try:
+        assert session._monitor_availability("bash") == ("gone", "")
+        outcome = await session._run_monitor_check(_spec(tool="bash"))
+        assert outcome.get("kind") is None
+        assert "not in this session's tool set" in str(outcome["error"])
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_status_this_build_does_not_know_is_unavailable_and_named(tmp_path: Any) -> None:
+    """A state outside the documented four is not proof of removal either, and
+    reporting it as "disconnected" would invent a cause the manager never gave.
+    """
+    manager = FakeManager([], status="warming-up")
+    session = _session(tmp_path, manager)
+    try:
+        state, detail = session._monitor_availability(mcp_name())
+        assert state == "unavailable"
+        assert 'reported status "warming-up"' in detail
     finally:
         await session.dispose()

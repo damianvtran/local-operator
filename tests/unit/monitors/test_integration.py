@@ -35,6 +35,7 @@ from local_operator.monitors.spec import MonitorSpec
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from tests.unit.monitors.support import drain_checks
+from tests.unit.monitors.test_session_monitor_availability import FakeManager
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -372,5 +373,174 @@ async def test_a_session_gate_suppresses_a_non_material_change(
         # say the change was suppressed instead of "nothing has changed".
         index_row = monitor_store.read_index(config_dir)[session.session_id]["monitors"][0]
         assert index_row["suppressed"]["non_material_metadata"] == 1
+    finally:
+        await session.dispose()
+
+
+# --- The lazy-MCP window, through a REAL scheduler tick --------------------
+#
+# m4, 2026-11-05: a monitor over ``mcp__slack_read_channel`` lived in a session
+# that went cold. A scheduled wake re-hosted it at 05:27, the tick beat the lazy
+# MCP connect, and the state file recorded a genuine strike:
+#
+#   consecutive_failures: 1
+#   last_error: monitor can't watch "mcp__slack_read_channel": it is not in
+#               this session's tool set.
+#
+# These two tests drive the same path a wake does — ``set_monitor_schedules``
+# (the restore entry point, which does not validate) then a due pump — and pin
+# what the ladder records either side of the ``mcp__`` boundary.
+
+
+def _dark_mcp_session(tmp_path: Path, config_dir: Path) -> tuple[Session, list[int]]:
+    """A hosted session whose MCP layer has not connected, plus its clock.
+
+    ``mcp_manager`` stays None exactly as it is before ``discover_and_connect``:
+    the runtime boots and engages with MCP lazy, and the tool is absent only for
+    that window.
+    """
+    session = _session(tmp_path, make_read_tool(tmp_path / "unused.txt"))
+    session.mcp_manager = None
+    clock = [1_756_000_000_000]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    return session, clock
+
+
+def _notice_kinds(session: Session) -> list[str]:
+    """The lifecycle notices this session actually emitted, in order."""
+    return [
+        str(entry.payload.get("details", {}).get("kind"))
+        for entry in session._transcript.entries()
+        if entry.type == "message"
+        and entry.payload.get("kind") == "custom"
+        and entry.payload.get("custom_type") == "monitor_prompt"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_tick_before_the_mcp_layer_connects_charges_no_strike(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """The measured m4 strike, end to end: an ``mcp__`` tick that beats the lazy
+    connect records an unavailable EPISODE and stays armed, and the notice it
+    eventually earns is the stall one — the ladder to a disable never starts.
+    """
+    session, clock = _dark_mcp_session(tmp_path, config_dir)
+    spec = MonitorSpec(
+        id="m4",
+        name="slack",
+        tool="mcp__slack_read_channel",
+        arguments={"channel_id": "C0TEST"},
+        every_ms=60_000,
+        created_at=1,
+    )
+    try:
+        await session.set_monitor_schedules([spec])
+        await session._monitors.pump(now_ms=clock[0] + 5_000)
+        await drain_checks(session._monitors, session)
+
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m4")
+        assert counters is not None
+        assert counters["consecutive_failures"] == 0, "the lazy-MCP window is not a failure"
+        assert counters["unavailable_ticks"] == 1
+        assert counters["last_note"] == "tool unavailable — retrying"
+        assert "not connected in this session yet" in counters["last_error"]
+        assert not counters.get("disabled")
+
+        # 31 minutes later the episode crosses the stall window: one notice, and
+        # the monitor is still armed. The 24-hour disable is the only thing past
+        # this point, and it is unreachable while the watch keeps ticking.
+        clock[0] += 31 * 60_000
+        await session._monitors.pump(now_ms=clock[0] + 15_000)
+        await drain_checks(session._monitors, session)
+
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m4")
+        assert counters is not None
+        assert not counters.get("disabled"), counters.get("disabled_reason")
+        assert counters["consecutive_failures"] == 0
+        assert _notice_kinds(session) == ["stalled"]
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_builtin_that_is_gone_still_charges_a_strike_on_the_same_rig(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """CONTROL: the same session and pump, a NON-MCP name that is not in the tool
+    set. That absence is a real change, so the ordinary ladder must charge it —
+    the lazy-MCP excuse may not leak onto builtins.
+    """
+    session, clock = _dark_mcp_session(tmp_path, config_dir)
+    spec = MonitorSpec(
+        id="m4",
+        name="builtin",
+        tool="bash",
+        arguments={"command": "date -u"},
+        every_ms=60_000,
+        created_at=1,
+    )
+    try:
+        await session.set_monitor_schedules([spec])
+        await session._monitors.pump(now_ms=clock[0] + 5_000)
+        await drain_checks(session._monitors, session)
+
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m4")
+        assert counters is not None
+        assert counters["consecutive_failures"] == 1
+        assert counters["unavailable_ticks"] == 0
+        assert "not in this session's tool set" in counters["last_error"]
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_removal_walks_the_disable_ladder(tmp_path: Path, config_dir: Path) -> None:
+    """PROPERTY PIN: the lazy-MCP excuse must never cover a REAL absence.
+
+    A manager exists only after ``attach_mcp_dispose``, which runs after the
+    connect round — so a manager with an EMPTY registry means zero enabled
+    servers (disabled entries never reach it): a name whose server is gone (a
+    removed config entry, every entry disabled), not a load in progress. That
+    has to keep charging strikes and end in a disable; classifying it
+    ``unavailable`` would replace five truthful failures with 24 hours of
+    "the runtime is still starting", which is the untrue-diagnosis class this
+    PR removes. The five ticks below are the whole ladder.
+    """
+    session = _session(tmp_path, make_read_tool(tmp_path / "unused.txt"))
+    session.mcp_manager = FakeManager([], servers=[])  # type: ignore[assignment]
+    clock = [1_756_000_000_000]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    spec = MonitorSpec(
+        id="m9",
+        name="retired",
+        tool="mcp__retired_server_tool",
+        arguments={"query": "x"},
+        every_ms=60_000,
+        created_at=1,
+    )
+    try:
+        await session.set_monitor_schedules([spec])
+        await session._monitors.pump(now_ms=clock[0] + 5_000)
+        await drain_checks(session._monitors, session)
+
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m9")
+        assert counters is not None
+        assert counters["consecutive_failures"] == 1, "a removal is a real failure"
+        assert counters["unavailable_ticks"] == 0
+
+        # Past each backoff (60s, 120s, 240s, 480s) to the fifth failure.
+        for advance in (60_000, 120_000, 240_000, 480_000):
+            clock[0] += advance
+            await session._monitors.pump(now_ms=clock[0] + 5_000)
+            await drain_checks(session._monitors, session)
+
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m9")
+        assert counters is not None
+        assert counters["consecutive_failures"] == 5
+        assert counters.get("disabled"), "the ladder must still reach a disable"
+        assert counters["disabled_kind"] == "checks"
+        assert "not in this session's tool set" in counters["disabled_reason"]
+        assert "still starting" not in counters["disabled_reason"]
     finally:
         await session.dispose()
