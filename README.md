@@ -466,8 +466,8 @@ lop network sessions --peer radiant-m4 --create --name "auth rebase" \
 
 The `--prompt` is that session's **first turn**, run there as `--send` would run
 it; the receipt says what became of it — completed, failed (with the cause the
-turn ended on), or still running, in which case
-`lop network sessions --peer <device> --peek <session>` reads how it ended. A
+turn ended on), or still running, in which case it says it cannot see the end
+(the owner settles the turn, and an owner older than this command cannot). A
 create with no `--prompt` starts no turn at all: it mints the session, warms its
 runtime in the background and says so.
 

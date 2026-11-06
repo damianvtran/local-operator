@@ -596,8 +596,10 @@ def add_parser(
         default="",
         help=(
             "with --create: its first turn, run on that device once its runtime is up. "
-            "The receipt reports whether that turn settled — completed, failed (with the "
-            "cause), or still running — so a failure there is never silent here"
+            "The receipt reports whether it settled — completed, failed (with the cause), "
+            "or still running — so a failure is reported here whenever that owner can "
+            "settle the turn; against an older owner the receipt says it cannot see the "
+            "end instead of claiming one"
         ),
     )
     # WHO THE SESSION IS (definitions.py). Three flags, each naming a DISTINCT

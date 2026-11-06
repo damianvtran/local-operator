@@ -9269,11 +9269,18 @@ class RelayServer:
             # this, a create that carries a prompt answers "prompt admitted" and
             # the requester's user reads a silent conversation while the turn has
             # already failed here (2026-11-06: the failure landed 1.2 s after the
-            # row and never left this machine). Only the two outcomes a create can
-            # know are named: whether the turn settled, and the cause when it
-            # failed. ``running`` is the honest third.
+            # row and never left this machine).
+            #
+            # GATED ON THE PROMPT ALONE, NEVER ON ``admitted`` (agent review round 2,
+            # MINOR): the states that most need telling apart are the ones where
+            # admission is NOT established — ``refused`` (the owner said no) and
+            # ``unreported`` (its socket died before it answered, so whether the
+            # message landed is unknown). Keying this block on ``admitted`` collapsed
+            # both into "no turn block at all", which left a `--json` consumer and the
+            # desktop route unable to tell a certain refusal from an absence of
+            # knowledge. Every state is reported; its name is what carries the fact.
             {"state": prompt_state, "detail": prompt_detail if prompt_state == "failed" else ""}
-            if (prompt and admitted)
+            if prompt
             else None
         )
         return {

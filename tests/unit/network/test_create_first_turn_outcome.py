@@ -328,6 +328,53 @@ def test_a_promptless_create_starts_no_turn(root: Path) -> None:
     assert "turn" not in detail, detail
 
 
+@pytest.mark.parametrize(
+    ("reply", "eof", "admitted", "state"),
+    [
+        # The owner said no: a certain refusal.
+        pytest.param(
+            {"op": "error", "req": 1, "message": "the runtime refused the prompt"},
+            False,
+            False,
+            "refused",
+            id="refused",
+        ),
+        # The owner's socket died before it answered: NOT a refusal.
+        pytest.param(None, True, False, "unreported", id="unreported"),
+        # A reply that arrives after the wait budget: admitted and still going.
+        pytest.param(None, False, True, "running", id="running"),
+    ],
+)
+def test_the_three_states_a_json_consumer_can_see_never_collapse(
+    root: Path, reply: dict[str, Any] | None, eof: bool, admitted: bool, state: str
+) -> None:
+    """``--json`` must tell a refusal from an absence of knowledge.
+
+    Agent review round 2 (MINOR): the ``turn`` block was gated on ``admitted``,
+    so ``refused`` and ``unreported`` both vanished from the payload — the two
+    facts a consumer most needs to keep apart (one is "your words were not
+    taken", the other is "nobody knows whether they were") read identically.
+    Every state now travels; the block's NAME is the fact.
+    """
+    identity.mint(root, name="probe-node")
+    server = _server(root)
+    server._engage_locally = lambda *_a, **_k: ""  # type: ignore[assignment]
+    dialed = _ScriptedDial(reply, eof=eof)
+    server._dial_owned = lambda *_a, **_k: dialed  # type: ignore[assignment]
+    detail = server._op_session_create(  # noqa: SLF001
+        _link(),
+        {
+            "op": "net_session_create",
+            "req": 7,
+            "locality": "remote",
+            "cwd": str(root),
+            "prompt": "Reply with exactly MESH_OK",
+        },
+    )
+    assert detail["admitted"] is admitted, detail
+    assert detail["turn"]["state"] == state, detail
+
+
 def _link() -> Any:
     """A stub link carrying exactly what ``_op_session_create`` reads."""
     peer = "d_" + "a" * 32
