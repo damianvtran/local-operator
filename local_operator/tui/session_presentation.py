@@ -1149,6 +1149,9 @@ def project_settled_rows(
         ASK_TIMEOUT_MESSAGE_TYPE as ASK_TIMEOUT_CUSTOM_TYPE,
     )
     from local_operator.harness.message_types import (
+        DIVERGENCE_NOTICE_MESSAGE_TYPE as DIVERGENCE_CUSTOM_TYPE,
+    )
+    from local_operator.harness.message_types import (
         HUB_MESSAGE_TYPE,
         PEER_MESSAGE_MESSAGE_TYPE,
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
@@ -1167,6 +1170,7 @@ def project_settled_rows(
         assistant_row_text,
         assistant_stop_notice,
         compaction_refused_notice,
+        divergence_notice,
         gate_timeout_notice,
         held_delivery_notice,
         is_ask_gate_divert_message,
@@ -1602,6 +1606,19 @@ def project_settled_rows(
                 details = getattr(message, "details", None) or {}
                 self._append_block(
                     NoticeBlock(gate_timeout_notice(details), kind="warning", fold_width=fold_width)
+                )
+                appended = True
+                continue
+            # A DIVERGENCE notice: a turn asserted a project root nothing in
+            # this session's context named (``local_operator/divergence.py``).
+            # Its own branch for this module's stated rule — an unbranched
+            # custom row paints NOWHERE — and ``warning`` ink because the
+            # operator has to look at it, not because anything failed: the
+            # flagged call ran exactly as it would have.
+            if getattr(message, "custom_type", None) == DIVERGENCE_CUSTOM_TYPE:
+                details = getattr(message, "details", None) or {}
+                self._append_block(
+                    NoticeBlock(divergence_notice(details), kind="warning", fold_width=fold_width)
                 )
                 appended = True
                 continue

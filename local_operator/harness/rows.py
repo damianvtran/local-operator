@@ -2368,3 +2368,60 @@ def supplement_row_details(row: Any) -> Mapping[str, Any] | None:
         return None
     details = payload.get("details")
     return details if isinstance(details, Mapping) else None
+
+
+def divergence_notice(details: Mapping[str, Any]) -> str:
+    """What a divergence row SAYS, and why it says exactly that.
+
+    ``local_operator.divergence`` observed a tool call asserting a project root
+    that appeared nowhere in this session's instructions or earlier tool output.
+    The three facts an operator needs, in the order they need them:
+
+    1. **What the root is and what asserted it.** ``~/squeeze`` plus the tool
+       and the path it named — the row has to be actionable ("look at that
+       turn"), not merely alarming.
+    2. **What was checked, named explicitly.** "no system prompt, custom
+       instruction, user message or earlier tool output" is the whole claim;
+       a shorter phrasing ("unexplained path") would read as the harness
+       having no opinion, and a longer one would claim a cause this layer
+       cannot see. The incident's own premise — that the task came from
+       somewhere outside the session — is exactly what this sentence states
+       without asserting *where* it came from.
+    3. **That the call RAN.** This is observation, never enforcement
+       (``harness/loop.py``'s ``_observe_divergence`` is wrapped so it cannot
+       break a turn). A notice that leaves the reader unsure whether something
+       was blocked would be read as a new gate, and an operator debugging a
+       turn must not have to guess which one happened.
+
+    ``warning`` ink on both surfaces, decided HERE rather than in a renderer
+    (this module's own rule: a tier chosen inside one host is a tier the other
+    does not have). Not ``error``: nothing failed, and the incident's cost was
+    a task substitution nobody noticed, which is a state to look at and not a
+    failure to retry.
+    """
+    root = str(details.get("root") or "").strip() or "an unnamed root"
+    path = str(details.get("path") or "").strip()
+    tool = str(details.get("tool") or "a tool").strip()
+    turn = details.get("turn")
+    asserted = f"`{tool}` named `{path}`" if path else f"`{tool}`"
+    if bool(details.get("escalated")) and str(details.get("reason") or "") == "write":
+        subject = f"unexplained project root {root} — a WRITE asserted it"
+    elif bool(details.get("escalated")):
+        # Escalation on a second TURN, not on a second mention: the incident
+        # repeats its noun 117 times in 134 turns, and the row that matters is
+        # the one saying the model came back to it.
+        where = f"turn {turn}" if isinstance(turn, int) and turn else "a later turn"
+        subject = f"unexplained project root {root} — named AGAIN in {where}"
+    else:
+        subject = f"unexplained project root {root}"
+    text = (
+        f"{subject}: {asserted}; it appears in no system prompt, custom "
+        f"instruction, user message or earlier tool output of this session — "
+        f"the call ran (observation only)"
+    )
+    if details.get("recorded") is False:
+        # The audit row is the durable half (``config_dir()/audit/divergence.
+        # jsonl``); saying so here is the difference between a lost record and
+        # a record nobody was told was lost.
+        text += " · audit row NOT written"
+    return text

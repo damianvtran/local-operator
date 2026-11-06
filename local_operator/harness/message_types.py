@@ -585,3 +585,24 @@ ASK_RELAY_MESSAGE_TYPE = "ask_relay"
 #: ``Session._PERSISTABLE_CUSTOM_TYPES``: like the todo reminder it is a
 #: point-in-time assertion that a resume must never replay.
 PROJECT_REMINDER_MESSAGE_TYPE = "project_reminder"
+
+
+#: The custom-message type of a DIVERGENCE notice: the model asserted a project
+#: root that appeared nowhere in this session's system prompt, custom
+#: instructions, user messages or earlier tool output (``local_operator.
+#: divergence``; the incident it was built for is 2026-11-06's ``~/squeeze``).
+#:
+#: DELIBERATELY NOT IN ``harness/render.py``'s INJECTION TUPLE. This row is for
+#: the OPERATOR, who is the only reader who can decide a derailed turn should
+#: stop; to the model it restates what it just did, and the credential-redaction
+#: marker's history is the argument against telling the model about its own
+#: detector (1,493 notices across 1,080 sessions, every one injected as a user
+#: turn, every one carrying nothing actionable). Unlisted custom types are
+#: dropped by that tuple as bookkeeping, which is exactly the treatment wanted
+#: here: the transcript keeps the row, the prompt does not.
+#:
+#: It lives in this module because every surface that paints a transcript row
+#: must be able to NAME the type — ``tui/session_presentation.py`` has its own
+#: branch, and an unbranched record paints nowhere. Nothing added to this module
+#: becomes model-visible by being here.
+DIVERGENCE_NOTICE_MESSAGE_TYPE = "divergence_notice"
