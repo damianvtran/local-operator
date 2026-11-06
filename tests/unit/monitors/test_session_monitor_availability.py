@@ -517,6 +517,14 @@ def test_the_discovery_failed_remedy_names_only_commands_that_exist() -> None:
         if command == "mcp":
             assert verb in MCP_SUBCOMMANDS, f"/mcp {verb} is not a verb /mcp accepts"
     assert "/mcp reload" not in detail
+    # And NO app control. In this state the session's roster is empty, so the
+    # app's catalog row carries no live facts: it offers no reload and no
+    # connect (``mcp.catalog._row``) -- in practice Test -- and review round 3
+    # caught a copy that sent the operator to a Reload the app never shows. A
+    # PR that does add an app control for this state must update the copy AND
+    # this assertion together.
+    for app_control in ("Settings", "Integrations", "\u2192", "in the app"):
+        assert app_control not in detail, f"the remedy names an app control: {app_control!r}"
     assert len(detail) < NOTICE_ERROR_CHARS
 
 

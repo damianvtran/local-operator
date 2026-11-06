@@ -3315,28 +3315,31 @@ MCP_NOT_READY_DETAIL = (
 #: look a name up in. Distinct from :data:`MCP_NOT_READY_DETAIL` (no manager at
 #: all) and, like it, no strike is charged: nothing was removed.
 #:
-#: The copy names the CAUSE and a RETRY, not a wait, because nothing retries by
-#: itself: ``discover_and_connect`` runs once per manager, and the raise in
-#: ``mcp/__init__.py`` returns before ``_connect_round`` assigns ``_configs``.
-#: (The other writer, ``connect_configured_server``, fills one entry on an
-#: explicit login and runs no round.)
+#: The copy names the CAUSE and WHEN it is retried, never "wait": nothing
+#: retries discovery inside a running session. ``discover_and_connect`` runs
+#: once per manager, and the raise in ``mcp/__init__.py`` returns before
+#: ``_connect_round`` assigns ``_configs``. (The other writer,
+#: ``connect_configured_server``, fills one entry on an explicit login and runs
+#: no round.)
 #:
-#: It names ONLY routes that re-run discovery for THIS session. The app's Reload
-#: (a row control on its Settings → Integrations page) runs ``manager.reload()``
-#: on the owner's live manager (``MCPDesktop``, behind
-#: ``POST /v1/desktop/sessions/{id}/mcp``), wherever the session is hosted.
-#: ``/reload`` relaunches the terminal with ``--resume``, which rediscovers only
-#: when that terminal OWNS the session: a viewer of a session hosted elsewhere
-#: relaunches itself and leaves the owner's manager untouched ("runtime work
-#: continues"), hence the qualifier. There is no ``/mcp reload`` verb
-#: (``MCP_SUBCOMMANDS``), and a headless runtime has no command for this. When
-#: the record itself is refreshed is the KNOWN LIMIT on
-#: ``Session._mcp_discovery_incomplete``. Telling the operator to wait would be
-#: a promise no code keeps. Well under the stall notice's 200-character clip
-#: (``monitors.delivery.NOTICE_ERROR_CHARS``), so the remedy is never cut off.
+#: The retry it names is the one every host has: any fresh process for the
+#: session builds it through ``create_session``, which runs
+#: ``wire_mcp_into_session`` and so discovery again — a wake re-hosting it, a
+#: runtime replaced after ``lop-update``, or ``/reload`` from a terminal that
+#: OWNS the session. A viewer's ``/reload`` relaunches only the viewer ("runtime
+#: work continues"), hence the qualifier. It names NO app control, on purpose:
+#: the row the app shows in this state carries no reload, and ``connect`` only
+#: with live facts an empty roster does not have (``mcp.catalog._row``), while
+#: the app's own ``/reload`` reattaches (``preserve_running``) rather than
+#: restarting the host. There is no ``/mcp reload`` verb (``MCP_SUBCOMMANDS``)
+#: either. A future app control for this state must update this copy and
+#: ``test_the_discovery_failed_remedy_names_only_commands_that_exist`` together.
+#: When the record itself is refreshed is the KNOWN LIMIT on
+#: ``Session._mcp_discovery_incomplete``. Well under the stall notice's
+#: 200-character clip (``monitors.delivery.NOTICE_ERROR_CHARS``).
 MCP_DISCOVERY_FAILED_DETAIL = (
-    "MCP discovery failed at startup — retry it with Reload in the app "
-    "(Settings → Integrations), or /reload if this session runs in your terminal"
+    "MCP discovery failed at startup; it is retried when the session restarts "
+    "(/reload, if this session runs in your terminal)"
 )
 
 

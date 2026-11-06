@@ -75,9 +75,8 @@ Unrelated provider credentials are untouched.
 It is deliberately **not** the process environment, in either tier: a
 project-scoped `.mcp.json` cannot use a reference to copy an unrelated variable
 out of the running app's environment. Nothing is cached, so a credential added
-while a session is running is picked up by the next connect (**Reload** in the
-app's Settings → Integrations, `/reload` in a terminal that runs the session,
-or the server's reconnect).
+while a session is running is picked up by the next connect (**Connect** on a
+loaded server's row in the app, or the server's own reconnect).
 
 Writing one: the MCP key popout sends `POST /v1/desktop/sessions/{id}/mcp/credentials`,
 which validates every ID against the server's own declared references and stores
