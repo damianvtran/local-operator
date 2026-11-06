@@ -227,6 +227,34 @@ async def connector_state(value: dict[str, Any], *, reachable: bool = True) -> d
 
 
 async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
+    """The pinned login's verdict, plus a provable same-account successor when it is dead.
+
+    See :func:`_pinned_login_verdict` for the verdict itself. The successor is
+    added here, outside it, because the verdict may come from the memo (whose
+    dict must never be mutated) and because whether a successor exists moves
+    with writes the memo's key cannot see — a sign-in writes a DIFFERENT row.
+    """
+    verdict = await _pinned_login_verdict(value)
+    if verdict.get("state") not in (gateway.LOGIN_REQUIRED, gateway.OWNER_MISSING):
+        return verdict
+    from local_operator.tunnels import api
+
+    record = value.get("record")
+    try:
+        successor = api.same_account_successor(
+            value.get("credential_id"),
+            owner_account=record.get("owner_account_id") if isinstance(record, dict) else None,
+        )
+    except (AuthStoreError, OSError, ValueError):
+        # The verdict stands on its own; a store that cannot answer this second
+        # question must not turn a correct `login_required` into an error.
+        return verdict
+    if successor is None:
+        return verdict
+    return {**verdict, "successor_credential_id": successor}
+
+
+async def _pinned_login_verdict(value: dict[str, Any]) -> dict[str, Any]:
     """Whether the login that owns this tunnel still works, decided locally.
 
     Decided from this device's own credential store rather than from the cloud
@@ -312,13 +340,27 @@ async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
     device does not have are both "the configuration points at a login that is not
     here", and neither is cleared by signing in.
 
-    WHY NOT HEAL IT AT THE CREDENTIAL-WRITE HOOK (where ``install.rearm_if_parked``
-    already runs): re-pointing safely needs a CLOUD read — `tunnel/config.json`
-    does not persist the record's owner account — and that hook is deliberately
-    cheap by construction (stats and small file reads), so the read would turn
-    every login into a network call; and surfaces must be honest anyway for the
-    cases no heal can fix (a tunnel owned by another account; an unrecoverable
-    account). A deliberate decision, not an omission — see issue #1711.
+    WHY THE CREDENTIAL-WRITE HOOK HEALS ONLY THE SAME-ACCOUNT CASE (where
+    ``install.rearm_if_parked`` already runs): a GENERAL re-point — to whatever
+    login is on this device — needs a CLOUD read to learn who owns the tunnel,
+    and that hook is deliberately cheap by construction (stats and small file
+    reads), so the read would turn every login into a network call; and surfaces
+    must be honest anyway for the cases no heal can fix (a tunnel owned by
+    another account; an unrecoverable account). That stays a deliberate decision
+    (issue #1711). The ONE re-point the hook does make,
+    ``install.heal_pin_after_login``, needs no cloud read because it is proven
+    locally (``api.same_account_successor``): a verified sign-in to the SAME
+    account id, on the tunnel's own hub, replacing a pin that is dead or gone —
+    the owner cannot change, only the row carrying its bearer (2026-11-06: a
+    legacy-keyed pin with a refused grant, and every sign-in landing on a new
+    row beside it).
+
+    WHEN THAT HEAL COULD NOT RUN (the tunnel was stopped at the time, a build
+    before it wrote the login), a dead or missing pin with a provable
+    same-account successor carries ``successor_credential_id``. The STATE is
+    unchanged — it is still the truth about the pinned row — but ``remedy()``
+    then names the re-point instead of a sign-in that has already happened.
+    Read from the store on every call and never memoised, like `owner_missing`.
     """
     selected = value.get("credential_id")
     dead: dict[str, Any] = {"credential_id": selected, "state": "login_required"}
@@ -442,14 +484,32 @@ def remedy(
         # nothing re-points the configuration at it — while the verdict's command
         # does, so the verdict's stands in. Every other park keeps its own
         # remedy: the connector knows better than this module what its own fix is.
+        #
+        # The same holds for a park whose dead login has a same-account
+        # successor already on this device (`successor_credential_id`): the
+        # park's sign-in has, in effect, already been done, and repeating it
+        # writes the same new row again.
         if not (
             connector.get("reason") == gateway.LOGIN_REQUIRED
-            and login.get("state") == gateway.OWNER_MISSING
+            and (
+                login.get("state") == gateway.OWNER_MISSING
+                or login.get("successor_credential_id") is not None
+            )
         ):
             return {
                 "command": str(parked["command"]),
                 "url": str(parked.get("url") or gateway.CONSOLE_URL),
             }
+    if login.get("successor_credential_id") is not None and login.get("state") in (
+        gateway.LOGIN_REQUIRED,
+        gateway.OWNER_MISSING,
+    ):
+        # Ahead of both arms below: a newer sign-in to the same account is
+        # already here, so the fix is re-pointing at it, never another sign-in.
+        return {
+            "command": gateway.TERMINAL_REMEDY[gateway.LOGIN_SUPERSEDED],
+            "url": gateway.CONSOLE_URL,
+        }
     if login.get("state") == gateway.OWNER_MISSING:
         # The re-point command, never a sign-in: the login this tunnel was
         # enrolled with is not on this device, and only re-pointing the

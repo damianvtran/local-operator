@@ -454,6 +454,21 @@ def rearm_if_parked(*, provider: str, credential_id: int) -> str:
         # string) must not match a `credential_id` of the same kind: the guard is
         # "this is the credential the tunnel owns", and None == None is not that.
         return ""
+    return _kick_connector(kind, restart=False)
+
+
+def _kick_connector(kind: str, *, restart: bool) -> str:
+    """Start (or restart) the installed connector, if this store owns it.
+
+    Shared by :func:`rearm_if_parked` (``restart=False``: a parked connector is
+    stopped) and :func:`heal_pin_after_login` (``restart=True``: the connector
+    reads `tunnel/config.json` once at startup, so after a re-point a RUNNING
+    connector that is being refused must be restarted, not merely started).
+    Keeps the two guards both callers need, for the reason `rearm_if_parked`'s
+    docstring gives: only a store in the real home, and only an installed unit,
+    because `launchctl` addresses the real session whatever ``HOME`` says.
+    Never raises.
+    """
     try:
         if not supervisors.config_lives_in_real_home(config_dir()):
             return ""
@@ -463,6 +478,15 @@ def rearm_if_parked(*, provider: str, credential_id: int) -> str:
             # the shared one `action()` uses for the same reason.
             if not supervisors.task_scheduler_is_addressable(config_dir()):
                 return ""
+            if restart:
+                # A RUNNING task must end first: `/Run` on a running task is a
+                # no-op, and the point of a restart is that the connector
+                # re-reads `tunnel/config.json`. "not running" is the parked
+                # case, where there is nothing to end.
+                ended = supervisors.schtasks(*supervisors.task_end_args(TASK_NAME))
+                detail = ((ended.stderr or ended.stdout) or "").lower()
+                if ended.returncode and "running" not in detail:
+                    raise ValueError(detail.strip()[:200])
             started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
             if started.returncode:
                 raise ValueError(((started.stderr or started.stdout) or "").strip()[:200])
@@ -477,16 +501,93 @@ def rearm_if_parked(*, provider: str, credential_id: int) -> str:
             # plist is already correct and the job is loaded but stopped, so
             # there is nothing to tear down and a reload would discard a
             # pending plist repair mid-flight. The mobile installer starts its
-            # own daemon the same way.
+            # own daemon the same way. `-k` is also what makes this the RESTART
+            # the re-point needs: it kills a running instance before starting,
+            # and starts a stopped (parked) one, so one call covers both.
             result = _launchctl("kickstart", "-k", f"gui/{os.getuid()}/{LABEL}")
             if result.returncode:
                 raise ValueError(result.stderr.strip())
         else:
-            # Started, not restarted: the unit is inactive by definition here.
-            _run(["systemctl", "--user", "start", path.name])
+            # `start` for a park (the unit is inactive by definition there);
+            # `restart` after a re-point, which also starts an inactive unit and
+            # is the only verb that makes a RUNNING connector re-read its config.
+            _run(["systemctl", "--user", "restart" if restart else "start", path.name])
     except (OSError, ValueError, subprocess.SubprocessError):
         return "Signed in, but the tunnel connector could not be restarted; run lop tunnel install."
     return "The Radient tunnel connector is starting again."
+
+
+def heal_pin_after_login(*, provider: str, credential_id: int) -> str:
+    """Re-point the tunnel at a VERIFIED same-account sign-in that replaced a dead pin.
+
+    THE GAP `rearm_if_parked` CANNOT CLOSE (2026-11-06): a sign-in to the very
+    account that owns the tunnel can land on a NEW credential row (the pinned
+    row predates endpoint-stamped identity keys, so the upsert does not match
+    it), and the re-arm then declines because ``owns != credential_id``. The
+    configuration keeps pinning the row the IdP refused, every surface keeps
+    saying ``login_required``, and the sign-in they offer re-writes the new row
+    and changes nothing. A desktop operator had no way out short of a terminal.
+
+    So, after a COMPLETED, VERIFIED Radient login only (``AuthStore.complete_radient_login``
+    — never a generic metadata or refresh write, which proves no identity), when
+    :func:`api.same_account_successor` proves the fresh row is the same account
+    on the tunnel's own hub and the pin is dead or gone: rewrite
+    ``tunnel/config.json``'s ``credential_id`` (every other key kept, including
+    ``cloudflared_path`` and ``mobile_password``) and restart the connector,
+    which reads its credential once at startup — parked OR running-but-refused.
+    Same account is what makes this safe without the cloud read
+    ``report.login_verdict``'s docstring says a GENERAL re-point needs: the
+    owner of the tunnel does not change, only which local row carries its bearer.
+
+    THE GUARDS ARE SPLIT BETWEEN THE FILE AND THE SERVICE, deliberately:
+
+    * The re-point needs only proof, a configured tunnel and not ``stopped`` (a
+      stopped tunnel is one the operator is not using, which every automatic
+      repair here leaves alone). It writes the configuration that belongs to the
+      SAME store root the login just wrote, so it is contained wherever that
+      root lives — a sandboxed store re-points its own sandboxed tunnel, which
+      is also what makes the surfaces' verdict honest there.
+    * The restart keeps every guard `rearm_if_parked` has, for its reasons:
+      ``LOP_TUNNEL_NO_REARM``, a supervisor, a real-home store and an installed
+      unit (`_kick_connector`), since `launchctl` addresses the real session
+      whatever ``HOME`` says.
+
+    COMPARE-AND-SWAP on the pin: the configuration is re-read immediately before
+    the write and left alone if anything moved its ``credential_id`` (a
+    concurrent `lop tunnel configure`), so this never overwrites a newer choice.
+
+    Returns a sentence for the log, or "" when it did nothing. Never raises: the
+    caller is a login that has already succeeded.
+    """
+    if provider != "radient":
+        return ""
+    try:
+        from local_operator.tunnels import api
+
+        value = config.load()
+        if value.get("stopped"):
+            return ""
+        pin = value.get("credential_id")
+        if pin == credential_id:
+            return ""
+        record = value.get("record")
+        owner = record.get("owner_account_id") if isinstance(record, dict) else None
+        if api.same_account_successor(pin, owner_account=owner, fresh_id=credential_id) is None:
+            return ""
+        current = config.load()
+        if current.get("credential_id") != pin or current.get("stopped"):
+            return ""
+        config.save({**current, "credential_id": credential_id})
+    except Exception:  # noqa: BLE001 — a login must not fail over a tunnel repair
+        return ""
+    note = f"Tunnel re-pointed from credential {pin} to {credential_id} (same Radient account)."
+    if not _rearm_allowed():
+        return note
+    kind = supervisors.supervisor()
+    if kind is None:
+        return note
+    kicked = _kick_connector(kind, restart=True)
+    return f"{note} {kicked}" if kicked else note
 
 
 def _rearm_allowed() -> bool:

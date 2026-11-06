@@ -163,6 +163,16 @@ REENROLMENT_REQUIRED = "reenrolment_required"
 #: declared here, beside the reason codes, so its remedy below is keyed by the
 #: same word the verdict reports and the two cannot drift (issue #1711).
 OWNER_MISSING = "owner_missing"
+#: The pinned login is DEAD (or gone) but a newer sign-in to the SAME Radient
+#: account is already on this device (`api.same_account_successor` proves it).
+#: Not a state the verdict reports — the verdict stays `login_required` /
+#: `owner_missing`, which is still the truth about the pinned row — but a REMEDY
+#: key: the sign-in that `LOGIN_REQUIRED` offers has already happened, and a
+#: second one writes the same new row again, so the fix is the re-point. A
+#: verified sign-in performs that re-point itself (`install.heal_pin_after_login`);
+#: this remedy is for when it could not (a stopped tunnel brought back, a build
+#: that predates the heal wrote the login).
+LOGIN_SUPERSEDED = "login_superseded"
 
 # What a phone is shown: self-contained, and carrying any link it needs, because
 # there is nothing to type on that surface.
@@ -317,6 +327,11 @@ TERMINAL_REMEDY = {
     # to the current login (see `tunnels/cli.py`), and it says which account owns
     # the tunnel when the current login is not that account.
     OWNER_MISSING: "lop tunnel configure",
+    # The same re-point, for a dead pin whose account already signed in again:
+    # bare `lop tunnel configure` falls back from it to that same-account row
+    # (`api.usable_credential_id`). Its own key rather than a reuse of
+    # `OWNER_MISSING`'s, so the two causes can diverge without a hunt.
+    LOGIN_SUPERSEDED: "lop tunnel configure",
     # Names the CHECK rather than a fix, by the rule above: this state clears itself,
     # and handing the operator `lop login radient` for it would be the misdirection
     # this code exists to remove.
@@ -342,6 +357,7 @@ REASON_LABEL = {
     LEASE_PENDING: "waiting for authorization",
     LOGIN_REQUIRED: "login required",
     OWNER_MISSING: "tunnel login missing",
+    LOGIN_SUPERSEDED: "newer sign-in not in use",
     LOCAL_PREREQUISITE: "prerequisite missing",
     REENROLMENT_REQUIRED: "needs re-enrolment",
 }

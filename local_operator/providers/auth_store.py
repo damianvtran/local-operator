@@ -2273,7 +2273,9 @@ class AuthStore:
                 ("identity_unattributed", self._now_ms(), legacy.id, json.dumps(legacy.data)),
             )
         self._conn.commit()
-        written = self._after_credential_write("radient", stored.id)
+        # `verified_login`: this is the one write that PROVES an identity, so it
+        # alone may re-point the tunnel at itself (`install.heal_pin_after_login`).
+        written = self._after_credential_write("radient", stored.id, verified_login=True)
         self._org_hub_boundary("sign-in")
         return written
 
@@ -2581,7 +2583,9 @@ class AuthStore:
             return None
         return str(row[0]) if row and row[0] else None
 
-    def _after_credential_write(self, provider: str, credential_id: int | None) -> StoredCredential:
+    def _after_credential_write(
+        self, provider: str, credential_id: int | None, *, verified_login: bool = False
+    ) -> StoredCredential:
         """Read the row back, then run what a completed write implies.
 
         One exit for both the update and the insert path, so a later caller
@@ -2618,7 +2622,7 @@ class AuthStore:
         # receipt. Quarantine belongs after a verified exchange and the host's
         # cancellation check, never in this shared metadata-write hook.
         self._delete_blocks(stored.id)
-        self._rearm_parked_tunnel_login(provider, stored)
+        self._rearm_parked_tunnel_login(provider, stored, verified_login=verified_login)
         self._publish_account_file()
         return stored
 
@@ -2645,7 +2649,9 @@ class AuthStore:
             store_uid=self.store_uid,
         )
 
-    def _rearm_parked_tunnel_login(self, provider: str, stored: StoredCredential) -> None:
+    def _rearm_parked_tunnel_login(
+        self, provider: str, stored: StoredCredential, *, verified_login: bool = False
+    ) -> None:
         """Let a login that fixed a dead grant bring the tunnel connector back.
 
         The connector cannot notice by itself: parking exits SUCCESSFULLY
@@ -2687,10 +2693,12 @@ class AuthStore:
             # No loop on this thread. Deliberately the same call rather than a
             # skipped one: a script driving a login still wants its connector
             # back, and there is no loop here to stall.
-            self._rearm_off_thread(install, provider, stored.id)
+            self._rearm_off_thread(install, provider, stored.id, verified_login)
             return
         try:
-            loop.run_in_executor(None, self._rearm_off_thread, install, provider, stored.id)
+            loop.run_in_executor(
+                None, self._rearm_off_thread, install, provider, stored.id, verified_login
+            )
         except RuntimeError:
             # A running loop whose default executor is ALREADY SHUT DOWN — and
             # this is the one line in the guard chain that can fail there, so it
@@ -2711,17 +2719,33 @@ class AuthStore:
             # describes — a loop on its way out is not serving anyone, so the
             # blocking call it can no longer hand to a thread costs no request,
             # and `_rearm_off_thread` never raises.
-            self._rearm_off_thread(install, provider, stored.id)
+            self._rearm_off_thread(install, provider, stored.id, verified_login)
 
     @staticmethod
-    def _rearm_off_thread(install: Any, provider: str, credential_id: int) -> None:
+    def _rearm_off_thread(
+        install: Any, provider: str, credential_id: int, verified_login: bool = False
+    ) -> None:
         """The re-arm itself, where a blocking call costs nobody a turn.
 
         Never raises: a re-arm that fails must not fail the login that triggered
         it — and on the executor path an exception would surface only as an
         unretrieved future exception, which is neither a log line nor a shrug.
+
+        A VERIFIED login first tries the same-account re-point
+        (``install.heal_pin_after_login``), in THIS thread and BEFORE the re-arm,
+        because the two are one decision about one connector: the heal re-points
+        a pin the re-arm would decline (``owns != credential_id``) and restarts
+        the connector itself, so when it acted the re-arm is skipped rather than
+        racing it with a second kickstart from another thread.
         """
         try:
+            if verified_login:
+                healed = install.heal_pin_after_login(
+                    provider=provider, credential_id=credential_id
+                )
+                if healed:
+                    logger.info("%s (provider=%s)", healed, provider)
+                    return
             note = install.rearm_if_parked(provider=provider, credential_id=credential_id)
         except Exception:  # noqa: BLE001 — a login must not fail over a service restart
             logger.warning(
