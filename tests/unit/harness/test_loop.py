@@ -84,6 +84,7 @@ from local_operator.providers.failover import (
     stream_with_failover,
     wrap_transport_error,
 )
+from local_operator.providers.replay import credential_scope, replay_items
 from local_operator.tools.registry import create_tools
 
 MODEL = ModelSpec(provider="test", model_id="m")
@@ -301,12 +302,30 @@ async def test_leaked_tool_markup_never_reaches_transcript_render_or_replay() ->
         {"text": "alpha"},
         {"text": "beta"},
     ]
-    # The replayed history is clean, AND the native reasoning still rides along:
-    # its fingerprint matched the persisted text, so it was not discarded.
+    # The replayed history is clean, and the native reasoning was NOT discarded: its
+    # fingerprint still matches the persisted text, which is what
+    # ``replay_items`` re-checks on every build.
     replayed = [m for m in bodies[2]["messages"] if m["role"] == "assistant"]
     assert [m.get("content") for m in replayed] == ["Checking the record.", None]
-    assert [m.get("reasoning_content") for m in replayed] == ["Look it up.", "Again."]
     assert dsml not in json.dumps(bodies) and "parameter name" not in json.dumps(bodies)
+    for message in assistants[:2]:
+        assert (
+            replay_items(
+                message,
+                spec,
+                "https://test.invalid/v1/chat/completions",
+                "openai-chat",
+                credential_scope("test-token"),
+            )
+            is not None
+        ), "the capture must survive the markup filter"
+    # ``radient/auto`` is the route the REPLAY INCIDENT happened on, though: its
+    # id is a router, no family resolves from it, so nothing requires the thought
+    # and the gate keeps it off the wire
+    # (``model.configure.native_replay_required``). That is the deliberate change
+    # this assertion records; the capture half above is unchanged and is why the
+    # fingerprint claim this test exists for is still proved.
+    assert all("reasoning_content" not in entry for entry in bodies[2]["messages"])
 
 
 @pytest.mark.asyncio

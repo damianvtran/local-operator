@@ -29,6 +29,7 @@ from local_operator.model.configure import build_model_spec
 from local_operator.model.discovery import available_models, cached_available_models
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.clients import OpenAICompatClient
+from local_operator.providers.replay import credential_scope, replay_items
 from local_operator.providers.controller import ProviderController
 from local_operator.providers.local import (
     LOCAL_PRESETS,
@@ -383,7 +384,36 @@ async def test_real_stream_reasoning_replay_is_endpoint_scoped(local_server):
         second = request.model_copy(update={"messages": [*request.messages, history]})
         await anext(client.stream(second, api_key=None))
         body = local_server["requests"][-1][1]
-        assert body["messages"][-1]["reasoning_content"] == "Private protocol continuation"
+        # The record is still PROVENANCE-VALID on the endpoint it was made for --
+        # same protocol, same model, same credential scope -- which is the half
+        # this test exists for (a resume or a route change must not leak another
+        # endpoint's state) ...
+        assert (
+            replay_items(
+                history,
+                model,
+                f"{endpoint}/chat/completions",
+                "openai-chat",
+                credential_scope(None),
+            )
+            is not None
+        )
+        # ... but a LOCAL server's template is the operator's own and nobody
+        # measured a requirement to replay into it, so the openai-chat gate
+        # leaves the thought off the wire (``native_replay_required``). The
+        # replay itself is case-covered on the routes that require or record it
+        # (``test_native_replay_gate.py``, ``test_deepseek.py``).
+        assert "reasoning_content" not in body["messages"][-1]
+        assert (
+            replay_items(
+                history,
+                model,
+                f"{endpoint.replace('/proxy/', '/other/')}/chat/completions",
+                "openai-chat",
+                credential_scope(None),
+            )
+            is None
+        )
         other_endpoint = endpoint.replace("/proxy/", "/other/")
         local_server["manager"].update_config({"providers": {"vllm": {"base_url": other_endpoint}}})
         other = OpenAICompatClient(other_endpoint, http_client=http)
