@@ -1690,6 +1690,22 @@ class TeamBridgeClient:
 
         return pin_gone_with_login_present(self._auth_store(), self._pinned_credential_id)
 
+    def pin_gone_self_repairs(self) -> bool:
+        """Would the receiver's heal re-point this client's gone pin by itself?
+
+        Chooses between the two pin-gone sentences: only a provable
+        same-account successor earns the self-repair promise
+        (``team_bridge.heal.pin_gone_self_repairs``).
+        """
+
+        if self._pinned_credential_id is None:
+            return False
+        from local_operator.team_bridge.heal import pin_gone_self_repairs
+
+        return pin_gone_self_repairs(
+            self._config_dir, self._auth_store(), self._pinned_credential_id
+        )
+
     def _require_destination(self) -> None:
         """Refuse a destination the signed-in account's bearer must not travel to.
 

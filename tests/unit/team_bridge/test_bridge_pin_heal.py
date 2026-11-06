@@ -224,9 +224,12 @@ def test_a_broken_install_heals_on_receiver_start_without_a_login(root: Path) ->
     owner = _enroll(root, gone)
     before = _enrollment(root)
 
-    # The reproduction: today's answer to a signed-in operator.
+    # The reproduction: today's answer to a signed-in operator. The heal's own
+    # proof holds here, so (and only so) the refusal promises the self-repair.
     refused = asyncio.run(_tool_answer(root))
     assert refused["code"] == "bridge_credential_pin_gone", refused
+    assert refused["error"] == host.PIN_GONE_SELF_REPAIR_SENTENCE, refused
+    assert "team-bridge setup" not in refused["error"], "setup does not inspect the pin"
 
     # The receiver starts (the updated build): one pass of the real loop.
     rearmed = asyncio.run(_run_receiver(root, owner, horizon=600))
@@ -324,6 +327,10 @@ def test_an_unprovable_successor_is_never_re_pointed(root: Path, shape: str) -> 
     assert refused["code"] == "bridge_credential_pin_gone", refused
     assert "no longer on this device" in refused["error"]
     assert "sign in to Radient to use agent messages" not in refused["error"]
+    # The heal declined above, so the wording must not promise it (QA round 1, Q1).
+    assert refused["error"] == host.PIN_GONE_SENTENCE, refused
+    assert "by itself" not in refused["error"] and "re-points" not in refused["error"]
+    assert "not repaired automatically" in refused["error"]
 
 
 def test_a_genuinely_signed_out_device_keeps_the_sign_in_sentence(root: Path) -> None:
@@ -371,3 +378,29 @@ def test_a_live_pin_is_never_churned_across_repeated_refusals(
     assert len(attempts) >= 9, "the refusal arm really ran repeatedly"
     assert (_enrollment(root), loop_mod._owner_signal(root), database.read_bytes()) == snapshot
     assert _heals(root) == []
+
+
+# ---------------------------------------------------------------------------
+# 5. A heal that loses the race to another writer is benign, not a warning.
+# ---------------------------------------------------------------------------
+
+
+def test_a_heal_losing_the_race_logs_owner_moved_at_info(root: Path, monkeypatch, caplog) -> None:
+    from local_operator.team_bridge import heal
+    from local_operator.team_bridge.store import StoreRefused
+
+    _enroll(root, _gone_row(root))
+    _row(root)
+
+    def _lost(*_a: Any, **_k: Any) -> None:
+        # What ``commit_enrollment`` raises when the login hook and the
+        # receiver race and the other one re-pointed first.
+        raise StoreRefused("owner_moved", "the enrollment changed since the heal read it")
+
+    monkeypatch.setattr(Store, "commit_enrollment", _lost)
+    caplog.set_level("INFO", logger=heal.logger.name)
+    assert heal.heal_credential_pin(config_dir=root, trigger=heal.TRIGGER_RECEIVER_START) == ""
+    skipped = [r for r in caplog.records if "heal skipped" in r.getMessage()]
+    assert [(r.levelname, r.getMessage()) for r in skipped] == [
+        ("INFO", "team bridge credential heal skipped: code=owner_moved")
+    ]

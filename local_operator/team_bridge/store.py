@@ -2642,7 +2642,10 @@ class Store:
         A missing/corrupt/unsupported database reads as "no authority"; the
         caller must stop (the handoff's fail-closed law). ``credential_id``
         narrows to the EXACT pinned credential: a same-account re-login with a
-        new credential row is a DIFFERENT owner and needs explicit rebinding.
+        new credential row does not match until ``team_bridge.heal`` re-points
+        the enrollment at it (provable same-account successor only; a login or
+        the receiver's recheck triggers it). Anything it cannot prove still
+        needs an explicit re-enrolment.
         """
 
         try:

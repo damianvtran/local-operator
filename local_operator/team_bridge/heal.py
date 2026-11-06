@@ -118,7 +118,13 @@ def heal_credential_pin(
             heal_trigger=trigger,
         )
     except Exception as exc:  # noqa: BLE001 — a heal must never fail its caller
-        logger.warning("team bridge credential heal skipped: code=%s", type(exc).__name__)
+        # ``owner_moved`` is a racing heal (login hook vs receiver) or a
+        # concurrent re-enrolment winning the write lock: the enrollment is
+        # already where it should be, so it is not an operator-facing warning.
+        if getattr(exc, "code", None) == "owner_moved":
+            logger.info("team bridge credential heal skipped: code=owner_moved")
+        else:
+            logger.warning("team bridge credential heal skipped: code=%s", type(exc).__name__)
         return ""
     return (
         f"team bridge enrollment re-pointed from credential {owner.credential_id} "
@@ -141,5 +147,30 @@ def pin_gone_with_login_present(auth_store: Any, credential_id: int) -> bool:
             row.credential_type == "oauth" and not auth_store.grant_is_dead(row.id)
             for row in auth_store.list_credentials("radient")
         )
+    except Exception:  # noqa: BLE001 — a wording choice must not fail a refusal
+        return False
+
+
+def pin_gone_self_repairs(config_dir: Path | None, auth_store: Any, credential_id: int) -> bool:
+    """Would :func:`heal_credential_pin` re-point the enrollment pinned at ``credential_id``?
+
+    The pin-gone refusal promises a self-repair ONLY when this is true
+    (QA round 1, Q1): "a login is present" is not the heal's proof — two
+    same-account logins, or a different account, make the heal decline — so
+    the wording runs the SAME proof (:func:`_successor`, committed account and
+    hub) read-only. The committed owner must still pin ``credential_id``: once
+    it moved, the session's own owner fence answers ``owner_changed`` instead.
+    Never raises (``False``, the wording that promises nothing).
+    """
+
+    try:
+        from local_operator.team_bridge.store import Store, state_db_path
+
+        if config_dir is None or not state_db_path(config_dir).exists():
+            return False
+        owner = Store(config_dir).active_owner()
+        if owner is None or owner.credential_id != credential_id:
+            return False
+        return _successor(owner, auth_store, None) is not None
     except Exception:  # noqa: BLE001 — a wording choice must not fail a refusal
         return False
