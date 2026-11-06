@@ -29,7 +29,7 @@ from local_operator.harness.types import (
 from local_operator.monitors.spec import MonitorSpec
 from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
 from local_operator.session.session import (
-    MCP_DISCOVERY_PENDING_DETAIL,
+    MCP_DISCOVERY_FAILED_DETAIL,
     MCP_NOT_READY_DETAIL,
 )
 from tests.unit.session.test_session import ScriptedStream, make_session
@@ -487,11 +487,11 @@ async def test_a_manager_whose_discovery_did_not_complete_is_unavailable(tmp_pat
     try:
         assert session._monitor_availability(mcp_name()) == (
             "unavailable",
-            MCP_DISCOVERY_PENDING_DETAIL,
+            MCP_DISCOVERY_FAILED_DETAIL,
         )
         outcome = await session._run_monitor_check(_spec())
         assert outcome["kind"] == "unavailable"
-        assert outcome["error"] == MCP_DISCOVERY_PENDING_DETAIL
+        assert outcome["error"] == MCP_DISCOVERY_FAILED_DETAIL
     finally:
         await session.dispose()
 

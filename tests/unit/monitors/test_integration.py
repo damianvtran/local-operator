@@ -33,7 +33,7 @@ from local_operator.monitors import state as monitor_state
 from local_operator.monitors import store as monitor_store
 from local_operator.monitors.spec import MonitorSpec
 from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
-from local_operator.session.session import Session
+from local_operator.session.session import MCP_DISCOVERY_FAILED_DETAIL, Session
 from local_operator.session.transcript import Transcript
 from tests.unit.monitors.support import drain_checks
 from tests.unit.monitors.test_session_monitor_availability import FakeManager
@@ -609,7 +609,7 @@ async def test_a_tick_after_a_failed_discovery_takes_no_strike(
         assert counters["consecutive_failures"] == 0, "a discovery in flight is not a failure"
         assert counters["unavailable_ticks"] == 5
         assert counters["checks"] == 0
-        assert "still being discovered" in counters["last_error"]
+        assert MCP_DISCOVERY_FAILED_DETAIL in counters["last_error"]
         assert not counters.get("disabled"), counters.get("disabled_reason")
         assert counters["next_due_at"] is not None
     finally:

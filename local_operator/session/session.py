@@ -3310,13 +3310,18 @@ MCP_NOT_READY_DETAIL = (
     "MCP servers are not connected in this session yet — the runtime is still starting"
 )
 
-#: The one sentence for "this session's MCP discovery did not COMPLETE", i.e. a
-#: manager that IS attached but whose configs were never read, so it has no
-#: roster to look a name up in. Distinct from :data:`MCP_NOT_READY_DETAIL`
-#: (no manager at all) and, like it, no strike is charged: nothing was removed,
-#: and the next `/mcp reload` re-reads what the raise never read (see
-#: ``_monitor_availability`` and ``_mcp_discovery_incomplete``).
-MCP_DISCOVERY_PENDING_DETAIL = "MCP servers are still being discovered in this session"
+#: The one sentence for "this session's MCP discovery FAILED", i.e. a manager
+#: that IS attached but whose configs were never read, so it has no roster to
+#: look a name up in. Distinct from :data:`MCP_NOT_READY_DETAIL` (no manager at
+#: all) and, like it, no strike is charged: nothing was removed.
+#:
+#: The copy names the CAUSE and the REMEDY, not a wait, because nothing retries
+#: by itself: ``discover_and_connect`` runs once per manager, and the raise in
+#: ``mcp/__init__.py`` returns before ``_connect_round`` — the only thing that
+#: fills ``_configs`` — so only an explicit ``/mcp reload`` (``manager.reload``)
+#: can clear this state. Telling the operator to wait would be a promise no
+#: code keeps.
+MCP_DISCOVERY_FAILED_DETAIL = "MCP discovery failed at startup — run /mcp reload to retry it"
 
 
 class Session:
@@ -30746,10 +30751,10 @@ class Session:
             if self._mcp_discovery_incomplete():
                 # The one attached-manager shape whose empty roster is NOT an
                 # answer: discovery raised inside the wrapper, so the manager
-                # was built but never got `_configs`. See the helper — the
-                # evidence is the discovery failure the same wiring recorded,
-                # and the sentence names a wait, not a removal.
-                return ("unavailable", MCP_DISCOVERY_PENDING_DETAIL)
+                # was built but never got `_configs`. See the helper for the
+                # evidence (the failure the same wiring recorded) and the
+                # constant for why the sentence names a retry, not a wait.
+                return ("unavailable", MCP_DISCOVERY_FAILED_DETAIL)
             # NOT excused: a manager exists (so its connect round finished) and
             # does not name this server's prefix, which means the name is not
             # configured at all -- a typo, a server removed from the config, or
@@ -30818,16 +30823,28 @@ class Session:
 
         - the discovery key is PRESENT in ``failures``. No record at all
           (``mcp_startup is None``: a bare embedder, a reduced test host) is
-          not proof a round is in flight, and an outcome without that failure
-          is a COMPLETED round that found nothing configured — a real removal
-          that must keep walking the ladder.
+          not proof the round failed, and an outcome without that failure is a
+          COMPLETED round that found nothing configured — a real removal that
+          must keep walking the ladder.
         - ``configured`` is EMPTY. The discovery key is also the collapse
           target when every configured server failed for one setup reason (the
           MCP SDK missing), and there the round DID complete with the roster
-          known: a name that roster does not name is a stale name, not a load
-          in progress. An empty roster can only arrive with an empty
+          known: a name that roster does not name is a stale name, not a
+          failed round. An empty roster can only arrive with an empty
           ``configured`` (both read the same manager state), so this narrows
           that corner without touching the raise shape above.
+
+        KNOWN LIMIT: ``mcp_startup`` is a BOOT snapshot that no later path
+        rewrites, so a successful ``/mcp reload`` does not clear this record.
+        After a failing boot, a reload that connects the watched server
+        resolves the name directly and never reaches this question; a reload
+        that leaves the name unconfigured still reads as "the boot round
+        failed" and waits the unavailable window out instead of walking the
+        ladder in five ticks. Both outcomes are bounded (24 h) and neither
+        can disable a watch over a server that was actually there, so this is
+        a diagnosis that is older than the truth rather than a wrong one —
+        narrowing it needs a signal the record does not carry (review NIT-1,
+        accepted as deferred).
         """
         outcome = self.mcp_startup
         failures = getattr(outcome, "failures", None) or {}
