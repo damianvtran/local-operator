@@ -526,9 +526,7 @@ def _viewer(tmp_path: Path, monitors: list[MonitorState] | None = None) -> Attac
     return viewer
 
 
-async def _paint_host(
-    session: Any, *, size: tuple[int, int] = (100, 30)
-) -> tuple[bool, str]:
+async def _paint_host(session: Any, *, size: tuple[int, int] = (100, 30)) -> tuple[bool, str]:
     """``_paint`` for a caller that owns the whole session object."""
     app = _PanelHost()
     async with app.run_test(size=size) as pilot:

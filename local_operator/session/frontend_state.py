@@ -5832,9 +5832,7 @@ class SnapshotMonitorScheduler:
         # drop the health keys — ``blind``, ``consecutive_failures`` — that live
         # only in counters, turning a stalled watch into a quiet one.
         rows = [value.model_dump() for value in values]
-        self._rows: dict[str, dict[str, Any]] = {
-            str(row.get("id", "")): row for row in rows
-        }
+        self._rows: dict[str, dict[str, Any]] = {str(row.get("id", "")): row for row in rows}
         self.monitors = [SimpleNamespace(**row) for row in rows]
 
     def runtime(self, monitor_id: str) -> Any | None:
