@@ -382,6 +382,60 @@ REMOTE_PARK_ASK_HINTS = (
     "runs on {device}",
 )
 
+# --- the park's DURABLE row -------------------------------------------------
+#
+# The toast and the banner above are edges: a reader who is not looking loses
+# them, and the 2026-09-28 offload test (a session on a peer, parked for hours
+# while the origin was told nothing) is what that costs. The inbox row is the
+# durable half (``notifications/remote_park.py``), and it is the ONE surface
+# with room for the exact one-time remedy — so the remedy lives here rather
+# than only in the card, which is budgeted to a toast.
+#
+# WHY THIS ONE NAMES COMMANDS (design note §2.9 says a remedy names a product
+# action, never a terminal command). §2.9's reader is a PHONE, which cannot run
+# either of these; this row's reader is the machine the session was offloaded
+# FROM, whose owner asked for an actionable step and got "ask Local Operator to
+# set up operator authority", which is not a step. The commands are the ones
+# ``operator/cli.py`` actually ships (``anchor export --file``, ``install
+# --from``) — never a spelling invented here.
+REMOTE_PARK_APPROVAL_REMEDY_COMMANDS = (
+    "Allowing it happens on {device} (Touch ID) or on a phone paired with it. If {device} "
+    "cannot check a signature yet, this machine's operator anchor is not installed there: "
+    "run `lop operator anchor export --file anchor.json` on this machine, copy that file "
+    "to {device}, then run `lop operator install --from anchor.json` on {device} once "
+    "(one admin password prompt). That lets {device} check a signature made on this "
+    "machine; it grants nothing else."
+)
+
+
+def remote_park_item_title(device: str, kind: str) -> str:
+    """The inbox row's title: the same state sentence the toast opens with.
+
+    Deliberately NOT a second spelling of the state (the row and the toast are
+    one event on two surfaces), and the device name is in it because that is
+    the fact the reader needs to know where the gesture happens.
+    """
+    if kind == "approval":
+        return REMOTE_PARK_APPROVAL_TITLE.format(device=device)
+    return REMOTE_PARK_ASK_TITLE.format(device=device)
+
+
+def remote_park_item_body(device: str, kind: str) -> str:
+    """The inbox row's body: what still works here, then the exact remedy.
+
+    Two paragraphs because they answer two different questions in the order the
+    reader asks them — "can I answer this from where I am?" (deny: yes) and
+    "what ends this state?" (the anchor install). An ask has no authority term
+    at all, so its body stays the card's one sentence.
+    """
+    if kind == "approval":
+        return (
+            REMOTE_PARK_APPROVAL_LEAD
+            + "\n\n"
+            + REMOTE_PARK_APPROVAL_REMEDY_COMMANDS.format(device=device)
+        )
+    return REMOTE_PARK_ASK_BODY
+
 
 def remote_park_card(device: str, kind: str, *, name: str = "", attached: bool = False) -> str:
     """The in-app card for a park on ``device``: title line(s), then the body.

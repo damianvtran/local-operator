@@ -84,6 +84,25 @@ settles one: dismissing it — by id, by session or all — answers
 the existing reasoned "Dismiss ask…" doors, which tell the agent. Related
 projects come from the session's project links at read time.
 
+### 2.1 The two writers that are not the tool
+
+A gate that parks a person writes the same rows through the same door, because
+"the model asked for attention" and "the run cannot continue without a person"
+are the same problem from the operator's side:
+
+* ``Session.raise_gate_item`` — a LOCAL approval or ask (2026-10-30).
+* ``notifications/remote_park.raise_park_item`` — the same event on a session
+  that runs on a PEER, keyed by ``(device, session, kind)`` alongside the peer
+  session's id (2026-11-05). Its row is the durable half of the park notice the
+  TUI already toasts, and its body carries the exact anchor-install remedy for
+  a peer that cannot check a signature. It is cleared when the park clears, and
+  it is REOPENED (unread, un-dismissed) when the same conversation parks again:
+  the store's collapse otherwise leaves the second identical wait with no row.
+
+Neither raiser banners: the park's OS banner belongs to the surface that owns
+the park's announce decision (`_announce_pending`, the TUI notifier), and one
+event must not produce two lock-screen cards.
+
 ## 3. The `notify` tool
 
 ### 3.1 Schema

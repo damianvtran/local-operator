@@ -23,8 +23,11 @@ and what a machine hears:
 * while THIS app is attached to the parked session neither fires: the gate card
   is already on screen with the device hint on it, and the app must not toast
   over its own dock card;
-* nothing is written to the attention store — a park has no token, and the
-  store's rule is that no automatic path acknowledges (design note §2).
+* nothing is written to the ATTENTION store — a park has no completion token,
+  and that store's rule is that no automatic path acknowledges (design note
+  §2). The operator's INBOX is a different store and does gain a row per live
+  park (``notifications/remote_park.py``); the pairing is pinned at the bottom
+  of this file, through the same detector these cells drive.
 
 ``test_tunnel_park_notice.py`` is the sibling suite (a park of THIS machine's
 connector); this one is the mesh half.
@@ -597,3 +600,52 @@ async def test_a_stored_unread_completion_raises_no_card() -> None:
         await pilot.pause()
         assert not _toast(app).display
         assert app._remote_park_episodes == {}
+
+
+@pytest.mark.asyncio
+async def test_a_park_on_a_peer_raises_a_row_in_the_operator_inbox(tmp_path: Path) -> None:
+    """The DURABLE half, through the real detector (behaviour 1 of the slice).
+
+    A toast is an edge for a reader who is looking. The 2026-09-28 offload test
+    is the case where nobody was: a session on a peer parked for hours and this
+    machine held no record of it. So the same transition that shows the card and
+    the banner must leave a row the operator finds when they come back — and
+    that row must leave again when the park does, or the reel contradicts the
+    answer that ended it.
+
+    Driven through ``_note_remote_parks`` rather than the raiser directly: a
+    raiser nothing calls is exactly the defect this pins.
+    """
+    from local_operator.notifications.remote_park import item_key
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.paths import config_dir
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+
+        app._note_remote_parks((_parked(),))
+        await pilot.pause()
+
+        root = config_dir()
+        store = NotificationStore(root)
+        row = store.get_by_key("s_parked", item_key("d_bb", "s_parked", "approval"))
+        assert row is not None, "a park on a peer left no durable row on this machine"
+        assert "demo-laptop" in row["title"]
+        assert row["priority"] == "high"
+        assert row["dismissed"] is False
+
+        # Polling the same park again is not a second row, nor a second unread.
+        app._note_remote_parks((_parked(),))
+        await pilot.pause()
+        unread = [one for one in store.list_items(state="unread")[0]]
+        mine = [one for one in unread if one["session_id"] == "s_parked"]
+        assert len(mine) == 1, "a second poll of one park added a second unread row"
+
+        # The park clears: the row leaves with the card.
+        app._note_remote_parks(())
+        await pilot.pause()
+        cleared = store.get_by_key("s_parked", item_key("d_bb", "s_parked", "approval"))
+        assert (
+            cleared is not None and cleared["dismissed"] is True
+        ), "an answered park left its inbox row standing"
