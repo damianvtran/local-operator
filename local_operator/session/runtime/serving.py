@@ -602,6 +602,13 @@ class _PromptCommand:
     #: delivery, a compaction) before handing this command to ``Session.prompt``.
     #: See ``ServingSessionHandle.prompt``'s ``wait_for_turn``.
     wait_for_turn: bool = True
+    #: The terminal event's own error text, when this command's turn failed.
+    #: Recorded by the drain's outcome observer because ``completed`` carries only
+    #: the VERDICT: a ``wait_complete`` caller that got a bare "did not complete"
+    #: had no way to tell the user WHY (a model refusal, a rate limit, a provider
+    #: outage all read the same), and the sentence is the whole of what makes the
+    #: failure actionable. Empty for every turn that did not fail.
+    failure: str = ""
     #: Silent input metadata (see ``Message.input_mode``) carried from the wire
     #: to the durable row: set by the desktop composer for a dictation send and
     #: for the reserved ``input_path`` route slot; ``None`` for every legacy
@@ -4235,7 +4242,13 @@ class ServingSessionHandle(SessionHandle):
         await asyncio.shield(admitted)
         self._command_reservations.accept(command_id)
         if completed is not None and not await asyncio.shield(completed):
-            raise RuntimeError("The admitted loop turn did not complete")
+            # A TYPED failure, so the caller can report "your message ran and the
+            # turn failed" instead of reading it as an admission refusal. The
+            # cause rides it: a caller with no cause gets the historical sentence
+            # byte for byte (see ``FirstTurnFailed``).
+            from local_operator.session.errors import FirstTurnFailed
+
+            raise FirstTurnFailed(command.failure)
         if legacy_prompt and position > 1:
             return f"prompt queued ({position})"
         return "prompt admitted"
@@ -5046,6 +5059,12 @@ class ServingSessionHandle(SessionHandle):
                     return
                 if isinstance(event, AgentEndEvent) and (event.error or event.aborted):
                     emitted_failure = True
+                    # THE CAUSE, KEPT FOR THE WAITING CALLER (see
+                    # ``_PromptCommand.failure``): the verdict alone cannot say
+                    # whether a model refused, a login expired, or a provider was
+                    # down, and those need different actions from the person.
+                    if event.error:
+                        command.failure = str(event.error)
                 # The last COMPLETED tool boundary, recorded while the turn is
                 # still running: a turn that is killed never reaches its close,
                 # and "which boundary it last completed" is what keeps the

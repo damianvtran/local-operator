@@ -591,7 +591,17 @@ def add_parser(
     )
     net_sessions.add_argument("--cwd", default="", help="with --create: where it should run")
     net_sessions.add_argument("--name", default="", help="with --create: its title")
-    net_sessions.add_argument("--prompt", default="", help="with --create: its first turn")
+    net_sessions.add_argument(
+        "--prompt",
+        default="",
+        help=(
+            "with --create: its first turn, run on that device once its runtime is up. "
+            "The receipt reports whether it settled — completed, failed (with the cause), "
+            "or still running — so a failure is reported here whenever that owner can "
+            "settle the turn; against an older owner the receipt says it cannot see the "
+            "end instead of claiming one"
+        ),
+    )
     # WHO THE SESSION IS (definitions.py). Three flags, each naming a DISTINCT
     # thing the local product can put on a session, because collapsing them would
     # make one word mean two and the frame already has to say which it got:
@@ -7892,6 +7902,36 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 str(detail.get("detail") or "")
                 or ("prompt admitted" if admitted else "the prompt was not admitted")
             )
+            # WHAT BECAME OF THAT FIRST TURN (CR-1). "prompt admitted" is the
+            # durable append, not the turn: a turn that failed a second later on
+            # that device was reported to nobody here, so the person watched a
+            # conversation that never answered (measured on a real peer,
+            # 2026-11-06). `--send` reads the same fact off a viewer stream; a
+            # create has no stream, so the OWNER settles its own turn and this
+            # renders what it reported.
+            #
+            # THE THREE STATES ARE THE OWNER'S OWN WORDS, and `settled` is the
+            # only one that may say "completed": it is carried by an owner that
+            # honoured the wait, never inferred from this side having asked
+            # (agent review round 1, BLOCKER-1 — an older peer's append ack is
+            # byte-identical to a settling peer's success).
+            turn = detail.get("turn")
+            if isinstance(turn, dict):
+                state = str(turn.get("state") or "")
+                if state == "failed":
+                    why = str(turn.get("detail") or "the turn ended in failure")
+                    lines.append(f"turn failed on {peer}: {why}")
+                elif state == "settled":
+                    lines.append(f"turn: completed on {peer}")
+                elif state == "running":
+                    # NO "FOLLOW IT WITH --peek" HERE (agent review round 1,
+                    # MAJOR-2): over the real journal a failed turn's assistant row
+                    # is `content: null` and its cause is an incident record with no
+                    # `.text`, so the peek window filters both out and shows the
+                    # user their own message and nothing else — the dead end this
+                    # whole slice exists to end. Saying the outcome is NOT reported
+                    # is true; naming a read that silently cannot show it is not.
+                    lines.append(f"turn: running on {peer} — this receipt cannot see how it ends")
         else:
             lines.append(
                 "no prompt sent — the session exists on that device; "

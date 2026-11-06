@@ -9254,15 +9254,52 @@ class RelayServer:
         elif wanted_model:
             model_result = self._set_model_on(session_id, wanted_model)
         admitted = False
+        prompt_state = ""
         prompt_detail = ""
         if prompt:
-            admitted, prompt_detail = self._prompt_on(session_id, prompt, frame.get("images"))
+            outcome = self._prompt_on(session_id, prompt, frame.get("images"))
+            admitted = bool(outcome["admitted"])
+            prompt_state = str(outcome["state"])
+            prompt_detail = str(outcome["detail"])
+        first_turn = (
+            # WHAT BECAME OF THE FIRST TURN, for the ONE case the requester cannot
+            # see for itself: the turn ran on THIS device, and `--send`'s own
+            # reporting (a viewer stream that waits for the terminal outcome,
+            # ``attached.prompt_and_wait``) does not exist on a create. Without
+            # this, a create that carries a prompt answers "prompt admitted" and
+            # the requester's user reads a silent conversation while the turn has
+            # already failed here (2026-11-06: the failure landed 1.2 s after the
+            # row and never left this machine).
+            #
+            # GATED ON THE PROMPT ALONE, NEVER ON ``admitted`` (agent review round 2,
+            # MINOR): the states that most need telling apart are the ones where
+            # admission is NOT established — ``refused`` (the owner said no) and
+            # ``unreported`` (its socket died before it answered, so whether the
+            # message landed is unknown). Keying this block on ``admitted`` collapsed
+            # both into "no turn block at all", which left a `--json` consumer and the
+            # desktop route unable to tell a certain refusal from an absence of
+            # knowledge. Every state is reported; its name is what carries the fact.
+            {"state": prompt_state, "detail": prompt_detail if prompt_state == "failed" else ""}
+            if prompt
+            else None
+        )
         return {
             "session_id": session_id,
             "admitted": admitted,
             "duplicate": False,
-            "detail": prompt_detail,
+            # THE COMPLAINT, and a FAILED TURN IS NOT ONE: its sentence rides the
+            # ``turn`` block below, and putting it here too printed it twice on the
+            # receipt (once where the admission line goes, once where the outcome
+            # goes). ``detail`` keeps the REFUSAL's sentence, which is the fact a
+            # caller branches on beside ``admitted: false``.
+            "detail": "" if prompt_state == "failed" else prompt_detail,
             "model": model_result,
+            # KEYED AS ITS OWN BLOCK rather than folded into ``detail``: ``detail``
+            # is the create's COMPLAINT (and the CLI reads it as the sentence
+            # beside ``created on <peer>``), while this is a report about a turn
+            # that legitimately ran. A promptless create omits the key entirely,
+            # so a ``--json`` consumer's shape is unchanged where nothing ran.
+            **({"turn": first_turn} if first_turn is not None else {}),
             # WHAT THE SESSION ACTUALLY IS, so the requester can show the binding it
             # asked for instead of guessing it from its own registries — a claim
             # about a store that does not hold this session (the desktop route already
@@ -10697,17 +10734,57 @@ class RelayServer:
             return {"applied": False, "detail": str(reply.get("message") or "refused")}
         return {"applied": True, "detail": ""}
 
-    def _prompt_on(self, session_id: str, text: str, images: Any) -> tuple[bool, str]:
-        """Admit the first prompt of a freshly created session.
+    def _prompt_on(self, session_id: str, text: str, images: Any) -> dict[str, Any]:
+        """Admit the first prompt of a freshly created session, and say what became of it.
 
-        The `command_id` is minted HERE and is a real idempotency key: it rides
-        the runtime's own durable-admission path, so a retry of this create
-        cannot run the turn twice.
+        Returns ``{"admitted": bool, "state": str, "detail": str}``, where
+        ``state`` is one of ``refused`` / ``unreported`` / ``running`` /
+        ``failed`` / ``settled``:
+
+        * ``refused`` — this device's runtime would not take the message at all
+          (unreachable, or an admission gate said no). Nothing is in the
+          transcript.
+        * ``unreported`` — the owner closed the connection before it answered, so
+          whether the message landed is UNKNOWN. Not a refusal: a refusal is a
+          fact, and this is the absence of one (``dial.eof`` is what tells the
+          two apart — a bare timeout is ``running``).
+        * ``running`` — admitted, and the turn had not settled within this
+          device's op budget, or the owner is one that answers at the append and
+          cannot settle at all. Not a failure and not a completion.
+        * ``failed`` — the message IS in the transcript and the turn it opened
+          ended in failure; ``detail`` is the provider's/runtime's own cause.
+        * ``settled`` — the OWNER reported that the turn finished. This is read
+          off the owner's own ``settled`` marker on the ack and never off this
+          device's request: an owner from before that marker acks at the durable
+          append with a reply byte-identical to a settling owner's success, so
+          keying on "we asked" printed ``turn: completed`` for a turn nobody
+          waited for (agent review round 1, BLOCKER-1).
+
+        THE OUTCOME IS THE POINT, and it exists because the bare boolean this
+        returned was read as "the turn happened". ``prompt``'s reply is the
+        DURABLE APPEND, not the outcome (``serving.ServingSessionHandle.prompt``
+        says so in its own docstring), so a peer asked for a session with a first
+        prompt could answer "prompt admitted" for a turn that had already died on
+        a model the requesting device cannot see — measured on a real peer
+        (2026-11-06): user row at 1.0 s, provider failure at 2.2 s, and the
+        creating device was told nothing at all, so its user polled a silent
+        conversation for seven minutes. ``lop network sessions --send`` reports
+        the same failure because it waits on a viewer stream
+        (``attached.prompt_and_wait``); a create has no stream, so it asks its own
+        runtime to settle the turn and reports THAT.
+
+        ``wait_complete`` rides the existing prompt op, which is why no new wire op
+        was needed. It is sent unconditionally because this hop has exactly one
+        caller — a create that carries a first prompt — so a "do not wait" arm
+        would be a branch nothing can reach (agent review round 1, NIT-5). The
+        ``command_id`` is minted HERE and is a real idempotency key: it rides the
+        runtime's own durable-admission path, so a retry of this create cannot run
+        the turn twice.
         """
         try:
             dial = self._dial_owned(session_id, capabilities=("prompt",))
         except session_dial.OwnerUnreachable as exc:
-            return False, str(exc)
+            return {"admitted": False, "state": "refused", "detail": str(exc)}
         try:
             reply = dial.exchange(
                 {
@@ -10716,17 +10793,49 @@ class RelayServer:
                     "command_id": str(uuid.uuid4()),
                     "text": text,
                     "images": list(images or []),
+                    "wait_complete": True,
                 },
                 timeout_s=self.settings.op_wait_s,
             )
+            # READ BEFORE THE CLOSE, and it is what separates the two silences:
+            # ``exchange`` answers ``None`` both for "quiet past the budget" and
+            # for "the owner's socket went away" (``dial.OwnerDial.eof`` says
+            # exactly this), and reporting a dead owner as admitted-and-running
+            # claimed durability nobody observed (agent review round 1, MINOR-4).
+            owner_gone = dial.eof
         finally:
             dial.close()
         if reply is None:
-            return False, "the runtime did not admit the prompt"
+            if owner_gone:
+                return {
+                    "admitted": False,
+                    "state": "unreported",
+                    "detail": (
+                        f"{session_id}'s owner closed the connection before it reported the "
+                        "first turn, so whether the message landed is unknown — read the "
+                        "session on that device before re-sending"
+                    ),
+                }
+            # A ``wait_complete`` reply arrives only AFTER the turn, so silence
+            # here means the turn outlived the budget: the message is durable and
+            # its turn is still going (the append precedes the settle).
+            return {"admitted": True, "state": "running", "detail": ""}
         if reply.get("op") == "error":
-            return False, str(reply.get("message") or "the runtime refused the prompt")
+            message = str(reply.get("message") or "the runtime refused the prompt")
+            if reply.get("error_code") == "turn_failed":
+                # THE TURN WAS ADMITTED AND FAILED. Reported as such: the caller
+                # must not read it as a message that never landed.
+                return {"admitted": True, "state": "failed", "detail": message}
+            return {"admitted": False, "state": "refused", "detail": message}
         detail = reply.get("detail")
-        return True, "" if detail is None else str(detail)
+        # THE OWNER'S OWN MARKER, never this device's request (BLOCKER-1): an
+        # owner that settled says so; an older owner's append ack cannot.
+        settled = reply.get("settled") is True
+        return {
+            "admitted": True,
+            "state": "settled" if settled else "running",
+            "detail": "" if detail is None else str(detail),
+        }
 
     def _row_for(self, session_id: str) -> dict[str, Any] | None:
         """One session's row from the SAME builder `net_catalog` uses."""
