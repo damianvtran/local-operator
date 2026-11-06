@@ -401,6 +401,155 @@ async def test_a_non_http_scheme_is_absent_without_a_request(
     assert seen == []
 
 
+def _spy_dns(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every name the address guard asks DNS about; return the log.
+
+    Replaces the pinned fixture for one test. It mirrors the two halves of the
+    production resolver that matter here WITHOUT touching the network: an IP
+    literal short-circuits (no lookup is recorded, exactly as
+    ``_resolve_host_ips`` skips ``getaddrinfo`` for one), and a name is IDNA
+    encoded first, which is what ``socket.getaddrinfo`` does to a ``str`` host
+    before it sends anything — so ``.`` raises the same ``UnicodeError`` QA
+    measured against real DNS for ``./notes/plan.md`` (it became a 500).
+    """
+    import ipaddress
+
+    looked_up: list[str] = []
+
+    def _resolve(hostname: str) -> list[str]:
+        try:
+            ipaddress.ip_address(hostname)
+            return [hostname]
+        except ValueError:
+            pass
+        looked_up.append(hostname)
+        hostname.encode("idna")
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(fetch_service, "_resolve_host_ips", _resolve)
+    return looked_up
+
+
+#: Inputs a message can carry that are NOT absolute http(s) URLs with a host,
+#: and the coded absence each must answer. Scheme-less spellings are refused as
+#: ``unsupported-scheme`` (no http/https scheme at all) rather than having
+#: ``https://`` prepended — QA measured ``README.md`` being fetched as the site
+#: ``https://README.md`` after a real DNS lookup. A URL that names http(s) but no
+#: usable host, or does not parse, is ``blocked-host``: the code the renderer
+#: draws as "could not be used" with no Retry.
+_REFUSED_TARGETS = [
+    ("README.md", "unsupported-scheme"),
+    ("example.com/login", "unsupported-scheme"),
+    ("//evil.example/p", "unsupported-scheme"),
+    ("./notes/plan.md", "unsupported-scheme"),
+    ("#section", "unsupported-scheme"),
+    ("mailto:x@y", "unsupported-scheme"),
+    ("javascript:", "unsupported-scheme"),
+    ("https:///no-host", "blocked-host"),
+    ("https://./x", "blocked-host"),
+    ("https://[::1/unterminated", "blocked-host"),
+    ("https://preview.test:99999/x", "blocked-host"),
+    # A COLLAPSED SCHEME is refused too, and that is a deliberate narrowing: the
+    # shared fetcher repairs ``https:/host`` to ``https://host``, but a preview's
+    # contract is an absolute URL, and keeping the repair here would be a second
+    # spelling of "guess what the operator meant". The renderer already shows the
+    # original text, so nothing is lost but a fetcher-shaped reinterpretation.
+    ("https:/preview.test/x", "blocked-host"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("url", "reason"), _REFUSED_TARGETS)
+async def test_a_non_absolute_url_is_a_coded_absence_with_no_lookup_or_fetch(
+    url: str, reason: str, monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(monkeypatch, lambda request: httpx.Response(200, content=_html("")))
+    async with _client() as client:
+        response = await _post(client, {"url": url, "index": 0, "expected_account_id": ACCOUNT})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"kind": "absent", "reason": reason}
+    assert looked_up == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "lookups"),
+    [
+        # The control: an ordinary absolute https URL is still looked up and fetched.
+        ("https://preview.test/page", ["preview.test"]),
+        # A non-ASCII path is a real URL, not a parse error: it is fetched.
+        ("https://preview.test/caf\u00e9/notes", ["preview.test"]),
+        # A public IP literal is a real host; it is judged directly, with no DNS.
+        ("http://93.184.216.34/page", []),
+    ],
+)
+async def test_an_absolute_http_url_with_a_host_is_still_resolved(
+    url: str, lookups: list[str], monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=_html("<title>Fixture</title>"),
+        ),
+    )
+    async with _client() as client:
+        response = await _post(client, {"url": url, "index": 0, "expected_account_id": ACCOUNT})
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["kind"] == "ready", result
+    assert result["preview"]["title"] == "Fixture"
+    assert looked_up == lookups
+    assert len(seen) >= 1
+
+
+@pytest.mark.asyncio
+async def test_the_shared_fetcher_still_absolutises_what_a_preview_refuses(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The scheme prepend STAYS in the shared fetcher; only the preview refuses.
+
+    ``normalize_url`` is shared by ``fetch``, ``fetch_bytes`` and the ``web_fetch``
+    tool, where a model genuinely means ``example.com`` and the prepend is the
+    documented repair. Rewriting it would change those callers instead, so this
+    test pins the boundary: the same string is absolutised by the fetcher and
+    refused by the preview, in one place where a future "simplification" that
+    moved the rule into ``normalize_url`` would go red.
+    """
+    from local_operator.web_fetch.service import normalize_url
+
+    assert normalize_url("README.md") == "https://README.md"
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(monkeypatch, lambda request: httpx.Response(200, content=_html("")))
+    async with _client() as client:
+        response = await _post(
+            client, {"url": "README.md", "index": 0, "expected_account_id": ACCOUNT}
+        )
+    assert response.json()["result"] == {"kind": "absent", "reason": "unsupported-scheme"}
+    assert looked_up == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_private_ip_literal_is_refused_without_a_fetch(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(monkeypatch, lambda request: httpx.Response(200, content=b""))
+    async with _client() as client:
+        response = await _post(
+            client, {"url": "http://10.0.0.7/admin", "index": 0, "expected_account_id": ACCOUNT}
+        )
+    assert response.status_code == 200
+    assert response.json()["result"] == {"kind": "absent", "reason": "local-or-private"}
+    assert looked_up == []
+    assert seen == []
+
+
 @pytest.mark.asyncio
 async def test_a_loopback_target_is_refused_as_local_or_private(signed_in: None) -> None:
     async with _client() as client:

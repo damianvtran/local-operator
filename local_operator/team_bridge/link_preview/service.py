@@ -167,13 +167,24 @@ async def resolve_preview(
         return _absent("cap")
 
     # The URL that is FETCHED and RETURNED stays the caller's; only the key is
-    # normalised (see the cache module). A bare host keeps its scheme-less form
-    # here and is absolutised by the fetcher, which is why the card reports the
-    # URL that actually answered rather than the string it was handed.
+    # normalised (see the cache module), which is why the card reports the URL
+    # that actually answered rather than the string it was handed.
+    #
+    # A PREVIEW REQUIRES AN ABSOLUTE http(s) URL WITH A REAL HOST, and that rule is
+    # enforced HERE, before any key, cache read, DNS lookup or request (QA defect
+    # 1-3, core 0.101.4). The shared fetcher is deliberately more forgiving —
+    # :func:`~local_operator.web_fetch.service.normalize_url` prepends ``https://``
+    # to a bare host because a model or a ``read`` sugar realistically hands it
+    # ``example.com`` — and a preview must not inherit that: the string it is
+    # handed is display text out of a chat message, so ``README.md`` is a FILENAME
+    # the operator sees as plain text, not the third-party site ``https://README.md``.
+    # Absolutising it made the machine fetch an arbitrary domain that nobody
+    # named. The prepend therefore stays untouched in the shared path, where other
+    # callers legitimately rely on it, and the refusal lives in this path only.
     target = url.strip()
-    scheme_refusal = _scheme_refusal(target)
-    if scheme_refusal is not None:
-        return _absent(scheme_refusal)
+    target_refusal = _target_refusal(target)
+    if target_refusal is not None:
+        return _absent(target_refusal)
 
     # A URL CARRYING CREDENTIALS IS REFUSED HERE, ON THE RAW SPELLING, BEFORE THE
     # KEY IS BUILT (QA Q2-1). ``canonical_url`` DROPS userinfo — that is what
@@ -260,6 +271,14 @@ async def _resolve_origin(
         return _absent(_policy_reason(refusal.reason))
     except FetchError as error:
         return _error(retryable=_retryable(error))
+    except (UnicodeError, ValueError):
+        # THE FLOOR UNDER THE PARSE-ERROR GUARANTEE: a URL shape the guard above
+        # did not anticipate (a redirect hop's spelling, a host only the resolver
+        # re-encodes) must still never reach the renderer as a 500, because the UI
+        # maps 5xx to a Retry control that cannot help. Nothing was learned about
+        # the host, so it is a coded absence and NOT cached as a verdict on it.
+        logger.debug("link preview refused an unparsable target", exc_info=True)
+        return _absent("blocked-host")
 
     # A refusal or a broken origin is not a page. 4xx can be a WAF challenge and
     # 5xx can be a rolling deploy, so the class decides whether another try could
@@ -499,17 +518,57 @@ async def _store_artifact(
     return stored, raster
 
 
-def _scheme_refusal(target: str) -> AbsentReason | None:
-    """Refuse a non-http(s) scheme before anything resolves it.
+def _target_refusal(target: str) -> AbsentReason | None:
+    """Why ``target`` cannot be previewed as an absolute URL, or ``None`` if it can.
 
-    A bare host has no scheme and is NOT refused: the fetcher normalises it to
-    https, and a link pasted without ``https://`` is the commonest case there is.
+    The contract is exactly one shape — an absolute ``http``/``https`` URL with a
+    real host — and everything else is a CODED, NON-RETRYABLE absence. The codes
+    are the module's existing vocabulary, chosen so the renderer draws the right
+    thing with no Retry control:
+
+    * no usable scheme at all (``README.md``, ``example.com/login``,
+      ``//evil.example/p``, ``./notes/plan.md``, ``#section``) and a non-http(s)
+      scheme (``mailto:``, ``javascript:``, ``file:``) are
+      ``unsupported-scheme``: this surface does not fetch them now and never
+      will, so a retry is a control that cannot succeed.
+    * a http(s) URL whose host is missing, unparsable or not encodable is
+      ``blocked-host`` — the code the card already draws for "no host to judge".
+
+    NOTHING HERE RESOLVES OR FETCHES, and that is the point of refusing on the
+    spelling: a refusal must cost zero DNS lookups. It also closes the crash QA
+    measured — ``./notes/plan.md`` reached ``socket.getaddrinfo``, whose IDNA
+    encode of ``.`` raised ``UnicodeError`` past every handler and became a 500 the
+    UI mapped to a Retry that could never work. A host that cannot be IDNA-encoded
+    is refused here for the same reason, one layer earlier.
+
+    The depth defence is unchanged: :func:`~local_operator.web_fetch.service.
+    validate_public_url` still re-checks every hop, including redirects a parse
+    here never sees.
     """
     if not target:
         return "no-metadata"
-    scheme = urlsplit(target).scheme.lower()
-    if scheme and scheme not in ("http", "https"):
+    try:
+        parts = urlsplit(target)
+        scheme = parts.scheme.lower()
+        # ``hostname`` also validates the netloc (an unterminated IPv6 literal
+        # raises), and ``port`` raises on an out-of-range one; a URL that fails
+        # either is one nothing downstream could use.
+        host = parts.hostname
+        # Reading ``port`` is a VALIDATION, not a use: urlsplit defers the port
+        # parse, so an out-of-range one raises only when the attribute is read.
+        parts.port
+    except ValueError:
+        return "blocked-host"
+    if scheme not in ("http", "https"):
         return "unsupported-scheme"
+    if not host:
+        return "blocked-host"
+    try:
+        host.encode("idna")
+    except (UnicodeError, ValueError):
+        # ``.`` or an over-long label: the resolver's own encode would raise the
+        # same way after a lookup was already attempted.
+        return "blocked-host"
     return None
 
 
