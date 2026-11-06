@@ -1675,6 +1675,21 @@ class TeamBridgeClient:
             return None
         return rows[0]
 
+    def pin_gone_with_login_present(self) -> bool:
+        """Is this client's pinned row gone while a usable Radient login remains?
+
+        The one state in which :data:`SIGN_IN_SENTENCE` is false (a
+        same-identity re-login replaced the row; ``team_bridge.heal``), so a
+        surface can name it instead. ``False`` without a pin: "the sole row"
+        mode has no frozen id to have lost.
+        """
+
+        if self._pinned_credential_id is None:
+            return False
+        from local_operator.team_bridge.heal import pin_gone_with_login_present
+
+        return pin_gone_with_login_present(self._auth_store(), self._pinned_credential_id)
+
     def _require_destination(self) -> None:
         """Refuse a destination the signed-in account's bearer must not travel to.
 

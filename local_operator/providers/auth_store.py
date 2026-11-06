@@ -2697,17 +2697,27 @@ class AuthStore:
                 provider,
             )
             return
+        # The Team Bridge enrollment pins a credential row exactly as the tunnel
+        # does, and reads it from THIS store's root (``<root>/auth.db``), so a
+        # verified login here is also the bridge's same-account heal trigger.
+        bridge_root = self._db_path.parent
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             # No loop on this thread. Deliberately the same call rather than a
             # skipped one: a script driving a login still wants its connector
             # back, and there is no loop here to stall.
-            self._rearm_off_thread(install, provider, stored.id, verified_login)
+            self._rearm_off_thread(install, provider, stored.id, verified_login, bridge_root)
             return
         try:
             loop.run_in_executor(
-                None, self._rearm_off_thread, install, provider, stored.id, verified_login
+                None,
+                self._rearm_off_thread,
+                install,
+                provider,
+                stored.id,
+                verified_login,
+                bridge_root,
             )
         except RuntimeError:
             # A running loop whose default executor is ALREADY SHUT DOWN — and
@@ -2729,11 +2739,15 @@ class AuthStore:
             # describes — a loop on its way out is not serving anyone, so the
             # blocking call it can no longer hand to a thread costs no request,
             # and `_rearm_off_thread` never raises.
-            self._rearm_off_thread(install, provider, stored.id, verified_login)
+            self._rearm_off_thread(install, provider, stored.id, verified_login, bridge_root)
 
     @staticmethod
     def _rearm_off_thread(
-        install: Any, provider: str, credential_id: int, verified_login: bool = False
+        install: Any,
+        provider: str,
+        credential_id: int,
+        verified_login: bool = False,
+        bridge_root: Path | None = None,
     ) -> None:
         """The re-arm itself, where a blocking call costs nobody a turn.
 
@@ -2747,7 +2761,26 @@ class AuthStore:
         a pin the re-arm would decline (``owns != credential_id``) and restarts
         the connector itself, so when it acted the re-arm is skipped rather than
         racing it with a second kickstart from another thread.
+
+        The Team Bridge heal runs FIRST and on its own: it is independent of the
+        tunnel's outcome (the tunnel heal's early return must not skip it), and
+        ``heal_credential_pin`` never raises. ``fresh_id`` makes the row this
+        login just wrote the only acceptable successor.
         """
+        if verified_login and provider == "radient" and bridge_root is not None:
+            try:
+                from local_operator.team_bridge.heal import (
+                    TRIGGER_LOGIN,
+                    heal_credential_pin,
+                )
+
+                bridged = heal_credential_pin(
+                    config_dir=bridge_root, trigger=TRIGGER_LOGIN, fresh_id=credential_id
+                )
+            except Exception:  # noqa: BLE001 — a login must not fail over the bridge
+                bridged = ""
+            if bridged:
+                logger.info("%s", bridged)
         try:
             if verified_login:
                 healed = install.heal_pin_after_login(

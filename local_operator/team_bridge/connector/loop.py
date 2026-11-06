@@ -1154,6 +1154,11 @@ async def run_forever(
                 if idle_code != code:
                     logger.warning("bridge connector failure: stage=iteration code=%s", code)
                     idle_code = code
+                if code == "bridge_sign_in_required" and await _heal_pin(config_dir):
+                    # The enrollment now names the live row: the next pass
+                    # reads a different owner and RETURNS it, and the caller
+                    # re-arms with a client pinned to it — no restart needed.
+                    continue
                 await idle_until_owner_changes(
                     owner,
                     config_dir=config_dir,
@@ -1166,6 +1171,34 @@ async def run_forever(
             await _pause(stop, _failure_delay(failure, backoff))
             backoff = min(backoff * 2.0, BACKOFF_MAX_S)
     return None
+
+
+async def _heal_pin(config_dir: Path) -> bool:
+    """Try the same-account credential heal; ``True`` when it re-pointed.
+
+    WHY HERE. An install that was already broken when it updated (the pinned
+    row deleted by a same-identity re-login) may never sign in again, so the
+    login hook alone would leave it dark forever; this receiver holds the
+    ``ConnectorLock``, so it is the one process that reconciles. Only on the
+    sign-in refusal, once per ``OWNER_RECHECK_S`` at most, and after a heal the
+    pin is live so the proof declines — a healthy receiver never gets here.
+    Not in ``Store`` open paths: readers carry a logical-zero-write contract.
+
+    In a worker thread: the heal opens SQLite stores and waits on their busy
+    bound, which must not stall this loop's pause/stop handling.
+    """
+
+    from local_operator.team_bridge.heal import (
+        TRIGGER_RECEIVER_START,
+        heal_credential_pin,
+    )
+
+    note = await asyncio.to_thread(
+        heal_credential_pin, config_dir=config_dir, trigger=TRIGGER_RECEIVER_START
+    )
+    if note:
+        logger.info("%s", note)
+    return bool(note)
 
 
 def _owner_signal(config_dir: Path) -> tuple[Any, ...]:

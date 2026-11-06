@@ -77,6 +77,21 @@ from .tool import BridgeRuntime
 
 logger = logging.getLogger(__name__)
 
+#: The ``bridge_credential_pin_gone`` refusal (model-facing tool result, like
+#: every sentence in ``_admission_refusal``). The pinned login row is gone but
+#: a Radient login IS present, so "sign in to Radient" would be false — the
+#: operator is signed in. Names both real remedies: the receiver's start-time
+#: heal (``team_bridge.heal``) for the same account, and the app-only
+#: enrolment (``setup_cli``: consent is never granted from a terminal) for a
+#: different one. ``lop team-bridge setup`` is the real readiness command.
+PIN_GONE_SENTENCE = (  # i18n: ignore model-facing tool refusal, like its siblings
+    "agent messages are enrolled with a Radient login that is no longer on this "
+    "device. If you are signed in as the same account, the agent-message receiver "
+    "repairs this by itself the next time it starts (check with `lop team-bridge "
+    "setup`); otherwise sign in as the account that owns the enrollment, or enrol "
+    "this account by turning agent messages on in the Local Operator app"
+)
+
 __all__ = [
     "admission_refusal",
     "admit_bridge_runtime",
@@ -221,7 +236,11 @@ async def _admission_fetch(runtime: BridgeRuntime) -> None:
         payload = await runtime.client.status()
     except BridgeSignInRequired:
         runtime.admission = "signin"
-        runtime.admission_note = "signin_required"
+        # A pin whose row is gone while a login IS present is not "signed
+        # out": a same-identity re-login replaced the row (team_bridge.heal).
+        runtime.admission_note = (
+            "pin_gone" if runtime.client.pin_gone_with_login_present() else "signin_required"
+        )
         return
     except BridgeUnreachable:
         # Transport only: nothing was answered. Stays VISIBLY pending
@@ -314,6 +333,11 @@ def admission_refusal(runtime: BridgeRuntime, *, is_read: bool = False) -> dict[
             ),
         }
     if state == "signin":
+        if runtime.admission_note == "pin_gone":
+            return {
+                "code": "bridge_credential_pin_gone",
+                "error": PIN_GONE_SENTENCE,
+            }
         return {
             "code": "bridge_signin_required",
             "error": "sign in to Radient to use agent messages",

@@ -213,6 +213,17 @@ def state_db_path(config_dir: Path) -> Path:
     return Path(config_dir) / "team_bridge" / "state.sqlite3"
 
 
+#: The same-account credential heal's audit receipt (``team_bridge.heal``): one
+#: row per re-point, old row -> new row, which enrollment, which trigger, when.
+#: Ids, the account id and a trigger word only — no token, no name.
+_CREDENTIAL_HEALS_DDL = (
+    "CREATE TABLE IF NOT EXISTS credential_heals ("
+    "owner_key TEXT NOT NULL, old_credential_id INTEGER NOT NULL, "
+    "new_credential_id INTEGER NOT NULL, enrollment_generation INTEGER NOT NULL, "
+    "account_id TEXT NOT NULL, trigger TEXT NOT NULL, at REAL NOT NULL, "
+    "PRIMARY KEY (owner_key, at))"
+)
+
 _CORE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
@@ -4018,6 +4029,8 @@ class Store:
         *,
         cos_session_id: str | None = None,
         require_no_owner: bool = False,
+        expected_credential_id: int | None = None,
+        heal_trigger: str | None = None,
     ) -> None:
         """Atomically commit authority: exact owner + server consent receipt.
 
@@ -4035,9 +4048,28 @@ class Store:
         3/40). Under ``BEGIN IMMEDIATE`` the count and the insert cannot
         interleave, and it closes the cross-process case too (a second `lop`
         process), which no in-process lock could have.
+
+        ``expected_credential_id`` + ``heal_trigger`` are the SAME-ACCOUNT
+        CREDENTIAL HEAL (``team_bridge.heal``): a sign-in to the same Radient
+        account landed on a new credential row, and the committed pin still
+        names the old one, so every bridge call answers "sign in" to someone
+        who is. The heal is NOT a new consent — it moves which local row
+        carries the same account's bearer — so everything authority-bearing is
+        re-checked HERE, under the write lock, against the row being replaced:
+        the committed row must still name ``expected_credential_id`` and the
+        same account/tenant/endpoint/hub, and the receipt and designation the
+        caller read must still be the stored ones. Any difference is
+        ``owner_moved`` (a concurrent re-enrolment, a Turn-off, an edited
+        designation) and nothing is written. The designation is carried
+        because ``designated_session`` is written from ``cos_session_id``
+        below and ``_reservation`` filters on it: a heal that dropped it would
+        silently end wake delivery. The audit receipt row commits in the same
+        transaction as the re-point, so neither exists without the other.
         """
 
         owner.validated()
+        if (expected_credential_id is None) != (heal_trigger is None):
+            raise StoreRefused("invalid_heal", "a heal names both the old pin and its trigger")
         if not receipt.consent_version.strip() or not receipt.consent_ref.strip():
             raise StoreRefused("invalid_receipt", "consent receipt must name version + ref")
         with self._connect() as conn:
@@ -4061,9 +4093,22 @@ class Store:
                         "this machine already holds a committed owner",
                     )
             existing = conn.execute(
-                "SELECT enrollment_generation, state FROM enrollments WHERE owner_key = ?",
+                "SELECT * FROM enrollments WHERE owner_key = ?",
                 (_owner_key(owner),),
             ).fetchone()
+            if expected_credential_id is not None and (
+                existing is None
+                or existing["state"] != "committed"
+                or int(existing["credential_id"]) != expected_credential_id
+                or existing["account_id"] != owner.account_id
+                or existing["tenant_id"] != owner.tenant_id
+                or existing["endpoint_id"] != owner.endpoint_id
+                or existing["canonical_base_url"] != owner.canonical_base_url
+                or existing["consent_version"] != receipt.consent_version
+                or existing["consent_ref"] != receipt.consent_ref
+                or existing["designated_session"] != cos_session_id
+            ):
+                raise StoreRefused("owner_moved", "the enrollment changed since the heal read it")
             if (
                 existing is not None
                 and existing["state"] == "committed"
@@ -4096,6 +4141,29 @@ class Store:
                 ),
             )
             conn.execute("INSERT OR IGNORE INTO sync (owner_key) VALUES (?)", (_owner_key(owner),))
+            if heal_trigger is not None and existing is not None:
+                # Created here, not in ``_CORE_SCHEMA``: a stamped store never
+                # re-runs that DDL (``_init_layout`` VERIFIES and returns), so a
+                # table declared only there would exist on fresh stores alone —
+                # exactly not the broken installs this receipt is for. Plain
+                # ``execute`` keeps it inside this transaction (``executescript``
+                # would commit it). Additive and optional — nothing verifies or
+                # reads it on open — so no ``schema_version`` move.
+                conn.execute(_CREDENTIAL_HEALS_DDL)
+                conn.execute(
+                    "INSERT INTO credential_heals (owner_key, old_credential_id, "
+                    "new_credential_id, enrollment_generation, account_id, trigger, at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        _owner_key(owner),
+                        int(existing["credential_id"]),
+                        owner.credential_id,
+                        owner.enrollment_generation,
+                        owner.account_id,
+                        heal_trigger,
+                        time.time(),
+                    ),
+                )
             # A generation bump makes every reservation bound to an older
             # credential/generation permanently unclaimable: ``owner_key`` is
             # unchanged across a same-account re-login, so nothing else will
