@@ -242,15 +242,26 @@ class MeshAwareAuthStore:
                 return False
             from local_operator.network.credentials import refresh as refresh_mod
 
+            # R1-2: the DOCUMENT is not the question, the ROWS are. A deleted
+            # document beside a row that still holds delegated material is exactly
+            # §3.5's "cannot tell", and asking only about the file left the store's
+            # refresh path un-fenced — the reproduced BLOCKER. `delegated_row_ids`
+            # answers `None` for "this store cannot say", which fences.
             try:
                 document = refresh_mod.load(network_id, root, recipient=recipient)
             except refresh_mod.RefreshUnknown:
-                # Unprovable evidence still fences: the fence will refuse every
-                # POST, which is the fail-closed direction.
                 document = {"state": "unknown"}
             if document is None:
-                return False
-            installer(fence)
+                query = getattr(self._local, "delegated_credential_ids", None)
+                if query is None:  # pragma: no cover — a store build without the seam
+                    return False
+                try:
+                    rows = query()
+                except Exception:  # noqa: BLE001 — cannot tell: fence
+                    rows = None
+                if rows == []:
+                    return False
+            installer(fence, watch=client)
             return True
         except Exception:  # noqa: BLE001 — a construct-time fence must not fail a session
             return False

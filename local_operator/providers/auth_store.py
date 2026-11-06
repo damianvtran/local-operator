@@ -1541,6 +1541,8 @@ class AuthStore:
         #: ``None`` is every ordinary construction site, and it is what keeps this
         #: module's behaviour unchanged for a device that holds no delegation.
         self._refresh_fence: Callable[[int, dict[str, Any]], str | None] | None = None
+        #: The outcome half of the same seam (see :meth:`set_refresh_fence`).
+        self._refresh_watch: Any = None
         self._store_uid: str | None = None
         self._sticky: dict[tuple[str, str], int] = {}
         self._round_robin: dict[str, int] = {}
@@ -2035,7 +2037,12 @@ class AuthStore:
                 keys.append(secret)
         return keys
 
-    def set_refresh_fence(self, fence: Callable[[int, dict[str, Any]], str | None] | None) -> None:
+    def set_refresh_fence(
+        self,
+        fence: Callable[[int, dict[str, Any]], str | None] | None,
+        *,
+        watch: Any = None,
+    ) -> None:
         """Install the PRE-POST fence this store consults before presenting a token.
 
         THE ONE SEAM THE NODE'S FENCE CAN RUN FROM. ``mesh-refresh-delegation.md``
@@ -2053,8 +2060,18 @@ class AuthStore:
 
         A fence that RAISES is a refusal, not a pass: the caller treats any
         exception as "cannot tell", which §3.5 resolves to stop.
+
+        ``watch`` is the OUTCOME half, and it exists because a fence can only say
+        "do not POST": the two facts a delegation needs recorded are decided AFTER
+        the exchange — that a POST happened (so ``max_refreshes`` is a live bound
+        and not a decorative one, review R1-3) and that the provider refused it
+        with the node's own current token (the §3.5 stop, review R1-5). It is an
+        object with optional ``posted(credential_id, data)`` and
+        ``invalid_grant(credential_id, data)`` callables; every call is guarded, so
+        a watch fault can never fail a refresh.
         """
         self._refresh_fence = fence
+        self._refresh_watch = watch
 
     def set_fallback_resolver(
         self, provider: str, resolver: Callable[[str], str | None] | None
@@ -3531,6 +3548,67 @@ class AuthStore:
             return None
         return dict(record)
 
+    def delegated_credential_ids(self) -> list[int] | None:
+        """Rows whose provenance says a DELEGATION wrote them, or ``None`` if unknown.
+
+        THE PREDICATE R1-2 NEEDS. A delegation's material is a normal-looking row,
+        so the only way to know this device may hold one — when the delegation
+        document itself is gone — is the provenance this build stamped on it.
+        ``None`` means "this store could not answer", and the installers treat that
+        as "install the fence": a fence that refuses costs a refresh, an absent
+        fence costs a reused rotating token.
+
+        ``grant_id`` is the discriminator, deliberately: a sync COPY also carries
+        ``mesh_origin`` (owner + key) and has its own refresh material, so keying on
+        ``mesh_origin`` alone would fence ordinary copies and break them.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return None
+        try:
+            rows = conn.execute(
+                "SELECT id FROM auth_credentials "
+                "WHERE json_extract(data, '$.mesh_origin.grant_id') IS NOT NULL"
+            ).fetchall()
+        except sqlite3.Error:
+            logger.debug("delegated-row query failed", exc_info=True)
+            return None
+        return [int(row[0]) for row in rows]
+
+    @staticmethod
+    def _ended_delegation(creds: dict[str, Any], *, now_ms: int) -> dict[str, Any] | None:
+        """A delegation record that has RUN OUT, or ``None``.
+
+        THE OTHER HALF OF :meth:`_delegated`, and the half that was missing.
+        ``_delegated`` answers ``None`` once ``not_after`` passes, which correctly
+        ends the *block* — but reading that as "no delegation ever existed" is what
+        let the owner present the copy it froze at mint, on a family a node may
+        already have rotated. That POST is the reuse-detection exchange §1.1
+        records as measured twice in this tree.
+
+        So an ended record is a FACT about the family, not an absence: the caller
+        turns it into the family-moved marker and an interactive re-login, which is
+        the cost §0 of the design states up front ("if the node is destroyed
+        mid-delegation, the recovery is an interactive re-login, not an automatic
+        one"). A record in a TERMINAL state (``failed``/``returned``/``refused``)
+        is not "ended" — those states are written by paths that already decided
+        what happens next, and the handback's own transition is ``returned``.
+        """
+        record = creds.get(REFRESH_DELEGATE_KEY)
+        if not isinstance(record, dict):
+            return None
+        state = record.get("state")
+        if isinstance(state, str) and state not in _REFRESH_DELEGATION_LIVE_STATES:
+            return None
+        not_after = record.get("not_after")
+        if isinstance(not_after, bool) or not isinstance(not_after, (int, float)):
+            # No readable ceiling: `_delegated` treats that as unbounded, so it is
+            # still live and never "ended" here either.
+            return None
+        if int(not_after * 1000.0) <= now_ms:
+            return dict(record)
+        return None
+
     @staticmethod
     def _family_moved_at(creds: dict[str, Any]) -> int | None:
         """The epoch-ms a family-moved marker was written, or ``None``.
@@ -3544,6 +3622,28 @@ class AuthStore:
         if isinstance(marker, bool) or not isinstance(marker, (int, float)):
             return None
         return int(marker) if marker > 0 else None
+
+    def _end_delegation(self, creds: dict[str, Any], credential_id: int) -> dict[str, Any] | None:
+        """Fold an ended delegation to the family-moved marker, and return the record.
+
+        The write is best-effort: if it fails, or a peer wins the race, the marker
+        may already be there — and the CALLER still refuses, because the refusal is
+        what protects the token. The row read below is the authority, never this
+        process's copy of it.
+        """
+        ended = self._ended_delegation(creds, now_ms=self._now_ms())
+        if ended is None:
+            return None
+        if self._family_moved_at(creds) is None:
+            try:
+                self.mark_family_moved(credential_id)
+            except Exception:  # noqa: BLE001 — the refusal below is the protection
+                logger.debug(
+                    "family-moved marker for %s could not be written; the refusal stands",
+                    credential_id,
+                    exc_info=True,
+                )
+        return ended
 
     def refresh_delegate_record(self, credential_id: int) -> dict[str, Any] | None:
         """The delegation record in ANY state, for the handback's own protocol.
@@ -3604,6 +3704,26 @@ class AuthStore:
             # gone from here, and leaving the record would keep this row refusing
             # to POST for a family that no longer exists.
             data.pop(REFRESH_DELEGATE_KEY, None)
+            return True
+
+        return self._update_payload(credential_id, write, moves_write_stamp=True)
+
+    def wipe_delegated_material(self, credential_id: int) -> bool:
+        """Remove a delegated row's rotating material and mark the family moved.
+
+        §3.5's local half of the stop: the node must not keep a token it has been
+        told is stale, and it must not retry. The row KEEPS its identity fields and
+        its delegation provenance so a surface can still say which login this was —
+        only the two secrets go, and the family-moved key is what makes the state
+        visible without a live attempt to re-earn it.
+        """
+
+        def write(data: dict[str, Any]) -> bool:
+            data.pop("refresh", None)
+            data.pop("refresh_token", None)
+            data.pop("access", None)
+            data.pop(REFRESH_DELEGATE_KEY, None)
+            data[REFRESH_FAMILY_MOVED_KEY] = self._now_ms()
             return True
 
         return self._update_payload(credential_id, write, moves_write_stamp=True)
@@ -3761,6 +3881,14 @@ class AuthStore:
                 f"OAuth grant for '{row.provider}' was refreshed on another device, so this "
                 f"copy is no longer current; run /login {row.provider} to take it back"
             )
+        expired = self._end_delegation(creds, row.id)
+        if expired is not None and self._needs_refresh(creds, force=force):
+            raise CredentialInvalidError(
+                f"OAuth grant for '{row.provider}' was delegated to "
+                f"{expired.get('device') or 'another device'}, that delegation has ended, and "
+                f"the family may have moved with it, so the copy frozen here is not presented "
+                f"and cannot be refreshed; run /login {row.provider} to sign in again"
+            )
         delegated = self._delegated(creds, now_ms=self._now_ms())
         if delegated is not None and self._needs_refresh(creds, force=force):
             raise RefreshDelegatedError(
@@ -3797,6 +3925,17 @@ class AuthStore:
             # repeated: this process may have MINTED the delegation for a sibling
             # node while we waited, and the row it just re-read is the only place
             # that fact lives.
+            if self._ended_delegation(
+                fresh, now_ms=self._now_ms()
+            ) is not None and self._needs_refresh(fresh, force=force):
+                # The record ran out while we waited for the lock: same ruling, same
+                # refusal, and the marker is folded here so the next reader agrees.
+                self._end_delegation(fresh, row.id)
+                raise CredentialInvalidError(
+                    f"OAuth grant for '{row.provider}' was delegated and that delegation has "
+                    f"ended, so the copy frozen here is not presented; run /login "
+                    f"{row.provider} to sign in again"
+                )
             live = self._delegated(fresh, now_ms=self._now_ms())
             if live is not None:
                 raise RefreshDelegatedError(
@@ -3975,6 +4114,16 @@ class AuthStore:
                     # clears it. The marker is resolved by the write — the IdP told
                     # us what happened to the presented token.
                     self._mark_grant_dead(row.id, rejected_refresh_token=presented)
+                    # §3.5's node-side stop (R1-5): past the race guard the token we
+                    # presented was this row's OWN current token, so the family moved
+                    # outside this device. The watch wipes the delegated material,
+                    # fails the delegation and reports — and never retries.
+                    watch = self._refresh_watch
+                    if watch is not None:
+                        try:
+                            watch.invalid_grant(row.id, dict(fresh))
+                        except Exception:  # noqa: BLE001
+                            logger.debug("refresh watch.invalid_grant failed", exc_info=True)
                     raise CredentialInvalidError(
                         f"OAuth grant for '{row.provider}' is no longer valid: {exc}"
                     ) from exc
@@ -4082,6 +4231,16 @@ class AuthStore:
                     (json.dumps(merged), self._now_ms(), row.id),
                 )
                 self._conn.commit()
+                # The POST is durable: tell the watch so `max_refreshes` counts it
+                # (R1-3). Guarded: a watch fault must never fail a refresh that
+                # already succeeded, and a lost increment only makes the bound
+                # stricter, never looser.
+                watch = self._refresh_watch
+                if watch is not None:
+                    try:
+                        watch.posted(row.id, merged)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("refresh watch.posted failed", exc_info=True)
                 return merged
             finally:
                 self._release_refresh_lease(row.id)

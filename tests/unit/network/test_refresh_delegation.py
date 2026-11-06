@@ -380,8 +380,17 @@ def test_owner_gate_refuses_the_post_and_serves_a_live_bearer(owner_auth: Any, i
     assert idp.posts == []
 
 
-def test_expired_delegation_record_no_longer_blocks(owner_auth: Any, idp: Any) -> None:
-    """The pure fold: `not_after` passing ends the block, with no writer involved."""
+def test_an_ended_delegation_is_a_family_moved_event(owner_auth: Any, idp: Any) -> None:
+    """R1-1 — the OWNER never presents the copy it froze at mint.
+
+    INVERTED from the first version of this test, which asserted ``len(idp.posts) == 1``
+    after ``not_after`` passed. That assertion was the defect: the node may have
+    rotated the family during the window, so the frozen copy is a possibly-spent
+    refresh token, and presenting it is the reuse-detection POST §1.1 records as
+    measured twice in this tree. The manager's ruling is that delegation END is a
+    family-moved event — §0's own stated cost — so the assertion is now zero POSTs,
+    a refusal, and the marker left on the row for every surface to read.
+    """
     auth = owner_auth
     row = auth.list_credentials(STUB_PROVIDER)[0]
     _expire_row(auth, row.id)
@@ -396,10 +405,16 @@ def test_expired_delegation_record_no_longer_blocks(owner_auth: Any, idp: Any) -
             "state": "active",
         },
     )
-    served = _refresh_once(auth, row.id)
-    # The fold re-opened the POST path: exactly one exchange, and the row moved on.
-    assert len(idp.posts) == 1
-    assert served["refresh"] != "refresh-0"
+    from local_operator.providers.auth_store import CredentialInvalidError
+
+    with pytest.raises(CredentialInvalidError):
+        _refresh_once(auth, row.id)
+    assert idp.posts == [], "the owner presented the token it froze at mint"
+    # The refusal is durable state, not just this call's answer: a surface reading
+    # the row must see the cause without a live attempt to re-earn it.
+    current = dict(auth.get_credential(row.id).data)
+    assert current.get("refresh_family_moved") is not None
+    assert "refresh_delegate" not in current
 
 
 def test_family_moved_marker_stops_refresh_for_good(owner_auth: Any, idp: Any) -> None:
@@ -458,6 +473,9 @@ def _node_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         _self_membership_active=lambda: True,
     )
     mesh.refresh_fence = client_mod.MeshCredentialClient.refresh_fence.__get__(mesh)
+    mesh.refresh_posted = client_mod.MeshCredentialClient.refresh_posted.__get__(mesh)
+    mesh.refresh_invalid_grant = client_mod.MeshCredentialClient.refresh_invalid_grant.__get__(mesh)
+    mesh.report_family_moved = client_mod.MeshCredentialClient.report_family_moved.__get__(mesh)
     monkeypatch.setattr(refresh, "anchor_spki_for", lambda root: _SPKI.get("value"))
     return mesh
 
@@ -561,6 +579,281 @@ def test_owner_policy_binding_uses_a_live_delegation(
 
 
 # ---------------------------------------------------------------------------
+# R1-2: a delegated ROW with no document still gets a refuse-all fence
+# ---------------------------------------------------------------------------
+
+
+def _delegated_row(store: Any, *, key: str = KEY, grant_id: str = "rd_0007") -> int:
+    """Write a delegation-sourced row straight into the store, as ``refresh_take`` does."""
+    row = store.upsert_credential(
+        STUB_PROVIDER,
+        {
+            "access": "access-0",
+            "refresh": "refresh-0",
+            "expires": int(time.time() * 1000) - 60_000,
+            "mesh_origin": {
+                "owner_device": OWNER,
+                "key": key,
+                "grant_id": grant_id,
+                "epoch": 7,
+            },
+        },
+    )
+    return row.id
+
+
+def test_the_production_installer_fences_a_row_whose_document_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_provider: str, operator_spki: bytes
+) -> None:
+    """R1-2 — the reproduced BLOCKER: document deleted, delegated row, restart.
+
+    THE POINT OF THIS TEST IS WHICH INSTALLER IT USES. Every earlier fence test
+    hand-installed ``refresh_fence`` on a namespace, so none of them exercised the
+    decision "is a fence needed at all" — and both production installers answered
+    that question by looking only at the FILE. A deleted document beside a row that
+    still holds the material therefore ran un-fenced, which is design T1 failing
+    open. This drives ``MeshAwareAuthStore``'s own constructor path, which is what a
+    restarted session does.
+    """
+    from local_operator.network.credentials.store import MeshAwareAuthStore
+    from local_operator.providers.auth_store import AuthStore, RefreshDelegatedError
+
+    _SPKI["value"] = operator_spki
+    monkeypatch.setattr(refresh, "anchor_spki_for", lambda root: _SPKI.get("value"))
+    local = AuthStore(config_dir=tmp_path)
+    row_id = _delegated_row(local)
+
+    mesh = SimpleNamespaceRef(NETWORK, NODE, tmp_path)
+    store = MeshAwareAuthStore(local, mesh=mesh, config_dir=tmp_path)
+    store._install_refresh_fence()
+
+    assert local._refresh_fence is not None, "no fence installed for a delegated row"
+    assert local._refresh_fence(row_id, dict(local.get_credential(row_id).data)) is not None
+    with pytest.raises(RefreshDelegatedError):
+        asyncio.run(local.ensure_oauth_fresh_or_raise(row_id))
+
+
+def test_a_plain_copy_is_not_fenced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R1-2's control: ``mesh_origin`` WITHOUT a grant id is a sync copy, not a delegation."""
+    from local_operator.network.credentials.store import MeshAwareAuthStore
+    from local_operator.providers.auth_store import AuthStore
+
+    local = AuthStore(config_dir=tmp_path)
+    local.upsert_credential(
+        STUB_PROVIDER,
+        {
+            "access": "access-0",
+            "refresh": "refresh-0",
+            "expires": 1,
+            "mesh_origin": {"owner_device": OWNER, "key": KEY},  # a COPY: no grant
+        },
+    )
+    assert local.delegated_credential_ids() == []
+    mesh = SimpleNamespaceRef(NETWORK, NODE, tmp_path)
+    store = MeshAwareAuthStore(local, mesh=mesh, config_dir=tmp_path)
+    store._install_refresh_fence()
+    assert local._refresh_fence is None, "an ordinary copy must not be fenced"
+
+
+def SimpleNamespaceRef(network_id: str, device: str, root: Path) -> Any:
+    """The two attributes the store's installer reads off its mesh client."""
+    from types import SimpleNamespace
+
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    from local_operator.network.credentials.held_policy import HeldPolicyStore
+
+    mesh = SimpleNamespace(
+        network_id=network_id,
+        self_device=device,
+        root=root,
+        # The fence's own dependencies, bound to the real classes: a placeholder
+        # here would make this test pass for the scaffold rather than for the fence.
+        _self_membership_active=lambda: True,
+        _policy=lambda: HeldPolicyStore(network_id, device, root),
+    )
+    mesh.refresh_fence = MeshCredentialClient.refresh_fence.__get__(mesh)
+    mesh.refresh_posted = MeshCredentialClient.refresh_posted.__get__(mesh)
+    mesh.refresh_invalid_grant = MeshCredentialClient.refresh_invalid_grant.__get__(mesh)
+    return mesh
+
+
+# ---------------------------------------------------------------------------
+# R1-3: `max_refreshes` is a live bound
+# ---------------------------------------------------------------------------
+
+
+def test_max_refreshes_actually_bounds_the_node(
+    tmp_path: Path, monkeypatch, operator_key, operator_spki
+) -> None:
+    """R1-3 — the budget trips, and it trips through the PRODUCTION counter.
+
+    ``refresh.record_post`` had no callers, so ``refreshes_used`` stayed zero and
+    ``active()`` could never refuse on budget: a bound nobody increments. This
+    drives the store's own success path through ``refresh_posted`` and then asserts
+    the fence refuses.
+    """
+    _SPKI["value"] = operator_spki
+    monkeypatch.setattr(refresh, "anchor_spki_for", lambda root: _SPKI.get("value"))
+    mesh = _node_client(tmp_path, monkeypatch)
+    delegated = {
+        "mesh_origin": {"owner_device": OWNER, "key": KEY, "grant_id": "rd_0007", "epoch": 7}
+    }
+
+    grant, statement = _grant(operator_key)
+    assert grant.max_refreshes == 20
+    # One refresh of budget, so the bound is reached after a single counted POST.
+    from local_operator.operator.verify import RefreshGrant
+
+    tight = RefreshGrant(**{**grant.fields(), "max_refreshes": 1})
+    tight_statement = _sign(operator_key, tight)
+    refresh.install(
+        NETWORK, tmp_path, recipient=NODE, statement=tight_statement, operator_spki=operator_spki
+    )
+    assert mesh.refresh_fence(1, delegated) is None
+
+    mesh.refresh_posted(1, delegated)
+    document = refresh.load(NETWORK, tmp_path, recipient=NODE)
+    assert document["refreshes_used"] == 1, "the POST was not counted"
+    refusal = mesh.refresh_fence(1, delegated)
+    assert refusal is not None and "delegation" in refusal
+
+
+def test_refresh_posted_ignores_a_row_with_no_grant(
+    tmp_path: Path, monkeypatch, operator_key
+) -> None:
+    """R1-3's control: an ordinary row's POST is not counted against a delegation."""
+    from types import SimpleNamespace
+
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    meshline = SimpleNamespace(
+        network_id=NETWORK,
+        self_device=NODE,
+        root=tmp_path,
+        _auth_store=lambda: None,
+    )
+    meshline.refresh_posted = MeshCredentialClient.refresh_posted.__get__(meshline)
+    meshline.refresh_posted(1, {"access": "a", "refresh": "r"})
+    assert refresh.load(NETWORK, tmp_path, recipient=NODE) is None
+
+
+# ---------------------------------------------------------------------------
+# R1-4: the capability the node gates on is advertised
+# ---------------------------------------------------------------------------
+
+
+def test_the_refresh_capability_is_advertised_and_additive() -> None:
+    """R1-4 — advertised in the link capabilities, with the compatibility proof.
+
+    CONDITION (a): a peer that does not know the name ignores it rather than
+    refusing the link — ``wire.negotiate_capabilities`` intersects the two lists, and
+    the hello/challenge parsers store ``caps`` as opaque strings, so nothing on the
+    parse path can reject an unknown name.
+    CONDITION (b): additive only — no existing capability's meaning moves.
+    """
+    from local_operator.network import wire
+
+    assert types.REFRESH_CAP_STRING in wire.LINK_CAPABILITIES
+    # (a) An unknown name from a peer is simply not offered; the link still forms.
+    assert wire.negotiate_capabilities(["mesh-net-v1", "future-thing-v9"], ["mesh-net-v1"]) == [
+        "mesh-net-v1"
+    ]
+    # ...and the reverse direction: OUR unknown extra is ignored by an older peer.
+    assert wire.negotiate_capabilities(["future-thing-v9"], ["mesh-net-v1"]) == []
+    # (b) Every pre-existing capability is still advertised, unchanged.
+    assert {"mesh-net-v1", "credential-broker-v1", "session-mobility-v1"} <= set(
+        wire.LINK_CAPABILITIES
+    )
+
+
+# ---------------------------------------------------------------------------
+# R1-5: the node's stop, and the report that distinguishes it from silence
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_grant_stops_wipes_and_reports(
+    tmp_path: Path, monkeypatch, stub_provider: str, operator_key, operator_spki
+) -> None:
+    """R1-5 — §3.5's node-side stop, through the real watch method.
+
+    Asserted in the order the design gives: the delegated material is gone, the
+    delegation can no longer POST, the owner is told, and the result distinguishes
+    "this device stopped" from "the owner heard it".
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from local_operator.providers.auth_store import AuthStore
+
+    _SPKI["value"] = operator_spki
+    monkeypatch.setattr(refresh, "anchor_spki_for", lambda root: _SPKI.get("value"))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    mesh = SimpleNamespace(
+        network_id=NETWORK,
+        self_device=NODE,
+        root=tmp_path,
+        _auth_store=lambda: local,
+        serve_report=lambda key, **fields: {"kind": "error", "code": "owner_offline", "key": key},
+        owner_of=lambda key: OWNER,
+        _audit_refresh=lambda *a, **k: None,
+        _self_membership_active=lambda: True,
+        _policy=lambda: HeldPolicy(NETWORK, NODE, tmp_path),
+    )
+    mesh.refresh_fence = MeshCredentialClient.refresh_fence.__get__(mesh)
+    mesh.refresh_invalid_grant = MeshCredentialClient.refresh_invalid_grant.__get__(mesh)
+    mesh.report_family_moved = MeshCredentialClient.report_family_moved.__get__(mesh)
+
+    local = AuthStore(config_dir=tmp_path)
+    row_id = _delegated_row(local)
+    _, statement = _grant(operator_key)
+    refresh.install(
+        NETWORK, tmp_path, recipient=NODE, statement=statement, operator_spki=operator_spki
+    )
+    assert mesh.refresh_fence(row_id, dict(local.get_credential(row_id).data)) is None
+
+    result = mesh.refresh_invalid_grant(row_id, dict(local.get_credential(row_id).data))
+
+    # 1. the material is wiped, and the row says why
+    data = dict(local.get_credential(row_id).data)
+    assert "refresh" not in data and "access" not in data
+    assert data.get("refresh_family_moved") is not None
+    # 2. the delegation can never POST again until a new signed statement lands
+    assert (refresh.load(NETWORK, tmp_path, recipient=NODE) or {}).get("state") == "failed"
+    assert mesh.refresh_fence(row_id, data) is not None
+    # 3. the result separates the two facts the owner's behaviour depends on
+    assert result["stopped"] is True
+    assert result["reported"] is False
+    assert result["reason"] == "owner_offline"
+
+
+def test_report_family_moved_says_whether_the_owner_heard_it(tmp_path: Path, monkeypatch) -> None:
+    """R1-5 — "stopped" and "reported" are different answers, deliberately.
+
+    An owner that cannot tell them apart re-serves a dead family or waits for a
+    report that will never come; the node's stop does not depend on the link.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    for detail, expected in (
+        ({"kind": "ack", "action": "family_moved"}, (True, "reported")),
+        ({"kind": "error", "code": "owner_offline"}, (False, "owner_offline")),
+        (None, (False, "owner_unreachable")),
+    ):
+        mesh = SimpleNamespace(
+            serve_report=lambda key, **fields: detail,
+        )
+        mesh.report_family_moved = MeshCredentialClient.report_family_moved.__get__(mesh)
+        reported, reason = (
+            mesh.report_family_moved(KEY)["reported"],
+            mesh.report_family_moved(KEY)["reason"],
+        )
+        assert (reported, reason) == expected, (detail, reported, reason)
+
+
+# ---------------------------------------------------------------------------
 # The mint's two refusals (§3.5's mint gate, §3.2's single record)
 # ---------------------------------------------------------------------------
 
@@ -612,3 +905,70 @@ def test_new_broker_kinds_are_declared_once() -> None:
     assert types.REFRESH_CAP_STRING == "credential-refresh-v1"
     # §3.7a: no new peer op — the two kinds ride the existing one.
     assert types.PEER_BROKER_OP == "net_broker"
+
+
+def test_the_owner_applies_a_family_moved_report_only_from_the_delegatee(tmp_path: Path) -> None:
+    """R1-5's owner half: the report stops THIS login, and only the named node may say it.
+
+    The second assertion is what keeps the first safe: a report from any other peer
+    must not be able to make the owner discard a working account.
+    """
+    from local_operator.network.credentials.owner import MeshCredentialBroker
+    from local_operator.network.credentials.types import CredentialPlacementEntry
+    from local_operator.providers.auth_store import AuthStore
+
+    from local_operator.network.credentials import placement as placement_mod
+
+    root = tmp_path / "owner"
+    root.mkdir()
+    # The broker resolves the row through its OWN placement document, so a report
+    # can only ever act on a key this device really owns.
+    document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
+    document.declare(
+        STUB_PROVIDER,
+        owner_device=OWNER,
+        owner_device_name="owner",
+        provider=STUB_PROVIDER,
+        identity_label="owner@example.test",
+        by=OWNER,
+    )
+    document.grant(STUB_PROVIDER, NODE, scope="device", by=OWNER)
+    document.save()
+    local = AuthStore(config_dir=root)
+    row = local.upsert_credential(
+        STUB_PROVIDER,
+        {"access": "access-0", "refresh": "refresh-0", "expires": 1},
+    )
+    local.set_refresh_delegate(
+        row.id,
+        {
+            "device": NODE,
+            "grant_id": "rd_0007",
+            "epoch": 7,
+            "issued_at": time.time() - 60,
+            "not_after": time.time() + 3600,
+            "state": "active",
+        },
+    )
+    broker = MeshCredentialBroker(
+        root=root, self_device=OWNER, self_device_name="owner", network_id=NETWORK, auth_store=local
+    )
+    entry = CredentialPlacementEntry(
+        key=STUB_PROVIDER,
+        provider=STUB_PROVIDER,
+        kind="oauth-rotating",
+        owner_device=OWNER,
+    )
+    try:
+        refused = broker._family_moved_report(STUB_PROVIDER, entry, "d_stranger", {})
+        assert refused["code"] == "not_authorised"
+        assert local.refresh_delegate_record(row.id) is not None, "a stranger stopped the login"
+
+        accepted = broker._family_moved_report(
+            STUB_PROVIDER, entry, NODE, {"cause": "family_moved"}
+        )
+        assert accepted["action"] == "family_moved"
+        assert local.refresh_delegate_record(row.id) is None
+        assert dict(local.get_credential(row.id).data).get("refresh_family_moved") is not None
+    finally:
+        broker.close()

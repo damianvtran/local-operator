@@ -1707,6 +1707,12 @@ class MeshCredentialClient:
         owner = str(origin.get("owner_device") or "")
         if not key or not owner:
             return None
+        if not str(origin.get("grant_id") or ""):
+            # A COPY's provenance (``sync`` writes owner+key, no grant) is this
+            # device's OWN row with its own refresh material: it refreshes on the
+            # ordinary path and this fence must not touch it. Only a DELEGATED row
+            # carries a grant id, because only a delegation hands over a token.
+            return None
         if not self._self_membership_active():
             return (
                 "this device is no longer an active member of the network, so the delegated "
@@ -1761,23 +1767,105 @@ class MeshCredentialClient:
             )
         return None
 
-    def install_refresh_fence(self) -> bool:
-        """Install :meth:`refresh_fence` into this device's auth store.
+    # -- the outcome half: a POST happened, or the family moved ---------------
 
-        No delegation on this device means NO fence is installed at all, so the
-        store's refresh path costs one attribute read and behaves exactly as the
-        pre-delegation build — the mixed-fleet and 0-peer guarantee (§7, T14). An
-        UNPROVABLE document installs the fence anyway: it will refuse every POST,
-        which is the fail-closed direction.
+    def refresh_posted(self, credential_id: int, data: dict[str, Any]) -> None:
+        """Record one successful POST against the delegation's budget (R1-3).
+
+        ``max_refreshes`` was decorative while nothing incremented it: the
+        document's ``refreshes_used`` stayed at zero and ``refresh.active`` could
+        never refuse on budget. This is the caller, and it is the store's own
+        success path — the one place that knows the exchange was accepted.
         """
         from local_operator.network.credentials import refresh as refresh_mod
 
+        origin = (data or {}).get("mesh_origin")
+        if not isinstance(origin, dict) or not str(origin.get("grant_id") or ""):
+            return
         try:
             document = refresh_mod.load(self.network_id, self.root, recipient=self.self_device)
         except refresh_mod.RefreshUnknown:
-            document = {"state": "unknown"}
+            return
         if document is None:
-            return False
+            return
+        # ``record_post`` increments the stored epoch itself; the argument is the
+        # floor, so passing the current epoch + 1 makes the caller's intent explicit
+        # rather than relying on that internal increment.
+        refresh_mod.record_post(
+            self.network_id,
+            self.root,
+            recipient=self.self_device,
+            epoch=int(document.get("epoch") or 0) + 1,
+        )
+
+    def refresh_invalid_grant(self, credential_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        """§3.5's node-side stop (R1-5): wipe, fail the delegation, report, never retry.
+
+        Reached ONLY when the store's own race guard passed — i.e. the token the
+        provider refused was this device's CURRENT token, so no sibling on this node
+        moved the family and the move therefore happened outside the device. That
+        is the design's exact condition, and it is why this is not "any 401".
+
+        The three local effects happen before the report, in this order, so a crash
+        mid-report cannot leave a retryable delegation behind: the row's material is
+        wiped, the document is failed with ``family_moved`` (``active`` is the only
+        state that may POST), and only then is the owner told. The return value
+        distinguishes the two facts a caller needs — that this device STOOD DOWN,
+        and whether the owner actually heard about it — because an owner that cannot
+        tell "stopped" from "unreachable" acts on the wrong one.
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+
+        origin = (data or {}).get("mesh_origin")
+        key = str((origin or {}).get("key") or "")
+        grant_id = str((origin or {}).get("grant_id") or "")
+        self._auth_store().wipe_delegated_material(credential_id)
+        try:
+            refresh_mod.stop(
+                self.network_id,
+                self.root,
+                recipient=self.self_device,
+                state="failed",
+                cause="family_moved",
+            )
+        except refresh_mod.RefreshUnknown:
+            pass
+        self._audit_refresh(
+            "credential.refresh_family_moved",
+            credential_key=key,
+            act=self.self_device,
+            sub=self.owner_of(key),
+            grant_id=grant_id,
+            cause="family_moved",
+        )
+        if key:
+            report = self.report_family_moved(key)
+        else:
+            report = {"reported": False, "reason": "no_key"}
+        return {"stopped": True, **report}
+
+    def report_family_moved(self, key: str) -> dict[str, Any]:
+        """Tell the owner the family moved, and say whether it was told.
+
+        ``stopped`` is a statement about THIS device and is true before the call;
+        ``reported``/``reason`` are a statement about the link. The design's §3.5
+        step 3 exists so the owner stops advertising and refreshing a dead family —
+        it does not exist to make the node's stop conditional on the owner hearing
+        it, which is why an unreachable owner does not re-enable anything here.
+        """
+        detail = self.serve_report(key, kind="grant_dead", cause="family_moved")
+        reported = isinstance(detail, dict) and detail.get("kind") != "error"
+        reason = "reported" if reported else str((detail or {}).get("code") or "owner_unreachable")
+        return {"reported": reported, "reason": reason}
+
+    def install_refresh_fence(self) -> bool:
+        """Install :meth:`refresh_fence` into this device's auth store.
+
+        A fence is installed whenever a delegation MIGHT be in force — a readable
+        document, an unprovable one, or (R1-2) a delegation-sourced ROW even when the
+        document is gone. Only a device with neither gets no fence at all, which is
+        what keeps the mixed-fleet and 0-peer path byte-identical (§7, T14).
+        """
         try:
             target = self._auth_store()
         except Exception:  # noqa: BLE001 — no store root here: nothing to fence
@@ -1785,8 +1873,41 @@ class MeshCredentialClient:
         installer = getattr(target, "set_refresh_fence", None)
         if installer is None:  # pragma: no cover — a store build without the seam
             return False
-        installer(self.refresh_fence)
+        if not self._delegation_may_exist(target):
+            return False
+        installer(self.refresh_fence, watch=self)
         return True
+
+    def _delegation_may_exist(self, store: Any) -> bool:
+        """Whether a fence is needed at all — document OR a delegated ROW (R1-2).
+
+        The document alone is not the question. §3.5's "cannot tell" case is a
+        DELETED document beside a row that still holds the material, and the first
+        version asked only about the file, so the fence was never installed and the
+        store's photo-free path posted. The rows are the durable evidence; the file
+        is an optimisation.
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+
+        try:
+            if refresh_mod.load(self.network_id, self.root, recipient=self.self_device) is not None:
+                return True
+        except refresh_mod.RefreshUnknown:
+            return True
+        return self._delegated_rows(store)
+
+    def _delegated_rows(self, store: Any) -> bool:
+        """Whether this store holds any delegation-sourced row. Unknown => True."""
+        query = getattr(store, "delegated_credential_ids", None)
+        if query is None:  # pragma: no cover — a store build without the seam
+            return True
+        try:
+            ids = query()
+        except Exception:  # noqa: BLE001 — cannot tell: fence (fail closed)
+            return True
+        if ids is None:
+            return True
+        return bool(ids)
 
     def _audit_refresh(self, event: str, **fields: Any) -> None:
         """Emit one non-material delegation record, if this client has an audit sink."""

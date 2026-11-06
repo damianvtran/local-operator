@@ -238,6 +238,54 @@ def test_mint_take_refresh_return_and_deny(
         broker.close()
 
 
+def test_revocation_marks_the_owners_own_family_moved(
+    tmp_path: Path, monkeypatch, stub_provider: str, idp: Any, operator_key: Any, operator_spki: Any
+) -> None:
+    """R1-1 — revocation ends the delegation on the OWNER as well as on the node.
+
+    The deny stops the node (previous test); this is the other half the ruling
+    added: the owner's frozen copy is a possibly-spent token, so revocation marks
+    the family moved here and the login is unusable locally until a re-login. The
+    assertion is the POST count, because that is the harm.
+    """
+    anchored_owner(tmp_path, monkeypatch, operator_spki)
+    broker, auth, _owner_root = _owner_broker(tmp_path, operator_key)
+    try:
+        broker.mint_refresh_delegation(
+            key=KEY,
+            device=NODE,
+            not_after=time.time() + 3600,
+            exclusivity_confirmed=True,
+            login_epoch=7,
+        )
+        revoked = broker.revoke_refresh_delegation(KEY)
+        assert revoked["deny"]
+        assert auth.refresh_delegate_record(1) is None
+        assert dict(auth.get_credential(1).data).get("refresh_family_moved") is not None
+
+        # The row is now expired so a refresh WOULD be needed — and must not happen.
+        auth._conn.execute(
+            "UPDATE auth_credentials SET data = ? WHERE id = 1",
+            (
+                __import__("json").dumps(
+                    {**dict(auth.get_credential(1).data), "expires": int(time.time() * 1000) - 1000}
+                ),
+            ),
+        )
+        auth._conn.commit()
+        before = len(idp.posts)
+        with pytest.raises(Exception) as refused:  # noqa: B017 — CredentialInvalidError
+            asyncio.run(auth.ensure_oauth_fresh_or_raise(1))
+        assert idp.posts[before:] == [], "the owner presented the token after revoking"
+        # Either refusal is correct — the family-moved message fires first, and the
+        # ended-delegation message is its sibling for the case where no marker was
+        # written yet. Both name the interactive remedy.
+        message = str(refused.value)
+        assert "sign in again" in message or "take it back" in message
+    finally:
+        broker.close()
+
+
 def test_revocation_reaches_the_node_by_relay_and_stops_it(
     tmp_path: Path, monkeypatch, stub_provider: str, idp: Any, operator_key: Any, operator_spki: Any
 ) -> None:

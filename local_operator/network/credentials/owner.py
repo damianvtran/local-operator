@@ -1766,6 +1766,12 @@ class MeshCredentialBroker:
         entry = self._entry(key)
         if entry is None or entry.owner_device != self.self_device or not entry.is_holder(by):
             return {"kind": "error", "code": "not_a_holder", "key": key}
+        if failure == "grant_dead":
+            # §3.5 step 3 (R1-5): the DELEGATED NODE told us the family moved. Stop
+            # serving and refreshing this login here too, and say so — the whole
+            # reason the report exists is that the owner cannot otherwise tell a
+            # stopped family from an unreachable node.
+            return self._family_moved_report(key, entry, by, frame)
         if failure == "quota":
             return self._remote_quota_block(key, entry, by, frame, reported_id=reported_id)
         if failure in ("invalid", "unauthorized", "copy_stale"):
@@ -1780,6 +1786,34 @@ class MeshCredentialBroker:
         # against the credential, and the owner's own rotation only DEPRIORITISES on
         # it, which is routing state a peer must not move (§2.1).
         return {"kind": "ack", "key": key, "action": "noted"}
+
+    def _family_moved_report(
+        self, key: str, entry: CredentialPlacementEntry, by: str, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Apply a delegated node's family-moved report to this device's own row.
+
+        BOUND TO THE DELEGATION, deliberately: only the device the live record
+        names may stop this login, and the record is read from the row (another
+        process may have minted or revoked it since this broker started). A report
+        from any other peer is refused rather than honoured — otherwise any holder
+        could log the owner out of a login by claiming its family moved.
+        """
+        store = self._auth_store_instance()
+        row_id = self._credential_id_for(key)
+        record = store.refresh_delegate_record(row_id) if row_id is not None else None
+        if row_id is None or record is None or str(record.get("device") or "") != by:
+            return {"kind": "error", "code": "not_authorised", "key": key}
+        store.mark_family_moved(row_id)
+        self._audit(
+            "credential.refresh_family_moved",
+            credential_key=key,
+            act=self.self_device,
+            sub=by,
+            grant_id=str(record.get("grant_id") or ""),
+            epoch=int(record.get("epoch") or 0),
+            cause=str(frame.get("cause") or "family_moved"),
+        )
+        return {"kind": "ack", "key": key, "action": "family_moved", "stopped": True}
 
     def _remote_quota_block(
         self,
@@ -2341,7 +2375,11 @@ class MeshCredentialBroker:
             exclusive_holder=True,
             relay_deny=True,
         )
-        store.clear_refresh_delegate(row_id)
+        # A REVOKE IS A FAMILY-MOVED EVENT (R1-1 ruling). The node held the family;
+        # this device must not present the copy it froze at mint, and cannot know
+        # whether the node rotated it. The marker, not a bare record removal, is
+        # what makes that state visible to every surface without a live attempt.
+        store.mark_family_moved(row_id)
         self._audit(
             "credential.refresh_revoked",
             credential_key=key,

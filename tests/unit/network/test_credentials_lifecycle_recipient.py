@@ -437,6 +437,10 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # Catalogue is a metadata kind on the installed broker, not a pure
         # handshake feature or a second unregistered peer operation.
         wire.CREDENTIAL_CATALOGUE_METADATA_V1: "net_broker",
+        # The refresh delegation's advertisement (R1-4): it authorises no new op —
+        # `refresh_take`/``refresh_return`` are KINDS on the ``net_broker`` op the
+        # broker already serves, which is why this row maps to the same handler.
+        "credential-refresh-v1": "net_broker",
         "peer-readiness-v1": "net_readiness",
         "mcp-defs-v1": "net_mcp_defs",
         "memory-sync-v1": "net_memory",
