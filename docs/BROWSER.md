@@ -224,7 +224,11 @@ Wire contract, which the desktop host implements as follows:
   `input_type` alone leaks a `redacted` host's value. The direction is
   deliberately fail-safe: a host that says `redacted` and still sends a value,
   or names `password` without redacting, is not trusted to have done it for us.
-  (The paired host sets `redacted` and omits `value`.)
+  What the PAIRED host sends: it declares secrecy as `input_type: "password"`
+  with `value` absent — it consumes the page program's `redacted` to decide that
+  omission and does not forward the flag, so `details.redacted` cannot appear
+  from it. The harness still accepts `redacted: true` from any host that does
+  send it, and withholds on either trigger.
 - Native `<select>`: an option is matched by trimmed label, then option value,
   exact before case-insensitive; `multiple` requires exactly one match. No match
   (or an ambiguous one) is `element_not_found` with `data.reason` written the way
@@ -255,7 +259,8 @@ Wire contract, which the desktop host implements as follows:
   - `value_rejected` — the control's own sanitizer would not store the value as
     asked; the refusal carries `input_type` plus `expected`, the format that type
     accepts (`YYYY-MM-DD`, `HH:MM or HH:MM:SS`, `YYYY-MM-DDTHH:MM`, `YYYY-MM`,
-    `YYYY-Www`, `a number`, `#rrggbb`). It is a refusal and not a coercion,
+    `YYYY-Www`, `a number`, `a number between the control's min and max` for
+    `range`, `#rrggbb`). It is a refusal and not a coercion,
     because a `range` clamps and a `color` falls back rather than clearing, and
     both were once the same silent success. The refusal is TOTAL: the host
     snapshots the prior value, samples the write, and on rejection restores that

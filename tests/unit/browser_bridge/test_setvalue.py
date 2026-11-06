@@ -343,9 +343,11 @@ async def test_a_missing_value_match_lists_the_controls_own_options() -> None:
         "option_not_found",
         "option_ambiguous",
         # `credential_input` deliberately ABSENT: it was never a host status, and
-        # from the host head that redacts password writes it never will be. A
-        # credential target answers `ready` + `redacted`, so keeping the token
-        # here would document a refusal that cannot occur.
+        # from the host head that withholds password writes it never will be. A
+        # credential target answers `ready` with `input_type: "password"` and no
+        # `value` (the action consumes the page program's `redacted` to decide
+        # that omission, so the flag itself does not travel), so keeping the
+        # token here would document a refusal that cannot occur.
     ],
 )
 async def test_a_host_refusal_keeps_its_typed_reason(reason: str) -> None:
