@@ -37,6 +37,16 @@ BEST-EFFORT BY CONTRACT. A row is chrome beside a parked tool call; nothing
 here may raise. Every failure is logged and returns ``None``/``False``, because
 the alternative — an attention write that can break the poll it rides — would
 cost the park notice as well as the row.
+
+ONE KNOWN CONSEQUENCE OF THE EPISODE MAP, STATED RATHER THAN PAPERED OVER. A
+row the operator DISMISSED while its park was still live comes back unread if
+the TUI restarts during that park: the episode map is per-process
+(``OperatorApp._remote_park_episodes``), so the first read of a fresh process
+sees every live park as a new edge. That is the same rule the notice already
+follows — a restart re-toasts and re-banners a live park — and the alternative
+would be a per-poll store write to learn "this row was dismissed inside the
+episode it belongs to", which costs the quiet path to save an edge. Chosen:
+mirror the toast, and say so here.
 """
 
 from __future__ import annotations

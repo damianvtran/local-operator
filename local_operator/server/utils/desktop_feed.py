@@ -1565,6 +1565,7 @@ class DesktopFeed:
         """
         from local_operator.notifications.delivery import (
             BANNER_GRACE_MS,
+            PARK_ITEM_PREFIXES,
             gates_refuse,
             grace_remaining_ms,
         )
@@ -1585,7 +1586,16 @@ class DesktopFeed:
         try:
             pending = await asyncio.to_thread(
                 lambda: [
-                    dict(row) for row in store.undelivered(priority="high", limit=ITEM_CLAIM_BOUND)
+                    dict(row)
+                    for row in store.undelivered(
+                        priority="high",
+                        limit=ITEM_CLAIM_BOUND,
+                        # A PARK announces itself (a local gate through
+                        # ``_announce_pending``, a peer park through the TUI's
+                        # park notice): the ladder must not put a second card on
+                        # one event (``delivery.PARK_ITEM_PREFIXES``).
+                        exclude_prefixes=PARK_ITEM_PREFIXES,
+                    )
                 ]
             )
         except Exception:  # noqa: BLE001 - a banner never breaks the feed

@@ -103,6 +103,19 @@ Neither raiser banners: the park's OS banner belongs to the surface that owns
 the park's announce decision (`_announce_pending`, the TUI notifier), and one
 event must not produce two lock-screen cards.
 
+That rule is enforced at the LADDER, not at the writers. Every banner leg asks
+`NotificationStore.undelivered(exclude_prefixes=PARK_ITEM_PREFIXES)`
+(`notifications/delivery.py`), so a `gate:` or `remote-gate:` row is never
+claimed by a rung — the row stays OWED, and the leg that speaks for the park
+still owns it. Writing the rule once, in the query, is also why a burst of
+parks cannot fill a rung's LIMIT window and starve a plain item behind them.
+
+A row's key carries its KIND (`remote-gate:<device>:<session>:<kind>`), so a
+park that changes kind inside one read is TWO keys: the old kind's row is
+dismissed as its episode ends (key comparison alone would strand it unread and
+`high` for ever) and the new kind's row is raised in the same pass, clears
+before raises.
+
 ## 3. The `notify` tool
 
 ### 3.1 Schema

@@ -38437,13 +38437,17 @@ class OperatorApp(App[None]):
                 rows,
                 unanswered=[peer.device_id for peer in unanswered],
             )
-            # The kind of a CLEARED key is only readable off the map being
-            # replaced, so it is read before the assignment below (the row for
-            # a park that ended is dismissed by kind, and a park can change
-            # kind inside one read — ``park_edges`` makes that a new episode).
+            # A key ENDS when it leaves the state OR when its KIND changed. The
+            # kind is part of the row's key, so ``ask`` → ``approval`` on one
+            # conversation is two rows: the old kind's row must be dismissed as
+            # the old episode ending, or it stays unread and ``high`` for ever
+            # after the park has gone — the lie the row exists not to tell. A
+            # key carried forward for a SILENT device keeps its kind
+            # (``park_edges`` inserts it unchanged), so the outage rule is
+            # untouched.
             ended: list[dict[str, str]] = []
             for key, kind in self._remote_park_episodes.items():
-                if key in state:
+                if state.get(key) == kind:
                     continue
                 ended.append({"device_id": key[0], "session_id": key[1], "kind": kind})
             self._remote_park_episodes = state

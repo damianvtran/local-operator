@@ -43,11 +43,42 @@ model-written title or body (contract §1.5).
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from local_operator.notifications.store import NotificationStore
+
+#: Key prefixes whose rows belong to a PARK, which announces itself.
+#:
+#: A parked gate already has an owner that decides its banner once, on evidence
+#: the item ladder cannot see: ``gate:`` rows are announced by the runtime's
+#: ``ServingSessionHandle._announce_pending`` (which re-decides on detach) and
+#: ``remote-gate:`` rows by the TUI's ``App._show_remote_park``, whose banner
+#: names the DEVICE and the remedy. Letting the ladder banner them as well put
+#: TWO lock-screen cards on one park — and the case a park matters in is the one
+#: where the operator is away, so both cards land.
+#:
+#: The prefix is the identifier because the store's row shape has no kind
+#: column, and both writers already namespace their keys (``Session.
+#: raise_gate_item`` writes ``gate:<kind>:<wait id>``; ``notifications/
+#: remote_park`` writes ``remote-gate:<device>:<session>:<kind>``). Every banner
+#: leg passes these to ``NotificationStore.undelivered(exclude_prefixes=...)``
+#: so the exclusion is part of the query rather than a post-read filter that
+#: could starve other items behind a burst of parks.
+PARK_ITEM_PREFIXES: tuple[str, ...] = ("gate:", "remote-gate:")
+
+
+def announced_by_its_park(row: Mapping[str, Any]) -> bool:
+    """Whether ``row``'s banner belongs to the park that wrote it, not the ladder.
+
+    Exported as a predicate as well as a constant so a caller holding one row
+    (an in-view renderer, a test) can ask the same question the SQL asks, with
+    one answer.
+    """
+    return str(row.get("key") or "").startswith(PARK_ITEM_PREFIXES)
+
 
 #: How long every rung holds a `high` revision before raising it, measured from
 #: the row's last CONTENT change (`updated_at`), so that an in-view receipt can

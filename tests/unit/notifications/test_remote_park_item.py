@@ -192,30 +192,91 @@ def test_the_kill_switch_and_a_broken_store_both_leave_no_row_and_no_raise(
     assert _raise(root) is None
 
 
-def test_one_read_of_transitions_clears_before_it_raises(root: Path) -> None:
-    """A key that ends and starts in one read must finish PRESENT, not dismissed.
+def _park(
+    device_id: str = "d_bb", session_id: str = "s_parked", kind: str = "approval"
+) -> dict[str, str]:
+    return {"device_id": device_id, "session_id": session_id, "kind": kind}
 
-    The order is a rule, not an accident: a re-park inside one poll is one key
-    in both lists, and raising first would let the clear dismiss the row that
-    describes the live park.
+
+def _fresh(
+    device_id: str = "d_bb", session_id: str = "s_parked", kind: str = "approval"
+) -> dict[str, str]:
+    return {
+        **_park(device_id, session_id, kind),
+        "device_name": "demo-laptop",
+        "name": "Backfill the audit log",
+    }
+
+
+def test_a_clear_alone_ends_the_row(root: Path) -> None:
+    """ORDERING PIN 1/3: a clear and nothing else leaves no live row."""
+    _raise(root)
+    items.write_transitions(root, [_park()], [])
+    row = _row(root)
+    assert row is not None and row["dismissed"] is True
+
+
+def test_a_clear_and_a_raise_in_one_poll_end_present_and_unread(root: Path) -> None:
+    """ORDERING PIN 2/3: the same key ending and starting is a LIVE park.
+
+    This is the re-park inside one poll — ``park_edges`` reports the old key as
+    ended and the new one as an edge — and the row must finish present, because
+    the call really is waiting. ``write_transitions`` orders the clears before
+    the raises for exactly this cell; swapping the two loops fails it.
     """
     _raise(root)
-    items.write_transitions(
-        root,
-        [{"device_id": "d_bb", "session_id": "s_parked", "kind": "approval"}],
-        [
-            {
-                "device_id": "d_bb",
-                "session_id": "s_parked",
-                "kind": "approval",
-                "device_name": "demo-laptop",
-                "name": "Backfill the audit log",
-            }
-        ],
-    )
+    items.write_transitions(root, [_park()], [_fresh()])
     row = _row(root)
     assert row is not None
     assert row["dismissed"] is False, "a live park's row was left dismissed"
+    assert row["read"] is False, "a live park's row was left read"
+
+
+def test_a_raise_then_a_clear_in_one_poll_ends_absent(root: Path) -> None:
+    """ORDERING PIN 3/3: the OTHER order ends the row — the caller decides.
+
+    Written as two calls because that is the only way to express it: the point
+    is that the pair is not commutative, so the module's fixed order (clear,
+    then raise) is what makes pin 2 true rather than an accident of list order.
+    """
+    _raise(root)
+    items.write_transitions(root, [], [_fresh()])
+    items.write_transitions(root, [_park()], [])
+    row = _row(root)
+    assert row is not None and row["dismissed"] is True
+
+
+def test_the_banner_ladder_never_sees_a_park_row(tmp_path: Path) -> None:
+    """R1-2: one park, one card — the ladder declines both park families.
+
+    The exclusion is part of ``undelivered``'s SQL, so a burst of parks cannot
+    fill the window and starve a plain item behind them (the failure a post-read
+    filter would have caused), and an UNKEYED row is untouched.
+    """
+    from local_operator.notifications.delivery import (
+        PARK_ITEM_PREFIXES,
+        announced_by_its_park,
+    )
+
+    remote_key = items.item_key("d_bb", "s_parked", "approval")
+    gate_key = ":".join(("gate", "approval", "req-1"))
+
+    store = NotificationStore(tmp_path)
+    remote = store.notify(
+        "s_parked", title="Waiting for approval on demo-laptop", priority="high", key=remote_key
+    )
+    local = store.notify("s_local", title="Approve the command", priority="high", key=gate_key)
+    plain = store.notify("s_plain", title="A plain item", priority="high")
+
+    owed = store.undelivered(priority="high", exclude_prefixes=PARK_ITEM_PREFIXES)
+    assert [row["id"] for row in owed] == [plain.item_id]
+    # The parks were DECLINED, not consumed: their own announce paths still own
+    # them, so both are still claimable by the leg that speaks for a park.
+    everything = {row["id"] for row in store.undelivered(priority="high")}
+    assert {remote.item_id, local.item_id} <= everything
+    assert announced_by_its_park({"key": remote_key})
+    assert announced_by_its_park({"key": gate_key})
+    assert not announced_by_its_park({"key": ""})
 
 
 def test_a_new_park_reopens_a_row_that_was_read_or_dismissed(root: Path) -> None:

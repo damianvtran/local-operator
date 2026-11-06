@@ -234,6 +234,42 @@ def test_rung_three_raises_high_once_and_never_normal_or_low(tmp_path: Path) -> 
     assert raised == [high.item_id]
 
 
+def test_a_park_row_is_never_bannered_by_the_ladder(tmp_path: Path) -> None:
+    """R1-2: one park, one card — the park's own path owns its banner.
+
+    A remote park writes a ``high`` row, and the TUI's park notice has already
+    raised the DEVICE-named banner for that same park; rung 3 then claimed the
+    row and bannered it a second time. The case a park matters in is the one
+    where the operator is away, so both cards land. Both park families are
+    declined (a local ``gate:`` row has the same latent shape — its banner
+    belongs to ``_announce_pending``), and the rows are left OWED rather than
+    consumed, so the leg that speaks for a park can still claim them.
+    """
+    from local_operator.notifications.remote_park import item_key
+
+    store = NotificationStore(tmp_path)
+    remote_key = item_key("d_bb", S1, "approval")
+    gate_key = ":".join(("gate", "approval", "req-1"))
+    park = store.notify(
+        S1, title="Waiting for approval on demo-laptop", priority="high", key=remote_key
+    )
+    gate = store.notify(S1, title="Approve the command", priority="high", key=gate_key)
+    plain = store.notify(S2, title="A plain item", priority="high")
+    _age(tmp_path)
+
+    raised: list[str] = []
+    tick = attention.announce_items(
+        tmp_path,
+        raise_one=lambda row: raised.append(str(row["id"])) or True,
+        raise_digest=lambda rows: True,
+        desktop_delivers_update=lambda: False,
+    )
+    assert raised == [plain.item_id], "the ladder bannered a row a park already announced"
+    assert tick.raised == (plain.item_id,)
+    owed = {row["id"] for row in store.undelivered(priority="high")}
+    assert {park.item_id, gate.item_id} <= owed, "a park row was claimed away from its own path"
+
+
 def test_rung_three_digests_the_overflow_and_releases_a_failed_digest(tmp_path: Path) -> None:
     store = NotificationStore(tmp_path)
     for index in range(5):

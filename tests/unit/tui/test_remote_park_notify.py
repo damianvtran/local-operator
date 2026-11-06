@@ -649,3 +649,46 @@ async def test_a_park_on_a_peer_raises_a_row_in_the_operator_inbox(tmp_path: Pat
         assert (
             cleared is not None and cleared["dismissed"] is True
         ), "an answered park left its inbox row standing"
+
+
+@pytest.mark.asyncio
+async def test_a_kind_change_ends_the_old_kinds_row() -> None:
+    """R1-1: ask → approval on one conversation must not strand the ask row.
+
+    ``park_edges`` fires an edge when the KIND changes and carries only the new
+    kind in its state map, so a clear pass that compared keys alone had no
+    reason to dismiss the old kind's row: it stayed unread and ``high`` for
+    ever, after the park it described was over. Reproduced on the old predicate
+    (``if key in state: continue``) — the first assertion below fails there.
+    """
+    from local_operator.notifications.remote_park import item_key
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.paths import config_dir
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        store = NotificationStore(config_dir())
+        ask_key = item_key("d_bb", "s_parked", "ask")
+        approval_key = item_key("d_bb", "s_parked", "approval")
+
+        app._note_remote_parks((_parked(kind="ask"),))
+        await pilot.pause()
+        assert store.get_by_key("s_parked", ask_key) is not None
+
+        # The same wait becomes an approval inside one read: a new episode of a
+        # different KIND, and the old kind's row ends with it.
+        app._note_remote_parks((_parked(kind="approval"),))
+        await pilot.pause()
+        ask_row = store.get_by_key("s_parked", ask_key)
+        assert (
+            ask_row is not None and ask_row["dismissed"] is True
+        ), "the ask row survived the park changing kind: a parked row nobody can clear"
+        approval_row = store.get_by_key("s_parked", approval_key)
+        assert approval_row is not None and approval_row["dismissed"] is False
+
+        # And the ordinary end still clears the CURRENT kind.
+        app._note_remote_parks(())
+        await pilot.pause()
+        done = store.get_by_key("s_parked", approval_key)
+        assert done is not None and done["dismissed"] is True
