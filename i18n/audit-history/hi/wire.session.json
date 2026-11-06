@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.session",
+  "history_sha256": "09fa542261a3335fd19323e37488e51c629cea7d1dea6b2b35a1ea120eb51b16",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "wire.session",
+      "source_sha256": "8a52e6b30bc82f0e1ae0cd801fa9d6c192a770c74976238e74983e1d2b2b659c",
+      "context_sha256": "79d3b829d3852083eecb22eaff55855ebf164e45dc3350d316d458409c4ff438",
+      "target_sha256": "4a3b639f7d8ca141ebb0b7decf6d1e34670da7ab25833d9ba8e879e16dd955b9",
+      "translator": {
+        "agent": "translator (lopdev task subagent 'translate-scheduled-key')",
+        "session": "d133b409e337",
+        "model": "radient/auto",
+        "model_kind": "served opaque router selector; the row records the selector that actually served the calls, not proof of a concrete underlying model (UNKNOWN)",
+        "underlying_model": "UNKNOWN",
+        "date": "2026-11-06",
+        "fallback": "provider-quota fallback: primary anthropic/claude-sonnet-5-5 displaced through anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol -> kimi/k3.1-pro -> radient/auto (served). Source: the session's own harness active_model_route events, every hop reason='provider failure: quota'."
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev task subagent 'audit-scheduled-key'; independent agent instance, separate session from the translator)",
+        "session": "63b52c6ac108",
+        "model": "radient/auto",
+        "model_kind": "served opaque router selector; the row records the selector that actually served the calls, not proof of a concrete underlying model (UNKNOWN)",
+        "underlying_model": "UNKNOWN",
+        "date": "2026-11-06",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 1 minor (H1 hi term split, pre-existing), 2 nits (Z1 zh-CN classifier; ru/vi width informational)",
+        "independent_from_translator": true,
+        "translator_session": "d133b409e337",
+        "fallback": "provider-quota fallback: primary anthropic/claude-sonnet-5-5 displaced through anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol -> kimi/k3.1-pro -> radient/auto (served). Source: the session's own harness active_model_route events, every hop reason='provider failure: quota'."
+      },
+      "status": "passed",
+      "note": "wire.session.status.scheduled, one key. Independent audit passed on these bytes: placeholder is {count} (argument name and kind exact), plural arms are exactly plural_rules.json for this locale, and the real renderer was exercised at counts 0/1/2/5/21/1.5/1e6. Verdict for hi: clean-with-findings: 1 minor (H1, pre-existing hi term split निर्धारित vs शेड्यूल की गई; not a comprehension defect, does not gate). One independent audit is what the contract requires here: this is a session-row status line, not safety or high-visibility copy under docs/I18N.md step 3, so no second audit is claimed. Audit record: independent i18n-auditor session 63b52c6ac108, a different agent instance from the translator session d133b409e337; both served by radient/auto after the provider-quota chain, which this row records rather than a requested model name. Gate outputs in the PR #3503 comment."
+    }
+  ]
+}
