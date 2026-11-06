@@ -19,7 +19,10 @@ import pytest
 
 from local_operator.harness.types import ModelSpec
 from local_operator.providers.controller import PICKER_TTL_S, ProviderController
-from local_operator.providers.registry import get_provider_definition
+from local_operator.providers.registry import (
+    credential_provider_id,
+    get_provider_definition,
+)
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
 from local_operator.providers.usage_cache import (
     USAGE_ACCOUNT_MAX_FAILURES,
@@ -68,6 +71,12 @@ class FakeAuthStore:
             self._runtime_overrides.pop(provider, None)
 
     def list_credentials(self, provider=None):
+        # Translated through the same function the real store uses: login
+        # flavours (``openai-device``, ``xai-oauth`` …) own no rows of their
+        # own, so an exact-string fake would report "no credential" for a
+        # flavour that resolves fine in production.
+        if provider is not None:
+            provider = credential_provider_id(provider)
         rows = (
             list(self.rows)
             if provider is None
@@ -111,6 +120,19 @@ class FakeAuthStore:
 
     async def get_oauth_access(self, provider):
         return self.oauth.get(provider)
+
+    async def ensure_oauth_fresh(self, credential_id):
+        # The real store refreshes and returns the row's own dict; the fake has
+        # no clock and no IdP, so it returns the stored payload for an enabled
+        # OAuth row and None for anything else -- the same two answers the
+        # controller has to distinguish.
+        for row in self.rows:
+            if row["id"] != credential_id or row.get("disabled_cause"):
+                continue
+            if row.get("credential_type") != "oauth":
+                return None
+            return dict(row["data"])
+        return None
 
     async def list_oauth_accesses(self, provider):
         if self._runtime_overrides.get(provider):
@@ -252,6 +274,166 @@ async def test_fetch_one_no_credential_returns_none(controller) -> None:
     async with httpx.AsyncClient() as client:
         result = await controller._fetch_one(client, "openrouter", access=None)
     assert result is None
+
+
+class TestConsumeUsageReset:
+    """Spending a reset credit is irreversible, so the IDENTITY -- not the
+    registry id, not the cascade's current pick -- selects the credential.
+
+    The cascade resolves to whichever sibling outranks the others, which is the
+    right answer for "where does the next request go" and the wrong one for "on
+    whose account do I spend this": the user confirms an account by the label
+    the panel shows, and that label is what has to pick the token.
+    """
+
+    @staticmethod
+    def _seed(store, email: str, account_id: str) -> None:
+        store.upsert_credential(
+            "openai",
+            {
+                "type": "oauth",
+                "access": f"tok-{account_id}",
+                "refresh": f"refresh-{account_id}",
+                "email": email,
+                "account_id": account_id,
+            },
+        )
+
+    @staticmethod
+    def _patch_transport(monkeypatch, payload, requests: list[httpx.Request]) -> None:
+        """Give the controller's own ``AsyncClient()`` a canned transport.
+
+        The method deliberately owns its client (a spend request must not ride
+        on a caller's session), so the seam is the module's ``httpx`` reference:
+        replacing it there leaves the real httpx module untouched for every
+        other test in the process.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=payload)
+
+        monkeypatch.setattr(
+            "local_operator.providers.controller.httpx",
+            types.SimpleNamespace(
+                AsyncClient=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_named_identity_picks_that_rows_token(self, controller, store, monkeypatch):
+        self._seed(store, "first@example.com", "acct-1")
+        self._seed(store, "second@example.com", "acct-2")
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset", "windows_reset": 2}, requests)
+
+        result = await controller.consume_usage_reset("openai", "second@example.com", "r-1")
+
+        assert result.outcome == "reset"
+        assert result.windows_reset == 2
+        (request,) = requests
+        assert request.headers["Authorization"] == "Bearer tok-acct-2"
+        assert request.headers["ChatGPT-Account-Id"] == "acct-2"
+
+    @pytest.mark.asyncio
+    async def test_the_device_code_flavour_resolves_the_same_rows(
+        self, controller, store, monkeypatch
+    ):
+        self._seed(store, "first@example.com", "acct-1")
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "no_credit"}, requests)
+
+        result = await controller.consume_usage_reset("openai-device", "first@example.com", "r-1")
+
+        assert result.outcome == "no_credit"
+        assert len(requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_provider_without_the_product_is_refused_without_a_request(
+        self, controller, store, monkeypatch
+    ):
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset"}, requests)
+
+        result = await controller.consume_usage_reset("anthropic", "me@example.com", "r-1")
+
+        assert result.outcome == "failed"
+        assert "anthropic" in result.detail
+        assert requests == []
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_identity_is_refused_without_a_request(
+        self, controller, store, monkeypatch
+    ):
+        self._seed(store, "first@example.com", "acct-1")
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset"}, requests)
+
+        result = await controller.consume_usage_reset("openai", "nobody@example.com", "r-1")
+
+        assert result.outcome == "failed"
+        assert "nobody@example.com" in result.detail
+        assert requests == []
+
+    @pytest.mark.asyncio
+    async def test_a_login_that_cannot_mint_a_token_is_refused(
+        self, controller, store, monkeypatch
+    ):
+        """A dead grant must not fall through to another account's bearer:
+        that would spend the credit on a login the user did not confirm."""
+        self._seed(store, "first@example.com", "acct-1")
+
+        async def no_token(credential_id):
+            return None
+
+        store.ensure_oauth_fresh = no_token
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset"}, requests)
+
+        result = await controller.consume_usage_reset("openai", "first@example.com", "r-1")
+
+        assert result.outcome == "failed"
+        assert requests == []
+
+    @pytest.mark.asyncio
+    async def test_a_store_that_raises_while_minting_is_a_failure_not_a_crash(
+        self, controller, store, monkeypatch
+    ):
+        self._seed(store, "first@example.com", "acct-1")
+
+        async def broken(credential_id):
+            raise RuntimeError("lock held by another session")
+
+        store.ensure_oauth_fresh = broken
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset"}, requests)
+
+        result = await controller.consume_usage_reset("openai", "first@example.com", "r-1")
+
+        assert result.outcome == "failed"
+        assert requests == []
+
+    @pytest.mark.asyncio
+    async def test_a_spent_credit_drops_the_cached_row(self, controller, store, monkeypatch):
+        """The cache is shared by every lop session on the machine and now
+        states a count and windows that are no longer true; leaving it would
+        make a successful redeem look like a no-op on the next warm `/usage`."""
+        self._seed(store, "first@example.com", "acct-1")
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset", "windows_reset": 1}, requests)
+        cache = controller._usage_cache_store()
+        assert cache is not None
+        cache.set(
+            controller._usage_cache_key("openai"),
+            "openai",
+            [UsageReport(provider="openai", resets_available=1)],
+            expires_at_ms=int(time.time() * 1000) + 60_000,
+        )
+        assert cache.get(controller._usage_cache_key("openai")) is not None
+
+        await controller.consume_usage_reset("openai", "first@example.com", "r-1")
+
+        assert cache.get(controller._usage_cache_key("openai")) is None
 
 
 class TestUsageIsPerAccount:

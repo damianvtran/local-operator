@@ -121,6 +121,26 @@ ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 #: OpenAI ChatGPT backend usage windows (OAuth device-code / ChatGPT Plus).
 OPENAI_WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 
+#: Spend one ChatGPT/Codex usage-reset credit (OAuth).
+#:
+#: The ``credits`` balance the usage payload also carries is a DIFFERENT
+#: product: that one is payable balance, spent by inference. A reset credit is
+#: a one-shot event that clears a rate-limit window, and only this route spends
+#: it.
+#:
+#: Contract taken from the reference implementation shipping in ChatGPT.app --
+#: codex-rs ``backend-client/src/client/rate_limit_resets.rs``, codex-cli
+#: 0.163.0-alpha.10.2 -- and verified live, not assumed: the SAME
+#: bearer/account headers as the usage GET, a JSON body carrying only an opaque
+#: idempotency id (the server picks which credit to spend), and a 200 answering
+#: ``{"code": ..., "windows_reset": N}`` where ``code`` is ``reset`` /
+#: ``nothing_to_reset`` / ``no_credit`` / ``already_redeemed``. Replaying one
+#: ``redeem_request_id`` is the documented-safe retry because the server answers
+#: ``already_redeemed`` rather than spending a second credit.
+OPENAI_WHAM_RESET_CONSUME_URL = (
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+)
+
 #: Kimi coding-plan usage (OAuth).
 #:
 #: The .com API host is deliberately NOT split alongside the OAuth hosts: the
@@ -406,6 +426,21 @@ class UsageReport:
     #: retry backoff. Last-known limits are preserved either way -- the login
     #: is still real and its final numbers are still the truth about it.
     credential_invalid: bool = False
+    #: Vendor "usage reset" credits still on this account, or ``None``.
+    #:
+    #: ``None`` means either the provider has no reset-credit product at all
+    #: (every provider but OpenAI today -- Anthropic ships none) OR the payload
+    #: omitted the field; ``0`` means the product exists and nothing is left to
+    #: spend. The distinction is the whole reason this is not a plain ``int``:
+    #: a surface may offer the redeem affordance only where a credit can
+    #: actually be spent, and must not offer it on every account of every
+    #: provider.
+    #:
+    #: Deliberately NOT an input to :func:`usage_health`, :func:`binding_limit`
+    #: or any paid/eligibility calculation. A reset credit is an event that
+    #: clears a spent window, not quota the account can serve requests with, so
+    #: counting it as headroom would report an exhausted plan as serviceable.
+    resets_available: int | None = None
 
 
 def usage_report_state(report: UsageReport) -> str:
@@ -1756,7 +1791,105 @@ async def fetch_openai_oauth(
         return None
     plan = payload.get("plan_type")
     notes = f"plan: {plan}" if isinstance(plan, str) and plan.strip() else None
-    return UsageReport(provider="openai", limits=limits, notes=notes)
+    reset_credits = payload.get("rate_limit_reset_credits")
+    resets_available: int | None = None
+    if isinstance(reset_credits, dict):
+        raw_count = reset_credits.get("available_count")
+        # EXACT type, not ``isinstance``: ``bool`` is an ``int`` in Python, and
+        # ``"2"`` / ``2.0`` are plausible wire spellings of the same field. An
+        # untrusted count reaches a button that SPENDS something, so anything
+        # but a non-negative int reads as "not reported" and the surface simply
+        # does not offer the action.
+        if type(raw_count) is int and raw_count >= 0:
+            resets_available = raw_count
+    return UsageReport(
+        provider="openai",
+        limits=limits,
+        notes=notes,
+        resets_available=resets_available,
+    )
+
+
+@dataclass(frozen=True)
+class ResetConsumeResult:
+    """The outcome of ONE attempt to spend a ChatGPT usage-reset credit.
+
+    ``outcome`` is the server's own vocabulary when it answered -- ``reset``,
+    ``nothing_to_reset``, ``no_credit``, ``already_redeemed`` -- plus
+    ``failed`` for everything this client could not establish.
+
+    The distinction the caller needs is not success versus failure but SPENT
+    versus UNKNOWN. Only ``reset`` proves a credit was used; ``failed`` may or
+    may not have spent one (a timeout can hide a 200), so a retry must reuse
+    the same ``redeem_request_id`` -- the server then answers
+    ``already_redeemed`` instead of spending a second credit. ``detail`` is a
+    short machine-ish cause (``HTTP 500``, an exception class name), safe to
+    render in a confirmation dialog.
+    """
+
+    outcome: str
+    windows_reset: int = 0
+    detail: str = ""
+
+
+#: The answer codes the consume endpoint is documented to return. Anything else
+#: is a wire change, so it is reported as a failure with the code in ``detail``
+#: rather than silently mapped onto a guess: misreading ``no_credit`` as
+#: ``reset`` would tell the user a window was cleared when none was.
+RESET_CONSUME_OUTCOMES = frozenset({"reset", "nothing_to_reset", "no_credit", "already_redeemed"})
+
+
+async def consume_openai_reset_credit(
+    client: httpx.AsyncClient,
+    access_token: str,
+    *,
+    account_id: str | None,
+    redeem_request_id: str,
+) -> ResetConsumeResult:
+    """Spend one usage-reset credit on this ChatGPT account. Never raises.
+
+    Transport errors, a non-200, a body that is not JSON and an unknown answer
+    code all come back as ``outcome="failed"`` with a short ``detail``. A
+    raised exception would leave the caller unable to tell whether the credit
+    went, and this runs behind a confirmation dialog -- the one place a
+    traceback is not an acceptable answer.
+
+    ``credit_id`` is deliberately omitted so the server picks which credit to
+    spend: the usage payload only reports an account-wide COUNT, so naming one
+    would need the per-credit details endpoint and a choice the panel has no
+    information to make.
+    """
+    # The same header set the usage GET sends (see ``fetch_openai_oauth``): the
+    # bearer, the account the credit belongs to, and a product User-Agent.
+    headers = _bearer(access_token)
+    headers["User-Agent"] = "LocalOperator/1.0"
+    if account_id:
+        headers["ChatGPT-Account-Id"] = account_id
+    try:
+        response = await client.post(
+            OPENAI_WHAM_RESET_CONSUME_URL,
+            headers=headers,
+            json={"redeem_request_id": redeem_request_id},
+            timeout=10.0,
+        )
+    except Exception as error:  # noqa: BLE001 -- a verdict, not a raise, is the contract
+        return ResetConsumeResult(outcome="failed", detail=type(error).__name__)
+    if response.status_code != 200:
+        return ResetConsumeResult(outcome="failed", detail=f"HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError:
+        return ResetConsumeResult(outcome="failed", detail="unparseable response")
+    if not isinstance(payload, dict):
+        return ResetConsumeResult(outcome="failed", detail="unparseable response")
+    code = payload.get("code")
+    if not isinstance(code, str) or code not in RESET_CONSUME_OUTCOMES:
+        # Bounded before it reaches a dialog: ``detail`` is rendered to the
+        # user and an unknown code is untrusted input from the wire.
+        return ResetConsumeResult(outcome="failed", detail=f"unexpected code: {str(code)[:40]!r}")
+    windows = payload.get("windows_reset")
+    windows_reset = windows if type(windows) is int and windows >= 0 else 0
+    return ResetConsumeResult(outcome=code, windows_reset=windows_reset)
 
 
 def _kimi_reset_ms(data: dict[str, Any], now_ms: float) -> int | None:

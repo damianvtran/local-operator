@@ -168,6 +168,22 @@ def report_to_dict(report: UsageReport) -> dict[str, Any]:
     return asdict(report)
 
 
+def _resets_available(raw: Any) -> int | None:
+    """The cached reset-credit count, or None when it is not trustworthy.
+
+    The same rule the fetcher applies (``providers/usage.py``,
+    ``fetch_openai_oauth``): ``type(...) is int`` rather than ``isinstance``
+    because ``True``/``False`` are ints in Python, so a boolean could otherwise
+    decode as one spendable credit. ``0`` must survive decode -- it means "the
+    product exists, none left" -- which is why this cannot be ``raw or None``.
+
+    A row written before this field existed has no key at all and decodes to
+    None, which is the same "not reported" a provider without the product
+    reports: the badge simply stays off.
+    """
+    return raw if type(raw) is int and raw >= 0 else None
+
+
 def report_from_dict(data: Any) -> UsageReport | None:
     """Rebuild a report from a cached dict, or None when it no longer parses.
 
@@ -262,6 +278,7 @@ def report_from_dict(data: Any) -> UsageReport | None:
             usage_unavailable=bool(data.get("usage_unavailable", False)),
             next_probe_at_ms=next_probe_at_ms,
             credential_invalid=bool(data.get("credential_invalid", False)),
+            resets_available=_resets_available(data.get("resets_available")),
         )
     except Exception:  # noqa: BLE001 — a bad row is a miss, not a failure
         logger.debug("usage cache: unparseable report row dropped", exc_info=True)

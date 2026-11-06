@@ -59,7 +59,9 @@ from local_operator.providers.registry import (
 )
 from local_operator.providers.usage import (
     USAGE_PROVIDERS,
+    ResetConsumeResult,
     UsageReport,
+    consume_openai_reset_credit,
     fetch_usage,
     usage_kinds,
     usage_supported,
@@ -102,6 +104,16 @@ logger = logging.getLogger("local_operator.providers.controller")
 #: plausible rate-limit window, short enough that a lapsed plan stops burning
 #: a request per warm tick the same day.
 EMPTY_OVER_DATA_ACCEPT_MS = 30 * 60_000
+
+#: Provider ids whose usage-reset credits this facade can spend.
+#:
+#: Both spellings of the ChatGPT login: ``openai`` and its device-code flavour
+#: ``openai-device`` share one stored credential set (see
+#: ``auth_store._storage_id``), and reports may carry either id, so refusing one
+#: spelling would make the affordance dead for half the users. Anthropic is
+#: absent on purpose -- its plan has no reset-credit product, so there is
+#: nothing to redeem and no endpoint to call.
+_RESET_CREDIT_PROVIDERS = frozenset({"openai", "openai-device"})
 
 #: The listing TTL the ``/model`` picker asks :meth:`live_catalogue` for. The
 #: user is asking NOW, and the fetch already runs off-loop behind rows painted
@@ -297,6 +309,10 @@ class ControllerAuthStore(Protocol):
     async def list_oauth_accesses(
         self, provider: str
     ) -> list["OAuthAccess"]: ...  # pragma: no cover
+
+    async def ensure_oauth_fresh(
+        self, credential_id: int
+    ) -> dict[str, Any] | None: ...  # pragma: no cover
 
     def list_oauth_identities(self, provider: str) -> list["OAuthAccess"]: ...  # pragma: no cover
 
@@ -1630,6 +1646,84 @@ class ProviderController:
                 continue
             reports.extend(result)
         return reports
+
+    async def consume_usage_reset(
+        self, provider: str, identity: str, redeem_request_id: str
+    ) -> ResetConsumeResult:
+        """Spend one vendor usage-reset credit on ONE named account.
+
+        ``identity`` is the label the reports carry (``credential_identity``:
+        email, then account id, then org name) and it -- not the registry id,
+        not the cascade's currently selected account -- chooses the credential.
+        THAT is the whole point of the argument: the cascade resolves to
+        whichever sibling outranks the others, while a reset spends something
+        that cannot be refunded on the wrong login. A user with two ChatGPT
+        accounts asks about the one they can see, and this credits that one or
+        nothing at all.
+
+        Never raises; every unusable state is a ``ResetConsumeResult`` with
+        ``outcome="failed"`` and a short detail the confirmation dialog can
+        show. ``redeem_request_id`` is the caller's opaque idempotency id: pass
+        the SAME one when retrying an ambiguous failure, and a fresh one for a
+        genuinely new attempt (see :func:`consume_openai_reset_credit`).
+
+        On a spent or already-redeemed credit the cached usage row for the
+        provider is dropped, because that row now states a count and set of
+        windows that are no longer true and the cache is shared by every lop
+        session on the machine -- a stale row would make the panel look like
+        the button did nothing.
+        """
+        from local_operator.providers.auth_store import credential_identity
+
+        if provider not in _RESET_CREDIT_PROVIDERS:
+            return ResetConsumeResult(
+                outcome="failed", detail=f"{provider} has no usage-reset credits"
+            )
+        try:
+            rows = self.auth_store.list_credentials(provider)
+        except Exception:  # noqa: BLE001 -- an unreadable store is a refusal, not a crash
+            rows = []
+        row = next(
+            (
+                candidate
+                for candidate in rows
+                if candidate.credential_type == "oauth"
+                and credential_identity(candidate) == identity
+            ),
+            None,
+        )
+        if row is None:
+            return ResetConsumeResult(outcome="failed", detail=f"no stored login for '{identity}'")
+        # The row's OWN token, refreshed on the row rather than resolved through
+        # the cascade: the same accessor the usage fetcher's per-account path
+        # uses, so the request authenticates as the account whose numbers the
+        # panel showed.
+        creds = None
+        try:
+            creds = await self.auth_store.ensure_oauth_fresh(row.id)
+        except Exception:  # noqa: BLE001 -- an unmintable token is a refusal, not a crash
+            creds = None
+        access_token = (creds or {}).get("access")
+        if not access_token:
+            return ResetConsumeResult(
+                outcome="failed", detail=f"could not refresh login for '{identity}'"
+            )
+        account_id = (creds or {}).get("account_id") or row.data.get("account_id")
+        async with httpx.AsyncClient() as client:
+            result = await consume_openai_reset_credit(
+                client,
+                access_token,
+                account_id=account_id,
+                redeem_request_id=redeem_request_id,
+            )
+        if result.outcome in ("reset", "already_redeemed"):
+            cache = self._usage_cache_store()
+            if cache is not None:
+                try:
+                    cache.invalidate(self._usage_cache_key(provider))
+                except Exception:  # noqa: BLE001 -- teardown of a stale row, never fatal
+                    logger.debug("usage cache drop after reset failed", exc_info=True)
+        return result
 
     # -- usage cache plumbing ------------------------------------------------
 
