@@ -295,10 +295,28 @@ _PNG_SIGNATURE: Final = b"\x89PNG\r\n\x1a\n"
 _GIF_SIGNATURES: Final = (b"GIF87a", b"GIF89a")
 _ICO_SIGNATURE: Final = b"\x00\x00\x01\x00"
 
-#: JPEG start-of-frame markers that carry the frame header. Deliberately the
-#: closed set: C4 (Huffman tables), C8 (reserved) and CC (arithmetic conditioning)
-#: sit inside the same range and are NOT frames, and reading them as one yields
-#: nonsense dimensions from unrelated bytes.
+#: How far into a JPEG the segment walk may look for its start-of-frame header.
+#:
+#: The walk is a Python loop over ATTACKER-SUPPLIED bytes, so it has to be bounded
+#: by something other than the body length: a 2 MiB body of ``FF D8 FF`` followed by
+#: repeated ``FF D0`` (restart markers, no SOF ever) measured **545-757 ms** of pure
+#: loop on this host's CPython 3.12.13, and 208-514 ms on CPython 3.14.x on the review
+#: hosts, before this cap; capped it measures 5-45 ms. An earlier revision of this
+#: comment claimed 1.75 s, which no reviewer could reproduce on any interpreter —
+#: the range above is what was actually measured, and the cap is justified by it.
+#:
+#: THE LIMITATION THIS ACCEPTS, stated rather than hidden: a JPEG whose EXIF/APP1
+#: block is larger than the cap pushes its SOF past the walk, so that photo reports
+#: **unknown** dimensions (``None`` per axis, which the renderer contract allows)
+#: rather than a number. It can never report a WRONG pair — the walk only reads an
+#: SOF it actually reached — and the bytes are still stored and served either way;
+#: only the dimensions are unknown.
+_JPEG_SOF_SCAN_BYTES: Final = 64 * 1024
+
+#: JPEG start-of-frame markers that carry the frame header. Deliberately the closed
+#: set: C4 (Huffman tables), C8 (reserved) and CC (arithmetic conditioning) sit in
+#: the same range and are NOT frames, and reading one as a frame yields dimensions
+#: from unrelated bytes.
 _JPEG_SOF: Final = frozenset(
     {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
 )
@@ -368,7 +386,9 @@ def _jpeg_size(body: bytes) -> tuple[int | None, int | None]:
     dimensions — never a wrong pair read from arbitrary bytes.
     """
     index = 2
-    limit = len(body)
+    # The cap, not the body: see :data:`_JPEG_SOF_SCAN_BYTES`. Every bound below
+    # uses it, so no read can walk past it either.
+    limit = min(len(body), _JPEG_SOF_SCAN_BYTES)
     while index + 4 <= limit:
         if body[index] != 0xFF:
             index += 1

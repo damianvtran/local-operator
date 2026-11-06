@@ -31,10 +31,16 @@ capability tokens in its query string, and a log line outlives the message; the
 only identifier that appears anywhere on this surface is the artifact id, which
 is a scope-derived hash and names nothing on its own.
 
-The client stack (and therefore ``httpx``) is imported INSIDE the handler that
-needs it: this module rides ``server.app``'s import path on every ``lop serve``
-boot, and a module-scope httpx costs boot time for a surface most boots never
-touch (the discipline ``routes/desktop_team_bridge.py`` documents).
+THE IMPORT DISCIPLINE HERE IS THE OPPOSITE OF ``desktop_team_bridge``'S, deliberately.
+That module imports its client stack inside handlers because it rides
+``server.app``'s import path on every ``lop serve`` boot and ``httpx`` is a
+measurable slice of that boot. This module cannot make the same trade: its whole
+service layer (``web_fetch.service``, reached through ``link_preview.service``)
+imports ``httpx`` at module scope, because that transport is exactly what it must
+reuse — so a lazy import here would buy nothing and would only hide the
+dependency. What IS kept off the import path is work: no store is opened, no cache
+is built and no bucket is allocated until a request arrives, all of them lazily
+built process-wide accessors.
 """
 
 from __future__ import annotations
@@ -44,9 +50,9 @@ import logging
 from pathlib import Path
 from typing import Annotated, Final
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi import Path as PathParam
-from fastapi import Query, Request, status
+from fastapi import Request, status
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from starlette.responses import Response
 
@@ -63,6 +69,10 @@ from local_operator.team_bridge.link_preview.store import (
     InvalidArtifactId,
     PreviewStore,
 )
+from local_operator.team_bridge.link_preview.throttle import (
+    PreviewThrottled,
+    get_resolve_throttle,
+)
 from local_operator.web_fetch.service import load_fetch_settings
 
 logger = logging.getLogger(__name__)
@@ -77,6 +87,13 @@ ArtifactID = Annotated[str, PathParam(pattern=rf"^{ARTIFACT_ID_PATTERN}$")]
 #: A URL longer than this is not a link anyone wrote by hand. Bounded here so the
 #: fetcher's own normalisation never sees an unbounded body field.
 MAX_URL_CHARS: Final = 4096
+
+#: The account receipt for the artifact route, as a HEADER rather than a query
+#: parameter (security round 1, S-3). A query string is written down by every
+#: intermediary on the way — proxy logs, a browser's history, a crash report — and
+#: an account id has no business in any of them; the resolve route already takes
+#: its receipt in the body for the same reason.
+ACCOUNT_RECEIPT_HEADER: Final = "X-Link-Preview-Account"
 
 
 class ResolveRequest(BaseModel):
@@ -102,10 +119,11 @@ class ResolveRequest(BaseModel):
 class LinkPreviewCacheStats(BaseModel):
     """What the preview cache holds, in numbers that cannot name a page.
 
-    camelCased on the wire (``residentBytes``) because the renderer's own contract
-    reads it that way, for the same reason ``siteName`` carries a
-    ``serialization_alias`` in ``link_preview.models``: the alias is the boundary,
-    not a second vocabulary.
+    camelCased on the wire (``residentBytes``) to match the alias boundary the
+    card's own model sets (``siteName`` in ``link_preview.models``), NOT because
+    any renderer contract declares a cache shape — none does. This is a
+    diagnostics surface: the alias keeps the desktop wire's one spelling
+    convention rather than inventing a second one beside it.
     """
 
     entries: int
@@ -184,24 +202,53 @@ def _scope_for(config_dir: Path, account_id: str) -> PreviewScope:
     with no fence at all.
 
     An install with no committed owner row has no tenant, and the account alone is
-    then the whole scope: a missing tenant must narrow nothing. The same applies
-    to a store that cannot be read — the tenant is the SECOND fence, and losing it
-    must not fail a preview the account scope still isolates. ``sqlite3.Error`` is
-    caught alongside ``StoreRefused`` for exactly that reason (the pair
-    ``desktop_team_bridge._locally_enrolled`` catches): a malformed or half-written
-    owner row must narrow the scope, never 500 the route.
-    """
-    import sqlite3
+    then the whole scope: a missing tenant must narrow nothing. The same applies to
+    a store that cannot be read — the tenant is the SECOND fence, and losing it
+    must not fail a preview the account scope still isolates.
 
+    WHICH FAILURES THAT COVERS, EXACTLY (review R2-2). ``active_owner_readonly``
+    already wraps what SQLite raises while reading as ``StoreRefused`` (its
+    read-only connection wraps the caller's read), so catching a raw
+    ``sqlite3.Error`` here caught nothing. What DOES escape is the row decoder:
+    ``_owner_from_row`` calls ``int()`` on the id and generation columns and then
+    ``OwnerSnapshot.validated()``, so a HALF-WRITTEN committed row raises
+    ``TypeError`` (a ``NULL`` where an int belongs) or ``ValueError``
+    (``TeamBridgeTypeError`` is a ``ValueError``; an empty tenant or a relative
+    base URL lands there). Those are precisely the case this docstring promises to
+    degrade, and catching only the store's own refusal answered them with a 500 on
+    both routes.
+    """
     from local_operator.team_bridge.store import Store, StoreRefused
 
     owner = None
     try:
         owner = Store(config_dir).active_owner_readonly()
-    except (StoreRefused, sqlite3.Error):
+    except (StoreRefused, TypeError, ValueError):
         owner = None
     tenant_id = "" if owner is None else str(getattr(owner, "tenant_id", "") or "")
     return PreviewScope(account_id=account_id, tenant_id=tenant_id)
+
+
+def _rate_limited(retry_after: float) -> HTTPException:
+    """The 429 for a bucket that is empty, shaped like the desktop surface's 429s.
+
+    A ``429`` and not a refusal kind in the resolution body: "you are asking too
+    fast" is a fact about the CALLER, not about the link, and putting it in the
+    card vocabulary would make the renderer remember it against the URL. The code
+    and the ``Retry-After`` are what the client acts on, exactly as
+    ``desktop_sessions``'s runtime-busy refusal does.
+    """
+    return HTTPException(
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        {
+            # i18n: ignore desktop wire refusal; the renderer switches on `code`
+            "code": "rate_limited",
+            "message": "too many previews at once; try again shortly",
+            "retryable": True,
+            "retry_after_seconds": retry_after,
+        },
+        headers={"Retry-After": str(max(1, int(retry_after) + (retry_after % 1 > 0)))},
+    )
 
 
 @router.post(
@@ -221,14 +268,26 @@ async def resolve_link_preview(body: ResolveRequest, request: Request):
     """
     config_dir = _config_dir(request)
     account_id = await _require_account(config_dir, body.expected_account_id)
-    resolution = await resolve_preview(
-        url=body.url,
-        index=body.index,
-        scope=_scope_for(config_dir, account_id),
-        settings=load_fetch_settings(request.app.state.config_manager),
-        store=PreviewStore.from_config(config_dir),
-        cache=preview_cache.get_preview_cache(),
-    )
+    # THE FLOOD BOUND, passed INTO the resolver rather than applied here. ``index <
+    # 3`` is the renderer's own numbering, so a client that renumbers its links gets
+    # an unbounded number of resolves from one message (code review round 1). But the
+    # charge belongs where a FETCH happens: applying it at this boundary billed cache
+    # hits and cap refusals, so a warm re-render of seven messages exhausted a burst
+    # of twenty and started refusing real work (round 2, minor). The resolver spends
+    # the token on a cache miss and raises ``PreviewThrottled``; this route only
+    # translates it.
+    try:
+        resolution = await resolve_preview(
+            url=body.url,
+            index=body.index,
+            scope=_scope_for(config_dir, account_id),
+            settings=load_fetch_settings(request.app.state.config_manager),
+            store=PreviewStore.from_config(config_dir),
+            cache=preview_cache.get_preview_cache(),
+            throttle=get_resolve_throttle(),
+        )
+    except PreviewThrottled as throttled:
+        raise _rate_limited(throttled.retry_after_s) from None
     return reply(resolution)
 
 
@@ -254,8 +313,11 @@ async def link_preview_cache_stats():
     disk, no lock), which is why it runs on the loop instead of in a thread like
     the store's file work does.
 
-    Enveloped in the surface's usual ``CRUDResponse`` so the renderer's one client
-    helper parses it like every sibling GET.
+    Enveloped in the surface's usual ``CRUDResponse`` so the one desktop client
+    helper parses it like every sibling GET. That is a wire-convention choice, not
+    a renderer contract: this is the surface's DIAGNOSTIC endpoint — what an
+    operator or a test reads to see the cache move — and no renderer draws it, so
+    there is no cache shape in any renderer contract to keep in step.
     """
     stats = preview_cache.get_preview_cache().stats()
     return CRUDResponse(
@@ -300,7 +362,7 @@ async def _read_owned_artifact(
         raise HTTPException(422, {"code": "invalid_request"}) from None
     if body is None:
         return None
-    raster = sniff_raster(body)
+    raster = await asyncio.to_thread(sniff_raster, body)
     if raster is None:
         return None
     return body, raster.mime
@@ -310,7 +372,9 @@ async def _read_owned_artifact(
 async def link_preview_artifact(
     artifact_id: ArtifactID,
     request: Request,
-    expected_account_id: Annotated[StrictStr, Query(min_length=1, max_length=128)],
+    expected_account_id: Annotated[
+        StrictStr, Header(alias=ACCOUNT_RECEIPT_HEADER, min_length=1, max_length=128)
+    ],
 ):
     """The stored bytes for one artifact id, as an image and nothing else.
 
@@ -325,6 +389,13 @@ async def link_preview_artifact(
     identity this install actually holds, and the caller's string is only compared
     with it. A renderer on an install signed in as B cannot read A's bytes even by
     replaying an id it copied from A's card.
+
+    IT TRAVELS IN A HEADER (``X-Link-Preview-Account``), never in the query string
+    (security round 1, S-3). This is a GET, so its URL is the one thing written
+    down by every intermediary on the way — a proxy log, a browser history, a crash
+    report — and an account id does not belong in any of them. The resolve route
+    already carries its receipt in the body for the same reason; a query parameter
+    was the one spelling that put it somewhere it outlives the request.
 
     The mime is re-sniffed from the bytes on every read rather than stored
     alongside them: a blob whose header no longer parses is corrupt, and serving
@@ -350,5 +421,13 @@ async def link_preview_artifact(
             # so setting a lifetime here would be a header that never applies. A
             # renderer that re-asks costs one local file read, not a fetch.
             "X-Content-Type-Options": "nosniff",
+            # The same pair every sibling byte route sends
+            # (``routes/desktop_team_bridge.py``'s avatar routes): ``nosniff`` stops
+            # a MIME reinterpretation, and this makes the response inert if a browser
+            # renders it as the type it claims — nothing loads and nothing runs. NOT
+            # a second validation of the bytes: the raster sniff above is the one
+            # gate that decides what may be stored and served at all; this only
+            # removes the ability of an admitted file to act like a document.
+            "Content-Security-Policy": "default-src 'none'; sandbox",
         },
     )

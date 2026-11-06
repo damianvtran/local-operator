@@ -171,13 +171,23 @@ def canonical_url(url: str) -> str:
     USERINFO IS DROPPED. ``https://user:pass@host/x`` is the same resource as
     ``https://host/x``; keeping credentials in a cache key would put them in a
     structure that outlives the request they arrived with, which is the one thing
-    this package must never do. THAT DROP IS BELT-AND-BRACES, NOT A GUARD: the
-    address guard refuses any URL carrying credentials before it is fetched
-    (:class:`~local_operator.web_fetch.service.PolicyRefusal` with ``reason="host"``),
-    so the collapsed form is unreachable here — a credentialed target never gets
-    far enough to be keyed at all. The normalisation stays because a key function
-    must be total: it runs on whatever the renderer sent, before any fetch has had
-    the chance to refuse it.
+    this package must never do.
+
+    THAT DROP IS NOT ITSELF A GUARD, AND IT IS REACHABLE — which is why the refusal
+    has to come first (QA Q2-1). Dropping the pair is what makes the two spellings
+    ONE KEY here, so a credentialed URL that reached this function would read the
+    plain URL's entry, and on a miss would write its own ``blocked-host`` back
+    under that shared key: one message's malformed link then denying the card the
+    plain URL is entitled to for the whole negative TTL. The address guard in the
+    fetcher prevents neither half, because a cache HIT never reaches the fetcher at
+    all. So the service refuses credentials on the RAW url before it keys anything,
+    and the engine-level refusal in ``validate_public_url`` stays as the depth
+    defence that also covers every redirect hop.
+
+    The normalisation itself stays regardless, because a key function must be
+    total: it runs on whatever the renderer sent, and a key that carried a
+    credential into a long-lived structure would be a leak even on a path nothing
+    reaches yet.
 
     This value is a KEY and nothing else: it is never fetched and never returned.
     """
