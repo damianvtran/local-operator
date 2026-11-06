@@ -129,6 +129,16 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
     "credential-broker-v1",
+    # The refresh delegation's advertisement (manager ruling on review R1-4: this
+    # is an INTERPRETATION of the signed design's §3.9 "no wire.py change" line,
+    # not an amendment to it — that line exists to stop the wire PROTOCOL being
+    # renegotiated, and a capability nobody advertises makes the node's entry
+    # point permanently answer `unsupported`). ADDITIVE ONLY: `negotiate_capabilities`
+    # intersects the two lists, and the hello/challenge parsers read `caps` as
+    # opaque strings, so a peer that does not know this name ignores it and the
+    # link is unchanged. Spelled in `credentials.types.REFRESH_CAP_STRING`; the
+    # two are pinned together by a test.
+    "credential-refresh-v1",
     CREDENTIAL_LIFECYCLE_V1,
     CREDENTIAL_CATALOGUE_METADATA_V1,
     CREDENTIAL_PLACEMENT_PUSH_V1,

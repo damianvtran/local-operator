@@ -718,6 +718,26 @@ class PlacementDocument:
         changed: list[str] = []
         if not from_device or (self_device and from_device == self_device):
             return changed
+        # THE ONE THIRD-PARTY RELAY THIS MERGE ACCEPTS (§3.4 Channel 1), and the only
+        # place the owner-write rule below is narrowed. A revocation is an
+        # operator-SIGNED statement: the signature is the authority, never the
+        # sender, so any member may carry it and a node that cannot reach its owner
+        # still learns within one hop. It can only ever REDUCE — the handler writes
+        # a local stop, never a grant — and an unverifiable statement is dropped
+        # silently, leaving the node's fence closed rather than open.
+        relayed = incoming.get("refresh_deny")
+        if isinstance(relayed, str) and relayed:
+            from local_operator.network.credentials import refresh as refresh_mod
+
+            try:
+                refresh_mod.note_deny(
+                    relayed,
+                    network_id=self.network_id,
+                    root=self.root,
+                    recipient=self_device or "",
+                )
+            except Exception:  # noqa: BLE001 — a bad relay must not fail a merge
+                pass
         for keyword in incoming.get("credentials") or []:
             if not isinstance(keyword, dict) or not keyword.get("key"):
                 continue

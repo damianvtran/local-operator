@@ -1533,6 +1533,455 @@ class MeshCredentialClient:
             if entry.owner_device != self.self_device and entry.is_holder(self.self_device)
         }
 
+    # -- the node's half of a refresh delegation (design §3.4/§3.7d) --------
+
+    def refresh_take(self, key: str, *, provider: str = "") -> dict[str, Any]:
+        """Ask the owner for the delegated material, and install the statement.
+
+        Three properties, each of which is why this is not a second ``grant``:
+
+        * **gated on the CAPABILITY, never on the answer.** An owner on the
+          pre-delegation build answers the unknown kind ``internal``, which this
+          module reports as ``owner_unreachable``-ish noise; a node would then
+          retry forever and the fleet would look flaky (§3.7b, §8.5). So the
+          advertised string is required before the frame is sent, and its absence
+          answers ``unsupported`` — what an older peer's silence already gets.
+        * **the statement is verified and INSTALLED here**, not carried in memory:
+          :func:`refresh.install` re-verifies against the operator anchor and
+          writes the document the pre-POST fence reads, so a restart cannot lose a
+          live delegation while the material stays behind (§3.7d).
+        * **the material lands in THIS device's own row** with ``mesh_origin``
+          provenance, which is what makes the ordinary refresh path apply — "the
+          node's row is a normal row" (§3.7e) is true only because this is how the
+          row is written.
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+        from local_operator.network.credentials.types import (
+            PEER_BROKER_OP,
+            REFRESH_CAP_STRING,
+        )
+
+        owner = self.owner_of(key)
+        entry = self.entry(key)
+        label = provider or (entry.provider if entry else "") or key
+        if not owner:
+            return self._refresh_refusal(key, "not_a_holder", "no owner is placed for this key")
+        reply = self._ask_owner_directly(
+            owner,
+            {"op": PEER_BROKER_OP, "kind": "refresh_take", "key": key},
+            required_capability=REFRESH_CAP_STRING,
+        )
+        if reply is None:
+            return self._refresh_refusal(
+                key, "owner_offline", f"{self.owner_label(key) or owner} did not answer"
+            )
+        detail = reply.get("detail") if isinstance(reply, dict) else None
+        if not isinstance(detail, dict):
+            return self._refresh_refusal(key, "internal", "the answer carried no detail")
+        if detail.get("kind") == "error" or detail.get("ok") is False:
+            return self._refresh_refusal(
+                key,
+                str(detail.get("code") or "internal"),
+                str(detail.get("message") or ""),
+            )
+        statement = str(detail.get("statement") or "")
+        token = detail.get("refresh")
+        if not statement or not isinstance(token, str) or not token:
+            return self._refresh_refusal(
+                key, "grant_invalid", "the owner's answer carried no usable material"
+            )
+        try:
+            installed = refresh_mod.install(
+                self.network_id,
+                self.root,
+                recipient=self.self_device,
+                statement=statement,
+            )
+        except (refresh_mod.RefreshRefused, refresh_mod.RefreshUnknown) as exc:
+            return self._refresh_refusal(key, "grant_invalid", str(exc))
+        # THE ROW'S PROVENANCE COMES FROM THE VERIFIED STATEMENT (R2-2), never from
+        # the answer's envelope: ``detail["grant_id"]`` is unsigned, so an answer
+        # that omitted or renamed it would land a real delegated row that reads as
+        # a sync copy ever after — and a copy is precisely what the fence does not
+        # guard. `install` returned the verified grant it wrote, so the row and the
+        # document agree by construction.
+        verified = refresh_mod.read_statement_grant(
+            str(installed.get("statement") or ""), root=self.root
+        )
+        if verified is None:
+            return self._refresh_refusal(
+                key, "grant_invalid", "the installed delegation could not be re-read"
+            )
+        row_written = self._write_delegated_row(
+            key,
+            owner=owner,
+            provider=str(detail.get("provider") or label),
+            grant_id=verified.grant_id,
+            epoch=int(installed.get("epoch") or 0),
+            data=detail,
+        )
+        if not row_written:
+            return self._refresh_refusal(
+                key, "internal", "the delegated material could not be recorded on this device"
+            )
+        self.install_refresh_fence()
+        self._audit_refresh(
+            "credential.refresh_taken",
+            credential_key=key,
+            act=self.self_device,
+            sub=owner,
+            grant_id=verified.grant_id,
+            epoch=int(installed.get("epoch") or 0),
+        )
+        return {
+            "ok": True,
+            "key": key,
+            "grant_id": verified.grant_id,
+            "epoch": int(installed.get("epoch") or 0),
+            "code": "",
+            "message": "",
+        }
+
+    def _refresh_refusal(self, key: str, code: str, message: str) -> dict[str, Any]:
+        return {"ok": False, "key": key, "code": code, "message": message, "grant_id": ""}
+
+    def _write_delegated_row(
+        self,
+        key: str,
+        *,
+        owner: str,
+        provider: str,
+        grant_id: str,
+        epoch: int,
+        data: dict[str, Any],
+    ) -> bool:
+        """Write the node's own row for one delegated key, provenance-marked (§3.7d).
+
+        The provenance is ``sync.MESH_ORIGIN_KEY``'s shape — ``{owner_device, key,
+        grant_id, epoch}`` — because that is the shape the lifecycle and reconcile
+        readers already understand, and because the fence finds a delegated row by
+        it: a row with no ``mesh_origin`` is an ordinary local login and is never
+        fenced.
+
+        Written through ``upsert_credential`` like any other login, so the store
+        owns the dedupe key and the payload's shape; the transient markers
+        (``grant_dead_at``, ``refresh_send_unconfirmed``) are dropped for the
+        reason ``sync`` drops them — they describe a LOCAL interaction.
+        """
+        from local_operator.network.credentials import sync as sync_mod
+
+        payload: dict[str, Any] = {
+            "access": data.get("access"),
+            "refresh": data.get("refresh"),
+            "expires": data.get("expires"),
+            "token_type": data.get("token_type") or "Bearer",
+            "login_incarnation": str(data.get("login_incarnation") or ""),
+            sync_mod.MESH_ORIGIN_KEY: {
+                "owner_device": owner,
+                "key": key,
+                "grant_id": grant_id,
+                "epoch": int(epoch),
+            },
+        }
+        if data.get("email"):
+            payload["email"] = data.get("email")
+        if data.get("account_id"):
+            payload["account_id"] = data.get("account_id")
+        try:
+            store = self._auth_store()
+            store.upsert_credential(provider, payload)
+        except Exception:  # noqa: BLE001 — a write failure is a refusal, never a crash
+            return False
+        return True
+
+    def refresh_fence(self, credential_id: int, data: dict[str, Any]) -> str | None:
+        """The node's PRE-POST fence (§3.4): ``None`` allows the POST, a sentence refuses.
+
+        Runs immediately before the store arms its send marker, on EVERY attempt —
+        not once when the material arrived — and refuses at the first failure, in
+        the design's order:
+
+        1. this device's membership is active;
+        2. the signed delegation verifies for this device, this key, inside its
+           window, with budget left (``refresh.active`` re-verifies against the
+           anchor every time; §6 item 3 is encoded as a REFUSAL: an anchor this
+           device cannot read verifies nothing, so nothing is presented);
+        2b. the network deny stamp (``deny_network`` / ``membership_denied``);
+        3. the per-key deny watermark, and ``PolicyUnknown`` is a refusal;
+        4. the local lease (unchanged, and taken by the store after this returns).
+
+        A row with no ``mesh_origin`` is an ordinary local login: the fence answers
+        ``None`` so the shipped path is untouched (T10/T14).
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+        from local_operator.network.credentials.held_policy import (
+            NONRESTRICTIVE,
+            PolicyUnknown,
+        )
+
+        origin = (data or {}).get("mesh_origin")
+        if not isinstance(origin, dict):
+            return None
+        key = str(origin.get("key") or "")
+        owner = str(origin.get("owner_device") or "")
+        if not key or not owner:
+            return None
+        if not str(origin.get("grant_id") or ""):
+            # A COPY's provenance (``sync`` writes owner+key, no grant) is this
+            # device's OWN row with its own refresh material: it refreshes on the
+            # ordinary path and this fence must not touch it. Only a DELEGATED row
+            # carries a grant id, because only a delegation hands over a token.
+            return None
+        if not self._self_membership_active():
+            return (
+                "this device is no longer an active member of the network, so the delegated "
+                "refresh was not presented"
+            )
+        try:
+            grant = refresh_mod.active(
+                self.network_id,
+                self.root,
+                recipient=self.self_device,
+                key=key,
+                operator_spki=refresh_mod.anchor_spki_for(self.root),
+            )
+        except refresh_mod.RefreshUnknown:
+            return (
+                "the delegation for this login could not be proved on this device, so the "
+                "refresh token was not presented"
+            )
+        if grant is None:
+            return (
+                "no signed refresh delegation is live for this login, so the refresh token "
+                "was not presented"
+            )
+        if grant.owner_device != owner:
+            return (
+                "the delegation on this device names a different owner, so the refresh token "
+                "was not presented"
+            )
+        try:
+            policy = self._policy()
+            # ``initialize=True`` is genesis on a MISSING file only — a deny-only
+            # document with no entries, which cannot grant anything. A node that
+            # pulled a placement document already has one; a corrupt or
+            # uninspectable file still raises PolicyUnknown and still refuses, so
+            # "missing evidence is never permission" is unchanged.
+            with policy.transaction(initialize=True) as document:
+                if document.get("membership_denied"):
+                    return (
+                        "this device was denied membership of the network, so the delegated "
+                        "refresh was not presented"
+                    )
+                code = policy.code(document, owner, key)
+        except PolicyUnknown:
+            return (
+                "the deny record on this device could not be read, so the delegated refresh "
+                "was not presented"
+            )
+        if code and code not in NONRESTRICTIVE:
+            return (
+                f"refreshing {key!r} was withdrawn ({code}), so the delegated refresh was not "
+                "presented"
+            )
+        return None
+
+    # -- the outcome half: a POST happened, or the family moved ---------------
+
+    def refresh_posted(self, credential_id: int, data: dict[str, Any]) -> None:
+        """Record one successful POST against the delegation's budget (R1-3).
+
+        ``max_refreshes`` was decorative while nothing incremented it: the
+        document's ``refreshes_used`` stayed at zero and ``refresh.active`` could
+        never refuse on budget. This is the caller, and it is the store's own
+        success path — the one place that knows the exchange was accepted.
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+
+        origin = (data or {}).get("mesh_origin")
+        if not isinstance(origin, dict) or not str(origin.get("grant_id") or ""):
+            return
+        try:
+            document = refresh_mod.load(self.network_id, self.root, recipient=self.self_device)
+        except refresh_mod.RefreshUnknown:
+            return
+        if document is None:
+            return
+        # ``record_post`` increments the stored epoch itself; the argument is the
+        # floor, so passing the current epoch + 1 makes the caller's intent explicit
+        # rather than relying on that internal increment.
+        refresh_mod.record_post(
+            self.network_id,
+            self.root,
+            recipient=self.self_device,
+            epoch=int(document.get("epoch") or 0) + 1,
+        )
+
+    def refresh_invalid_grant(self, credential_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        """§3.5's node-side stop (R1-5): wipe, fail the delegation, report, never retry.
+
+        Reached ONLY when the store's own race guard passed — i.e. the token the
+        provider refused was this device's CURRENT token, so no sibling on this node
+        moved the family and the move therefore happened outside the device. That
+        is the design's exact condition, and it is why this is not "any 401".
+
+        The three local effects happen before the report, in this order, so a crash
+        mid-report cannot leave a retryable delegation behind: the row's material is
+        wiped, the document is failed with ``family_moved`` (``active`` is the only
+        state that may POST), and only then is the owner told. The return value
+        distinguishes the two facts a caller needs — that this device STOOD DOWN,
+        and whether the owner actually heard about it — because an owner that cannot
+        tell "stopped" from "unreachable" acts on the wrong one.
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+
+        origin = (data or {}).get("mesh_origin")
+        key = str((origin or {}).get("key") or "")
+        grant_id = str((origin or {}).get("grant_id") or "")
+        # THE GUARD ITS SIBLINGS ALREADY HAD (R2-1). The store calls this watch for
+        # EVERY row once a fence is installed, and a fence is installed on any
+        # device that holds a delegation document or a delegated row — so without
+        # this check an ordinary local login lost both its secrets and gained a
+        # family-moved marker that told the operator to sign in again. "Cannot
+        # tell" resolves to STOP (§3.5); it never resolves to destroying a login
+        # this delegation was never about.
+        #
+        # Two conditions, and the second is the one that makes the marker
+        # meaningful: the row must be delegation-sourced AND its grant must be the
+        # one the document currently holds — otherwise this node has moved on (a
+        # new delegation, or none), and stopping would be a stop for a family it
+        # no longer owns.
+        if not self._owns_delegation(origin, key, grant_id):
+            return {"stopped": False, "reported": False, "reason": "not_delegated"}
+        self._auth_store().wipe_delegated_material(credential_id)
+        try:
+            refresh_mod.stop(
+                self.network_id,
+                self.root,
+                recipient=self.self_device,
+                state="failed",
+                cause="family_moved",
+            )
+        except refresh_mod.RefreshUnknown:
+            pass
+        self._audit_refresh(
+            "credential.refresh_family_moved",
+            credential_key=key,
+            act=self.self_device,
+            sub=self.owner_of(key),
+            grant_id=grant_id,
+            cause="family_moved",
+        )
+        if key:
+            report = self.report_family_moved(key)
+        else:
+            report = {"reported": False, "reason": "no_key"}
+        return {"stopped": True, **report}
+
+    def _owns_delegation(self, origin: Any, key: str, grant_id: str) -> bool:
+        """Whether this row is the delegation the document on disk currently holds.
+
+        ONE predicate for the watch's two destructive arms, so a future third
+        caller cannot re-derive it and forget half. ``grant_id`` is what separates a
+        delegated row from a sync COPY (``sync`` writes ``mesh_origin`` without a
+        grant), which is the same discriminator the fence uses.
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+
+        if not key or not grant_id:
+            return False
+        try:
+            document = refresh_mod.load(self.network_id, self.root, recipient=self.self_device)
+        except refresh_mod.RefreshUnknown:
+            # Unprovable evidence is not permission to destroy: the fence already
+            # refuses every POST in this state, so there is nothing here to stop.
+            return False
+        if document is None:
+            return False
+        try:
+            held = refresh_mod.read_statement_grant(
+                str(document.get("statement") or ""), root=self.root
+            )
+        except Exception:  # noqa: BLE001 — an unreadable statement is not this grant
+            return False
+        return held is not None and held.grant_id == grant_id and held.key == key
+
+    def report_family_moved(self, key: str) -> dict[str, Any]:
+        """Tell the owner the family moved, and say whether it was told.
+
+        ``stopped`` is a statement about THIS device and is true before the call;
+        ``reported``/``reason`` are a statement about the link. The design's §3.5
+        step 3 exists so the owner stops advertising and refreshing a dead family —
+        it does not exist to make the node's stop conditional on the owner hearing
+        it, which is why an unreachable owner does not re-enable anything here.
+        """
+        detail = self.serve_report(key, kind="grant_dead", cause="family_moved")
+        reported = isinstance(detail, dict) and detail.get("kind") != "error"
+        reason = "reported" if reported else str((detail or {}).get("code") or "owner_unreachable")
+        return {"reported": reported, "reason": reason}
+
+    def install_refresh_fence(self) -> bool:
+        """Install :meth:`refresh_fence` into this device's auth store.
+
+        A fence is installed whenever a delegation MIGHT be in force — a readable
+        document, an unprovable one, or (R1-2) a delegation-sourced ROW even when the
+        document is gone. Only a device with neither gets no fence at all, which is
+        what keeps the mixed-fleet and 0-peer path byte-identical (§7, T14).
+        """
+        try:
+            target = self._auth_store()
+        except Exception:  # noqa: BLE001 — no store root here: nothing to fence
+            return False
+        installer = getattr(target, "set_refresh_fence", None)
+        if installer is None:  # pragma: no cover — a store build without the seam
+            return False
+        if not self._delegation_may_exist(target):
+            return False
+        installer(self.refresh_fence, watch=self)
+        return True
+
+    def _delegation_may_exist(self, store: Any) -> bool:
+        """Whether a fence is needed at all — document OR a delegated ROW (R1-2).
+
+        The document alone is not the question. §3.5's "cannot tell" case is a
+        DELETED document beside a row that still holds the material, and the first
+        version asked only about the file, so the fence was never installed and the
+        store's photo-free path posted. The rows are the durable evidence; the file
+        is an optimisation.
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+
+        try:
+            if refresh_mod.load(self.network_id, self.root, recipient=self.self_device) is not None:
+                return True
+        except refresh_mod.RefreshUnknown:
+            return True
+        return self._delegated_rows(store)
+
+    def _delegated_rows(self, store: Any) -> bool:
+        """Whether this store holds any delegation-sourced row. Unknown => True."""
+        query = getattr(store, "delegated_credential_ids", None)
+        if query is None:  # pragma: no cover — a store build without the seam
+            return True
+        try:
+            ids = query()
+        except Exception:  # noqa: BLE001 — cannot tell: fence (fail closed)
+            return True
+        if ids is None:
+            return True
+        return bool(ids)
+
+    def _audit_refresh(self, event: str, **fields: Any) -> None:
+        """Emit one non-material delegation record, if this client has an audit sink."""
+        sink = getattr(self, "audit", None)
+        write = getattr(sink, "write", None)
+        if write is None:
+            return
+        try:
+            write(event, **fields)
+        except Exception:  # noqa: BLE001 — an audit fault must not fail a refresh
+            return
+
     def _auth_store(self) -> Any:
         """This root's credential database, explicitly — see :meth:`_sync_engine`."""
         from local_operator.providers.auth_store import AuthStore

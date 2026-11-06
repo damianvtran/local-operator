@@ -286,6 +286,15 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/network/credentials/refresh.py": (
+        2,
+        "``DOC_FILENAME`` ('refresh.json') and ``LOCK_FILENAME`` ('.refresh.lock') sit in "
+        "the per-NETWORK credentials directory (<config>/network/credentials/<network_id>/), "
+        "beside the placement document — per-device mesh state, never an entry of a session "
+        "directory, and explicitly not copyable: the delegation is this device's authority "
+        "and a copy would hand another device a second refresher, which is the one thing "
+        "the design's Fence 1 forbids.",
+    ),
     "local_operator/guardrails/classify.py": (
         4,
         "_CONFIG_FILE, _SECRETS_DIRNAME, _SESSIONS_DIRNAME and _STATE_DIRNAME "

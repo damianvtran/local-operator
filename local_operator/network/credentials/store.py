@@ -215,6 +215,56 @@ class MeshAwareAuthStore:
         #: the owner's selector sorts them last for this device's lends only.
         self._lend_demotions: dict[tuple[str, str], dict[int, int]] = {}
         self._receipts: Any = None
+        # THE NODE'S PRE-POST FENCE IS INSTALLED HERE, at construction, and not only
+        # when a ``refresh_take`` succeeds: a device restarted while it holds a
+        # delegation must fence its very first refresh, and the document on disk is
+        # the only thing that knows. `_install_refresh_fence` is a no-op when this
+        # device holds no delegation, which is every install and every 0-peer run —
+        # the store's refresh path then costs one attribute read and is unchanged.
+        self._install_refresh_fence()
+
+    def _install_refresh_fence(self) -> bool:
+        """Point the local auth store's fence at this client's, if this device has a
+        live delegation. Deliberately silent: no fence is a normal state, and a
+        failure to install one must not stop a session from being constructed."""
+        try:
+            client = self._mesh
+            fence = getattr(client, "refresh_fence", None)
+            if fence is None:
+                return False
+            installer = getattr(self._local, "set_refresh_fence", None)
+            if installer is None:  # pragma: no cover — a store build without the seam
+                return False
+            network_id = str(getattr(client, "network_id", "") or "")
+            recipient = str(getattr(client, "self_device", "") or "")
+            root = self.config_dir
+            if not network_id or not recipient:
+                return False
+            from local_operator.network.credentials import refresh as refresh_mod
+
+            # R1-2: the DOCUMENT is not the question, the ROWS are. A deleted
+            # document beside a row that still holds delegated material is exactly
+            # §3.5's "cannot tell", and asking only about the file left the store's
+            # refresh path un-fenced — the reproduced BLOCKER. `delegated_row_ids`
+            # answers `None` for "this store cannot say", which fences.
+            try:
+                document = refresh_mod.load(network_id, root, recipient=recipient)
+            except refresh_mod.RefreshUnknown:
+                document = {"state": "unknown"}
+            if document is None:
+                query = getattr(self._local, "delegated_credential_ids", None)
+                if query is None:  # pragma: no cover — a store build without the seam
+                    return False
+                try:
+                    rows = query()
+                except Exception:  # noqa: BLE001 — cannot tell: fence
+                    rows = None
+                if rows == []:
+                    return False
+            installer(fence, watch=client)
+            return True
+        except Exception:  # noqa: BLE001 — a construct-time fence must not fail a session
+            return False
 
     @property
     def _mesh(self) -> CredentialSource | None:
@@ -303,7 +353,52 @@ class MeshAwareAuthStore:
         if str(getattr(binding, "policy", "")) != _OWNER_POLICY:
             return False
         owner = str(getattr(binding, "owner_device", "") or "")
-        return bool(owner) and owner != self._self_device()
+        if not owner or owner == self._self_device():
+            return False
+        # A LIVE DELEGATION IS THE LOCAL ANSWER for THAT owner binding (§3.9):
+        # while this device is authorised to refresh the owner's login, brokering
+        # to an owner whose laptop is closed is exactly the outage the delegation
+        # exists to prevent — and the delegated row is already the better answer.
+        # Scoped to this one binding on purpose: any other key still brokers, so
+        # this cannot quietly turn a moved session into a local one.
+        return not self._delegated_for(owner)
+
+    def _delegated_for(self, owner: str) -> bool:
+        """Whether this device holds a live delegation for ANY key of ``owner``.
+
+        Deliberately not per-key: the placement binding names a provider and an
+        owner, and the delegation document names one key — the binding's provider
+        IS that key's provider in every construction site that writes one. Asking
+        per key here would need the binding's key, which a ``policy: owner`` row
+        does not carry; asking per owner is the narrower true statement and it is
+        only ever consulted for a row that already names this owner.
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+
+        network_id = str(getattr(self._mesh, "network_id", "") or "") if self._mesh else ""
+        if not network_id:
+            return False
+        try:
+            document = refresh_mod.load(network_id, self.config_dir, recipient=self._self_device())
+        except refresh_mod.RefreshUnknown:
+            # Unprovable evidence is not permission, but it is also not a reason to
+            # broker: the fence will refuse the POST either way, and brokering to an
+            # offline owner is the worse failure. So this reads as "not delegated"
+            # and the moved session brokers — today's behaviour, fail-safe.
+            return False
+        if document is None or document.get("state") != "active":
+            return False
+        try:
+            grant = refresh_mod.active(
+                network_id,
+                self.config_dir,
+                recipient=self._self_device(),
+                key="",
+                require_key=False,
+            )
+        except refresh_mod.RefreshUnknown:
+            return False
+        return grant is not None and grant.owner_device == owner
 
     def _self_device(self) -> str:
         """This device's id as the placement document spells it (``""`` if unknown)."""

@@ -401,3 +401,252 @@ def signature_verdict(
         action=action, session_id=session_id, request_id=request_id, challenge=challenge
     )
     return verify_signature(spki=signer_spki, message=message, signature=signature)
+
+
+# ---------------------------------------------------------------------------
+# Refresh delegation (mesh-refresh-delegation.md §3.7g)
+# ---------------------------------------------------------------------------
+
+#: The domain tag for a REFRESH DELEGATION: the statement by which the operator
+#: lets ONE named node present one login's refresh family while the owner is
+#: away. A fifth tag, and deliberately NOT a member of :data:`ACTIONS` or a new
+#: approval ``KIND``: a delegation is multi-use and time-bounded (like a device
+#: certificate) where an approval is a single-use transition, and folding one
+#: into the other would either weaken the fence or widen the approval payload
+#: (design §3.8). The same stub signs revocation notices — a deny statement is
+#: the same document with ``relay_deny`` set and ``not_after`` at the revoke
+#: moment — so ONE verifier answers both and a deny can only ever reduce.
+REFRESH_GRANT_DOMAIN = b"lop-refresh-grant-v1\x00"
+
+#: A delegation statement is a small JSON envelope. Bounded for the same reason
+#: :data:`MAX_CERT_BYTES` is: nothing that big can be a real statement, and an
+#: unbounded parse is free work for whoever sent it.
+MAX_REFRESH_GRANT_BYTES = 8192
+
+#: The signed field order, fixed here so the signer and every verifier derive
+#: the same bytes. Ordered rather than sorted by JSON: length-prefixed fields
+#: leave no separator to shift a byte across (the argument
+#: ``approvals.signed_payload`` states for its own framing), and a fixed tuple is
+#: the only place the order can be got wrong.
+REFRESH_GRANT_FIELDS: tuple[str, ...] = (
+    "network_id",
+    "owner_device",
+    "owner_spki_fp",
+    "node_device",
+    "node_spki_fp",
+    "key",
+    "provider",
+    "credential_kind",
+    "login_incarnation",
+    "family_epoch_at_issue",
+    "grant_id",
+    "issued_at",
+    "not_after",
+    "max_refreshes",
+    "exclusive_holder",
+    "relay_deny",
+)
+
+
+def _grant_field(value: object) -> bytes:
+    """One length-prefixed delegation field. Booleans and ints get ONE spelling each.
+
+    Reuses this module's own :func:`_lp` framing so the delegation cannot drift
+    from the other operator-signed messages, and canonicalises the two non-string
+    types here because ``"True"``/``"1"`` must never both be accepted for the same
+    field.
+    """
+    if isinstance(value, bool):
+        return _lp("1" if value else "0")
+    return _lp(str(value))
+
+
+def refresh_grant_payload(fields: Any) -> bytes:
+    """The canonical bytes a delegation signature covers — the ONE builder.
+
+    ``fields`` is any mapping with :data:`REFRESH_GRANT_FIELDS`; a missing field
+    is a ``KeyError`` rather than a zero, because a statement that silently
+    omitted ``not_after`` must not verify as one that expired at 0.
+    """
+    return REFRESH_GRANT_DOMAIN + b"".join(
+        _grant_field(fields[name]) for name in REFRESH_GRANT_FIELDS
+    )
+
+
+@dataclass(frozen=True)
+class RefreshGrant:
+    """A parsed delegation (or revocation) statement, NOT yet verified.
+
+    ``not_after`` is a Unix timestamp so expiry is one integer comparison, the
+    same choice :class:`DeviceCert` makes. ``login_incarnation`` binds the
+    statement to one login *lineage*, so a re-login on the owner invalidates the
+    delegation by a VALUE the owner already has rather than by a clock.
+    ``node_spki_fp`` binds the node's identity KEY, not merely its device id, so
+    a rotated node key must be re-granted (the device-certificate lesson).
+    """
+
+    network_id: str
+    owner_device: str
+    owner_spki_fp: str
+    node_device: str
+    node_spki_fp: str
+    key: str
+    provider: str
+    credential_kind: str
+    login_incarnation: str
+    family_epoch_at_issue: int
+    grant_id: str
+    issued_at: int
+    not_after: int
+    max_refreshes: int
+    exclusive_holder: bool
+    relay_deny: bool
+
+    def fields(self) -> dict[str, Any]:
+        return {name: getattr(self, name) for name in REFRESH_GRANT_FIELDS}
+
+    def payload(self) -> bytes:
+        """The SIGNED message: domain tag plus length-prefixed fields."""
+        return refresh_grant_payload(self.fields())
+
+    def body(self) -> dict[str, Any]:
+        return {"v": 1, **{name: getattr(self, name) for name in REFRESH_GRANT_FIELDS}}
+
+    def envelope(self) -> bytes:
+        """The STORED/WIRE envelope: domain tag plus canonical JSON of the body.
+
+        Not the signed bytes: the signature covers :meth:`payload`, and a
+        verifier re-derives that from the parsed body (below), so an envelope
+        someone edited cannot be made to verify by editing it — the re-derived
+        message differs and the signature check fails. Keeping the two forms
+        apart is what makes that true.
+        """
+        return REFRESH_GRANT_DOMAIN + json.dumps(
+            self.body(), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+
+    def encode(self, *, signature: bytes) -> str:
+        """The wire form: ``<b64 envelope>.<b64 signature>``."""
+        return f"{_b64(self.envelope())}.{_b64(signature)}"
+
+
+def read_refresh_grant(statement: str) -> RefreshGrant | None:
+    """The statement's CONTENT, parsed and bounded, but NOT verified.
+
+    Split from :func:`verify_refresh_grant` for the same reason
+    :func:`read_device_cert` is split from :func:`verify_device_cert`: a relay
+    needs the ``grant_id``/``node_device`` to route a revocation, and nothing
+    that reads those fields is thereby trusting the statement.
+    """
+    if not statement or len(statement) > MAX_REFRESH_GRANT_BYTES:
+        return None
+    payload_b64, _, _signature_b64 = statement.partition(".")
+    if not payload_b64:
+        return None
+    payload = _unb64(payload_b64)
+    if payload is None or not payload.startswith(REFRESH_GRANT_DOMAIN):
+        return None
+    rest = payload[len(REFRESH_GRANT_DOMAIN) :]
+    # The signed message is length-prefixed, not JSON, so the body is NOT
+    # recoverable from it: the payload travels as the JSON envelope a signer
+    # emits. Reading it back means parsing that envelope from the decoded text
+    # the signer wrote, which is the only place it exists.
+    return _refresh_grant_from_json(rest)
+
+
+def _refresh_grant_from_json(raw: bytes) -> RefreshGrant | None:
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(body, dict) or body.get("v") != 1:
+        return None
+    strings = (
+        "network_id",
+        "owner_device",
+        "owner_spki_fp",
+        "node_device",
+        "node_spki_fp",
+        "key",
+        "provider",
+        "credential_kind",
+        "login_incarnation",
+        "grant_id",
+    )
+    ints = ("family_epoch_at_issue", "issued_at", "not_after", "max_refreshes")
+    bools = ("exclusive_holder", "relay_deny")
+    for name in strings:
+        if not isinstance(body.get(name), str):
+            return None
+    for name in ints:
+        value = body.get(name)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+    for name in bools:
+        if not isinstance(body.get(name), bool):
+            return None
+    return RefreshGrant(**{name: body[name] for name in REFRESH_GRANT_FIELDS})
+
+
+def verify_refresh_grant(
+    statement: str,
+    *,
+    operator_spki: bytes | None,
+    now: float,
+    network_id: str = "",
+    node_device: str = "",
+    node_spki_fp: str = "",
+    key: str = "",
+    parsed: RefreshGrant | None = None,
+) -> RefreshGrant | None:
+    """The statement, or ``None`` when it does not hold for THIS device.
+
+    Three things are checked and each one is a fence, so none is a caller's job:
+
+    * **the signature**, against the operator anchor — never a senders' claim
+      and never a device key. This is why a revocation may be relayed by any
+      member: the authority is the signature, not who carried the frame.
+    * **the name bindings** supplied by the caller (``network_id``,
+      ``node_device``, ``node_spki_fp``, ``key``). A statement about another
+      device's login answers ``None`` here rather than being refused later by a
+      caller that might forget.
+    * **the window**, and the DIRECTION differs per kind: a grant must be
+      ``issued_at <= now < not_after``, while a deny statement is *by design* at
+      or past its own ``not_after`` (it is minted with ``not_after = now``), so
+      it is accepted from its ``issued_at`` onward with no upper bound. A clock
+      behind the issuer refuses both, because a statement from the future is as
+      much a lie as an expired one (the device-certificate rule).
+    """
+    if operator_spki is None:
+        return None
+    if not statement or len(statement) > MAX_REFRESH_GRANT_BYTES:
+        return None
+    payload_b64, _, signature_b64 = statement.partition(".")
+    if not payload_b64 or not signature_b64:
+        return None
+    payload = _unb64(payload_b64)
+    signature = _unb64(signature_b64)
+    if payload is None or signature is None or not payload.startswith(REFRESH_GRANT_DOMAIN):
+        return None
+    if parsed is None:
+        parsed = _refresh_grant_from_json(payload[len(REFRESH_GRANT_DOMAIN) :])
+    if parsed is None:
+        return None
+    # The signature covers the RE-DERIVED message, never the bytes as they
+    # arrived: a tampered envelope body changes the derived fields and dies
+    # here, which is the whole reason the builder is one function.
+    if not verify_signature(spki=operator_spki, message=parsed.payload(), signature=signature):
+        return None
+    if network_id and parsed.network_id != network_id:
+        return None
+    if node_device and parsed.node_device != node_device:
+        return None
+    if node_spki_fp and parsed.node_spki_fp != node_spki_fp:
+        return None
+    if key and parsed.key != key:
+        return None
+    if now < parsed.issued_at:
+        return None
+    if not parsed.relay_deny and now >= parsed.not_after:
+        return None
+    return parsed

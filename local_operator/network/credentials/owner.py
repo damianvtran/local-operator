@@ -67,10 +67,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -327,6 +329,37 @@ class _BrokerLoop:
         )
 
 
+@dataclass(frozen=True)
+class _SignedStatement:
+    """A delegation statement and the fields the signature covers."""
+
+    grant: Any
+    statement: str
+
+
+def _stamp(value: Any) -> str:
+    """A human-readable delegation deadline, tolerant of a damaged record."""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(value or 0)))
+    except (TypeError, ValueError, OSError):
+        return "an unknown time"
+
+
+def _mark_recalled(data: dict[str, Any]) -> bool:
+    """Fold a live delegation record to ``recalled`` — the owner's promise not to POST.
+
+    A pure payload mutation so it goes through the store's one read-modify-write
+    primitive: ``recalled`` is a state the POST gate reads (``_delegated`` returns
+    ``None`` only for a record that is NOT ``active``) and therefore a state that
+    must be written by the same code path the gate reads.
+    """
+    record = data.get("refresh_delegate")
+    if not isinstance(record, dict):
+        return False
+    record["state"] = "recalled"
+    return True
+
+
 class MeshCredentialBroker:
     """Serves ``net_broker`` on the owning device."""
 
@@ -363,6 +396,11 @@ class MeshCredentialBroker:
         #: and its one lender, built on the first mint — a relay that never lends
         #: github pays nothing (see :meth:`_lender`).
         self._github_minter = github_minter
+        #: The seam a test signs a delegation statement through, so no fixture ever
+        #: needs the machine's operator key (and no test can accidentally prompt).
+        #: Production leaves it ``None`` and :meth:`_statement_signature` uses the
+        #: operator key.
+        self._refresh_signer: Any = None
         self._github_lender: github_app.GithubLender | None = None
         self._loop = _BrokerLoop(self_device[-8:] or "owner")
         self._inflight: dict[tuple[Any, ...], asyncio.Future[Any]] = {}
@@ -1728,6 +1766,12 @@ class MeshCredentialBroker:
         entry = self._entry(key)
         if entry is None or entry.owner_device != self.self_device or not entry.is_holder(by):
             return {"kind": "error", "code": "not_a_holder", "key": key}
+        if failure == "grant_dead":
+            # §3.5 step 3 (R1-5): the DELEGATED NODE told us the family moved. Stop
+            # serving and refreshing this login here too, and say so — the whole
+            # reason the report exists is that the owner cannot otherwise tell a
+            # stopped family from an unreachable node.
+            return self._family_moved_report(key, entry, by, frame)
         if failure == "quota":
             return self._remote_quota_block(key, entry, by, frame, reported_id=reported_id)
         if failure in ("invalid", "unauthorized", "copy_stale"):
@@ -1742,6 +1786,34 @@ class MeshCredentialBroker:
         # against the credential, and the owner's own rotation only DEPRIORITISES on
         # it, which is routing state a peer must not move (§2.1).
         return {"kind": "ack", "key": key, "action": "noted"}
+
+    def _family_moved_report(
+        self, key: str, entry: CredentialPlacementEntry, by: str, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Apply a delegated node's family-moved report to this device's own row.
+
+        BOUND TO THE DELEGATION, deliberately: only the device the live record
+        names may stop this login, and the record is read from the row (another
+        process may have minted or revoked it since this broker started). A report
+        from any other peer is refused rather than honoured — otherwise any holder
+        could log the owner out of a login by claiming its family moved.
+        """
+        store = self._auth_store_instance()
+        row_id = self._credential_id_for(key)
+        record = store.refresh_delegate_record(row_id) if row_id is not None else None
+        if row_id is None or record is None or str(record.get("device") or "") != by:
+            return {"kind": "error", "code": "not_authorised", "key": key}
+        store.mark_family_moved(row_id)
+        self._audit(
+            "credential.refresh_family_moved",
+            credential_key=key,
+            act=self.self_device,
+            sub=by,
+            grant_id=str(record.get("grant_id") or ""),
+            epoch=int(record.get("epoch") or 0),
+            cause=str(frame.get("cause") or "family_moved"),
+        )
+        return {"kind": "ack", "key": key, "action": "family_moved", "stopped": True}
 
     def _remote_quota_block(
         self,
@@ -1914,6 +1986,536 @@ class MeshCredentialBroker:
         if str(frame.get("want") or "") != "pull":
             return {"kind": "ack", "key": ""}
         return {"kind": "placement", "document": self._document().to_json()}
+
+    # -- refresh delegation (mesh-refresh-delegation.md §3.2/§3.3) ----------
+
+    def mint_refresh_delegation(
+        self,
+        *,
+        key: str,
+        device: str,
+        not_after: float,
+        exclusivity_confirmed: bool,
+        login_epoch: int | None = None,
+        max_refreshes: int | None = None,
+    ) -> dict[str, Any]:
+        """Sign a delegation for ``device`` over ``key`` and record it here.
+
+        THE OPERATOR'S OWN ACT, and the only place a delegation can begin. Each
+        refusal is load-bearing:
+
+        * ``exclusivity_confirmed`` — the mint-time gate of §3.5. A login that may
+          also be held by an external tool (Claude Code, Codex) cannot be
+          delegated, because the first evidence of the clash would be an
+          ``invalid_grant`` AFTER a token had been presented. Unknown is refused
+          rather than defaulted: a caller that forgets must not be able to
+          authorise a refresh nobody can reason about.
+        * a second live record — one delegation per ``(owner, key)``, which is the
+          owner-side half of "exactly one authorised refresher" (§3.2).
+        * a device-bound provider — refused by name through the placement
+          document's own helper (§7: Kimi's device fingerprint makes a copy
+          meaningless and dangerous).
+
+        The statement is signed through the same operator-key prompt as every
+        other operator-signed surface (``operator.sign``), so a human is present
+        at the moment authority is created. §6 item 3 — whether a paired node can
+        read an operator anchor — is NOT assumed here: the node's certificate is
+        looked up in the anchor, and a node that is not in it is REFUSED rather
+        than delegated to on faith.
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+        from local_operator.network.credentials.placement import refuse_device_bound
+        from local_operator.network.types import MeshRefusal
+
+        if not exclusivity_confirmed:
+            raise MeshRefusal(
+                "interactive_required",
+                f"delegating {key!r} needs the operator to confirm this login is not used "
+                "on another device or by an external tool; without that confirmation the "
+                "first clash would surface as a revoked token family, so nothing was "
+                "delegated",
+            )
+        entry = self._entry(key)
+        if entry is None or entry.owner_device != self.self_device:
+            raise MeshRefusal(
+                "not_owner",
+                f"{self.self_device_name or self.self_device} does not hold {key!r}",
+            )
+        refuse_device_bound(key, entry.provider)
+        if not device or device == self.self_device:
+            raise MeshRefusal("bad_request", "a delegation must name ANOTHER device")
+        row_id = self._credential_id_for(key)
+        if row_id is None:
+            raise MeshRefusal(
+                "no_local_credential",
+                f"this device has no stored login for {key!r}; sign in here first",
+            )
+        store = self._auth_store_instance()
+        live = store.refresh_delegate_for(row_id)
+        if live is not None:
+            raise MeshRefusal(
+                "already_delegated",
+                f"{key!r} is already delegated to {live.get('device') or 'another device'} "
+                f"until {_stamp(live.get('not_after'))}; revoke it before delegating to "
+                "another device",
+            )
+        row = store.get_credential(row_id)
+        data = dict(getattr(row, "data", {}) or {})
+        issued_at = int(time.time())
+        epoch = int(login_epoch if login_epoch is not None else 0)
+        if max_refreshes is None:
+            max_refreshes = refresh_mod.max_refreshes_for(float(not_after) - issued_at)
+        statement = self._sign_refresh_statement(
+            network_id=self.network_id,
+            owner_device=self.self_device,
+            owner_spki_fp=self._operator_key_id(),
+            node_device=device,
+            node_spki_fp=self._node_key_id(device),
+            key=key,
+            provider=str(entry.provider or key),
+            credential_kind="oauth",
+            login_incarnation=str(data.get("login_incarnation") or ""),
+            family_epoch_at_issue=epoch,
+            grant_id=f"rd_{secrets.token_hex(8)}",
+            issued_at=issued_at,
+            not_after=int(not_after),
+            max_refreshes=int(max_refreshes),
+            exclusive_holder=True,
+            relay_deny=False,
+        )
+        record = {
+            "device": device,
+            "grant_id": statement.grant.grant_id,
+            "epoch": epoch,
+            "issued_at": issued_at,
+            "not_after": not_after,
+            "statement": statement.statement,
+            "state": "active",
+            # The login lineage the handback is compared against (§3.3 Rule B).
+            "login_incarnation": str(data.get("login_incarnation") or ""),
+            "max_refreshes": int(max_refreshes),
+        }
+        if not store.set_refresh_delegate(row_id, record):
+            raise MeshRefusal(
+                "internal", f"the delegation for {key!r} could not be recorded; nothing was lent"
+            )
+        self._audit(
+            "credential.refresh_delegated",
+            credential_key=key,
+            act=self.self_device,
+            sub=device,
+            grant_id=statement.grant.grant_id,
+            epoch=epoch,
+        )
+        return {
+            "ok": True,
+            "key": key,
+            "device": device,
+            "grant_id": statement.grant.grant_id,
+            "statement": record["statement"],
+            "epoch": epoch,
+            "not_after": float(not_after),
+            "max_refreshes": int(max_refreshes),
+        }
+
+    def refresh_take(self, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        """Hand the delegated material to the ONE node the record names.
+
+        This is leg 2's second half (§3.7a): the node asks, the owner answers with
+        the refresh token, the current bearer, and the statement that authorises
+        it. The answer travels inside the encrypted record the transport already
+        provides, and the material appears NOWHERE in the audit log — the event
+        carries ids only.
+
+        The authority is the RECORD, not the frame: a frame may name any key it
+        likes, and the record's ``device`` is the only device this handler will
+        serve. A delegation that is not live answers ``not_a_holder`` with the
+        shipped sentence, so an old node learns nothing new.
+        """
+        key = str(frame.get("key") or "")
+        by, refused = self._caller(link, frame, key, key)
+        if refused is not None:
+            return refused
+        entry = self._entry(key)
+        if entry is None or entry.owner_device != self.self_device:
+            return self._refuse(
+                link,
+                key,
+                str(frame.get("provider") or key),
+                by,
+                "not_owner",
+                f"{self.self_device_name or self.self_device} does not hold this login",
+            )
+        store = self._auth_store_instance()
+        row_id = self._credential_id_for(key)
+        record = store.refresh_delegate_for(row_id) if row_id is not None else None
+        if row_id is None or record is None:
+            return self._refuse(
+                link,
+                key,
+                entry.provider or key,
+                by,
+                "not_a_holder",
+                f"{self.self_device_name or self.self_device} holds no live refresh "
+                f"delegation for {entry.provider or key!r}",
+            )
+        if str(record.get("device") or "") != by:
+            # Not a refusal about the login: it is delegated to someone else, and
+            # naming that device is what lets the operator see the real state.
+            return self._refuse(
+                link,
+                key,
+                entry.provider or key,
+                by,
+                "not_authorised",
+                f"{key!r} is delegated to another device until "
+                f"{_stamp(record.get('not_after'))}",
+            )
+        row = store.get_credential(row_id)
+        data = dict(getattr(row, "data", {}) or {})
+        token = store._presented_refresh_token(data)
+        if not token:
+            return self._refuse(
+                link,
+                key,
+                entry.provider or key,
+                by,
+                "grant_invalid",
+                f"the login for {entry.provider or key!r} holds no refresh token to delegate",
+            )
+        self._audit(
+            "credential.refresh_taken",
+            credential_key=key,
+            act=by,
+            sub=self.self_device,
+            grant_id=str(record.get("grant_id") or ""),
+            epoch=int(record.get("epoch") or 0),
+        )
+        return {
+            "kind": "refresh_take",
+            "ok": True,
+            "key": key,
+            "provider": str(entry.provider or key),
+            "grant_id": str(record.get("grant_id") or ""),
+            "statement": str(record.get("statement") or ""),
+            "epoch": int(record.get("epoch") or 0),
+            "not_after": float(record.get("not_after") or 0.0),
+            "login_incarnation": str(data.get("login_incarnation") or ""),
+            "refresh": token,
+            "access": data.get("access"),
+            "expires": data.get("expires"),
+        }
+
+    def refresh_return(self, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        """The handback's owner half: acknowledge the intent, adopt the last frame.
+
+        ``intent`` (message 1) writes ``state = "recalled"`` and STILL does not
+        POST — the family is still on the node, and posting here would be the
+        second refresher §3.2 forbids. ``done`` (message 3) adopts the material,
+        but only when :func:`refresh.refresh.handback_holds` holds: a higher epoch
+        and the same login lineage (§3.3 Rule B). A dropped last frame leaves the
+        owner ``family_moved``, which is the honest answer — it serves the bearer
+        it still holds, refuses to refresh, and says "sign in again".
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+
+        act = str(frame.get("act") or "")
+        key = str(frame.get("key") or "")
+        by, refused = self._caller(link, frame, key, key)
+        if refused is not None:
+            return refused
+        store = self._auth_store_instance()
+        row_id = self._credential_id_for(key)
+        # ANY state, deliberately: the handback continues after `recalled`, and a
+        # reader that answered only the live record would strand the family on the
+        # node at exactly the step the protocol needs to complete.
+        record = store.refresh_delegate_record(row_id) if row_id is not None else None
+        if row_id is None or record is None or record.get("state") == "failed":
+            return self._refuse(
+                link,
+                key,
+                key,
+                by,
+                "not_a_holder",
+                f"no refresh delegation is live for {key!r} on this device",
+            )
+        if str(record.get("device") or "") != by or str(record.get("grant_id") or "") != str(
+            frame.get("grant_id") or ""
+        ):
+            return self._refuse(
+                link,
+                key,
+                key,
+                by,
+                "not_authorised",
+                "this handback does not name the delegation that is live here",
+            )
+        epoch = int(frame.get("epoch") or 0)
+        if act == "intent":
+            # `recalled` STILL DOES NOT POST (§3.3 Rule A, message 2): the family is
+            # on the node until the last frame arrives, and refreshing here would
+            # be the second refresher the whole fence exists to prevent.
+            if not store._update_payload(row_id, _mark_recalled):
+                return self._refuse(
+                    link,
+                    key,
+                    key,
+                    by,
+                    "internal",
+                    "the delegation record could not be marked recalled; the handback was "
+                    "not acknowledged",
+                )
+            return {
+                "kind": "refresh_return",
+                "act": "ack",
+                "grant_id": str(record.get("grant_id") or ""),
+                "epoch": epoch,
+                "ok": True,
+            }
+        if act != "done":
+            return self._refuse(
+                link,
+                key,
+                key,
+                by,
+                "bad_request",
+                f"refresh_return carries act intent|done, not {act!r}",
+            )
+        incarnation = str(frame.get("login_incarnation") or "")
+        if not refresh_mod.handback_holds(
+            epoch,
+            epoch_at_issue=int(record.get("epoch") or 0),
+            incarnation=incarnation,
+            login_incarnation=str(record.get("login_incarnation") or ""),
+        ):
+            # A lower epoch or a superseded family: adopt NOTHING, and say so. The
+            # refusal keeps the owner's row as it was, which is the safe direction
+            # because its own token is still the one the provider has not seen.
+            return self._refuse(
+                link,
+                key,
+                key,
+                by,
+                "epoch_stale",
+                "this handback belongs to an older or superseded login lineage, so it was "
+                "not adopted",
+            )
+        adopted = store.adopt_refresh_handback(
+            row_id,
+            refresh=frame.get("refresh"),
+            access=frame.get("access"),
+            expires=frame.get("expires"),
+            incarnation=incarnation,
+        )
+        if not adopted:
+            return self._refuse(
+                link,
+                key,
+                key,
+                by,
+                "internal",
+                "the handed-back material could not be adopted; nothing was overwritten",
+            )
+        self._audit(
+            "credential.refresh_returned",
+            credential_key=key,
+            act=by,
+            sub=self.self_device,
+            grant_id=str(record.get("grant_id") or ""),
+            epoch=epoch,
+        )
+        return {"kind": "refresh_return", "act": "done", "ok": True, "epoch": epoch}
+
+    def revoke_refresh_delegation(self, key: str, *, device: str = "") -> dict[str, Any]:
+        """Stop a delegation and mint the DENY statement that carries the stop.
+
+        A deny is the same signed document with ``relay_deny`` set and
+        ``not_after`` at the revoke moment (§3.4 Channel 1), because the
+        SIGNATURE is the authority and not the sender: any member may relay it,
+        it can only ever reduce, and it is accepted wherever the placement merge
+        refuses a third-party relay.
+
+        The owner's own record is cleared in the same act, so the owner may serve
+        a live bearer and (after the record is gone) refresh again. The node's
+        copy is what the deny statement disables; if the statement never arrives,
+        expiry is the backstop and the surfaces say so (§9 Q5).
+        """
+        from local_operator.network.credentials import refresh as refresh_mod
+        from local_operator.network.types import MeshRefusal
+
+        store = self._auth_store_instance()
+        row_id = self._credential_id_for(key)
+        record = store.refresh_delegate_for(row_id) if row_id is not None else None
+        if row_id is None or record is None:
+            raise MeshRefusal("not_a_holder", f"no refresh delegation is live for {key!r}")
+        held = str(record.get("device") or "")
+        if device and device != held:
+            raise MeshRefusal(
+                "not_authorised", f"{key!r} is delegated to {held or 'another device'}"
+            )
+        now = int(time.time())
+        entry = self._entry(key)
+        row = store.get_credential(row_id)
+        data = dict(getattr(row, "data", {}) or {})
+        deny = self._sign_refresh_statement(
+            network_id=self.network_id,
+            owner_device=self.self_device,
+            owner_spki_fp=self._operator_key_id(),
+            node_device=held,
+            node_spki_fp=self._node_key_id(held),
+            key=key,
+            provider=str((entry.provider if entry else "") or key),
+            credential_kind="oauth",
+            login_incarnation=str(data.get("login_incarnation") or ""),
+            family_epoch_at_issue=int(record.get("epoch") or 0),
+            grant_id=str(record.get("grant_id") or ""),
+            issued_at=int(record.get("issued_at") or 0),
+            not_after=min(int(record.get("not_after") or 0), int(time.time())),
+            max_refreshes=int(record.get("max_refreshes") or 0) or refresh_mod.WORST_CASE_REFRESHES,
+            exclusive_holder=True,
+            relay_deny=True,
+        )
+        # A REVOKE IS A FAMILY-MOVED EVENT (R1-1 ruling). The node held the family;
+        # this device must not present the copy it froze at mint, and cannot know
+        # whether the node rotated it. The marker, not a bare record removal, is
+        # what makes that state visible to every surface without a live attempt.
+        store.mark_family_moved(row_id)
+        self._audit(
+            "credential.refresh_revoked",
+            credential_key=key,
+            act=self.self_device,
+            sub=held,
+            grant_id=str(record.get("grant_id") or ""),
+            epoch=int(record.get("epoch") or 0),
+        )
+        return {
+            "ok": True,
+            "key": key,
+            "device": held,
+            "grant_id": str(record.get("grant_id") or ""),
+            "deny": deny.statement,
+            "revoked_at": now,
+        }
+
+    # -- the signed statement: one signer, one prompt -----------------------
+
+    def _operator_key_id(self) -> str:
+        """The operator anchor's key id, or a refusal that names the setup action.
+
+        §6 item 3 is NOT assumed: an anchor this device cannot read means no
+        statement can be minted at all, so it refuses here rather than delegating on
+        faith to a node whose abilities nobody proved.
+        """
+        from local_operator.network.types import MeshRefusal
+        from local_operator.operator.trust import load_local_anchor
+        from local_operator.operator.verify import key_id_for
+
+        try:
+            anchor = load_local_anchor(self.root)
+        except Exception:  # noqa: BLE001 — an unreadable anchor is no anchor
+            anchor = None
+        if anchor is None:
+            raise MeshRefusal(
+                "interactive_required",
+                "this device has no operator authority to sign a refresh delegation with; "
+                "set up operator authority on it first",
+            )
+        return key_id_for(anchor.spki)
+
+    def _node_key_id(self, device: str) -> str:
+        """The node's OPERATOR-CERTIFIED key id, from this device's anchor.
+
+        Not the mesh member's Ed25519 key: a delegation is authority over a
+        provider login, so it binds the key the operator certified. A device the
+        anchor does not certify is refused — the design's §6 item 3 says nothing
+        proves a paired node can verify an anchor, and delegating to one would
+        assume exactly that.
+        """
+        from local_operator.network.types import MeshRefusal
+        from local_operator.operator.trust import load_local_anchor
+        from local_operator.operator.verify import key_id_for
+
+        try:
+            anchor = load_local_anchor(self.root)
+        except Exception:  # noqa: BLE001
+            anchor = None
+        if anchor is None:
+            raise MeshRefusal(
+                "interactive_required",
+                "this device has no operator authority, so no delegation can be signed",
+            )
+        for row in getattr(anchor, "devices", ()) or ():
+            if not isinstance(row, dict) or str(row.get("device_id") or "") != device:
+                continue
+            raw = bytes.fromhex(row["spki_hex"]) if isinstance(row.get("spki_hex"), str) else None
+            if raw is None:
+                try:
+                    from local_operator.operator.verify import _unb64
+
+                    raw = _unb64(str(row.get("spki") or ""))
+                except Exception:  # noqa: BLE001
+                    raw = None
+            if raw:
+                return key_id_for(raw)
+        raise MeshRefusal(
+            "interactive_required",
+            f"{device} has no operator-certified key this device knows about, so a "
+            "refresh delegation to it could not be verified there; nothing was delegated",
+        )
+
+    def _sign_refresh_statement(self, **fields: Any) -> Any:
+        """Sign one delegation statement with the operator key. Prompts.
+
+        Returns an object carrying ``statement`` (the encoded document) and the
+        fields it was built from, so the caller never re-derives what it signed.
+        """
+        from local_operator.network.types import MeshRefusal
+        from local_operator.operator.verify import REFRESH_GRANT_FIELDS, RefreshGrant
+
+        grant = RefreshGrant(**{name: fields[name] for name in REFRESH_GRANT_FIELDS})
+        message = grant.payload()
+        signature = self._statement_signature(message)
+        if not signature:
+            raise MeshRefusal(
+                "interactive_required",
+                "the delegation was not signed: no operator gesture was given, so nothing "
+                "was delegated",
+            )
+        return _SignedStatement(grant=grant, statement=grant.encode(signature=signature))
+
+    def _statement_signature(self, message: bytes) -> bytes:
+        """The operator signature over ``message``, or ``b""``.
+
+        One seam so a test can sign with a fixture key without a prompt, and so the
+        production path has exactly one spelling: ``load_signer`` +
+        ``sign_message``, the same pair ``team_bridge.hold_release.sign_release``
+        uses.
+        """
+        if self._refresh_signer is not None:
+            return self._refresh_signer(message)
+        try:
+            from local_operator.operator.sign import (
+                load_signer,
+                resolve_backend_name,
+                sign_message,
+            )
+
+            root = self.root or Path()
+            signer = load_signer(config_root=root, backend_name=resolve_backend_name(root))
+        except Exception:  # noqa: BLE001 — no key, or the OS refused the gesture
+            return b""
+        if signer is None:
+            return b""
+        try:
+            signed = sign_message(signer, message, timeout=None)
+        except Exception:  # noqa: BLE001
+            return b""
+        finally:
+            signer.close()
+        try:
+            return bytes.fromhex(signed.sig)
+        except ValueError:
+            return b""
 
     # -- lifecycle (metadata only) -------------------------------------------
 
