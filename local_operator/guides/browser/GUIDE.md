@@ -658,7 +658,7 @@ store without it passing through the conversation:
 
 ```text
 browser open  https://app.example.test/settings/keys
-snapshot                    # find the field or code block's ref, e.g. e9
+snapshot                    # take the ref BEFORE a value is in the field, e.g. e9
 copy selector=e9            # writes the element's text to the clipboard
 ```
 
@@ -677,6 +677,11 @@ the text. So a one-time key can go from a page into the encrypted store while no
 tool result, log line or error message ever holds it. Never `echo` the value,
 never print it to check it, never paste it into a message to the user or to
 another tool.
+- **Take the ref before the value is in the field.** A snapshot reports a
+control's value on its line, so a one-time key already sitting in a field rides
+that line into the transcript and into every later result that quotes it. Snapshot
+first and paste second, or reach the element with a CSS `selector` instead of a
+ref when the value is already on the page.
 - **Use `printf '%s' "$(pbpaste)"`, not bare `pbpaste`.** Command substitution
 strips the trailing newline a page may have written, and that newline would
 become part of the stored secret — every later use of it then fails in a way
