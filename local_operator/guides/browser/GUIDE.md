@@ -523,7 +523,9 @@ How a value is matched and what comes back:
 - **Refused**: a target that is not a form control (use `select` for a
   page-owned ARIA listbox, or `type` for a `contenteditable`), a disabled, inert
   or read-only control, a file input (that is `upload`), or a missing target or
-  value.
+  value. A credential field takes `type` with `secret_ref`, not `setvalue`:
+  `setvalue` refuses a secret ref outright, which is what keeps a password out of
+  `text` on the one action whose value is a literal by definition.
 
 What `setvalue` is, and is not — the boundary is structural, not a promise:
 
