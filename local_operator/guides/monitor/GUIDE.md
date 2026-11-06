@@ -159,10 +159,11 @@ monitor({op:"create", name:"product-feedback-watch",
   a host that stays up: an app tab left open on the session, or a recurring wake
   (say every 2h) that re-hosts it so the next tick can run. Each wake fire is
   one short turn even when nothing moved, and the monitor then delivers ONE
-  consolidated delta for everything it missed while the session was down. That
-  is the price of a watch that cannot miss: a wake is what keeps a cold
-  session's watch alive, and a cheaper way to host an idle session does not
-  exist today.
+  delta for the window it missed — bounded like any delivery (about 12 preview
+  lines, the delivery budget, the hourly cap), so it is not a replay of every
+  missed tick. That is the price of a watch that cannot miss: a wake is what
+  keeps a cold session's watch alive, and a cheaper way to host an idle
+  session does not exist today.
 - **A watch armed before the record split** keeps working: its stored
   baseline is re-read in the new shape, so a message that landed during the
   upgrade is still delivered. The exception is a baseline the old cap had
@@ -191,10 +192,11 @@ Two worked examples from this guide:
   change to one giant line: the gate sees opaque text, calls it metadata, and
   the message is lost.
 - **A `read` of a growing file.** `read` numbers its lines and truncates at
-  ~8 KB with a `[truncated … N more lines]` footer, so the snapshot is a window,
-  not the file: a line appended past the window never appears, and once the
-  window fills the head shifts under you. Watch the counter instead
-  (`wc -l <file>`, `tail -n 20`) — a changed line is at least the right object.
+  ~8 KB with a `[truncated … N more lines]` footer. `read` pins the HEAD of the
+  file, so once it grows past that window you see the first lines and nothing
+  else: appended lines are invisible, and the watch can never report them.
+  Watch the counter (`wc -l <file>`, `tail -n 20`) instead — that is the right
+  object for a log.
 
 The test to apply before arming: **if one new item does not produce one new
 line, the watch is measuring something else.** Reshape the CALL — narrower
@@ -282,11 +284,14 @@ on it). If the session goes cold, monitors go dormant and resume with it.
 A tool that is momentarily **unreachable** (an MCP server reconnecting or
 asking for a re-auth) is not a failed check: the monitor waits on its backoff
 ladder without counting failures, and if that lasts longer than 30 minutes you
-are told once, with a matching "running again" when it recovers. Only a
-genuine failure walks the disable ladder, and the monitor's departure is
-always announced: a disable, a stall and a recovery each arrive as a message
-naming the monitor, the cause, its delivery count and how to reactivate it.
-Nothing stops silently.
+are told once, with a matching "running again" when it recovers. The waiting
+is bounded: an MCP tool that never resolves does not wait forever — after 24
+hours the monitor disables itself with the same truthful notice, and because
+`unavailable_since` is persisted, re-hosting the session across wakes does not
+reset that clock. Only a genuine failure walks the disable ladder, and the
+monitor's departure is always announced: a disable, a stall and a recovery
+each arrive as a message naming the monitor, the cause, its delivery count and
+how to reactivate it. Nothing stops silently.
 
 A monitor can also be **blind**: its call still runs, but the full result it
 needs to compare is no longer available — the saved output was evicted from

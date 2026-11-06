@@ -35,6 +35,7 @@ from local_operator.monitors.spec import MonitorSpec
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from tests.unit.monitors.support import drain_checks
+from tests.unit.monitors.test_session_monitor_availability import FakeManager
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -489,5 +490,57 @@ async def test_a_builtin_that_is_gone_still_charges_a_strike_on_the_same_rig(
         assert counters["consecutive_failures"] == 1
         assert counters["unavailable_ticks"] == 0
         assert "not in this session's tool set" in counters["last_error"]
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_removal_walks_the_disable_ladder(tmp_path: Path, config_dir: Path) -> None:
+    """PROPERTY PIN: the lazy-MCP excuse must never cover a REAL absence.
+
+    A manager exists only after ``attach_mcp_dispose``, which runs after the
+    connect round — so a manager with an EMPTY registry means zero enabled
+    servers (disabled entries never reach it): a name whose server is gone (a
+    removed config entry, every entry disabled), not a load in progress. That
+    has to keep charging strikes and end in a disable; classifying it
+    ``unavailable`` would replace five truthful failures with 24 hours of
+    "the runtime is still starting", which is the untrue-diagnosis class this
+    PR removes. The five ticks below are the whole ladder.
+    """
+    session = _session(tmp_path, make_read_tool(tmp_path / "unused.txt"))
+    session.mcp_manager = FakeManager([], servers=[])  # type: ignore[assignment]
+    clock = [1_756_000_000_000]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    spec = MonitorSpec(
+        id="m9",
+        name="retired",
+        tool="mcp__retired_server_tool",
+        arguments={"query": "x"},
+        every_ms=60_000,
+        created_at=1,
+    )
+    try:
+        await session.set_monitor_schedules([spec])
+        await session._monitors.pump(now_ms=clock[0] + 5_000)
+        await drain_checks(session._monitors, session)
+
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m9")
+        assert counters is not None
+        assert counters["consecutive_failures"] == 1, "a removal is a real failure"
+        assert counters["unavailable_ticks"] == 0
+
+        # Past each backoff (60s, 120s, 240s, 480s) to the fifth failure.
+        for advance in (60_000, 120_000, 240_000, 480_000):
+            clock[0] += advance
+            await session._monitors.pump(now_ms=clock[0] + 5_000)
+            await drain_checks(session._monitors, session)
+
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m9")
+        assert counters is not None
+        assert counters["consecutive_failures"] == 5
+        assert counters.get("disabled"), "the ladder must still reach a disable"
+        assert counters["disabled_kind"] == "checks"
+        assert "not in this session's tool set" in counters["disabled_reason"]
+        assert "still starting" not in counters["disabled_reason"]
     finally:
         await session.dispose()

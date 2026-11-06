@@ -446,18 +446,21 @@ async def test_a_session_without_its_mcp_layer_is_unavailable_not_a_strike(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_a_manager_that_has_not_loaded_its_configs_is_unavailable(tmp_path: Any) -> None:
-    """A manager exists for a while before its servers do: ``_connect_round`` is
-    what fills the configured-server map, so the registry is empty until the
-    first discovery. An empty registry cannot prove a server was removed, and
-    the tick that lands in that window must not strike.
+async def test_a_manager_with_no_enabled_servers_is_gone_not_waiting(tmp_path: Any) -> None:
+    """The excuse above is scoped to a session with NO manager, and this is the
+    boundary. A manager exists only after ``attach_mcp_dispose``, which runs
+    after the connect round, so a manager with an empty registry means zero
+    ENABLED servers (disabled entries never reach it) — a real absence, not a
+    load in progress. Calling that "the runtime is still starting" would be an
+    untrue diagnosis for 24 hours, which is the class this method removes.
     """
     manager = FakeManager([], servers=[])
     session = _session(tmp_path, manager)
     try:
-        assert session._monitor_availability(mcp_name()) == ("unavailable", MCP_NOT_READY_DETAIL)
+        assert session._monitor_availability(mcp_name()) == ("gone", "")
         outcome = await session._run_monitor_check(_spec())
-        assert outcome["kind"] == "unavailable"
+        assert outcome.get("kind") is None
+        assert "not in this session's tool set" in str(outcome["error"])
     finally:
         await session.dispose()
 

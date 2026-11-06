@@ -3302,10 +3302,10 @@ def _monitor_comparable_text(text: str, details: Any) -> tuple[str | None, str |
     return "\n".join(lines), None, handle
 
 
-#: The one sentence for "the MCP layer has not connected in this session yet".
-#: Both shapes of that state answer with it -- no manager at all, and a manager
-#: whose server registry is still empty -- so a reader sees one cause, not two,
-#: and neither is charged as a failed check (see ``_monitor_availability``).
+#: The one sentence for "the MCP layer has not connected in this session yet",
+#: i.e. a session that has no manager at all. No strike is charged on it: the
+#: layer connects lazily, so the next tick after the connect resolves the tool
+#: (see ``_monitor_availability``).
 MCP_NOT_READY_DETAIL = (
     "MCP servers are not connected in this session yet — the runtime is still starting"
 )
@@ -30696,12 +30696,14 @@ class Session:
 
         The states, and why each is unavailable rather than gone:
 
-        - ``unavailable`` also covers the two silences that are NOT a removal:
-          the session has no MCP manager yet, and the manager's registry is
-          still empty because its connect round has not loaded the configs.
-          Both were ``gone`` and charged a real strike (measured live on m4,
-          2026-11-05: a wake re-hosted a cold session, the tick beat the lazy
-          connect, and the tool was absent only for that instant).
+        - ``unavailable`` also covers the silence that is NOT a removal: the
+          session has no MCP manager yet at all. That state was ``gone`` and
+          charged a real strike (measured live on m4, 2026-11-05: a wake
+          re-hosted a cold session, the tick beat the lazy connect, and the
+          tool was absent only for that instant). It is the ONLY such state:
+          every session-path assignment of ``mcp_manager`` happens after the
+          connect round (``attach_mcp_dispose``), so a non-None manager already
+          means the load finished, and its silence is a real answer.
         - the server needs a re-auth, or its reconnect is suspended: it will
           NOT heal by itself, but the fix is a one-line operator action, so
           this stalls immediately (a notice naming ``/mcp reauth``) rather
@@ -30733,16 +30735,12 @@ class Session:
             return ("unavailable", MCP_NOT_READY_DETAIL)
         server = self._monitor_server_for(name)
         if server is None:
-            # Two silences look identical here and only one is a change. A
-            # manager that HAS a registry and does not name this server's
-            # prefix is looking at a name that is not configured (a typo, a
-            # server removed from the config): a real change, keeps the
-            # strike. A manager whose registry is still EMPTY has not run its
-            # connect round yet -- ``_connect_round`` is what loads the
-            # configs, so the manager exists for a while before its servers
-            # do -- and an empty registry cannot prove anything was removed.
-            if not self._mcp_registry_populated(manager):
-                return ("unavailable", MCP_NOT_READY_DETAIL)
+            # NOT excused: a manager exists (so its connect round finished) and
+            # does not name this server's prefix, which means the name is not
+            # configured at all -- a typo, a server removed from the config, or
+            # every entry disabled. Reporting "the runtime is still starting"
+            # there would be an untrue diagnosis for 24 hours, which is the
+            # class this method exists to remove, so the strike stays.
             return ("gone", "")
         detail = f'"{server}"'
         try:
@@ -30768,10 +30766,10 @@ class Session:
                 )
             if status == "disconnected":
                 return ("unavailable", f"MCP server {detail} is disconnected")
-            # A state this build does not know (a newer manager, a partial
-            # implementation) is not one of the documented outcomes, so it is
-            # not proof of removal either: wait, and report what was actually
-            # said instead of inventing "disconnected".
+            # ``get_connection_status`` has exactly four answers, so anything
+            # else means a manager that does not implement the contract (a
+            # fake, a snapshot). Waiting is the safe reading, but the detail
+            # names what it actually said rather than claiming "disconnected".
             return ("unavailable", f'MCP server {detail} reported status "{status}"')
         except Exception:  # noqa: BLE001 — fail CLOSED, and the states are the reason
             # A manager that cannot answer is not proof of absence, so this does
@@ -30782,20 +30780,6 @@ class Session:
             # nothing can run.
             logger.debug("monitor availability probe failed for %s", name, exc_info=True)
             return ("gone", "")
-
-    def _mcp_registry_populated(self, manager: Any) -> bool:
-        """Whether ``manager`` knows ANY server yet (else absence proves nothing).
-
-        ``get_all_server_names`` lists the CONFIGURED servers, and the manager
-        fills that map in its connect round — so an empty answer means "not
-        loaded yet", which must not be read as "this server was removed". A
-        manager that cannot answer at all counts as populated, which keeps the
-        fail-closed strike path every other unanswerable probe here takes.
-        """
-        try:
-            return bool(manager.get_all_server_names())
-        except Exception:  # noqa: BLE001 — no answer must not excuse the strike
-            return True
 
     def _monitor_server_for(self, name: str) -> str | None:
         """The MCP server that mints ``name``, by registry meta then by prefix.
