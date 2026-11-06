@@ -3,13 +3,14 @@
 The #3199 residual, carried forward from the superseded ``fix/3199-sender-budget``.
 Four properties, each one a way an unverified sender could buy allowance:
 
-* the ledger column that makes a sender VERIFIED (``sender_kind``) and the check
-  that reads it — an account with no stated class is unknown provenance, never
-  an attributed charge;
+* the ACCOUNT is the attribution and ``sender_kind`` only rides it: the class
+  is a property OF the account, so an account with no stated class is still the
+  sender the dispatch saw, never dropped as unproven and never defaulted;
 * the dispatched job's provenance equals the registration's, refused BEFORE the
   physical charge (``reserve_screening_dispatch``);
-* unattributed spend fails closed: it counts against every sender's allowance
-  and sees all spend itself, so losing provenance can never buy a fresh twenty;
+* unattributed spend fails closed for ITSELF and fines nobody: an unattributed
+  caller sees all spend, so losing provenance can never buy a fresh twenty,
+  and its own rows never consume a named sender's share;
 * an input refusal is isolated from the outage breaker — the provider rejected
   this submission, which says nothing about route health.
 
@@ -110,9 +111,9 @@ def _http_rows(tmp_path: Path) -> int:
     conn = sqlite3.connect(state_db_path(tmp_path))
     try:
         return int(
-            conn.execute(
-                "SELECT COUNT(*) FROM screening_attempts WHERE kind = 'http'"
-            ).fetchone()[0]
+            conn.execute("SELECT COUNT(*) FROM screening_attempts WHERE kind = 'http'").fetchone()[
+                0
+            ]
         )
     finally:
         conn.close()
@@ -423,7 +424,7 @@ def test_unattributed_rows_do_not_deplete_a_named_sender(tmp_path: Path) -> None
             sender_account_id="acc_b",
             sender_kind="human",
         )
-    # B's OWN two units are what fenced B, not the six inbox rows.
+    # B's OWN two units are what fenced B, not the two inbox rows.
     assert refused.value.code == "sender_exhausted"
 
 

@@ -4800,8 +4800,9 @@ class Store:
         file never names them, and a pre-upgrade row reads NULL — its own unit,
         counted at the ADDRESSED tier (so it still counts against the account
         ceiling and can never let a lower tier past its own fence) and, having
-        no verified provenance, charged against EVERY sender's allowance until
-        it ages out (see :meth:`_check_budget`).
+        no verified provenance, counted in the UNATTRIBUTED pool: it fences
+        unattributed work, which sees all spend, and fines no named sender (see
+        :meth:`_check_budget`).
         Not in ``_V3_COLUMNS``: a ledger without them is not damaged.
         """
 

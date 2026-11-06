@@ -36,13 +36,13 @@ import pytest
 from local_operator.team_bridge import screening
 from local_operator.team_bridge.settings import ScreeningBudget
 from local_operator.team_bridge.store import Store, StoreRefused, state_db_path
+from tests.unit.team_bridge.test_screening import _setup  # noqa: F401 - autouse fixture
 from tests.unit.team_bridge.test_screening import (  # noqa: F401 - autouse fixture
     Policy,
     Runner,
     _fixture_models_are_evaluated,
-    _item as _unattributed_item,
-    _setup,
 )
+from tests.unit.team_bridge.test_screening import _item as _unattributed_item
 
 
 def _item(**kwargs: Any) -> dict[str, Any]:
@@ -83,9 +83,11 @@ def _fill(store, owner, entries, *, tier):
 
     sender = f"acc_fill{next(_FILL_SENDERS)}"
     rows = [
-        dict(entry)
-        if entry.get("sender_account_id")
-        else dict(entry, sender_account_id=sender, sender_kind="agent")
+        (
+            dict(entry)
+            if entry.get("sender_account_id")
+            else dict(entry, sender_account_id=sender, sender_kind="agent")
+        )
         for entry in entries
     ]
     return store.reserve_screening_batch(owner, rows, tier=tier)
@@ -448,10 +450,7 @@ def test_budget_counts_one_unit_per_call_not_per_message(tmp_path: Path) -> None
         )
     # 8 calls x 20 messages = 160 rows, 8 units: the 9th call is refused.
     with pytest.raises(StoreRefused) as refused:
-        _fill(
-            store,
-            owner, [{"message_id": "bmsg_x"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
-        )
+        _fill(store, owner, [{"message_id": "bmsg_x"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED)
     assert refused.value.code == "budget_exhausted"
     assert _units(tmp_path) == budget.account
 
@@ -467,13 +466,11 @@ def test_ambient_chatter_leaves_the_reserve_for_humans_and_addressed(tmp_path: P
     reserve = budget.account - budget.ambient
     for i in range(reserve):
         _fill(
-            store,
-            owner, [{"message_id": f"bmsg_dm{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
+            store, owner, [{"message_id": f"bmsg_dm{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
         )
     with pytest.raises(StoreRefused) as full:
         _fill(
-            store,
-            owner, [{"message_id": "bmsg_dm_x"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
+            store, owner, [{"message_id": "bmsg_dm_x"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
         )
     assert full.value.code == "budget_exhausted"
 
@@ -496,8 +493,7 @@ def test_a_persons_room_lines_cannot_spend_the_addressed_only_units(tmp_path: Pa
     addressed = budget.account - budget.unaddressed
     for i in range(addressed):
         _fill(
-            store,
-            owner, [{"message_id": f"bmsg_dm{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
+            store, owner, [{"message_id": f"bmsg_dm{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
         )
 
 
@@ -524,7 +520,9 @@ def test_an_agent_mentioning_the_recipient_cannot_spend_the_last_five(tmp_path: 
     for i in range(budget.account - budget.unaddressed):
         _fill(
             store,
-            owner, [{"message_id": f"bmsg_owner{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
+            owner,
+            [{"message_id": f"bmsg_owner{i}"}],
+            tier=Store.SCREENING_TIER_HUMAN_ADDRESSED,
         )
 
 

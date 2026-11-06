@@ -581,10 +581,18 @@ def validate_envelope(
         sender_account = ""
     if not isinstance(sender_account, str) or len(sender_account) > _ENVELOPE_LABEL_MAX:
         return None, "envelope_malformed"
-    # ALLOCATION identity comes from the server's stored message participant
-    # (the gated classification body read; the pair DTO freezes the same
-    # AccountID from m.Sender, agent-server bridge_read_service.go). The
-    # top-level block above is a LABEL, so it is never the attribution.
+    # ALLOCATION identity is the account the HUB stored as this message's
+    # sender — never a client stamp, and never the display half (``name``,
+    # ``organization``). Two lanes state it in different blocks: the
+    # CONVERSATION lane in the participant block below, built from the gated
+    # classification body read; the PAIR/INBOX lane in the top-level block
+    # above, which ``connector/wake.py`` fills from ``wire.message`` verbatim
+    # (the authenticated DTO, so hub data rather than client data).
+    #
+    # So "the top-level block is a label" is true of its DISPLAY fields and
+    # false of its ``account_id``: reading it as label-only is exactly how
+    # security round 1 dropped the inbox lane's charge, which then made
+    # ordinary inbox volume fine every named sender.
     #
     # ACCOUNT is the attribution: it is what the ledger charges, what the
     # retained proof pins and what every dispatch is re-checked against. KIND is
@@ -3356,9 +3364,7 @@ async def _screen_batch_core(
             "input_proof": prepared.input_proof,
             # The message's OWN verified identity, so a call charges each
             # participating sender exactly as its own single screen would.
-            "sender_account_id": (
-                prepared.envelope.sender_account
-            ),
+            "sender_account_id": (prepared.envelope.sender_account),
             "sender_kind": prepared.envelope.sender_kind,
         }
         for index, prepared in pending
