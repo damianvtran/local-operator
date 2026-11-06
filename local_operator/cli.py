@@ -8289,7 +8289,11 @@ def _wake_create(args: argparse.Namespace) -> int:
     """
     import time as _time
 
-    from local_operator.harness.wake import parse_wake_at, parse_wake_duration
+    from local_operator.harness.wake import (
+        WAKE_TIME_FORMS,
+        parse_wake_at,
+        parse_wake_duration,
+    )
     from local_operator.paths import config_dir
     from local_operator.wakes.arm import WakeWriteError, arm_wake
 
@@ -8321,7 +8325,10 @@ def _wake_create(args: argparse.Namespace) -> int:
         # applies to a leading ``+``.
         request["in" if duration is not None else "at"] = body
     if due_at is None:
-        print(f"could not read a time from {raw!r} (try 'in 2m' or 'at 09:30')", file=sys.stderr)
+        # Names the same accepted forms the tool's refusal does, from the same
+        # constant: this command refuses BEFORE the validator sees the string,
+        # so this is the only sentence a person at a terminal gets to read.
+        print(f"could not read a time from {raw!r}; {WAKE_TIME_FORMS}.", file=sys.stderr)
         return 1
 
     # WHAT THIS COMMAND CHECKS, AND WHAT IT DOES NOT. Everything here that
@@ -8364,7 +8371,7 @@ def _wake_create(args: argparse.Namespace) -> int:
         until_at = now_ms + duration if duration is not None else parse_wake_at(body, now_ms)
         if until_at is None:
             print(
-                f"could not read an end time from {until_raw!r} (try 'in 7d' or 'at 09:30')",
+                f"could not read an end time from {until_raw!r}; {WAKE_TIME_FORMS}.",
                 file=sys.stderr,
             )
             return 1
@@ -8415,7 +8422,7 @@ def _wake_create(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    from local_operator.wakes.display import format_wake_time
+    from local_operator.wakes.display import format_wake_at_echo, format_wake_time
 
     # The row as PERSISTED (the message the validator stripped), not the flag
     # as typed: what the listing will show must be what was printed here.
@@ -8426,6 +8433,18 @@ def _wake_create(args: argparse.Namespace) -> int:
         f"({_format_due((outcome.next_due_at - now_ms) / 1000.0)})  "
         f"{row.message if row else request['message']}"
     )
+    # A LOCAL clock reading has just been rendered back in the reader's OWN
+    # clock, which is exactly the clock they typed in — so the row above cannot
+    # show them the difference between what they wrote and the instant that was
+    # stored. Print that instant with its offset, beside the input, for the one
+    # form where the two disagree. An absolute form already said its own
+    # instant, so the echo is empty and nothing is added.
+    echo = format_wake_at_echo(outcome.next_due_at, request.get("at"), now_ms)
+    if echo:
+        print(
+            # i18n: ignore machine-readable resolved instant, English-only
+            f"  resolved: {echo}"
+        )
     if outcome.supervisor:
         print(f"supervisor: {outcome.supervisor}")
     return 0

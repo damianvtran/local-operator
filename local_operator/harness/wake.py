@@ -32,6 +32,7 @@ import asyncio
 import inspect
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Awaitable, Callable, Literal, Sequence, TypedDict
 
@@ -75,6 +76,22 @@ LOAD_GRACE_MS = 2_000  # an overdue wake adopted at resume fires shortly AFTER l
 WAKE_SCHEDULES_CUSTOM_TYPE = "wake_schedules"
 WAKE_PROMPT_MESSAGE_TYPE = "wake_prompt"
 
+#: The accepted time forms, as one sentence fragment, shared by EVERY refusal
+#: that reads a wake time: ``build_wake_schedule``'s invalid-``at`` AND
+#: invalid-``until`` sentences, plus both flag-translation refusals in ``lop wake
+#: create``. All four spell it here, because ``until`` is read by the same parser
+#: as ``at`` and the CLI rejects an unreadable ``when``/``until`` BEFORE the
+#: validator ever sees the string — a second wording there is the one a person at
+#: a terminal actually reads, and a refusal that does not name the accepted forms
+#: (nor the local rule that makes a bare clock ambiguous) teaches nothing about
+#: the mistake. One constant, so the tool, the CLI and the desktop route cannot
+#: describe the same value four different ways.
+WAKE_TIME_FORMS = (
+    "use a delay ('+30m'), a LOCAL clock time ('HH:MM' or 'local:HH:MM', read in this "
+    "machine's zone), or an ISO-8601 timestamp with an offset ('2026-11-05T18:45:00Z') "
+    "for an absolute instant"
+)
+
 #: The scratchpad clause carried by every wake envelope. A wake is the turn with
 #: the LEAST context around it — no user message, no recent tool result naming a
 #: path — so it is the turn where the standing scratchpad rule is least likely to
@@ -100,7 +117,15 @@ _DURATION_UNITS_MS = {
 # "8h30m" a hard error even though it is the most natural way to say it.
 _DURATION_RE = re.compile(r"^\s*(?:\d+\s*[smhdwSMHDW]\s*)+$")
 _DURATION_TERM_RE = re.compile(r"(\d+)\s*([smhdwSMHDW])")
-_CLOCK_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
+# ``local:`` prefixes a clock reading so the LOCAL-ness is stated rather than
+# inferred (see :class:`WakeTime`). It rides in the clock pattern instead of a
+# second grammar, but the prefix on its own is checked separately below: a
+# string that says ``local:`` and is not then a valid clock must FAIL, never
+# fall through to the ISO branch — ``fromisoformat`` would read a naive
+# timestamp in this machine's zone anyway, so silently accepting the leftover
+# would be the very ambiguity the prefix exists to remove.
+_CLOCK_RE = re.compile(r"^\s*(?:local\s*:\s*)?(\d{1,2}):(\d{2})\s*$", re.IGNORECASE)
+_LOCAL_PREFIX_RE = re.compile(r"^\s*local\s*:", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -218,13 +243,36 @@ def parse_wake_duration(text: str) -> int | None:
     return total_ms
 
 
-def parse_wake_at(text: str, now_ms: int) -> int | None:
-    """Parse a wake time into epoch ms. Tries, in order: ``+duration``,
-    ``HH:MM`` (next local occurrence), then ISO-8601. Returns ``None`` on no
-    match.
+WakeTimeKind = Literal["relative", "local", "absolute"]
 
-    ``HH:MM`` uses date arithmetic (``date + 1 day``) rather than ``+24h`` so
-    a DST transition keeps the requested wall-clock time.
+
+@dataclass(frozen=True, slots=True)
+class WakeTime:
+    """A parsed schedule timestamp plus HOW it was read.
+
+    ``epoch_ms`` is what the scheduler needs; the kind exists because one input
+    form is ambiguous to a reader and the others are not: ``HH:MM`` (and a
+    naively-written ISO timestamp) is a wall-clock reading that only the local
+    zone can turn into an instant, so the resolved instant must be quoted back
+    to whoever wrote it. A caller that only needs the instant keeps calling
+    :func:`parse_wake_at`.
+    """
+
+    epoch_ms: int
+    kind: WakeTimeKind
+
+
+def resolve_wake_at(text: str, now_ms: int) -> WakeTime | None:
+    """Parse a wall-clock-or-absolute time into ``epoch_ms`` plus how it was read.
+
+    Tries, in order: ``+duration``, ``HH:MM``/``local:HH:MM`` (next LOCAL
+    occurrence), then ISO-8601. Returns ``None`` on no match.
+
+    The kind is the point of the function: ``HH:MM`` and an ISO timestamp with
+    no offset are the SAME statement — read this clock in the local zone — and
+    that is how a glance at the string can differ from the instant it means.
+    An offset-bearing ISO value names its zone outright, so nothing needs to be
+    quoted back.
     """
     if not isinstance(text, str):
         return None
@@ -236,7 +284,7 @@ def parse_wake_at(text: str, now_ms: int) -> int | None:
         duration = parse_wake_duration(stripped[1:])
         if duration is None:
             return None
-        return now_ms + duration
+        return WakeTime(epoch_ms=now_ms + duration, kind="relative")
 
     clock = _CLOCK_RE.match(stripped)
     if clock:
@@ -253,14 +301,40 @@ def parse_wake_at(text: str, now_ms: int) -> int | None:
             # across a DST boundary.
             tomorrow = now_dt.date() + timedelta(days=1)
             target = datetime.combine(tomorrow, time(hour=hour, minute=minute))
-        return int(target.timestamp() * 1000)
+        return WakeTime(epoch_ms=int(target.timestamp() * 1000), kind="local")
+    if _LOCAL_PREFIX_RE.match(stripped):
+        # Said ``local:`` and was not a clock: REFUSED, not passed on. The ISO
+        # branch could not read the prefix either, so the observable result is
+        # the same today — the explicit refusal is what keeps it true if that
+        # branch ever loosens, and it is the caller's only signal that the
+        # form, not the value, is wrong.
+        return None
 
     # ISO-8601 (Python 3.11+ fromisoformat accepts offsets and a trailing Z).
     try:
         parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return int(parsed.timestamp() * 1000)
+    # An offset says which instant the writer meant. Without one, ``timestamp()``
+    # reads the wall clock in THIS machine's zone — the very ambiguity ``HH:MM``
+    # has — so the kind is not simply "iso".
+    kind: WakeTimeKind = "absolute" if parsed.utcoffset() is not None else "local"
+    return WakeTime(epoch_ms=int(parsed.timestamp() * 1000), kind=kind)
+
+
+def parse_wake_at(text: str, now_ms: int) -> int | None:
+    """Parse a wake time into epoch ms. Returns ``None`` on no match.
+
+    ``HH:MM`` — and ``local:HH:MM``, its explicit spelling — is this machine's
+    LOCAL wall clock resolved to its next occurrence. Resolution uses date
+    arithmetic (``date + 1 day``) rather than ``+24h`` so a DST transition
+    keeps the requested wall-clock time. An ISO-8601 timestamp carrying an
+    offset is absolute. :func:`resolve_wake_at` is how a caller learns which of
+    those readings applied; this wrapper is for callers that only need the
+    instant.
+    """
+    moment = resolve_wake_at(text, now_ms)
+    return None if moment is None else moment.epoch_ms
 
 
 def format_duration(ms: int) -> str:
@@ -387,10 +461,11 @@ def build_wake_schedule(
     elif at_val is not None:
         parsed = parse_wake_at(str(at_val), now_ms)
         if parsed is None:
+            # No fallback anywhere — an unreadable `at` is refused, and the shared
+            # ``WAKE_TIME_FORMS`` fragment is what makes the refusal name every
+            # accepted form and the local rule the clock form depends on.
             return {
-                "error": (
-                    f"invalid time '{at_val}'; use +duration, HH:MM, or an " "ISO-8601 timestamp."
-                ),
+                "error": f"invalid time '{at_val}'; {WAKE_TIME_FORMS}.",
                 "malformed": True,
             }
         next_due_at = parsed
@@ -426,7 +501,13 @@ def build_wake_schedule(
     if until_val is not None:
         until_at = parse_wake_at(str(until_val), now_ms)
         if until_at is None:
-            return {"error": f"invalid 'until' time '{until_val}'.", "malformed": True}
+            # Same fragment as the ``at`` refusal above: ``until`` is read by the
+            # same parser, so a bound that cannot be read is the same mistake and
+            # must not describe the accepted forms differently.
+            return {
+                "error": f"invalid 'until' time '{until_val}'; {WAKE_TIME_FORMS}.",
+                "malformed": True,
+            }
 
     limit: int | None = None
     limit_val = request.get("limit")

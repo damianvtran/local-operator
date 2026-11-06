@@ -498,3 +498,48 @@ def test_a_live_owner_is_refused_with_a_sentence_that_says_what_to_do(
     assert "stale owner marker" in message
     assert "Nothing was written" in message
     assert _persisted_wakes(session) == []
+
+
+def test_an_unreadable_time_names_every_form_and_the_local_rule(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """FOUR surfaces read the same parser; all four must name the same forms.
+
+    ``lop wake create`` refuses an unreadable ``when``/``until`` BEFORE the
+    validator ever sees the string, so the validator's sentence is not the one a
+    person at a terminal reads. The bound is the same story from the other side:
+    ``until`` goes through ``parse_wake_at`` exactly like ``at``, and used to
+    answer "invalid 'until' time ..." with no forms at all — a third voice for
+    one rule. Every refusal now builds on ``WAKE_TIME_FORMS``, and this pins the
+    fragment at each site so none of them can quietly simplify back.
+    """
+    from local_operator.cli import _wake_create
+    from local_operator.harness.wake import WAKE_TIME_FORMS, build_wake_schedule
+
+    now = 1_700_000_000_000
+    _session(tmp_path, "wakecreate01")
+
+    # (1) the CLI's `when` flag
+    assert _wake_create(_args(when="at tomorrow")) == 1
+    when_err = capsys.readouterr().err
+    for fragment in ("+30m", "local:HH:MM", "ISO-8601", "offset", "LOCAL"):
+        assert fragment in when_err
+    assert WAKE_TIME_FORMS in when_err
+
+    # (2) the CLI's `until` flag — the same "which kind is this value" question
+    assert _wake_create(_args(until="tomorrow")) == 1
+    assert WAKE_TIME_FORMS in capsys.readouterr().err
+
+    # (3) the validator's `at` refusal, which the tool and the desktop arm route
+    #     both reach
+    refused_at = build_wake_schedule({"message": "m", "at": "tomorrow"}, [], now)
+    assert "error" in refused_at
+    assert refused_at["malformed"] is True
+    assert WAKE_TIME_FORMS in refused_at["error"]
+
+    # (4) the validator's `until` refusal — the site that was still formless
+    refused_until = build_wake_schedule({"message": "m", "in": "2m", "until": "tomorrow"}, [], now)
+    assert "error" in refused_until
+    assert refused_until["malformed"] is True
+    assert "until" in refused_until["error"]
+    assert WAKE_TIME_FORMS in refused_until["error"]
