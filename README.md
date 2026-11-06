@@ -464,6 +464,13 @@ lop network sessions --peer radiant-m4 --create --name "auth rebase" \
   --prompt "rebase the auth branch and run the test suite"
 ```
 
+The `--prompt` is that session's **first turn**, run there as `--send` would run
+it; the receipt says what became of it — completed, failed (with the cause the
+turn ended on), or still running, in which case
+`lop network sessions --peer <device> --peek <session>` reads how it ended. A
+create with no `--prompt` starts no turn at all: it mints the session, warms its
+runtime in the background and says so.
+
 Whichever front end starts it, the session is the *peer's*: it appears in that
 device's own `lop sessions`, it shows up here under the `⇄` heading for that
 device, and piloting it is what piloting a local session is — read the

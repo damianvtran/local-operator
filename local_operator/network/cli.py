@@ -591,7 +591,15 @@ def add_parser(
     )
     net_sessions.add_argument("--cwd", default="", help="with --create: where it should run")
     net_sessions.add_argument("--name", default="", help="with --create: its title")
-    net_sessions.add_argument("--prompt", default="", help="with --create: its first turn")
+    net_sessions.add_argument(
+        "--prompt",
+        default="",
+        help=(
+            "with --create: its first turn, run on that device once its runtime is up. "
+            "The receipt reports whether that turn settled — completed, failed (with the "
+            "cause), or still running — so a failure there is never silent here"
+        ),
+    )
     # WHO THE SESSION IS (definitions.py). Three flags, each naming a DISTINCT
     # thing the local product can put on a session, because collapsing them would
     # make one word mean two and the frame already has to say which it got:
@@ -7628,6 +7636,26 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 str(detail.get("detail") or "")
                 or ("prompt admitted" if admitted else "the prompt was not admitted")
             )
+            # WHAT BECAME OF THAT FIRST TURN (CR-1). "prompt admitted" is the
+            # durable append, not the turn: a turn that failed a second later on
+            # that device was reported to nobody here, so the person watched a
+            # conversation that never answered (measured on a real peer,
+            # 2026-11-06). The peer settles the turn when it can and sends the
+            # outcome; `--send` reads the same fact off a viewer stream, so this
+            # is the create's only route to it.
+            turn = detail.get("turn")
+            if isinstance(turn, dict):
+                state = str(turn.get("state") or "")
+                if state == "failed":
+                    why = str(turn.get("detail") or "the turn ended in failure")
+                    lines.append(f"turn failed on {peer}: {why}")
+                elif state == "running":
+                    lines.append(
+                        f"turn: running on {peer} — `network sessions --peer {peer} "
+                        f"--peek {minted}` reads how it ended"
+                    )
+                elif state == "ran":
+                    lines.append(f"turn: completed on {peer}")
         else:
             lines.append(
                 "no prompt sent — the session exists on that device; "

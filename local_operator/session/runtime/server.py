@@ -7226,6 +7226,7 @@ class RuntimeServer:
                 AttachmentUnavailable,
                 AudioInputUnsupported,
                 DocumentCarriageUnsupported,
+                FirstTurnFailed,
                 ForkRefused,
                 OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
@@ -7250,6 +7251,7 @@ class RuntimeServer:
                     AttachmentUnavailable,
                     AudioInputUnsupported,
                     DocumentCarriageUnsupported,
+                    FirstTurnFailed,
                     ForkRefused,
                     OperatorAuthorityRequired,
                     ProfileRegistryUnavailable,
@@ -8322,6 +8324,16 @@ class RuntimeServer:
             images = frame.get("images")
             fields: dict[str, Any] = {"images": images}
             parameters = inspect.signature(h.prompt).parameters
+            # WHETHER THIS CALLER WANTS THE TURN'S OUTCOME, not just its durable
+            # admission — probed exactly like ``command_id`` below, and absent
+            # from every frame that predates the field (a viewer, the desktop
+            # composer, ``lop send``), so those callers keep the ack-at-append
+            # contract byte for byte. It exists for ONE caller: the peer relay's
+            # first-prompt hop, whose receipt is the only thing that device's user
+            # will ever see about a turn that ran on somebody else's machine
+            # (``network.relay._prompt_on`` / ``_op_session_create``).
+            if "wait_complete" in parameters:
+                fields["wait_complete"] = bool(frame.get("wait_complete"))
             if "command_id" in parameters:
                 fields["command_id"] = frame.get("command_id")
             # Silent input metadata (see ``Message.input_mode``), probed exactly

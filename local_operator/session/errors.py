@@ -181,6 +181,37 @@ class TurnInFlight(RuntimeError):
     """
 
 
+class FirstTurnFailed(RuntimeError):
+    """The prompt WAS admitted and the turn it opened ended in failure.
+
+    THE DISTINCTION THIS CLASS EXISTS FOR: an admission refusal ("this runtime
+    will not take the message") and a failed turn ("the message is in the
+    transcript and the model call failed") are different facts, and a caller
+    that reports the second as the first tells the user their words were
+    dropped when they were not. ``ServingSessionHandle.prompt`` raises this when
+    its own drain saw its turn's terminal event fail (``wait_complete`` callers
+    only — the ordinary ack still returns at the durable append).
+
+    ``code`` crosses the runtime's error frame as ``error_code`` so a caller can
+    branch on the CATEGORY instead of a sentence (see ``server``'s typed-reply
+    block): the peer relay's ``prompt`` hop is the first reader, and it must not
+    turn a failed turn into ``admitted: false``. A ``RuntimeError`` subclass
+    because that is what the settle has always raised, so every existing catcher
+    keeps its shape.
+    """
+
+    code = "turn_failed"
+
+    def __init__(self, cause: str = "") -> None:
+        self.cause = cause
+        # The bare sentence is byte-identical to the one this replaces when the
+        # runtime knows no cause, which is what keeps a test that pins it honest.
+        sentence = "The admitted loop turn did not complete"
+        if cause:
+            sentence = f"{sentence}: {cause}"
+        super().__init__(sentence)
+
+
 class AudioInputUnsupported(ValueError):
     """The message carried a recording the selected model cannot be sent on
     the audio door.
