@@ -2352,10 +2352,17 @@ def _repair_borrowed(
         except Exception:  # noqa: BLE001 — an unreadable store is reported, not raised
             networks = []
         if networks:
+            # "holds no sharing list" was untrue for the owner this file is full of
+            # (review round 4, nit): an owner that shares its logins OUT and borrows
+            # nothing has a placement list and no borrowable key, which is exactly the
+            # state this branch describes. Say what the failed predicate actually
+            # means: `placement_for_store` returns None when no key owned elsewhere is
+            # held here — not when the device has no placement list at all.
             reason = (
                 "this device is in "
-                f"{len(networks)} network record(s) but holds no sharing list — no key "
-                "here is shared with it, so there is nothing to re-ask (a durable "
+                f"{len(networks)} network record(s) but borrows nothing here — no key "
+                "is shared with it by another device (sharing its own logins out does "
+                "not create a borrow), so there is nothing to re-ask (a durable "
                 "refusal record outlives the placement document that produced it)"
             )
         else:
@@ -2412,7 +2419,22 @@ def _repair_borrowed(
             borrowable = set(document.borrowable_keys(asker))
             for key in sorted(document.entries):
                 entry = document.entries[key]
-                if key in borrowable:
+                # SECRET-KEY COPIES FIRST, BEFORE ``borrowable`` (review round 4, R4-1).
+                # ``borrowable_keys` filters on owner and holder only, so a ``secret:``
+                # copy this device materialised from an owner SATISFIES it — reading the
+                # holder test as "askable" dialled the owner for a value already sitting
+                # in the local store, and then reported a false "still refused" (or a
+                # false "repaired") about a credential that works fine. A copy is never
+                # asked for, whatever the holder predicate says.
+                if key.startswith("secret:"):
+                    skipped.append(
+                        _skip(
+                            key,
+                            "a copy — it is read from this device's own store, "
+                            "so no owner is asked",
+                        )
+                    )
+                elif key in borrowable:
                     if state.status(key) == "active":
                         # Already proven working: a re-ask would be a gratuitous dial
                         # and a gratuitous grant on the owner.
@@ -2426,14 +2448,6 @@ def _repair_borrowed(
                         continue
                     wanted.append(key)
                     continue
-                if key.startswith("secret:"):
-                    skipped.append(
-                        _skip(
-                            key,
-                            "a copy — it is read from this device's own store, "
-                            "so no owner is asked",
-                        )
-                    )
                 elif entry.owner_device == asker:
                     skipped.append(
                         _skip(

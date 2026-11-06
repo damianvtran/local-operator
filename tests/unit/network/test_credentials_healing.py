@@ -350,6 +350,19 @@ def test_repair_asks_only_borrowable_keys_of_its_own_network(
         by="d_owner",
     )
     doc_a.grant("meshtest", "d_self", scope="session", by="d_owner")
+    # A COPY this device materialised from the owner (``secret:``): it satisfies
+    # ``borrowable_keys`` (owner elsewhere, held here), so the first version of the
+    # skip reporting dialled the owner for a value already in the local store
+    # (review round 4, R4-1). It must never be asked for.
+    doc_a.declare(
+        "secret:LINEAR_TOKEN",
+        owner_device="d_owner",
+        owner_device_name="owner-b",
+        provider="linear",
+        identity_label="owner@example.test",
+        by="d_owner",
+    )
+    doc_a.grant("secret:LINEAR_TOKEN", "d_self", scope="session", by="d_owner")
     # Owned here: no borrow exists, so asking would be a request to be served a
     # credential this device already holds.
     doc_a.declare(
@@ -419,6 +432,10 @@ def test_repair_asks_only_borrowable_keys_of_its_own_network(
     reasons = {row["credential_name"]: row["reason"] for row in skipped}
     assert "owned here" in reasons["openai"], reasons
     assert "in network 'n_other'" in reasons["anthropic"], reasons
+    # The COPY is named as a copy and never dialled (R4-1): a false "still refused"
+    # or "repaired" about a credential whose local value works is the defect.
+    assert "a copy" in reasons["secret:LINEAR_TOKEN"], reasons
+    assert "secret:LINEAR_TOKEN" not in asked, asked
 
 
 def test_repair_with_nothing_askable_says_so(
