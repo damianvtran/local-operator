@@ -50,9 +50,9 @@ import logging
 from pathlib import Path
 from typing import Annotated, Final
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi import Path as PathParam
-from fastapi import Header, Request, status
+from fastapi import Request, status
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from starlette.responses import Response
 
@@ -64,14 +64,14 @@ from local_operator.team_bridge.link_preview.cache import PreviewScope
 from local_operator.team_bridge.link_preview.extract import sniff_raster
 from local_operator.team_bridge.link_preview.models import LinkPreviewResolution
 from local_operator.team_bridge.link_preview.service import resolve_preview
-from local_operator.team_bridge.link_preview.throttle import (
-    PreviewThrottled,
-    get_resolve_throttle,
-)
 from local_operator.team_bridge.link_preview.store import (
     ARTIFACT_ID_PATTERN,
     InvalidArtifactId,
     PreviewStore,
+)
+from local_operator.team_bridge.link_preview.throttle import (
+    PreviewThrottled,
+    get_resolve_throttle,
 )
 from local_operator.web_fetch.service import load_fetch_settings
 

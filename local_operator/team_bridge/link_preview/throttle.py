@@ -15,9 +15,13 @@ which costs the operator bandwidth and spends this install's allowance at origin
 that rate-limit by IP. It is deliberately generous for a human and only bites a
 burst.
 
-BOUNDED MEMORY, ALSO DELIBERATELY. One bucket per account is two floats; the map
-is capped, dropping the least recently touched bucket first. Nothing here is
-persisted and nothing survives the process — a restart is not something a client
+BOUNDED MEMORY, ALSO DELIBERATELY. One bucket per account is two floats, and the
+map is capped. The cap is NOT an LRU: a depleted bucket is never dropped, because
+recreating an account at full burst after forgetting it is a refund — a way to buy
+tokens by being forgotten (code review round 2). Only a bucket still holding its
+whole burst is evictable, and when every tracked bucket is depleted a NEW account
+is refused instead: over-counting is the safe direction for a bound. Nothing here
+is persisted and nothing survives the process — a restart is not something a client
 can choose.
 """
 
@@ -110,7 +114,9 @@ class ResolveThrottle:
 
         Read AFTER a refusal, so a refused client waits the real interval instead of
         retrying into the same refusal. Deliberately does not CREATE a bucket: a
-        read must not be able to grow the map.
+        read must not be able to grow the map — and an assertion in the bucket test
+        pins that, because mutating this to ``setdefault`` used to leave the suite
+        green (security review round 3, S-4).
         """
         if self.refill_per_second <= 0:
             # A bucket with no refill never recovers. Reported as an hour rather
@@ -119,11 +125,28 @@ class ResolveThrottle:
             return _NO_REFILL_RETRY_S
         with self._lock:
             now = self._clock()
-            level = self._level.get(account_id, self.burst)
-            last = self._stamped.get(account_id, now)
-            level = min(self.burst, level + max(0.0, now - last) * self.refill_per_second)
+            if account_id not in self._level:
+                # A NEW account refused because the map is full holds no bucket of
+                # its own. Answering "one token away" (0.05 s at the defaults) sends
+                # it straight back into the same refusal, which real waits of up to
+                # ``burst / refill`` (= 5 s) contradict (code review round 3, M1).
+                # The honest wait is until SOME tracked bucket refills to its whole
+                # burst and becomes evictable — the minimum across the map.
+                if not self._level:
+                    return 0.05
+                until_evictable = min(
+                    self.burst - self._level_at(other, now) for other in self._level
+                )
+                return round(max(0.05, until_evictable / self.refill_per_second), 2)
+            level = self._level_at(account_id, now)
         missing = max(0.0, 1.0 - level)
         return round(max(0.05, missing / self.refill_per_second), 2)
+
+    def _level_at(self, account_id: str, now: float) -> float:
+        """``account_id``'s level at ``now``, credited but not stored. Holds the lock."""
+        level = self._level.get(account_id, self.burst)
+        last = self._stamped.get(account_id, now)
+        return min(self.burst, level + max(0.0, now - last) * self.refill_per_second)
 
     def _refill(self, account_id: str, now: float) -> float:
         """``account_id``'s level at ``now``, credited and re-ordered. Holds the lock."""
@@ -143,15 +166,18 @@ class ResolveThrottle:
         forgotten (code review round 2). A bucket still holding its whole burst is
         the only safe one to drop — recreating it later at full burst is
         indistinguishable from having kept it.
+
+        With ``refill_per_second <= 0`` no bucket ever reaches ``burst`` again, so no
+        slot is ever freed and a brand-new account is refused for the process's life.
+        That mode is unreachable through :func:`get_resolve_throttle` (defaults only);
+        it is stated here so the next reader does not discover it by measuring
+        (code review round 3, N2).
         """
         for account_id in list(self._level):
             # Refill on the fly rather than trusting the stored level: the stored
             # one is only current as of that bucket's last touch, so an idle bucket
             # reads as depleted and would never be evictable.
-            level = self._level[account_id]
-            last = self._stamped.get(account_id, now)
-            level = min(self.burst, level + max(0.0, now - last) * self.refill_per_second)
-            if level >= self.burst:
+            if self._level_at(account_id, now) >= self.burst:
                 del self._level[account_id]
                 self._stamped.pop(account_id, None)
                 return

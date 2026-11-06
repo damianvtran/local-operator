@@ -11,6 +11,7 @@ the renderer talks to.
 from __future__ import annotations
 
 import asyncio
+import operator
 import socket
 import sqlite3
 import threading
@@ -18,7 +19,6 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-import operator
 from typing import Any, Callable, SupportsIndex, overload
 
 import httpx
@@ -1868,6 +1868,15 @@ def test_forgetting_an_account_never_refunds_a_spent_burst() -> None:
     # A second account cannot buy its way in by evicting a depleted bucket.
     assert not tight.allow("acc_b")
     assert "acc_a" in tight._level
+    # S-4: reading the wait must not CREATE a bucket — a read that grew the map
+    # would be the same bug the eviction rule exists to prevent, and mutating this
+    # to ``setdefault`` used to leave the suite green.
+    # M1: the refusal is "the map is full", not "this account is empty", so the
+    # advertised wait is until a slot frees (acc_a needs its whole burst of 2 back
+    # at 1 token/s = 2 s), NOT the 0.05 s floor a missing bucket used to report.
+    assert "acc_b" not in tight._level
+    assert tight.retry_after_s("acc_b") == 2.0, "Retry-After must name the real wait"
+    assert "acc_b" not in tight._level
     # Once acc_a has refilled to its whole burst, forgetting it changes nothing, so
     # the slot may be handed over.
     now["t"] += 10.0

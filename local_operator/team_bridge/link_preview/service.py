@@ -62,7 +62,10 @@ from local_operator.team_bridge.link_preview.models import (
     LinkPreviewResolution,
 )
 from local_operator.team_bridge.link_preview.store import PreviewStore
-from local_operator.team_bridge.link_preview.throttle import PreviewThrottled, ResolveThrottle
+from local_operator.team_bridge.link_preview.throttle import (
+    PreviewThrottled,
+    ResolveThrottle,
+)
 from local_operator.web_fetch.models import FetchBytes, WebFetchSettings
 from local_operator.web_fetch.service import (
     FetchError,

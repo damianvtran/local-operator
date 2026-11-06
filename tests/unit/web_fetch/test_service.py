@@ -1024,6 +1024,12 @@ def test_coerce_clamps_attempts() -> None:
         # ``ipv4_mapped``, so only the reserved term catches it.
         "::a9fe:a9fe",
         "::7f00:1",
+        # IPv6 SITE-LOCAL ``fec0::/10`` (S-2): RFC 3879 deprecated the prefix and
+        # removed it from the registries ``is_global`` reasons about, so the stdlib
+        # reports ``is_global=True`` while ``is_site_local`` is True. Measured
+        # here — the only term that catches it, and it is IPv6-only.
+        "fec0::1",
+        "fec0:0:0:ffff::1",
         # The plain guards, kept here so one test states the whole closed set.
         "169.254.169.254",
         "127.0.0.1",
@@ -1045,8 +1051,9 @@ def test_every_address_class_the_guard_must_refuse_is_refused(
     IPv4-compatible ``::a.b.c.d`` — every one of which the six-flag list this
     replaced refused, and every one of which ``validate_public_url`` would then PIN
     the connection to. The predicate therefore carries ``is_multicast`` and
-    ``is_reserved`` alongside ``not is_global``, and this parametrisation is what
-    keeps the pair honest in both directions.
+    ``is_reserved`` alongside ``not is_global``, plus ``is_site_local`` for the
+    deprecated ``fec0::/10`` prefix (S-2), which ``is_global`` also calls global.
+    This parametrisation is what keeps all four terms honest in both directions.
     """
     monkeypatch.setattr(service, "_resolve_host_ips", lambda host: [address])
     with pytest.raises(service.PolicyRefusal) as caught:

@@ -401,20 +401,29 @@ def _pin_request(url: str, pinned_ip: str | None) -> tuple[str, dict[str, str], 
 def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Whether ``ip`` is a target SSRF must refuse unless ``allow_private``.
 
-    THREE terms, and each one is load-bearing — measured, not assumed:
+    FOUR terms, and each one is load-bearing — measured, not assumed:
 
-    * ``not ip.is_global`` — IANA's own "globally routable" judgement, so the next
-      special-purpose range fails closed without a code change. It is what closes
-      ``100.64.0.0/10`` (CGNAT and Tailscale's MagicDNS), which the six-flag list
-      this replaced admitted.
+    * ``not ip.is_global`` — the private/loopback/link-local/ULA/CGNAT classes, and
+      the right default. It is NOT identical to the IANA registry: the stdlib's is a
+      static table and reports ``is_global=True`` for ``192.88.99.0/24`` (the
+      deprecated 6to4 relay anycast, registry-listed as not globally reachable),
+      ``2001:20::/28`` (ORCHIDv2) and ``2001:30::/28`` (Drone RID) — all measured
+      here. Treat it as the right default that a Python upgrade can extend, never as
+      a promise of closure.
     * ``ip.is_multicast`` and ``ip.is_reserved`` — because ``is_global`` is NOT a
-      superset of that list: it reports **True** for ``224.0.0.0/4``,
-      ``ff00::/8``, ``64:ff9b::/96`` (NAT64, which embeds an IPv4 address — so
-      ``64:ff9b::a9fe:a9fe`` IS ``169.254.169.254``) and IPv4-compatible
+      superset of the six-flag list this replaced: it reports **True** for
+      ``224.0.0.0/4``, ``ff00::/8``, ``64:ff9b::/96`` (NAT64, which embeds an IPv4
+      address — so ``64:ff9b::a9fe:a9fe`` IS ``169.254.169.254``) and IPv4-compatible
       ``::a.b.c.d``. An ``is_global``-only predicate therefore ALLOWED six classes
       the old one refused, and ``validate_public_url`` pins the connection to
       whatever it allows: on a NAT64 or IPv6-only host that is a stranger's link
       reaching the metadata endpoint. Both delta lanes found this independently.
+    * ``ip.is_site_local`` (IPv6 only) — ``fec0::/10``, the deprecated site-local
+      prefix. RFC 3879 removed it from the registries ``is_global`` reasons about,
+      so the stdlib reports ``is_global=True`` for it, and on a host that still
+      carries site-local addressing that is a LAN target reached and pinned.
+      Pre-existing rather than a regression, but it is an SSRF class inside this
+      expression and the fix is one term.
 
     Two cases still need spelling out: the cloud metadata address
     ``169.254.169.254`` is named even though it is link-local and therefore already
@@ -428,7 +437,15 @@ def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         ip = ip.ipv4_mapped
     if isinstance(ip, ipaddress.IPv4Address) and ip == ipaddress.IPv4Address("169.254.169.254"):
         return True
-    return not ip.is_global or ip.is_multicast or ip.is_reserved
+    # ``is_site_local`` exists only on IPv6Address — an IPv4Address raises
+    # AttributeError for it (measured), so the isinstance guard is required rather
+    # than defensive decoration.
+    return (
+        not ip.is_global
+        or ip.is_multicast
+        or ip.is_reserved
+        or (isinstance(ip, ipaddress.IPv6Address) and ip.is_site_local)
+    )
 
 
 #: The gaierror codes that mean "this name does not exist" rather than "the
