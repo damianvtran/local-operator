@@ -80,6 +80,12 @@ STATES: frozenset[str] = frozenset({"expired", "revoked", "unauthorized", "unava
 #: inventing a state for it would overwrite a precise older answer with a vague
 #: new one.
 STATE_FOR_CODE: dict[str, str] = {
+    # The owner's own "nothing is signed in here" answer. It was MISSING, so an MCP
+    # borrow refused with it still recorded nothing and the status had to guess —
+    # one of the three causes this table exists to distinguish (review round 1,
+    # R1-1). ``expired`` rather than a new word: the vocabulary is closed, and what
+    # an operator must do (sign in THERE) is the same.
+    "no_local_credential": "expired",
     "interactive_required": "expired",
     "refresh_failed": "expired",
     "not_a_holder": "revoked",

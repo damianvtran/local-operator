@@ -27,6 +27,9 @@ from typing import TYPE_CHECKING
 
 from local_operator.network.credentials.github import GITHUB_KEY, no_source_arms
 from local_operator.network.credentials.types import (
+    CAUSE_GRANT,
+    CAUSE_OWNER_LOGIN,
+    CAUSE_UNREACHABLE,
     BrokerError,
     is_secret_key,
     secret_name_from_key,
@@ -420,6 +423,76 @@ def render_borrowed_signin(owner: str, name: str) -> str:
     WHERE it runs may run it here.
     """
     return f"{owner}: /mcp login {name}"
+
+
+def render_mcp_disconnect(
+    key: str,
+    *,
+    cause: str,
+    code: str = "",
+    owner_name: str = "",
+    peer_name: str = "",
+) -> str:
+    """WHY a borrowed MCP sign-in stopped working, and the one command that repairs it.
+
+    WHY THIS IS NOT ANOTHER ``render_broker_error`` ARM. That function speaks about a
+    BORROW (it is rendered the moment the owner answers), and its subject is the
+    credential the owner refused to serve. This one speaks about a CONNECTION that
+    already held a borrowed sign-in and lost it, so its subject is the server and the
+    repair runs on the owning device — which is a different sentence even when both
+    derive from the same code.
+
+    THE FOUR CAUSES ARE THE FOUR THAT CAN BE PROVED, and each has a different
+    remedy. ``owner_login``: the server refused the sign-in the owner serves (the
+    owner's token expired or was signed out) — the owner signs in, then re-shares.
+    ``grant``: the share itself was withdrawn, so nothing on the owner needs signing
+    in. ``unreachable``: no answer from the owner, which proves nothing about the
+    credential and needs only a reconnect. ``unknown``: this build cannot classify
+    it, and says so rather than guessing one of the three.
+
+    WHERE IT IS RENDERED, AND WHAT A CLAMP COSTS. Three surfaces: the ``/mcp`` credential
+    row (``credential_status``'s ``_bounded``, 200 cells), the CLI's repair output, and
+    the startup/transcript hint — the manager's ``_credential_hint`` returns exactly
+    this row's ``reason`` for a borrowed ``expired``/``revoked`` row and passes it as
+    ``credential_hint`` into ``_auth_failure_text``; ``render_borrowed_signin`` is only
+    the fallback when that hint is empty. So this line IS toast text, and the toast
+    clamps to card width — there is no 32-cell variant of it. A reader must not assume
+    it is clamp-proof: the share command sits mid-sentence, so a narrow card truncates
+    the command, which is why the sentence leads with the owner and the cause and why
+    nothing here may claim otherwise.
+
+    ``key`` is the placement key (``mcp:<url>``), which is exactly what the share
+    verb takes, and ``peer_name`` is the device reading this line — the device the
+    share must name, since the grant is per holder. No value, no token and no path
+    is in reach of this function; it composes names only.
+    """
+    peer = peer_name or "<this device>"
+    owner = owner_name or "the owning device"
+    share = f"lop network credential share {key} --with {peer}"
+    if cause == CAUSE_OWNER_LOGIN:
+        # TWO LOGIN FAILURES, TWO FACTS, and the tail is where they differ: the
+        # server refused a bearer the owner had just served (``http_401``), or the
+        # owner could not refresh the token at all (``refresh_failed``). Calling a
+        # failed refresh "the server refused it" was untrue and sent the operator
+        # looking for a rejection the server never made.
+        if code == "refresh_failed":
+            detail = "the token refresh failed there"
+        elif code == "http_401":
+            detail = "the server rejected the sign-in there"
+        else:
+            detail = "its sign-in stopped working there"
+        return f"on {owner}: sign in to this server again, then '{share}' — {detail}"
+    if cause == CAUSE_GRANT:
+        return (
+            f"on {owner}: '{share}' — it no longer shares this server with {peer}, "
+            "and nothing here was changed"
+        )
+    if cause == CAUSE_UNREACHABLE:
+        return (
+            f"{owner} cannot be reached, so this borrowed sign-in cannot be repaired "
+            "yet; reconnect that device (nothing here was changed)"
+        )
+    return f"no usable sign-in for this server here or on {owner}; run 'lop network doctor'"
 
 
 def render_success(provider: str, owner_name: str, *, cached: bool = False) -> str:

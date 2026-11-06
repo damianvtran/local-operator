@@ -889,10 +889,26 @@ def add_parser(
     )
     identity_set_name.add_argument("--json", action="store_true")
 
-    actions.add_parser(
+    # ``--repair`` is the BORROWER-side sibling of ``lop network mcp credentials
+    # --repair`` (which is the OWNER's, and re-grants the references behind a
+    # shared server). This one re-asks every owner whose shared key this device is
+    # not currently able to use, once, through the ordinary grant path: the
+    # operator's answer to "the login expired and I fixed it on the other machine,
+    # do I have to restart the session?". Without the flag the listing is
+    # read-only, as it always was.
+    credentials_parser = actions.add_parser(
         "credentials",
         help="What this device owns, and what it borrows from whom",
-    ).add_argument("--json", action="store_true")
+    )
+    credentials_parser.add_argument("--json", action="store_true")
+    credentials_parser.add_argument(
+        "--repair",
+        action="store_true",
+        help=(
+            "Re-ask each owner whose share this device cannot use right now, then "
+            "list; prints why it still cannot when the owner has nothing to offer"
+        ),
+    )
 
     credential = actions.add_parser("credential", help="Share, revoke, or mark one credential")
     credential_actions = credential.add_subparsers(dest="credential_command")
@@ -2272,6 +2288,226 @@ def _owner_seen_at(record: Any, owner_device: str) -> float | None:
     return float(seen) if seen else None
 
 
+def _skip(key: str, reason: str) -> dict[str, Any]:
+    """One considered-but-not-asked key, and WHY. The shape the CLI prints."""
+    return {"credential_name": key, "asked": False, "reason": reason}
+
+
+def _repair_borrowed(
+    self_device: str, self_name: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Re-ask each owner this device borrows from, ONCE; report what came back.
+
+    Returns ``(outcomes, skipped)``. ``outcomes`` is one entry per ASK made (or the
+    one entry saying no ask could start at all); ``skipped`` is one entry per key the
+    selection CONSIDERED and did not ask, with the reason. A repair that finds
+    nothing must say so: a flag that prints its network summary, asks nobody and
+    exits 0 is indistinguishable from one that worked (QA round 3), and "nothing was
+    askable" and "the selection missed a key that should have been asked" are
+    different facts about the device.
+
+    WHY THE BORROWER NEEDS ITS OWN ``--repair``, and why it is not the owner's. A
+    share that stops working looks identical from here whether the owner signed out,
+    the share was withdrawn, or the owner is simply away — three different repairs,
+    two of which happen on the OTHER machine. What this device can do is the one
+    thing the session cannot: ask again NOW, and then say which of the three came
+    back. That is also the answer to "I fixed the login on the other machine, must I
+    restart the session?": after this the running session's next resolve reaches the
+    owner.
+
+    THE ASK IS ORDINARY (``heal_borrow`` passes ``force_refresh=False``): the owner
+    refuses a FORCED refresh from a device that is not its admin, and the repair the
+    operator needs must not require admin rights. What this clears first is this
+    device's own observation of the refusal (``forget_refusal``).
+
+    WHOSE KEYS ARE ASKABLE. Exactly the ones ``PlacementDocument.borrowable_keys``
+    names — this device is a HOLDER for the key and does not own it — in the network
+    the client belongs to. ``borrowable_keys`` is the decision, and the per-key
+    classification below only supplies the words for the keys it excludes, so the two
+    cannot drift into disagreeing about what was asked.
+
+    ``lop network mcp credentials --repair`` is the OWNER-side sibling (it re-grants
+    the secrets behind a shared server); this one mints nothing and grants nothing —
+    a device that is not permitted to ask is refused again, by the owner, on the
+    dial.
+    """
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from local_operator.network.credentials.state import PlacementState
+
+    try:
+        client = MeshCredentialClient.for_this_device()
+    except Exception:  # noqa: BLE001 — a repair that cannot start is reported, not raised
+        client = None
+    if client is None:
+        # TWO REASONS, TOLD APART. "No network" and "in a network but nothing is
+        # shared with this device" are the same absence of a client and different
+        # facts for the operator: the durable refusal record can outlive the placement
+        # document that produced it (QA round 3 hit exactly that), and telling them
+        # "you are not in an active network" while their network record is right there
+        # is the kind of wrong reason this flag exists to stop printing.
+        from local_operator.network import store as network_store
+
+        try:
+            networks = network_store.list_networks()
+        except Exception:  # noqa: BLE001 — an unreadable store is reported, not raised
+            networks = []
+        if networks:
+            # "holds no sharing list" was untrue for the owner this file is full of
+            # (review round 4, nit): an owner that shares its logins OUT and borrows
+            # nothing has a placement list and no borrowable key, which is exactly the
+            # state this branch describes. Say what the failed predicate actually
+            # means: `placement_for_store` returns None when no key owned elsewhere is
+            # held here — not when the device has no placement list at all.
+            reason = (
+                "this device is in "
+                f"{len(networks)} network record(s) but borrows nothing here — no key "
+                "is shared with it by another device (sharing its own logins out does "
+                "not create a borrow), so there is nothing to re-ask (a durable "
+                "refusal record outlives the placement document that produced it)"
+            )
+        else:
+            reason = (
+                "nothing to re-ask: this device is not in an active network, so no "
+                "credential here is borrowed"
+            )
+        return (
+            [
+                {
+                    "credential_name": "",
+                    "asked": False,
+                    "recovered": False,
+                    "code": "no_network",
+                    "cause": "unreachable",
+                    "reason": reason,
+                }
+            ],
+            [],
+        )
+    outcomes: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    wanted: list[str] = []
+    try:
+        ours = str(getattr(client, "network_id", "") or "")
+        asker = str(getattr(client, "self_device", "") or self_device or "")
+        documents = list(_placement_documents())
+        foreign: list[str] = []
+        for document in documents:
+            if ours and document.network_id != ours:
+                foreign.append(document.network_id)
+                for key in sorted(document.entries):
+                    skipped.append(
+                        _skip(
+                            key,
+                            f"in network '{document.network_id}', which this "
+                            f"device's relay cannot ask for — only '{ours}' is reachable",
+                        )
+                    )
+                continue
+            if not asker:
+                # No member id in this network means no holder row can name this
+                # device, so no key is askable from inside it.
+                for key in sorted(document.entries):
+                    skipped.append(
+                        _skip(
+                            key,
+                            "this device has no member id for the network — "
+                            "see 'lop network status'",
+                        )
+                    )
+                continue
+            state = PlacementState.load(document.network_id)
+            borrowable = set(document.borrowable_keys(asker))
+            for key in sorted(document.entries):
+                entry = document.entries[key]
+                # SECRET-KEY COPIES FIRST, BEFORE ``borrowable`` (review round 4, R4-1).
+                # ``borrowable_keys` filters on owner and holder only, so a ``secret:``
+                # copy this device materialised from an owner SATISFIES it — reading the
+                # holder test as "askable" dialled the owner for a value already sitting
+                # in the local store, and then reported a false "still refused" (or a
+                # false "repaired") about a credential that works fine. A copy is never
+                # asked for, whatever the holder predicate says.
+                if key.startswith("secret:"):
+                    skipped.append(
+                        _skip(
+                            key,
+                            "a copy — it is read from this device's own store, "
+                            "so no owner is asked",
+                        )
+                    )
+                elif key in borrowable:
+                    if state.status(key) == "active":
+                        # Already proven working: a re-ask would be a gratuitous dial
+                        # and a gratuitous grant on the owner.
+                        skipped.append(
+                            _skip(
+                                key,
+                                "already working — a grant was served, so there "
+                                "is nothing to repair",
+                            )
+                        )
+                        continue
+                    wanted.append(key)
+                    continue
+                elif entry.owner_device == asker:
+                    skipped.append(
+                        _skip(
+                            key,
+                            "owned here — the local login serves it, so there "
+                            "is no borrow to repair",
+                        )
+                    )
+                else:
+                    skipped.append(
+                        _skip(
+                            key,
+                            "not shared with this device (no holder row), so "
+                            "the owner would refuse the ask",
+                        )
+                    )
+        if not documents:
+            skipped.append(
+                _skip(
+                    "",
+                    f"no placement rows in '{ours or 'this network'}' — no key "
+                    "here is shared with this device, so there is nothing to "
+                    "re-ask (the last refusal stands until an owner shares one)",
+                )
+            )
+        elif not wanted and not skipped:
+            skipped.append(_skip("", "no placement entry was askable — see above"))
+        outcomes = asyncio.run(_repair_each(client, wanted, self_name=self_name))
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 — closing a client is not part of the answer
+                pass
+    return outcomes, skipped
+
+
+async def _repair_each(client: Any, keys: list[str], *, self_name: str) -> list[dict[str, Any]]:
+    """One healing re-ask per key, SERIALLY — a repair is not a fan-out.
+
+    Serial on purpose: every ask is a round trip to a device that may be refreshing
+    a token, and the operator's repair is a handful of keys at most. A parallel
+    version against one owner would be the retry storm the refusal cache exists to
+    prevent, with the cache deliberately bypassed.
+    """
+    from local_operator.network.credentials.healing import heal_borrow
+
+    outcomes: list[dict[str, Any]] = []
+    for key in keys:
+        outcome = await heal_borrow(
+            client,
+            key,
+            provider="mcp-oauth" if key.startswith("mcp:") else key,
+            peer_name=self_name,
+        )
+        outcomes.append(outcome.as_dict())
+    return outcomes
+
+
 def _cmd_credentials(args: argparse.Namespace) -> int:
     """``lop network credentials [--json]``: who owns what, and what this device borrows.
 
@@ -2454,6 +2690,31 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     shareable = _shareable_servers(self_device, self_name=self_name)
     shareable.extend(_shareable_providers(self_device))
     lines.extend(readiness_mod.shareable_lines(shareable))
+    # THE REPAIR RUNS BEFORE THE PAYLOAD IS BUILT, so the listing the operator reads
+    # already reflects what the owners just answered — the same order the pull takes
+    # above, and for the same reason: a row composed before the ask would show the
+    # state the repair exists to change.
+    repaired: list[dict[str, Any]] = []
+    repair_skipped: list[dict[str, Any]] = []
+    if bool(getattr(args, "repair", False)):
+        repaired, repair_skipped = _repair_borrowed(self_device, self_name)
+        for row in repaired:
+            name = str(row.get("credential_name") or "")
+            if row.get("recovered"):
+                lines.append(f"repaired: '{name}' — the owner served a working credential")
+            elif name:
+                lines.append(f"still refused: '{name}' — {row.get('reason') or ''}")
+            else:
+                lines.append(f"repair: {row.get('reason') or ''}")
+        # A CONSIDERED KEY THAT WAS NOT ASKED IS SAID OUT LOUD (QA round 3): the flag
+        # used to exit 0 with no line at all when its selection found nothing, which
+        # reads exactly like a repair that worked.
+        for row in repair_skipped:
+            name = str(row.get("credential_name") or "")
+            if name:
+                lines.append(f"skipped: '{name}' — {row.get('reason') or ''}")
+            else:
+                lines.append(f"repair: {row.get('reason') or ''}")
     payload = {
         "ok": True,
         "self_device": self_device,
@@ -2463,6 +2724,9 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         "refreshed": bool(pulled),
         "newly_borrowable": newly,
     }
+    if bool(getattr(args, "repair", False)):
+        payload["repaired"] = repaired
+        payload["repair_skipped"] = repair_skipped
     # A MEMBER WHOSE DOCUMENT COULD NOT BE MERGED IS SAID OUT LOUD (review round 5,
     # NIT 2). ``pull_placement`` refuses one unreadable document BY NAME and merges the
     # rest, which is the resilience we want — but that reply reached no surface: this

@@ -274,6 +274,43 @@ def test_known_lifecycle_baseline_restriction_cannot_hold(mesh, monkeypatch, kin
             lifecycle._VOLATILE_BASELINES.pop(life._volatile_key(), None)
 
 
+def test_clearing_a_retry_observation_keeps_the_policy_fence(tmp_path):
+    """A transient refusal must not erase a deny's recorded DIAGNOSIS — ON DISK.
+
+    ``clear`` is what the repair path calls to forget this device's retry memo. The
+    fence fields are documented as outliving that memo, so clearing a later
+    ``owner_offline`` must leave the deny's code and owner alone (review round 1,
+    R1-4) — and the row must still be READABLE after the save/load round trip, which
+    is where the first version failed: it kept the fence fields but dropped the
+    ``key`` the loader indexes by, so the preserved fence vanished on the next read
+    (review round 2, R2-1). This asserts the reload, not the in-memory dict.
+    """
+    from local_operator.network.credentials.state import PlacementState
+
+    a = PlacementState("net-C", root=tmp_path / "c")
+    a.observe("openai", "consent_withdrawn", owner_device="owner-C", retry_after_ms=1)
+    fence = a.held_policy_fence("openai", "owner-C")
+    assert fence[0] and fence[1] == "consent_withdrawn"
+
+    a.clear("openai")
+    assert a.held_policy_fence("openai", "owner-C") == fence
+    # The retry observation itself is gone: nothing reads the row as a live refusal.
+    assert a.status("openai") == ""
+    assert a.observation("openai") is None
+
+    # THE ROUND TRIP. This is the assertion R2-1 said was missing.
+    a.save()
+    reloaded = PlacementState.load("net-C", tmp_path / "c")
+    assert reloaded.held_policy_fence("openai", "owner-C") == fence, (
+        "the preserved fence did not survive the loader — the row lost a field "
+        "``PlacementState.load`` requires"
+    )
+    assert reloaded.status("openai") == ""
+    # Scoping still holds after a reload, exactly as it does in memory.
+    assert reloaded.held_policy_fence("openai", "owner-other") == ("", "")
+    assert PlacementState("net-D", root=tmp_path / "c").held_policy_fence("openai") == ("", "")
+
+
 def test_policy_watermark_is_scoped_and_survives_success(tmp_path):
     from local_operator.network.credentials.state import PlacementState
 
