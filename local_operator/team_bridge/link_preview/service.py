@@ -145,7 +145,18 @@ async def resolve_preview(
     that must drive a fixture origin without a real socket; production passes
     ``None`` and :func:`preview_fetcher` builds one.
     """
-    # The cap is checked FIRST and returns before any parse, any DNS, any cache
+    # THE KILL SWITCH, FIRST — before the cap, before the URL is even looked at.
+    # ``web_fetch.enabled: false`` is what a privacy- or airgap-minded operator
+    # flips, and the setting's own documentation promises that "no fetching" means
+    # no fetching through ANY spelling (``web_fetch/tool.py`` re-checks it per
+    # call for exactly that reason). A preview is one of those spellings, so with
+    # the switch off it answers ``absent/disabled`` and issues ZERO requests — the
+    # round-1 security finding S-1, measured as two outbound fetches from a
+    # stranger's link on a switched-off install.
+    if not settings.enabled:
+        return _absent("disabled")
+
+    # The cap is checked next and returns before any parse, any DNS, any cache
     # read and any request: an over-cap index must cost nothing at all.
     if index < 0 or index >= PER_MESSAGE_CAP:
         return _absent("cap")
@@ -457,7 +468,7 @@ async def _store_artifact(
         # format's header survives, which is exactly why storing it would be a
         # silent lie (a card would draw a half-pixel strip and never notice).
         return None
-    raster = sniff_raster(fetched.body)
+    raster = await asyncio.to_thread(sniff_raster, fetched.body)
     if raster is None:
         return None
     # OFF THE EVENT LOOP, deliberately. ``PreviewStore.put`` writes a temporary

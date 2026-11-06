@@ -31,10 +31,16 @@ capability tokens in its query string, and a log line outlives the message; the
 only identifier that appears anywhere on this surface is the artifact id, which
 is a scope-derived hash and names nothing on its own.
 
-The client stack (and therefore ``httpx``) is imported INSIDE the handler that
-needs it: this module rides ``server.app``'s import path on every ``lop serve``
-boot, and a module-scope httpx costs boot time for a surface most boots never
-touch (the discipline ``routes/desktop_team_bridge.py`` documents).
+THE IMPORT DISCIPLINE HERE IS THE OPPOSITE OF ``desktop_team_bridge``'S, deliberately.
+That module imports its client stack inside handlers because it rides
+``server.app``'s import path on every ``lop serve`` boot and ``httpx`` is a
+measurable slice of that boot. This module cannot make the same trade: its whole
+service layer (``web_fetch.service``, reached through ``link_preview.service``)
+imports ``httpx`` at module scope, because that transport is exactly what it must
+reuse — so a lazy import here would buy nothing and would only hide the
+dependency. What IS kept off the import path is work: no store is opened, no cache
+is built and no bucket is allocated until a request arrives, all of them lazily
+built process-wide accessors.
 """
 
 from __future__ import annotations
@@ -46,7 +52,7 @@ from typing import Annotated, Final
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Path as PathParam
-from fastapi import Query, Request, status
+from fastapi import Header, Request, status
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from starlette.responses import Response
 
@@ -58,6 +64,7 @@ from local_operator.team_bridge.link_preview.cache import PreviewScope
 from local_operator.team_bridge.link_preview.extract import sniff_raster
 from local_operator.team_bridge.link_preview.models import LinkPreviewResolution
 from local_operator.team_bridge.link_preview.service import resolve_preview
+from local_operator.team_bridge.link_preview.throttle import get_resolve_throttle
 from local_operator.team_bridge.link_preview.store import (
     ARTIFACT_ID_PATTERN,
     InvalidArtifactId,
@@ -77,6 +84,13 @@ ArtifactID = Annotated[str, PathParam(pattern=rf"^{ARTIFACT_ID_PATTERN}$")]
 #: A URL longer than this is not a link anyone wrote by hand. Bounded here so the
 #: fetcher's own normalisation never sees an unbounded body field.
 MAX_URL_CHARS: Final = 4096
+
+#: The account receipt for the artifact route, as a HEADER rather than a query
+#: parameter (security round 1, S-3). A query string is written down by every
+#: intermediary on the way — proxy logs, a browser's history, a crash report — and
+#: an account id has no business in any of them; the resolve route already takes
+#: its receipt in the body for the same reason.
+ACCOUNT_RECEIPT_HEADER: Final = "X-Link-Preview-Account"
 
 
 class ResolveRequest(BaseModel):
@@ -212,6 +226,28 @@ def _scope_for(config_dir: Path, account_id: str) -> PreviewScope:
     return PreviewScope(account_id=account_id, tenant_id=tenant_id)
 
 
+def _rate_limited(retry_after: float) -> HTTPException:
+    """The 429 for a bucket that is empty, shaped like the desktop surface's 429s.
+
+    A ``429`` and not a refusal kind in the resolution body: "you are asking too
+    fast" is a fact about the CALLER, not about the link, and putting it in the
+    card vocabulary would make the renderer remember it against the URL. The code
+    and the ``Retry-After`` are what the client acts on, exactly as
+    ``desktop_sessions``'s runtime-busy refusal does.
+    """
+    return HTTPException(
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        {
+            # i18n: ignore desktop wire refusal; the renderer switches on `code`
+            "code": "rate_limited",
+            "message": "too many previews at once; try again shortly",
+            "retryable": True,
+            "retry_after_seconds": retry_after,
+        },
+        headers={"Retry-After": str(max(1, int(retry_after) + (retry_after % 1 > 0)))},
+    )
+
+
 @router.post(
     "/v1/desktop/team-bridge/link-preview/resolve",
     response_model=CRUDResponse[LinkPreviewResolution],
@@ -229,6 +265,15 @@ async def resolve_link_preview(body: ResolveRequest, request: Request):
     """
     config_dir = _config_dir(request)
     account_id = await _require_account(config_dir, body.expected_account_id)
+    # THE SERVER-SIDE FLOOD BOUND, after the receipt and before any resolution.
+    # ``index < 3`` is the renderer's own numbering, so a client that renumbers its
+    # links gets an unbounded number of resolves from one message (code review
+    # round 1); the bucket is keyed by the account the install actually holds, so
+    # it cannot be sidestepped by relabelling. Refused BEFORE the cache, the store
+    # or the network is touched.
+    throttle = get_resolve_throttle()
+    if not throttle.allow(account_id):
+        raise _rate_limited(throttle.retry_after_s(account_id))
     resolution = await resolve_preview(
         url=body.url,
         index=body.index,
@@ -311,7 +356,7 @@ async def _read_owned_artifact(
         raise HTTPException(422, {"code": "invalid_request"}) from None
     if body is None:
         return None
-    raster = sniff_raster(body)
+    raster = await asyncio.to_thread(sniff_raster, body)
     if raster is None:
         return None
     return body, raster.mime
@@ -321,7 +366,9 @@ async def _read_owned_artifact(
 async def link_preview_artifact(
     artifact_id: ArtifactID,
     request: Request,
-    expected_account_id: Annotated[StrictStr, Query(min_length=1, max_length=128)],
+    expected_account_id: Annotated[
+        StrictStr, Header(alias=ACCOUNT_RECEIPT_HEADER, min_length=1, max_length=128)
+    ],
 ):
     """The stored bytes for one artifact id, as an image and nothing else.
 
@@ -336,6 +383,13 @@ async def link_preview_artifact(
     identity this install actually holds, and the caller's string is only compared
     with it. A renderer on an install signed in as B cannot read A's bytes even by
     replaying an id it copied from A's card.
+
+    IT TRAVELS IN A HEADER (``X-Link-Preview-Account``), never in the query string
+    (security round 1, S-3). This is a GET, so its URL is the one thing written
+    down by every intermediary on the way — a proxy log, a browser history, a crash
+    report — and an account id does not belong in any of them. The resolve route
+    already carries its receipt in the body for the same reason; a query parameter
+    was the one spelling that put it somewhere it outlives the request.
 
     The mime is re-sniffed from the bytes on every read rather than stored
     alongside them: a blob whose header no longer parses is corrupt, and serving
@@ -361,5 +415,12 @@ async def link_preview_artifact(
             # so setting a lifetime here would be a header that never applies. A
             # renderer that re-asks costs one local file read, not a fetch.
             "X-Content-Type-Options": "nosniff",
+            # The same pair every sibling byte route sends
+            # (``routes/desktop_team_bridge.py``'s avatar routes): ``nosniff`` alone
+            # stops a MIME reinterpretation, and this stops what the bytes could do
+            # if a browser rendered them as the type they claim — nothing loads and
+            # nothing runs. A second, independent gate behind the raster sniff, so a
+            # future format cannot become a document by being served here.
+            "Content-Security-Policy": "default-src 'none'; sandbox",
         },
     )

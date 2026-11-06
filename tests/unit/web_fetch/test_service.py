@@ -999,3 +999,25 @@ def test_coerce_clamps_attempts() -> None:
     assert coerce_fetch_settings({"max_attempts": 0}).max_attempts == 1
     assert coerce_fetch_settings({}).max_attempts == 3
     assert coerce_fetch_settings({}).blocked_retry is True
+
+
+def test_cgnat_and_magicdns_are_not_global_and_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``is_global`` failed closed on the range an enumeration missed.
+
+    Security round 1 (S-2): the old ``is_private or is_loopback or …`` list let
+    ``100.64.0.0/10`` through — CGNAT, and Tailscale's MagicDNS at 100.100.100.100 —
+    so those came back as the PINNED target for a pasted link. ``is_global`` is
+    IANA's own answer, so the next special-purpose range needs no code change.
+    """
+    for address in ("100.64.0.1", "100.100.100.100", "::ffff:100.64.0.1"):
+        monkeypatch.setattr(service, "_resolve_host_ips", lambda host, a=address: [a])
+        with pytest.raises(service.PolicyRefusal) as caught:
+            validate_public_url("https://pasted.example/x", allow_private=False)
+        assert caught.value.reason == "private", address
+
+
+def test_a_globally_routable_address_still_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tightening must not refuse the addresses it exists to fetch."""
+    for address in ("93.184.216.34", "2606:4700::1"):
+        monkeypatch.setattr(service, "_resolve_host_ips", lambda host, a=address: [a])
+        assert validate_public_url("https://pasted.example/x", allow_private=False) == address

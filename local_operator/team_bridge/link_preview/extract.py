@@ -299,6 +299,18 @@ _ICO_SIGNATURE: Final = b"\x00\x00\x01\x00"
 #: closed set: C4 (Huffman tables), C8 (reserved) and CC (arithmetic conditioning)
 #: sit inside the same range and are NOT frames, and reading them as one yields
 #: nonsense dimensions from unrelated bytes.
+#: How far into a JPEG the segment walk may look for its start-of-frame header.
+#:
+#: The walk is a Python loop over ATTACKER-SUPPLIED bytes, so it has to be bounded
+#: by something other than the body length: a 2 MiB body of ``FF D8 FF`` followed by
+#: repeated ``FF D0`` (restart markers, no SOF ever) measured **1.75 s** of pure
+#: loop before this cap, and the bytes were then stored as an image with unknown
+#: dimensions. 64 KiB is comfortably past every real encoder's APP0/APP1 block, so
+#: a legitimate photo still reports its dimensions; a stream that has not named a
+#: frame by then answers "unknown" — the contract allows ``None`` per axis, so the
+#: cap costs an optional field rather than the card.
+_JPEG_SOF_SCAN_BYTES: Final = 64 * 1024
+
 _JPEG_SOF: Final = frozenset(
     {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
 )
@@ -368,7 +380,9 @@ def _jpeg_size(body: bytes) -> tuple[int | None, int | None]:
     dimensions — never a wrong pair read from arbitrary bytes.
     """
     index = 2
-    limit = len(body)
+    # The cap, not the body: see :data:`_JPEG_SOF_SCAN_BYTES`. Every bound below
+    # uses it, so no read can walk past it either.
+    limit = min(len(body), _JPEG_SOF_SCAN_BYTES)
     while index + 4 <= limit:
         if body[index] != 0xFF:
             index += 1

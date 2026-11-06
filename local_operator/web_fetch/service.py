@@ -401,30 +401,35 @@ def _pin_request(url: str, pinned_ip: str | None) -> tuple[str, dict[str, str], 
 def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Whether ``ip`` is a target SSRF must refuse unless ``allow_private``.
 
-    Covers the full private/loopback/link-local/multicast/reserved surface plus
-    two cases the stdlib flags do not fold together on their own: the cloud
-    metadata address ``169.254.169.254`` (it IS link-local, but naming it makes
-    the intent unmissable to a reviewer) and an IPv4-mapped IPv6 address, whose
-    embedded v4 must be re-checked or ``::ffff:169.254.169.254`` walks through.
+    The answer is ``not ip.is_global`` — the IANA registry's own "globally routable"
+    judgement — rather than a hand-written list of the ranges that are not. A list
+    is always one range behind the network reality (the one this replaced admitted
+    ``100.64.0.0/10``, i.e. CGNAT and Tailscale's MagicDNS), while ``is_global``
+    fails CLOSED on the next special-purpose range without a code change. Two cases
+    still need spelling out: the cloud metadata address ``169.254.169.254`` is named
+    even though it is link-local and therefore already non-global, and an
+    IPv4-mapped IPv6 address must have its embedded v4 re-checked or
+    ``::ffff:169.254.169.254`` would be judged as the wrapper.
     """
     # An IPv4-mapped IPv6 (``::ffff:a.b.c.d``) hides a v4 target behind a v6
     # literal; unwrap and judge the real address, not the wrapper.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
-    if (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    ):
-        return True
-    # Explicit, even though it is link-local above: the cloud metadata endpoint
-    # is the single most important thing this policy exists to block.
+    # ``is_global`` IS the predicate — not an enumeration of the "bad" ranges.
+    # An enumeration is always one range behind the network reality: the list this
+    # replaces missed ``100.64.0.0/10`` (CGNAT, and Tailscale's MagicDNS at
+    # 100.100.100.100), so a review measured those used as the PINNED target.
+    # ``is_global`` is the IANA registry's own "globally routable" answer, so the
+    # next special-purpose range fails CLOSED with no code change (measured here:
+    # 100.64.0.1, 100.100.100.100 and ::ffff:100.64.0.1 are all non-global, while
+    # 93.184.216.34 and 2606:4700::1 stay global).
+    #
+    # The metadata endpoint is named anyway: it is link-local and therefore already
+    # covered, and it is the single most important target this policy exists to
+    # block — a reader should not have to prove that to themselves.
     if isinstance(ip, ipaddress.IPv4Address) and ip == ipaddress.IPv4Address("169.254.169.254"):
         return True
-    return False
+    return not ip.is_global
 
 
 #: The gaierror codes that mean "this name does not exist" rather than "the
