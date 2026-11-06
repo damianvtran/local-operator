@@ -761,6 +761,25 @@ class MeshAwareAuthStore:
             )
         self._note_lent_failure(pair, error, api_key)
         self._report_failure(pair[0], error=error, session_id=session_id or "", model_id=model_id)
+        # THE HEALING RE-ASK, AND WHY IT BELONGS ON THIS LINE. A failed borrowed
+        # bearer is the one moment this device knows the owner's answer may have
+        # moved: the token died under us, or the owner re-signed-in after the last
+        # refusal was recorded here. ``forget_refusal`` drops only THIS device's own
+        # observation of that refusal — never a grant, never an authorisation — so
+        # the failure surfaces stop reporting a state the operator may have just
+        # fixed, and a ``quota_blocked`` short-circuit cannot swallow the turn's own
+        # re-resolve (which the failover driver performs after a rotation). The dial
+        # itself is answered from the owner's CURRENT login and grants, so nothing is
+        # assumed: an owner that still has nothing, or a device still not permitted
+        # to ask, refuses again, and that refusal's own sentence is what the session
+        # then reports (``no_credential_reason``).
+        forget = getattr(self._mesh, "forget_refusal", None)
+        if callable(forget):
+            try:
+                forget(pair[0])
+            except Exception:  # noqa: BLE001 — a cache repair must not fail the turn
+                pass
+        self._refusals.pop(pair[0], None)
         # Still ``False``: there is no LOCAL sibling. The driver's rotation leg
         # re-resolves regardless, and the demotion noted above is what moves that
         # re-ask to another of the owner's rows on a server-side fault.

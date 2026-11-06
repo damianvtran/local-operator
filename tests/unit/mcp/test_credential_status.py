@@ -384,8 +384,15 @@ def test_durable_evidence_beats_a_live_holder_row(
     rows = server_states(str(cwd), base=root, configs=configs)
 
     assert rows["linear"]["state"] == "expired", rows
-    assert rows["linear"]["reason"] == "macbook: sign in again", rows["linear"]["reason"]
-    assert "sign in again — sign in again" not in rows["linear"]["reason"]
+    # THE REASON NOW CARRIES THE REPAIR, not only the diagnosis: the owner has to
+    # sign in THERE, and then re-run the share so the new login is what it serves.
+    # Both halves are asserted, because the whole point of the sentence is that a
+    # reader on the BORROWING device cannot act on "sign in again" here.
+    reason = rows["linear"]["reason"]
+    assert reason.startswith("on macbook: "), reason
+    assert "sign in to this server again" in reason, reason
+    assert f"lop network credential share {credential_key_for_mcp(URL)} --with" in reason, reason
+    assert "sign in again — sign in again" not in reason
 
 
 def test_a_configured_server_dropped_by_discovery_still_has_a_row(

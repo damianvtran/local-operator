@@ -889,10 +889,26 @@ def add_parser(
     )
     identity_set_name.add_argument("--json", action="store_true")
 
-    actions.add_parser(
+    # ``--repair`` is the BORROWER-side sibling of ``lop network mcp credentials
+    # --repair`` (which is the OWNER's, and re-grants the references behind a
+    # shared server). This one re-asks every owner whose shared key this device is
+    # not currently able to use, once, through the ordinary grant path: the
+    # operator's answer to "the login expired and I fixed it on the other machine,
+    # do I have to restart the session?". Without the flag the listing is
+    # read-only, as it always was.
+    credentials_parser = actions.add_parser(
         "credentials",
         help="What this device owns, and what it borrows from whom",
-    ).add_argument("--json", action="store_true")
+    )
+    credentials_parser.add_argument("--json", action="store_true")
+    credentials_parser.add_argument(
+        "--repair",
+        action="store_true",
+        help=(
+            "Re-ask each owner whose share this device cannot use right now, then "
+            "list; prints why it still cannot when the owner has nothing to offer"
+        ),
+    )
 
     credential = actions.add_parser("credential", help="Share, revoke, or mark one credential")
     credential_actions = credential.add_subparsers(dest="credential_command")
@@ -2272,6 +2288,95 @@ def _owner_seen_at(record: Any, owner_device: str) -> float | None:
     return float(seen) if seen else None
 
 
+def _repair_borrowed(self_device: str, self_name: str) -> list[dict[str, Any]]:
+    """Re-ask each owner this device borrows from, ONCE, and report what came back.
+
+    WHY THE BORROWER NEEDS ITS OWN ``--repair``, and why it is not the owner's. A
+    share that stops working looks identical from here whether the owner signed out,
+    the share was withdrawn, or the owner is simply away — three different repairs,
+    two of which happen on the OTHER machine. What this device can do is the one
+    thing the session cannot: ask again NOW, past its own cached "no" (the grant
+    path's ``force_refresh``), and then say which of the three came back. That is
+    also the answer to "I fixed the login on the other machine, must I restart the
+    session?": after this, the running session's next resolve reaches the owner.
+
+    ``lop network mcp credentials --repair`` is the OWNER-side sibling (it re-grants
+    the secrets behind a shared server); this one mints nothing and grants nothing —
+    a device that is not permitted to ask is refused again, by the owner, on the
+    dial.
+
+    Copy keys (``secret:``) are skipped on purpose: a copy is read from this
+    device's own store, so there is no owner to re-ask and a borrow attempt would
+    report a refusal for a credential that works.
+    """
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from local_operator.network.credentials.state import PlacementState
+
+    try:
+        client = MeshCredentialClient.for_this_device()
+    except Exception:  # noqa: BLE001 — a repair that cannot start is reported, not raised
+        client = None
+    if client is None:
+        return [
+            {
+                "credential_name": "",
+                "recovered": False,
+                "code": "no_network",
+                "cause": "unreachable",
+                "reason": (
+                    "nothing to re-ask: this device is not in an active network, so "
+                    "no credential here is borrowed"
+                ),
+            }
+        ]
+    wanted: list[str] = []
+    try:
+        for document in _placement_documents():
+            state = PlacementState.load(document.network_id)
+            for key in sorted(document.entries):
+                entry = document.entries[key]
+                if not self_device or not entry.is_holder(self_device):
+                    continue
+                if key.startswith("secret:"):
+                    continue
+                if state.status(key) == "active":
+                    # Already proven working: a re-ask would be a gratuitous dial and
+                    # a gratuitous grant on the owner.
+                    continue
+                wanted.append(key)
+        outcomes = asyncio.run(_repair_each(client, wanted, self_name=self_name))
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 — closing a client is not part of the answer
+                pass
+    return outcomes
+
+
+async def _repair_each(client: Any, keys: list[str], *, self_name: str) -> list[dict[str, Any]]:
+    """One healing re-ask per key, SERIALLY — a repair is not a fan-out.
+
+    Serial on purpose: every ask is a round trip to a device that may be refreshing
+    a token, and the operator's repair is a handful of keys at most. A parallel
+    version against one owner would be the retry storm the refusal cache exists to
+    prevent, with the cache deliberately bypassed.
+    """
+    from local_operator.network.credentials.healing import heal_borrow
+
+    outcomes: list[dict[str, Any]] = []
+    for key in keys:
+        outcome = await heal_borrow(
+            client,
+            key,
+            provider="mcp-oauth" if key.startswith("mcp:") else key,
+            peer_name=self_name,
+        )
+        outcomes.append(outcome.as_dict())
+    return outcomes
+
+
 def _cmd_credentials(args: argparse.Namespace) -> int:
     """``lop network credentials [--json]``: who owns what, and what this device borrows.
 
@@ -2454,6 +2559,21 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     shareable = _shareable_servers(self_device, self_name=self_name)
     shareable.extend(_shareable_providers(self_device))
     lines.extend(readiness_mod.shareable_lines(shareable))
+    # THE REPAIR RUNS BEFORE THE PAYLOAD IS BUILT, so the listing the operator reads
+    # already reflects what the owners just answered — the same order the pull takes
+    # above, and for the same reason: a row composed before the ask would show the
+    # state the repair exists to change.
+    repaired: list[dict[str, Any]] = []
+    if bool(getattr(args, "repair", False)):
+        repaired = _repair_borrowed(self_device, self_name)
+        for row in repaired:
+            name = str(row.get("credential_name") or "")
+            if row.get("recovered"):
+                lines.append(f"repaired: '{name}' — the owner served a working credential")
+            elif name:
+                lines.append(f"still refused: '{name}' — {row.get('reason') or ''}")
+            else:
+                lines.append(f"repair: {row.get('reason') or ''}")
     payload = {
         "ok": True,
         "self_device": self_device,
@@ -2463,6 +2583,8 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         "refreshed": bool(pulled),
         "newly_borrowable": newly,
     }
+    if bool(getattr(args, "repair", False)):
+        payload["repaired"] = repaired
     # A MEMBER WHOSE DOCUMENT COULD NOT BE MERGED IS SAID OUT LOUD (review round 5,
     # NIT 2). ``pull_placement`` refuses one unreadable document BY NAME and merges the
     # rest, which is the resilience we want — but that reply reached no surface: this

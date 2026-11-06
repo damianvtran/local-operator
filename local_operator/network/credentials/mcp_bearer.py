@@ -84,6 +84,14 @@ class BrokeredBearerAuth(httpx2.Auth):
         The connect that follows then behaves exactly as it did before brokering
         existed — an unauthenticated request against a server that wants a bearer,
         which the challenge path already turns into an actionable message.
+
+        A REFUSAL IS EVIDENCE, NOT SILENCE. ``""`` alone left the connect to fail as
+        a bare 401 with no durable record of WHY no bearer was offered, so every
+        operator-facing surface could only guess between "the owner signed out",
+        "the share was withdrawn" and "the owner is unreachable" — the three states
+        that need three different repairs. Recording it here (through the same
+        broker-code table the client uses) is what makes the cause PROVABLE on a
+        later read; the value never reaches this file, and ``record`` never raises.
         """
         from local_operator.network.credentials.types import Grant
 
@@ -91,7 +99,41 @@ class BrokeredBearerAuth(httpx2.Auth):
             grant = self._client.request_grant_sync(self.key, provider="mcp-oauth", session_id="")
         except Exception:  # noqa: BLE001 — see the docstring
             return ""
-        return grant.access_token if isinstance(grant, Grant) else ""
+        if isinstance(grant, Grant):
+            return grant.access_token
+        self._record_refusal(grant)
+        return ""
+
+    def _record_refusal(self, error: Any) -> None:
+        """Persist the broker's refusal CODE as this key's evidence. Never raises."""
+        code = str(getattr(error, "code", "") or "")
+        from local_operator.network.credentials import mcp_state
+
+        state = mcp_state.state_for_code(code)
+        if not state:
+            # A code the evidence vocabulary does not classify (a quota or rate
+            # answer) records nothing: overwriting a precise older answer with a
+            # vague new one is worse than leaving the reader to ask again.
+            return
+        if state == "revoked":
+            # A COLD ``not_a_holder`` IS NOT A REVOCATION — the same rule the
+            # client's own evidence writer applies, asked through the same method so
+            # the two writers cannot disagree about it. A device that never held a
+            # claim has lost nothing.
+            try:
+                if not self._client._has_prior_claim(self.key):  # noqa: SLF001
+                    return
+            except Exception:  # noqa: BLE001 — unknown is not a claim
+                return
+        mcp_state.record(
+            getattr(self._client, "network_id", ""),
+            self.key,
+            state=state,
+            code=code,
+            owner_device=self._client.owner_of(self.key),
+            owner_name=self._client.owner_label(self.key),
+            root=getattr(self._client, "root", None),
+        )
 
     async def _bearer(self) -> str:
         return self._live_bearer() or await asyncio.to_thread(self._blocking_bearer)
@@ -138,6 +180,18 @@ class BrokeredBearerAuth(httpx2.Auth):
             root=getattr(self._client, "root", None),
         )
         self._client.grants.drop(self.key)
+        # The 401 is also the one signal that this device's cached "no" may be
+        # stale: the OWNER may have re-signed in since it refused us, and a cached
+        # ``interactive_required`` would otherwise answer this re-borrow WITHOUT
+        # dialling — the repair below could never reach the owner it is about. Same
+        # rule as ``store.rotate_sibling``'s healing re-ask, and the same absence of
+        # assumption: the owner still decides on the dial.
+        forget = getattr(self._client, "forget_refusal", None)
+        if callable(forget):
+            try:
+                forget(self.key)
+            except Exception:  # noqa: BLE001 — a cache repair must not fail a connect
+                pass
         bearer = await asyncio.to_thread(self._blocking_bearer)
         if not bearer:
             return

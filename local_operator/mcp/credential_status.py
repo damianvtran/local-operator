@@ -218,6 +218,8 @@ def _server_row(
         return _oauth_row(
             name,
             url=url,
+            key=oauth_key,
+            peer_name=str(mesh.get("self_name") or ""),
             placement=placement,
             holder=bool(placement and placement.get("holder")),
             grant=grants,
@@ -392,6 +394,8 @@ def _oauth_row(
     name: str,
     *,
     url: str,
+    key: str = "",
+    peer_name: str = "",
     placement: dict[str, Any] | None,
     holder: bool,
     grant: "_GrantIndex",
@@ -425,29 +429,37 @@ def _oauth_row(
     evidence_state = str(evidence.get("state") or "")
     code = str(evidence.get("code") or "")
     owner_name = str(evidence.get("owner_name") or owner_name or evidence.get("owner_device") or "")
+
+    # THE PROVABLE CAUSES, EACH WITH THE COMMAND THAT REPAIRS IT, composed by the
+    # one classifier the session path also uses (``credentials/healing.py``). Before
+    # this every arm said what was wrong in prose and none said what to RUN on the
+    # owning device — the operator's "generic failure" — so the three causes the
+    # evidence can actually distinguish (the sign-in stopped working there, the
+    # share was withdrawn, the owner is unreachable) read as variations of one
+    # sentence. The repair runs THERE: a borrower cannot fix any of them from here,
+    # and a local ``/mcp login`` would create a grant that then wins over the borrow
+    # (``manager._brokered_mcp_auth``'s local-wins rule). The import is
+    # function-scoped, which is how this module reaches the network package without
+    # putting it on the mcp package's import path.
+    def _repaired(cause: str) -> str:
+        from local_operator.network.credentials.healing import repair_for
+
+        return repair_for(
+            key or f"mcp:{url}",
+            cause=cause,
+            code=code,
+            owner_device=str(evidence.get("owner_device") or owner or ""),
+            owner_name=owner_name,
+            peer_name=peer_name,
+        ).sentence
+
     if evidence_state in ("expired", "unauthorized"):
-        # ``http_401`` means the server refused a bearer the OWNER had just served,
-        # which is a different sentence from a refresh the owner could not perform:
-        # one says the sign-in is wrong there, the other that it needs a person.
-        # The generic code ALREADY says "sign in again"; prefixing another one
-        # produced "…: sign in again — sign in again there" (node, round 2).
-        if code == "refresh_failed":
-            detail = "the token refresh failed there"
-        elif code == "http_401":
-            detail = "the server rejected the sign-in there"
-        else:
-            detail = ""
-        if detail:
-            sentence = (
-                f"{owner_name}: sign in again — {detail}"
-                if owner_name
-                else f"sign in again — {detail}"
-            )
-        else:
-            sentence = f"{owner_name}: sign in again" if owner_name else "sign in again"
+        # ``http_401`` (the server refused a bearer the owner had just served) and
+        # ``refresh_failed`` (the owner could not perform a refresh) are the same
+        # repair for a person: the owner's sign-in has to be replaced there.
         return _row(
             "expired",
-            _bounded(sentence),
+            _bounded(_repaired("owner_login")),
             owner=owner or str(evidence.get("owner_device") or ""),
             shape="oauth",
             refs=refs,
@@ -455,11 +467,7 @@ def _oauth_row(
     if evidence_state == "revoked":
         return _row(
             "revoked",
-            _bounded(
-                f"{owner_name}: access was revoked; ask its owner for a new share"
-                if owner_name
-                else "access was revoked; ask its owner for a new share"
-            ),
+            _bounded(_repaired("grant")),
             owner=owner or str(evidence.get("owner_device") or ""),
             shape="oauth",
             refs=refs,
@@ -482,14 +490,12 @@ def _oauth_row(
         # A TRANSIENT-ONLY VERDICT: the owner could not be reached, so nothing is
         # proved about the credential either way. Saying "synced" here would make
         # an unreachable check look like a working server; the next successful
-        # borrow overwrites this row.
+        # borrow overwrites this row. No command rides this arm — reconnecting a
+        # device is not one, and printing a share command here would claim the share
+        # is the problem when nobody has shown that it is.
         return _row(
             "not_yet_synced",
-            _bounded(
-                f"{owner_name}: the owner is unreachable; try again later"
-                if owner_name
-                else "the owner is unreachable; try again later"
-            ),
+            _bounded(_repaired("unreachable")),
             owner=owner or str(evidence.get("owner_device") or ""),
             shape="oauth",
             refs=refs,
@@ -537,6 +543,11 @@ def _mesh_context(root: Path) -> dict[str, Any]:
     evidence: dict[str, dict[str, Any]] = {}
     has_records = False
     any_live = False
+    #: This device's own member name, for the remedy COMMANDS that must name the
+    #: holder (``--with <peer>``). Read here because this pass already holds the
+    #: record; an unresolvable name stays empty and the composer falls back to its
+    #: own placeholder rather than inventing a device.
+    self_name = ""
     try:
         from local_operator.network import store
         from local_operator.network.credentials import mcp_state
@@ -555,6 +566,7 @@ def _mesh_context(root: Path) -> dict[str, Any]:
             "entries": entries,
             "evidence": evidence,
             "has_records": False,
+            "self_name": self_name,
             "lost_membership": False,
             "holder_of_secret": _no_holder,
             "evidence_revoked": _no_revoked,
@@ -580,6 +592,8 @@ def _mesh_context(root: Path) -> dict[str, Any]:
         except Exception:  # noqa: BLE001 — one unreadable network must not hide the rest
             continue
         any_live = any_live or live
+        if not self_name and member is not None:
+            self_name = str(getattr(member, "name", "") or "")
         self_id = str(record.self_device_id or "")
         for key, entry in document.entries.items():
             entries.setdefault(
@@ -650,6 +664,7 @@ def _mesh_context(root: Path) -> dict[str, Any]:
         "entries": entries,
         "evidence": evidence,
         "has_records": has_records,
+        "self_name": self_name,
         "lost_membership": lost,
         "holder_of_secret": holder_of_secret,
         "evidence_revoked": evidence_revoked,
