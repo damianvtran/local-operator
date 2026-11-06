@@ -25086,9 +25086,9 @@ _COPY_ELEMENT_KEYS = ("tag", "id", "name")
 #: The exact shape of the digest prefix in a receipt: 16 lowercase hex chars.
 #: The contract is a PREFIX of the sha256 of the copied bytes (a full digest is
 #: 64 chars, and a constant that long is not worth spending in every result).
-#: Matched rather than merely length-capped: a host that put the copied text in
-#: this field would still be caught by the cap, but a host that put a TRUNCATED
-#: COPY of the text there would look exactly like a fresh digest.
+#: MATCHED rather than length-capped: a cap alone would accept whatever a peer put
+#: in the field as long as it was short, and "short arbitrary string" is exactly
+#: what a truncated copy of the value looks like.
 _COPY_SHA_PREFIX_RE = re.compile(r"^[0-9a-f]{16}$")
 
 #: The longest legitimate string in a receipt: an element id or name. A field
@@ -25113,7 +25113,7 @@ _COPY_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
 #: Which grammar each element field must satisfy. `tag` is checked as a tag and
 #: `id`/`name` as identifiers, so a field that swaps them is dropped rather than
-#: rendered — a `<SYNTH-copy-token…>` label is not a tag.
+#: rendered — a sentence pasted into `tag` is not a tag name.
 _COPY_ELEMENT_PATTERNS = {
     "tag": _COPY_TAG_RE,
     "id": _COPY_NAME_RE,
