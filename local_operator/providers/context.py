@@ -22,6 +22,7 @@ from local_operator.harness.types import (
     Message,
     Usage,
 )
+from local_operator.model.configure import native_replay_required
 from local_operator.providers.replay import replay_items
 
 
@@ -227,10 +228,24 @@ def bind_native_context(
     )
     validity = []
     reasoning = extra_native_tokens
+    # Whether the openai-chat BODY BUILDER will actually send the recorded
+    # native state this loop is about to count. It is the same predicate the
+    # builder asks (``model.configure.native_replay_required``), called with the
+    # spec's own echo flag so the loop's fill recovery composes, and it is CALLED
+    # rather than restated here because two spellings of one rule is how the
+    # accounting and the body drift apart: a body that suppresses the replay
+    # while this counts it over-reports the call's own input, which is the
+    # calibration error this function exists to prevent. The other three
+    # protocols keep their own native contracts and are not gated by it.
+    openai_chat_replays_native = native_replay_required(
+        request.model.provider,
+        request.model.model_id,
+        echo_required=request.model.requires_reasoning_echo,
+    )
     for index, message in enumerate(request.messages):
         native = replay_items(message, request.model, endpoint, protocol, scope)
         validity.append(native is not None)
-        if protocol == "openai-chat" and native is not None:
+        if protocol == "openai-chat" and native is not None and openai_chat_replays_native:
             # Compatible servers replay literal reasoning, including before the
             # latest user turn. Count those bytes rather than assuming the
             # Responses API's encrypted-state accounting applies here too.

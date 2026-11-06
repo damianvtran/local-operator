@@ -66,6 +66,7 @@ from local_operator.harness.types import (
 )
 from local_operator.incidents import CONTEXT_LENGTH_MARKERS
 from local_operator.model import tariff
+from local_operator.model.configure import native_replay_required
 from local_operator.model.speed import (
     DIALECT_ANTHROPIC_SPEED,
     DIALECT_SERVICE_TIER,
@@ -3371,6 +3372,35 @@ class OpenAICompatClient:
             document_budget_,
             document_text_cap(model.context_window),
         )
+        # RECORDED reasoning IS GATED, not copied on matching provenance alone.
+        # The placeholder echo downstream is gated on
+        # ``model.configure.reasoning_echo_required``; this copy had no gate at
+        # all, so a route whose echo requirement is False still re-attached
+        # whatever native block matched -- which is how ONE derailed turn became
+        # durable context on ``radient/auto``: the echo bit there is False (the
+        # client only ever sees the router's id ``auto``, so no family resolves),
+        # and the reasoning came back on every later request with nothing
+        # requiring it.
+        #
+        # ``model.configure.native_replay_required`` is asked instead: the same
+        # requirement PLUS its recorded per-family exceptions (xAI/grok, where
+        # omitting a replayed previous reasoning is a measured prompt-cache
+        # degradation rather than a refusal; the citation lives beside the gate).
+        # It is asked with the spec's OWN echo flag so the loop's refusal
+        # recovery composes: that recovery sets ``requires_reasoning_echo`` on the
+        # RESOLVED spec after a provider refuses a request for a missing echo, and
+        # a gate that ignored it would fill an echo on that route and then refuse
+        # to feed back the real thoughts the same validator asked for.
+        #
+        # Scope is ``openai-chat`` ONLY -- do not extend this by analogy. The
+        # responses wire re-attaches provider-side ENCRYPTED state, the anthropic
+        # wire must return thinking blocks complete and unmodified, and the
+        # google wire needs its ``thoughtSignature``; each has a vendor contract
+        # of its own, so a gate applied by analogy would break all three.
+        if not native_replay_required(
+            model.provider, model.model_id, echo_required=model.requires_reasoning_echo
+        ):
+            return entry
         native = replay_items(message, model, endpoint, "openai-chat", scope)
         if native:
             for item in native:
