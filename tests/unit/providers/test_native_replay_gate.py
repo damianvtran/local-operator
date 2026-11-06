@@ -43,10 +43,7 @@ from local_operator.providers.context import (
     ContextTokenTracker,
     measure_request,
 )
-from local_operator.providers.replay import (
-    REASONING_ECHO_PLACEHOLDER,
-    native_payload,
-)
+from local_operator.providers.replay import REASONING_ECHO_PLACEHOLDER, native_payload
 
 DEEPSEEK_BASE = "https://api.deepseek.com/v1"
 RADIENT_BASE = "https://api.radienthq.com/v1"
@@ -312,9 +309,7 @@ def test_the_fill_recovery_re_enables_both_halves_it_arms():
     thought on the recorded one. A gate that ignored the flag would fill an echo
     and then deny the thoughts the same validator asked for.
     """
-    model = build_model_spec("radient", "auto").model_copy(
-        update={"requires_reasoning_echo": True}
-    )
+    model = build_model_spec("radient", "auto").model_copy(update={"requires_reasoning_echo": True})
     blank = Message.assistant("considered it")
     request = ChatRequest(
         model=model,

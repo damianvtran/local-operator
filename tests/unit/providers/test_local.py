@@ -29,7 +29,6 @@ from local_operator.model.configure import build_model_spec
 from local_operator.model.discovery import available_models, cached_available_models
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.clients import OpenAICompatClient
-from local_operator.providers.replay import credential_scope, replay_items
 from local_operator.providers.controller import ProviderController
 from local_operator.providers.local import (
     LOCAL_PRESETS,
@@ -44,6 +43,7 @@ from local_operator.providers.registry import (
     get_provider_definition,
     list_login_providers,
 )
+from local_operator.providers.replay import credential_scope, replay_items
 from local_operator.settings_io import BY_KEY, validate, write_setting
 
 

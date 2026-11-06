@@ -10,8 +10,8 @@ import asyncio
 import json
 import time
 import zlib
-from pathlib import Path
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
