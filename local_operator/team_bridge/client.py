@@ -4041,8 +4041,9 @@ class TeamBridgeClient:
         well as images (the auditor is a human, and the human predicate serves
         them), so the accepted types are :data:`OWNER_AUDIT_ATTACHMENT_MIME_TYPES`
         and the bounded read uses the hub's largest file class cap. An image is
-        still held to :data:`ATTACHMENT_MAX_BYTES`. Anything else — another
-        type, an empty body, a missing header — is refused rather than handed
+        still held to :data:`ATTACHMENT_MAX_BYTES`, and an empty image is refused;
+        an empty generic file is served (zero bytes, as the hub stores it). Anything
+        else — another type, a missing header — is refused rather than handed
         downstream under a type nobody can name. HUMAN-ONLY.
         """
 
@@ -4061,11 +4062,19 @@ class TeamBridgeClient:
         if response.status_code >= 400:
             raise _refusal(response)
         mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        is_image = mime in ATTACHMENT_MIME_TYPES
+        # An empty body is refused on the IMAGE lane only, mirroring
+        # :meth:`fetch_attachment` (#3521): zero bytes are never a decodable
+        # png/jpeg, but a generic file may legitimately be empty — the hub accepts
+        # and serves a zero-byte file — so refusing it here would turn a real file
+        # into a 502 in the owner audit view. There is no caller-chosen ``mode`` on
+        # this route, so the lane is the SERVED type, already pinned to the closed
+        # set above; an empty octet-stream can never stand in for an image.
         if (
             response.status_code != 200
             or mime not in OWNER_AUDIT_ATTACHMENT_MIME_TYPES
-            or not response.content
-            or (mime in ATTACHMENT_MIME_TYPES and len(response.content) > ATTACHMENT_MAX_BYTES)
+            or (is_image and not response.content)
+            or (is_image and len(response.content) > ATTACHMENT_MAX_BYTES)
         ):
             raise BridgeRefusal(
                 "bridge_invalid_response",

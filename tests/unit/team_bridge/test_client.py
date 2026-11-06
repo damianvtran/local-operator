@@ -1533,6 +1533,37 @@ async def test_an_empty_body_is_refused_on_the_image_lane_only(mode, served, ref
     assert (data, mime) == (b"", "application/octet-stream")
 
 
+@pytest.mark.parametrize(
+    ("served", "refused"),
+    [
+        ("application/octet-stream", False),
+        ("image/png", True),
+        ("image/jpeg", True),
+    ],
+    ids=["an-empty-file-is-a-file", "an-empty-png-is-refused", "an-empty-jpeg-is-refused"],
+)
+async def test_owner_audit_refuses_an_empty_body_on_the_image_lane_only(served, refused):
+    """The owner-audit byte read mirrors :meth:`fetch_attachment` (#3521): the hub
+    serves a zero-byte GENERIC file, so the auditor must receive it; zero bytes are
+    never a decodable image, so an empty png/jpeg stays refused."""
+
+    client = _make_client(
+        lambda request: httpx.Response(200, content=b"", headers={"content-type": served})
+    )
+    if refused:
+        with pytest.raises(BridgeRefusal) as info:
+            await client.owner_audit_attachment(
+                FILE_CID, FILE_MID, FILE_AID, expected_account_id="acc_1"
+            )
+        assert info.value.code == "bridge_invalid_response"
+        assert info.value.http_status == 502
+        return
+    data, mime = await client.owner_audit_attachment(
+        FILE_CID, FILE_MID, FILE_AID, expected_account_id="acc_1"
+    )
+    assert (data, mime) == (b"", "application/octet-stream")
+
+
 def test_file_mode_has_exactly_one_caller_the_desktop_route():
     """``mode`` is the human save lane's switch; the agent lanes stay image-only.
 
