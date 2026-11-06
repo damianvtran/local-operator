@@ -116,8 +116,7 @@ monitor({op:"create", name:"product-feedback-watch",
 ```
 
 - `limit` is the window: pick a value that covers a busy day (roughly one
-  record line per message). The window is also what makes a fire cheap: the
-  delivery carries the delta, not the channel.
+  record line per message). The delivery carries the delta, not the channel.
 - **A new message is an appended record line**, so the delta reads
   `+1/-0 changed lines` and the added line IS the message (author, `Message
   TS`, body). Appends are delivered as-is — the materiality gate is never
@@ -143,9 +142,10 @@ monitor({op:"create", name:"product-feedback-watch",
 - **Other fields in the reply** (a cursor, a `has_more` flag) are lines of
   their own too, so `ignore: ["^next_cursor:"]` drops one that churns
   without touching the messages beside it.
-- **A quiet watch is not a working one**: the listing reads `N checks, 0
-  deliveries` with the suppression count when the gate filed changes as
-  non-material. Check that before concluding a channel had nothing to say.
+- **A quiet watch is not a working one**: the row reads `N changes
+  suppressed as non-material (M checks, 0 deliveries)` when the gate filed a
+  change as bookkeeping. Check that before concluding a channel had nothing to
+  say.
 
 ## What counts as material, and tuning noise
 
