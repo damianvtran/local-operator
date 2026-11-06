@@ -137,9 +137,13 @@ class GrantCache:
         AN ATTRIBUTION READ, NOT A USABILITY READ. When a provider has just refused
         a bearer, the grant that carried it may be inside ``REASK_MARGIN_MS`` — the
         window where :meth:`get` reads as absent — and that grant is exactly the one
-        a report must name. Nothing serves a bearer from here, so a grant inside
-        the margin is still never handed out: the resolve path keeps using
-        :meth:`get`.
+        a report must name. The reads that serve a bearer without dialling (the
+        ``github`` gate in ``request_grant_sync``, MCP's ``_live_bearer``) use
+        :meth:`get`, so they never hand out a grant inside the margin.
+
+        ONE CALLER DOES SERVE FROM HERE: ``_held_or``, the owner-unreachable path.
+        It applies its own ``Grant.usable_at`` check, which has no margin, so it
+        serves a grant marked ``held_offline`` right up to the grant's expiry.
         """
         with self._lock:
             return self._grants.get((key, session_id))

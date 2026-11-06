@@ -920,10 +920,21 @@ does not surface, add it as a purely additive method there (§8 Q2).
 - **A malicious holder can spend the operator's quota.** `holders` is a real
   capability increase and is granted explicitly. Least authority is the
   defence: `scope: "session"` by default, `api-key-static` default-off.
-- **The owner is a single point of failure for the borrower.** When the owner
-  is offline, a borrower with no local login has no model access. That is
-  R14's intended trade (spending a rotating token off-device is worse), and
-  §4.1 gives the operator a one-command remedy.
+- **The owner is a single point of failure for the borrower.** As designed,
+  when the owner is offline a borrower with no local login has no model
+  access. That is R14's intended trade (spending a rotating token off-device
+  is worse), and §4.1 gives the operator a one-command remedy.
+  **As built, a bounded hold comes first** (§3.5's as-built note). While the
+  owner is unreachable, a provider borrow is served this session's still-live
+  cached grant, marked `held_offline`: never under `force_refresh`, and never
+  for MCP, `github` or device-bound keys. The hold ends at the grant's own
+  expiry, at most `grant_ttl_s` after the owner last served it. If the owner
+  is still unreachable then, `_held_or` drops the grant and returns the
+  owner's refusal (`owner_offline` or `owner_unreachable`), and the session
+  store returns no credential for that provider. From there the design's
+  statement holds: a borrower with no local login has none until the owner
+  answers again. The hold lives in process memory only (`GrantCache` has no
+  serializer), so a process restarted during the outage has nothing to hold.
 - **A pool must not persist a bearer.** §6.3 makes the pool's grant in-memory
   and expiry-bounded, and forbids the pool from declaring credentials at all.
 
