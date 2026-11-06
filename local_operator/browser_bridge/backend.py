@@ -761,6 +761,24 @@ _CAPABILITY_HOST_REMEDY = {
 }
 
 
+#: The first DESKTOP-APP version that serves each capability-gated method.
+#:
+#: EMPTY on purpose, and the refusal says so in words rather than guessing. The
+#: app half of a capability ships from a different repository on its own release
+#: train, so this runtime cannot derive a floor from its own version, and no
+#: released desktop build's floor has been measured for any method here. A
+#: number invented from the harness release is worse than no number: the measured
+#: 2026-11-06 incident is a user who read "update the desktop app" as a dead end
+#: — the app may already be current, and updating again cannot help — and
+#: photographed a tenant-wide admin API key off the screen instead of using
+#: `copy`, which that very build predated.
+#:
+#: Record a measured value here (as ``CAPABILITY_MIN_EXTENSION_VERSION`` does for
+#: the extension) and both the floor sentence and the remedy follow from it with
+#: no second edit.
+_CAPABILITY_MIN_APP_VERSION: dict[str, str] = {}
+
+
 def capability_refusal(
     method: str,
     *,
@@ -917,10 +935,25 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
             "the Chrome extension cannot do it. Open the page with backend='ui'."
         )
     if host == HOST_UI:
+        # Names the METHOD, the HOST that serves it and the VERSION story, because
+        # the copy that stopped at "update the desktop app" read as a dead end: it
+        # left the reader unable to tell "an update fixes this" from "this app is
+        # current and the action is not here at all" (measured 2026-11-06). The
+        # scope clause is DESKTOP_ONLY only — for a method both hosts serve,
+        # claiming the app is the only one that can would send the caller away from
+        # a host that works.
+        minimum = _CAPABILITY_MIN_APP_VERSION.get(method)
+        floor = (
+            f"The first desktop-app version that serves it is {minimum}. "
+            if minimum
+            else f"No desktop-app version floor is recorded for '{method}', so aim at the "
+            "latest release rather than a version number. "
+        )
+        scope = ", and only that host serves it" if method in DESKTOP_ONLY_METHODS else ""
         return (
             f"the Local Operator desktop app's browser host does not provide '{method}' — "
-            f"the app that answered was built before this action existed. Please {remedy}; "
-            "every other browser action still works."
+            f"the app that answered was built before this action existed{scope}. {floor}"
+            f"Please {remedy}; every other browser action still works."
         )
     if str(error.data.get("method") or "") in (error.data.get("disabled") or []):
         # The OPERATOR'S consent, not a version: this build serves the method and

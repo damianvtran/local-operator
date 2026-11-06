@@ -173,6 +173,39 @@ def test_pre_copy_desktop_app_refuses_copy_and_names_the_update() -> None:
     result = _run(client)
     assert result.details["error_code"] == "capability_unsupported"
     assert "built before this action existed" in result.text
+    # The measured 2026-11-06 incident: this copy read as a dead end, so its
+    # reader photographed a tenant-wide admin API key off the screen. Pin what
+    # it has to carry now — the METHOD, the HOST, and the fact that only that
+    # host serves it — because dropping any of the three brings the dead end
+    # back. `copy` deliberately has no recorded app-version floor, so the copy
+    # must SAY that rather than invent one from the harness release.
+    assert "does not provide 'copy'" in result.text
+    assert "desktop app's browser host" in result.text
+    assert "only that host serves it" in result.text
+    assert "No desktop-app version floor is recorded for 'copy'" in result.text
+    assert "latest release" in result.text
+    assert "update the desktop app, then retry" in result.text
+    assert client.calls == []
+
+
+def test_a_recorded_app_floor_is_named_in_the_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor, when one IS recorded, is named without a second edit.
+
+    No released desktop build's floor is measured today, so the table is empty
+    and the refusal says so. This drives the other arm: a floor recorded here
+    reaches the copy as a concrete version, which is what makes "record it when
+    you measure it" a data change rather than a copy rewrite.
+    """
+    from local_operator.browser_bridge import backend as bridge_backend
+
+    monkeypatch.setattr(bridge_backend, "_CAPABILITY_MIN_APP_VERSION", {"copy": "0.102.0"})
+    client = _Host(host=HOST_UI, methods=("open", "read"), reply={})
+    result = _run(client)
+    assert result.details["error_code"] == "capability_unsupported"
+    assert "The first desktop-app version that serves it is 0.102.0." in result.text
+    assert "No desktop-app version floor is recorded" not in result.text
     assert client.calls == []
 
 
@@ -402,6 +435,22 @@ def test_guide_carries_the_secret_store_recipe() -> None:
     # desktop-host-only.
     assert "`copy` is the fallback" in flat
     assert "desktop app's browser host only" in flat
+    # The two limits the recipe has to carry, because both were learned the hard
+    # way (2026-11-06): the main-frame restriction on the page's own Copy button
+    # with its measured reason, and the interim policy for a host that predates
+    # `copy` — prefer an API or a download route, never screenshot/OCR as the
+    # routine fallback.
+    assert "main-frame only" in flat
+    assert "navigator.userActivation.isActive" in flat
+    assert "isolated world the page cannot patch" in flat
+    assert "borrow the top frame's activation" in flat
+    assert "`copy` ACTION against that element" in flat
+    # The interim paragraph is worded to stay true AFTER the fix ships: it is
+    # conditional on the host refusing, never on the feature being absent.
+    assert "If the host refuses `copy`, the page's own Copy button is dead" in flat
+    assert "prefer an API or a download route" in flat
+    assert "compromise" in flat
+    assert "screenshot read with OCR as the routine fallback" in flat
 
 
 # ---------------------------------------------------------------------------
