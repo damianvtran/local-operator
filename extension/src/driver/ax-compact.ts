@@ -5,6 +5,15 @@ export interface AXNode {
   ignored?: boolean;
   role?: AXValue;
   name?: AXValue;
+  /* The control's CURRENT value, which Chromium reports on the node itself
+   * (`AXNode.value.value`) rather than as an `AXProperty`. Declared here
+   * because the projection below reads it: on a settings form the value is the
+   * whole point of reading the line — `combobox "Environment" [collapsed]`
+   * cannot be told apart from the same combobox holding `Production`, and an
+   * agent had to screenshot the page to learn a fact the protocol had already
+   * handed over. Optional because most nodes (landmarks, static text, buttons)
+   * carry no value at all. */
+  value?: AXValue;
   childIds?: string[];
   properties?: Array<{ name: string; value: AXValue }>;
 }
@@ -105,6 +114,62 @@ function stateSuffix(node: AXNode): string {
   return markers.length ? ` [${markers.join("] [")}]` : "";
 }
 
+/* The roles whose VALUE changes what the next call does, and nothing else.
+ *
+ * Deliberately a whitelist rather than "print any value the node carries":
+ * Chromium reports a value on roles an agent cannot act on here (a `button`'s
+ * value duplicates its name, a `heading`'s value is its text), and printing
+ * those would both double every line's length and — because the printed line is
+ * what `search` matches — silently change what a search term returns. The
+ * measured gap these exist for is a settings form: a native `<select>` printed
+ * `combobox "Environment" [collapsed]` with no indication that it was set to
+ * Production, so the agent could not tell an unset control from a configured
+ * one without a screenshot. */
+const VALUE_BEARING = new Set(["combobox", "option", "listbox", "textbox", "spinbutton", "searchbox", "slider"]);
+
+/** Longest value rendered before the tail is replaced with an ellipsis. Text
+ *  inputs hold paragraphs; one field's contents must not push every other line
+ *  out of the caller's context budget. 40 keeps a URL, a date, a currency
+ *  amount and a person's name intact. */
+const VALUE_CLIP = 40;
+
+/* One line's worth of a control's value.
+ *
+ * WHY IT IS APPENDED AFTER THE STATE MARKERS, and this is the constraint that
+ * shaped the string: agents (and the locator grammar) read `[ref]` and `[state]`
+ * POSITIONALLY — `ax-locator.ts` parses `role=combobox[name="Environment"]`
+ * against the existing shape and refuses an unknown bracketed predicate — so
+ * the value had to arrive as a suffix that changes no earlier character. It is
+ * also why the value is quoted with JSON.stringify rather than printed bare: an
+ * option label containing `"` or a newline must not be able to forge a second
+ * predicate on the line.
+ *
+ * `valuetext` outranks the raw value because it is the page's own rendering of
+ * it: a slider with `aria-valuetext="Medium"` and a numeric value of 3 means
+ * "Medium" to the person using the page, and that is the fact worth printing.
+ *
+ * A value identical to the accessible name is dropped: `<option
+ * value="production">Production</option>` would print `Production` twice on one
+ * line, and the duplicate costs context for no new information. */
+function valueSuffix(node: AXNode, name: string): string {
+  const role = String(node.role?.value ?? "");
+  if (!VALUE_BEARING.has(role)) return "";
+  const property = (propertyName: string) => node.properties?.find((entry) => entry.name === propertyName)?.value.value;
+  const valuetext = property("valuetext");
+  const preferred = typeof valuetext === "string" && valuetext.trim() ? valuetext : node.value?.value;
+  // Numbers are real values (a `spinbutton` holds 3, not "3"); booleans are
+  // not — a `checked` bool arriving as `value` would print `= true` beside a
+  // [checked] marker that already says it.
+  if (typeof preferred !== "string" && typeof preferred !== "number") return "";
+  // Collapse whitespace FIRST: a `<textarea>` full of newlines and indentation
+  // would otherwise render as one enormous line and the clip would cut it in
+  // the middle of the layout rather than the middle of the text.
+  const collapsed = String(preferred).replace(/\s+/g, " ").trim();
+  if (!collapsed || collapsed === name.replace(/\s+/g, " ").trim()) return "";
+  const clipped = collapsed.length > VALUE_CLIP ? `${collapsed.slice(0, VALUE_CLIP)}…` : collapsed;
+  return ` = ${JSON.stringify(clipped)}`;
+}
+
 export function compactAX(nodes: AXNode[], epoch: number, options: CompactOptions = {}): CompactResult {
   const byId = new Map(nodes.map((node) => [node.nodeId, node]));
   const refs: Record<string, SnapshotRef> = {};
@@ -182,7 +247,7 @@ export function compactAX(nodes: AXNode[], epoch: number, options: CompactOption
       // table must describe the whole page so a ref name is stable.
       if (inside) {
         const shown = depth - (scopeAt ?? 0);
-        lines.push(`${"  ".repeat(shown)}- ${role || "node"}${name ? ` ${JSON.stringify(name)}` : ""}${ref ? ` [${ref}]` : ""}${stateSuffix(node)}`);
+        lines.push(`${"  ".repeat(shown)}- ${role || "node"}${name ? ` ${JSON.stringify(name)}` : ""}${ref ? ` [${ref}]` : ""}${stateSuffix(node)}${valueSuffix(node, name)}`);
       }
     }
     for (const child of node.childIds ?? []) {

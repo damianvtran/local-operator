@@ -195,6 +195,49 @@ limitation honestly. No match uses existing `element_not_found` with
 correction list, so agents need not hallucinate labels. Older hosts refuse before
 send with `capability_unsupported`. `select` stays write-tier like click/type.
 
+## Values in the snapshot
+
+A control's current value rides on its snapshot line, after the ref and every
+state marker:
+
+```
+- combobox "Environment" [e12] [collapsed] = "Production"
+- textbox "App name" [e13] = "release-bot"
+- slider "Volume" [e14] = "Medium"
+```
+
+`<role> "<name>" [<ref>] [<state>]… = "<value>"` is the whole shape, and the
+order is the contract: the value arrives strictly after everything that was
+already there, so refs, state markers and the `role=`/`label=`/`text=` locator
+grammar keep their positions and their meaning. Nothing before the ` = ` changes
+because a value exists.
+
+- **Only the roles an agent acts on**: `combobox`, `listbox`, `option`,
+  `textbox`, `searchbox`, `spinbutton`, `slider`. A `button` or a `heading`
+  carries a value in the accessibility tree too — it duplicates the name, so
+  printing it would lengthen every line and, because `snapshot --search` matches
+  the rendered line, silently change what a search term returns.
+- **The page's own rendering wins**: the `valuetext` accessibility property is
+  preferred over the raw value, so a control that renders `Medium` for a numeric
+  `3` shows `Medium`. Measured caveat on Electron 44.3.0 (Chromium 142):
+  `valuetext` is populated for native `<input type=range|number>` and **not** for
+  `aria-valuetext` on an ARIA `div[role=slider]`, where the numeric value is what
+  prints.
+- **Nothing is invented**: an absent or empty value, and a value identical to the
+  accessible name, print nothing at all. Whitespace is collapsed, and the value is
+  quoted and clipped at 40 characters with a trailing `…`.
+
+The value comes from the AX tree the snapshot already fetched — no extra protocol
+round trip and no page script. Measured on a real page: a native `<select>` puts
+the selected option's text on the combobox node (`value` `"Production"`, with
+`expanded: false`, hence `[collapsed]` beside it), a `<textarea>`'s newlines and
+indentation collapse to single spaces on the line, `option` nodes carry no value
+of their own (only a `selected` bool), and a **password field's value is redacted
+by the browser before the driver sees it** — `"••••••••••••••"` for a
+14-character password. Nothing in this path prints password text, and there is no
+`protected` property to detect such a field by, so that masking is Chromium's
+guarantee rather than the projection's.
+
 ## Network telemetry
 
 Four actions expose the owned tab's request stream: `network_start`,
