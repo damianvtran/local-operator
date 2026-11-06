@@ -115,6 +115,30 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Unlinks the mkstemp lop-runtime-*.log capture this call created, on its two failure arms.",
         2,
     ),
+    # THE LINK-PREVIEW ARTIFACT CACHE. Its root is ``<config_dir>/link_preview_artifacts``
+    # (``store.STORE_DIRNAME``) and nothing else: ``PreviewStore`` is constructed
+    # either by ``PreviewStore.from_config`` (which joins that fixed name to the
+    # config root) or in tests on a ``tmp_path``, so neither receiver below can be a
+    # directory under ``sessions/`` nor a transcript. Both are also FILE paths built
+    # from a 32-hex scope-derived id, never a caller-supplied name, and the store
+    # refuses anything that is not that pattern before a path exists at all.
+    (
+        "local_operator/team_bridge/link_preview/store.py::PreviewStore.put",
+        "<path>.replace",
+        (
+            "Replaces the temp blob this call wrote (``.incoming-<id>``) with the "
+            "cache blob under the config root's artifact dir; both are files named by "
+            "a 32-hex id, never a session directory."
+        ),
+    ),
+    (
+        "local_operator/team_bridge/link_preview/store.py::PreviewStore.sweep",
+        "<path>.unlink",
+        (
+            "Drops cache blobs from that same artifact dir, only names matching the "
+            "artifact-id pattern; a stray file a human left there is skipped."
+        ),
+    ),
     # The bridge connector's registration file, on all three receivers the
     # cross-platform install added (the original entry covered macOS only). Each
     # path is FIXED by the platform helper, never caller-supplied: ``plist_path()``
