@@ -14,9 +14,10 @@ host:
 * `copy` is desktop-only and gated on the host's advertised capabilities, so an
   extension host and a pre-`copy` app are refused in words that name the remedy
   instead of sending a method the peer answers with a bare `internal`.
-* the result is a RECEIPT (``chars``, a ``sha256`` prefix, the element identity,
-  ``verified``) and never the copied bytes — including when the host is
-  generous, wrong-typed or hostile about what it returns.
+* the result is a RECEIPT (``chars``, a ``sha256`` prefix, ``verified``) and never
+  the copied bytes — including when the host is generous, wrong-typed or hostile
+  about what it returns. The element is named by the caller's own selector, so no
+  page-supplied string reaches the receipt at all.
 * a failure names the failure, without relaying a host message that could quote
   what the page held.
 * the guide still carries the recipe that makes the copied value usable without

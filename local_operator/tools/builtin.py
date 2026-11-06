@@ -21428,8 +21428,9 @@ BROWSER_ACTIONS = (
     # working affordance is lost — so the harness needs a route that does not
     # depend on the page's button at all. The write happens in the desktop app's
     # MAIN process, never through a page permission, and the result is a receipt
-    # (chars, a sha256 prefix, the element identity) — never the text. See
-    # DESKTOP_ONLY_METHODS for why the extension cannot serve it.
+    # (`chars`, a sha256 prefix, and whether the readback matched) — never the text,
+    # and never a page-supplied string either: the element is named by the caller's
+    # selector. See DESKTOP_ONLY_METHODS for why the extension cannot serve it.
     "copy",
     # tabs lists every live agent-owned tab (all sessions', read-only
     # awareness) so parallel agents can see what is being driven and know which

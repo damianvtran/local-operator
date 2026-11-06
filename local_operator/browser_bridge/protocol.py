@@ -435,9 +435,11 @@ METHODS = (
     # process (`clipboard.writeText`), never through a page permission, so
     # granting it is not a way for any page to reach the user's clipboard: the
     # wire names an element, the host reads that element's own text, and the
-    # answer is a receipt (chars, a sha256 prefix, the element identity) — never
-    # the text. Desktop-only because the extension has no main process to write
-    # from (`chrome.clipboard` does not exist) and cmux has no page-script read.
+    # answer is a receipt (`chars`, a sha256 prefix, whether the readback matched)
+    # — never the text, and never a page-supplied string: the element is named by
+    # the caller's selector. Desktop-only because the extension has no main process
+    # to write from (`chrome.clipboard` does not exist) and cmux has no page-script
+    # read.
     "copy",
     # Site-permission flow (agent-legible approvals). ``request_access`` raises
     # the pending approval in the extension and returns immediately;
