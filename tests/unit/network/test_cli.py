@@ -2870,9 +2870,7 @@ def test_credentials_shareable_block_renders_login_states_and_shares(
     ), out
     assert "      organization account — share only to your own devices" in out, out
     assert "      signed in as owner@example.test" in out, out
-    assert (
-        "  notion  http  no login here yet — run `/mcp login notion` here first"
-    ) in out, out
+    assert ("  notion  http  no login here yet — run `/mcp login notion` here first") in out, out
     assert "fs" not in out
 
 
