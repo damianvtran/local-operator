@@ -106,6 +106,7 @@ def repair_checks(
         key = str(detail.get("credential_key") or "")
         borrower = str(detail.get("sub") or "")
         name = _member_name(record, borrower)
+        login_name = _login_name(key)
         rows.append(
             {
                 "check": "credential_repair",
@@ -117,11 +118,28 @@ def repair_checks(
                 # The wire diagnostic's own wording, recomposed HERE for this
                 # device's operator: the sender's name is the borrower's, and
                 # "here" is the device the report and the login live on.
-                "detail": render_repair_notice(name or borrower, key),
-                "remedies": [f"run `{repair_command(key)}` on this device"],
+                "detail": render_repair_notice(name or borrower, key, name=login_name),
+                "remedies": [f"run `{repair_command(key, name=login_name)}` on this device"],
             }
         )
     return rows
+
+
+def _login_name(key: str) -> str:
+    """The server NAME this device lists for an ``mcp:<url>`` key, or ``""``.
+
+    The row's remedy runs HERE, so the name must be the one THIS device resolves
+    (review R2/Q2): ``/mcp login`` looks its argument up in the local config, and
+    a URL — or another device's name — is refused there. ``""`` keeps the
+    command a form instead of an unrunnable paste.
+    """
+    if not key.startswith("mcp:"):
+        return ""
+    from local_operator.network.credentials.types import mcp_url_from_key
+    from local_operator.network.readiness import mcp_server_name_for_url
+    from local_operator.paths import config_dir
+
+    return mcp_server_name_for_url(config_dir(), mcp_url_from_key(key))
 
 
 def _member_name(record: Any, device_id: str) -> str:

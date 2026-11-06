@@ -49,11 +49,16 @@ class _FakeViewer:
         holds_mcp: bool | None = False,
         placement: dict[str, Any] | None = None,
         device_id: str = VIEWER,
+        root: Path | None = None,
     ) -> None:
         self.device_id = device_id
         self._rows = rows
         self._holds_mcp = holds_mcp
         self._placement = dict(placement or {})
+        # The config root a readiness row resolves ``/mcp login``'s argument from
+        # (review/QA round 2): the command runs on THIS device, so its own
+        # ``mcp.json`` is the authority — never the peer's label for the server.
+        self.root = root
 
     def provider_rows(self, provider: str) -> list[str] | None:
         return self._rows
@@ -66,6 +71,20 @@ class _FakeViewer:
 
     def close(self) -> None:  # pragma: no cover — duck-typed parity
         pass
+
+
+def _mcp_config_root(tmp_path: Path, name: str, url: str) -> Path:
+    """A config root whose ``mcp.json`` maps a NAME to the URL of interest.
+
+    The row resolves ``/mcp login``'s argument from THIS device's file (review
+    R2/Q2), so a test that pins the named form must publish one.
+    """
+    root = tmp_path / "cfg"
+    root.mkdir(exist_ok=True)
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {name: {"type": "http", "url": url}}}), encoding="utf-8"
+    )
+    return root
 
 
 def _facts(**over: Any) -> dict[str, Any]:
@@ -212,14 +231,12 @@ def test_git_row_says_what_commits_will_do() -> None:
     )
     assert ok_row["ok"] is True
     assert "commits as Damian Tran <damian@gominerva.com>" in ok_row["detail"]
-    assert "push credentials are a separate question" in ok_row["detail"]
-    # The github clause (source ladder, S2): push is brokered when that device has
-    # ANY ladder arm configured — gh login, GITHUB_TOKEN-class secret, or the
-    # stronger App — never "implemented" and never "blocked".
-    assert (
-        "GitHub push through the mesh is brokered when that device has a GitHub "
-        "credential configured"
-    ) in ok_row["detail"]
+    # THE PUSH CREDENTIAL IS NAMED, NOT ASSUMED (2026-11-06). This peer sends no
+    # ``github`` fact, so the row must say it CANNOT tell a copy from a brokered
+    # grant — the old sentence read "brokered" in exactly this state.
+    assert "GitHub push through the mesh is brokered" not in ok_row["detail"]
+    assert "whether a push there would use a GitHub credential copied onto" in ok_row["detail"]
+    assert "build does not report its GitHub source" in ok_row["detail"]
 
     bad_row = readiness.git_row(
         _member(), _facts(git={"user_name": "", "user_email": "someone@e.test"}), peer_label="box"
@@ -830,6 +847,16 @@ _CREDENTIAL_TRUTH_TABLE = {
 }
 
 
+#: Cells where the MCP row's verdict DIFFERS from the model credential's, and why:
+#: an MCP share is served from THIS device's store, so "this device owns the login"
+#: with nothing in that store is not a borrow (2026-11-06). The model row keeps its
+#: answer: a provider login the peer borrows is resolved by this device's provider
+#: path, which the MCP row's ``holds_grant`` question does not model.
+_MCP_CREDENTIAL_TRUTH_OVERRIDES: dict[tuple[str, str], tuple[bool, str]] = {
+    ("viewer", "absent"): (False, readiness.CODE_NO_CREDENTIAL),
+}
+
+
 def _truth_fixture(
     root: Path, placement_shape: str, store_state: str, *, observation: bool = False
 ) -> Any:
@@ -939,8 +966,13 @@ def test_credential_verdict_truth_table(
             readiness.mcp_credential_rows(member, facts, viewer=viewer, peer_label="holder")[0],
         )
         for row in rows:
-            assert row["ok"] is ok, (placement_shape, store_state, row)
-            assert row.get("code", "") == code, (placement_shape, store_state, row)
+            expected_ok, expected_code = (ok, code)
+            if row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL:
+                expected_ok, expected_code = _MCP_CREDENTIAL_TRUTH_OVERRIDES.get(
+                    (placement_shape, store_state), (ok, code)
+                )
+            assert row["ok"] is expected_ok, (placement_shape, store_state, row)
+            assert row.get("code", "") == expected_code, (placement_shape, store_state, row)
             rendered = readiness.render_check_lines([row])
             assert row["detail"] in rendered[0]
             assert len(rendered) == 1 + (0 if row["ok"] else len(row["remedies"]))
@@ -1177,8 +1209,14 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
     }
 
     class _PlacementViewer(_FakeViewer):
-        def __init__(self, entries: dict[str, dict[str, Any]], *, holds_urls: set[str]) -> None:
-            super().__init__(holds_mcp=False)
+        def __init__(
+            self,
+            entries: dict[str, dict[str, Any]],
+            *,
+            holds_urls: set[str],
+            root: Path | None = None,
+        ) -> None:
+            super().__init__(holds_mcp=False, root=root)
             self._entries = entries
             self._holds_urls = holds_urls
 
@@ -1210,7 +1248,9 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
                 "holders": [{"device": PEER, "scope": "session"}],
             },
         },
-        holds_urls={"https://e.example/mcp"},
+        holds_urls={"https://b.example/mcp", "https://e.example/mcp"},
+        # The remedy resolves ``/mcp login``'s argument HERE (review R2/Q2).
+        root=_mcp_config_root(tmp_path, "declared", "https://g.example/mcp"),
     )
     rows = readiness.mcp_credential_rows(
         _member(),
@@ -1223,6 +1263,9 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
     assert "stdio-one" not in by_server, "stdio servers are listed, not credential-checked"
     assert by_server["mine"]["ok"] is True
     assert by_server["borrowed"]["ok"] is True and "borrow" in by_server["borrowed"]["detail"]
+    # The promise is now made from the STORE as well as the books: this viewer
+    # holds b.example's login, which is what a borrow there would be served from.
+    assert "holds a shareable login" in by_server["borrowed"]["detail"]
     assert (
         by_server["shared-to-me"]["ok"] is True
         and "not verified from here" in by_server["shared-to-me"]["detail"]
@@ -1252,10 +1295,132 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         by_server["unreadable"]["ok"] is False
         and by_server["unreadable"]["code"] == readiness.CODE_UNKNOWN
     )
-    assert "sign in here first" in by_server["declared"]["detail"]
+    assert "run `/mcp login declared` here first" in by_server["declared"]["detail"]
     assert by_server["soft"]["detail"].startswith("if the `soft` server needs a sign-in")
     for row in by_server.values():
         assert row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL
+
+
+def test_mcp_row_never_promises_a_borrow_this_device_cannot_fund(tmp_path: Path) -> None:
+    """A share on the books is not a credential in the store (2026-11-06)."""
+    url = "https://notion.example/mcp"
+    servers = {
+        "servers": [
+            {
+                "name": "notion",
+                "url": url,
+                "transport": "http",
+                "auth_declared": True,
+                "has_row": False,
+                "has_placement": True,
+            }
+        ],
+        "withheld": [],
+        "config_path": "/r/mcp.json",
+    }
+    placement = {
+        url: {
+            "owner_device": VIEWER,
+            "owner_device_name": "damian-mac",
+            "holders": [{"device": PEER, "scope": "session"}],
+        }
+    }
+
+    class _PlacedViewer(_FakeViewer):
+        """This device's store answer, with the placement the peer's share wrote."""
+
+        def __init__(self, holds: bool | None, root: Path | None = None) -> None:
+            super().__init__(holds_mcp=holds, root=root)
+
+        def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
+            return dict(placement.get(mcp_url, {}))
+
+    def one(holds: bool | None) -> dict[str, Any]:
+        rows = readiness.mcp_credential_rows(
+            _member(),
+            _facts(mcp=servers),
+            viewer=_PlacedViewer(holds, _mcp_config_root(tmp_path, "notion", url)),
+            peer_label="cloud-node-1",
+            viewer_label="damian-mac",
+        )
+        assert len(rows) == 1
+        return rows[0]
+
+    empty = one(False)
+    assert empty["ok"] is False, empty
+    assert empty["code"] == readiness.CODE_NO_CREDENTIAL
+    assert "a borrow there would be refused" in empty["detail"]
+    assert "run `/mcp login notion` here first" in empty["remedies"][0]
+    assert empty["observed"]["shareable_here"] is False
+    assert empty["source"] == readiness.SOURCE_LOCAL
+
+    unreadable = one(None)
+    assert unreadable["ok"] is False, unreadable
+    assert unreadable["code"] == readiness.CODE_UNKNOWN
+    assert unreadable["observed"]["shareable_here"] is None
+
+    served = one(True)
+    assert served["ok"] is True, served
+    assert "holds a shareable login" in served["detail"]
+    assert served["observed"]["shareable_here"] is True
+
+
+def test_the_login_command_names_this_devices_server_not_the_peers(tmp_path: Path) -> None:
+    """R2-1/Q2-1: the command runs HERE, so its argument must resolve HERE.
+
+    The peer's label for a server is the peer's business: a viewer that keys the
+    URL as ``notion-work`` was told to run ``/mcp login notion`` (the peer's name),
+    which this device answers with "MCP server 'notion' is not configured"; a
+    viewer with no ``mcp.json`` at all was told to run the peer's name outright.
+    """
+    url = "https://notion.example/mcp"
+    servers = {
+        "servers": [
+            {
+                "name": "notion",
+                "url": url,
+                "transport": "http",
+                "auth_declared": True,
+                "has_row": False,
+            }
+        ],
+        "withheld": [],
+        "config_path": "/r/mcp.json",
+    }
+
+    def root_at(parent: Path, entries: dict[str, str]) -> Path:
+        root = parent / "cfg"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        name: {"type": "http", "url": address} for name, address in entries.items()
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return root
+
+    def row_for(root: Path) -> dict[str, Any]:
+        return readiness.mcp_credential_rows(
+            _member(),
+            _facts(mcp=servers),
+            viewer=_FakeViewer(root=root),
+            peer_label="cloud-node-1",
+        )[0]
+
+    # (a) this device has no entry for the URL: no command at all, and none of the
+    # peer's name leaks into one.
+    absent = row_for(root_at(tmp_path / "a", {}))
+    assert "run `/mcp login notion`" not in absent["detail"]
+    assert "/mcp login <name>` signs one in" in absent["detail"]
+
+    # (b) this device keys it differently: THIS device's name wins.
+    renamed = row_for(root_at(tmp_path / "b", {"notion-work": url}))
+    assert "run `/mcp login notion-work` here first" in renamed["detail"]
+    assert "/mcp login notion " not in renamed["detail"]
 
 
 def test_mcp_owner_expiry_names_the_owner_in_the_row_and_remedy(
@@ -1490,7 +1655,10 @@ def test_a_stdio_server_with_only_literal_credentials_gets_an_adopt_row() -> Non
     }
 
     rows = readiness.mcp_credential_rows(
-        _member(), _facts(mcp=servers), viewer=_FakeViewer(), peer_label="cloud-node-1"
+        _member(),
+        _facts(mcp=servers),
+        viewer=_FakeViewer(),
+        peer_label="cloud-node-1",
     )
 
     assert len(rows) == 1
@@ -1552,7 +1720,7 @@ def test_an_http_literal_only_server_gets_the_adopt_row_not_a_sign_in() -> None:
     assert row["observed"]["literal_keys"] == ["headers.Authorization"]
 
 
-def test_an_http_oauth_server_keeps_the_login_copy_even_with_literals() -> None:
+def test_an_http_oauth_server_keeps_the_login_copy_even_with_literals(tmp_path: Path) -> None:
     """Literal handling must not hide a separate OAuth failure."""
     servers = {
         "servers": [
@@ -1573,11 +1741,15 @@ def test_an_http_oauth_server_keeps_the_login_copy_even_with_literals() -> None:
     }
 
     rows = readiness.mcp_credential_rows(
-        _member(), _facts(mcp=servers), viewer=_FakeViewer(), peer_label="cloud-node-1"
+        _member(),
+        _facts(mcp=servers),
+        # The remedy resolves the name from THIS device's file (review R2/Q2).
+        viewer=_FakeViewer(root=_mcp_config_root(tmp_path, "dd", "https://dd.test/mcp")),
+        peer_label="cloud-node-1",
     )
 
     assert len(rows) == 1
-    assert "sign in here first" in rows[0]["detail"]
+    assert "run `/mcp login dd` here first" in rows[0]["detail"]
     assert "--adopt" not in " ".join(rows[0]["remedies"])
 
 
@@ -3924,6 +4096,157 @@ def test_git_row_strips_terminal_controls_from_the_peers_identity() -> None:
     assert row["ok"] is True
     assert "commits as Dan <d@e.test>" in row["detail"]
     assert not any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in row["detail"])
+
+
+# ---------------------------------------------------------------------------
+# The GitHub push credential: copy vs brokered grant (review R1-2, R1-3, R1-4)
+# ---------------------------------------------------------------------------
+
+_GIT = {"user_name": "Pat Doe", "user_email": "pat@example.test"}
+
+
+class _GithubViewer(_FakeViewer):
+    """A viewer with a config root, so the owner branch can read THIS ladder."""
+
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        device_id: str = VIEWER,
+        placement: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(device_id=device_id, placement=placement)
+        self.root = root
+
+    def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
+        return dict(self._placement)
+
+
+def _github_row(facts_github: Any, *, viewer: Any, member: Any = None) -> dict[str, Any]:
+    facts: dict[str, Any] = {"git": _GIT}
+    if facts_github is not None:
+        facts["github"] = facts_github
+    return readiness.git_row(member or _member(), facts, peer_label="cloud-node-1", viewer=viewer)
+
+
+def test_git_row_attributes_a_copy_from_the_peers_own_marker() -> None:
+    """Provenance comes from the RECEIVING store's origin marker (review NIT)."""
+    copier = _github_row(
+        {"source": "token", "origin": {"owner_device": "d_owner", "key": "secret:GITHUB_TOKEN"}},
+        viewer=_GithubViewer(),
+    )
+    assert (
+        "a push there uses a copy of d_owner's GITHUB_TOKEN token, not a brokered grant"
+        in copier["detail"]
+    )
+
+    own = _github_row({"source": "token", "origin": None}, viewer=_GithubViewer())
+    assert "a push there uses cloud-node-1's own GITHUB_TOKEN token" in own["detail"]
+
+
+def test_git_row_says_provenance_is_unknown_when_the_peer_omits_the_marker() -> None:
+    """No marker field is not "its own": an older peer simply did not say."""
+    row = _github_row({"source": "token"}, viewer=_GithubViewer())
+    assert "whose provenance this report cannot tell" in row["detail"]
+    assert "its own" not in row["detail"]
+
+
+def test_git_row_claims_a_broker_only_when_this_device_can_fund_it(
+    tmp_path: Path,
+) -> None:
+    """R1-2: the share is a promise the OWNER has to be able to keep."""
+    root = tmp_path / "cfg"
+    root.mkdir()
+    placement = {
+        "owner_device": VIEWER,
+        "owner_device_name": "damian-mac",
+        "holders": [{"device": PEER, "scope": "device"}],
+    }
+    viewer = _GithubViewer(root, placement=placement)
+
+    unfunded = _github_row({"source": "", "has_local": False}, viewer=viewer)
+    assert "borrows a grant" not in unfunded["detail"]
+    assert "holds no GitHub credential to lend" in unfunded["detail"]
+    assert "would be refused until one is set up here" in unfunded["detail"]
+    # The ladder's own enumeration, not a second copy of it.
+    from local_operator.network.credentials import github as github_mod
+
+    assert github_mod.no_source_arms() in unfunded["detail"]
+
+    from local_operator.secrets import access
+
+    access.open_store(root, create=True).set("GITHUB_APP", b'{"app_id": "1"}')
+    funded = _github_row({"source": "", "has_local": False}, viewer=viewer)
+    assert "borrows a grant from damian-mac" in funded["detail"]
+    assert "it mints contents: write, pull_requests: write" in funded["detail"]
+
+
+def test_git_row_owner_with_an_unreadable_ladder_is_not_a_promise(tmp_path: Path) -> None:
+    """An unreadable store on the owner is "cannot tell", never "will borrow"."""
+    root = tmp_path / "cfg-unreadable"
+    root.mkdir()
+    (root / "secrets").mkdir()
+    (root / "secrets" / "store.db").write_bytes(b"not a database")
+    placement = {
+        "owner_device": VIEWER,
+        "owner_device_name": "damian-mac",
+        "holders": [{"device": PEER, "scope": "device"}],
+    }
+    row = _github_row(
+        {"source": "", "has_local": False}, viewer=_GithubViewer(root, placement=placement)
+    )
+    assert "borrows a grant" not in row["detail"]
+    assert "could not be resolved" in row["detail"]
+    assert "not known" in row["detail"]
+
+
+@pytest.mark.parametrize(
+    ("repositories", "expected", "forbidden"),
+    [
+        (None, "could not be read", "no repository is designated"),
+        ([], "no repository is designated", "could not be read"),
+        (["damianvtran/local-operator"], "narrowed to damianvtran/local-operator", "refuse"),
+    ],
+)
+def test_the_scope_clause_tells_unreadable_from_empty(
+    repositories: Any, expected: str, forbidden: str
+) -> None:
+    """R1-3: unreadable is "cannot tell"; empty is "a mint would refuse"."""
+    fact = {"source": "app", "repositories": repositories}
+    clause = readiness._github_scope_clause(fact, "cloud-node-1")  # noqa: SLF001
+    assert expected in clause
+    assert forbidden not in clause
+
+
+def test_the_scope_clause_uses_the_permissions_constant() -> None:
+    """Review NIT: one owner for the mint's permissions, not a second literal."""
+    from local_operator.network.credentials import github as github_mod
+
+    fact = {"source": "app", "repositories": []}
+    clause = readiness._github_scope_clause(fact, "peer")  # noqa: SLF001
+    for name, level in github_mod.GITHUB_PERMISSIONS.items():
+        assert f"{name}: {level}" in clause
+
+
+def test_git_row_brokers_from_another_owner_without_reading_their_config() -> None:
+    """The brokered branch, reached: another device owns it (QA follow-up)."""
+    placement = {
+        "owner_device": THIRD,
+        "owner_device_name": "macbook",
+        "holders": [{"device": PEER, "scope": "device"}],
+    }
+    row = _github_row({"source": "", "has_local": False}, viewer=_GithubViewer(placement=placement))
+    assert "a push there borrows a grant from macbook" in row["detail"]
+    assert "decided on macbook" in row["detail"]
+    assert "repositories" not in json.dumps(row.get("observed") or {})
+
+
+def test_git_row_with_no_github_fact_says_it_cannot_tell() -> None:
+    """An older peer: the row refuses to guess a copy or a grant."""
+    row = _github_row(None, viewer=_GithubViewer())
+    assert "not knowable from here" in row["detail"]
+    assert "does not report its GitHub source" in row["detail"]
+    assert row["observed"] == {"source": None}
 
 
 def test_compose_reports_this_devices_serve_daemon_unless_a_peer_was_named(
