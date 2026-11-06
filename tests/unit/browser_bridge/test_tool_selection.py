@@ -160,6 +160,12 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
             # advertising an action it would answer with nothing.
             "record_start",
             "record_stop",
+            # Clipboard copy reads one element with a page script and writes the
+            # OS clipboard from the app's MAIN process; a cmux panel has neither
+            # a page-script read nor a main process to write from, so it degrades
+            # with the typed refusal rather than claiming a copy it never made
+            # (which would send the caller to `pbpaste` for a stale value).
+            "copy",
         }
     )
 

@@ -21422,6 +21422,15 @@ BROWSER_ACTIONS = (
     # returns no attributes, `snapshot` returns an AX tree, and `eval` is not a
     # surface to expose. It never mutates, so it is safe where eval is not.
     "query",
+    # Clipboard WRITE of one element's text, desktop host only. A page's own Copy
+    # button can be refused by the host (a page's `navigator.clipboard.writeText`
+    # needs a permission its origin holds), and a key shown exactly once with no
+    # working affordance is lost — so the harness needs a route that does not
+    # depend on the page's button at all. The write happens in the desktop app's
+    # MAIN process, never through a page permission, and the result is a receipt
+    # (chars, a sha256 prefix, the element identity) — never the text. See
+    # DESKTOP_ONLY_METHODS for why the extension cannot serve it.
+    "copy",
     # tabs lists every live agent-owned tab (all sessions', read-only
     # awareness) so parallel agents can see what is being driven and know which
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
@@ -21512,6 +21521,11 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
         "hit_test",
         "ancestors",
         "query",
+        # copy needs a page-script read of the element AND a main process to
+        # write the clipboard from; cmux offers neither, so it degrades with the
+        # typed "use a non-cmux host" refusal rather than reporting a copy it
+        # never made (which would send an agent to `pbpaste` for a stale value).
+        "copy",
         "network_start",
         "network_stop",
         "network_read",
@@ -21786,8 +21800,9 @@ class BrowserParams(BaseModel):
         description="CSS selector, snapshot ref, or a11y locator for the "
         'click/type/hover/select target (role=checkbox[name="Active"], label=…, text=…) '
         "resolved against the a11y tree, so it survives framework ids. Also the "
-        "read/snapshot scope, query CSS, scroll element, 'press' focus target or "
-        "download/upload control.",
+        "read/snapshot scope, query CSS, scroll element, 'press' focus target, "
+        "download/upload control, or the element whose text 'copy' writes to the "
+        "clipboard.",
     )
     # The snapshot window. Three fields rather than a page token, because the
     # three questions an agent asks a cut tree are different: "give me the next
@@ -23512,6 +23527,13 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
         # already refused a locator here, because a locator resolves a TARGET
         # while a query asks the DOM a question.
         return _validate_selector(params.selector, "query")
+    if action == "copy":
+        # One element, named by a selector, and nothing else: "copy whatever is
+        # focused" would put a value on the clipboard that the caller never
+        # named, and the receipt could not say which element it came from. The
+        # flag-shaped check matters here too — this selector reaches a page
+        # script.
+        return _validate_selector(params.selector, "copy")
     if action in ("styles", "ancestors"):
         # Both name one element, so the selector is mandatory and the same
         # refusal click/type use keeps the copy consistent. The flag-shaped
@@ -25047,6 +25069,175 @@ def _host_of_client(client: Any) -> str:
     if str(getattr(client, "host", "")) == HOST_UI_PREFIX:
         return HOST_UI_PREFIX
     return HOST_BRIDGE_PREFIX
+
+
+#: The ONLY fields a `copy` receipt may carry.
+#:
+#: An ALLOWLIST, and deliberately not a list of fields to strip. The action exists
+#: because a value shown once must reach the clipboard; forwarding the host's
+#: payload verbatim would put that value in the transcript the moment a host —
+#: current, future or hostile — was generous with its result. So the receipt is
+#: BUILT from these keys rather than filtered down to them, which is what makes
+#: "the value cannot reach the tool result" a property of the code instead of a
+#: promise about the peer. `element` has its own allowlist, and deliberately no
+#: `href`: a URL can carry a query value, and no copied value may travel.
+_COPY_ELEMENT_KEYS = ("tag", "id", "name")
+
+#: The exact shape of the digest prefix in a receipt: 16 lowercase hex chars.
+#: The contract is a PREFIX of the sha256 of the copied bytes (a full digest is
+#: 64 chars, and a constant that long is not worth spending in every result).
+#: Matched rather than merely length-capped: a host that put the copied text in
+#: this field would still be caught by the cap, but a host that put a TRUNCATED
+#: COPY of the text there would look exactly like a fresh digest.
+_COPY_SHA_PREFIX_RE = re.compile(r"^[0-9a-f]{16}$")
+
+#: The longest legitimate string in a receipt: an element id or name. A field
+#: longer than this is not one, so it is DROPPED (never truncated — a truncated
+#: secret is still secret material, and `chars`/`sha256` already say what was
+#: copied).
+_COPY_FIELD_MAX_CHARS = 64
+
+#: The grammar an element's IDENTITY may have, which is not free text.
+#:
+#: A tag is an HTML tag name (custom elements keep their dash); an id or name is
+#: an identifier a framework wrote. Neither may contain whitespace, quotes or
+#: markup — which is what keeps a rendered `<input id="…">` a label instead of a
+#: channel. Stated as a grammar rather than a length cap because the two answer
+#: different questions: the cap bounds how much can travel, the grammar bounds
+#: WHAT, and `chars` already tells the caller how big the value was.
+_COPY_TAG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,31}$")
+# Dashes ARE allowed here (`api-key`, `secret-key` are ordinary ids); what is not
+# is whitespace, a quote, a newline or markup.
+_COPY_NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+
+#: Which grammar each element field must satisfy. `tag` is checked as a tag and
+#: `id`/`name` as identifiers, so a field that swaps them is dropped rather than
+#: rendered — a `<SYNTH-copy-token…>` label is not a tag.
+_COPY_ELEMENT_PATTERNS = {
+    "tag": _COPY_TAG_RE,
+    "id": _COPY_NAME_RE,
+    "name": _COPY_NAME_RE,
+}
+
+
+def _copy_receipt_field(raw: Any, *, limit: int = _COPY_FIELD_MAX_CHARS) -> str:
+    """One receipt string, or ``""`` when the host sent something else.
+
+    Type-checked before it is used, because this is the boundary the whole
+    allowlist rests on: `str(raw)` on an unexpected object built from page
+    content would be a stringifying bug away from leaking it.
+    """
+    if not isinstance(raw, str):
+        return ""
+    value = raw.strip()
+    return value if value and len(value) <= limit else ""
+
+
+def _copy_element_field(key: str, raw: Any) -> str:
+    """One element-identity field, or ``""`` when it is not shaped like one.
+
+    Grammar-checked, not just capped: see `_COPY_ELEMENT_PATTERNS` for why an
+    identity is a narrower thing than a string. A rejected field is DROPPED — the
+    receipt then names the element by whatever is left, which is why
+    `_copy_element_label` degrades to `<element>` rather than rendering an empty
+    `<…>`.
+    """
+    value = _copy_receipt_field(raw)
+    return value if value and _COPY_ELEMENT_PATTERNS[key].match(value) else ""
+
+
+def _browser_copy_receipt(result: Mapping[str, Any]) -> dict[str, Any]:
+    """The receipt a ``copy`` call may report, and NOTHING else.
+
+    Keys are transcribed one by one; there is no `**result`, no `dict(result)` and
+    no passthrough of unknown fields anywhere on this path (a test feeds this a
+    result carrying the copied text in extra keys and in the wrong-typed keys and
+    asserts the built receipt holds none of it). `chars` and `verified` are
+    type-checked rather than coerced for the same reason: a string in `chars` is
+    the copied text under the wrong name, and `bool("...")` is True.
+
+    A receipt with an EMPTY `sha256` means the host reported no digest, which is
+    reported as unverified rather than as a copy of nothing.
+    """
+    raw_element = result.get("element")
+    element_source: Mapping[str, Any] = raw_element if isinstance(raw_element, Mapping) else {}
+    combined = {
+        **{key: _copy_element_field(key, element_source.get(key)) for key in _COPY_ELEMENT_KEYS},
+        # `href` is deliberately NOT in the element allowlist: a URL can carry a
+        # query value, and this action's whole contract is that no copied value
+        # travels. `verified` is `is True` so a truthy string from a peer cannot
+        # claim a readback happened.
+        "verified": result.get("verified") is True,
+        "chars": result.get("chars") if type(result.get("chars")) is int else 0,
+        "sha256": _copy_receipt_field(result.get("sha256"), limit=16),
+    }
+    if not _COPY_SHA_PREFIX_RE.match(combined["sha256"]):
+        combined["sha256"] = ""
+    chars = combined["chars"]
+    if not isinstance(chars, int) or chars < 0:
+        combined["chars"] = 0
+    return {
+        "chars": combined["chars"],
+        "sha256": combined["sha256"],
+        "verified": combined["verified"],
+        "element": {key: combined[key] for key in _COPY_ELEMENT_KEYS if combined[key]},
+    }
+
+
+def _copy_element_label(element: Mapping[str, Any]) -> str:
+    """`<input id="key">`, or as much of the identity as the host reported."""
+    tag = str(element.get("tag") or "element")
+    for attribute in ("id", "name"):
+        value = str(element.get(attribute) or "")
+        if value:
+            return f"<{tag} {attribute}={json.dumps(value)}>"
+    return f"<{tag}>"
+
+
+def _browser_copy_result(
+    tool_call_id: str,
+    params: BrowserParams,
+    result: Mapping[str, Any],
+) -> ToolResult:
+    """Render a ``copy`` receipt in words, and NEVER render the copied bytes.
+
+    The one sentence that has to be unmistakable is what is NOT here: an agent
+    that reads "Copied 44 characters" and then assumes it can see the value will
+    look in its own transcript for a key that was deliberately left out. The
+    remedy is named instead (`pbpaste`, then straight into `lop secret set`), and
+    the guide carries the full recipe.
+
+    `verified: false` is reported rather than hidden: the host's compare-only
+    readback is the only proof the bytes reached the OS clipboard, and a caller
+    that skipped a copy it believed in is the exact failure this action exists to
+    prevent.
+    """
+    selector = params.selector.strip()
+    receipt = _browser_copy_receipt(result)
+    details: dict[str, Any] = {"selector": selector, **receipt}
+    label = _copy_element_label(receipt["element"])
+    chars = receipt["chars"]
+    if chars:
+        text = f"Copied {chars} character{'s' if chars != 1 else ''} from {label} to the clipboard"
+    else:
+        # The host reports `empty_element_text` as a typed failure, so this is
+        # only reachable from a host that reported success with no length — and
+        # claiming a copy here would be the lie the error code exists to avoid.
+        text = f"The clipboard write from {label} reported no length, so treat it as unconfirmed"
+    if receipt["sha256"]:
+        text += f" (sha256 {receipt['sha256']}…)"
+    text += "."
+    if not receipt["verified"]:
+        text += (
+            " The host could not confirm the clipboard holds it (its readback did not "
+            "match) — check with 'pbpaste' before relying on it."
+        )
+    text += (
+        " The text is deliberately absent from this result: read it where it landed "
+        "(`printf '%s' \"$(pbpaste)\" | lop secret set NAME`, never echoed)."
+    )
+    return _text(tool_call_id, "browser", text, details=details)
 
 
 async def _bridge_call(
@@ -27866,6 +28057,14 @@ async def _bridge_action(
         wire["selector"] = params.selector.strip()
         if params.limit is not None:
             wire["limit"] = params.limit
+    elif action == "copy":
+        # Only the selector: the host reads THAT element and nothing else, so
+        # there is no second target to send and no text field to accept. The
+        # action is desktop-only, so the extension and cmux never reach this
+        # branch — `_capability_problem` refuses an unadvertised `copy` before
+        # the request is built, and that is the ONE place that decides who
+        # serves it (a second host check here would be a second answer).
+        wire["selector"] = params.selector.strip()
     elif action in ("click", "type"):
         wire["selector"] = params.selector.strip()
         if action == "type":
@@ -27936,6 +28135,11 @@ async def _bridge_action(
             state.surface_id = ""
         return problem
     assert result is not None
+    if action == "copy":
+        # Before `details` is filled with url/title: a copy reports a receipt and
+        # nothing else, and the receipt builder is the only reader of the host's
+        # payload on this path (see `_browser_copy_receipt`).
+        return _browser_copy_result(tool_call_id, params, result)
     href = str(result.get("url", ""))
     title = str(result.get("title", ""))
     details: dict[str, Any] = {"surface_id": surface}
@@ -29605,6 +29809,12 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         # host — it is NOT the protection. The protection is the policy in
         # `local_operator/browser_files.py`, which runs unconditionally, plus this
         # describer naming what the call will do.
+        #
+        # `copy` deliberately stays on the ordinary write tier: it writes the OS
+        # clipboard on this machine and moves nothing between hosts, so it does not
+        # earn upload's per-call `exec` escalation — and a value shown exactly once
+        # is the case where an extra prompt costs the user the value. What protects
+        # it is the receipt (the text never travels back), not the tier.
         approval_tier="write",
         # Inspection is a true read: the harness must not ask for a write
         # approval before it can reach the admittedly effect-free dispatcher.

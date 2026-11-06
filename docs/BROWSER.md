@@ -88,7 +88,7 @@ an operator action.
 ## Actions
 
 The non-cmux hosts answer the same wire methods; cmux can serve a subset, and
-the rest (`scroll`, `logs`, `tabs`, `download`, `upload`, the site-approval trio,
+the rest (`scroll`, `logs`, `tabs`, `download`, `upload`, `copy`, the site-approval trio,
 `network_start`/`network_stop`/`network_read`/`network_clear`) degrade with a
 typed error naming the hosts that can. The table below is the CMUX
 mapping (the full list is the docstring of `BROWSER_ACTIONS`).
@@ -111,6 +111,7 @@ mapping (the full list is the docstring of `BROWSER_ACTIONS`).
 | `network_clear` | Drop the buffer and its counters | not available (typed refusal) |
 | `record_start` | Record the owned tab's video to an `.mp4` | not available (typed refusal) |
 | `record_stop` | Stop and save the recording | not available (typed refusal) |
+| `copy` | Write ONE element's text to the OS clipboard and report a receipt (chars, a sha256 prefix, the element identity) — the text itself is never returned. Desktop app host only; the recipe that keeps it out of the transcript is in `guide://browser` | not available (typed refusal) |
 
 One surface per session, owned by the `Session` and injected into every rebuilt
 `ToolContext` as `ToolContext.browser`. `open` called a second time navigates

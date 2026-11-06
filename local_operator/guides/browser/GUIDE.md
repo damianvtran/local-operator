@@ -425,6 +425,9 @@ Same `browser` tool. Actions:
 - `open` (start a surface at an http/https URL) · `goto` (navigate the surface)
 - `read` (page text; `selector` scopes it) · `snapshot` (accessibility tree
   with click refs like `e5`)
+- `copy` (write ONE element's text to the clipboard — desktop app host only, and
+  the result is a receipt, never the text; use it for a value the page shows
+  once. See "Copying a value the page shows once" below)
 - `screenshot` (writes a PNG; works on the background tab)
 - `click` / `type` (by CSS selector or a snapshot ref; trusted input events)
 - `press key="Control+K"` (ONE key chord to the owned page; desktop app only).
@@ -646,6 +649,54 @@ does not have to be the visible one: recording reads the same pixels
   `record_size` capability and is refused before any capture; the copy says to
   update it or drop the size for a 1280x720 clip. The Chrome extension host
   cannot record at a chosen size at all and says so.
+
+### Copying a value the page shows once (an API key, a recovery code)
+
+Some pages show a value exactly once and never again — a freshly created API key,
+a recovery code, a webhook secret. Move it to the clipboard and into the secret
+store without it passing through the conversation:
+
+```text
+browser open  https://app.example.test/settings/keys
+snapshot                    # find the field or code block's ref, e.g. e9
+copy selector=e9            # writes the element's text to the clipboard
+```
+
+Then, in `bash`, in this order and without printing the value:
+
+```bash
+printf '%s' "$(pbpaste)" | lop secret set MY_NEW_KEY   # store it
+lop secret describe MY_NEW_KEY --length --fingerprint   # verify without revealing
+lop secret list                                         # it is stored, and under the right name
+```
+
+- **The whole point of this recipe is that the value never enters the
+transcript.** `copy` answers with a receipt — how many characters, a `sha256`
+prefix, which element, and whether the clipboard readback matched — and never
+the text. So a one-time key can go from a page into the encrypted store while no
+tool result, log line or error message ever holds it. Never `echo` the value,
+never print it to check it, never paste it into a message to the user or to
+another tool.
+- **Use `printf '%s' "$(pbpaste)"`, not bare `pbpaste`.** Command substitution
+strips the trailing newline a page may have written, and that newline would
+become part of the stored secret — every later use of it then fails in a way
+that looks exactly like a wrong key.
+- **A page can never read the clipboard.** The desktop app grants pages a
+clipboard WRITE only (for the page's own Copy button) and `clipboard-read` stays
+denied for every page, so the clipboard is a one-way street out of the page: the
+site being driven cannot take anything off it. Treat `copy` as a write, never as
+a way to move a secret INTO a page — `secret_ref` on `type` is how a credential
+gets in.
+- Where the page HAS a working Copy button, clicking it is equally fine — the
+same `pbpaste` recipe follows. `copy` is the fallback that needs no affordance on
+the page at all, which is what makes a one-time key recoverable from a page whose
+button is broken.
+- **`copy` is served by the desktop app's browser host only.** The Chrome
+extension has no main process to write the clipboard from and cmux has no
+page-script read, so both refuse it with a typed message naming the desktop app.
+- The value sits on this machine's clipboard after the call, where any process
+that can read the clipboard can still see it. Store it, then move on rather than
+leaving it there for the rest of the turn.
 
 ### Typing a credential: use `secret_ref`, never `text`
 

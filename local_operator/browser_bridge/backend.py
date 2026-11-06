@@ -590,6 +590,26 @@ def format_error(
         return f"navigation failed: {error.message}"
     if error.code == ErrorCode.ELEMENT_NOT_FOUND:
         return _element_not_found_copy(error)
+    if error.code == ErrorCode.EMPTY_ELEMENT_TEXT:
+        # The host's own message is deliberately NOT relayed: it is composed by
+        # the peer and could quote what the page held, and this action's whole
+        # contract is that no copied value travels in a result, a log or an
+        # error string. Fixed copy, naming the likelier mistake instead.
+        return (
+            "the element held no text to copy (an empty value, or whitespace only), so "
+            "nothing was written to the clipboard. Name the element that CARRIES the "
+            "value — for a key shown once that is the field or the code block itself, "
+            "not the label beside it."
+        )
+    if error.code == ErrorCode.CLIPBOARD_WRITE_FAILED:
+        # Same rule, same reason (the page's text must not ride an error string),
+        # and the remedy is actionable without it: the value is still on the page.
+        return (
+            "the element's text was read but the OS clipboard refused the write, so "
+            "nothing landed — the value is still on the page. Retry once; if it "
+            "repeats, the desktop app's main process cannot reach the clipboard on "
+            "this machine."
+        )
     if error.code == ErrorCode.ORIGIN_PROMPT_PENDING:
         return pending_copy
     if error.code == ErrorCode.TAB_LIMIT:
