@@ -99,6 +99,51 @@ reach you when they land (60 s is the sensible default), and reply only when
 someone messaged or tagged you or the delta genuinely needs attention. Being
 woken with nothing to do is a fine outcome — it is why monitors are quiet.
 
+## Watching a Slack channel or thread
+
+An MCP read tool returns its result as a JSON envelope holding a text log
+(`{"messages": "…"}`). The monitor splits that log into **one line per
+record** before comparing, so a channel read diffs per message, not per
+envelope:
+
+```
+monitor({op:"create", name:"product-feedback-watch",
+         tool:"mcp__slack_read_channel",
+         arguments:{"channel_id":"C06TXN4AD9R", "limit":50},
+         every:"5m",
+         description:"new messages and thread replies in #product-feedback — "
+                     "each new record is a feedback item to triage and report"})
+```
+
+- `limit` is the window: pick a value that covers a busy day (roughly one
+  record line per message). The window is also what makes a fire cheap: the
+  delivery carries the delta, not the channel.
+- **A new message is an appended record line**, so the delta reads
+  `+1/-0 changed lines` and the added line IS the message (author, `Message
+  TS`, body). Appends are delivered as-is — the materiality gate is never
+  asked, so nothing can file a new message as bookkeeping.
+- **A full window shifts**, and a shifted window is `+1/-1`: the new record
+  added, the oldest one dropped, so *that* delta IS judged by the materiality
+  gate. Both sides are legible records (the new message and the one that
+  aged out), which is what the gate reads. Raise `limit` if you see this
+  often, and write the `description` as the instruction you want followed
+  when it fires.
+- **Thread replies** surface on the parent message's record line as its
+  `Thread: N replies (latest: …)` field changing — that is a changed line.
+  Read the parent's ts from that line and follow up with
+  `mcp__slack_read_thread`; do not re-read the whole channel to answer.
+- **Your own echo**: `ignore` drops matching LINES, and a record is one line,
+  so `ignore: ["<your own user id regex>"]` removes just the messages you
+  posted. (On the unsplit envelope that regex would have matched the single
+  line carrying every record.)
+- **Ownership**: this watch only ticks while its session is hosted. A cold
+  session's watch is dormant — `lop monitor status` marks the row `idle` — so
+  a channel watch belongs to a session that stays open. Record where it lives
+  when you arm it.
+- A quiet watch is not a working one: the listing reads `N checks, 0
+  deliveries` with the suppression count when the gate filed changes as
+  non-material. Check that before concluding a channel had nothing to say.
+
 ## What counts as material, and tuning noise
 
 Every tick that finds a difference delivers a delta — but two knobs and one
