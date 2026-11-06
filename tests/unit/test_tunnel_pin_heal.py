@@ -305,3 +305,91 @@ def test_a_successor_on_another_hub_is_not_this_tunnels_login(sandbox) -> None:
             },
         )
     assert api.same_account_successor(pin) is None
+
+
+def test_a_fresh_login_does_not_win_over_another_live_same_account_row(sandbox) -> None:
+    """Agent review round 1, m-2: `fresh_id` is membership, not a filter.
+
+    A live same-account row the operator already had makes the store
+    ambiguous for status and configure; the heal must call it the same.
+    """
+    pin = _seed_dead_legacy_pin()
+    _configure(pin)
+    with closing(AuthStore()) as store:
+        # Unkeyed and stamped with the hub's trailing-slash spelling: the same
+        # hub to the tunnel (`api._hub` folds it), a different binding to the
+        # store, so the sign-in below cannot dedupe onto it.
+        store._conn.execute(
+            "INSERT INTO auth_credentials (provider, credential_type, data, identity_key,"
+            " created_at, updated_at) VALUES ('radient', 'oauth', ?, NULL, 1, 1)",
+            (
+                json.dumps(
+                    {
+                        "type": "oauth",
+                        "account_id": ACCOUNT,
+                        "api_endpoint": api.TUNNEL_HUB + "/",
+                        "access": "a",
+                        "refresh": "r",
+                    }
+                ),
+            ),
+        )
+        store._conn.commit()
+    fresh = _sign_in()
+    assert api.same_account_successor(pin, fresh_id=fresh) is None
+    assert config.load()["credential_id"] == pin
+    assert sandbox["kicks"] == []
+
+
+def test_a_pin_with_no_account_heals_on_the_cached_owner(sandbox) -> None:
+    """Agent review round 1, m-4: a pre-identity pin row has no `account_id`;
+    the cached owner is the tunnel's owner itself, so it is the evidence."""
+    with closing(AuthStore()) as store:
+        pin = store.upsert_credential(
+            "radient", {"type": "oauth", "access": "old", "refresh": "old", "expires": 1}
+        ).id
+    _configure(pin)
+    _sign_in()
+    assert config.load()["credential_id"] == pin, "no account anywhere: untouched"
+
+    _configure(pin, record={"id": "tunnel-1", "owner_account_id": ACCOUNT})
+    fresh = _sign_in()
+    assert config.load()["credential_id"] == fresh
+
+
+def test_a_login_into_another_store_never_re_points_the_default_tunnel(sandbox) -> None:
+    """Agent review round 1, m-1: the heal's proof reads the default store, so
+    an id written by a store on another `db_path` must not be taken for a row
+    there — even when that id names a provable successor in the default one."""
+    pin = _seed_dead_legacy_pin()
+    _configure(pin)
+    with closing(AuthStore()) as store:
+        successor = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": ACCOUNT,
+                "api_endpoint": api.TUNNEL_HUB,
+                "access": "a",
+                "refresh": "r",
+            },
+        ).id
+    other_root = sandbox["root"] / "other"
+    other_root.mkdir()
+    result = asyncio.run(_verified_login_result(ACCOUNT))
+    with closing(AuthStore(db_path=other_root / "auth.db", config_dir=other_root)) as other:
+        while True:  # line the other store's next id up with the default successor
+            nxt = other._conn.execute(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM auth_credentials"
+            ).fetchone()[0]
+            if nxt >= successor:
+                break
+            other._conn.execute(
+                "INSERT INTO auth_credentials (provider, credential_type, data, created_at,"
+                " updated_at) VALUES ('filler', 'api_key', '{}', 1, 1)"
+            )
+            other._conn.commit()
+        written = other.complete_radient_login(result).id
+    assert written == successor
+    assert config.load()["credential_id"] == pin
+    assert sandbox["kicks"] == []

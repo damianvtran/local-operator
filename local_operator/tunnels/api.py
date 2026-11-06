@@ -77,11 +77,13 @@ def same_account_successor(
 
     The proof, all of it required:
 
-    * the account: the pinned row's own ``account_id`` when the row is still
-      here, else the cached record's ``owner_account_id`` (``owner_account``,
-      written at the last create/connect/configure). When both exist they must
-      agree; when neither does (a legacy row with no account, a gone row with no
-      cached owner) there is nothing to compare and the answer is ``None``.
+    * the account: the pinned row's own ``account_id`` when it has one, else
+      the cached record's ``owner_account_id`` (``owner_account``, written at
+      the last create/connect/configure) — for a gone pin AND for a
+      pre-identity pin row that never carried an account (agent review round
+      1, m-4): the cached owner is the tunnel's owner itself, which is the
+      fact the re-point has to preserve. When both exist they must agree;
+      when neither does there is nothing to compare and the answer is ``None``.
     * the pin is NOT USABLE: gone, or present with a dead-grant tombstone or a
       disabled cause. A live pin is the operator's choice (two logins to one
       account are a legitimate setup) and is never second-guessed.
@@ -90,8 +92,13 @@ def same_account_successor(
       deliberately does not invent, and the tunnel itself only ever spoke to
       :data:`TUNNEL_HUB`.
     * exactly ONE enabled, non-dead Radient oauth row other than the pin carries
-      that account on :data:`TUNNEL_HUB` (``fresh_id`` narrows it to the row a
-      login just wrote). Two would be a choice this function must not make.
+      that account on :data:`TUNNEL_HUB`. Two would be a choice this function
+      must not make — and that holds on the login path too (agent review round
+      1, m-2): ``fresh_id`` is a MEMBERSHIP check (the one candidate must be
+      the row the login just wrote), never a filter that would let a fresh
+      sign-in win over another live same-account row the status and configure
+      paths would call ambiguous. One rule, so the heal never re-points a
+      store those surfaces would refuse to choose in.
 
     Store reads only — no network — because the credential-write hook calls it
     and that hook is cheap by construction (see ``install.rearm_if_parked``).
@@ -102,7 +109,7 @@ def same_account_successor(
     with closing(AuthStore()) as store:
         row = store.get_credential(pin)
         if row is not None and row.provider == "radient" and row.credential_type == "oauth":
-            account = _account(row.data)
+            account = _account(row.data) or owner
             if account is None or (owner is not None and owner != account):
                 return None
             if row.disabled_cause is None and not store.grant_is_dead(pin):
@@ -118,12 +125,13 @@ def same_account_successor(
             for other in store.list_credentials("radient")
             if other.id != pin
             and other.credential_type == "oauth"
-            and (fresh_id is None or other.id == fresh_id)
             and _account(other.data) == account
             and _hub(other.data.get("api_endpoint")) == TUNNEL_HUB
             and not store.grant_is_dead(other.id)
         ]
-    return candidates[0] if len(candidates) == 1 else None
+    if len(candidates) != 1 or (fresh_id is not None and candidates[0] != fresh_id):
+        return None
+    return candidates[0]
 
 
 def usable_credential_id(selected: object, *, owner_account: object = None) -> int | None:

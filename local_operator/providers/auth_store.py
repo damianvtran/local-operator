@@ -2275,7 +2275,13 @@ class AuthStore:
         self._conn.commit()
         # `verified_login`: this is the one write that PROVES an identity, so it
         # alone may re-point the tunnel at itself (`install.heal_pin_after_login`).
-        written = self._after_credential_write("radient", stored.id, verified_login=True)
+        # ONLY FOR THE DEFAULT STORE (agent review round 1, m-1): the heal and its
+        # proof read the process-default store and `tunnel/config.json` beside it
+        # (`config_dir()`), so `stored.id` names "the row this login just wrote"
+        # only when THIS store is that one. A store opened on another
+        # `db_path` (a scratch or test store) still gets the plain re-arm.
+        verified_here = self._db_path.resolve() == default_db_path().resolve()
+        written = self._after_credential_write("radient", stored.id, verified_login=verified_here)
         self._org_hub_boundary("sign-in")
         return written
 
@@ -2664,7 +2670,11 @@ class AuthStore:
 
         Unconditional and cheap on purpose: `tunnels.install.rearm_if_parked`
         decides whether the write concerns the tunnel at all, and its first
-        guard is the park file, which does not exist in the ordinary case. The
+        guard is the park file, which does not exist in the ordinary case. A
+        VERIFIED login (``verified_login``) costs a little more first: the
+        same-account heal reads `tunnel/config.json` and, when a tunnel is
+        configured with a different pin, opens the store to scan its Radient
+        rows — still no network, and still off the loop (below). The
         import is lazy because `tunnels.install` reaches `launchd`, `paths` and
         the tunnels package, none of which belong on the import path of a
         credential write — and because this module is imported BY that package.

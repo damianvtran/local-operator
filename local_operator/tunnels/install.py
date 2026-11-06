@@ -552,9 +552,10 @@ def heal_pin_after_login(*, provider: str, credential_id: int) -> str:
       unit (`_kick_connector`), since `launchctl` addresses the real session
       whatever ``HOME`` says.
 
-    COMPARE-AND-SWAP on the pin: the configuration is re-read immediately before
-    the write and left alone if anything moved its ``credential_id`` (a
-    concurrent `lop tunnel configure`), so this never overwrites a newer choice.
+    RE-CHECKED IMMEDIATELY BEFORE WRITING: the configuration is re-read just
+    before the save and left alone if anything moved its ``credential_id`` (a
+    concurrent `lop tunnel configure`). That is not under a lock, so a narrow
+    window remains; it is the same window every writer of this file has.
 
     Returns a sentence for the log, or "" when it did nothing. Never raises: the
     caller is a login that has already succeeded.

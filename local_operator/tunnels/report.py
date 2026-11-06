@@ -229,7 +229,14 @@ async def connector_state(value: dict[str, Any], *, reachable: bool = True) -> d
 async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
     """The pinned login's verdict, plus a provable same-account successor when it is dead.
 
-    See :func:`_pinned_login_verdict` for the verdict itself. The successor is
+    See :func:`_pinned_login_verdict` for the verdict itself.
+
+    WHEN THE SAME-ACCOUNT HEAL COULD NOT RUN (the tunnel was stopped at the
+    time, a build before it wrote the login), a dead or missing pin with a
+    provable same-account successor carries ``successor_credential_id``. The
+    STATE is unchanged — it is still the truth about the pinned row — but
+    ``remedy()`` then names the re-point instead of a sign-in that has already
+    happened. The successor is
     added here, outside it, because the verdict may come from the memo (whose
     dict must never be mutated) and because whether a successor exists moves
     with writes the memo's key cannot see — a sign-in writes a DIFFERENT row.
@@ -355,12 +362,8 @@ async def _pinned_login_verdict(value: dict[str, Any]) -> dict[str, Any]:
     legacy-keyed pin with a refused grant, and every sign-in landing on a new
     row beside it).
 
-    WHEN THAT HEAL COULD NOT RUN (the tunnel was stopped at the time, a build
-    before it wrote the login), a dead or missing pin with a provable
-    same-account successor carries ``successor_credential_id``. The STATE is
-    unchanged — it is still the truth about the pinned row — but ``remedy()``
-    then names the re-point instead of a sign-in that has already happened.
-    Read from the store on every call and never memoised, like `owner_missing`.
+    When that heal could not run, :func:`login_verdict` (the wrapper) adds the
+    successor to this verdict; this function never returns it.
     """
     selected = value.get("credential_id")
     dead: dict[str, Any] = {"credential_id": selected, "state": "login_required"}
@@ -463,8 +466,11 @@ def remedy(
     `owner_missing` (the stored row is GONE from this device, below). The park's
     own command there is provably unable to clear anything — a fresh sign-in is a
     new row and nothing re-points the configuration — so the verdict's re-point
-    command stands in. Every other park, including a genuine refused grant
-    (`login_required` with a row still present), keeps its own remedy.
+    command stands in. The same holds for a `login_required` park whose verdict
+    carries ``successor_credential_id``: a newer sign-in to the same account is
+    already here, so the park's sign-in command cannot clear it either. Every
+    other park, including a genuine refused grant with no successor, keeps its
+    own remedy.
 
     A deliberately stopped tunnel has NO remedy even when the credential behind
     it is dead: `stopped` means the operator is not using the tunnel, and
