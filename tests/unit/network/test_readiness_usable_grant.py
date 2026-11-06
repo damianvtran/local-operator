@@ -114,11 +114,42 @@ def test_registration_only_row_with_synced_share_borrows(
         root=root,
     )
 
-    row = _holder_row(root, viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT))
+    row = _holder_row(
+        root, viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT, holds_mcp=True)
+    )
 
     assert row["ok"] is True, row
-    assert "holder borrows the login for linear" in row["detail"]
+    # The verdict names the OWNER's store as the source, not just the placement
+    # document: this viewer holds the login the borrow would be served from.
+    assert "holds a shareable login for linear" in row["detail"]
+    assert row["observed"]["shareable_here"] is True
     assert "sign in again" not in json.dumps(row)
+
+
+def test_owner_share_with_no_login_in_the_store_is_not_a_borrow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-11-06: the placement promised a borrow this device cannot fund.
+
+    The reported defect: ``ready`` said the peer borrows this device's login while
+    the store the share path reads held nothing (a UI re-authentication left the
+    row ``absent``), so the borrow then refused at ``no_local_credential``. The
+    verdict now comes from that store, and the remedy is the exact command.
+    """
+    root = _holder_root(tmp_path, monkeypatch, placed=True)
+    _write_shape(root, "registration-only")
+
+    row = _holder_row(
+        root, viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT, holds_mcp=False)
+    )
+
+    assert row["ok"] is False, row
+    assert row["code"] == readiness.CODE_NO_CREDENTIAL
+    assert "a borrow there would be refused" in row["detail"]
+    assert f"run `/mcp login {URL}` here first" in row["remedies"][0]
+    assert row["observed"]["shareable_here"] is False
+    # The old sentence must be gone: it promised a borrow from a device with no row.
+    assert "borrows the login" not in row["detail"]
 
 
 def test_registration_only_row_with_owner_expiry_names_the_owner(
@@ -151,25 +182,40 @@ def test_registration_only_row_with_owner_expiry_names_the_owner(
 def test_readiness_local_answer_matches_the_runtime(
     shape: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One rule: with a share to borrow, readiness attributes the server to the
-    LOCAL login exactly when the runtime would use it instead of borrowing.
+    """The share row answers the SHARE path's question, not the placement's.
 
-    The share is what makes the question meaningful: without one there is no
-    borrow to choose, and a dead unshared row is a local repair by design (m1,
-    pinned by ``test_dead_local_login_without_a_share_says_sign_in_again_on_the_holder``).
+    ``holds_grant`` is what ``lop network credential share mcp:<url>`` reads to
+    decide it can lend (2026-11-06): a row is shareable whenever a grant was ever
+    issued, including a tombstoned one, so the sentence is "holds a shareable
+    login" exactly then and "nothing to serve from here" otherwise. That is a
+    DIFFERENT question from ``server_has_stored_grant`` (would the runtime prefer
+    the local grant), which is why the two are asserted separately here.
     """
     root = _holder_root(tmp_path, monkeypatch, placed=True)
     _write_shape(root, shape)
     auth = AuthStore(db_path=root / "auth.db", config_dir=root)
     try:
         runtime_uses_local = server_has_stored_grant(URL, auth)
+        shareable_here = McpTokenStorage(URL, auth).holds_grant()
     finally:
         auth.close()
 
-    row = _holder_row(root, viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT))
-    readiness_says_local = "borrows" not in row["detail"]
-
-    assert readiness_says_local is runtime_uses_local, (shape, row)
+    row = _holder_row(
+        root,
+        viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT, holds_mcp=shareable_here),
+    )
+    if runtime_uses_local:
+        # A LOCAL grant the runtime would use answers first, so the row attributes
+        # the server to it — as the peer's own login, or as the local repair when
+        # its diagnostics say the grant is unavailable — and never to the share.
+        assert "holds a shareable login" not in row["detail"], (shape, row)
+        assert "borrows" not in row["detail"], (shape, row)
+    else:
+        shares_here = "holds a shareable login" in row["detail"]
+        assert shares_here is shareable_here, (shape, row)
+        assert row["ok"] is shareable_here, (shape, row)
+        if not shareable_here:
+            assert "no MCP login" in row["detail"], (shape, row)
     diagnostics = readiness.mcp_servers_fact(root)["servers"][0]["auth_diagnostics"]
     assert diagnostics["usable_grant"] is runtime_uses_local
     # The row itself still exists in every shape: ``has_row`` keeps meaning ANY row.
@@ -193,10 +239,13 @@ def test_old_node_without_usable_grant_absent_absent_is_no_row() -> None:
     rows = readiness.mcp_credential_rows(
         HOLDER,
         _facts(mcp={"servers": [server]}),
-        viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT),
+        viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT, holds_mcp=True),
         peer_label="holder",
     )
-    assert rows[0]["ok"] is True and "borrows" in rows[0]["detail"], rows[0]
+    # The borrow branch: an old node's absent/absent shape is no row, so the
+    # verdict falls through to the share this device holds (2026-11-06: and only
+    # says so because the viewer's STORE answers True).
+    assert rows[0]["ok"] is True and "holds a shareable login" in rows[0]["detail"], rows[0]
 
 
 def test_old_node_real_expired_login_is_still_a_local_repair() -> None:
@@ -454,14 +503,33 @@ def test_dead_local_login_without_a_share_says_sign_in_again_on_the_holder(
     assert row["remedies"] == ["sign in again on holder"]
 
 
-def test_dead_local_login_with_a_share_borrows(
+def test_dead_local_login_with_a_share_is_named_as_dead_not_borrowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other half of m1: with a share the runtime borrows, so readiness does."""
+    """2026-11-06: a share of a TOMBSTONED grant is not a working borrow.
+
+    ``holds_grant`` keeps a dead row shareable on purpose, so placement and store
+    both look fine — but every request a holder makes against it comes back telling
+    it to sign in again on this device. The row says that, and its remedy is the
+    same repair sentence the ledger and the share receipt print.
+    """
     root = _holder_root(tmp_path, monkeypatch, placed=True)
     _write_shape(root, "dead")
-    row = _holder_row(root, viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT))
-    assert row["ok"] is True and "borrows" in row["detail"], row
+
+    class _DeadLoginViewer(_FakeViewer):
+        """Shareable (``holds_grant``) but not usable (``server_has_stored_grant``)."""
+
+        def mcp_login_usable(self, url: str) -> bool | None:
+            return False
+
+    row = _holder_row(
+        root,
+        viewer=_DeadLoginViewer(device_id=OWNER, placement=OWNER_PLACEMENT, holds_mcp=True),
+    )
+    assert row["ok"] is False, row
+    assert row["code"] == "local_grant_unavailable"
+    assert "no longer valid" in row["detail"]
+    assert readiness.MCP_DEAD_LOGIN_REMEDY in row["remedies"][0]
 
 
 # ---------------------------------------------------------------------------

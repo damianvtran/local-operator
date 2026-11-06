@@ -718,6 +718,50 @@ def tooling_fact(home: Path | None = None) -> dict[str, Any]:
     }
 
 
+def github_fact(root: Path, home: Path | None = None) -> dict[str, Any]:
+    """Which arm of THIS device's GitHub ladder serves, and what it covers.
+
+    The peer half of the row that has to tell a COPY from a BROKERED GRANT
+    (2026-11-06). ``credentials.github.resolve_source`` is the ladder's own
+    resolver — the same one the lender serves with and the share verb checks — so
+    a peer answering from it cannot disagree with what would actually serve there.
+
+    ``source`` is ``app`` / ``token`` / ``gh`` / ``""`` (no arm) / ``unreadable``,
+    spelled by the module that owns the vocabulary rather than re-spelled here.
+    ``permissions`` and ``repositories`` are sent for the APP arm only: it is the
+    one arm whose coverage is knowable without a network call (the mint's
+    permissions are fixed and narrowed to the designated repositories). A token or
+    a gh login carries its scopes in the credential, which this report never reads,
+    so the viewer is told nothing rather than something flattering.
+
+    NAMES AND SHAPES ONLY, like every other fact in this payload: no token, no key,
+    no path into either. Read-only — ``resolve_source`` reads the encrypted store's
+    METADATA and gh's hosts file; it never constructs a store that does not exist.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    try:
+        source = github_mod.resolve_source(root, home=home)
+    except Exception:  # noqa: BLE001 — a broken ladder read is "not known"
+        return {"source": SOURCE_UNKNOWN}
+    fact: dict[str, Any] = {
+        "source": _safe_text(source, limit=40),
+        # A flag the viewer can branch on without re-deriving the vocabulary:
+        # this device holds an arm that would serve a push by ITSELF.
+        "has_local": source
+        in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH),
+    }
+    if source == github_mod.SOURCE_APP:
+        fact["permissions"] = dict(github_mod.GITHUB_PERMISSIONS)
+        try:
+            fact["repositories"] = [
+                _safe_text(name, limit=200) for name in github_mod.repositories_for(root)
+            ]
+        except Exception:  # noqa: BLE001 — an unreadable list is "not stated"
+            fact["repositories"] = None
+    return fact
+
+
 def _transport_of(raw: Mapping[str, Any]) -> str:
     """The transport the entry spells, with mcp/config.py's own inference.
 
@@ -869,17 +913,17 @@ def mcp_login_remedy(url: str) -> str:
     exactly how one of them starts sending the operator to sign in somewhere other
     than "here".
 
-    THE SENTENCE NAMES THE ACTION, NOT A COMMAND (§2.9's repave): the retired
-    shape instructed its reader to run ``'/mcp login …'`` — a terminal command
-    in a remedy — and this clause is now the product action alone. ``url`` stays
-    in the signature because the three callers name it in the sentence this
-    clause rides. The guides' canonical ``/mcp login`` route stays as
-    documentation (§2.9's own carve-out); the MCP surfaces' own FAILURE copy
-    (the login toasts, the broker's refusals in ``credentials/messages.py``) is
-    a SEPARATE SWEEP owed against §2.9 — that rule names failure and refusal
-    sentences outright, so those sites are debt, never an exemption.
+    THE CLAUSE NAMES THE EXACT COMMAND (2026-11-06). It used to be the bare
+    sentence "sign in here first", which told an operator outside a session WHICH
+    device was short a login but not what to do there: the URL the sentence already
+    carried was not in the action. ``/mcp login <url>`` is a SESSION command — the
+    product action, typed in the composer — not a terminal instruction, so §2.9's
+    rule (no failure/refusal/remedy may name a TERMINAL command) still holds; the
+    MCP toasts already render that same spelling as ``"<owner>: /mcp login <name>"``.
+    ``url`` is therefore in the signature for its original reason and this one: the
+    sentence names it, and so does the command.
     """
-    return "sign in here first"
+    return f"run `/mcp login {url}` here first"
 
 
 def mcp_share_command(url: str, peer_label: str) -> str:
@@ -1476,6 +1520,10 @@ def collect_peer_facts(
         "git": git_identity_fact(home),
         "repository": repository_fact(home, repository=repository),
         "tooling": tooling_fact(home),
+        # ADDITIVE ON THE WIRE (2026-11-06): a viewer built before this key ignores
+        # it, and this build reads its ABSENCE as "which GitHub credential that peer
+        # would push with is not knowable" — never as "it has none".
+        "github": github_fact(root, home),
         "operator": operator_fact(),
         "memory": memory_fact(),
         # ADDITIVE ON THE WIRE: a viewer built before this key ignores it, and a
@@ -2654,7 +2702,189 @@ def _ssh_github_clause(facts: Mapping[str, Any], peer_label: str) -> str:
     )
 
 
-def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+def _github_credential_entry(viewer: Any, name: str) -> Mapping[str, Any]:
+    """The placement entry for one GitHub credential name, or an empty mapping.
+
+    ``secrets`` are tracked by ``secret:<name>`` placement entries, and the
+    viewer's ``secret_placement`` is optional (the initialising viewer substrate
+    does not need it), so it is read defensively and an absent reader yields "no
+    entry known" rather than an exception on a report path.
+    """
+    lookup = getattr(viewer, "secret_placement", None)
+    if not callable(lookup):
+        return {}
+    try:
+        entry = lookup(name)
+    except Exception:  # noqa: BLE001 — a failed lookup is "no entry known"
+        return {}
+    return entry if isinstance(entry, Mapping) else {}
+
+
+def _github_copy_origin(viewer: Any, member: Any, name: str) -> str:
+    """The device a mesh COPY of ``name`` came from, or ``""`` for the peer's own.
+
+    THE DISTINCTION THE ROW EXISTS FOR (2026-11-06). A credential that arrived
+    as a mesh COPY sits in the peer's own store and keeps working after the
+    share is revoked; a brokered grant is minted per request and revoked with
+    it. Only the placement entry can tell them apart, so an absent or unreadable
+    entry answers ``""`` — the peer's own — without inventing a provenance.
+    """
+    entry = _github_credential_entry(viewer, name)
+    owner = str(entry.get("owner_device") or "")
+    device_id = str(getattr(member, "device_id", ""))
+    if not owner or owner == device_id or device_id not in _holder_names(entry):
+        return ""
+    # The name rides the SAME entry the copy came from: ``owner_label`` reads the
+    # github placement (a different document), which does not name the device that
+    # shared a secret.
+    return _safe_text(str(entry.get("owner_device_name") or ""), limit=120) or owner
+
+
+def _github_scope_clause(fact: Mapping[str, Any], peer_label: str) -> str:
+    """What a peer-held GitHub credential covers, or an explicit "not knowable".
+
+    Scopes are only knowable for the App arm, whose permissions are fixed
+    (:data:`credentials.github.GITHUB_PERMISSIONS`) and narrowed to designated
+    repositories. A token or a gh login carries its scopes inside the
+    credential, which no report reads — so the sentence says that instead of
+    implying coverage the operator would have to discover by failing.
+    """
+    if str(fact.get("source") or "") != "app":
+        return (
+            "this report cannot read the scopes that credential carries, so whether "
+            "it covers a push is not knowable from here"
+        )
+    permissions = fact.get("permissions")
+    stated = (
+        ", ".join(f"{name}: {level}" for name, level in sorted(permissions.items()))
+        if isinstance(permissions, Mapping) and permissions
+        else "contents: write, pull_requests: write"
+    )
+    repositories = fact.get("repositories")
+    if isinstance(repositories, list) and repositories:
+        shown = _name_list([str(name) for name in repositories])
+        return f"it mints {stated}, narrowed to {shown}, which is what a push and a PR need"
+    return (
+        f"it mints {stated}, but no repository is designated there, so a mint would "
+        "refuse rather than widen"
+    )
+
+
+def _github_observed(fact: Any) -> dict[str, Any]:
+    """The peer's GitHub ladder answer as a machine field, never as prose.
+
+    ``None`` means "the peer did not say" (an older peer, or one whose secret
+    store could not be read) and is deliberately distinct from the empty string,
+    which is a peer that answered "no arm". A consumer must never read the
+    former as the latter.
+    """
+    if not isinstance(fact, Mapping):
+        return {"source": None}
+    return {"source": fact.get("source")}
+
+
+def _github_push_clause(
+    facts: Mapping[str, Any], *, member: Any, viewer: Any, peer_label: str
+) -> str:
+    """Which GitHub credential a push on ``peer_label`` would actually use.
+
+    The sentence this replaced said push "is brokered when that device has a
+    GitHub credential configured", which is true of two different states with
+    different consequences: the peer's OWN copy (or its own gh login) is not
+    revoked when a share ends and may not carry the scopes the work needs, while
+    a brokered grant is minted per request, narrowed, and revoked with it.
+    Reporting the stronger of the two is the lie this function removes
+    (2026-11-06).
+
+    Every branch that cannot establish the answer SAYS SO — an older peer that
+    sends no ``github`` fact, an unreadable store, an unreadable narrowing list —
+    rather than falling back on "brokered".
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    fact = facts.get("github")
+    if not isinstance(fact, Mapping):
+        return (
+            "whether a push there would use a GitHub credential copied onto that "
+            f"device or one brokered from its owner is not knowable from here: "
+            f"{peer_label}'s build does not report its GitHub source"
+        )
+    source = str(fact.get("source") or "")
+    if source in (github_mod.SOURCE_UNREADABLE, SOURCE_UNKNOWN):
+        return (
+            f"{peer_label}'s GitHub source could not be resolved (its secret store "
+            "could not be read), so which credential a push there would use is not known"
+        )
+    if viewer is None:
+        # A builder driven without a viewer (a unit double, an offline reader) has
+        # not loaded this device's placement documents, so it cannot see a share at
+        # all — and must not read that absence as "nobody shares one".
+        return (
+            "whether a push there would use a GitHub credential copied onto that device "
+            "or one brokered from its owner is not knowable here: this report did not "
+            "read this device's placement documents"
+        )
+    # arm -> (the noun the sentence attaches "X's own" / "a copy of Y's" to, the
+    # SECRET name a mesh copy of it lands under)
+    arms = {
+        github_mod.SOURCE_APP: ("App credential", github_mod.APP_SECRET_NAME),
+        github_mod.SOURCE_TOKEN: ("GITHUB_TOKEN token", github_mod.TOKEN_SECRET_NAME),
+        # gh's login is the device's own by construction: a device-code sign-in on
+        # that machine creates it and no share can, so it has no secret name.
+        github_mod.SOURCE_GH: ("gh CLI login", ""),
+    }
+    device_id = str(getattr(member, "device_id", ""))
+    placement = viewer.placement(provider=github_mod.GITHUB_KEY) if viewer is not None else {}
+    placement = placement if isinstance(placement, Mapping) else {}
+    placement_owner = str(placement.get("owner_device") or "")
+
+    def owner_label(device: str) -> str:
+        return _owner_label(placement, fallback=device) or device
+
+    if source in arms:
+        label, secret_name = arms[source]
+        copied_from = _github_copy_origin(viewer, member, secret_name) if secret_name else ""
+        held = (
+            f"a copy of {copied_from}'s {label}" if copied_from else f"{peer_label}'s own {label}"
+        )
+        covered = _github_scope_clause(fact, peer_label)
+        return (
+            f"a push there uses {held}, not a brokered grant: the mesh does not revoke "
+            f"it when a share ends, and {covered}"
+        )
+    if placement_owner and device_id in _holder_names(placement):
+        if placement_owner == str(getattr(viewer, "device_id", "")):
+            # This device is the owner: its OWN ladder decides what the grant
+            # carries, and an App arm is the one whose coverage is knowable.
+            own_root = getattr(viewer, "root", None)
+            local = github_fact(own_root) if own_root is not None else {}
+            covered = _github_scope_clause(local if isinstance(local, Mapping) else {}, peer_label)
+        else:
+            covered = (
+                f"what that grant covers is decided on {owner_label(placement_owner)}, "
+                "which this report cannot read from here"
+            )
+        return (
+            f"a push there borrows a grant from {owner_label(placement_owner)}: minted "
+            f"for that request and revoked when the grant ends, and {covered}"
+        )
+    if placement_owner:
+        return (
+            "a GitHub credential is shared in this network, but "
+            f"{peer_label} is not among its holders, so a push there would be refused "
+            "until its owner shares it: `lop network credential share github --with "
+            f"{peer_label}` on the device that holds it"
+        )
+    return (
+        f"{peer_label} holds no GitHub credential and no share of one, so a push "
+        "there would be refused: `lop network credential share github --with "
+        f"{peer_label}` from the device that holds a GitHub login, or set one up there"
+    )
+
+
+def git_row(
+    member: Any, facts: Mapping[str, Any], *, peer_label: str, viewer: Any = None
+) -> dict[str, Any]:
     """(c) Will offloaded work that commits have an author?"""
     fact = facts.get("git")
     if not isinstance(fact, Mapping):
@@ -2679,11 +2909,9 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
             capability=CAPABILITY_GIT,
             ok=True,
             detail=(
-                f"{peer_label} commits as {name} <{email}> (push credentials are a "
-                "separate question this report does not cover yet; GitHub push "
-                "through the mesh is brokered when that device has a GitHub "
-                "credential configured — its gh CLI login, a GITHUB_TOKEN-class "
-                "token, or the stronger GitHub App; the network guide has the ladder). "
+                f"{peer_label} commits as {name} <{email}> ("
+                + _github_push_clause(facts, member=member, viewer=viewer, peer_label=peer_label)
+                + "). "
                 # BY DESIGN, SAID WHERE IT IS ASKED (2026-10-28): an operator who
                 # SSHed into a node and found `git push` unauthenticated read it as
                 # a broken credential. The brokered credential is handed to the
@@ -2692,6 +2920,7 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
                 + _ssh_github_clause(facts, peer_label)
             ),
             source=SOURCE_PEER,
+            observed=_github_observed(facts.get("github")),
         )
     missing = " and ".join(
         label for label, value in (("user.name", name), ("user.email", email)) if not value
@@ -3941,17 +4170,88 @@ def _mcp_credential_row(
                 observed={"server": name, "url": url},
             )
         if owner == viewer.device_id:
+            # A SHARE ON THE BOOKS IS NOT A CREDENTIAL IN THE STORE (2026-11-06).
+            # The device the placement names as the owner is the device that must
+            # SERVE the borrow, and the serve path refuses at ``no_local_credential``
+            # when ``credentials.offers.credential_here`` — the read below, the same
+            # store and the same ``holds_grant`` predicate — finds nothing to lend.
+            # Deriving the verdict from the placement alone therefore promised a
+            # borrow this device cannot fund: a re-authentication through the UI has
+            # been observed to leave the row the share path reads in ``absent``, while
+            # the placement still named this device the owner and the peer a holder.
+            served = viewer.holds_mcp_login(url)
+            if served is None:
+                return _capability_row(
+                    device_id=member.device_id,
+                    device_name=peer_label,
+                    capability=CAPABILITY_MCP_CREDENTIAL,
+                    ok=False,
+                    code=CODE_UNKNOWN,
+                    detail=(
+                        f"the share for {name} names this device as {peer_label}'s "
+                        "source, but this device's credential store could not be read, "
+                        "so whether it still holds a login to serve is not known"
+                    ),
+                    remedies=["check the credential store on this device, then re-check"],
+                    source=SOURCE_UNKNOWN,
+                    observed={"server": name, "url": url, "shareable_here": None},
+                )
+            if served is False:
+                return _capability_row(
+                    device_id=member.device_id,
+                    device_name=peer_label,
+                    capability=CAPABILITY_MCP_CREDENTIAL,
+                    ok=False,
+                    code=CODE_NO_CREDENTIAL,
+                    detail=(
+                        f"the share for {name} names this device as {peer_label}'s "
+                        f"source, but this device's store holds no MCP login for {url}: "
+                        "a borrow there would be refused, so nothing can be served "
+                        "until this device signs in"
+                    ),
+                    remedies=[
+                        f"{mcp_login_remedy(url)} — the share already stands, and the "
+                        "borrow serves it once this device holds the login"
+                    ],
+                    source=SOURCE_LOCAL,
+                    observed={"server": name, "url": url, "shareable_here": False},
+                )
+            usable_lookup = getattr(viewer, "mcp_login_usable", None)
+            if callable(usable_lookup) and usable_lookup(url) is False:
+                # Shareable and served, but tombstoned: ``holds_grant`` keeps it on
+                # the share path deliberately, and a borrower's own request comes
+                # back with the repair sentence. Say that here rather than a green
+                # row over a grant that is already dead.
+                return _capability_row(
+                    device_id=member.device_id,
+                    device_name=peer_label,
+                    capability=CAPABILITY_MCP_CREDENTIAL,
+                    ok=False,
+                    code="local_grant_unavailable",
+                    detail=(
+                        f"this device's login for {name} is the source {peer_label} "
+                        "borrows, but it is no longer valid: every borrow would tell "
+                        f"{peer_label} to sign in again here"
+                    ),
+                    remedies=[
+                        f"{MCP_DEAD_LOGIN_REMEDY}; the share stays in place, so the "
+                        "borrow works again once this device does"
+                    ],
+                    source=SOURCE_LOCAL,
+                    observed={"server": name, "url": url, "shareable_here": True},
+                )
             return _capability_row(
                 device_id=member.device_id,
                 device_name=peer_label,
                 capability=CAPABILITY_MCP_CREDENTIAL,
                 ok=True,
                 detail=(
-                    f"{peer_label} borrows the login for {name} from this device (a grant "
-                    "is issued per request; nothing to copy)"
+                    f"this device holds a shareable login for {name} and shares it "
+                    f"with {peer_label}: a grant is issued per request, so nothing is "
+                    "copied and the borrow revokes with it"
                 ),
-                source=SOURCE_PEER,
-                observed={"server": name, "url": url},
+                source=SOURCE_LOCAL,
+                observed={"server": name, "url": url, "shareable_here": True},
             )
         return _capability_row(
             device_id=member.device_id,
@@ -5047,7 +5347,7 @@ def _peer_checks(
         return rows
     rows[restart_index] = peer_restart_row(member, facts, record=record, peer_label=peer_label)
     rows.append(operator_row(member, facts, peer_label=peer_label))
-    rows.append(git_row(member, facts, peer_label=peer_label))
+    rows.append(git_row(member, facts, peer_label=peer_label, viewer=viewer))
     rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))

@@ -212,14 +212,12 @@ def test_git_row_says_what_commits_will_do() -> None:
     )
     assert ok_row["ok"] is True
     assert "commits as Damian Tran <damian@gominerva.com>" in ok_row["detail"]
-    assert "push credentials are a separate question" in ok_row["detail"]
-    # The github clause (source ladder, S2): push is brokered when that device has
-    # ANY ladder arm configured — gh login, GITHUB_TOKEN-class secret, or the
-    # stronger App — never "implemented" and never "blocked".
-    assert (
-        "GitHub push through the mesh is brokered when that device has a GitHub "
-        "credential configured"
-    ) in ok_row["detail"]
+    # THE PUSH CREDENTIAL IS NAMED, NOT ASSUMED (2026-11-06). This peer sends no
+    # ``github`` fact, so the row must say it CANNOT tell a copy from a brokered
+    # grant — the old sentence read "brokered" in exactly this state.
+    assert "GitHub push through the mesh is brokered" not in ok_row["detail"]
+    assert "whether a push there would use a GitHub credential copied onto" in ok_row["detail"]
+    assert "build does not report its GitHub source" in ok_row["detail"]
 
     bad_row = readiness.git_row(
         _member(), _facts(git={"user_name": "", "user_email": "someone@e.test"}), peer_label="box"
@@ -830,6 +828,16 @@ _CREDENTIAL_TRUTH_TABLE = {
 }
 
 
+#: Cells where the MCP row's verdict DIFFERS from the model credential's, and why:
+#: an MCP share is served from THIS device's store, so "this device owns the login"
+#: with nothing in that store is not a borrow (2026-11-06). The model row keeps its
+#: answer: a provider login the peer borrows is resolved by this device's provider
+#: path, which the MCP row's ``holds_grant`` question does not model.
+_MCP_CREDENTIAL_TRUTH_OVERRIDES: dict[tuple[str, str], tuple[bool, str]] = {
+    ("viewer", "absent"): (False, readiness.CODE_NO_CREDENTIAL),
+}
+
+
 def _truth_fixture(
     root: Path, placement_shape: str, store_state: str, *, observation: bool = False
 ) -> Any:
@@ -939,8 +947,13 @@ def test_credential_verdict_truth_table(
             readiness.mcp_credential_rows(member, facts, viewer=viewer, peer_label="holder")[0],
         )
         for row in rows:
-            assert row["ok"] is ok, (placement_shape, store_state, row)
-            assert row.get("code", "") == code, (placement_shape, store_state, row)
+            expected_ok, expected_code = (ok, code)
+            if row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL:
+                expected_ok, expected_code = _MCP_CREDENTIAL_TRUTH_OVERRIDES.get(
+                    (placement_shape, store_state), (ok, code)
+                )
+            assert row["ok"] is expected_ok, (placement_shape, store_state, row)
+            assert row.get("code", "") == expected_code, (placement_shape, store_state, row)
             rendered = readiness.render_check_lines([row])
             assert row["detail"] in rendered[0]
             assert len(rendered) == 1 + (0 if row["ok"] else len(row["remedies"]))
@@ -1210,7 +1223,7 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
                 "holders": [{"device": PEER, "scope": "session"}],
             },
         },
-        holds_urls={"https://e.example/mcp"},
+        holds_urls={"https://b.example/mcp", "https://e.example/mcp"},
     )
     rows = readiness.mcp_credential_rows(
         _member(),
@@ -1223,6 +1236,9 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
     assert "stdio-one" not in by_server, "stdio servers are listed, not credential-checked"
     assert by_server["mine"]["ok"] is True
     assert by_server["borrowed"]["ok"] is True and "borrow" in by_server["borrowed"]["detail"]
+    # The promise is now made from the STORE as well as the books: this viewer
+    # holds b.example's login, which is what a borrow there would be served from.
+    assert "holds a shareable login" in by_server["borrowed"]["detail"]
     assert (
         by_server["shared-to-me"]["ok"] is True
         and "not verified from here" in by_server["shared-to-me"]["detail"]
@@ -1252,10 +1268,74 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         by_server["unreadable"]["ok"] is False
         and by_server["unreadable"]["code"] == readiness.CODE_UNKNOWN
     )
-    assert "sign in here first" in by_server["declared"]["detail"]
+    assert "run `/mcp login https://g.example/mcp` here first" in by_server["declared"]["detail"]
     assert by_server["soft"]["detail"].startswith("if the `soft` server needs a sign-in")
     for row in by_server.values():
         assert row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL
+
+
+def test_mcp_row_never_promises_a_borrow_this_device_cannot_fund() -> None:
+    """A share on the books is not a credential in the store (2026-11-06)."""
+    url = "https://notion.example/mcp"
+    servers = {
+        "servers": [
+            {
+                "name": "notion",
+                "url": url,
+                "transport": "http",
+                "auth_declared": True,
+                "has_row": False,
+                "has_placement": True,
+            }
+        ],
+        "withheld": [],
+        "config_path": "/r/mcp.json",
+    }
+    placement = {
+        url: {
+            "owner_device": VIEWER,
+            "owner_device_name": "damian-mac",
+            "holders": [{"device": PEER, "scope": "session"}],
+        }
+    }
+
+    class _PlacedViewer(_FakeViewer):
+        """This device's store answer, with the placement the peer's share wrote."""
+
+        def __init__(self, holds: bool | None) -> None:
+            super().__init__(holds_mcp=holds)
+
+        def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
+            return dict(placement.get(mcp_url, {}))
+
+    def one(holds: bool | None) -> dict[str, Any]:
+        rows = readiness.mcp_credential_rows(
+            _member(),
+            _facts(mcp=servers),
+            viewer=_PlacedViewer(holds),
+            peer_label="cloud-node-1",
+            viewer_label="damian-mac",
+        )
+        assert len(rows) == 1
+        return rows[0]
+
+    empty = one(False)
+    assert empty["ok"] is False, empty
+    assert empty["code"] == readiness.CODE_NO_CREDENTIAL
+    assert "a borrow there would be refused" in empty["detail"]
+    assert f"run `/mcp login {url}` here first" in empty["remedies"][0]
+    assert empty["observed"]["shareable_here"] is False
+    assert empty["source"] == readiness.SOURCE_LOCAL
+
+    unreadable = one(None)
+    assert unreadable["ok"] is False, unreadable
+    assert unreadable["code"] == readiness.CODE_UNKNOWN
+    assert unreadable["observed"]["shareable_here"] is None
+
+    served = one(True)
+    assert served["ok"] is True, served
+    assert "holds a shareable login" in served["detail"]
+    assert served["observed"]["shareable_here"] is True
 
 
 def test_mcp_owner_expiry_names_the_owner_in_the_row_and_remedy(
@@ -1577,7 +1657,9 @@ def test_an_http_oauth_server_keeps_the_login_copy_even_with_literals() -> None:
     )
 
     assert len(rows) == 1
-    assert "sign in here first" in rows[0]["detail"]
+    # The sign-in clause now names the exact command (2026-11-06) — the URL was
+    # already in the sentence and belongs in the action.
+    assert "run `/mcp login https://dd.test/mcp` here first" in rows[0]["detail"]
     assert "--adopt" not in " ".join(rows[0]["remedies"])
 
 

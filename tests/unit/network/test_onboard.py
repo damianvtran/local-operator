@@ -794,7 +794,8 @@ def _mcp_login_check(*, ok: bool = False) -> dict[str, Any]:
         "device_name": "cloud-node-1",
         "ok": ok,
         "detail": (
-            "this device has no MCP login for https://mcp.slack.com/mcp; sign in here first"
+            "this device has no MCP login for https://mcp.slack.com/mcp; "
+            "run `/mcp login https://mcp.slack.com/mcp` here first"
             if not ok
             else "cloud-node-1 borrows the login for slack from this device (a grant is "
             "issued per request; nothing to copy)"
