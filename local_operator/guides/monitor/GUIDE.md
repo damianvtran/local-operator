@@ -99,6 +99,71 @@ reach you when they land (60 s is the sensible default), and reply only when
 someone messaged or tagged you or the delta genuinely needs attention. Being
 woken with nothing to do is a fine outcome — it is why monitors are quiet.
 
+## Watching a Slack channel or thread
+
+An MCP read tool returns its result as a JSON envelope holding a text log
+(`{"messages": "…"}`). The monitor splits that log into **one line per
+record** before comparing, so a channel read diffs per message, not per
+envelope:
+
+```
+monitor({op:"create", name:"product-feedback-watch",
+         tool:"mcp__slack_read_channel",
+         arguments:{"channel_id":"C06TXN4AD9R", "limit":25},
+         every:"5m",
+         description:"new messages and thread replies in #product-feedback — "
+                     "each new record is a feedback item to triage and report"})
+```
+
+- **`limit` must fit the stored baseline.** The snapshot holds 32,768
+  characters and a rich record (author, id, body, links) runs 800–1,600, so
+  25 is a safe ceiling and 15–20 is comfortable. Past that the stored baseline
+  is a clipped prefix and every tick depends on the spilled full body; if that
+  is evicted the watch goes `blind` and reports nothing.
+- **A new message is a record line**: added at the top when the window is not
+  full (`+1/-0`), or added while the oldest drops out (`+1/-1`) once it is —
+  the steady state for a busy channel is the second. Either way the added line
+  IS the message: author, a readable clock (`at 2026/11/05 22:37 EST`) and the
+  message id (`1793908014.147179`), so `mcp__slack_read_thread` can be called
+  straight from the wake.
+- **A record RESULT does not go through the materiality gate.** The decision
+  is the shape of the result, not the source: while a tool returns records, its
+  delta is judged structurally instead of by a model. That gate separates signal
+  from bookkeeping in opaque text, and the record view has already done it —
+  one line per record, the reply's paging fields dropped, header clocks readable
+  and body timestamps scrubbed. On real traffic the gate still called 5
+  of 6 genuine changes `non-material-metadata` and swallowed a thread reply
+  outright, so a record log's delta is delivered unjudged by design. The noise
+  controls that remain are `ignore`, `limit` and the hourly delivery cap.
+  A source that CHANGES shape (a plain-text watch that starts answering in
+  records) re-delivers its whole payload once, because the comparison basis
+  moved — then it behaves as a record watch.
+- **Thread replies** surface on the parent message's record line as its
+  `Thread: N replies (latest: …)` field changing — a CHANGED line, not an
+  added one, which is exactly why a thread watch must not be gate-judged. Read
+  the parent's id from that line and follow up with `mcp__slack_read_thread`.
+- **Do not `ignore` your own user id.** A reply to your message rides YOUR
+  parent record, so that pattern silences the replies the watch exists for
+  (and on a channel where you post, it can silence the channel). `ignore` a
+  bot author that never receives replies instead — on a Gong-fed channel the
+  bot is most of the volume.
+- **A multi-paragraph message is still one record.** Its body stays on the
+  line that carries the author and the id; a blank line inside a message does
+  not split it, so `ignore` and the delta both see one record.
+- **Ownership**: this watch only ticks while its session is hosted. A cold
+  session's watch is dormant — `lop monitor status` marks the row `idle` — so
+  a channel watch belongs to a session that stays open. Record where it lives
+  when you arm it.
+- **A watch armed before the record split** keeps working: its stored
+  baseline is re-read in the new shape, so a message that landed during the
+  upgrade is still delivered. The exception is a baseline the old cap had
+  clipped — that one is re-captured on the first tick (no delivery), then
+  normal service.
+- **A quiet watch is not a working one**: the row reads `N changes
+  suppressed as non-material (M checks, 0 deliveries)` when the gate filed a
+  change as bookkeeping. Check that before concluding a channel had nothing to
+  say.
+
 ## What counts as material, and tuning noise
 
 Every tick that finds a difference delivers a delta — but two knobs and one
@@ -120,7 +185,9 @@ default keep "difference" honest:
   `description` leaves the gate guessing, and it will call a counter tick or a
   status line "bookkeeping" and suppress it. **Appended content is never
   gated**: a delta that only adds lines (a log tail, a new row) is delivered
-  as-is. Suppressions are counted (`suppressed.*` in the monitor's state file)
+  as-is, and **a record log is never gated at all** — one line per record has
+  already done the separation the gate is asked to make (see the channel
+  recipe above). Suppressions are counted (`suppressed.*` in the monitor's state file)
   and logged at INFO, and the listing says so: a row with checks, no deliveries
   and suppressions reads `N changes suppressed as non-material (M checks, 0
   deliveries) — the call may have changed without telling you`, not `nothing
@@ -134,7 +201,9 @@ default keep "difference" honest:
   metadata — the 2026-10-20 Slack monitor lost seven replies that way. A long
   changed line now shows a window around the first differing character, and if
   a preview still hides the difference the gate is skipped and the change is
-  delivered (fail open, by design).
+  delivered (fail open, by design). An ADDED line is not clipped at 200
+  characters at all: it gets whatever the delivery budget has left, because for
+  a record log the added line is the news itself.
 - **Long results are compared in full — up to a bound.** A result over the
   tool-output limit is spilled to disk and the model sees a head+tail
   projection; the monitor reads the FULL stored body back for its comparison,

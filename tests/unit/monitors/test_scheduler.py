@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
+import re
 from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
 
+from local_operator.monitors import diff as monitor_diff
 from local_operator.monitors import state as monitor_state
 from local_operator.monitors.scheduler import CheckOutcome, MonitorScheduler
 from local_operator.monitors.settings import MonitorSettings
@@ -1465,3 +1468,231 @@ async def test_the_diff_bound_also_covers_the_no_hash_recovery_path(tmp_path: An
         assert elapsed < 5.0, f"the matcher ran unbounded: {elapsed:.2f}s"
     finally:
         harness.scheduler.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The upgrade that changes the comparison basis (the normalizer tag)
+# ---------------------------------------------------------------------------
+
+_LEGACY_CHANNEL = "Channel: #product-feedback (C06TXN4AD9R)"
+
+
+def _envelope(*records: str) -> str:
+    """An MCP-shaped result: the record log in ONE JSON-escaped string."""
+    return json.dumps({"messages": "\n\n".join([_LEGACY_CHANNEL, *records]) + "\n"})
+
+
+def _record(body: str, *, user: str = "U058BN13Q0Y", ts: str = "1762400000.000100") -> str:
+    return (
+        f"=== Message from Gong Support Bot ({user}) at 2026-11-05T20:10:00Z ==="
+        f"\nMessage TS: {ts}\n{body}"
+    )
+
+
+#: The scrub regexes verbatim from ``origin/main:local_operator/monitors/diff.py``
+#: (the released pre-record-view pipeline), so a legacy fixture is what that
+#: build actually stored — masked ``<ts>`` and all. Reusing TODAY's scrubbers to
+#: build it hides exactly the mismatch that produced the round-2 upgrade bug
+#: (R2-MIN-A / R2-MAJ-A).
+_PRE_PR_ISO_TS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+_PRE_PR_EPOCH_MS_RE = re.compile(r"\b\d{13}\b")
+_PRE_PR_EPOCH_S_RE = re.compile(r"\b\d{10}\b")
+
+
+def _pre_pr_normalize(text: str) -> str:
+    """What the pre-record-view pipeline stored for ``text`` (R2-MIN-C)."""
+
+    def scrub(line: str) -> str:
+        line = _PRE_PR_ISO_TS_RE.sub("<ts>", line)
+        line = _PRE_PR_EPOCH_MS_RE.sub("<ts>", line)
+        return _PRE_PR_EPOCH_S_RE.sub("<ts>", line)
+
+    lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(scrub(line) for line in lines)
+
+
+def _simulate_legacy_store(harness: Harness, legacy_text: str, *, truncated: bool = False) -> None:
+    """Rewrite the monitor's state as a pre-record-view store left it.
+
+    That store held an envelope as ONE escaped line and hashed it that way, and
+    its blob carried no ``normalizer`` tag at all — so the next tick compares
+    today's record lines against a basis that no longer exists.
+    """
+    monitor_state.snapshot_path(harness.config_dir, "sess", "m1").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "monitor_id": "m1",
+                "snapshot": legacy_text,
+                "snapshot_truncated": truncated,
+            }
+        ),
+        encoding="utf-8",
+    )
+    counters = monitor_state.read_counters(harness.config_dir, "sess", "m1")
+    assert counters is not None
+    counters["content_hash"] = monitor_diff.content_hash(legacy_text)
+    counters["last_handle"] = ""  # the old store kept no spill body for a small result
+    monitor_state.write_counters(harness.config_dir, "sess", "m1", counters)
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_from_an_earlier_normalizer_still_delivers_the_change(
+    harness: Harness,
+) -> None:
+    """A change of comparison basis must not swallow a change (review MIN-3).
+
+    The legacy blob is the OLD pipeline's text of the same content, so today's
+    pipeline can restate it: the tick diffs the restatement against the new
+    result and the message that landed during the upgrade is delivered. A
+    silent re-capture here would drop exactly the delta this PR exists to
+    deliver.
+    """
+    first = _record("first")
+    second = _record("new", user="U2", ts="1762400200.000200")
+    harness.scheduler.load([spec()])
+    harness.results.append({"text": _envelope(first), "error": None})
+    await harness.pump_ripen()
+    _simulate_legacy_store(harness, _pre_pr_normalize(_envelope(first)))
+
+    harness.results.append({"text": _envelope(second, first), "error": None})
+    await harness.pump_ripen()
+
+    assert len(harness.deliveries) == 1, "the upgrade swallowed a real change"
+    delta = harness.deliveries[0].delta_text
+    assert "new" in delta
+    counters = harness.counters()
+    assert counters["last_note"] != "baseline re-established (record-view)"
+    # The committed baseline is today's pipeline's text, so the NEXT tick diffs
+    # against a comparable basis.
+    assert counters["content_hash"] == monitor_diff.content_hash(
+        monitor_diff.normalize(_envelope(second, first))
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_legacy_snapshot_re_establishes_silently(
+    tmp_path: Any,
+) -> None:
+    """The one upgrade case that reports nothing (NIT-4, stated in the guide).
+
+    A clipped legacy blob has no comparable old side and no full body to
+    restate, so the baseline is re-captured rather than guessed at.
+    """
+    settings = dataclasses.replace(MonitorSettings(), snapshot_max_chars=120)
+    harness = Harness(tmp_path, settings=settings)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": _envelope(_record("first")), "error": None})
+        await harness.pump_ripen()
+        legacy = _pre_pr_normalize(_envelope(_record("first")))
+        assert len(legacy) > 120
+        _simulate_legacy_store(harness, legacy[:120], truncated=True)
+
+        second = _record("second", ts="1762400200.0")
+        harness.results.append({"text": _envelope(second, _record("first")), "error": None})
+        await harness.pump_ripen()
+
+        assert harness.deliveries == []
+        assert harness.counters()["last_note"] == "baseline re-established (record-view)"
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_snapshot_whose_text_restates_identically_still_delivers(
+    harness: Harness,
+) -> None:
+    """A plain-text baseline is the same text under both pipelines.
+
+    Re-baselining THAT would swallow a real change to fix a problem it does not
+    have: the tag is stale, the basis is not. The append delivers as usual.
+    """
+    harness.scheduler.load([spec()])
+    harness.results.append({"text": "A", "error": None})
+    await harness.pump_ripen()
+    _simulate_legacy_store(harness, _pre_pr_normalize("A"))
+
+    harness.results.append({"text": "A\nB", "error": None})
+    await harness.pump_ripen()
+
+    assert len(harness.deliveries) == 1
+    assert "+ B" in harness.deliveries[0].delta_text
+    assert harness.counters()["last_note"] != "baseline re-established (record-view)"
+
+
+@pytest.mark.asyncio
+async def test_a_blob_written_by_this_normalizer_diffs_normally(harness: Harness) -> None:
+    """The tag only separates bases; the current one keeps ordinary diffing."""
+    harness.scheduler.load([spec()])
+    harness.results.extend([{"text": "A", "error": None}, {"text": "A\nB", "error": None}])
+    await harness.pump_ripen()
+    blob = monitor_state.read_snapshot(harness.config_dir, "sess", "m1")
+    assert blob is not None
+    assert monitor_state.snapshot_normalizer(blob) == monitor_state.NORMALIZER_TAG
+    await harness.pump_ripen()
+    assert len(harness.deliveries) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_snapshot_with_unchanged_content_delivers_nothing(
+    harness: Harness,
+) -> None:
+    """The upgrade tick must not report the RESHAPING as a change (R2-MAJ-A).
+
+    A stored baseline written before the record view is already masked (``at
+    <ts> EST``, ``Message TS: <ts>.147170``) and no restatement unmasks it, so
+    diffing it against today's unmasked rendering reported every record as
+    changed — measured as a ``+2/-2`` phantom delta on an unchanged source, and
+    ``+25/-25`` on a 20-record window. The basis-change tick compares in the
+    legacy mask space instead, so an unchanged source is a quiet tick.
+    """
+    first = _record("first", ts="1793908014.147179")
+    second = _record("second", user="U2", ts="1793908100.000200")
+    content = _envelope(first, second)
+    harness.scheduler.load([spec()])
+    harness.results.append({"text": content, "error": None})
+    await harness.pump_ripen()
+    _simulate_legacy_store(harness, _pre_pr_normalize(content))
+
+    harness.results.append({"text": content, "error": None})
+    await harness.pump_ripen()
+
+    assert harness.deliveries == [], "the upgrade tick re-rendered the baseline as a change"
+    counters = harness.counters()
+    assert counters["content_hash"] == monitor_diff.content_hash(monitor_diff.normalize(content))
+    assert counters["last_note"] != "baseline re-established (record-view)"
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_snapshot_delivers_a_real_change_and_nothing_else(
+    harness: Harness,
+) -> None:
+    """In the mask space only the new record moves (R2-MAJ-A, second half)."""
+    first = _record("first", ts="1793908014.147179")
+    second = _record("second", user="U2", ts="1793908100.000200")
+    third = _record("third", user="U3", ts="1793908200.000300")
+    harness.scheduler.load([spec()])
+    harness.results.append({"text": _envelope(first, second), "error": None})
+    await harness.pump_ripen()
+    _simulate_legacy_store(harness, _pre_pr_normalize(_envelope(first, second)))
+
+    harness.results.append({"text": _envelope(third, first, second), "error": None})
+    await harness.pump_ripen()
+
+    assert len(harness.deliveries) == 1
+    delta = harness.deliveries[0].delta_text
+    lines = delta.split("\n")
+    assert lines[0] == "+1/-0 changed lines", delta
+    assert len(lines) == 2, f"re-rendered records leaked into the delta: {delta}"
+    assert "third" in lines[1]
+    # The comparison runs in the legacy mask space; the COMMITTED baseline is
+    # today's unmasked rendering, so the next tick is normal again.
+    counters = harness.counters()
+    assert counters["content_hash"] == monitor_diff.content_hash(
+        monitor_diff.normalize(_envelope(third, first, second))
+    )

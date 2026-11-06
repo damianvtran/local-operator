@@ -3,6 +3,11 @@
 Pure functions. The scheduler owns the file state; this module owns the
 comparison semantics:
 
+- :func:`unpack_records` — the record split that runs BEFORE everything
+  else: a JSON envelope whose string field is a RECORD LOG
+  (``{"name": "…"}`` / ``{"results": "…"}``) becomes one line per record.
+  A monitor watches RECORDS, not an envelope, and :func:`is_record_log`
+  says whether a result took that path.
 - :func:`normalize` — line endings, trailing whitespace per line, optional
   timestamp scrubbing, per-monitor ignore regexes, optional line-multiset
   ordering. The result is the ONLY thing hashed or stored, so equality is
@@ -25,6 +30,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 
@@ -47,12 +53,324 @@ _ISO_TS_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?"
 )
 _EPOCH_MS_RE = re.compile(r"\b\d{13}\b")
-_EPOCH_S_RE = re.compile(r"\b\d{10}\b")
+#: ``\d{10}`` NOT followed by a dotted six-digit fraction. A dotted pair
+#: (``1793908014.147179``) is a Slack message id, i.e. an IDENTIFIER, not a clock
+#: reading: scrubbing it destroyed the one field that lets a reader call
+#: ``mcp__slack_read_thread`` straight from the wake, which is why it is exempt
+#: here (design D1). Every bare 10-digit epoch is still scrubbed.
+_EPOCH_S_RE = re.compile(r"\b\d{10}\b(?!\.\d{6})")
 
 _EPOCH_S_FLOOR = 1_000_000_000  # 2001-09-09
 _EPOCH_S_CEIL = 4_102_444_800  # 2100-01-01
 _EPOCH_MS_FLOOR = 1_000_000_000_000
 _EPOCH_MS_CEIL = 4_102_444_800_000
+
+
+#: Blank lines separate the BLOCKS of an envelope's payload. Whether a block
+#: starts a new record is decided by the repeated record lead, not by the blank
+#: line itself — a message body may contain blank lines (see ``_record_lines``).
+_ENVELOPE_BLOCK_SPLIT = re.compile(r"\n[ \t]*\n+")
+
+#: What joins a record's own fields (and a continuation block) back up, so one
+#: record stays ONE comparable line.
+_RECORD_FIELD_SEPARATOR = " · "
+
+#: A payload must contain a blank line before it is treated as a record log at
+#: all. Two newlines in a row is that blank line; a single-newline string field
+#: is prose (a pagination sentence) and stays a ``key: value`` line.
+_RECORD_LOG_MARKER = "\n\n"
+
+#: Envelope fields that are PAGE STATE, never content. A cursor changes whenever
+#: the page window moves, so comparing it makes every tick a change (measured:
+#: it churned a line on every message in the 2026-11-05 QA run). Dropped from
+#: the compared text entirely rather than rendered and then ignored.
+_ENVELOPE_BOOKKEEPING_KEYS = frozenset(
+    {
+        "pagination_info",
+        "pagination",
+        "next_cursor",
+        "cursor",
+        "next_page",
+        "has_more",
+        "has_next",
+    }
+)
+
+#: A record's OWN clock, as a source renders it (``2026-11-05 14:46:54 EST`` or
+#: ``2026-11-05T14:46:54Z``). Rewritten to ``2026/11/05 …`` inside a record line
+#: before timestamp scrubbing runs, because for a record log the clock is
+#: CONTENT: "when was this said" is the first thing a reader of a wake needs,
+#: and the operator's own report was a timing report ("Victor replied at 20:17").
+#: The slash form is deliberately outside ``_ISO_TS_RE``, so the global churn
+#: rule keeps applying to every other timestamp in every other source.
+_RECORD_CLOCK_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})([T ])(?=\d{2}:\d{2})")
+
+
+def is_record_log(text: str) -> bool:
+    """Whether THIS RESULT is a JSON envelope holding a record log.
+
+    The trigger is the shape of the result — the same one
+    :func:`unpack_records` uses — not the provenance of the source: a result
+    counts while it parses as an object with a blank-line-separated payload, and
+    a source that stops returning that shape stops counting on the next tick.
+    The decision is what tells the scheduler to judge the delta structurally
+    instead of by the materiality gate (see :func:`unpack_records`).
+
+    Consequence, stated where it bites: a plain-text source that STARTS
+    returning a record shape changes comparison basis mid-stream, so its next
+    tick skips the gate and delivers the whole payload once rather than a delta.
+    """
+    return _record_log_envelope(text) is not None
+
+
+def unpack_records(text: str) -> str:
+    """One line per record when ``text`` is a JSON envelope over a record log.
+
+    The shape this exists for: an MCP read tool returns its result as
+    ``{"messages": "<a whole channel log in ONE string>"}`` (or
+    ``{"results": …}``, ``{"thread": …}``), where the payload string carries
+    real newlines once decoded. Read literally the envelope is ONE line of
+    escaped JSON, so a new message can only ever REPLACE it: the delta the
+    materiality gate then sees is a window of escaped bookkeeping
+    (``Message TS: …``, a cursor) instead of the message, and the gate answers
+    ``non-material-metadata``. Measured 2026-11-05 on a
+    ``mcp__slack_read_channel`` watch: two real messages delivered nothing,
+    ``suppressed.non_material_metadata: 2``. The same single line hid thread
+    replies (a ``Thread: N replies (latest: …)`` field buried inside it) and
+    made the watcher's own posts impossible to ``ignore``.
+
+    A monitor watches RECORDS, not an envelope, so one line per record is the
+    unit everything downstream already assumes: a new message becomes an
+    ADDED line, ``ignore`` drops a record line whole, and a thread's reply
+    count changing is a changed line that reads as news instead of as part of
+    one long escaped line.
+
+    Trigger: the WHOLE text parses as a JSON object AND at least one value is
+    a ``str`` holding a BLANK LINE (two newlines) — i.e. the envelope was
+    JSON-escaped around a multi-line log. Everything else is returned byte for
+    byte unchanged: plain text, a compact JSON document whose strings are
+    single-line (``{"messages": [{…}]}`` is a list of objects), an array, a
+    prose field such as ``pagination_info``, and a TRUNCATED result that no
+    longer parses. It never raises: a tick may not fail because a source
+    produced something odd, and the fallback is exactly the previous
+    behaviour.
+
+    Deterministic and idempotent: the envelope's own key order is honoured
+    (nested containers are dumped with sorted keys; a TOP-LEVEL key reorder
+    does reorder the lines, which is why the key order is read from the source
+    and never re-sorted), and the unpacked text no longer parses as JSON, so
+    re-normalizing it — which the scheduler's baseline reproduction does — is
+    a no-op rather than a second, different transform.
+    """
+    envelope = _record_log_envelope(text)
+    if envelope is None:
+        return text
+    lines: list[str] = []
+    for key, value in envelope.items():
+        if key in _ENVELOPE_BOOKKEEPING_KEYS:
+            continue
+        if isinstance(value, str) and _is_record_payload(value):
+            lines.extend(_record_lines(value))
+        else:
+            lines.append(f"{key}: {_envelope_scalar(value)}")
+    return "\n".join(lines)
+
+
+def _record_log_envelope(text: str) -> dict[str, object] | None:
+    """``text`` parsed as an envelope over a record log, or ``None``."""
+    candidate = text.strip()
+    # Cheap reject before the parse: only an object can be this envelope, and
+    # most tool results are not JSON at all.
+    if not candidate.startswith("{"):
+        return None
+    try:
+        data = json.loads(candidate)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not any(_is_record_payload(value) for value in data.values()):
+        return None
+    return data
+
+
+def _is_record_payload(value: object) -> bool:
+    """A payload string holding blank-line-separated records."""
+    return isinstance(value, str) and _RECORD_LOG_MARKER in value
+
+
+def _record_lines(payload: str) -> list[str]:
+    """One line per record, a multi-block body joined into its own record.
+
+    The record boundary is the REPEATED LEAD, not the blank line: Slack renders
+    each message as ``=== Message from … ===`` / ``Message TS: …`` / body, and a
+    body with a paragraph break is still one message. Splitting on every blank
+    line fragmented a real message into a header plus four unattributed
+    fragments (measured: ``+2/-7`` where the record was one new message), which
+    also defeated ``ignore`` — the fragment carrying the author id was dropped
+    and the prose survived.
+
+    So the blocks are classified: a block whose first token repeats across at
+    least two blocks is a record lead; every block starting with it opens a new
+    record, and every other block continues the record it follows (joined with
+    the field separator, so the author, the id and the time stay on ONE line).
+    Blocks before the first record (a channel header) stay lines of their own.
+    With no repeated lead the payload is not structured this way and keeps the
+    plain block-per-line behaviour.
+    """
+    blocks = _payload_blocks(payload)
+    lead = _record_lead(blocks)
+
+    def starts_record(block: list[str]) -> bool:
+        if lead is not None:
+            return _block_lead(block) == lead
+        # No repeated lead: a ONE-record payload still has a record header, and
+        # the fallback below is for payloads with no record structure at all, not
+        # for a single-record log whose body happens to have blank lines.
+        return _is_record_header_block(block)
+
+    if not any(starts_record(block) for block in blocks):
+        return [_RECORD_FIELD_SEPARATOR.join(_record_fields(block)) for block in blocks]
+    lines: list[str] = []
+    current: list[str] | None = None
+    for block in blocks:
+        if starts_record(block):
+            if current is not None:
+                lines.append(_RECORD_FIELD_SEPARATOR.join(current))
+            current = _record_fields(block)
+        elif current is not None:
+            current.extend(_record_fields(block))
+        else:
+            lines.append(_RECORD_FIELD_SEPARATOR.join(_record_fields(block)))
+    if current is not None:
+        lines.append(_RECORD_FIELD_SEPARATOR.join(current))
+    return lines
+
+
+def _payload_blocks(payload: str) -> list[list[str]]:
+    """The payload's blank-line-separated blocks, as lists of field lines."""
+    text = payload.replace("\r\n", "\n").replace("\r", "\n")
+    blocks: list[list[str]] = []
+    for raw in _ENVELOPE_BLOCK_SPLIT.split(text):
+        # rstripped, not stripped: leading indentation is content (an
+        # indentation-only change in a line-mode payload must stay visible;
+        # normalize() rstrips every line anyway, so nothing trailing survives).
+        fields = [field.rstrip() for field in raw.split("\n")]
+        kept = [field for field in fields if field.strip()]
+        if kept:
+            blocks.append(kept)
+    return blocks
+
+
+def _block_lead(block: list[str]) -> str:
+    """The block's first token: what a repeated record prefix repeats."""
+    first = block[0].lstrip()
+    return first.split(" ", 1)[0]
+
+
+def _record_lead(blocks: list[list[str]]) -> str | None:
+    """The token that opens a record, or ``None`` when no token repeats.
+
+    First-appearance order decides a tie, so the choice is deterministic for a
+    given payload rather than dependent on hash ordering.
+    """
+    counts: dict[str, int] = {}
+    for block in blocks:
+        if not block:
+            continue
+        token = _block_lead(block)
+        counts[token] = counts.get(token, 0) + 1
+    for token, count in counts.items():
+        if count >= 2:
+            return token
+    return None
+
+
+#: The fields a record's rendering applies to: the ones that say WHO, WHEN and
+#: WHICH message. Another field — the message BODY — is content the source wrote,
+#: so its timestamps keep the global scrub (a body ``updated_at`` is exactly the
+#: churn class that rule exists for; review R2-MIN-A).
+_RECORD_HEADER_FIELD_RE = re.compile(
+    r"^(?:===.*===|Message TS:|Time:|Sent:|Date:|Sent at:)(?:\s|$)"
+)
+
+
+def _is_record_header_field(field: str) -> bool:
+    return bool(_RECORD_HEADER_FIELD_RE.match(field.strip()))
+
+
+def _is_record_header_block(block: list[str]) -> bool:
+    """Whether a block opens a record even without a repeated lead (R2-MIN-D).
+
+    The Slack rendering's lead is ``=== Message from … ===``. A ONE-record
+    payload has no repeated lead, so the lead rule cannot see it; the header
+    shape can.
+    """
+    return bool(block) and _is_record_header_field(block[0])
+
+
+def _record_fields(block: list[str]) -> list[str]:
+    """A block's fields with only its HEADER clock made readable.
+
+    A header's own clock and message id are the fields a reader of the wake
+    needs (``at 2026/11/05 20:37 EST``, ``Message TS: 1793908014.147179``).
+    Everything else in the record is body text: its timestamps stay masked, so a
+    changing body stamp cannot ride out ungated.
+    """
+    fields: list[str] = []
+    for field in block:
+        if _is_record_header_field(field):
+            fields.append(_RECORD_CLOCK_RE.sub(r"\1/\2/\3 ", field))
+        else:
+            # A dotted epoch pair would otherwise survive the global scrub; in a
+            # BODY it is just numbers that can churn.
+            fields.append(_LEGACY_DOTTED_EPOCH_RE.sub(_TS_MARKER, field))
+    return fields
+
+
+#: The pre-record-view MASK, applied to BOTH sides of a basis-change diff
+#: (:func:`legacy_masked`). A stored baseline written before the record view was
+#: already masked — ``at <ts> EST``, ``Message TS: <ts>.147170`` — and no
+#: restatement can unmask it, so comparing it against today's UNMASKED rendering
+#: reports every record as changed even when the source did not move (measured by
+#: review round 2 as a ``+2/-2`` phantom delta, and ``+25/-25`` on a 20-record
+#: window). Masking both sides keeps only real content changes.
+#: The readable clock form the record view renders, masked back to the shape the
+#: old pipeline stored. A trailing ``Z``/offset belongs to the clock (the ISO
+#: pattern swallowed it), so it is masked with it; a `` EST``-style zone was
+#: never part of the ISO match and stays.
+_LEGACY_SLASH_CLOCK_RE = re.compile(
+    r"\b\d{4}/\d{2}/\d{2} \d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+_LEGACY_DOTTED_EPOCH_RE = re.compile(r"\b\d{10}(?=\.\d{6})")
+_LEGACY_EPOCH_S_RE = re.compile(r"\b\d{10}\b")
+
+
+def legacy_masked(text: str) -> str:
+    """``text`` with the pre-record-view timestamp MASK applied to every line.
+
+    The basis-change diff compares in this space: the stored baseline is already
+    masked, and today's rendering is not, so masking both sides makes the two
+    comparable without undo-masking anything (the unmasked rendering is kept for
+    everything else — review MAJ-3 stays closed). Only real changes survive it.
+    """
+    masked: list[str] = []
+    for line in text.split("\n"):
+        line = _ISO_TS_RE.sub(_TS_MARKER, line)
+        line = _LEGACY_SLASH_CLOCK_RE.sub(_TS_MARKER, line)
+        line = _LEGACY_DOTTED_EPOCH_RE.sub(_TS_MARKER, line)
+        line = _EPOCH_MS_RE.sub(_mask_epoch_ms, line)
+        masked.append(_LEGACY_EPOCH_S_RE.sub(_mask_epoch_s, line))
+    return "\n".join(masked)
+
+
+def _envelope_scalar(value: object) -> str:
+    """``key: value`` rendering for an envelope field that is not a record log."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value)
 
 
 def normalize(
@@ -63,6 +381,7 @@ def normalize(
     normalize_timestamps: bool = True,
 ) -> str:
     """The stored/comparable form of one tool result (§7.1, applied in order)."""
+    text = unpack_records(text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.rstrip() for line in text.split("\n")]
     # A trailing newline is formatting, not content: the final empty element
@@ -82,21 +401,22 @@ def normalize(
     return "\n".join(lines)
 
 
+def _mask_epoch_ms(match: re.Match[str]) -> str:
+    value = int(match.group(0))
+    return _TS_MARKER if _EPOCH_MS_FLOOR <= value <= _EPOCH_MS_CEIL else match.group(0)
+
+
+def _mask_epoch_s(match: re.Match[str]) -> str:
+    value = int(match.group(0))
+    return _TS_MARKER if _EPOCH_S_FLOOR <= value <= _EPOCH_S_CEIL else match.group(0)
+
+
 def _strip_timestamps(line: str) -> str:
     if not line:
         return line
     line = _ISO_TS_RE.sub(_TS_MARKER, line)
-
-    def _epoch_ms(match: re.Match[str]) -> str:
-        value = int(match.group(0))
-        return _TS_MARKER if _EPOCH_MS_FLOOR <= value <= _EPOCH_MS_CEIL else match.group(0)
-
-    def _epoch_s(match: re.Match[str]) -> str:
-        value = int(match.group(0))
-        return _TS_MARKER if _EPOCH_S_FLOOR <= value <= _EPOCH_S_CEIL else match.group(0)
-
-    line = _EPOCH_MS_RE.sub(_epoch_ms, line)
-    return _EPOCH_S_RE.sub(_epoch_s, line)
+    line = _EPOCH_MS_RE.sub(_mask_epoch_ms, line)
+    return _EPOCH_S_RE.sub(_mask_epoch_s, line)
 
 
 def content_hash(normalized: str) -> str:
@@ -210,7 +530,7 @@ def render_delta(
     matcher = difflib.SequenceMatcher(None, old.split("\n"), new.split("\n"), autojunk=False)
     opcodes = matcher.get_opcodes()
     added = removed = 0
-    previews: list[str] = []
+    previews: list[tuple[str, bool]] = []
     hidden = False
     old_split = old.split("\n")
     new_split = new.split("\n")
@@ -248,14 +568,38 @@ def render_delta(
             for line in new_lines[paired:]:
                 plus.append(_clip(line))
         else:
+            # An ADDED line is not clipped here: for a record log the added line
+            # IS the new content, and a 200-char prefix of a real message cut
+            # the body off mid-sentence (measured: an 823-char record delivered
+            # as a link preamble and a ``…``, design D1/MAJ-1). It is bounded by
+            # the delivery budget below instead. A REMOVED line keeps the clip:
+            # its job is to identify what went, not to be read in full.
             minus = [_clip(line) for line in old_lines]
-            plus = [_clip(line) for line in new_lines]
-        previews.extend("- " + preview for preview in minus)
-        previews.extend("+ " + preview for preview in plus)
+            plus = list(new_lines)
+        previews.extend(("- " + preview, False) for preview in minus)
+        previews.extend(("+ " + preview, True) for preview in plus)
 
     changed = added + removed
     header = f"+{added}/-{removed} changed lines"
-    shown = previews[: max(0, max_delta_lines)]
+    # The budget is spent in preview order, so what a reader sees first is what
+    # the diff considered first. An added line that would overflow what is left
+    # is cut there (with the ellipsis marking it) rather than dropped whole —
+    # a count with no content is not a wake. Every other line keeps the old
+    # behaviour: it is shown, or it is dropped and counted in the marker.
+    shown: list[str] = []
+    used = len(header) + 1
+    for text_preview, is_addition in previews:
+        if len(shown) >= max(0, max_delta_lines):
+            break
+        room = delta_max_chars - used
+        if room <= 2:
+            break
+        if len(text_preview) + 1 > room:
+            if not is_addition:
+                break
+            text_preview = text_preview[: max(0, room - 2)] + "…"
+        shown.append(text_preview)
+        used += len(text_preview) + 1
     dropped = changed - len(shown)
     while True:
         marker = f"… and {dropped} more changed lines" if dropped > 0 else ""

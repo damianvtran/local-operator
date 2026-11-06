@@ -59,6 +59,8 @@ from local_operator.monitors.diff import (
     content_hash,
     has_line_difference,
     is_pure_addition,
+    is_record_log,
+    legacy_masked,
     normalize,
     render_delta,
 )
@@ -211,6 +213,10 @@ class _Change:
     #: live failure was the gate calling the only visible difference (a spill
     #: footer's char count) non-material metadata.
     hidden: bool = False
+    #: The watched result is a RECORD LOG (see
+    #: :func:`~local_operator.monitors.diff.is_record_log`), so the record view
+    #: has already separated records from bookkeeping: the gate is skipped.
+    record_view: bool = False
 
 
 @dataclass
@@ -861,6 +867,13 @@ class MonitorScheduler:
         counters = entry.counters
         old_last_check = int(counters.get("last_check_at") or 0)
         skipped = _skipped_checks_since(old_last_check, spec.every_ms, now)
+        # Whether THIS RESULT is a record log decides the gate, not a setting and
+        # not the source's provenance: the record view has already separated
+        # records from bookkeeping, which is the separation the gate would
+        # otherwise be asked to make from opaque text (§8, and see
+        # ``_classify_change``). A source that changes shape mid-stream is
+        # handled by the basis check below, not by this flag.
+        record_view = is_record_log(text)
         normalized = normalize(
             text,
             sort_lines=spec.sort_lines,
@@ -901,27 +914,72 @@ class MonitorScheduler:
             blob_text = str(blob.get("snapshot") or "")
             truncated = bool(blob.get("snapshot_truncated"))
 
+        # The baseline's comparison BASIS is part of the baseline. A blob the
+        # CURRENT pipeline would restate differently was captured under an
+        # earlier normalizer, so diffing the stored text directly against
+        # today's output reports the change of SHAPE as a change in the watched
+        # source: on the 2026-11-05 record split one envelope line became one
+        # line per message, and every live MCP watch would have fired that
+        # rewrite as a delta (or had it suppressed as metadata).
+        #
+        # So a legacy blob is RESTATED by today's pipeline and used as the diff
+        # base: the stored text is the old shape of the same content, which
+        # keeps a change that landed during the upgrade deliverable instead of
+        # adopting a fresh baseline and dropping it (review MIN-3). A plain-text
+        # blob restates to itself, so nothing changes for it at all. Only a
+        # CLIPPED legacy blob has no comparable old side — it is re-established
+        # silently, which is the one upgrade case that reports nothing.
+        restated: str | None = None
+        unreadable_basis = False
+        if (
+            blob is not None
+            and monitor_state.snapshot_normalizer(blob) != monitor_state.NORMALIZER_TAG
+        ):
+            if truncated:
+                unreadable_basis = True
+            else:
+                restated = normalize(
+                    blob_text,
+                    sort_lines=spec.sort_lines,
+                    ignore=spec.ignore,
+                    normalize_timestamps=self._settings.normalize_timestamps,
+                )
+
+        # The right-hand side of the diff. It equals ``normalized`` except on a
+        # basis-change tick, where BOTH sides are compared in the legacy mask
+        # space (see below): the commit still stores the unmasked rendering.
+        diff_text = normalized
+
         diff_base: str | None
         if not old_hash:
             if blob is None or truncated:
                 # No baseline at all (first check, or both files lost), or a
                 # clipped prefix with no hash to rebuild it from: the baseline
                 # is established SILENTLY — never a full-dump delivery.
-                if self._write_snapshot(spec, normalized):
-                    counters["content_hash"] = new_hash
-                    counters["last_handle"] = handle or ""
-                    counters["last_note"] = (
-                        "baseline re-established"
-                        if old_last_check or truncated
-                        else "baseline captured"
-                    )
-                else:
-                    counters["last_note"] = "baseline write failed"
-                counters["next_due_at"] = self._advance(spec, now)
+                self._establish_baseline(
+                    spec,
+                    counters,
+                    normalized,
+                    now,
+                    handle=handle,
+                    note=(
+                        "baseline re-established (record-view)"
+                        if unreadable_basis
+                        else (
+                            "baseline re-established"
+                            if old_last_check or truncated
+                            else "baseline captured"
+                        )
+                    ),
+                )
                 return None
             # A full stored snapshot with a lost hash is still complete
-            # content: diff against it, exactly as before.
-            diff_base = blob_text
+            # content: diff against it, exactly as before — restated first when
+            # an earlier normalizer wrote it.
+            if restated is not None:
+                diff_base, diff_text = legacy_masked(restated), legacy_masked(normalized)
+            else:
+                diff_base = blob_text
         else:
             # The diff's old side is the FULL previous result. The stored
             # snapshot is clipped at ``snapshotMaxChars``; diffing against that
@@ -931,8 +989,32 @@ class MonitorScheduler:
             # whole body, so it is preferred; the snapshot is the fallback only
             # when there is no usable handle.
             diff_base = self._previous_result(spec, counters, old_hash)
-            if diff_base is None and blob is not None and not truncated:
-                diff_base = blob_text
+            if diff_base is None:
+                if restated is not None:
+                    # The stored text was written by an earlier normalizer, so it
+                    # carries the OLD mask (``at <ts> EST``, ``Message TS:
+                    # <ts>.147170``) while today's rendering unmasks both. No
+                    # restatement can undo a mask, so the two are only comparable
+                    # in the mask space: mask BOTH sides and diff that, and only a
+                    # real content change survives (review round 2, R2-MAJ-A —
+                    # measured as a phantom ``+2/-2`` re-render on an unchanged
+                    # source, ``+25/-25`` on a 20-record window).
+                    diff_base, diff_text = legacy_masked(restated), legacy_masked(normalized)
+                elif unreadable_basis:
+                    # A clipped legacy blob cannot be restated and no handle
+                    # reproduced the hash: there is no comparable old side, so
+                    # the baseline is re-captured rather than guessed at.
+                    self._establish_baseline(
+                        spec,
+                        counters,
+                        normalized,
+                        now,
+                        handle=handle,
+                        note="baseline re-established (record-view)",
+                    )
+                    return None
+                elif blob is not None and not truncated:
+                    diff_base = blob_text
 
         # The bound applies to EVERY baseline source (review round 2, F1). It
         # used to sit inside the ``old_hash`` branch, so the recovery path —
@@ -941,9 +1023,9 @@ class MonitorScheduler:
         # write lock). A bound that only covers one of two paths is not a bound.
         if diff_base is not None and (
             len(diff_base) > MAX_DIFF_CHARS
-            or len(normalized) > MAX_DIFF_CHARS
+            or len(diff_text) > MAX_DIFF_CHARS
             or diff_base.count("\n") > MAX_DIFF_LINES
-            or normalized.count("\n") > MAX_DIFF_LINES
+            or diff_text.count("\n") > MAX_DIFF_LINES
         ):
             logger.info(
                 "monitor %s result is too large to diff; delivering a checksum delta",
@@ -959,7 +1041,7 @@ class MonitorScheduler:
             delta_text, changes = beyond_window_text(new_hash)
             delta_hidden = True
         else:
-            if not has_line_difference(diff_base, normalized):
+            if not has_line_difference(diff_base, diff_text):
                 # The hash disagreed while the content did not: the stored
                 # hash was TORN (a crash between the two writes), or a handle
                 # reproduced the same text under a different stored hash.
@@ -968,10 +1050,10 @@ class MonitorScheduler:
                 counters["last_handle"] = handle or str(counters.get("last_handle") or "")
                 counters["next_due_at"] = self._advance(spec, now)
                 return None
-            pure_addition = is_pure_addition(diff_base, normalized)
+            pure_addition = is_pure_addition(diff_base, diff_text)
             rendered = render_delta(
                 diff_base,
-                normalized,
+                diff_text,
                 max_delta_lines=self._settings.max_delta_lines,
                 delta_max_chars=self._settings.delta_max_chars,
             )
@@ -1003,6 +1085,7 @@ class MonitorScheduler:
             at_ms=now,
             pure_addition=pure_addition,
             hidden=delta_hidden,
+            record_view=record_view,
         )
 
     async def _classify_change(self, change: _Change) -> str | None:
@@ -1032,6 +1115,18 @@ class MonitorScheduler:
                 "monitor %s delta preview hides its change; delivering without the gate",
                 change.spec.id,
             )
+            return None
+        if change.record_view:
+            # A record log's delta is already sorted: one line per record, with
+            # the envelope's paging bookkeeping removed and timestamps scrubbed.
+            # The gate exists to separate signal from bookkeeping in OPAQUE
+            # text, and that separation has happened structurally, so a record
+            # appearing (or its thread count changing) is material by the
+            # gate's own rubric. Asking anyway is not a tuning problem: on real
+            # Slack traffic the live gate answered non-material-metadata 5
+            # times out of 6 and swallowed a thread reply entirely (QA round 1
+            # Q-1/Q-2, 2026-11-05). Noise control for a record watch is
+            # ``ignore``, ``limit`` and the hourly delivery cap — not a model.
             return None
         if change.pure_addition:
             # Appended content is new information, never "bookkeeping that
@@ -1422,6 +1517,32 @@ class MonitorScheduler:
             )
         except Exception:
             logger.warning("monitor counters write failed for %s", entry.spec.id, exc_info=True)
+
+    def _establish_baseline(
+        self,
+        spec: MonitorSpec,
+        counters: dict[str, Any],
+        normalized: str,
+        now: int,
+        *,
+        handle: str | None,
+        note: str,
+    ) -> None:
+        """Adopt ``normalized`` as the baseline with NO delivery (§7.2).
+
+        The first check, the recovery from lost state and the upgrade that
+        changes the comparison basis (a snapshot written by an earlier
+        normalizer) all end in the same place: the pair is written blob-first
+        and the hash advances only when the blob landed. The caller returns
+        ``None`` afterwards, i.e. a silent tick.
+        """
+        if self._write_snapshot(spec, normalized):
+            counters["content_hash"] = content_hash(normalized)
+            counters["last_handle"] = handle or ""
+            counters["last_note"] = note
+        else:
+            counters["last_note"] = "baseline write failed"
+        counters["next_due_at"] = self._advance(spec, now)
 
     def _write_snapshot(self, spec: MonitorSpec, normalized: str) -> bool:
         """Write the snapshot blob; ``False`` when the write did not land.
