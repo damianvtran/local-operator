@@ -571,6 +571,29 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
 
 BROKER_ERROR_CODES: frozenset[str] = frozenset(BROKER_ERROR_TTL_MS)
 
+#: The CAUSES a refusal is attributed to, and the reason the set lives HERE rather
+#: than in ``healing.py``: the composer of the operator's sentence (``messages.py``)
+#: is imported BY the classifier, so it cannot import it back — and a surface that
+#: spelled ``"owner_login"`` as a bare string beside the constant defining it is one
+#: rename away from silently reading as "no cause" (review round 1, NIT).
+#:
+#: One cause means one repair, and the four are chosen so each is PROVABLE from a
+#: broker code or a durable evidence state:
+#:
+#: ``owner_login``  the owner has nothing to offer until a PERSON signs in THERE;
+#: ``grant``        this device is not (or no longer) permitted to ask — a share or
+#:                  approval on the owner is the only fix;
+#: ``unreachable``  the owner did not answer, which proves nothing either way;
+#: ``unknown``      this build cannot classify the answer, and says so.
+CAUSE_OWNER_LOGIN = "owner_login"
+CAUSE_GRANT = "grant"
+CAUSE_UNREACHABLE = "unreachable"
+CAUSE_UNKNOWN = "unknown"
+
+CAUSES: frozenset[str] = frozenset(
+    {CAUSE_OWNER_LOGIN, CAUSE_GRANT, CAUSE_UNREACHABLE, CAUSE_UNKNOWN}
+)
+
 #: The default when the owner sent no ``retry_after_ms`` for a code that honours
 #: one. Deliberately conservative — a retry after a minute is cheap next to a
 #: loop that asks a rate-limited owner on every provider call.

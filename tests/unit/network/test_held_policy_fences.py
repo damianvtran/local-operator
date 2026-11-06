@@ -274,6 +274,30 @@ def test_known_lifecycle_baseline_restriction_cannot_hold(mesh, monkeypatch, kin
             lifecycle._VOLATILE_BASELINES.pop(life._volatile_key(), None)
 
 
+def test_clearing_a_retry_observation_keeps_the_policy_fence(tmp_path):
+    """A transient refusal must not erase a deny's recorded DIAGNOSIS.
+
+    ``clear`` is what the repair path calls to forget this device's retry memo. The
+    fence fields are documented as outliving that memo, so clearing a later
+    ``owner_offline`` must leave the deny's code and owner alone (review round 1,
+    R1-4). The EFFECT is held by the separate policy store; this pins the diagnosis.
+    """
+    from local_operator.network.credentials.state import PlacementState
+
+    a = PlacementState("net-C", root=tmp_path / "c")
+    a.observe("openai", "consent_withdrawn", owner_device="owner-C", retry_after_ms=1)
+    fence = a.held_policy_fence("openai", "owner-C")
+    assert fence[0] and fence[1] == "consent_withdrawn"
+
+    a.clear("openai")
+    assert a.held_policy_fence("openai", "owner-C") == fence
+    # And the retry observation itself is gone: nothing else reads the row as a
+    # live refusal any more.
+    assert a.status("openai") == ""
+    assert a.observation("openai") is None
+    assert PlacementState("net-D", root=tmp_path / "c").held_policy_fence("openai") == ("", "")
+
+
 def test_policy_watermark_is_scoped_and_survives_success(tmp_path):
     from local_operator.network.credentials.state import PlacementState
 

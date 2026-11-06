@@ -300,8 +300,36 @@ class PlacementState:
             "last_grant_at": time.time(),
         }
 
+    #: The fields a policy deny writes and ``held_policy_fence`` documents as
+    #: DELIBERATELY outliving the retry cache. ``clear`` must not take them with it:
+    #: one transient ``owner_offline`` that clears the retry row would otherwise
+    #: overwrite a deny's recorded DIAGNOSIS (the effect is held by the separate
+    #: policy store, but the operator's reason for it is not) — review round 1, R1-4.
+    HELD_FENCE_FIELDS: tuple[str, ...] = (
+        "held_fence",
+        "held_fence_code",
+        "held_fence_owner",
+        "held_authorized_fence",
+        # Kept so ``forget_owner`` still finds a fence-only row when the device
+        # it names leaves the network.
+        "owner_device",
+    )
+
     def clear(self, key: str) -> None:
-        self._observations.pop(key, None)
+        """Forget the retry observation for ``key``, KEEPING any policy fence.
+
+        ``status()``, ``observation()`` and ``cached_refusal()`` read a row with no
+        ``status``/``observed_at`` as absent, so a fence-only row is invisible to
+        every consumer that is not asking about the fence itself.
+        """
+        row = self._observations.get(key)
+        if row is None:
+            return
+        kept = {name: row[name] for name in self.HELD_FENCE_FIELDS if row.get(name)}
+        if kept:
+            self._observations[key] = kept
+        else:
+            self._observations.pop(key, None)
 
     def forget_owner(self, device: str) -> None:
         """Drop every observation about credentials owned by ``device``.

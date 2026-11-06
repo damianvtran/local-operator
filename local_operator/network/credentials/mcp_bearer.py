@@ -105,7 +105,12 @@ class BrokeredBearerAuth(httpx2.Auth):
         return ""
 
     def _record_refusal(self, error: Any) -> None:
-        """Persist the broker's refusal CODE as this key's evidence. Never raises."""
+        """Persist the broker's refusal CODE as this key's evidence. Never raises.
+
+        EVERY read is inside the guard, including the owner labels: they are client
+        lookups and can raise on a half-torn client, which is exactly the state a
+        connect-time failure is often met in (review round 1, NIT).
+        """
         code = str(getattr(error, "code", "") or "")
         from local_operator.network.credentials import mcp_state
 
@@ -125,14 +130,21 @@ class BrokeredBearerAuth(httpx2.Auth):
                     return
             except Exception:  # noqa: BLE001 — unknown is not a claim
                 return
+        try:
+            owner_device = self._client.owner_of(self.key)
+            owner_name = self._client.owner_label(self.key)
+            network_id = getattr(self._client, "network_id", "")
+            root = getattr(self._client, "root", None)
+        except Exception:  # noqa: BLE001 — bookkeeping must never fail a borrow
+            return
         mcp_state.record(
-            getattr(self._client, "network_id", ""),
+            network_id,
             self.key,
             state=state,
             code=code,
-            owner_device=self._client.owner_of(self.key),
-            owner_name=self._client.owner_label(self.key),
-            root=getattr(self._client, "root", None),
+            owner_device=owner_device,
+            owner_name=owner_name,
+            root=root,
         )
 
     async def _bearer(self) -> str:

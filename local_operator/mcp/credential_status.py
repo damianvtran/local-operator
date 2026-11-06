@@ -219,7 +219,11 @@ def _server_row(
             name,
             url=url,
             key=oauth_key,
-            peer_name=str(mesh.get("self_name") or ""),
+            # THE ROW'S OWN NETWORK, never "the" device name: see ``self_names``.
+            peer_name=str(
+                mesh.get("self_names", {}).get(str((placement or {}).get("network_id") or ""), "")
+                or ""
+            ),
             placement=placement,
             holder=bool(placement and placement.get("holder")),
             grant=grants,
@@ -453,13 +457,37 @@ def _oauth_row(
             peer_name=peer_name,
         ).sentence
 
-    if evidence_state in ("expired", "unauthorized"):
+    # THE CAUSE COMES FROM THE CLASSIFIER, NOT FROM THE STATE WORD. The evidence
+    # state is a coarse bucket (``expired`` / ``revoked`` / ``unauthorized`` /
+    # ``unavailable``) and several CODES inside one bucket need different remedies:
+    # ``grant_invalid`` and ``not_authorised`` are ``unauthorized`` yet the classifier
+    # — correctly — calls them ``grant``, while ``interactive_required`` is the
+    # owner's login. Selecting on the state alone rendered a share remedy as "sign in
+    # again there" (review round 1, R1-2), which sends the operator at a repair no
+    # amount of signing in can make.
+    from local_operator.network.credentials.healing import cause_for_evidence
+    from local_operator.network.credentials.types import (
+        CAUSE_GRANT,
+        CAUSE_OWNER_LOGIN,
+        CAUSE_UNREACHABLE,
+    )
+
+    cause = cause_for_evidence(evidence_state, code)
+    if cause == CAUSE_GRANT:
+        return _row(
+            "revoked",
+            _bounded(_repaired(CAUSE_GRANT)),
+            owner=owner or str(evidence.get("owner_device") or ""),
+            shape="oauth",
+            refs=refs,
+        )
+    if evidence_state in ("expired", "unauthorized") or cause == CAUSE_OWNER_LOGIN:
         # ``http_401`` (the server refused a bearer the owner had just served) and
         # ``refresh_failed`` (the owner could not perform a refresh) are the same
         # repair for a person: the owner's sign-in has to be replaced there.
         return _row(
             "expired",
-            _bounded(_repaired("owner_login")),
+            _bounded(_repaired(CAUSE_OWNER_LOGIN)),
             owner=owner or str(evidence.get("owner_device") or ""),
             shape="oauth",
             refs=refs,
@@ -467,7 +495,7 @@ def _oauth_row(
     if evidence_state == "revoked":
         return _row(
             "revoked",
-            _bounded(_repaired("grant")),
+            _bounded(_repaired(CAUSE_GRANT)),
             owner=owner or str(evidence.get("owner_device") or ""),
             shape="oauth",
             refs=refs,
@@ -495,7 +523,7 @@ def _oauth_row(
         # is the problem when nobody has shown that it is.
         return _row(
             "not_yet_synced",
-            _bounded(_repaired("unreachable")),
+            _bounded(_repaired(CAUSE_UNREACHABLE)),
             owner=owner or str(evidence.get("owner_device") or ""),
             shape="oauth",
             refs=refs,
@@ -543,11 +571,13 @@ def _mesh_context(root: Path) -> dict[str, Any]:
     evidence: dict[str, dict[str, Any]] = {}
     has_records = False
     any_live = False
-    #: This device's own member name, for the remedy COMMANDS that must name the
-    #: holder (``--with <peer>``). Read here because this pass already holds the
-    #: record; an unresolvable name stays empty and the composer falls back to its
-    #: own placeholder rather than inventing a device.
-    self_name = ""
+    #: This device's own member name PER NETWORK, for the remedy COMMANDS that must
+    #: name the holder (``--with <peer>``). ONE string for every network was wrong:
+    #: a device can be a member under a different name in each, and the command a
+    #: row printed carried the first network's name into servers belonging to
+    #: another (review round 1, R1-5). An unresolvable network has no entry and the
+    #: composer falls back to its own placeholder rather than inventing a device.
+    self_names: dict[str, str] = {}
     try:
         from local_operator.network import store
         from local_operator.network.credentials import mcp_state
@@ -566,7 +596,7 @@ def _mesh_context(root: Path) -> dict[str, Any]:
             "entries": entries,
             "evidence": evidence,
             "has_records": False,
-            "self_name": self_name,
+            "self_names": self_names,
             "lost_membership": False,
             "holder_of_secret": _no_holder,
             "evidence_revoked": _no_revoked,
@@ -592,8 +622,10 @@ def _mesh_context(root: Path) -> dict[str, Any]:
         except Exception:  # noqa: BLE001 — one unreadable network must not hide the rest
             continue
         any_live = any_live or live
-        if not self_name and member is not None:
-            self_name = str(getattr(member, "name", "") or "")
+        if member is not None:
+            name = str(getattr(member, "name", "") or "")
+            if name:
+                self_names[record.network_id] = name
         self_id = str(record.self_device_id or "")
         for key, entry in document.entries.items():
             entries.setdefault(
@@ -664,7 +696,7 @@ def _mesh_context(root: Path) -> dict[str, Any]:
         "entries": entries,
         "evidence": evidence,
         "has_records": has_records,
-        "self_name": self_name,
+        "self_names": self_names,
         "lost_membership": lost,
         "holder_of_secret": holder_of_secret,
         "evidence_revoked": evidence_revoked,

@@ -395,6 +395,45 @@ def test_durable_evidence_beats_a_live_holder_row(
     assert "sign in again — sign in again" not in reason
 
 
+def test_a_permission_code_renders_the_grant_remedy_not_a_sign_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CAUSE decides the remedy, not the coarse evidence state.
+
+    ``grant_invalid`` and ``not_authorised`` both arrive as ``unauthorized`` — a 401
+    the owner answered — but the classifier calls them ``grant``: signing in anywhere
+    cannot restore a permission this device no longer has, so the row must print the
+    share command and say the share is what changed (review round 1, R1-2). Selecting
+    on the state word alone rendered "sign in to this server again" for both.
+    """
+    from local_operator.network.credentials import mcp_state
+
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    store.save(_record(), root)
+    _place(root)
+    configs = {"linear": MCPHttpServerConfig(url=URL, auth=MCPAuthConfig(type="oauth"))}
+
+    for code in ("grant_invalid", "not_authorised"):
+        mcp_state.record(
+            NETWORK,
+            KEY,
+            state="unauthorized",
+            code=code,
+            owner_device=PEER,
+            owner_name="macbook",
+            root=root,
+        )
+        row = server_states(str(cwd), base=root, configs=configs)["linear"]
+        assert row["state"] == "revoked", (code, row)
+        reason = row["reason"]
+        assert "sign in" not in reason, (code, reason)
+        assert "lop network credential share" in reason, (code, reason)
+
+
 def test_a_configured_server_dropped_by_discovery_still_has_a_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

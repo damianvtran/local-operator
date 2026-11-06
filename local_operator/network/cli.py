@@ -2295,10 +2295,25 @@ def _repair_borrowed(self_device: str, self_name: str) -> list[dict[str, Any]]:
     share that stops working looks identical from here whether the owner signed out,
     the share was withdrawn, or the owner is simply away — three different repairs,
     two of which happen on the OTHER machine. What this device can do is the one
-    thing the session cannot: ask again NOW, past its own cached "no" (the grant
-    path's ``force_refresh``), and then say which of the three came back. That is
-    also the answer to "I fixed the login on the other machine, must I restart the
-    session?": after this, the running session's next resolve reaches the owner.
+    thing the session cannot: ask again NOW, and then say which of the three came
+    back. That is also the answer to "I fixed the login on the other machine, must I
+    restart the session?": after this the running session's next resolve reaches the
+    owner.
+
+    THE ASK IS ORDINARY (``heal_borrow`` passes ``force_refresh=False``): the owner
+    refuses a FORCED refresh from a device that is not its admin, and the repair the
+    operator needs must not require admin rights. What this clears first is this
+    device's own observation of the refusal (``forget_refusal``), which is what a
+    status surface reads — the dial itself is answered from the owner's current login
+    and grants either way.
+
+    WHOSE KEYS ARE ASKABLE. Exactly the ones this device is a HOLDER for and does not
+    own, in the network the client belongs to — ``PlacementDocument.borrowable_keys``
+    expressing the first half, and the network filter the second. Selection by
+    "anything with a placement row" asked owners for keys this device owns (where a
+    borrow is nonsense; the local cascade serves it) and for keys belonging to OTHER
+    networks, which a client for this network's relay cannot reach at all (review
+    round 1, R1-3).
 
     ``lop network mcp credentials --repair`` is the OWNER-side sibling (it re-grants
     the secrets behind a shared server); this one mints nothing and grants nothing —
@@ -2331,12 +2346,18 @@ def _repair_borrowed(self_device: str, self_name: str) -> list[dict[str, Any]]:
         ]
     wanted: list[str] = []
     try:
+        ours = str(getattr(client, "network_id", "") or "")
+        asker = str(getattr(client, "self_device", "") or self_device or "")
         for document in _placement_documents():
+            if ours and document.network_id != ours:
+                # A client dials ONE network's relay; a key from another network is
+                # not reachable from here, and asking would report a refusal about a
+                # share this device was never part of.
+                continue
+            if not asker:
+                continue
             state = PlacementState.load(document.network_id)
-            for key in sorted(document.entries):
-                entry = document.entries[key]
-                if not self_device or not entry.is_holder(self_device):
-                    continue
+            for key in document.borrowable_keys(asker):
                 if key.startswith("secret:"):
                     continue
                 if state.status(key) == "active":

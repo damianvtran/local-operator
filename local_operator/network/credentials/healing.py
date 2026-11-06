@@ -39,17 +39,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-#: The owner's login is the fix: a person signs in on the owning device.
-CAUSE_OWNER_LOGIN = "owner_login"
-#: A grant/share change is the fix; signing in anywhere changes nothing.
-CAUSE_GRANT = "grant"
-#: The owner did not answer; the credential's state is unproven.
-CAUSE_UNREACHABLE = "unreachable"
-#: Unclassified by this build.
-CAUSE_UNKNOWN = "unknown"
-
-CAUSES: frozenset[str] = frozenset(
-    {CAUSE_OWNER_LOGIN, CAUSE_GRANT, CAUSE_UNREACHABLE, CAUSE_UNKNOWN}
+#: The causes themselves live in ``types.py`` (the vocabulary home) because the
+#: COPY composer cannot import this module back — see the comment there. They are
+#: re-exported here so a caller reads one name for the classifier and its labels.
+from local_operator.network.credentials.types import (
+    CAUSE_GRANT,
+    CAUSE_OWNER_LOGIN,
+    CAUSE_UNKNOWN,
+    CAUSE_UNREACHABLE,
 )
 
 #: Broker code -> cause. Every code in ``types.BROKER_ERROR_CODES`` is either here
@@ -120,9 +117,14 @@ def cause_for_evidence(state: str, code: str = "") -> str:
 class Repair:
     """What is wrong with one borrowed key, who fixes it, and the command they run.
 
-    ``commands`` are EXACT argv-less command lines an operator can paste, and they
-    run on ``owner_device`` (never here) unless empty — the one case that has no
-    command is ``unreachable``, whose remedy is reconnecting a device.
+    ``commands`` are the exact command lines that repair the key, and they run on
+    ``owner_device`` (never here). Two honest qualifiers: they are empty for
+    ``unreachable``, whose remedy is reconnecting a device rather than a command;
+    and a caller that had no member name to give composes them with the same
+    ``<this device>`` placeholder the rest of this copy uses, so they are pasteable
+    as they stand only when ``.peer_name`` was known — otherwise the reader
+    substitutes their device, exactly as ``render_broker_error``'s arms ask (review
+    round 1, NIT).
     """
 
     key: str

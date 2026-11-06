@@ -595,6 +595,12 @@ class MeshCredentialClient:
         written and nothing is cached: the next borrow asks the owner, which decides
         from its current login and its current grants. A device still not permitted
         to ask stays refused, because that refusal comes back from the owner.
+
+        A POLICY FENCE IS NOT PART OF THIS. ``PlacementState.clear`` keeps the
+        ``held_fence*`` fields (``HELD_FENCE_FIELDS``), because a deny's recorded
+        diagnosis outlives the retry cache by design — clearing a transient
+        ``owner_offline`` must not erase it. The client does nothing extra to
+        preserve them; it relies on that one rule rather than restating it.
         """
         try:
             self.state.clear(key)

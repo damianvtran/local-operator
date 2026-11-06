@@ -27,6 +27,9 @@ from typing import TYPE_CHECKING
 
 from local_operator.network.credentials.github import GITHUB_KEY, no_source_arms
 from local_operator.network.credentials.types import (
+    CAUSE_GRANT,
+    CAUSE_OWNER_LOGIN,
+    CAUSE_UNREACHABLE,
     BrokerError,
     is_secret_key,
     secret_name_from_key,
@@ -445,11 +448,15 @@ def render_mcp_disconnect(
     credential and needs only a reconnect. ``unknown``: this build cannot classify
     it, and says so rather than guessing one of the three.
 
-    THE COMMAND LEADS. Every surface that renders this clamps it (the toast tail at
-    ~56 cells, ``credential_status``'s ``_bounded`` at 200), and the teaching of the
-    round that produced ``render_borrowed_signin`` is that a clamped sentence which
-    ends in the command shows the operator ``/mcp l…``. A clamp here can therefore
-    only shed the trailing explanation, never the repair.
+    WHERE IT IS RENDERED, AND WHAT A CLAMP COSTS. This sentence is composed for the
+    surfaces with room: the ``/mcp`` status row (``credential_status``'s ``_bounded``
+    at 200 cells) and the CLI's repair output. It is NOT the startup toast's tail —
+    that one is ``render_borrowed_signin``, 32 cells, because a command cannot survive
+    a ~56-cell clamp at all (the round that produced that function measured it being
+    cut to ``/mcp l…``). A reader must not assume this line is clamp-proof: the share
+    command sits mid-sentence, so any surface narrower than roughly 110 cells shows a
+    truncated command, and the honest rule is that a new surface either has room or
+    uses the short form.
 
     ``key`` is the placement key (``mcp:<url>``), which is exactly what the share
     verb takes, and ``peer_name`` is the device reading this line — the device the
@@ -459,7 +466,7 @@ def render_mcp_disconnect(
     peer = peer_name or "<this device>"
     owner = owner_name or "the owning device"
     share = f"lop network credential share {key} --with {peer}"
-    if cause == "owner_login":
+    if cause == CAUSE_OWNER_LOGIN:
         # TWO LOGIN FAILURES, TWO FACTS, and the tail is where they differ: the
         # server refused a bearer the owner had just served (``http_401``), or the
         # owner could not refresh the token at all (``refresh_failed``). Calling a
@@ -472,12 +479,12 @@ def render_mcp_disconnect(
         else:
             detail = "its sign-in stopped working there"
         return f"on {owner}: sign in to this server again, then '{share}' — {detail}"
-    if cause == "grant":
+    if cause == CAUSE_GRANT:
         return (
             f"on {owner}: '{share}' — it no longer shares this server with {peer}, "
             "and nothing here was changed"
         )
-    if cause == "unreachable":
+    if cause == CAUSE_UNREACHABLE:
         return (
             f"{owner} cannot be reached, so this borrowed sign-in cannot be repaired "
             "yet; reconnect that device (nothing here was changed)"
