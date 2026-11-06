@@ -838,6 +838,19 @@ class Msg:
     def sender_kind(self) -> str:
         return "human" if self.sender_endpoint is None else "agent"
 
+    @property
+    def sender_account(self) -> str:
+        """The stored participant account the live body read carries (#327).
+
+        Agent-server exposes the message's STORED sender on the classification
+        body response, which is what makes a screening charge attributable. A
+        rig that omits it models an OLD server: every message is then
+        unattributed, and the conservative per-sender fence fires long before
+        the tier ceilings these tests state.
+        """
+
+        return "acct_human" if self.sender_endpoint is None else f"acct_{self.sender_endpoint}"
+
 
 @dataclass
 class Hub:
@@ -936,6 +949,9 @@ class Wire:
                 "Ada" if msg.sender_endpoint is None else f"{msg.sender_endpoint}-agent"
             ),
             "sender_kind": msg.sender_kind,
+            # The stored sender the live response carries (agent-server #327);
+            # omitting it is what an older hub does.
+            "sender_account_id": msg.sender_account,
             # The live row's own routing facts (agent-server #255). Absent for an
             # older hub; the card falls back to the pre-#255 derivation then.
             "conversation_kind": msg.kind,

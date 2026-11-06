@@ -163,6 +163,16 @@ class AdmissionJob:
     revision: str
     epoch: int
     turn: str
+    #: Server-stated allocation identity, carried so the retained registration
+    #: and every physical dispatch can be compared against what was screened
+    #: (#3199 residual). NOT a display label: the account comes from the hub's
+    #: stored message participant via the gated body read, and ``sender_kind``
+    #: is what makes it verifiable — an account with no stated kind is unknown
+    #: provenance, not a verified sender. Empty means pre-contract/unknown, and
+    #: an empty pair is deliberately absent from the digest below so a proof
+    #: registered by an older build keeps verifying.
+    sender_account_id: str = ""
+    sender_kind: str = ""
 
     @property
     def digest(self) -> str:
@@ -190,6 +200,7 @@ class AdmissionJob:
                 self.revision,
                 self.epoch,
                 self.turn,
+                *([self.sender_account_id, self.sender_kind] if self.sender_account_id else []),
             ],
             separators=(",", ":"),
         )
@@ -881,8 +892,20 @@ def _scrub_wire_failure(failure: BaseException, *, sent: bool = True) -> BaseExc
     today's behaviour.
     """
 
-    from local_operator.providers.failover import ProviderError
+    from local_operator.providers.failover import ProviderError, is_input_refusal
 
+    # Decided HERE, before scrubbing: the predicate reads the provider's own
+    # text (a 400 submission-filter refusal), which is exactly what the scrub
+    # below erases. Only the BOOLEAN is retained (stamped on the scrub), never
+    # the body. A provider rejecting THIS submission says nothing about route
+    # health, and folding it into the generic failure path parks every other
+    # inbound message on a breaker this submission did not break.
+    # IDEMPOTENT (round 1 M3): a second scrub of an already-scrubbed failure
+    # must not lose the class, because the predicate has nothing left to read
+    # once the provider's prose is gone.
+    input_refusal = getattr(failure, "tb_input_refusal", False) is True or (
+        isinstance(failure, ProviderError) and is_input_refusal(failure)
+    )
     if isinstance(failure, ProviderError):
         scrub = ProviderError(
             failure.status or 0,
@@ -910,6 +933,9 @@ def _scrub_wire_failure(failure: BaseException, *, sent: bool = True) -> BaseExc
     # "did anything leave the wire", not "did the error carry a status".
     advance = _sender_cannot_cause(failure) or _prewire_refusal_advances(failure, sent=sent)
     setattr(scrub, _ADVANCE_ATTR, advance)
+    # Read by ``screening._is_input_refusal`` so a submission refusal stays out
+    # of the outage breaker while the attempt is still charged and held.
+    setattr(scrub, "tb_input_refusal", input_refusal)
     return scrub
 
 

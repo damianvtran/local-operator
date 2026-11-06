@@ -459,6 +459,11 @@ class Envelope:
     #: no files. Public (a hash the hub publishes), and bound into the admission digest
     #: so a verdict reached without these files cannot be reused as a file grant.
     files_hash: str | None = None
+    #: The sender CLASS the recipient's gated body read stated, and the only
+    #: thing that makes :attr:`sender_account` a verified identity (#3199
+    #: residual). Empty is unknown provenance — an account with no stated kind
+    #: is not attributable, and must never be charged as one.
+    sender_kind: str = ""
 
     def private_images(self) -> ScreeningAttachments | None:
         """The image set for the single dispatch, or ``None`` (text-only)."""
@@ -576,6 +581,46 @@ def validate_envelope(
         sender_account = ""
     if not isinstance(sender_account, str) or len(sender_account) > _ENVELOPE_LABEL_MAX:
         return None, "envelope_malformed"
+    # ALLOCATION identity is the account the HUB stored as this message's
+    # sender — never a client stamp, and never the display half (``name``,
+    # ``organization``). Two lanes state it in different blocks: the
+    # CONVERSATION lane in the participant block below, built from the gated
+    # classification body read; the PAIR/INBOX lane in the top-level block
+    # above, which ``connector/wake.py`` fills from ``wire.message`` verbatim
+    # (the authenticated DTO, so hub data rather than client data).
+    #
+    # So "the top-level block is a label" is true of its DISPLAY fields and
+    # false of its ``account_id``: reading it as label-only is exactly how
+    # security round 1 dropped the inbox lane's charge, which then made
+    # ordinary inbox volume fine every named sender.
+    #
+    # ACCOUNT is the attribution: it is what the ledger charges, what the
+    # retained proof pins and what every dispatch is re-checked against. KIND is
+    # a property OF that account, never a gate on it — a hub-verified account
+    # whose class an older server did not state is still the sender the
+    # dispatch saw. Gating the charge on the class was security round 1's
+    # S-1/S-2: the inbox lane states an account and no class, so its charge was
+    # dropped, and the resulting unattributed rows then exhausted every named
+    # sender. Guessing a class instead is the other failure (round 1 M1: an
+    # ``endpoint_id`` was being read as ``agent``), so a class with no account
+    # now names nobody rather than being inferred.
+    participant = message.get("sender")
+    participant = participant if isinstance(participant, Mapping) else {}
+    sender_kind = participant.get("kind", "")
+    account = participant.get("account_id", "")
+    if not isinstance(account, str) or len(account) > _ENVELOPE_LABEL_MAX:
+        return None, "envelope_malformed"
+    if sender_kind not in ("", "human", "agent"):
+        return None, "envelope_malformed"
+    if not account:
+        sender_kind = ""
+    if participant:
+        # A participant BLOCK is this item's allocation identity and decides the
+        # envelope's sender outright (an empty account is unknown, never the
+        # display label). An item WITHOUT one — the pair lane, whose stored
+        # sender arrives in the top-level block above — keeps the identity it
+        # already had, so an existing pair-lane digest does not move.
+        sender_account = account
     sender_name = sender.get("name")
     if sender_name is None or sender_name == "":
         sender_display = sender_account
@@ -700,6 +745,7 @@ def validate_envelope(
         envelope_digest=hashlib.sha256(digest_payload.encode("utf-8")).hexdigest(),
         attachments_hash=attachments.attachments_hash if attachments is not None else None,
         files_hash=files.files_hash if files is not None else None,
+        sender_kind=sender_kind,
     )
     # Private carrier: never a field, so repr/asdict/JSON stay content-free.
     object.__setattr__(envelope, "_private_body", body_text)
@@ -1228,9 +1274,10 @@ class _Prepared:
     fingerprint: str
     input_proof: dict[str, Any]
     provider: str
-    #: The hub-verified sender (allocation) and the conversation id, carried
-    #: ONLY for B4b's work-scope decision row (per-sender budget, S-6; the
-    #: release binds the conversation). Neither is a label.
+    #: The envelope's VERIFIED sender account — the one value the ledger charge
+    #: and B4b's per-sender hold budget both use (round 1 S-3) — plus the
+    #: conversation the work belongs to (its hold is released against it).
+    #: Neither is a display label.
     sender_account_id: str = ""
     conversation_id: str = ""
 
@@ -1570,6 +1617,13 @@ def _screen_prepare(
         "message": message_id,
         "tenant": owner.tenant_id,
         "logical": fingerprint,
+        # The verified allocation identity, pinned in the SAME registration the
+        # dispatch digest covers: ``_input_proof_mismatch`` refuses a bind whose
+        # job states a different sender, so the sender a message is charged to
+        # is the one that was screened. Both keys are ALWAYS written (empty
+        # meaning unknown) so the registered field set stays closed.
+        "sender_account_id": envelope.sender_account,
+        "sender_kind": envelope.sender_kind,
     }
 
     return _Prepared(
@@ -1579,7 +1633,10 @@ def _screen_prepare(
         fingerprint=fingerprint,
         input_proof=input_proof,
         provider=_canonical_provider,
-        sender_account_id=screening_allocation(item)[1],
+        # B4b's work-scope decision row AND (via ``_screen_spend``) the same
+        # envelope identity the charge uses, so the two surfaces cannot disagree
+        # (round 1 S-3/M2: they keyed on two different rules for one message).
+        sender_account_id=envelope.sender_account,
         conversation_id=_conversation_of(item),
     )
 
@@ -1609,7 +1666,7 @@ async def _screen_core(
     prepared = _screen_prepare(owner, item, config_dir=config_dir, policy=policy, runner=runner)
     if isinstance(prepared, ScreenResult):
         return prepared
-    tier, sender = screening_allocation(item)
+    tier = screening_allocation(item)
     return await _screen_spend(
         owner,
         prepared,
@@ -1619,32 +1676,53 @@ async def _screen_core(
         nonce=nonce,
         turn=turn,
         tier=tier,
-        sender_account_id=sender,
     )
 
 
-def screening_allocation(item: Mapping[str, Any]) -> tuple[int, str]:
-    """``(tier, verified sender)`` for the budget, from the item's hint.
+def _is_input_refusal(failure: BaseException) -> bool:
+    """Whether the PROVIDER rejected this submission's content, not the route.
+
+    Two sources, both production's own and both a typed boolean rather than
+    prose: the wire guard's scrub result (``model_boundary._scrub_wire_failure``
+    decides it on the raw failure before sanitizing, and keeps only the flag),
+    and ``providers.failover.is_input_refusal`` for a failure that never met
+    the guard. A 400 for a malformed image or an oversized body is NOT this
+    class — the predicate is narrow by design, so the breaker keeps those.
+    """
+
+    from local_operator.providers.failover import ProviderError, is_input_refusal
+
+    return getattr(failure, "tb_input_refusal", False) is True or (
+        isinstance(failure, ProviderError) and is_input_refusal(failure)
+    )
+
+
+def screening_allocation(item: Mapping[str, Any]) -> int:
+    """The budget TIER for the item, from the item's hint — and only the tier.
 
     The connector stamps ``allocation`` from hub-verified facts only (the
-    feed's mention bit, the body read's sender kind and conversation kind,
-    and the hub's sender account id when it sends one); see
-    ``Store.SCREENING_TIER_*``. An item WITHOUT the hint -- the pair lane,
-    every caller that predates the split -- is the (agent-)addressed tier with
-    no sender: a pair message is addressed to this agent by construction, and
-    an unknown caller is never fenced by a pool it does not know about. It is
-    never HUMAN_ADDRESSED: the last reserve is reachable only by a hub-stated
+    feed's mention bit, the body read's sender kind and conversation kind);
+    see ``Store.SCREENING_TIER_*``. An item WITHOUT the hint -- the pair lane,
+    every caller that predates the split -- is the (agent-)addressed tier: a
+    pair message is addressed to this agent by construction, and an unknown
+    caller is never fenced by a pool it does not know about. It is never
+    HUMAN_ADDRESSED: the last reserve is reachable only by a hub-stated
     person's DM or mention (#3400 S-4).
+
+    The hint's OWN ``sender_account_id`` is deliberately not returned any
+    more: the charged sender is the envelope's verified account, and the two
+    readers this used to feed (the charge and B4b's work-scope row) now take
+    that one value, so there is no second identity rule to drift (round 1
+    S-3/M2).
     """
 
     raw = item.get("allocation")
     if not isinstance(raw, Mapping):
-        return Store.SCREENING_TIER_ADDRESSED, ""
+        return Store.SCREENING_TIER_ADDRESSED
     tier = raw.get("tier")
     if not isinstance(tier, int) or isinstance(tier, bool) or tier not in (0, 1, 2, 3):
-        tier = Store.SCREENING_TIER_ADDRESSED
-    sender = raw.get("sender_account_id")
-    return tier, sender if isinstance(sender, str) else ""
+        return Store.SCREENING_TIER_ADDRESSED
+    return tier
 
 
 def _budget_hold_code(code: str) -> str:
@@ -1668,7 +1746,6 @@ async def _screen_spend(
     nonce: str | None,
     turn: str,
     tier: int,
-    sender_account_id: str,
 ) -> ScreenResult:
     """Steps 9-14 for ONE message: reserve, mint, render, dispatch, commit."""
 
@@ -1687,7 +1764,12 @@ async def _screen_spend(
             fingerprint=fingerprint,
             input_proof=input_proof,
             tier=tier,
-            sender_account_id=sender_account_id,
+            # The VERIFIED identity of the envelope this screen validated, never
+            # the item's allocation hint: that hint was a client-stamped claim
+            # nothing re-derived, so charging it let a caller spend against a
+            # sender that was never the dispatch.
+            sender_account_id=envelope.sender_account,
+            sender_kind=envelope.sender_kind,
         )
     except StoreRefused as failure:
         code = _HOLD_FOR_SCHEMA.get(failure.code)
@@ -1732,6 +1814,8 @@ async def _screen_spend(
         revision=snapshot.admission_revision,
         epoch=int(epoch),
         turn=turn,
+        sender_account_id=envelope.sender_account,
+        sender_kind=envelope.sender_kind,
     )
     fingerprint = job.digest
     try:
@@ -1898,7 +1982,14 @@ async def _screen_spend(
             return ScreenResult("hold", hold_code=answered)
 
         failure_class = screening_failure_class(failure)
-        retry_at = _record_failure(store, owner, failure_class=failure_class)
+        # An input refusal is THIS submission, not a sick route: it still holds
+        # and still charges, but it must not open the account breaker and park
+        # every other inbound message for the retry window (#3199 residual).
+        retry_at = (
+            None
+            if _is_input_refusal(failure)
+            else _record_failure(store, owner, failure_class=failure_class)
+        )
         # A 402 is its own owner-visible reason (an empty balance only a
         # top-up clears), still a route failure for the breaker.
         from local_operator.team_bridge.model_boundary import provider_hold_code
@@ -2478,7 +2569,7 @@ def _copy_work_scope_decision(
             prompt_version=str(source["prompt_version"]),
             categories=tuple(hr.decoded_categories(source)),
             policy_epoch=int(source["policy_epoch"]),
-            sender_digest=hr.sender_digest(screening_allocation(item)[1]),
+            sender_digest=hr.sender_digest(envelope.sender_account),
             now=_time.time(),
             screener_verdict=str(source.get("screener_verdict") or ""),
             screener_hop=_hop_of(source),
@@ -3266,12 +3357,15 @@ async def _screen_batch_core(
     # The CALL's tier is its highest message's: a DM riding with room chatter
     # must never be fenced by the ambient pool (the connector groups by tier,
     # so in practice a call is one tier).
-    tier = max(screening_allocation(items[index])[0] for index, _ in pending)
+    tier = max(screening_allocation(items[index]) for index, _ in pending)
     entries = [
         {
             "message_id": prepared.envelope.message_id,
             "input_proof": prepared.input_proof,
-            "sender_account_id": screening_allocation(items[index])[1],
+            # The message's OWN verified identity, so a call charges each
+            # participating sender exactly as its own single screen would.
+            "sender_account_id": (prepared.envelope.sender_account),
+            "sender_kind": prepared.envelope.sender_kind,
         }
         for index, prepared in pending
     ]
@@ -3393,7 +3487,8 @@ async def _screen_batch_core(
             return _finish()
         from local_operator.team_bridge.model_boundary import provider_hold_code
 
-        _record_failure(store, owner, failure_class=failure_class)
+        if not _is_input_refusal(failure):
+            _record_failure(store, owner, failure_class=failure_class)
         _commit_each(provider_hold_code(failure), failure_class=failure_class)
         return _finish()
 
@@ -3492,4 +3587,6 @@ def _job_for(entry: "tuple[int, _Prepared, str, str]", *, owner: OwnerSnapshot, 
         revision=snapshot.admission_revision,
         epoch=int(prepared.epoch),
         turn=turn,
+        sender_account_id=envelope.sender_account,
+        sender_kind=envelope.sender_kind,
     )

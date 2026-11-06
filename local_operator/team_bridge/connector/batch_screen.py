@@ -139,16 +139,16 @@ def allocation_for(ref: ConversationFeedRef, display: Mapping[str, Any]) -> dict
     line in a shared room; AMBIENT for the rest. An unknown sender kind (an
     older hub) is treated as an agent: it never reaches a person's reserve.
     THE ONE allocation source: the batch pass and the handler's single
-    screen both call this, so no screen is ever charged a default tier. The
-    verified sender is the hub's ``sender_account_id`` on the body read when
-    it sends one; an older hub sends none, and such a message is charged to
-    no sender (bounded by the account and ambient ceilings alone). Display
-    LABELS never decide either.
+    screen both call this, so no screen is ever charged a default tier. It
+    returns the TIER and nothing else: the charged sender is the envelope's
+    verified account (security round 1 S-3), so a ``sender_account_id`` here
+    would be a second identity rule that could drift from it — the hint the
+    connector stamps never decides who pays (round 1 S-9). Display LABELS
+    never decide the tier either.
     """
 
     kind = display.get("sender_kind")
     conversation_kind = display.get("conversation_kind")
-    sender = display.get("sender_account_id")
     from ..store import Store
 
     addressed = bool(ref.mention) or conversation_kind == "dm"
@@ -161,10 +161,7 @@ def allocation_for(ref: ConversationFeedRef, display: Mapping[str, Any]) -> dict
         tier = Store.SCREENING_TIER_HUMAN
     else:
         tier = Store.SCREENING_TIER_AMBIENT
-    return {
-        "tier": tier,
-        "sender_account_id": sender if isinstance(sender, str) and len(sender) <= 256 else "",
-    }
+    return {"tier": tier}
 
 
 async def prescreen_conversation_refs(
@@ -223,13 +220,19 @@ async def prescreen_conversation_refs(
             # batch unit spent on them would buy a receipt nothing admits.
             continue
         allocation = allocation_for(ref, fetched.display)
+        try:
+            sender = _conversation._allocation_sender(fetched.display)
+        except ValueError:
+            # The single handler records the malformed read (``sender_malformed``)
+            # without spend; batching it would charge a unit for a hold.
+            continue
         item = _conversation._screening_item(
             owner=owner,
             conversation_id=ref.conversation_id,
             message_id=ref.message_id,
             body=fetched.body,
             body_hash=fetched.body_hash,
-            sender={},
+            sender=sender,
         )
         item["allocation"] = allocation
         candidates.append((ref, fetched, item))

@@ -32,6 +32,7 @@ one exception is the shipped-ceiling flood below, and it says so.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import sqlite3
@@ -71,12 +72,32 @@ def _store_with(config_dir: Path, budget: ScreeningBudget) -> tuple[Store, Any]:
     return store, owner
 
 
-def _reserve(store: Store, owner: Any, message_id: str, *, tier: int = 3, sender: str = "") -> str:
-    return store.reserve_screening_batch(
-        owner,
-        [{"message_id": message_id, "sender_account_id": sender}],
-        tier=tier,
-    )[0]
+#: Distinct filler sender per reservation that names none, so a test which
+#: FILLS a tier measures that tier's ceiling rather than the per-sender fence.
+_FILL_SENDERS = itertools.count()
+
+
+def _reserve(
+    store: Store,
+    owner: Any,
+    message_id: str,
+    *,
+    tier: int = 3,
+    sender: str = "",
+    unattributed: bool = False,
+) -> str:
+    """Reserve ONE unit.
+
+    An unattributed unit is bounded fail-closed by the per-sender ceiling
+    (#3199 residual), so filler rows carry a verified sender unless the test is
+    ABOUT unknown provenance: ``unattributed=True`` writes the old row shape.
+    """
+
+    row: dict[str, Any] = {"message_id": message_id}
+    if not unattributed:
+        row["sender_account_id"] = sender or f"acc_fill{next(_FILL_SENDERS)}"
+        row["sender_kind"] = "agent"
+    return store.reserve_screening_batch(owner, [row], tier=tier)[0]
 
 
 # ------------------------- (a) the shipped ceilings -------------------------
@@ -540,9 +561,14 @@ def test_one_sender_cannot_spend_more_than_its_share_while_others_still_can(
     with pytest.raises(StoreRefused) as refused:
         _reserve(store, owner, "bmsg_loud_over", sender="acc_loud")
     assert refused.value.code == "sender_exhausted"
-    # Other senders, and a call of unknown provenance, still reserve.
+    # Another verified sender still reserves. A call of UNKNOWN provenance does
+    # NOT (#3199 residual): it used to be exempt from this ceiling, which is the
+    # default that let unattributed spend outlive every sender's share — it now
+    # counts all spend, so the loud sender's own units already fence it.
     _reserve(store, owner, "bmsg_quiet", sender="acc_quiet")
-    _reserve(store, owner, "bmsg_unknown")
+    with pytest.raises(StoreRefused) as unknown:
+        _reserve(store, owner, "bmsg_unknown", unattributed=True)
+    assert unknown.value.code == "sender_exhausted"
 
 
 def test_a_re_delivered_message_stops_at_its_senders_ceiling_with_no_owner_notice(
