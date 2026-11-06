@@ -148,6 +148,73 @@ async def test_the_wire_carries_the_target_and_the_value_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_empty_value_is_a_legitimate_clear() -> None:
+    # Presence is checked by TYPE, never by truthiness: clearing a field with ""
+    # is a real operation the host implements, and refusing it here would publish
+    # one wire contract with two answers (review R1-1).
+    app = App()
+    result = await setvalue(app, selector="#notes", text="")
+    assert not result.is_error, result.text
+    assert app.sent[0][1]["text"] == "", "the clear must reach the host"
+
+    # An OMITTED value is still refused, and refused before any dispatch: a
+    # missing argument is a caller mistake, not an instruction to clear.
+    missing = await builtin._execute_browser("t", {"action": "setvalue", "selector": "#notes"})
+    assert missing.is_error and "needs 'text'" in missing.text
+
+
+@pytest.mark.asyncio
+async def test_a_password_read_back_is_never_rendered() -> None:
+    # A password box whose value did not stick would otherwise hand the page's
+    # OWN secret to the transcript: this is the one verb that renders a value.
+    # `input_type` is the host's echo of the control's type — the harness must
+    # not infer it from the selector, and must stay safe against an older host
+    # that still sends the value (review R1-2).
+    result = await setvalue(
+        App(
+            result={
+                "kind": "input",
+                "input_type": "password",
+                "value": "hunter2",
+                "verified": True,
+                "url": "https://example.test/",
+                "title": "Sign in",
+            }
+        )
+    )
+    assert not result.is_error, result.text
+    assert "hunter2" not in result.text, result.text
+    assert "hunter2" not in str(result.details or {})
+    assert "value withheld: a password field" in result.text
+    assert (result.details or {})["input_type"] == "password"
+    assert "value" not in (result.details or {})
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_option_match_lists_the_controls_own_options() -> None:
+    # `option_ambiguous` is the setvalue-specific refusal a MULTIPLE select
+    # returns when a label matches twice. It carries the same `available` list as
+    # `option_not_found`, so the guide's promise ("names the options") holds for
+    # both reasons rather than only the one `select` already emitted (R1-3a).
+    available = [
+        {"index": 0, "label": "Beta", "value": "beta-1"},
+        {"index": 1, "label": "Beta", "value": "beta-2"},
+    ]
+    result = await setvalue(
+        App(
+            error=BridgeError(
+                ErrorCode.ELEMENT_NOT_FOUND,
+                "setvalue refused: option_ambiguous",
+                {"reason": "option_ambiguous", "available": available, "matches": 2},
+            )
+        )
+    )
+    assert result.is_error and (result.details or {})["reason"] == "option_ambiguous"
+    assert (result.details or {})["available"] == available
+    assert "[1] 'Beta' (value='beta-2')" in result.text
+
+
+@pytest.mark.asyncio
 async def test_a_dash_leading_value_is_legal_because_it_never_becomes_argv() -> None:
     # `type` refuses flag-shaped text because cmux's `--text` slot parses it as an
     # option. `setvalue` is a non-cmux method whose value travels as a JSON string
@@ -225,7 +292,19 @@ async def test_a_missing_value_match_lists_the_controls_own_options() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "reason", ["target_disabled", "target_readonly", "not_a_form_control", "file_input"]
+    "reason",
+    [
+        "disabled",
+        "readonly",
+        "not_a_form_control",
+        "file_input",
+        # The statuses the paired host's page program answers with (or is being
+        # changed to answer with: `credential_input` for a password target), so a
+        # new one cannot reach the model as prose the tool would have to parse.
+        "option_ambiguous",
+        "credential_input",
+        "invalid_arguments",
+    ],
 )
 async def test_a_host_refusal_keeps_its_typed_reason(reason: str) -> None:
     # The refusals the wire spec names arrive as the host's own reason, so the

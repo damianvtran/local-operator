@@ -378,7 +378,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="setvalue",
                 blurb=(
-                    "Set selector='s value: select option by label/value, "
+                    "Set `selector`'s value: select option by label/value, "
                     "input/textarea (ISO for date/time); returns the read-back. "
                     "Desktop app only."
                 ),
@@ -426,8 +426,8 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="network_start",
                 blurb=(
-                    "Begin recording this tab's requests (method, URL, status, "
-                    "timing, size, redirects). Metadata only; url= + "
+                    "Begin recording this tab's requests (method, safe URL, "
+                    "status, timing, size, redirects). Metadata only; url= + "
                     "include_request_body= + approved= opt one origin+path's "
                     "bodies into a file."
                 ),

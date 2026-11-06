@@ -21845,10 +21845,9 @@ class BrowserParams(BaseModel):
     )
     text: str = Field(
         default="",
-        description="'type': text to enter; 'setvalue': the value to set (option "
-        "label/value for a select, input/textarea value, ISO date/time); the reason "
-        "for 'retain'. NEVER a credential: use 'secret_ref' so it stays out of the "
-        "transcript.",
+        description="'type': text to enter; 'setvalue': the value to set (a select "
+        "option's label or value, an input/textarea value, ISO date/time; '' clears); "
+        "the reason for 'retain'. NEVER a credential: only 'type' takes 'secret_ref'.",
     )
     secret_ref: str = Field(
         default="",
@@ -23308,6 +23307,19 @@ def _browser_press_refusal(
     )
 
 
+#: The host refusal reasons that carry a control's OWN options as their remedy.
+#:
+#: Both need the list for the same reason — the caller named something that is
+#: not there, and the only way to retry correctly is to copy one that is.
+#: `option_not_found` is `select`'s; `option_ambiguous` is what a *multiple*
+#: `<select>` answers when a label or value matches more than one option, and it
+#: only exists on the `setvalue` path. One set, because the rendered sentence and
+#: the result's `details` must agree on which refusals get the list: telling a
+#: caller "there were options" without showing them is the retry-blind case the
+#: list exists to remove.
+_OPTION_LIST_REASONS = frozenset({"option_not_found", "option_ambiguous"})
+
+
 def _select_available_options(raw: Any) -> list[dict[str, Any]]:
     """Bound a host's suggestions too: page labels are untrusted/model-visible.
 
@@ -23495,17 +23507,17 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
             )
         return _validate_selector(params.selector, "select")
     if action == "setvalue":
-        # A target AND a value, both refused with copy rather than silently
-        # defaulted: an absent `text` is indistinguishable from a default-valued
-        # field at this layer, and a no-op that reads back the OLD value would
-        # look like a successful set. Clearing a field is therefore not this
-        # verb's job — say so instead of accepting "" and hoping.
-        if not params.text:
+        # Presence, not truthiness: an EMPTY string is a legitimate value (it
+        # clears an input or textarea) and the host implements exactly that,
+        # so truthiness here would publish one wire contract with two answers
+        # and silently withhold clearing from every caller.
+        if "text" not in params.model_fields_set:
             return (
                 "'setvalue' needs 'text': the value to set (a <select> option's label "
-                "or value, or the value for an input/textarea; date and time inputs "
-                "take the ISO string)"
+                "or value, the value for an input/textarea, or an ISO date/time). "
+                "Pass an empty string to clear a field."
             )
+        # The target is still mandatory: without one there is nothing to write.
         # Deliberately NOT _validate_typed_text: that guard exists because cmux's
         # `--text` argv slot parses a leading dash as an option, and `setvalue`
         # is a non-cmux method whose value travels as a JSON string field. A
@@ -25270,12 +25282,15 @@ async def _bridge_call(
                     "(or the browser extension), or pass a snapshot ref ('snapshot' shows "
                     "them) / a CSS selector instead."
                 )
-        if action in ("select", "setvalue") and exc.data.get("reason") == "option_not_found":
-            # Shared with `setvalue` because both verbs match an option by label or
-            # value, and a refusal that names the alternatives is the difference
-            # between a caller retrying blind and retrying correctly. The reason
-            # name is the host's; a host that words its own refusal differently
-            # still reaches the reader — it just arrives without this list.
+        if action in ("select", "setvalue") and (
+            str(exc.data.get("reason") or "") in _OPTION_LIST_REASONS
+        ):
+            # Shared with `setvalue` because both actions settle a value against
+            # the control's options, and a refusal that names the alternatives is
+            # the difference between a caller retrying blind and retrying
+            # correctly. The reason name is the host's; a host that words its own
+            # refusal differently still reaches the reader — it just arrives
+            # without this list.
             available = _select_available_options(exc.data.get("available"))
             message += "\nAvailable options (zero-based indexes):" + (
                 "\n"
@@ -25305,7 +25320,9 @@ async def _bridge_call(
         # it from the code alone (`busy` covers `record_active` and
         # `record_limit`), and substring-matching the rendered sentence is the
         # failure mode the typed code exists to remove (review round 2, F1).
-        if action in ("select", "setvalue") and exc.data.get("reason") == "option_not_found":
+        if action in ("select", "setvalue") and (
+            str(exc.data.get("reason") or "") in _OPTION_LIST_REASONS
+        ):
             problem.details["available"] = _select_available_options(exc.data.get("available"))
         reason = exc.data.get("reason")
         if isinstance(reason, str) and reason:
@@ -28265,20 +28282,41 @@ async def _bridge_action(
         raw_value = result.get("value")
         verified = result.get("verified")
         got = "" if raw_value is None else str(raw_value)
+        # A password control's read-back is a page-held secret, and this is the
+        # one verb that reads a value INTO model-visible text, so it must not be
+        # the verb that surfaces one. The host is being changed to send no
+        # `value` for a password target; this check is the fail-safe for an older
+        # host that still sends one. The detector is the host's own `input_type`
+        # — the result's echo of the control's `type` — never an inference from
+        # the selector text: a selector says WHERE a field is, not what it holds.
+        input_type = str(result.get("input_type") or "")
+        withheld = input_type == "password"
         # A host that could not read the value back says so rather than letting
         # an empty string pass as "the field is now empty" — the same honesty
         # `select`'s `verified` flag buys.
-        feedback = (
-            " (value unverified — check the page)" if verified is False or raw_value is None else ""
-        )
-        details.update(value=got, kind=result.get("kind"))
+        if withheld:
+            feedback = " (value withheld: a password field)"
+        else:
+            feedback = (
+                " (value unverified — check the page)"
+                if verified is False or raw_value is None
+                else ""
+            )
+        details["kind"] = result.get("kind")
+        if input_type:
+            details["input_type"] = input_type
+        if not withheld:
+            details["value"] = got
         if isinstance(verified, bool):
             details["verified"] = verified
+        if withheld:
+            message = f"Set {params.selector.strip()}{feedback}."
+        else:
+            message = f"Set {params.selector.strip()} to {got!r}{feedback}."
         return _text(
             tool_call_id,
             "browser",
-            f"Set {params.selector.strip()} to {got!r}{feedback}. "
-            f"Page: {_page_line(title, href)}",
+            f"{message} Page: {_page_line(title, href)}",
             details=details,
         )
     if action == "hover":

@@ -205,16 +205,21 @@ than through pointer or keyboard input, and it exists because a native
 model, `type` cannot move a native select, and clicking an option node fails when
 the list is browser chrome rather than page DOM.
 
-Wire contract, which both hosts implement identically:
+Wire contract, which the desktop host implements as follows:
 
 - Params `{tab, selector, text}` — no new parameter and no new method beside
   `setvalue` itself. `selector` resolves exactly as `click`/`select` do (CSS,
   snapshot ref, `role=`/`label=`/`text=` locator); `text` is the value.
-- Result `{value, kind?, verified?, url, title}`, where `value` is what the
-  control HOLDS after the dispatch — a native select maps a label onto its own
-  option value, and the harness renders that read-back rather than echoing the
-  request. `verified:false` (or an absent `value`) makes the tool say
-  `value unverified` instead of reporting an empty read as success.
+- Result `{value, kind?, input_type?, verified?, url, title}`, where `value` is
+  what the control HOLDS after the dispatch — a native select maps a label onto
+  its own option value, and the harness renders that read-back rather than
+  echoing the request. `input_type` is the control's own `type`, which is what
+  lets the harness withhold a `password` field's read-back: that result renders
+  as `value withheld: a password field` with no value in the details, so the one
+  verb that reads a value back cannot surface a page-held secret (fail-safe: it
+  also covers a host that still sends the value). `verified:false` (or an absent
+  `value`) makes the tool say `value unverified` instead of reporting an empty
+  read as success.
 - Native `<select>`: an option is matched by trimmed label, then option value,
   exact before case-insensitive; `multiple` requires exactly one match. No match
   (or an ambiguous one) is `element_not_found` with `data.reason` written the way
@@ -222,10 +227,21 @@ Wire contract, which both hosts implement identically:
   can print the same correction list.
 - `<input>`/`<textarea>`: the value is set through the prototype setter, then
   `input` and `change` are dispatched, in that order. `date`, `time`,
-  `datetime-local`, `month` and `week` take the ISO string.
+  `datetime-local`, `month` and `week` hold only the ISO spelling the DOM stores
+  and refuse a value the control cannot hold (a locale `01/03/2027` is not
+  translated); on a host older than that check the DOM keeps `""` and the result
+  carries `verified:false`, so the harness says `value unverified` and never
+  reports the write as clean. An empty `text` is a legitimate value (it clears an
+  input/textarea); presence is checked by type, never by truthiness.
 - Refused, typed, before any mutation: a target that is not a form control
   (a `contenteditable` is `type`'s, a page-owned ARIA listbox is `select`'s), a
-  disabled/inert/read-only control, and a file input (`upload`).
+  disabled/inert/read-only control, and a file input (`upload`). A secret cannot
+  travel through this action at all: `secret_ref` is `type`-only and is refused
+  here, so a credential field is `type` with a ref, never a literal in `text`.
+- The option-list refusal has two reasons, and the harness renders the list for
+  both: `option_not_found` and `option_ambiguous` (a `multiple` select whose
+  label matched more than one option). One set, `_OPTION_LIST_REASONS`, so the
+  sentence and `details.available` cannot disagree about which refusals carry it.
 
 The page program is a FIXED generated source string (`geometry-sources.gen.ts`
 style, one per driver function), so a caller supplies data and never source: no

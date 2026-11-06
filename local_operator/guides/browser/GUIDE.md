@@ -490,9 +490,9 @@ DOM. Three worked cases, all against the control the page actually renders:
 
 ```text
 # 1. Native <select> — an Apple-style settings form ("Environment")
-snapshot                                   # combobox "Environment" -> ref e9
-setvalue selector=e9 text="Production"     # by visible label, or by option value
-# -> Set e9 to 'production'. ...          the read-back is the OPTION's value
+snapshot                                   # prints combobox "Environment" [e2]
+setvalue selector=e2 text="Production"     # the ref WITHOUT its brackets
+# -> Set e2 to 'production'. ...           the read-back is the OPTION's value
 
 # 2. <input type="date"> — ISO string, exactly as the DOM stores it
 setvalue selector="input[name=expires]" text="2027-03-01"
@@ -506,26 +506,37 @@ setvalue selector="input[aria-label='Environment']" text="Production"
 How a value is matched and what comes back:
 
 - **Native `<select>`**: the option is matched by visible label, then by option
-  value; both are tried exact first, then case-insensitively. An absent or
-  ambiguous match is refused and names up to 50 of the control's own options —
-  copy one instead of guessing. A `multiple` select needs exactly one match.
+  value; both are tried exact first, then case-insensitively. An absent match
+  (`option_not_found`) and an ambiguous one (`option_ambiguous`, a `multiple`
+  select whose label matched twice) are both refused and both name up to 50 of
+  the control's own options — copy one instead of guessing.
 - **`<input>` / `<textarea>`**: the value goes through the prototype's setter, so
   a React-controlled field registers the edit, and `input` + `change` are
   dispatched after it.
-- **Date/time**: `date`, `time`, `datetime-local`, `month` and `week` take the
-  ISO spelling the DOM stores (`2027-03-01`, `13:45`, `2027-03-01T13:45`). A
-  locale spelling (`01/03/2027`) is refused rather than silently normalised.
+- **Date/time**: `date`, `time`, `datetime-local`, `month` and `week` hold only
+  the ISO spelling the DOM itself stores (`2027-03-01`, `13:45`,
+  `2027-03-01T13:45`). A locale spelling (`01/03/2027`) is not translated: the
+  host refuses a value the control cannot hold, and a host older than that check
+  leaves the field EMPTY and answers `value unverified` — either way the value it
+  had is gone, so pass ISO.
 - **The result reports the read-back** — the value the control holds after the
   dispatch, which is not always what was asked for (a select maps a label onto
   its value; a masked field reports its own format). If the host could not read
   it, the sentence says `value unverified` instead of presenting an empty string
   as success.
+- **A password control reports no value.** The harness reads the host's
+  `input_type` and, when it is `password`, prints `value withheld: a password
+  field` and leaves the value out of the details — so a page-held secret never
+  reaches the transcript, including from an older host that still sends one.
 - **Refused**: a target that is not a form control (use `select` for a
   page-owned ARIA listbox, or `type` for a `contenteditable`), a disabled, inert
   or read-only control, a file input (that is `upload`), or a missing target or
-  value. A credential field takes `type` with `secret_ref`, not `setvalue`:
-  `setvalue` refuses a secret ref outright, which is what keeps a password out of
-  `text` on the one action whose value is a literal by definition.
+  value. An empty `text` is a legitimate value: it clears an input or textarea.
+  A credential field is `type` with `secret_ref`, never `setvalue` — this action
+  carries a literal by definition and refuses a secret ref, so `type` is the only
+  action that can enter a stored secret. The one place a secret can still meet
+  `setvalue` is a target the caller did not know was a password box, so a
+  `password` control's result reports no value at all (see below).
 
 What `setvalue` is, and is not — the boundary is structural, not a promise:
 

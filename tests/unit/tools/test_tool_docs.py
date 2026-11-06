@@ -445,13 +445,24 @@ MEASURED_TOKENS: dict[str, int] = {
     # 0.5-0.7 GB of RAM), so the note states the RAM cost and the tested
     # playback instead. Measured by this test's own print; the doc is 8190 chars against
     # the 8192 cap.
-    # 2116 -> 2130 (+14, the `setvalue` action): one new op row plus the
-    # `setvalue` arm of the `text`/`selector` parameter descriptions. The doc sat
-    # at 8190 chars against an 8192 cap, so that row could not be added for free:
-    # the network note/op, the geometry note and the download note lose wording
-    # their own neighbouring rows already carry, and the net token cost below is
-    # what this test prints on the finished tree. MEASURED, not summed.
-    "browser": 2130,
+    # 2116 -> 2134 (+18, the `setvalue` action): one new op row, the `setvalue`
+    # arm of the `text`/`selector` parameter descriptions, and the `option_ambiguous`
+    # refusal it can meet. The doc sat at 8190 chars against an 8192 cap, so every
+    # added word had to be paid for, and the ledger below is what this test PRINTS
+    # on the finished tree rather than a sum of deltas. What paid, honestly:
+    # - `network_start` loses "exact" and "request"/"private"/"redirect links" (the
+    #   note below still states the exact-origin+path rule and the private file);
+    #   "safe URL" is RESTORED in that row - it is the doc's only statement that a
+    #   recorded URL has credentials and query values stripped, and it is
+    #   security-relevant, so it must not live only in docs/BROWSER.md.
+    # - the geometry note loses "(rect + computed styles + inline `--*` tokens)".
+    #   Those two facts did NOT vanish: the `styles` op row still says "rect +
+    #   computed styles", and the inline custom properties are documented in
+    #   `guide://browser` ("Reading layout: rects and computed styles").
+    # - `inspect_ownership` and `network_stop` are shortened to one clause each;
+    #   `download` says "private dir".
+    # Nothing else about any other tool moved.
+    "browser": 2134,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
