@@ -22,6 +22,7 @@ from local_operator.analytics.model import (
     apportion_components,
     condense_label,
     price_snapshot,
+    request_fingerprint,
     session_table_labels,
     snapshot_component_chars,
     split_system_prompt,
@@ -717,3 +718,158 @@ def test_a_provider_reported_dollar_is_stored_unscaled_by_any_schedule(monkeypat
     )
     snapshot = dataclasses.replace(_peak_priced_snapshot(_PEAK_MS), usd_cost=0.0075)
     assert price_snapshot(snapshot) == (7500, True)
+
+
+# -- the request fingerprint -------------------------------------------------
+#
+# ``prompt_hash`` exists because nothing else retained after a call says what
+# the model was actually given. These tests pin its three load-bearing
+# properties: same context -> same digest, changed context -> changed digest,
+# and every non-context input ignored so two calls over the same prefix stay
+# comparable.
+
+
+def _fingerprint_request(**overrides):
+    base = ChatRequest(
+        model=ModelSpec(provider="radient", model_id="auto"),
+        system_blocks=["persona", "## Available tools\ntools", "env", "<skills/>"],
+        messages=[Message(role="user", content=[TextContent(text="hello")])],
+        tools=[
+            AgentTool(
+                name="bash",
+                description="run",
+                parameters={"type": "object", "properties": {"command": {"type": "string"}}},
+                execute=_noop,
+            )
+        ],
+    )
+    return base.model_copy(update=overrides) if overrides else base
+
+
+def test_request_fingerprint_is_stable_for_the_same_request() -> None:
+    """Recomputable from the same request, which is the whole point: a stored
+    digest is only evidence if a later replay of the request reproduces it."""
+    first = request_fingerprint(_fingerprint_request())
+    second = request_fingerprint(_fingerprint_request())
+    assert first == second
+    assert len(first[0]) == 64
+
+
+def test_request_fingerprint_changes_when_a_message_is_appended() -> None:
+    request = _fingerprint_request()
+    grown = request.model_copy(
+        update={
+            "messages": [
+                *request.messages,
+                Message(role="assistant", content=[TextContent(text="hi")]),
+            ]
+        }
+    )
+    assert request_fingerprint(grown)[0] != request_fingerprint(request)[0]
+
+
+def test_request_fingerprint_changes_when_prompt_context_changes() -> None:
+    """Every covered input moves the digest: a swapped system block, a renamed
+    tool, an edited tool result. A digest that survives a changed block would be
+    unable to answer "was this the right context?"."""
+    base = _fingerprint_request()
+    for changed in (
+        {"system_blocks": ["persona EDITED", "## Available tools\ntools", "env", "<skills/>"]},
+        {"messages": [Message(role="user", content=[TextContent(text="goodbye")])]},
+        {"tools": []},
+        {"model": ModelSpec(provider="radient", model_id="deepseek-v4.1-flash")},
+    ):
+        assert request_fingerprint(base.model_copy(update=changed))[0] != (
+            request_fingerprint(base)[0]
+        ), changed
+
+
+def test_request_fingerprint_ignores_routing_and_sampling_knobs() -> None:
+    """``prompt_cache_key``, the host pin, sampling and effort choose HOW the
+    same context is served. Folding them in would make two calls over identical
+    context hash differently and defeat the comparison. (There is no
+    ``provider_payload`` on a request at all — it lives on the response end
+    event, so it cannot affect this hash by construction.)"""
+    base = _fingerprint_request()
+    variant = base.model_copy(
+        update={
+            "prompt_cache_key": "session-abc",
+            "provider_affinity": "AtlasCloud",
+            "provider_avoid": ["Novita"],
+            "temperature": 0.9,
+            "max_tokens": 1234,
+            "effort_ceiling": "low",
+            "purpose": "compaction",
+        }
+    )
+    assert request_fingerprint(variant) == request_fingerprint(_fingerprint_request())
+
+
+def test_request_fingerprint_counts_the_composed_messages() -> None:
+    """``message_count`` is the composed count (system blocks + messages), taken
+    before any per-dialect adaptation, so it means one thing on every wire and
+    matches what the hash covers."""
+    request = _fingerprint_request()
+    assert request_fingerprint(request)[1] == len(request.system_blocks) + len(request.messages)
+
+
+def test_request_fingerprint_summarises_media_without_hashing_bytes() -> None:
+    """An image counts as PRESENCE, never as bytes: digesting media on the turn's
+    own path would copy megabytes per call, and counts already answer the
+    question. Adding a second image must still move the digest."""
+    one = _fingerprint_request(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="look"),
+                    ImageContent(data="aGVsbG8=", mime_type="image/png"),
+                ],
+            )
+        ]
+    )
+    two = _fingerprint_request(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="look"),
+                    ImageContent(data="aGVsbG8=", mime_type="image/png"),
+                    ImageContent(data="d29ybGQ=", mime_type="image/png"),
+                ],
+            )
+        ]
+    )
+    assert request_fingerprint(one)[0] != request_fingerprint(two)[0]
+    # Different BYTES for the same single image deliberately share a digest:
+    # bytes are excluded, presence is what is covered.
+    other_bytes = _fingerprint_request(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="look"),
+                    ImageContent(data="d29ybGQ=", mime_type="image/png"),
+                ],
+            )
+        ]
+    )
+    assert request_fingerprint(other_bytes)[0] == request_fingerprint(one)[0]
+
+
+def test_request_fingerprint_never_raises_on_a_hostile_tool_schema() -> None:
+    """A diagnostic must not be the thing that breaks a turn. A non-JSON value is
+    rendered as its type name — stable across calls, content-blind by design."""
+    hostile = _fingerprint_request(
+        tools=[
+            AgentTool(
+                name="weird",
+                description="",
+                parameters={"type": "object", "properties": {"x": object()}},
+                execute=_noop,
+            )
+        ]
+    )
+    digest = request_fingerprint(hostile)
+    assert len(digest[0]) == 64
+    assert digest == request_fingerprint(hostile)
