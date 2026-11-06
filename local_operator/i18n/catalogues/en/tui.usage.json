@@ -19,5 +19,20 @@
   "tui.usage.refreshing": "refreshing…",
   "tui.usage.refresh_failed": "refresh failed — showing last known numbers",
   "tui.usage.showing_prefix": "showing ",
-  "tui.usage.of_separator": " of "
+  "tui.usage.of_separator": " of ",
+  "tui.usage.resets.badge": "{count, plural, one {1 reset} other {{count} resets}}",
+  "tui.usage.resets.hint": "reset",
+  "tui.usage.resets.choose": "choose",
+  "tui.usage.resets.accept": "reset",
+  "tui.usage.resets.cancel": "cancel",
+  "tui.usage.resets.choose_title": "{count, plural, one {1 account can reset} other {{count} accounts can reset}}",
+  "tui.usage.resets.more": "…and {count} more",
+  "tui.usage.resets.confirm_title": "Reset usage for {identity}?",
+  "tui.usage.resets.confirm_detail": "{count, plural, one {Uses your last reset credit; clears this account's rate-limit windows.} other {Uses 1 of {count} reset credits; clears this account's rate-limit windows.}}",
+  "tui.usage.resets.busy": "Resetting usage for {identity}…",
+  "tui.usage.resets.done": "{count, plural, one {Reset applied — 1 window cleared} other {Reset applied — {count} windows cleared}}",
+  "tui.usage.resets.nothing": "Limits aren't reached yet — nothing to reset",
+  "tui.usage.resets.no_credit": "No reset credits left on this account",
+  "tui.usage.resets.already": "That reset was already applied",
+  "tui.usage.resets.failed": "Couldn't confirm the reset — check your limits, then press r to refresh"
 }

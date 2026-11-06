@@ -66,6 +66,66 @@ def reported_balance(*, count: int | float, shown: str) -> Msg:
     return Msg("tui.usage.reported_balance", {"count": count, "shown": shown})
 
 
+def resets_accept() -> Msg:
+    return Msg("tui.usage.resets.accept", {})
+
+
+def resets_already() -> Msg:
+    return Msg("tui.usage.resets.already", {})
+
+
+def resets_badge(*, count: int | float) -> Msg:
+    return Msg("tui.usage.resets.badge", {"count": count})
+
+
+def resets_busy(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.busy", {"identity": identity})
+
+
+def resets_cancel() -> Msg:
+    return Msg("tui.usage.resets.cancel", {})
+
+
+def resets_choose() -> Msg:
+    return Msg("tui.usage.resets.choose", {})
+
+
+def resets_choose_title(*, count: int | float) -> Msg:
+    return Msg("tui.usage.resets.choose_title", {"count": count})
+
+
+def resets_confirm_detail(*, count: int | float) -> Msg:
+    return Msg("tui.usage.resets.confirm_detail", {"count": count})
+
+
+def resets_confirm_title(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.confirm_title", {"identity": identity})
+
+
+def resets_done(*, count: int | float) -> Msg:
+    return Msg("tui.usage.resets.done", {"count": count})
+
+
+def resets_failed() -> Msg:
+    return Msg("tui.usage.resets.failed", {})
+
+
+def resets_hint() -> Msg:
+    return Msg("tui.usage.resets.hint", {})
+
+
+def resets_more(*, count: str) -> Msg:
+    return Msg("tui.usage.resets.more", {"count": count})
+
+
+def resets_no_credit() -> Msg:
+    return Msg("tui.usage.resets.no_credit", {})
+
+
+def resets_nothing() -> Msg:
+    return Msg("tui.usage.resets.nothing", {})
+
+
 def resets_in(*, value: str) -> Msg:
     return Msg("tui.usage.resets_in", {"value": value})
 

@@ -103,5 +103,82 @@
     "role": "scroll counter",
     "tone": "faint",
     "note": "Separator between the shown range and the total; spaces are layout. Deliberately its own key rather than reaching across namespaces."
+  },
+  "tui.usage.resets.badge": {
+    "role": "chip",
+    "tone": "accent; the card's one interactive affordance",
+    "note": "Count of spendable vendor usage-reset credits. Rendered as `[N resets]` on the provider heading, after the binding window, before the row is truncated. Never counted as quota: a reset clears a rate-limit window, it is not headroom.",
+    "maxCells": 16
+  },
+  "tui.usage.resets.hint": {
+    "role": "key hint label",
+    "tone": "plain",
+    "note": "Label after the `x` key in the footer; appears only when at least one visible account holds a reset credit.",
+    "maxCells": 8
+  },
+  "tui.usage.resets.choose": {
+    "role": "key hint verb",
+    "tone": "plain",
+    "note": "Verb in the choose band's key line, after a `1-<last>` key range. Lowercase to match the footer."
+  },
+  "tui.usage.resets.accept": {
+    "role": "key hint verb",
+    "tone": "plain",
+    "note": "Verb after the `enter` key in the confirmation band: pressing enter spends the credit."
+  },
+  "tui.usage.resets.cancel": {
+    "role": "key hint verb",
+    "tone": "plain",
+    "note": "Verb after the `esc` key: leaves the reset band without spending anything."
+  },
+  "tui.usage.resets.choose_title": {
+    "role": "band title",
+    "tone": "factual",
+    "note": "Number of accounts that hold a reset credit; the band lists them below this line."
+  },
+  "tui.usage.resets.more": {
+    "role": "band overflow row",
+    "tone": "plain",
+    "note": "Placeholder count for candidates the band could not list; only the first five accounts are selectable."
+  },
+  "tui.usage.resets.confirm_title": {
+    "role": "confirmation title",
+    "tone": "direct question",
+    "note": "{identity} is the account email the report carries. It must stay visible: a reset cannot be undone and the user is confirming WHICH account pays."
+  },
+  "tui.usage.resets.confirm_detail": {
+    "role": "confirmation consequence",
+    "tone": "factual",
+    "note": "{count} is the credits remaining on that account. States the irreversible cost and the effect (rate-limit windows are cleared). Shed first when the card is too short for the whole band."
+  },
+  "tui.usage.resets.busy": {
+    "role": "in-flight band",
+    "tone": "factual",
+    "note": "{identity} names the account being reset. The request is already sent, so no key cancels it."
+  },
+  "tui.usage.resets.done": {
+    "role": "result",
+    "tone": "factual",
+    "note": "{count} is how many rate-limit windows the vendor cleared (0 is possible and does not mean failure)."
+  },
+  "tui.usage.resets.nothing": {
+    "role": "result",
+    "tone": "factual",
+    "note": "The credit was not spent because every window is below its limit."
+  },
+  "tui.usage.resets.no_credit": {
+    "role": "result",
+    "tone": "factual",
+    "note": "The account has no reset credits left; nothing was spent."
+  },
+  "tui.usage.resets.already": {
+    "role": "result",
+    "tone": "factual",
+    "note": "The vendor reports this redemption already happened — a retried request, not a second spend."
+  },
+  "tui.usage.resets.failed": {
+    "role": "result",
+    "tone": "honest, non-committal",
+    "note": "MUST NOT claim the credit survived, because the outcome is unknown. Points at the limits row and at `r`, the key that refreshes the panel."
   }
 }
