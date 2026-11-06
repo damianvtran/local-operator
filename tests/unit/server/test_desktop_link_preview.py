@@ -11,6 +11,8 @@ the renderer talks to.
 from __future__ import annotations
 
 import asyncio
+import socket
+import threading
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -88,6 +90,12 @@ def _pinned_dns(monkeypatch: pytest.MonkeyPatch) -> None:
         return [hostname]
 
     monkeypatch.setattr(fetch_service, "_resolve_host_ips", _resolve)
+
+
+#: The production resolver, captured at import time — i.e. BEFORE the autouse
+#: fixture above replaces it. Only a test of the resolver's own refusal behaviour
+#: wants this; everything else wants the pinned fixture.
+_RESOLVE_HOST_IPS_REAL = fetch_service._resolve_host_ips
 
 
 class _Clock:
@@ -409,6 +417,41 @@ async def test_a_redirect_to_a_private_address_is_re_validated_at_the_hop(
 
 
 @pytest.mark.asyncio
+async def test_credentials_in_the_url_are_refused_before_a_single_request(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """URL [redacted] would become ``Authorization: Basic`` on the wire.
+
+    httpx turns it into a header, so honouring such a URL would send a credential
+    the MESSAGE AUTHOR chose to a third party — in a request this process signs.
+    Refused by the address guard, before any lookup or connect, which the empty
+    request log is what proves.
+    """
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        response = await _post(client, _resolve_body("http://someone:hunter2@preview.test/page"))
+    assert response.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_that_introduces_credentials_is_refused_at_the_hop(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The hop target is judged BEFORE we connect, exactly like a private address."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/page", "the credentialed hop must never be requested"
+        return httpx.Response(302, headers={"location": "http://someone:hunter2@preview.test/deep"})
+
+    seen = _route_transport(monkeypatch, handler)
+    async with _client() as client:
+        response = await _post(client, _resolve_body())
+    assert response.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert seen == ["/page"]
+
+
+@pytest.mark.asyncio
 async def test_a_declared_oversize_page_is_too_large(
     monkeypatch: pytest.MonkeyPatch, signed_in: None
 ) -> None:
@@ -507,6 +550,27 @@ async def test_an_svg_og_image_is_rejected_and_the_card_still_ships(
     assert result["kind"] == "ready"
     assert result["preview"]["title"] == "Notes"
     assert "image" not in result["preview"]
+
+
+@pytest.mark.asyncio
+async def test_an_absent_display_string_is_absent_from_the_json_not_empty(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The renderer's contract says ``string | null``, so a missing one is a missing key."""
+    _route_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200,
+            content=_html("<title>Only a title</title>"),
+            headers={"content-type": "text/html"},
+        ),
+    )
+    async with _client() as client:
+        response = await _post(client, _resolve_body())
+    preview = response.json()["result"]["preview"]
+    assert preview["title"] == "Only a title"
+    assert "description" not in preview
+    assert "siteName" not in preview
 
 
 @pytest.mark.asyncio
@@ -876,6 +940,9 @@ def test_policy_refusals_carry_a_machine_reason() -> None:
         ("file:///etc/passwd", "scheme"),
         ("http://127.0.0.1/", "private"),
         ("http://10.0.0.1/", "private"),
+        # Credentials in the URL are a ``host`` refusal: never forwarded as an
+        # ``Authorization`` header, and refused before any lookup.
+        ("http://someone:hunter2@example.com/x", "host"),
     ):
         with pytest.raises(PolicyRefusal) as caught:
             fetch_service.validate_public_url(url, allow_private=False)
@@ -958,7 +1025,71 @@ async def test_the_cache_reports_the_bytes_it_holds(
         stats = preview_cache_for_test.stats()
         assert stats.hits == 1
         assert stats.resolutions == 1
-        assert stats.resident_bytes == len(PNG)
+
+
+@pytest.mark.asyncio
+async def test_the_store_write_runs_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """``PreviewStore.put`` is file I/O, so the service hands it to a worker thread.
+
+    The write is a temporary file, an ``os.replace`` and a directory sweep —
+    measured at 30-60 ms per artifact — and it sits inside the request path, where
+    on the loop it would stall every other renderer's resolve. Asserted by THREAD
+    IDENTITY rather than by reading the source: the write must land somewhere
+    other than the thread running the app.
+    """
+    threads: list[int] = []
+    real_put = PreviewStore.put
+
+    def _spy(self: PreviewStore, body: bytes, *, artifact_id: str) -> str:
+        threads.append(threading.get_ident())
+        return real_put(self, body, artifact_id=artifact_id)
+
+    monkeypatch.setattr(PreviewStore, "put", _spy)
+    _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    loop_thread = threading.get_ident()
+    async with _client() as client:
+        response = await _post(client, _resolve_body())
+    assert response.json()["result"]["kind"] == "ready", response.text
+    assert threads, "the favicon was never stored"
+    assert all(ident != loop_thread for ident in threads)
+
+
+CACHE = "/v1/desktop/team-bridge/link-preview/cache"
+
+
+@pytest.mark.asyncio
+async def test_the_cache_route_is_bearer_gated_like_its_siblings() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.get(CACHE)
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_the_cache_route_reports_counts_and_bytes_and_names_nothing(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The "resident size is reported" contract line, answered by a real route."""
+    _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        resolved = await _post(client, _resolve_body())
+        assert resolved.json()["result"]["kind"] == "ready", resolved.text
+        response = await client.get(CACHE)
+    assert response.status_code == 200
+    assert response.json()["result"] == {
+        "entries": 1,
+        "residentBytes": len(PNG),
+        "hits": 0,
+        "misses": 1,
+        "evictions": 0,
+        "resolutions": 1,
+    }
+    # Counts and bytes only: no URL, host or account id can appear in the answer.
+    assert "http" not in response.text
+    assert ACCOUNT not in response.text
 
 
 @pytest.mark.asyncio
@@ -1049,6 +1180,58 @@ async def test_an_absent_answer_is_reused_but_expires_sooner_than_a_card(
         _clock.advance(NEGATIVE_TTL_S + 1)
         await _post(client, _resolve_body())
         assert seen.count("/page") == 2
+
+
+@pytest.mark.asyncio
+async def test_a_name_with_no_address_is_a_blocked_host_and_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    signed_in: None,
+    _clock: _Clock,
+    preview_cache_for_test: PreviewCache,
+) -> None:
+    """A permanently dead link must not be re-resolved on every scroll.
+
+    ``socket.gaierror`` is a POLICY answer — the name has no address, and no retry
+    changes that — so it surfaces as ``blocked-host`` and is remembered as a
+    NEGATIVE entry, reused for the whole negative TTL before one more lookup is
+    allowed. A DNS TIMEOUT is a different animal: it stays a retryable ``error``
+    (see ``test_the_total_deadline_answers_instead_of_hanging``), because a slow
+    resolver is not a dead host.
+    """
+    # The autouse fixture pins every name; this test is about the resolver's own
+    # answer, so the production resolver goes back in and only DNS itself is faked.
+    monkeypatch.setattr(fetch_service, "_resolve_host_ips", _RESOLVE_HOST_IPS_REAL)
+    lookups: list[str] = []
+
+    def _no_such_name(hostname: str, *args: Any, **kwargs: Any) -> Any:
+        lookups.append(hostname)
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _no_such_name)
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    body = _resolve_body("http://nowhere.invalid/page")
+    async with _client() as client:
+        first = await _post(client, body)
+        assert first.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+        # No retryable flag at all: a dead name is an answer, not a blip.
+        assert "retryable" not in first.json()["result"]
+
+        again = await _post(client, body)
+        assert again.json()["result"] == first.json()["result"]
+        assert lookups == ["nowhere.invalid"], "the negative answer was not reused"
+
+        # Still inside the 30 min negative TTL: still no second lookup.
+        _clock.advance(NEGATIVE_TTL_S - 1)
+        third = await _post(client, body)
+        assert third.json()["result"] == first.json()["result"]
+        assert lookups == ["nowhere.invalid"]
+
+        # Past it, one more lookup is allowed — and answered the same way.
+        _clock.advance(2)
+        await _post(client, body)
+        assert lookups == ["nowhere.invalid", "nowhere.invalid"]
+    assert seen == [], "a refused name reached the transport"
+    assert preview_cache_for_test.stats().entries == 1
 
 
 @pytest.mark.asyncio

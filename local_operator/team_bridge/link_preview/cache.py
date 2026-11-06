@@ -37,9 +37,11 @@ shielded singleflight is the pattern
 same reason — a renderer that navigates away mid-request must not cancel a fetch
 other waiters are still holding.
 
-NOTHING HERE CAN IDENTIFY A READING. :meth:`PreviewCache.stats` reports counts
-and bytes and nothing else: no account id, no URL, no title. That is the
-resident-size report the surface needs, and it is deliberately not a route.
+NOTHING HERE CAN REVEAL A PAGE. :meth:`PreviewCache.stats` reports counts and
+bytes and nothing else: no account id, no URL, no title. That is the
+resident-size report the surface needs, and it is served read-only by
+``GET /v1/desktop/team-bridge/link-preview/cache`` — a route that takes no
+account receipt because the answer names no account.
 """
 
 from __future__ import annotations
@@ -169,7 +171,13 @@ def canonical_url(url: str) -> str:
     USERINFO IS DROPPED. ``https://user:pass@host/x`` is the same resource as
     ``https://host/x``; keeping credentials in a cache key would put them in a
     structure that outlives the request they arrived with, which is the one thing
-    this package must never do.
+    this package must never do. THAT DROP IS BELT-AND-BRACES, NOT A GUARD: the
+    address guard refuses any URL carrying credentials before it is fetched
+    (:class:`~local_operator.web_fetch.service.PolicyRefusal` with ``reason="host"``),
+    so the collapsed form is unreachable here — a credentialed target never gets
+    far enough to be keyed at all. The normalisation stays because a key function
+    must be total: it runs on whatever the renderer sent, before any fetch has had
+    the chance to refuse it.
 
     This value is a KEY and nothing else: it is never fetched and never returned.
     """

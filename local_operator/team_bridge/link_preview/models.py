@@ -23,8 +23,9 @@ from pydantic import BaseModel, Field
 #: Why a URL produced no card. The renderer switches on these strings, so they
 #: are a closed vocabulary: ``no-metadata`` (the page said nothing), ``local-or-
 #: private`` (the address guard refused it, including on a redirect hop),
-#: ``unsupported-scheme`` (not http/https), ``blocked-host`` (no host to judge, or
-#: a chain we could not complete), ``content-type`` (wrong declared type),
+#: ``unsupported-scheme`` (not http/https), ``blocked-host`` (no host to judge, a
+#: URL carrying credentials, a name that does not resolve, or a chain we could not
+#: complete), ``content-type`` (wrong declared type),
 #: ``not-html`` (declared as HTML but carries no markup), ``too-large`` (the page
 #: declared more bytes than a card is worth reading) and ``cap`` (this message
 #: already has :data:`~local_operator.team_bridge.link_preview.service.PER_MESSAGE_CAP`
@@ -64,12 +65,19 @@ class ImageArtifact(BaseModel):
 
 
 class LinkPreview(BaseModel):
-    """What a card renders. Nothing here is message text, sender or tenant."""
+    """What a card renders. Nothing here is message text, sender or tenant.
+
+    THE DISPLAY STRINGS ARE ``str | None``, not empty strings. The renderer's
+    contract declares ``title: string | null`` and the route omits ``None``, so an
+    absent title is a key that is not there rather than an empty one it would have
+    to test for separately. The extractor keeps its own empty-string internals; the
+    boundary is where "nothing to say" becomes a shape.
+    """
 
     url: str
-    title: str = ""
-    description: str = ""
-    site_name: str = Field(default="", serialization_alias="siteName")
+    title: str | None = None
+    description: str | None = None
+    site_name: str | None = Field(default=None, serialization_alias="siteName")
     favicon: FaviconArtifact | None = None
     image: ImageArtifact | None = None
 

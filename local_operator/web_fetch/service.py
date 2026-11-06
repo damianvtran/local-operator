@@ -231,13 +231,17 @@ class PolicyRefusal(FetchError):
     to change.
 
     ``reason`` is a small closed vocabulary, deliberately not the exception's own
-    prose: ``scheme`` (not http/https), ``host`` (no host to judge), ``private``
-    (resolves to a loopback/private/reserved address).
+    prose: ``scheme`` (not http/https), ``host`` (no host to judge, credentials
+    carried in the URL, or a name with no address), ``private`` (resolves to a
+    loopback/private/reserved address).
 
     Raised for the initial URL AND for every redirect hop, because
     :func:`validate_public_url` is the single address check the redirect loop
-    calls — a public URL that 302s to the metadata endpoint is refused at the
-    hop, and that refusal arrives here with ``reason="private"``.
+    calls — a public URL that 302s to the metadata endpoint is refused at the hop
+    with ``reason="private"``, and one that 302s to a URL carrying credentials is
+    refused at the hop with ``reason="host"``. Nothing in the chain skips that
+    function: it runs on every hop, every retry and the escalated attempt, before
+    any lookup or connection.
     """
 
     def __init__(self, message: str, *, reason: str) -> None:
@@ -439,11 +443,30 @@ def _resolve_host_ips(hostname: str) -> list[str]:
     try:
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        raise FetchError(f"could not resolve host {hostname!r}: {exc}") from exc
+        # A name with no address is a POLICY answer, not a transport hiccup: no
+        # amount of waiting or retrying changes what DNS knows, and callers that
+        # cache outcomes (a link preview's negative cache) must be able to tell
+        # "this host does not exist" from "this host timed out". Raised as the
+        # guard's own refusal — still a ``FetchError`` by inheritance, so every
+        # existing catcher, message and retry decision is unchanged.
+        raise PolicyRefusal(f"could not resolve host {hostname!r}: {exc}", reason="host") from exc
     # info[4] is the sockaddr; its first element is the address string for both
     # AF_INET and AF_INET6. str() guards the type checker against the union the
     # stdlib stubs give sockaddr elements.
     return list({str(info[4][0]) for info in infos})
+
+
+def _url_has_credentials(url: str) -> bool:
+    """Whether ``url`` carries userinfo (``scheme://user:secret@host/...``).
+
+    A pure parse — no DNS, no socket — so a refusal on this costs nothing. An
+    EMPTY userinfo (``http://@host/``) counts: httpx still treats it as
+    credentials, and the point of the check is that this process never sends an
+    ``Authorization`` header a link text chose for it.
+    """
+
+    parts = urlparse(url)
+    return parts.username is not None or parts.password is not None
 
 
 def validate_public_url(url: str, *, allow_private: bool) -> str | None:
@@ -469,6 +492,18 @@ def validate_public_url(url: str, *, allow_private: bool) -> str | None:
     if parsed.scheme.lower() not in ("http", "https"):
         raise PolicyRefusal(
             f"refusing {url!r}: only http:// and https:// are allowed", reason="scheme"
+        )
+    # CREDENTIALS IN THE URL ARE REFUSED, NEVER FORWARDED. httpx turns URL
+    # userinfo into an ``Authorization: Basic`` header, so honouring
+    # ``http://user:secret@host/x`` would send those credentials to a third
+    # party in a request this process signs — and a previewed link is written by
+    # whoever sent the message, not by the reader. Checked BEFORE any lookup or
+    # connect, so refusing costs no DNS and no socket, and it runs on every
+    # redirect hop for the same reason the rest of this function does. The URL is
+    # deliberately absent from the message: it carries the credential itself.
+    if _url_has_credentials(url):
+        raise PolicyRefusal(
+            "refusing a URL carrying credentials: userinfo is never forwarded", reason="host"
         )
     hostname = parsed.hostname
     if not hostname:

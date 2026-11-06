@@ -99,7 +99,10 @@ def _describe(resolution: LinkPreviewResolution) -> None:
         print(f"  reason        : {resolution.reason}  retryable={resolution.retryable}")
         return
     preview = resolution.preview
-    print(f"  title         : {'yes' if preview.title else 'no'}  ({preview.title[:60]!r})")
+    # ``title`` is ``str | None`` on the wire (an absent one is omitted, not ""), so
+    # the evidence script reports presence and a bounded excerpt from a local copy.
+    title = preview.title or ""
+    print(f"  title         : {'yes' if title else 'no'}  ({title[:60]!r})")
     print(f"  description   : {'yes' if preview.description else 'no'}")
     print(f"  siteName      : {'yes' if preview.site_name else 'no'} ({preview.site_name!r})")
     print(f"  resolved url  : {_public(preview.url)}")

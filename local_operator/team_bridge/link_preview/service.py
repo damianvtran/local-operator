@@ -259,9 +259,12 @@ async def _resolve_origin(
         kind="ready",
         preview=LinkPreview(
             url=page.final_url,
-            title=metadata.title,
-            description=metadata.description,
-            site_name=metadata.site_name,
+            # ``or None``, not ``or ""``: an absent display string is a wire shape
+            # (``string | null``, omitted when None), while the extractor keeps
+            # empty strings internally because that is how its parsers accumulate.
+            title=metadata.title or None,
+            description=metadata.description or None,
+            site_name=metadata.site_name or None,
             favicon=favicon,
             image=image,
         ),
@@ -430,7 +433,16 @@ async def _store_artifact(
     raster = sniff_raster(fetched.body)
     if raster is None:
         return None
-    return store.put(fetched.body, artifact_id=artifact_id), raster
+    # OFF THE EVENT LOOP, deliberately. ``PreviewStore.put`` writes a temporary
+    # file, ``os.replace``s it and then sweeps the directory — measured at 30-60 ms
+    # per artifact — and this call sits inside the request path, where blocking the
+    # loop stalls every other renderer's resolve. The store itself stays synchronous
+    # and single-purpose: it is a directory of content-addressed blobs, it owns no
+    # loop, and its own unit tests drive it as plain calls; the await belongs to the
+    # caller that has a loop (the same split ``link_preview_artifact`` uses for
+    # ``store.get``).
+    stored = await asyncio.to_thread(store.put, fetched.body, artifact_id=artifact_id)
+    return stored, raster
 
 
 def _scheme_refusal(target: str) -> AbsentReason | None:
@@ -453,6 +465,12 @@ def _policy_reason(reason: str) -> AbsentReason:
     ``private`` covers a redirect hop as well as the first URL: the guard runs on
     every hop, and the renderer's copy — "this link goes somewhere local" — is
     the same sentence for both.
+
+    ``host`` is three refusals sharing one code, and each is a dead end rather
+    than a blip: no host to judge, credentials carried in the URL (never
+    forwarded as an ``Authorization`` header), and a name that does not resolve.
+    All three are ``blocked-host``, which is the one code the renderer draws as
+    "this link could not be used" instead of offering a retry.
     """
     if reason == "scheme":
         return "unsupported-scheme"
@@ -464,9 +482,11 @@ def _policy_reason(reason: str) -> AbsentReason:
 def _retryable(error: FetchError) -> bool:
     """Whether another try could help, from the fetcher's own classification.
 
-    An unclassified ``FetchError`` (a redirect chain that never landed, a host
-    with no address) is treated as retryable: the card did not resolve, and the
-    honest answer to "could this work later" is that we do not know.
+    An unclassified ``FetchError`` (a redirect chain that never landed) is
+    treated as retryable: the card did not resolve, and the honest answer to
+    "could this work later" is that we do not know. A host with no address does
+    NOT arrive here any more — the guard refuses it as ``reason="host"``, which
+    becomes ``blocked-host`` and is cached as a negative answer.
     """
     failure = getattr(error, "failure", None)
     if failure is None:

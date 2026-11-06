@@ -1,7 +1,8 @@
-"""Desktop link-preview surface: two endpoints, both bounded, neither trusting the caller.
+"""Desktop link-preview surface: three endpoints, all bounded, none trusting the caller.
 
 ``POST /v1/desktop/team-bridge/link-preview/resolve``
 ``GET  /v1/desktop/team-bridge/link-preview/artifact/{artifact_id}``
+``GET  /v1/desktop/team-bridge/link-preview/cache``
 
 WHY THESE LIVE HERE AND NOT IN THE UI. The renderer never fetches. It sends the
 URL text it was given and receives either a card whose images are artifact IDs on
@@ -98,6 +99,23 @@ class ResolveRequest(BaseModel):
     expected_account_id: Annotated[StrictStr, Field(min_length=1, max_length=128)]
 
 
+class LinkPreviewCacheStats(BaseModel):
+    """What the preview cache holds, in numbers that cannot name a page.
+
+    camelCased on the wire (``residentBytes``) because the renderer's own contract
+    reads it that way, for the same reason ``siteName`` carries a
+    ``serialization_alias`` in ``link_preview.models``: the alias is the boundary,
+    not a second vocabulary.
+    """
+
+    entries: int
+    resident_bytes: int = Field(serialization_alias="residentBytes")
+    hits: int
+    misses: int
+    evictions: int
+    resolutions: int
+
+
 def _config_dir(request: Request) -> Path:
     return Path(request.app.state.config_manager.config_dir)
 
@@ -168,14 +186,19 @@ def _scope_for(config_dir: Path, account_id: str) -> PreviewScope:
     An install with no committed owner row has no tenant, and the account alone is
     then the whole scope: a missing tenant must narrow nothing. The same applies
     to a store that cannot be read — the tenant is the SECOND fence, and losing it
-    must not fail a preview the account scope still isolates.
+    must not fail a preview the account scope still isolates. ``sqlite3.Error`` is
+    caught alongside ``StoreRefused`` for exactly that reason (the pair
+    ``desktop_team_bridge._locally_enrolled`` catches): a malformed or half-written
+    owner row must narrow the scope, never 500 the route.
     """
+    import sqlite3
+
     from local_operator.team_bridge.store import Store, StoreRefused
 
     owner = None
     try:
         owner = Store(config_dir).active_owner_readonly()
-    except StoreRefused:
+    except (StoreRefused, sqlite3.Error):
         owner = None
     tenant_id = "" if owner is None else str(getattr(owner, "tenant_id", "") or "")
     return PreviewScope(account_id=account_id, tenant_id=tenant_id)
@@ -207,6 +230,48 @@ async def resolve_link_preview(body: ResolveRequest, request: Request):
         cache=preview_cache.get_preview_cache(),
     )
     return reply(resolution)
+
+
+@router.get(
+    "/v1/desktop/team-bridge/link-preview/cache",
+    response_model=CRUDResponse[LinkPreviewCacheStats],
+)
+async def link_preview_cache_stats():
+    """Counts and resident bytes for this process's preview cache, and nothing else.
+
+    NO ACCOUNT RECEIPT, DELIBERATELY. Every other route on this surface takes one
+    because it answers with something a specific account owns — a card, a blob.
+    This answer owns nothing: six integers describing this process's own cache
+    (entries held, bytes they occupy, and the hit/miss/eviction/resolution
+    counters), so there is no account for a caller to prove. That safety is
+    structural rather than promised: the report NEVER carries a URL, a host, a
+    title or an account id — :meth:`PreviewCache.stats` cannot produce one — so
+    what a caller learns is only that this install previews links at all, which
+    the bearer gate has already established.
+
+    Read through the same seam the resolve route writes to, so a test that injects
+    a cache sees these numbers move. ``stats()`` is a handful of integer reads (no
+    disk, no lock), which is why it runs on the loop instead of in a thread like
+    the store's file work does.
+
+    Enveloped in the surface's usual ``CRUDResponse`` so the renderer's one client
+    helper parses it like every sibling GET.
+    """
+    stats = preview_cache.get_preview_cache().stats()
+    return CRUDResponse(
+        status=200,
+        # i18n: ignore desktop wire diagnostic; the renderer reads the numbers,
+        # not the sentence, and nothing here is drawn as prose.
+        message="Link preview cache stats.",
+        result=LinkPreviewCacheStats(
+            entries=stats.entries,
+            resident_bytes=stats.resident_bytes,
+            hits=stats.hits,
+            misses=stats.misses,
+            evictions=stats.evictions,
+            resolutions=stats.resolutions,
+        ),
+    )
 
 
 async def _read_owned_artifact(
