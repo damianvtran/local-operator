@@ -43,6 +43,18 @@ operator_spki = rig.operator_spki
 LINK_DEVICE = NODE
 
 
+def _require_row(store: Any, credential_id: int) -> Any:
+    """The row a test just created, with the store's Optional arm asserted away.
+
+    ``get_credential`` returns ``StoredCredential | None`` for every caller; these
+    calls name a row from a previous step in the same test. Asserting keeps pyright
+    honest without a ``cast`` that would also hide a real regression.
+    """
+    row = store.get_credential(credential_id)
+    assert row is not None, f"credential {credential_id} is missing"
+    return row
+
+
 def anchored_owner(tmp_path: Path, monkeypatch, operator_spki: bytes) -> Any:
     """An owner root that believes a fixture operator key, plus an anchor entry for NODE.
 
@@ -198,7 +210,7 @@ def test_mint_take_refresh_return_and_deny(
             },
         )
         before = len(idp.posts)
-        creds = asyncio.run(node_auth._ensure_oauth_fresh(node_auth.get_credential(row.id)))
+        creds = asyncio.run(node_auth._ensure_oauth_fresh(_require_row(node_auth, row.id)))
         assert idp.posts[before:] == ["refresh-0"], idp.posts
         assert creds["refresh"] == "refresh-1"
 
@@ -350,7 +362,7 @@ def test_revocation_reaches_the_node_by_relay_and_stops_it(
                 },
             },
         )
-        assert node_client.refresh_fence(1, dict(node_auth.get_credential(row.id).data)) is None
+        assert node_client.refresh_fence(1, rig._row_data(node_auth, row.id)) is None
 
         revoked = broker.revoke_refresh_delegation(KEY)
         assert revoked["deny"]
@@ -363,7 +375,7 @@ def test_revocation_reaches_the_node_by_relay_and_stops_it(
         assert (refresh.load(NETWORK, node_root, recipient=NODE) or {}).get("state") == "refused"
         before = len(idp.posts)
         with pytest.raises(Exception) as refused:  # noqa: B017 — the store's own refusal type
-            asyncio.run(node_auth._ensure_oauth_fresh(node_auth.get_credential(row.id)))
+            asyncio.run(node_auth._ensure_oauth_fresh(_require_row(node_auth, row.id)))
         assert idp.posts[before:] == [], "the node presented the token after the deny"
         assert "not presented" in str(refused.value) or "delegation" in str(refused.value)
     finally:

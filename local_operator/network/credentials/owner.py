@@ -2494,7 +2494,11 @@ class MeshCredentialBroker:
         if self._refresh_signer is not None:
             return self._refresh_signer(message)
         try:
-            from local_operator.operator.sign import load_signer, resolve_backend_name, sign_message
+            from local_operator.operator.sign import (
+                load_signer,
+                resolve_backend_name,
+                sign_message,
+            )
 
             root = self.root or Path()
             signer = load_signer(config_root=root, backend_name=resolve_backend_name(root))

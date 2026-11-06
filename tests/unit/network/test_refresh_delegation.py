@@ -79,6 +79,19 @@ def _sign(operator_key: Any, grant: operator_verify.RefreshGrant) -> str:
     return grant.encode(signature=operator_key.sign(grant.payload(), ec.ECDSA(hashes.SHA256())))
 
 
+def _row_data(local, credential_id: int) -> dict[str, Any]:
+    """The row's data, with the store's Optional arm asserted away.
+
+    ``get_credential`` is typed ``StoredCredential | None`` because a caller may name a
+    row that is gone; every use here is a row the test just created. Asserting once
+    beats sprinkling ``cast``/``# type: ignore`` through assertions that then prove
+    nothing about the types they suppress.
+    """
+    row = local.get_credential(credential_id)
+    assert row is not None, f"credential {credential_id} is missing"
+    return dict(row.data)
+
+
 def _grant(
     operator_key: Any,
     *,
@@ -169,16 +182,20 @@ def test_expired_grant_refused_but_deny_past_its_window_verifies(
 
 def test_statement_for_another_device_or_key_does_not_verify(operator_key, operator_spki) -> None:
     _, statement = _grant(operator_key)
-    for kwargs in (
-        {"node_device": "d_someone_else"},
-        {"key": "anthropic"},
-    ):
-        assert (
-            operator_verify.verify_refresh_grant(
-                statement, operator_spki=operator_spki, now=time.time(), **kwargs
-            )
-            is None
+    # Spelled out rather than **spread: a dict of overrides loses its types, and the
+    # point of this test is which PARAMETER is refused.
+    assert (
+        operator_verify.verify_refresh_grant(
+            statement, operator_spki=operator_spki, now=time.time(), node_device="d_someone_else"
         )
+        is None
+    )
+    assert (
+        operator_verify.verify_refresh_grant(
+            statement, operator_spki=operator_spki, now=time.time(), key="anthropic"
+        )
+        is None
+    )
     # No anchor at all is a refusal, never a pass (§6 item 3, encoded as a stop).
     assert (
         operator_verify.verify_refresh_grant(statement, operator_spki=None, now=time.time()) is None
@@ -629,7 +646,7 @@ def test_the_production_installer_fences_a_row_whose_document_is_gone(
     store._install_refresh_fence()
 
     assert local._refresh_fence is not None, "no fence installed for a delegated row"
-    assert local._refresh_fence(row_id, dict(local.get_credential(row_id).data)) is not None
+    assert local._refresh_fence(row_id, _row_data(local, row_id)) is not None
     with pytest.raises(RefreshDelegatedError):
         asyncio.run(local.ensure_oauth_fresh_or_raise(row_id))
 
@@ -661,7 +678,6 @@ def SimpleNamespaceRef(network_id: str, device: str, root: Path) -> Any:
     from types import SimpleNamespace
 
     from local_operator.network.credentials.client import MeshCredentialClient
-
     from local_operator.network.credentials.held_policy import HeldPolicyStore
 
     mesh = SimpleNamespace(
@@ -715,6 +731,7 @@ def test_max_refreshes_actually_bounds_the_node(
 
     mesh.refresh_posted(1, delegated)
     document = refresh.load(NETWORK, tmp_path, recipient=NODE)
+    assert document is not None, "the delegation document vanished"
     assert document["refreshes_used"] == 1, "the POST was not counted"
     refusal = mesh.refresh_fence(1, delegated)
     assert refusal is not None and "delegation" in refusal
@@ -812,12 +829,12 @@ def test_invalid_grant_stops_wipes_and_reports(
     refresh.install(
         NETWORK, tmp_path, recipient=NODE, statement=statement, operator_spki=operator_spki
     )
-    assert mesh.refresh_fence(row_id, dict(local.get_credential(row_id).data)) is None
+    assert mesh.refresh_fence(row_id, _row_data(local, row_id)) is None
 
-    result = mesh.refresh_invalid_grant(row_id, dict(local.get_credential(row_id).data))
+    result = mesh.refresh_invalid_grant(row_id, _row_data(local, row_id))
 
     # 1. the material is wiped, and the row says why
-    data = dict(local.get_credential(row_id).data)
+    data = _row_data(local, row_id)
     assert "refresh" not in data and "access" not in data
     assert data.get("refresh_family_moved") is not None
     # 2. the delegation can never POST again until a new signed statement lands
@@ -915,11 +932,10 @@ def test_the_owner_applies_a_family_moved_report_only_from_the_delegatee(tmp_pat
     The second assertion is what keeps the first safe: a report from any other peer
     must not be able to make the owner discard a working account.
     """
+    from local_operator.network.credentials import placement as placement_mod
     from local_operator.network.credentials.owner import MeshCredentialBroker
     from local_operator.network.credentials.types import CredentialPlacementEntry
     from local_operator.providers.auth_store import AuthStore
-
-    from local_operator.network.credentials import placement as placement_mod
 
     root = tmp_path / "owner"
     root.mkdir()
@@ -971,7 +987,7 @@ def test_the_owner_applies_a_family_moved_report_only_from_the_delegatee(tmp_pat
         )
         assert accepted["action"] == "family_moved"
         assert local.refresh_delegate_record(row.id) is None
-        assert dict(local.get_credential(row.id).data).get("refresh_family_moved") is not None
+        assert _row_data(local, row.id).get("refresh_family_moved") is not None
     finally:
         broker.close()
 
@@ -1027,10 +1043,10 @@ def test_the_watch_never_touches_a_row_that_is_not_delegated(
     ):
         setattr(mesh, name, getattr(MeshCredentialClient, name).__get__(mesh))
 
-    before = dict(local.get_credential(ordinary.id).data)
+    before = _row_data(local, ordinary.id)
     result = mesh.refresh_invalid_grant(ordinary.id, before)
 
-    after = dict(local.get_credential(ordinary.id).data)
+    after = _row_data(local, ordinary.id)
     assert result["stopped"] is False and result["reason"] == "not_delegated"
     assert after["access"] == "keep-access" and after["refresh"] == "keep-refresh"
     assert "refresh_family_moved" not in after
@@ -1083,8 +1099,8 @@ def test_the_watch_ignores_a_delegated_row_for_a_grant_the_document_no_longer_ho
     ):
         setattr(mesh, name, getattr(MeshCredentialClient, name).__get__(mesh))
 
-    result = mesh.refresh_invalid_grant(row_id, dict(local.get_credential(row_id).data))
-    data = dict(local.get_credential(row_id).data)
+    result = mesh.refresh_invalid_grant(row_id, _row_data(local, row_id))
+    data = _row_data(local, row_id)
     assert result["stopped"] is False and result["reason"] == "not_delegated"
     assert data.get("refresh") == "refresh-0" and "refresh_family_moved" not in data
     assert (refresh.load(NETWORK, tmp_path, recipient=NODE) or {}).get("state") == "active"

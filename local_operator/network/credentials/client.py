@@ -1556,7 +1556,10 @@ class MeshCredentialClient:
           row is written.
         """
         from local_operator.network.credentials import refresh as refresh_mod
-        from local_operator.network.credentials.types import PEER_BROKER_OP, REFRESH_CAP_STRING
+        from local_operator.network.credentials.types import (
+            PEER_BROKER_OP,
+            REFRESH_CAP_STRING,
+        )
 
         owner = self.owner_of(key)
         entry = self.entry(key)
@@ -1711,7 +1714,10 @@ class MeshCredentialClient:
         ``None`` so the shipped path is untouched (T10/T14).
         """
         from local_operator.network.credentials import refresh as refresh_mod
-        from local_operator.network.credentials.held_policy import NONRESTRICTIVE, PolicyUnknown
+        from local_operator.network.credentials.held_policy import (
+            NONRESTRICTIVE,
+            PolicyUnknown,
+        )
 
         origin = (data or {}).get("mesh_origin")
         if not isinstance(origin, dict):
