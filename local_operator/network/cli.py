@@ -2451,7 +2451,7 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     # every provider key, the Radient org account among them.
     from local_operator.network import readiness as readiness_mod
 
-    shareable = _shareable_servers(self_device)
+    shareable = _shareable_servers(self_device, self_name=self_name)
     shareable.extend(_shareable_providers(self_device))
     lines.extend(readiness_mod.shareable_lines(shareable))
     payload = {
@@ -2487,7 +2487,7 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     return _emit(args, payload, lines)
 
 
-def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
+def _shareable_servers(self_device: str, *, self_name: str = "") -> list[dict[str, Any]]:
     """The device-level "shareable here" rows for ``lop network credentials``.
 
     Every user-scope HTTP/SSE server declared in this device's ``mcp.json`` (stdio
@@ -2551,7 +2551,13 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
         key = f"mcp:{url}"
         dead = login_here is False and readiness_mod.mcp_login_dead(server)
         if login_here is True:
-            remedy = f"lop network credential share {key} --with <device>"
+            # THE LOGIN IS HELD HERE, SO THE SHARE RUNS HERE (2026-11-05): the bare
+            # command told nobody which machine to type it on, and a reader took it
+            # for a step on the target device. The owner is this device, by name.
+            remedy = (
+                f"lop network credential share {key} --with <device>"
+                f" (run on {self_name or 'this device'}, which holds the login)"
+            )
         elif dead:
             remedy = readiness_mod.MCP_DEAD_LOGIN_REMEDY
         elif login_here is False:
@@ -8743,8 +8749,12 @@ def _cmd_ready(args: argparse.Namespace) -> int:
         "path": str(getattr(args, "repository_path", "") or ""),
         "url": str(getattr(args, "repository_url", "") or ""),
     }
-    # Omission preserves the installed-project default and the older request
-    # shape. Never infer the viewer's checkout/cwd as a peer repository path.
+    # NO REQUEST, NO REPOSITORY CLAIM: with neither flag the context carries no
+    # repository, so the peer reports the row as unasked (``unrequested`` /
+    # ``unknown``) rather than answering about whatever project IT is installed
+    # from — the installed-project default this build removed. The viewer's
+    # checkout and cwd are never inferred as substitutes: neither is a path on
+    # the peer.
     context: dict[str, Any] = {"repository": repository} if any(repository.values()) else {}
     live = _relay_call(
         "peer_readiness",

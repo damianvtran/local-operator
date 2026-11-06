@@ -2752,7 +2752,10 @@ def _share_fixture(root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, st
     from local_operator.network import identity as identity_mod
     from local_operator.network.credentials import placement as placement_mod
 
-    self_device = identity_mod.load_or_mint().device_id
+    # A NAMED identity, so the ledger's "run on <device>" clause is deterministic:
+    # an unnamed mint takes the host's name, which would make the assertion depend
+    # on the machine running the suite.
+    self_device = identity_mod.load_or_mint(name="this-device").device_id
     peer_device = "d_" + "b" * 32
     record = types.NetworkRecord(
         network_id=NETWORK, name="home", self_device_id=self_device, self_role="admin"
@@ -2803,7 +2806,10 @@ def test_credentials_lists_the_shareable_ledger_per_server(
         "transport": "http",
         "login_here": True,
         "shared_with": [{"device": peer_device, "name": "cloud-node-1", "scope": "session"}],
-        "remedy": f"lop network credential share mcp:{SLACK_URL} --with <device>",
+        "remedy": (
+            f"lop network credential share mcp:{SLACK_URL} --with <device>"
+            " (run on this-device, which holds the login)"
+        ),
     }
     assert notion == {
         "server": "notion",
@@ -2851,7 +2857,7 @@ def test_credentials_shareable_block_renders_login_states_and_shares(
     assert "shareable here:" in out
     assert (
         f"  slack  http  login held — share: lop network credential share mcp:{SLACK_URL}"
-        " --with <device>" in out
+        " --with <device> (run on this-device, which holds the login)" in out
     ), out
     assert "      shared with cloud-node-1 (session)" in out, out
     assert (

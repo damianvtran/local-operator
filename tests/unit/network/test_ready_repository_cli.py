@@ -121,8 +121,17 @@ def test_real_cli_control_receives_context_and_surfaces_probe_and_refusal(
         fact = readiness.repository_fact(peer_home, repository=frame.get("repository"))
         row = readiness.repository_row(
             SimpleNamespace(device_id="synthetic-peer"),
-            {"repository": fact},
+            # A REAL peer ships its whole fact set; the tooling section is what
+            # states the peer's home directory, which is what a home-relative
+            # request is resolved against (readiness._peer_home_dir).
+            {
+                "repository": fact,
+                "tooling": {"local_bin_dir": str(peer_home / ".local" / "bin")},
+            },
             peer_label="synthetic-peer",
+            # The request travels to the row, as the shipped handler does it: the
+            # row compares THIS path against the peer's answer.
+            repository=frame.get("repository"),
         )
         return {"checks": [row]}
 
