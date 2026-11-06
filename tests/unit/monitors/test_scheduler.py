@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
 
+from local_operator.monitors import diff as monitor_diff
 from local_operator.monitors import state as monitor_state
 from local_operator.monitors.scheduler import CheckOutcome, MonitorScheduler
 from local_operator.monitors.settings import MonitorSettings
@@ -1465,3 +1467,121 @@ async def test_the_diff_bound_also_covers_the_no_hash_recovery_path(tmp_path: An
         assert elapsed < 5.0, f"the matcher ran unbounded: {elapsed:.2f}s"
     finally:
         harness.scheduler.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The upgrade that changes the comparison basis (the normalizer tag)
+# ---------------------------------------------------------------------------
+
+_LEGACY_CHANNEL = "Channel: #product-feedback (C06TXN4AD9R)"
+
+
+def _envelope(*records: str) -> str:
+    """An MCP-shaped result: the record log in ONE JSON-escaped string."""
+    return json.dumps({"messages": "\n\n".join([_LEGACY_CHANNEL, *records]) + "\n"})
+
+
+def _record(body: str, *, user: str = "U058BN13Q0Y", ts: str = "1762400000.000100") -> str:
+    return (
+        f"=== Message from Gong Support Bot ({user}) at 2026-11-05T20:10:00Z ==="
+        f"\nMessage TS: {ts}\n{body}"
+    )
+
+
+def _simulate_legacy_store(harness: Harness, legacy_text: str) -> None:
+    """Rewrite the monitor's state as a pre-record-view store left it.
+
+    That store held an envelope as ONE escaped line and hashed it that way, and
+    its blob carried no ``normalizer`` tag at all — so the next tick would
+    compare today's record lines against a basis that no longer exists.
+    """
+    monitor_state.snapshot_path(harness.config_dir, "sess", "m1").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "monitor_id": "m1",
+                "snapshot": legacy_text,
+                "snapshot_truncated": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    counters = monitor_state.read_counters(harness.config_dir, "sess", "m1")
+    assert counters is not None
+    counters["content_hash"] = monitor_diff.content_hash(legacy_text)
+    counters["last_handle"] = ""  # the old store kept no spill body for a small result
+    monitor_state.write_counters(harness.config_dir, "sess", "m1", counters)
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_from_an_earlier_normalizer_re_establishes_silently(
+    harness: Harness,
+) -> None:
+    """A change of comparison basis is not a change in the watched source.
+
+    The measured upgrade shape: the stored blob is one escaped envelope line and
+    the next tick returns the same log plus a new message. Diffing across the
+    split would report the whole envelope rewrite as the delta (or have it
+    suppressed as metadata), so the baseline is re-captured and NOTHING is
+    delivered — one quiet tick, then normal service.
+    """
+    first = _record("first")
+    second = _record("new", user="U2", ts="1762400200.000200")
+    harness.scheduler.load([spec()])
+    harness.results.append({"text": _envelope(first), "error": None})
+    await harness.pump_ripen()
+    _simulate_legacy_store(harness, _envelope(first))  # the pre-split single line
+
+    harness.results.append({"text": _envelope(second, first), "error": None})
+    await harness.pump_ripen()
+
+    assert harness.deliveries == [], "a changed comparison basis must not deliver"
+    counters = harness.counters()
+    assert counters["last_note"] == "baseline re-established (record-view)"
+    # The baseline advanced to the NEW pipeline's hash, so the next change diffs
+    # against a comparable basis.
+    assert counters["content_hash"] == monitor_diff.content_hash(
+        monitor_diff.normalize(_envelope(second, first))
+    )
+
+    # ... and the following new message is delivered normally, as a record line.
+    third = _record("third", user="U3", ts="1762400300.000300")
+    harness.results.append({"text": _envelope(third, second, first), "error": None})
+    await harness.pump_ripen()
+    assert len(harness.deliveries) == 1
+    assert "third" in harness.deliveries[0].delta_text
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_snapshot_whose_text_restates_identically_still_delivers(
+    harness: Harness,
+) -> None:
+    """A plain-text baseline is the same text under both pipelines.
+
+    Re-baselining THAT would swallow a real change to fix a problem it does not
+    have: the tag is stale, the basis is not. The append delivers as usual.
+    """
+    harness.scheduler.load([spec()])
+    harness.results.append({"text": "A", "error": None})
+    await harness.pump_ripen()
+    _simulate_legacy_store(harness, "A")
+
+    harness.results.append({"text": "A\nB", "error": None})
+    await harness.pump_ripen()
+
+    assert len(harness.deliveries) == 1
+    assert "+ B" in harness.deliveries[0].delta_text
+    assert harness.counters()["last_note"] != "baseline re-established (record-view)"
+
+
+@pytest.mark.asyncio
+async def test_a_blob_written_by_this_normalizer_diffs_normally(harness: Harness) -> None:
+    """The tag only separates bases; the current one keeps ordinary diffing."""
+    harness.scheduler.load([spec()])
+    harness.results.extend([{"text": "A", "error": None}, {"text": "A\nB", "error": None}])
+    await harness.pump_ripen()
+    blob = monitor_state.read_snapshot(harness.config_dir, "sess", "m1")
+    assert blob is not None
+    assert monitor_state.snapshot_normalizer(blob) == monitor_state.NORMALIZER_TAG
+    await harness.pump_ripen()
+    assert len(harness.deliveries) == 1

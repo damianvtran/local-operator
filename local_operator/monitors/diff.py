@@ -3,10 +3,14 @@
 Pure functions. The scheduler owns the file state; this module owns the
 comparison semantics:
 
-- :func:`normalize` — line endings, trailing whitespace per line, optional
-  timestamp scrubbing, per-monitor ignore regexes, optional line-multiset
-  ordering. The result is the ONLY thing hashed or stored, so equality is
-  defined by this output.
+- :func:`unpack_records` — the record split that runs BEFORE everything
+  else: a JSON envelope whose one string field holds a text record log
+  (``{"messages": "…"}`` / ``{"results": "…"}``) becomes one line per
+    record. A monitor watches RECORDS, not an envelope.
+  - :func:`normalize` — line endings, trailing whitespace per line, optional
+    timestamp scrubbing, per-monitor ignore regexes, optional line-multiset
+    ordering. The result is the ONLY thing hashed or stored, so equality is
+    defined by this output.
 - :func:`content_hash` — ``sha256`` over the FULL normalized text. The
   counters file carries it as the equality fast-path; because it covers the
   full text it is exact regardless of the stored snapshot cap (§7.2).
@@ -25,6 +29,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 
@@ -55,6 +60,101 @@ _EPOCH_MS_FLOOR = 1_000_000_000_000
 _EPOCH_MS_CEIL = 4_102_444_800_000
 
 
+#: Blank lines separate the records inside a JSON envelope's payload string.
+#: A blank line may carry trailing spaces/tabs; two or more newlines run but
+#: never a single one (a record's own fields are one newline apart).
+_ENVELOPE_RECORD_SPLIT = re.compile(r"\n[ \t]*\n+")
+
+#: What joins a record's fields back up once its internal newlines collapse, so
+#: one record stays ONE comparable line.
+_RECORD_FIELD_SEPARATOR = " · "
+
+
+def unpack_records(text: str) -> str:
+    """One line per record when ``text`` is a JSON envelope over a record log.
+
+    The shape this exists for: an MCP read tool returns its result as
+    ``{"messages": "<a whole channel log in ONE string>"}`` (or
+    ``{"results": …}``, ``{"thread": …}``), where the payload string carries
+    real newlines once decoded. Read literally the envelope is ONE line of
+    escaped JSON, so a new message can only ever REPLACE it: the delta the
+    materiality gate then sees is a window of escaped bookkeeping
+    (``Message TS: …``, a cursor) instead of the message, and the gate answers
+    ``non-material-metadata``. Measured 2026-11-05 on a
+    ``mcp__slack_read_channel`` watch: two real messages delivered nothing,
+    ``suppressed.non_material_metadata: 2``. The same single line hid thread
+    replies (a ``Thread: N replies (latest: …)`` field buried inside it) and
+    made the watcher's own posts impossible to ``ignore``.
+
+    A monitor watches RECORDS, not an envelope, so one line per record is the
+    unit everything downstream already assumes: a new message becomes an
+    ADDED line (which :func:`is_pure_addition` delivers without consulting the
+    gate), ``ignore`` drops a record line whole (the watcher's own echo), and
+    a thread's reply count changing is a changed line whose text the gate can
+    actually read.
+
+    Trigger: the WHOLE text parses as a JSON object AND at least one value is
+    a ``str`` holding a real newline — i.e. the envelope was JSON-escaped
+    around a multi-line payload. Everything else is returned byte for byte
+    unchanged: plain text, a compact JSON document whose strings are
+    single-line (``{"messages": [{…}]}`` is a list of objects, not a payload
+    string), an array, and a TRUNCATED result that no longer parses. It never
+    raises: a tick may not fail because a source produced something odd, and
+    the fallback is exactly the previous behaviour.
+
+    Deterministic and idempotent: the envelope's own key order is honoured
+    (containers are dumped with sorted keys, so an envelope that reorders them
+    is not a difference), and the unpacked text no longer parses as JSON, so
+    re-normalizing it — which the scheduler's baseline reproduction does — is
+    a no-op rather than a second, different transform.
+    """
+    candidate = text.strip()
+    # Cheap reject before the parse: only an object can be this envelope, and
+    # most tool results are not JSON at all.
+    if not candidate.startswith("{"):
+        return text
+    try:
+        data = json.loads(candidate)
+    except ValueError:
+        return text
+    if not isinstance(data, dict):
+        return text
+    if not any(isinstance(value, str) and "\n" in value for value in data.values()):
+        return text
+
+    lines: list[str] = []
+    for key, value in data.items():
+        if isinstance(value, str) and "\n" in value:
+            lines.extend(_record_lines(value))
+        else:
+            lines.append(f"{key}: {_envelope_scalar(value)}")
+    return "\n".join(lines)
+
+
+def _record_lines(payload: str) -> list[str]:
+    """One line per blank-line-separated block of an envelope's payload."""
+    text = payload.replace("\r\n", "\n").replace("\r", "\n")
+    records: list[str] = []
+    for block in _ENVELOPE_RECORD_SPLIT.split(text):
+        # Every field line of the record, blanks dropped, joined so the record
+        # is ONE diff line. Blank lines INSIDE a block (a quoted body) are
+        # flattened too: a record may not span lines or the split is undone.
+        fields = [field.strip() for field in block.split("\n")]
+        fields = [field for field in fields if field]
+        if fields:
+            records.append(_RECORD_FIELD_SEPARATOR.join(fields))
+    return records
+
+
+def _envelope_scalar(value: object) -> str:
+    """``key: value`` rendering for an envelope field that is not a record log."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return json.dumps(value)
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
 def normalize(
     text: str,
     *,
@@ -63,6 +163,7 @@ def normalize(
     normalize_timestamps: bool = True,
 ) -> str:
     """The stored/comparable form of one tool result (§7.1, applied in order)."""
+    text = unpack_records(text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.rstrip() for line in text.split("\n")]
     # A trailing newline is formatting, not content: the final empty element

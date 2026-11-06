@@ -12,6 +12,7 @@ a fake callback alone would pin only our side of the contract.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
@@ -718,3 +719,129 @@ def _choice(question_id: str, choice: str) -> Any:
         output_tokens=10,
         cost_usd=0.00002,
     )
+
+
+# ---------------------------------------------------------------------------
+# A JSON envelope over a record log: a new message is an ADDED record line
+# ---------------------------------------------------------------------------
+
+_SLACK_CHANNEL = "Channel: #product-feedback (C06TXN4AD9R)"
+
+#: What the watch is FOR, in the words the gate judges a delta against.
+WATCH_DESCRIPTION = (
+    "New messages and thread replies in #product-feedback: any new record is a "
+    "feedback item that needs triage, so tell me what it says."
+)
+
+
+def _slack_record(body: str, *, user: str = "U058BN13Q0Y", ts: str = "1762400000.000100") -> str:
+    """One message block as ``mcp__slack_read_channel`` renders it."""
+    return (
+        f"=== Message from Gong Support Bot ({user}) at 2026-11-05T20:10:00Z ==="
+        f"\nMessage TS: {ts}\n{body}"
+    )
+
+
+def _slack_result(*blocks: str) -> str:
+    """The measured MCP shape: the whole message log in ONE JSON-escaped string.
+
+    This is the 2026-11-05 defect in one line — a new message could only REPLACE
+    the envelope line, and the gate was handed a ~200-char window of escaped
+    bookkeeping (a ``Message TS``, a cursor) instead of the message: two real
+    messages, ``deliveries: 0``, ``suppressed.non_material_metadata: 2``.
+    """
+    payload = "\n\n".join([_SLACK_CHANNEL, *blocks]) + "\n"
+    return json.dumps({"messages": payload})
+
+
+def _slack_spec() -> MonitorSpec:
+    return spec(
+        name="product-feedback",
+        tool="mcp__slack_read_channel",
+        arguments={"channel_id": "C0PEP", "limit": 20},
+        description=WATCH_DESCRIPTION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_new_message_in_a_channel_read_is_delivered_without_asking_the_gate(
+    harness: Harness,
+) -> None:
+    """The acceptance case: an appended record line, so no verdict can swallow it."""
+    harness.script.append(NON_MATERIAL_METADATA)  # would suppress, if it were asked
+    harness.scheduler.load([_slack_spec()])
+    first = _slack_record("Victor: the first note")
+    second = _slack_record("Mike: acknowledged", ts="1762400100.000200")
+    harness.results.extend(
+        [
+            {"text": _slack_result(first, second)},
+            {
+                "text": _slack_result(
+                    _slack_record(
+                        "Victor: the risk assessment report needs a second look",
+                        ts="1762400200.000300",
+                    ),
+                    first,
+                    second,
+                )
+            },
+        ]
+    )
+    await harness.ripe()  # baseline
+    await harness.ripe()  # the new message
+
+    assert harness.states == [], "the gate was asked about an appended record"
+    assert len(harness.deliveries) == 1
+    delta = harness.deliveries[0].delta_text
+    assert delta.split("\n")[0] == "+1/-0 changed lines", delta
+    assert "needs a second look" in delta, delta
+    # No envelope in the delta: the preview is a record, not escaped JSON.
+    assert '"messages"' not in delta and "\\n" not in delta
+    assert harness.counters()["suppressed"]["non_material_metadata"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_shifted_channel_window_shows_the_new_record_as_a_legible_line(
+    harness: Harness,
+) -> None:
+    """A fixed ``limit`` drops the oldest record too, so the delta is ``+1/-1``.
+
+    That shape is NOT a pure addition, so the gate DOES see it — the record
+    split does not change that, and this test does not claim it does. What it
+    changes is what the gate is shown: the new message as its own line and the
+    dropped message as its own line, instead of two ~200-char windows of the
+    same escaped envelope. Whether the live gate calls that material is a
+    measurement for QA on a real channel, not an assertion here.
+    """
+    harness.scheduler.load([_slack_spec()])
+    newest = _slack_record("Sara: newest", ts="1762400300.000400")
+    older = _slack_record("Mike: older", ts="1762400200.000300")
+    oldest = _slack_record("Victor: oldest", ts="1762400100.000200")
+    harness.results.extend(
+        [
+            {"text": _slack_result(newest, older, oldest)},
+            {
+                "text": _slack_result(
+                    _slack_record(
+                        "Victor: the risk assessment report needs a second look",
+                        ts="1762400400.000500",
+                    ),
+                    newest,
+                    older,
+                )
+            },
+        ]
+    )
+    await harness.ripe()  # baseline
+    await harness.ripe()  # the shifted window
+
+    assert len(harness.states) == 1, "a +1/-1 window is not an append; the gate sees it"
+    assert len(harness.deliveries) == 1
+    delta = harness.deliveries[0].delta_text
+    lines = delta.split("\n")
+    assert lines[0] == "+1/-1 changed lines", delta
+    added = [line for line in lines if line.startswith("+ ")]
+    removed = [line for line in lines if line.startswith("- ")]
+    assert len(added) == 1 and "needs a second look" in added[0], delta
+    assert len(removed) == 1 and "oldest" in removed[0], delta
+    assert '"messages"' not in delta and "\\n" not in delta

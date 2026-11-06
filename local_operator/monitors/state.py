@@ -42,6 +42,31 @@ STATE_DIRNAME = "state"
 #: transcript rebuilds both files on the next change anyway).
 STATE_SCHEMA = 1
 
+#: The shape of ``monitors.diff.normalize()``'s OUTPUT that a snapshot blob was
+#: written under, recorded on the blob itself.
+#:
+#: It is NOT part of ``STATE_SCHEMA`` on purpose: that constant gates the
+#: counters file too, and bumping it would discard every monitor's checks and
+#: deliveries. The blob is the OLD side of the next tick's diff, so when the
+#: pipeline changes what the stored text looks like, comparing a pre-change
+#: blob against a post-change result reports the SHAPE CHANGE as if the watched
+#: source had moved — the 2026-11-05 record split is exactly that (one envelope
+#: line became one line per message, so every live MCP watch would have fired a
+#: garbage delta or had it suppressed as metadata).
+#:
+#: Bump this whenever ``normalize()``'s output for the SAME input changes
+#: (line splitting, ordering, what counts as a line — not a change inside the
+#: hashing or the rendering). A mismatch makes the scheduler re-establish the
+#: baseline silently instead of diffing across the change of basis.
+#:
+#: History: ``record-view-1`` — a JSON envelope holding a text record log is
+#: unpacked into one line per record (2026-11-05).
+NORMALIZER_TAG = "record-view-1"
+
+#: What a blob written before the tag existed was produced with: the pipeline
+#: that read an MCP envelope as ONE escaped line. Absent ⇒ this value.
+LEGACY_NORMALIZER = "envelope-line-1"
+
 
 def state_dir(config_dir: Path, session_id: str) -> Path:
     return Path(config_dir) / "monitors" / STATE_DIRNAME / session_id
@@ -117,8 +142,21 @@ def write_snapshot(
             "monitor_id": monitor_id,
             "snapshot": snapshot,
             "snapshot_truncated": bool(truncated),
+            "normalizer": NORMALIZER_TAG,
         },
     )
+
+
+def snapshot_normalizer(blob: Mapping[str, Any]) -> str:
+    """The normalizer a snapshot blob was written under (absent ⇒ legacy).
+
+    A blob from before this field existed is read back without error and is
+    reported as :data:`LEGACY_NORMALIZER`, so an upgrade never loses a
+    monitor's baseline — it re-establishes it instead of comparing across a
+    changed basis.
+    """
+    value = blob.get("normalizer")
+    return str(value) if isinstance(value, str) and value else LEGACY_NORMALIZER
 
 
 def remove_monitor_state(config_dir: Path, session_id: str, monitor_id: str) -> None:

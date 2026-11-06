@@ -901,23 +901,55 @@ class MonitorScheduler:
             blob_text = str(blob.get("snapshot") or "")
             truncated = bool(blob.get("snapshot_truncated"))
 
+        # The baseline's comparison BASIS is part of the baseline. A blob the
+        # CURRENT pipeline would restate differently was captured under an
+        # earlier normalizer, so diffing it against today's output reports the
+        # change of shape as a change in the watched source: on the 2026-11-05
+        # record split, one envelope line became one line per message, and
+        # every live MCP watch would have fired that rewrite as a delta (or had
+        # it suppressed as metadata). The text decides, not the tag alone: a
+        # plain-text snapshot is byte-identical under both pipelines, so it
+        # keeps diffing normally — re-baselining it would swallow a real change
+        # to fix a problem it does not have. A clipped blob cannot be checked,
+        # so it counts as changed.
+        basis_changed = (
+            blob is not None
+            and monitor_state.snapshot_normalizer(blob) != monitor_state.NORMALIZER_TAG
+            and (
+                truncated
+                or normalize(
+                    blob_text,
+                    sort_lines=spec.sort_lines,
+                    ignore=spec.ignore,
+                    normalize_timestamps=self._settings.normalize_timestamps,
+                )
+                != blob_text
+            )
+        )
+
         diff_base: str | None
         if not old_hash:
-            if blob is None or truncated:
-                # No baseline at all (first check, or both files lost), or a
-                # clipped prefix with no hash to rebuild it from: the baseline
-                # is established SILENTLY — never a full-dump delivery.
-                if self._write_snapshot(spec, normalized):
-                    counters["content_hash"] = new_hash
-                    counters["last_handle"] = handle or ""
-                    counters["last_note"] = (
-                        "baseline re-established"
-                        if old_last_check or truncated
-                        else "baseline captured"
-                    )
-                else:
-                    counters["last_note"] = "baseline write failed"
-                counters["next_due_at"] = self._advance(spec, now)
+            if blob is None or truncated or basis_changed:
+                # No baseline at all (first check, or both files lost), a
+                # clipped prefix with no hash to rebuild it from, or a baseline
+                # captured under a different normalizer: the baseline is
+                # established SILENTLY — never a full-dump delivery.
+                self._establish_baseline(
+                    spec,
+                    counters,
+                    normalized,
+                    now,
+                    handle=handle,
+                    note=(
+                        "baseline re-established (record-view)"
+                        if basis_changed
+                        else (
+                            "baseline re-established"
+                            if old_last_check or truncated
+                            else "baseline captured"
+                        )
+                    ),
+                )
                 return None
             # A full stored snapshot with a lost hash is still complete
             # content: diff against it, exactly as before.
@@ -932,6 +964,20 @@ class MonitorScheduler:
             # when there is no usable handle.
             diff_base = self._previous_result(spec, counters, old_hash)
             if diff_base is None and blob is not None and not truncated:
+                if basis_changed:
+                    # The stored text cannot be reproduced by today's pipeline
+                    # and no handle reproduced the stored hash either: there is
+                    # no comparable old side, so the honest move is to adopt a
+                    # fresh baseline rather than to diff across the change.
+                    self._establish_baseline(
+                        spec,
+                        counters,
+                        normalized,
+                        now,
+                        handle=handle,
+                        note="baseline re-established (record-view)",
+                    )
+                    return None
                 diff_base = blob_text
 
         # The bound applies to EVERY baseline source (review round 2, F1). It
@@ -1422,6 +1468,32 @@ class MonitorScheduler:
             )
         except Exception:
             logger.warning("monitor counters write failed for %s", entry.spec.id, exc_info=True)
+
+    def _establish_baseline(
+        self,
+        spec: MonitorSpec,
+        counters: dict[str, Any],
+        normalized: str,
+        now: int,
+        *,
+        handle: str | None,
+        note: str,
+    ) -> None:
+        """Adopt ``normalized`` as the baseline with NO delivery (§7.2).
+
+        The first check, the recovery from lost state and the upgrade that
+        changes the comparison basis (a snapshot written by an earlier
+        normalizer) all end in the same place: the pair is written blob-first
+        and the hash advances only when the blob landed. The caller returns
+        ``None`` afterwards, i.e. a silent tick.
+        """
+        if self._write_snapshot(spec, normalized):
+            counters["content_hash"] = content_hash(normalized)
+            counters["last_handle"] = handle or ""
+            counters["last_note"] = note
+        else:
+            counters["last_note"] = "baseline write failed"
+        counters["next_due_at"] = self._advance(spec, now)
 
     def _write_snapshot(self, spec: MonitorSpec, normalized: str) -> bool:
         """Write the snapshot blob; ``False`` when the write did not land.
