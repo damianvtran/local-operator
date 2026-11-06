@@ -62,6 +62,7 @@ from local_operator.team_bridge.link_preview.models import (
     LinkPreviewResolution,
 )
 from local_operator.team_bridge.link_preview.store import PreviewStore
+from local_operator.team_bridge.link_preview.throttle import PreviewThrottled, ResolveThrottle
 from local_operator.web_fetch.models import FetchBytes, WebFetchSettings
 from local_operator.web_fetch.service import (
     FetchError,
@@ -130,6 +131,7 @@ async def resolve_preview(
     store: PreviewStore,
     cache: PreviewCache,
     fetcher: WebFetchService | None = None,
+    throttle: ResolveThrottle | None = None,
 ) -> LinkPreviewResolution:
     """Resolve ``url`` into a card for ``scope``, or say in one code why there is none.
 
@@ -196,6 +198,17 @@ async def resolve_preview(
     cached = cache.get(key)
     if cached is not None:
         return cached
+
+    # THE TOKEN IS SPENT HERE, and only here — after the cache miss, before the
+    # flight. Charging at the HTTP boundary instead made a re-render of already
+    # cached links spend tokens it never used: seven messages × three links is
+    # twenty-one resolves on a purely WARM screen, which exhausted a burst of twenty
+    # and started refusing real work (code review round 2, minor). A cap refusal
+    # above returns before this line, so it costs nothing either. A stampede of N
+    # identical COLD requests does spend N tokens for one collapsed fetch — that is
+    # deliberate: a client hammering one URL is precisely what the bound exists for.
+    if throttle is not None and not throttle.allow(scope.account_id):
+        raise PreviewThrottled(throttle.retry_after_s(scope.account_id))
 
     async def _resolve_and_remember() -> LinkPreviewResolution:
         resolution = await _resolve_origin(

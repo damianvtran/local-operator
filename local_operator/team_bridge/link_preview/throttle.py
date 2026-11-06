@@ -47,6 +47,21 @@ MAX_ACCOUNTS: Final = 64
 _NO_REFILL_RETRY_S: Final = 3600.0
 
 
+class PreviewThrottled(Exception):
+    """A resolution that was about to reach the origin, refused by the bucket.
+
+    Raised from CORE rather than the route because the charge has to happen where a
+    fetch does — charging at the HTTP boundary made a re-render of already-cached
+    links spend tokens it never used, which is a user-visible bug (seven messages ×
+    three links exhausts a burst of twenty on a purely warm screen). The route maps
+    this to a ``429`` with ``Retry-After``; core stays HTTP-free.
+    """
+
+    def __init__(self, retry_after_s: float) -> None:
+        super().__init__("preview resolves are throttled")
+        self.retry_after_s = retry_after_s
+
+
 class ResolveThrottle:
     """Per-account token bucket. ``allow`` is a yes/no; ``retry_after_s`` the wait."""
 
@@ -71,9 +86,21 @@ class ResolveThrottle:
         self._lock = Lock()
 
     def allow(self, account_id: str) -> bool:
-        """Spend one token for ``account_id``; ``False`` when the bucket is empty."""
+        """Spend one token for ``account_id``; ``False`` when the bucket is empty.
+
+        A NEW account only gets a bucket if there is a slot for it, and a slot is
+        only freed by forgetting a bucket that still holds its WHOLE burst — see
+        :meth:`_make_room`. When every tracked bucket is depleted the new account is
+        refused instead: over-counting is the safe direction for a bound, and one
+        install has a handful of accounts.
+        """
         with self._lock:
-            if self._refill(account_id, self._clock()) < 1.0:
+            now = self._clock()
+            if account_id not in self._level and len(self._level) >= self.max_accounts:
+                self._make_room(now)
+                if len(self._level) >= self.max_accounts:
+                    return False
+            if self._refill(account_id, now) < 1.0:
                 return False
             self._level[account_id] -= 1.0
             return True
@@ -82,15 +109,19 @@ class ResolveThrottle:
         """Seconds until this account holds a token again, for ``Retry-After``.
 
         Read AFTER a refusal, so a refused client waits the real interval instead of
-        retrying into the same refusal.
+        retrying into the same refusal. Deliberately does not CREATE a bucket: a
+        read must not be able to grow the map.
         """
-        with self._lock:
-            level = self._refill(account_id, self._clock())
         if self.refill_per_second <= 0:
             # A bucket with no refill never recovers. Reported as an hour rather
             # than infinity because this number becomes a ``Retry-After`` header
             # and a client needs a finite one.
             return _NO_REFILL_RETRY_S
+        with self._lock:
+            now = self._clock()
+            level = self._level.get(account_id, self.burst)
+            last = self._stamped.get(account_id, now)
+            level = min(self.burst, level + max(0.0, now - last) * self.refill_per_second)
         missing = max(0.0, 1.0 - level)
         return round(max(0.05, missing / self.refill_per_second), 2)
 
@@ -102,10 +133,28 @@ class ResolveThrottle:
         self._level[account_id] = level
         self._level.move_to_end(account_id)
         self._stamped[account_id] = now
-        while len(self._level) > self.max_accounts:
-            evicted, _ = self._level.popitem(last=False)
-            self._stamped.pop(evicted, None)
         return level
+
+    def _make_room(self, now: float) -> None:
+        """Forget one IDLE-FULL bucket, so a new account can have its slot. Holds the lock.
+
+        Evicting a DEPLETED bucket would be a refund: the account would come back to
+        a full burst it had already spent, which is a way to buy tokens by being
+        forgotten (code review round 2). A bucket still holding its whole burst is
+        the only safe one to drop — recreating it later at full burst is
+        indistinguishable from having kept it.
+        """
+        for account_id in list(self._level):
+            # Refill on the fly rather than trusting the stored level: the stored
+            # one is only current as of that bucket's last touch, so an idle bucket
+            # reads as depleted and would never be evictable.
+            level = self._level[account_id]
+            last = self._stamped.get(account_id, now)
+            level = min(self.burst, level + max(0.0, now - last) * self.refill_per_second)
+            if level >= self.burst:
+                del self._level[account_id]
+                self._stamped.pop(account_id, None)
+                return
 
 
 #: The process-wide bucket, built on first use — the same shape, and for the same

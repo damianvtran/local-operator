@@ -1001,23 +1001,78 @@ def test_coerce_clamps_attempts() -> None:
     assert coerce_fetch_settings({}).blocked_retry is True
 
 
-def test_cgnat_and_magicdns_are_not_global_and_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``is_global`` failed closed on the range an enumeration missed.
+@pytest.mark.parametrize(
+    "address",
+    [
+        # IPv4 carrier-grade NAT, and Tailscale's MagicDNS (100.64.0.0/10). The
+        # six-flag list missed these; ``is_global`` catches them.
+        "100.64.0.1",
+        "100.100.100.100",
+        "::ffff:100.64.0.1",
+        # IPv4 and IPv6 MULTICAST: ``is_global`` is True for these, so the
+        # is_global-only predicate this test was written for ALLOWED them.
+        "224.0.0.1",
+        "239.255.255.250",
+        "ff02::1",
+        "ff0e::1",
+        # NAT64 (64:ff9b::/96) embeds an IPv4 address, so this IS 169.254.169.254 on
+        # a NAT64 host — and on an IPv6-only host it is the address the connection
+        # would be pinned to.
+        "64:ff9b::a9fe:a9fe",
+        "64:ff9b::7f00:1",
+        # IPv4-COMPATIBLE ``::a.b.c.d``: is_reserved, and never unwrapped by
+        # ``ipv4_mapped``, so only the reserved term catches it.
+        "::a9fe:a9fe",
+        "::7f00:1",
+        # The plain guards, kept here so one test states the whole closed set.
+        "169.254.169.254",
+        "127.0.0.1",
+        "::1",
+        "10.0.0.1",
+        "192.168.0.1",
+        "0.0.0.0",
+        "198.18.0.1",
+        "192.0.2.1",
+    ],
+)
+def test_every_address_class_the_guard_must_refuse_is_refused(
+    address: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1/S-10: ``is_global`` ALONE REGRESSED six classes the old list refused.
 
-    Security round 1 (S-2): the old ``is_private or is_loopback or …`` list let
-    ``100.64.0.0/10`` through — CGNAT, and Tailscale's MagicDNS at 100.100.100.100 —
-    so those came back as the PINNED target for a pasted link. ``is_global`` is
-    IANA's own answer, so the next special-purpose range needs no code change.
+    Both delta lanes measured it independently: ``is_global`` is True for IPv4 and
+    IPv6 multicast, for the NAT64 prefix that embeds an IPv4 address, and for
+    IPv4-compatible ``::a.b.c.d`` — every one of which the six-flag list this
+    replaced refused, and every one of which ``validate_public_url`` would then PIN
+    the connection to. The predicate therefore carries ``is_multicast`` and
+    ``is_reserved`` alongside ``not is_global``, and this parametrisation is what
+    keeps the pair honest in both directions.
     """
-    for address in ("100.64.0.1", "100.100.100.100", "::ffff:100.64.0.1"):
-        monkeypatch.setattr(service, "_resolve_host_ips", lambda host, a=address: [a])
-        with pytest.raises(service.PolicyRefusal) as caught:
-            validate_public_url("https://pasted.example/x", allow_private=False)
-        assert caught.value.reason == "private", address
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: [address])
+    with pytest.raises(service.PolicyRefusal) as caught:
+        validate_public_url("https://pasted.example/x", allow_private=False)
+    assert caught.value.reason == "private", address
 
 
-def test_a_globally_routable_address_still_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("address", ["93.184.216.34", "2606:4700::1", "8.8.8.8"])
+def test_a_globally_routable_address_still_passes(
+    address: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The tightening must not refuse the addresses it exists to fetch."""
-    for address in ("93.184.216.34", "2606:4700::1"):
-        monkeypatch.setattr(service, "_resolve_host_ips", lambda host, a=address: [a])
-        assert validate_public_url("https://pasted.example/x", allow_private=False) == address
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: [address])
+    assert validate_public_url("https://pasted.example/x", allow_private=False) == address
+
+
+def test_allow_private_is_still_the_only_way_to_reach_a_local_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator's deliberate escape survives the tightening, and is explicit.
+
+    ``allow_private`` bypasses IP judgement entirely — that is the documented local
+    dev switch, and tightening the predicate must not quietly disable it. What must
+    NOT happen is any of the refused classes getting through it implicitly.
+    """
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["127.0.0.1"])
+    assert validate_public_url("http://localhost:3000/x", allow_private=True) is None
+    with pytest.raises(service.PolicyRefusal):
+        validate_public_url("http://localhost:3000/x", allow_private=False)

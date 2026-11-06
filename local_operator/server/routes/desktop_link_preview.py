@@ -64,7 +64,10 @@ from local_operator.team_bridge.link_preview.cache import PreviewScope
 from local_operator.team_bridge.link_preview.extract import sniff_raster
 from local_operator.team_bridge.link_preview.models import LinkPreviewResolution
 from local_operator.team_bridge.link_preview.service import resolve_preview
-from local_operator.team_bridge.link_preview.throttle import get_resolve_throttle
+from local_operator.team_bridge.link_preview.throttle import (
+    PreviewThrottled,
+    get_resolve_throttle,
+)
 from local_operator.team_bridge.link_preview.store import (
     ARTIFACT_ID_PATTERN,
     InvalidArtifactId,
@@ -265,23 +268,26 @@ async def resolve_link_preview(body: ResolveRequest, request: Request):
     """
     config_dir = _config_dir(request)
     account_id = await _require_account(config_dir, body.expected_account_id)
-    # THE SERVER-SIDE FLOOD BOUND, after the receipt and before any resolution.
-    # ``index < 3`` is the renderer's own numbering, so a client that renumbers its
-    # links gets an unbounded number of resolves from one message (code review
-    # round 1); the bucket is keyed by the account the install actually holds, so
-    # it cannot be sidestepped by relabelling. Refused BEFORE the cache, the store
-    # or the network is touched.
-    throttle = get_resolve_throttle()
-    if not throttle.allow(account_id):
-        raise _rate_limited(throttle.retry_after_s(account_id))
-    resolution = await resolve_preview(
-        url=body.url,
-        index=body.index,
-        scope=_scope_for(config_dir, account_id),
-        settings=load_fetch_settings(request.app.state.config_manager),
-        store=PreviewStore.from_config(config_dir),
-        cache=preview_cache.get_preview_cache(),
-    )
+    # THE FLOOD BOUND, passed INTO the resolver rather than applied here. ``index <
+    # 3`` is the renderer's own numbering, so a client that renumbers its links gets
+    # an unbounded number of resolves from one message (code review round 1). But the
+    # charge belongs where a FETCH happens: applying it at this boundary billed cache
+    # hits and cap refusals, so a warm re-render of seven messages exhausted a burst
+    # of twenty and started refusing real work (round 2, minor). The resolver spends
+    # the token on a cache miss and raises ``PreviewThrottled``; this route only
+    # translates it.
+    try:
+        resolution = await resolve_preview(
+            url=body.url,
+            index=body.index,
+            scope=_scope_for(config_dir, account_id),
+            settings=load_fetch_settings(request.app.state.config_manager),
+            store=PreviewStore.from_config(config_dir),
+            cache=preview_cache.get_preview_cache(),
+            throttle=get_resolve_throttle(),
+        )
+    except PreviewThrottled as throttled:
+        raise _rate_limited(throttled.retry_after_s) from None
     return reply(resolution)
 
 
@@ -416,11 +422,12 @@ async def link_preview_artifact(
             # renderer that re-asks costs one local file read, not a fetch.
             "X-Content-Type-Options": "nosniff",
             # The same pair every sibling byte route sends
-            # (``routes/desktop_team_bridge.py``'s avatar routes): ``nosniff`` alone
-            # stops a MIME reinterpretation, and this stops what the bytes could do
-            # if a browser rendered them as the type they claim — nothing loads and
-            # nothing runs. A second, independent gate behind the raster sniff, so a
-            # future format cannot become a document by being served here.
+            # (``routes/desktop_team_bridge.py``'s avatar routes): ``nosniff`` stops
+            # a MIME reinterpretation, and this makes the response inert if a browser
+            # renders it as the type it claims — nothing loads and nothing runs. NOT
+            # a second validation of the bytes: the raster sniff above is the one
+            # gate that decides what may be stored and served at all; this only
+            # removes the ability of an admitted file to act like a document.
             "Content-Security-Policy": "default-src 'none'; sandbox",
         },
     )

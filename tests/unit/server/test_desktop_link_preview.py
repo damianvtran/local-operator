@@ -18,7 +18,8 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+import operator
+from typing import Any, Callable, SupportsIndex, overload
 
 import httpx
 import pytest
@@ -968,20 +969,89 @@ def test_the_parser_is_bounded_by_its_tag_budget() -> None:
     assert metadata.title == "Collected"
 
 
-def test_a_jpeg_walk_that_never_names_a_frame_is_bounded() -> None:
-    """The reviewer's hostile body: ``FF D8 FF`` then restart markers, no SOF ever.
+class _Audited(bytes):
+    """Bytes that record the furthest byte index anyone read from them.
 
-    Bounded by :data:`extract._JPEG_SOF_SCAN_BYTES`, because the walk is a Python
-    loop over attacker-supplied bytes — 2 MiB of this measured 1.75 s before the cap.
+    A WALL-CLOCK ASSERTION CANNOT FAIL HERE. Code review round 2 measured the cap's
+    own cost at 0.07-0.2 s against a 0.3 s bound, so "it was fast" passed even when
+    the scan read the whole 2 MiB body. This counts the reads instead, so the test
+    fails the moment the bound is removed however fast the machine is.
+    """
+
+    def __new__(cls, data: bytes) -> "_Audited":
+        return super().__new__(cls, data)
+
+    def __init__(self, data: bytes) -> None:
+        self.furthest = -1
+
+    # The overloads mirror ``bytes.__getitem__`` exactly (``SupportsIndex`` and
+    # ``slice``), so this stays a real subclass of the type the sniffer is written
+    # against rather than a duck type that the guard could not run on.
+    @overload
+    def __getitem__(self, item: SupportsIndex) -> int: ...
+
+    @overload
+    def __getitem__(self, item: slice) -> bytes: ...
+
+    def __getitem__(self, item: SupportsIndex | slice) -> int | bytes:
+        if isinstance(item, slice):
+            self.furthest = max(self.furthest, item.stop if item.stop is not None else len(self))
+        else:
+            index = operator.index(item)
+            self.furthest = max(self.furthest, index if index >= 0 else len(self) + index)
+        return super().__getitem__(item)
+
+
+def _jpeg_with_sof_at(offset: int) -> bytes:
+    """A JPEG whose SOF header sits at ``offset`` bytes, with filler before it.
+
+    The filler is ``FF D0`` restart markers: a legal two-byte sequence with no
+    length field, so the walk steps over it two bytes at a time — the exact shape
+    that made the unbounded version slow, and the only way to place a header past a
+    64 KiB segment-length field.
+    """
+    units = max(0, (offset - 3) // 2)
+    sof0 = (
+        b"\xff\xc0"
+        + (17).to_bytes(2, "big")
+        + b"\x08"
+        + (200).to_bytes(2, "big")
+        + (300).to_bytes(2, "big")
+        + b"\x03"
+        + b"\x00" * 9
+    )
+    return b"\xff\xd8\xff" + b"\xff\xd0" * units + sof0 + b"\xff\xd9"
+
+
+def test_the_jpeg_walk_reads_no_further_than_its_cap() -> None:
+    """BYTES, not seconds: the hostile body is never walked past the bound.
+
+    The reviewer's exact body — ``FF D8 FF`` then repeated ``FF D0``, no SOF ever.
+    Bounded by :data:`extract._JPEG_SOF_SCAN_BYTES` because the walk is a Python loop
+    over attacker-supplied bytes (2 MiB of this measured 1.75 s before the cap).
     Dimensions are optional in the contract, so "unknown" is the right answer.
     """
-    hostile = b"\xff\xd8\xff" + b"\xff\xd0" * (1024 * 1024)
-    started = time.monotonic()
+    hostile = _Audited(b"\xff\xd8\xff" + b"\xff\xd0" * (1024 * 1024))
     raster = extract.sniff_raster(hostile)
-    elapsed = time.monotonic() - started
     assert raster is not None and raster.mime == "image/jpeg"
     assert (raster.width, raster.height) == (None, None)
-    assert elapsed < 0.2, f"the segment walk is unbounded again: {elapsed:.2f}s"
+    assert hostile.furthest <= extract._JPEG_SOF_SCAN_BYTES, hostile.furthest
+    assert hostile.furthest < len(hostile), "the walk read the whole body"
+
+
+def test_a_sof_past_the_cap_reports_unknown_and_a_sof_inside_it_reports_its_size() -> None:
+    """The pair that makes the cap DETECTABLE: same header, either side of the bound.
+
+    If the cap were removed (or raised past the second offset), the far case would
+    report 300x200 and this test would fail — which the wall-clock version could not
+    do. The far case is the documented EXIF limitation: unknown, never wrong.
+    """
+    near = extract.sniff_raster(_jpeg_with_sof_at(1024))
+    far_offset = extract._JPEG_SOF_SCAN_BYTES + 4096
+    far = extract.sniff_raster(_jpeg_with_sof_at(far_offset))
+    assert near is not None and (near.width, near.height) == (300, 200)
+    assert far is not None and far.mime == "image/jpeg"
+    assert (far.width, far.height) == (None, None)
 
 
 def test_a_relative_icon_resolves_against_the_served_url() -> None:
@@ -1697,8 +1767,11 @@ async def test_a_burst_of_resolves_is_refused_by_the_account_bucket(
     seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
     async with _client() as client:
         answers = []
-        for _ in range(3):
-            answers.append(await _post(client, _resolve_body("http://preview.test/a")))
+        # DISTINCT urls, so every one of them is a cold miss and therefore spends a
+        # token. Three repeats of one url would be two cache hits and only one charge
+        # — which is the behaviour the next test pins.
+        for name in ("a1", "a2", "a3"):
+            answers.append(await _post(client, _resolve_body(f"http://preview.test/{name}")))
         refused = await _post(client, _resolve_body("http://preview.test/b"))
     assert [answer.status_code for answer in answers] == [200, 200, 200]
     assert refused.status_code == 429
@@ -1706,11 +1779,58 @@ async def test_a_burst_of_resolves_is_refused_by_the_account_bucket(
     assert detail["code"] == "rate_limited"
     assert detail["retryable"] is True
     assert "Retry-After" in refused.headers
-    # The refused URL never reached the origin. The three admitted resolves spent
-    # ONE page fetch (the next two were cache hits) plus the card's favicon; ``/b``
-    # appears nowhere, which is the assertion that matters.
+    # The refused URL never reached the origin, and nothing else did for it either.
     assert "/b" not in seen, seen
-    assert seen.count("/a") == 1, seen
+
+
+@pytest.mark.asyncio
+async def test_a_warm_re_render_costs_no_tokens(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """A CACHE HIT IS FREE — the user-visible bug this round fixes.
+
+    The bucket used to be charged at the HTTP boundary, so re-rendering an already
+    cached screen (seven messages × three links = twenty-one resolves, all warm)
+    exhausted a burst of twenty and started refusing real work. The charge now lives
+    where a fetch does: one token for this throttled-to-1 bucket, spent by the FIRST
+    resolve, and the warm repeat must still answer.
+    """
+    starving = ResolveThrottle(burst=1, clock=lambda: 1_000.0)
+    monkeypatch.setattr(desktop_link_preview, "get_resolve_throttle", lambda: starving)
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        first = await _post(client, _resolve_body("http://preview.test/page"))
+        warm = await _post(client, _resolve_body("http://preview.test/page"))
+        cold = await _post(client, _resolve_body("http://preview.test/other"))
+    assert first.status_code == 200 and first.json()["result"]["kind"] == "ready"
+    assert warm.status_code == 200, warm.text
+    assert warm.json()["result"]["kind"] == "ready"
+    # The bucket held exactly one token: the warm repeat was free, the second COLD
+    # url was not.
+    assert cold.status_code == 429
+    assert seen.count("/page") == 1, seen
+
+
+@pytest.mark.asyncio
+async def test_a_cap_refusal_costs_no_token(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """Over-cap indexes are the renderer's numbering, not a fetch: they are free."""
+    starving = ResolveThrottle(burst=1, clock=lambda: 1_000.0)
+    monkeypatch.setattr(desktop_link_preview, "get_resolve_throttle", lambda: starving)
+    _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        over_cap = await _post(
+            client,
+            {
+                "url": "http://preview.test/page",
+                "index": 3,
+                "expected_account_id": ACCOUNT,
+            },
+        )
+        real = await _post(client, _resolve_body("http://preview.test/page"))
+    assert over_cap.json()["result"] == {"kind": "absent", "reason": "cap"}
+    assert real.status_code == 200 and real.json()["result"]["kind"] == "ready"
 
 
 def test_the_account_bucket_refills_and_stays_bounded() -> None:
@@ -1730,3 +1850,27 @@ def test_the_account_bucket_refills_and_stays_bounded() -> None:
         small.allow(f"acc_{index}")
     assert len(throttle._level) <= 1
     assert len(small._level) <= 4
+
+
+def test_forgetting_an_account_never_refunds_a_spent_burst() -> None:
+    """Eviction may only drop an IDLE-FULL bucket, or it hands tokens back.
+
+    Dropping a DEPLETED bucket and recreating it later at full burst is a way to buy
+    tokens by being forgotten (round 2). So a full map of depleted buckets admits no
+    new account at all, and once a bucket has refilled itself it is safe to forget.
+    """
+    now = {"t": 0.0}
+    clock = lambda: now["t"]  # noqa: E731 - a one-line test clock
+    tight = ResolveThrottle(burst=2, refill_per_second=1.0, max_accounts=1, clock=clock)
+    assert clock() == 0.0
+    assert [tight.allow("acc_a") for _ in range(2)] == [True, True]
+    assert not tight.allow("acc_a"), "the bucket should be empty"
+    # A second account cannot buy its way in by evicting a depleted bucket.
+    assert not tight.allow("acc_b")
+    assert "acc_a" in tight._level
+    # Once acc_a has refilled to its whole burst, forgetting it changes nothing, so
+    # the slot may be handed over.
+    now["t"] += 10.0
+    assert tight.allow("acc_b")
+    assert "acc_a" not in tight._level
+    assert not tight.allow("acc_a"), "the evicted account must not return with a full burst"

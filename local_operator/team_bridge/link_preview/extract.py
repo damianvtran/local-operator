@@ -295,21 +295,25 @@ _PNG_SIGNATURE: Final = b"\x89PNG\r\n\x1a\n"
 _GIF_SIGNATURES: Final = (b"GIF87a", b"GIF89a")
 _ICO_SIGNATURE: Final = b"\x00\x00\x01\x00"
 
-#: JPEG start-of-frame markers that carry the frame header. Deliberately the
-#: closed set: C4 (Huffman tables), C8 (reserved) and CC (arithmetic conditioning)
-#: sit inside the same range and are NOT frames, and reading them as one yields
-#: nonsense dimensions from unrelated bytes.
 #: How far into a JPEG the segment walk may look for its start-of-frame header.
 #:
 #: The walk is a Python loop over ATTACKER-SUPPLIED bytes, so it has to be bounded
 #: by something other than the body length: a 2 MiB body of ``FF D8 FF`` followed by
 #: repeated ``FF D0`` (restart markers, no SOF ever) measured **1.75 s** of pure
-#: loop before this cap, and the bytes were then stored as an image with unknown
-#: dimensions. 64 KiB is comfortably past every real encoder's APP0/APP1 block, so
-#: a legitimate photo still reports its dimensions; a stream that has not named a
-#: frame by then answers "unknown" — the contract allows ``None`` per axis, so the
-#: cap costs an optional field rather than the card.
+#: loop before this cap.
+#:
+#: THE LIMITATION THIS ACCEPTS, stated rather than hidden: a JPEG whose EXIF/APP1
+#: block is larger than the cap pushes its SOF past the walk, so that photo reports
+#: **unknown** dimensions (``None`` per axis, which the renderer contract allows)
+#: rather than a number. It can never report a WRONG pair — the walk only reads an
+#: SOF it actually reached — and the bytes are still stored and served either way;
+#: only the dimensions are unknown.
 _JPEG_SOF_SCAN_BYTES: Final = 64 * 1024
+
+#: JPEG start-of-frame markers that carry the frame header. Deliberately the closed
+#: set: C4 (Huffman tables), C8 (reserved) and CC (arithmetic conditioning) sit in
+#: the same range and are NOT frames, and reading one as a frame yields dimensions
+#: from unrelated bytes.
 
 _JPEG_SOF: Final = frozenset(
     {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
