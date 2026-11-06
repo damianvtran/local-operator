@@ -4124,10 +4124,16 @@ def _mcp_credential_row(
     peer_label: str,
     viewer_label: str = "",
 ) -> dict[str, Any]:
-    # THE ARGUMENT ``/mcp login`` TAKES IS THE NAME, NOT THE URL (review R1-1).
-    # ``mcp_credential_rows`` also falls back to the URL as a LABEL when a peer's
-    # fact carries no name, so the two are compared rather than assumed different.
-    login_name = name if name != url else ""
+    # THE NAME MUST BE ONE **THIS DEVICE** RESOLVES (review/QA round 2). ``name`` is
+    # the PEER's label for the server — its placement or mcp fact — and the command
+    # is typed HERE: a peer calling it ``notion`` while this device calls it
+    # ``notion-work`` produced a command this device answers with "not configured",
+    # and a viewer with no ``mcp.json`` at all emitted a name out of the peer's book.
+    # The name therefore comes from the viewer's OWN config file, the same read the
+    # share verb and the ledger make; when this device has no entry for the URL, the
+    # clause's no-command placeholder is the truthful answer.
+    viewer_root = getattr(viewer, "root", None)
+    login_name = mcp_server_name_for_url(viewer_root, url) if isinstance(viewer_root, Path) else ""
     # A row without a grant the runtime would use is NO row: the runtime goes
     # straight to the borrow, so the verdict must reach the holder/borrow branch
     # below instead of telling the operator to sign in on this peer.

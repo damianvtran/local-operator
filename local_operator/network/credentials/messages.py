@@ -127,7 +127,9 @@ def render_broker_error(
     # every other arm keeps ``label`` exactly as it was.
     shown = render_key_name(label)
     is_mcp = key.startswith("mcp:")
-    login = f"/mcp login {key[4:]}" if is_mcp else f"lop login {label}"
+    # ONE SPELLING, and no URL in a command (review R1-1/R2): the sentence names a
+    # FORM here because this module has no config root to resolve a server name from.
+    login = mcp_login_command(key) if is_mcp else f"lop login {label}"
     is_github = provider == GITHUB_KEY or key == GITHUB_KEY
 
     if is_github:
@@ -429,13 +431,25 @@ def render_success(provider: str, owner_name: str, *, cached: bool = False) -> s
     )
 
 
+#: THE MCP LOGIN COMMAND, ONE SPELLING — and it never carries a URL.
+#:
+#: ``/mcp login`` resolves a server NAME (``mcp.grants.resolve_server`` ->
+#: ``manager.get_server_config``), so ``/mcp login <url>`` is a command the product
+#: refuses (review R1-1). This module renders on devices and about devices it cannot
+#: read, so the name is optional: given one, the command names it; without one, the
+#: placeholder ``<name>`` keeps the sentence a FORM rather than pretending to be
+#: something a reader can paste. Callers with a config root in hand pass the name
+#: (``readiness.mcp_server_name_for_url``).
+def mcp_login_command(key: str, *, name: str = "") -> str:
+    return f"/mcp login {name or '<name>'}" if key.startswith("mcp:") else ""
+
+
 #: The interactive login that clears an ``interactive_required`` repair — the ONE
 #: spelling of the command, shared by the wire diagnostic below, the owner-side
 #: repair notice (``credentials/repair.py``) and its doctor row's remedy: three
 #: surfaces tell a reader to run the same thing, so the thing is spelled once.
-def repair_command(key: str) -> str:
-    is_mcp = key.startswith("mcp:")
-    return f"/mcp login {key[4:]}" if is_mcp else f"/login {key}"
+def repair_command(key: str, *, name: str = "") -> str:
+    return mcp_login_command(key, name=name) if key.startswith("mcp:") else f"/login {key}"
 
 
 #: The WIRE DIAGNOSTIC an owner sends with an ``interactive_required`` refusal —
@@ -463,9 +477,15 @@ def repair_command(key: str) -> str:
 #:
 #: ``key`` is the placement key (``mcp:<url>`` or a provider name); the quoting is
 #: deliberate, because the operator pastes the command.
-def render_repair_notice(peer_name: str, key: str) -> str:
+def render_repair_notice(peer_name: str, key: str, *, name: str = "") -> str:
+    """The owner-side sentence; ``name`` when the owner's config resolved one.
+
+    A reader of this sentence is being sent to a command on the device that holds
+    the login, so the same rule as :func:`mcp_login_command` applies: with a name
+    the command resolves, without one it stays a form (review R2/Q2).
+    """
     return (
-        f"{peer_name} needs '{repair_command(key)}' here — "
+        f"{peer_name} needs '{repair_command(key, name=name)}' here — "
         "its borrowed credential cannot be refreshed"
     )
 

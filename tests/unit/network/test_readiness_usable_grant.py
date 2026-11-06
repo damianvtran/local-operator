@@ -139,8 +139,11 @@ def test_owner_share_with_no_login_in_the_store_is_not_a_borrow(
     root = _holder_root(tmp_path, monkeypatch, placed=True)
     _write_shape(root, "registration-only")
 
+    # ``root`` is this device's own config dir here, so the row can resolve the
+    # name it would tell the operator to run (review R2/R2).
     row = _holder_row(
-        root, viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT, holds_mcp=False)
+        root,
+        viewer=_FakeViewer(device_id=OWNER, placement=OWNER_PLACEMENT, holds_mcp=False, root=root),
     )
 
     assert row["ok"] is False, row

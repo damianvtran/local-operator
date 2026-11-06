@@ -49,11 +49,16 @@ class _FakeViewer:
         holds_mcp: bool | None = False,
         placement: dict[str, Any] | None = None,
         device_id: str = VIEWER,
+        root: Path | None = None,
     ) -> None:
         self.device_id = device_id
         self._rows = rows
         self._holds_mcp = holds_mcp
         self._placement = dict(placement or {})
+        # The config root a readiness row resolves ``/mcp login``'s argument from
+        # (review/QA round 2): the command runs on THIS device, so its own
+        # ``mcp.json`` is the authority — never the peer's label for the server.
+        self.root = root
 
     def provider_rows(self, provider: str) -> list[str] | None:
         return self._rows
@@ -66,6 +71,20 @@ class _FakeViewer:
 
     def close(self) -> None:  # pragma: no cover — duck-typed parity
         pass
+
+
+def _mcp_config_root(tmp_path: Path, name: str, url: str) -> Path:
+    """A config root whose ``mcp.json`` maps a NAME to the URL of interest.
+
+    The row resolves ``/mcp login``'s argument from THIS device's file (review
+    R2/Q2), so a test that pins the named form must publish one.
+    """
+    root = tmp_path / "cfg"
+    root.mkdir(exist_ok=True)
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {name: {"type": "http", "url": url}}}), encoding="utf-8"
+    )
+    return root
 
 
 def _facts(**over: Any) -> dict[str, Any]:
@@ -1190,8 +1209,14 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
     }
 
     class _PlacementViewer(_FakeViewer):
-        def __init__(self, entries: dict[str, dict[str, Any]], *, holds_urls: set[str]) -> None:
-            super().__init__(holds_mcp=False)
+        def __init__(
+            self,
+            entries: dict[str, dict[str, Any]],
+            *,
+            holds_urls: set[str],
+            root: Path | None = None,
+        ) -> None:
+            super().__init__(holds_mcp=False, root=root)
             self._entries = entries
             self._holds_urls = holds_urls
 
@@ -1224,6 +1249,8 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
             },
         },
         holds_urls={"https://b.example/mcp", "https://e.example/mcp"},
+        # The remedy resolves ``/mcp login``'s argument HERE (review R2/Q2).
+        root=_mcp_config_root(tmp_path, "declared", "https://g.example/mcp"),
     )
     rows = readiness.mcp_credential_rows(
         _member(),
@@ -1274,7 +1301,7 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         assert row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL
 
 
-def test_mcp_row_never_promises_a_borrow_this_device_cannot_fund() -> None:
+def test_mcp_row_never_promises_a_borrow_this_device_cannot_fund(tmp_path: Path) -> None:
     """A share on the books is not a credential in the store (2026-11-06)."""
     url = "https://notion.example/mcp"
     servers = {
@@ -1302,8 +1329,8 @@ def test_mcp_row_never_promises_a_borrow_this_device_cannot_fund() -> None:
     class _PlacedViewer(_FakeViewer):
         """This device's store answer, with the placement the peer's share wrote."""
 
-        def __init__(self, holds: bool | None) -> None:
-            super().__init__(holds_mcp=holds)
+        def __init__(self, holds: bool | None, root: Path | None = None) -> None:
+            super().__init__(holds_mcp=holds, root=root)
 
         def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
             return dict(placement.get(mcp_url, {}))
@@ -1312,7 +1339,7 @@ def test_mcp_row_never_promises_a_borrow_this_device_cannot_fund() -> None:
         rows = readiness.mcp_credential_rows(
             _member(),
             _facts(mcp=servers),
-            viewer=_PlacedViewer(holds),
+            viewer=_PlacedViewer(holds, _mcp_config_root(tmp_path, "notion", url)),
             peer_label="cloud-node-1",
             viewer_label="damian-mac",
         )
@@ -1336,6 +1363,64 @@ def test_mcp_row_never_promises_a_borrow_this_device_cannot_fund() -> None:
     assert served["ok"] is True, served
     assert "holds a shareable login" in served["detail"]
     assert served["observed"]["shareable_here"] is True
+
+
+def test_the_login_command_names_this_devices_server_not_the_peers(tmp_path: Path) -> None:
+    """R2-1/Q2-1: the command runs HERE, so its argument must resolve HERE.
+
+    The peer's label for a server is the peer's business: a viewer that keys the
+    URL as ``notion-work`` was told to run ``/mcp login notion`` (the peer's name),
+    which this device answers with "MCP server 'notion' is not configured"; a
+    viewer with no ``mcp.json`` at all was told to run the peer's name outright.
+    """
+    url = "https://notion.example/mcp"
+    servers = {
+        "servers": [
+            {
+                "name": "notion",
+                "url": url,
+                "transport": "http",
+                "auth_declared": True,
+                "has_row": False,
+            }
+        ],
+        "withheld": [],
+        "config_path": "/r/mcp.json",
+    }
+
+    def root_at(parent: Path, entries: dict[str, str]) -> Path:
+        root = parent / "cfg"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        name: {"type": "http", "url": address} for name, address in entries.items()
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return root
+
+    def row_for(root: Path) -> dict[str, Any]:
+        return readiness.mcp_credential_rows(
+            _member(),
+            _facts(mcp=servers),
+            viewer=_FakeViewer(root=root),
+            peer_label="cloud-node-1",
+        )[0]
+
+    # (a) this device has no entry for the URL: no command at all, and none of the
+    # peer's name leaks into one.
+    absent = row_for(root_at(tmp_path / "a", {}))
+    assert "run `/mcp login notion`" not in absent["detail"]
+    assert "/mcp login <name>` signs one in" in absent["detail"]
+
+    # (b) this device keys it differently: THIS device's name wins.
+    renamed = row_for(root_at(tmp_path / "b", {"notion-work": url}))
+    assert "run `/mcp login notion-work` here first" in renamed["detail"]
+    assert "/mcp login notion " not in renamed["detail"]
 
 
 def test_mcp_owner_expiry_names_the_owner_in_the_row_and_remedy(
@@ -1570,7 +1655,10 @@ def test_a_stdio_server_with_only_literal_credentials_gets_an_adopt_row() -> Non
     }
 
     rows = readiness.mcp_credential_rows(
-        _member(), _facts(mcp=servers), viewer=_FakeViewer(), peer_label="cloud-node-1"
+        _member(),
+        _facts(mcp=servers),
+        viewer=_FakeViewer(),
+        peer_label="cloud-node-1",
     )
 
     assert len(rows) == 1
@@ -1632,7 +1720,7 @@ def test_an_http_literal_only_server_gets_the_adopt_row_not_a_sign_in() -> None:
     assert row["observed"]["literal_keys"] == ["headers.Authorization"]
 
 
-def test_an_http_oauth_server_keeps_the_login_copy_even_with_literals() -> None:
+def test_an_http_oauth_server_keeps_the_login_copy_even_with_literals(tmp_path: Path) -> None:
     """Literal handling must not hide a separate OAuth failure."""
     servers = {
         "servers": [
@@ -1653,12 +1741,14 @@ def test_an_http_oauth_server_keeps_the_login_copy_even_with_literals() -> None:
     }
 
     rows = readiness.mcp_credential_rows(
-        _member(), _facts(mcp=servers), viewer=_FakeViewer(), peer_label="cloud-node-1"
+        _member(),
+        _facts(mcp=servers),
+        # The remedy resolves the name from THIS device's file (review R2/Q2).
+        viewer=_FakeViewer(root=_mcp_config_root(tmp_path, "dd", "https://dd.test/mcp")),
+        peer_label="cloud-node-1",
     )
 
     assert len(rows) == 1
-    # The sign-in clause now names the exact command (2026-11-06) — the URL was
-    # already in the sentence and belongs in the action.
     assert "run `/mcp login dd` here first" in rows[0]["detail"]
     assert "--adopt" not in " ".join(rows[0]["remedies"])
 
