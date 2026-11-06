@@ -30704,12 +30704,14 @@ class Session:
           every session-path assignment of ``mcp_manager`` happens after the
           connect round (``attach_mcp_dispose``), so a non-None manager already
           means the load finished, and its silence is a real answer.
-        - the server needs a re-auth, or its reconnect is suspended: it will
-          NOT heal by itself, but the fix is a one-line operator action, so
-          this stalls immediately (a notice naming ``/mcp reauth``) rather
-          than striking;
+        - the server needs a re-auth: it will NOT heal by itself, but the fix
+          is a one-line operator action, so the detail names ``/mcp reauth``
+          rather than striking;
         - the server is still settling at startup, or reports ``connecting``:
           it may hand the tool over on its own;
+        - its reconnect breaker is open: paused after repeated drops and
+          retried on a cool-down, so it heals by itself and the detail names
+          no command;
         - the server is connected but no longer hands out the tool, or is
           disconnected: not available now, so it waits.
 
@@ -30752,13 +30754,26 @@ class Session:
                     "unavailable",
                     f"MCP server {detail} needs re-authentication — run /mcp reauth {server}",
                 )
+            if status == "connecting":
+                # Ahead of the breaker on purpose: a half-open probe inside its
+                # connect is still ``reconnect_suspended`` (the breaker closes
+                # only when the connect lands), and "still connecting" is the
+                # truthful answer for that instant. Nothing else is both
+                # suspended and connecting: the fast ladder is paused while the
+                # breaker is open, and auth-required is answered above.
+                return ("unavailable", f"MCP server {detail} is still connecting")
             if manager.reconnect_suspended(server):
+                # The flap breaker: paused and retried on its own cool-down
+                # (``RECONNECT_PROBE_COOLDOWN_S``), so it names no command —
+                # ``/mcp reauth`` would re-spend a perfectly valid grant. This
+                # text becomes the stall notice's ``Reason:``, whose body says
+                # the watch is retrying; the two must agree. Pinned verbatim in
+                # tests/unit/session (re-verify the probe if it changes).
                 return (
                     "unavailable",
-                    f"MCP server {detail} stopped reconnecting — run /mcp reauth {server}",
+                    f"MCP server {detail} keeps dropping; reconnects are paused "
+                    "and retried automatically",
                 )
-            if status == "connecting":
-                return ("unavailable", f"MCP server {detail} is still connecting")
             if status == "connected":
                 return (
                     "unavailable",

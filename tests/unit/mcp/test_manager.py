@@ -553,13 +553,13 @@ class TestCircuitBreaker:
                 break
 
         assert manager.reconnect_suspended("fast") is True
-        # The breaker is half-open now, so the incident names the pause, when
-        # it ends, and the manual override, instead of a permanent suspension.
+        # The breaker is half-open now, so the incident names the pause and
+        # when it ends; the manual override is the row's own last line
+        # (``incidents.MCP_BREAKER_TAIL``), keyed on this reason's prefix.
         assert incidents == [
             (
                 "fast",
-                "auto-reconnect paused after >5 attempts in 30s; next attempt in 60s, "
-                "and the app's Reconnect on this server resets it at once",
+                "auto-reconnect paused after >5 attempts in 30s; next attempt in 60s",
             )
         ]
         # Backoff escalates 0.5, 1, 2, 4 and caps at 4 (five failed attempts).
@@ -1233,9 +1233,7 @@ class TestHalfOpenBreaker:
         [
             "disconnect_all",
             "reload",
-            "reload_still_down",
             "reconnect_server",
-            "reconnect_server_still_down",
             "disconnect_server",
             "login",
             "removed_from_config",
@@ -1244,25 +1242,21 @@ class TestHalfOpenBreaker:
     async def test_a_reset_during_the_cooldown_cancels_the_probe(
         self, project: Path, monkeypatch: pytest.MonkeyPatch, action: str
     ) -> None:
-        """Each reset cancels the probe itself, not only by healing the server.
+        """Each reset cancels the probe itself, and nothing fires later.
 
-        The ``still_down`` cases are the ones that prove it: there the reset's
-        own connect fails, so ``_register_connection`` never runs to drop it.
+        A reset whose own connect FAILS re-arms a fresh probe instead; that is
+        :meth:`test_a_reset_that_fails_rearms_one_probe_and_heals`.
         """
         manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
         probe = await self._trip(manager, server, real_sleep)
-        server.mode = "down" if action.endswith("still_down") else "up"
+        server.mode = "up"
 
         if action == "disconnect_all":
             await manager.disconnect_all()
-        elif action.startswith("reload"):
+        elif action == "reload":
             await manager.reload()
         elif action == "reconnect_server":
             assert await manager.reconnect_server("fast") is not None
-        elif action == "reconnect_server_still_down":
-            assert await manager.reconnect_server("fast") is None
-            # The app's Reconnect resets the pause at once, even when it fails.
-            assert manager.reconnect_suspended("fast") is False
         elif action == "disconnect_server":
             await manager.disconnect_server("fast")
         elif action == "removed_from_config":
@@ -1291,6 +1285,55 @@ class TestHalfOpenBreaker:
             # Each of these connects the server, which closes the breaker.
             assert manager.get_connection("fast") is not None
             assert manager.reconnect_suspended("fast") is False
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["reload", "reload_past_the_gate", "reconnect_server"])
+    async def test_a_reset_that_fails_rearms_one_probe_and_heals(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, action: str
+    ) -> None:
+        """A reset whose own connect fails must not orphan the server (R1-1).
+
+        ``reload()`` and the app's Reconnect both drop the pending probe and dial
+        the server themselves. When that dial fails there is no live connection,
+        so no transport close will ever reach ``_schedule_reconnect`` again: the
+        only retry left is a probe the failure itself arms. ``reload`` fails
+        inside the startup gate, ``reload_past_the_gate`` in the deferred
+        continuation (``_finish_pending``); the two are separate failure arms.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        old_probe = await self._trip(manager, server, real_sleep)
+
+        if action == "reload":
+            await manager.reload()
+        elif action == "reload_past_the_gate":
+            server.hold = asyncio.Event()
+            await manager.reload()  # returns at the gate with the dial still held
+            assert manager.get_connection_status("fast") == "connecting"
+            server.hold.set()
+        else:
+            assert await manager.reconnect_server("fast") is None
+        await _spin(real_sleep)
+
+        # Paused again with exactly ONE fresh probe on the first cool-down step,
+        # and nothing else dialling meanwhile.
+        assert old_probe.done()
+        assert manager.get_connection("fast") is None
+        assert manager.reconnect_suspended("fast") is True
+        assert list(manager._pending_probes) == ["fast"]
+        assert manager._pending_probes["fast"] is not old_probe
+        assert clock.parked() == [60.0]
+
+        # The server returns; the probe alone heals it, with no further action.
+        server.hold = None
+        server.mode = "up"
+        attempts = server.attempts.count("fast")
+        clock.elapse()
+        await _spin(real_sleep)
+        assert server.attempts.count("fast") == attempts + 1
+        assert manager.get_connection("fast") is not None
+        assert manager.reconnect_suspended("fast") is False
+        assert manager._pending_probes == {}
         await manager.disconnect_all()
 
     @pytest.mark.asyncio

@@ -53,6 +53,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.incidents import MCP_BREAKER_REASON_PREFIX
 from local_operator.mcp.auth import (
     REFRESH_CONTENTION,
     REFRESH_REFUSAL_ENDPOINT,
@@ -2368,6 +2369,7 @@ class McpManager:
                 # A parked waiter (reload) must fail, not hang (MCP-08).
                 waiter = self._connect_futures.pop(name, None)
                 _settle_future_error(waiter, exc)
+                self._rearm_paused_probe(name)
                 continue
             self._register_connection(conn)
             result.connected_servers.append(name)
@@ -2472,7 +2474,9 @@ class McpManager:
 
         At once, including mid cool-down: the pending half-open probe is
         cancelled BEFORE this attempt, so it can neither race the manual
-        connect nor fire later against the connection the user just made.
+        connect nor fire later against the connection the user just made. If
+        this attempt fails for a non-auth reason the server goes back to
+        paused, with a fresh probe on the first cool-down step.
         """
         self._reconnect_history.pop(name, None)
         self._reconnect_suspended.discard(name)
@@ -2497,6 +2501,14 @@ class McpManager:
             return None
         except Exception as exc:
             logger.warning("Manual MCP reconnect failed for %r: %s", name, exc)
+            # Back to paused-and-probing rather than orphaned: the reset above
+            # dropped the probe, and with the connection torn down no transport
+            # close will ever reach ``_schedule_reconnect`` again, so without
+            # this a failed Reconnect left the server dead for the life of the
+            # process. The cool-down restarts at its first step (the reset
+            # cleared the ladder): the user just asked for a fresh start.
+            self._reconnect_suspended.add(name)
+            self._schedule_probe(name)
             return None
         self._register_connection(conn)
         self._fire_tools_changed()
@@ -4173,6 +4185,7 @@ class McpManager:
             self._rebuild_agent_names()
             if current_round:
                 self._settle_deferred(name)
+                self._rearm_paused_probe(name)
             self._fire_tools_changed()
             return
         if self._disposed or epoch != self._epoch:
@@ -5039,15 +5052,16 @@ class McpManager:
             sink = getattr(self, "on_incident", None)
             if sink is not None:
                 try:
-                    # The pause, when it ends, and the manual override: the
-                    # breaker is no longer permanent, so "until a reconnect
-                    # succeeds" undersold the self-heal and named no remedy.
+                    # The pause and when it ends. The manual override is the
+                    # row's last line (``MCP_BREAKER_TAIL``), which the
+                    # formatter picks by this reason's prefix, so the prefix
+                    # comes from the same constant and the override is not
+                    # repeated here.
                     sink(
                         name,
-                        f"auto-reconnect paused after >{RECONNECT_BURST_LIMIT} "
+                        f"{MCP_BREAKER_REASON_PREFIX} >{RECONNECT_BURST_LIMIT} "
                         f"attempts in {int(RECONNECT_BURST_WINDOW_S)}s; next attempt "
-                        f"in {cooldown}s, and the app's Reconnect on this server "
-                        "resets it at once",
+                        f"in {cooldown}s",
                     )
                     # Arm the recovery notice — INSIDE the ``if sink is not
                     # None`` branch, deliberately. The gate records that the
@@ -5144,6 +5158,22 @@ class McpManager:
         task = self._pending_probes.pop(name, None)
         if task is not None and task is not asyncio.current_task():
             task.cancel()
+
+    def _rearm_paused_probe(self, name: str) -> None:
+        """Re-arm the probe for a paused server a connect round failed to reach.
+
+        ``reload()`` cancels every pending probe because its round dials every
+        server itself. When that dial fails, neither round failure arm (the
+        gate's, ``_finish_pending``'s) goes through ``_schedule_reconnect``,
+        and with no live connection no transport close ever will, so a server
+        still suspended here would stay paused with nothing left to retry it.
+        Gated on suspension so a server that was never tripped keeps today's
+        startup behaviour; ``_schedule_probe`` stands down for an auth block,
+        which the auth arm of the same failure has already taken. The cool-down
+        ladder is kept from before the reload.
+        """
+        if name in self._reconnect_suspended and name not in self._connections:
+            self._schedule_probe(name)
 
     def _cancel_all_probes(self) -> None:
         """Cancel every pending probe (``reload``/``disconnect_all``).
