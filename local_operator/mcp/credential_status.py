@@ -492,14 +492,10 @@ def _oauth_row(
             shape="oauth",
             refs=refs,
         )
-    if evidence_state == "revoked":
-        return _row(
-            "revoked",
-            _bounded(_repaired(CAUSE_GRANT)),
-            owner=owner or str(evidence.get("owner_device") or ""),
-            shape="oauth",
-            refs=refs,
-        )
+    # No separate ``evidence_state == "revoked"`` arm: ``CAUSE_BY_EVIDENCE`` maps
+    # ``revoked`` to ``CAUSE_GRANT``, so the arm above takes every revoked row (review
+    # round 2, NIT — the duplicate was unreachable, and a second path to one sentence
+    # is a second thing to keep in step).
     if evidence_state == "synced":
         # A SUCCESSFUL VALIDATION THAT LEFT NO LOCAL GRANT (a borrow lives only
         # in the asking process's memory). Without this arm the very next status

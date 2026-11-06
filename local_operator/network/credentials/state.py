@@ -302,7 +302,7 @@ class PlacementState:
 
     #: The fields a policy deny writes and ``held_policy_fence`` documents as
     #: DELIBERATELY outliving the retry cache. ``clear`` must not take them with it:
-    #: one transient ``owner_offline`` that clears the retry row would otherwise
+    #: one transient ``owner_offline`` that cleared the retry row would otherwise
     #: overwrite a deny's recorded DIAGNOSIS (the effect is held by the separate
     #: policy store, but the operator's reason for it is not) — review round 1, R1-4.
     HELD_FENCE_FIELDS: tuple[str, ...] = (
@@ -310,23 +310,35 @@ class PlacementState:
         "held_fence_code",
         "held_fence_owner",
         "held_authorized_fence",
-        # Kept so ``forget_owner`` still finds a fence-only row when the device
-        # it names leaves the network.
-        "owner_device",
     )
+
+    #: What a SURVIVING row must still carry to be a row at all.
+    #:
+    #: ``load`` keeps only entries whose row has a ``"key"`` (the identity it
+    #: indexes by), so a preserved fence that dropped it was dropped on the next
+    #: read: the fix for R1-4 was writing a row the loader threw away, which is the
+    #: same defect one round later (review round 2, R2-1). ``owner_device`` rides
+    #: along for the same class of reason — ``forget_owner`` finds a fence-only row
+    #: by it when the device that owns the key leaves the network.
+    ROW_IDENTITY_FIELDS: tuple[str, ...] = ("key", "owner_device")
 
     def clear(self, key: str) -> None:
         """Forget the retry observation for ``key``, KEEPING any policy fence.
 
-        ``status()``, ``observation()`` and ``cached_refusal()`` read a row with no
-        ``status``/``observed_at`` as absent, so a fence-only row is invisible to
-        every consumer that is not asking about the fence itself.
+        The kept row is identity plus fence and NOTHING else: with no ``status`` or
+        ``observed_at``, ``status()``/``observation()``/``cached_refusal()`` read it
+        as absent, so no consumer mistakes a preserved deny for a live refusal — and
+        because ``key`` survives, ``load`` still reads it back from disk.
         """
         row = self._observations.get(key)
         if row is None:
             return
-        kept = {name: row[name] for name in self.HELD_FENCE_FIELDS if row.get(name)}
-        if kept:
+        kept = {
+            name: row[name]
+            for name in self.ROW_IDENTITY_FIELDS + self.HELD_FENCE_FIELDS
+            if row.get(name)
+        }
+        if any(row.get(name) for name in self.HELD_FENCE_FIELDS):
             self._observations[key] = kept
         else:
             self._observations.pop(key, None)

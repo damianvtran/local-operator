@@ -434,6 +434,80 @@ def test_a_permission_code_renders_the_grant_remedy_not_a_sign_in(
         assert "lop network credential share" in reason, (code, reason)
 
 
+def test_each_row_names_its_own_networks_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``--with`` in a remedy command names THIS network's member, not another's.
+
+    ``_mesh_context`` used to keep ONE ``self_name`` for every network — whichever
+    record was read first — so a remedy for a server in network B could tell the
+    operator to re-share ``--with`` the name this machine uses in network A. The
+    command is run by a person on another machine, so a wrong name is a failed
+    repair, not a cosmetic slip.
+    """
+    second_net = "net-second"
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+
+    def _record_for(network_id: str, name: str) -> types.NetworkRecord:
+        record = types.NetworkRecord(
+            network_id=network_id,
+            name=network_id,
+            self_device_id=SELF,
+            self_role="admin",
+            self_capabilities=sorted(types.capabilities_for_role("admin")),
+            epoch=1,
+        )
+        record.members.append(
+            types.MemberRecord(
+                device_id=SELF,
+                name=name,
+                public_key=wire.b64u(b"a" * 32),
+                role="admin",
+                capabilities=sorted(types.capabilities_for_role("admin")),
+                added_via="self",
+            )
+        )
+        return record
+
+    store.save(_record_for(NETWORK, "node-in-a"), root)
+    store.save(_record_for(second_net, "node-in-b"), root)
+
+    other_url = "https://other.example.test/mcp"
+    other_key = credential_key_for_mcp(other_url)
+    for network_id, key in ((NETWORK, KEY), (second_net, other_key)):
+        with placement_mod.mutate(network_id, root=root, self_device=PEER) as document:
+            document.declare(
+                key,
+                owner_device=PEER,
+                owner_device_name="macbook",
+                provider="mcp-oauth",
+                by=PEER,
+            )
+            document.grant(key, SELF, by=PEER)
+        mcp_state.record(
+            network_id,
+            key,
+            state="revoked",
+            code="not_a_holder",
+            owner_device=PEER,
+            owner_name="macbook",
+            root=root,
+        )
+
+    configs = {
+        "linear": MCPHttpServerConfig(url=URL, auth=MCPAuthConfig(type="oauth")),
+        "other": MCPHttpServerConfig(url=other_url, auth=MCPAuthConfig(type="oauth")),
+    }
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    rows = server_states(str(cwd), base=root, configs=configs)
+    assert "--with node-in-a" in rows["linear"]["reason"], rows["linear"]["reason"]
+    assert "--with node-in-b" in rows["other"]["reason"], rows["other"]["reason"]
+    assert "node-in-a" not in rows["other"]["reason"], rows["other"]["reason"]
+
+
 def test_a_configured_server_dropped_by_discovery_still_has_a_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

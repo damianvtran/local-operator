@@ -448,15 +448,16 @@ def render_mcp_disconnect(
     credential and needs only a reconnect. ``unknown``: this build cannot classify
     it, and says so rather than guessing one of the three.
 
-    WHERE IT IS RENDERED, AND WHAT A CLAMP COSTS. This sentence is composed for the
-    surfaces with room: the ``/mcp`` status row (``credential_status``'s ``_bounded``
-    at 200 cells) and the CLI's repair output. It is NOT the startup toast's tail —
-    that one is ``render_borrowed_signin``, 32 cells, because a command cannot survive
-    a ~56-cell clamp at all (the round that produced that function measured it being
-    cut to ``/mcp l…``). A reader must not assume this line is clamp-proof: the share
-    command sits mid-sentence, so any surface narrower than roughly 110 cells shows a
-    truncated command, and the honest rule is that a new surface either has room or
-    uses the short form.
+    WHERE IT IS RENDERED, AND WHAT A CLAMP COSTS. Three surfaces: the ``/mcp`` credential
+    row (``credential_status``'s ``_bounded``, 200 cells), the CLI's repair output, and
+    the startup/transcript hint — the manager's ``_credential_hint`` returns exactly
+    this row's ``reason`` for a borrowed ``expired``/``revoked`` row and passes it as
+    ``credential_hint`` into ``_auth_failure_text``; ``render_borrowed_signin`` is only
+    the fallback when that hint is empty. So this line IS toast text, and the toast
+    clamps to card width — there is no 32-cell variant of it. A reader must not assume
+    it is clamp-proof: the share command sits mid-sentence, so a narrow card truncates
+    the command, which is why the sentence leads with the owner and the cause and why
+    nothing here may claim otherwise.
 
     ``key`` is the placement key (``mcp:<url>``), which is exactly what the share
     verb takes, and ``peer_name`` is the device reading this line — the device the

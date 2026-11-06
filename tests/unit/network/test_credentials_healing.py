@@ -318,3 +318,94 @@ def test_a_refused_mcp_borrow_records_the_cause_durably(tmp_path: pathlib.Path) 
     assert evidence["state"] == "expired"
     assert evidence["code"] == "interactive_required"
     assert evidence["owner_name"] == "macbook"
+
+
+def test_repair_asks_only_borrowable_keys_of_its_own_network(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--repair`` asks what this device may ask, in the network it can reach.
+
+    Two ways the first version over-reached, both from selecting on
+    ``entry.is_holder(self)`` across every placement document: a key this device
+    OWNS (no borrow exists — the local cascade serves it) and a key belonging to
+    ANOTHER network (a client dials one network's relay). This drives the real
+    ``_repair_borrowed`` over a three-key, two-network root and records what was
+    asked (review round 2, R2-3).
+    """
+    from local_operator.network import cli as network_cli
+    from local_operator.network.credentials.placement import PlacementDocument
+
+    doc_a = PlacementDocument("n_first", root=tmp_path, written_by="d_self")
+    doc_a.declare(
+        "meshtest",
+        owner_device="d_owner",
+        owner_device_name="owner-b",
+        provider="meshtest",
+        identity_label="owner@example.test",
+        by="d_owner",
+    )
+    doc_a.grant("meshtest", "d_self", scope="session", by="d_owner")
+    # Owned here: no borrow exists, so asking would be a request to be served a
+    # credential this device already holds.
+    doc_a.declare(
+        "openai",
+        owner_device="d_self",
+        owner_device_name="self",
+        provider="openai",
+        identity_label="me@example.test",
+        by="d_self",
+    )
+    doc_a.save()
+
+    doc_b = PlacementDocument("n_other", root=tmp_path, written_by="d_self")
+    doc_b.declare(
+        "anthropic",
+        owner_device="d_owner",
+        owner_device_name="owner-b",
+        provider="anthropic",
+        identity_label="owner@example.test",
+        by="d_owner",
+    )
+    doc_b.grant("anthropic", "d_self", scope="session", by="d_owner")
+    doc_b.save()
+
+    asked: list[str] = []
+
+    class FakeClient:
+        network_id = "n_first"
+        self_device = "d_self"
+
+        def forget_refusal(self, key):
+            return None
+
+        def owner_of(self, key):
+            return "d_owner"
+
+        def owner_label(self, key):
+            return "owner-b"
+
+        async def grant_async(self, key, **kwargs):
+            asked.append(key)
+            return BrokerError(
+                code="not_a_holder",
+                key=key,
+                owner_device="d_owner",
+                owner_device_name="owner-b",
+            )
+
+        def close(self):
+            return None
+
+    fake = FakeClient()
+    monkeypatch.setattr(network_cli, "_placement_documents", lambda: [doc_a, doc_b])
+    monkeypatch.setattr(
+        "local_operator.network.credentials.client.MeshCredentialClient.for_this_device",
+        classmethod(lambda cls, *args, **kwargs: fake),
+    )
+
+    outcomes = network_cli._repair_borrowed(
+        "d_self", "node-a"
+    )  # noqa: SLF001 — the function under test
+
+    assert asked == ["meshtest"], asked
+    assert outcomes and outcomes[0]["cause"] == CAUSE_GRANT, outcomes
