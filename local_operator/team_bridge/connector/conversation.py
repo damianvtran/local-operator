@@ -366,20 +366,34 @@ def _allocation_sender(display: Mapping[str, Any]) -> dict[str, str]:
     ``display`` is the classification response's transient display block, and
     its ``sender_account_id`` is the hub's STORED participant (agent-server
     #327), so this is a verified claim rather than a label or client metadata.
-    Both fields or neither: an account with no stated kind is unknown
-    provenance, and an older server sends neither — the pair is then empty and
-    the message is budgeted conservatively instead of being attributed.
+    The ACCOUNT is the attribution and is kept whenever the server states it;
+    the class is carried alongside when stated, and names nobody on its own.
+    An older server (pre-#327) states neither, so the pair is empty and the
+    message is budgeted conservatively instead of being attributed.
 
     Raises ``ValueError`` on a malformed pair so the caller records a typed
     hold; defaulting a sender here is the failure this helper exists to stop.
     """
 
-    account = display.get("sender_account_id", "")
-    kind = display.get("sender_kind", "")
-    if not isinstance(account, str) or len(account) > 256 or kind not in ("", "human", "agent"):
+    # ``or ""`` first: a key PRESENT but null is this server saying nothing,
+    # exactly as ``_card_metadata`` treats its own fields (round 1 N1). A
+    # non-string value is still malformed.
+    account = display.get("sender_account_id") or ""
+    kind = display.get("sender_kind") or ""
+    # Imported here for the same reason ``_owner_released`` does: the screening
+    # module is the connector's leaf, and this cap must be ITS cap — a 201-256
+    # char account used to pass here and then hold ``envelope_malformed``
+    # downstream (round 1 S-5).
+    from ..screening import _ENVELOPE_LABEL_MAX
+
+    if (
+        not isinstance(account, str)
+        or len(account) > _ENVELOPE_LABEL_MAX
+        or kind not in ("", "human", "agent")
+    ):
         raise ValueError("invalid classification sender")
     return {
-        "account_id": account if kind in ("human", "agent") else "",
+        "account_id": account,
         "kind": kind if account else "",
         "display_label": display.get("sender_label", ""),
     }

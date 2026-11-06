@@ -531,8 +531,8 @@ def test_an_agent_mentioning_the_recipient_cannot_spend_the_last_five(tmp_path: 
 def test_an_unknown_tier_hint_never_reaches_the_persons_reserve() -> None:
     """The pair lane (no hint) and a bad hint are agent-addressed, never 3."""
 
-    assert screening.screening_allocation({})[0] == Store.SCREENING_TIER_ADDRESSED
-    assert screening.screening_allocation({"allocation": {"tier": 9}})[0] == (
+    assert screening.screening_allocation({}) == Store.SCREENING_TIER_ADDRESSED
+    assert screening.screening_allocation({"allocation": {"tier": 9}}) == (
         Store.SCREENING_TIER_ADDRESSED
     )
 

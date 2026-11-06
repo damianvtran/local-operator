@@ -118,6 +118,22 @@ def _http_rows(tmp_path: Path) -> int:
         conn.close()
 
 
+def _logical_rows(tmp_path: Path) -> list[tuple[str | None, str | None]]:
+    """Every logical ledger row's ``(sender_account_id, sender_kind)``."""
+
+    conn = sqlite3.connect(state_db_path(tmp_path))
+    try:
+        return [
+            (row[0], row[1])
+            for row in conn.execute(
+                "SELECT sender_account_id, sender_kind FROM screening_attempts "
+                "WHERE kind = 'logical' ORDER BY rowid"
+            )
+        ]
+    finally:
+        conn.close()
+
+
 # ------------------------- read-time provenance checks -------------------------
 
 
@@ -294,23 +310,36 @@ def test_a_pre_provenance_proof_still_dispatches(tmp_path: Path) -> None:
 # ----------------------- where the identity may come from -----------------------
 
 
-def test_a_half_stated_pair_is_never_an_attributed_sender() -> None:
-    """An account with no class (or a class with no account) is UNKNOWN.
+def test_the_account_is_the_attribution_and_the_class_only_rides_it() -> None:
+    """A hub-stated account is the sender; a class on its own names nobody.
 
-    The class decides a reserve, so a defaulted one would let the caller pick
-    its own pool; and a pre-#327 hub sends neither field.
+    Round 1 S-1/S-2: gating the charge on the class DROPPED the inbox lane's
+    verified account, and those unattributed rows then exhausted every named
+    sender. Inventing the class is the other failure (M1), so it is carried
+    when stated and never inferred.
     """
 
     assert _allocation_sender({"sender_account_id": "acc_ada"}) == {
-        "account_id": "",
+        "account_id": "acc_ada",
         "kind": "",
         "display_label": "",
     }
-    assert _allocation_sender({"sender_account_id": "acc_ada", "sender_kind": "human"})[
-        "account_id"
-    ] == "acc_ada"
+    assert (
+        _allocation_sender({"sender_account_id": "acc_ada", "sender_kind": "human"})["kind"]
+        == "human"
+    )
+    # A class with no account names nobody.
+    assert _allocation_sender({"sender_kind": "human"})["account_id"] == ""
+    # Present-but-null is the server saying nothing, not a malformed message
+    # (round 1 N1).
+    assert _allocation_sender({"sender_account_id": None, "sender_kind": None})["account_id"] == ""
     with pytest.raises(ValueError):
         _allocation_sender({"sender_account_id": "acc_ada", "sender_kind": "admin"})
+    # The connector's cap is the envelope's, so a long account holds on the
+    # ENVELOPE rule rather than passing here and failing one layer down
+    # (round 1 S-5).
+    with pytest.raises(ValueError):
+        _allocation_sender({"sender_account_id": "a" * 201})
     # An OLD server states nothing at all: unknown provenance, never refused.
     assert _allocation_sender({})["account_id"] == ""
 
@@ -326,33 +355,75 @@ def test_the_envelope_takes_provenance_only_from_the_stated_participant() -> Non
     envelope, problem = screening.validate_envelope(_owner(), item)
     assert problem is None and envelope is not None
     assert (envelope.sender_account, envelope.sender_kind) == ("", "")
-    # An account with no stated class is unknown too: it never forms a bucket.
+    # An ACCOUNT with no stated class IS the sender — the class only rides it
+    # (round 1 S-1/S-2). This is the inbox lane's shape.
     item["message"]["sender"] = {"account_id": "acc_ada"}
     envelope, problem = screening.validate_envelope(_owner(), item)
     assert problem is None and envelope is not None
-    assert (envelope.sender_account, envelope.sender_kind) == ("", "")
+    assert (envelope.sender_account, envelope.sender_kind) == ("acc_ada", "")
+    # An endpoint is NOT a class: an endpoint-only sender is unknown
+    # provenance, never a guessed "agent" (round 1 M1).
+    item["message"]["sender"] = {"account_id": "acc_ada", "endpoint_id": "bep_remote"}
+    envelope, problem = screening.validate_envelope(_owner(), item)
+    assert problem is None and envelope is not None
+    assert (envelope.sender_account, envelope.sender_kind) == ("acc_ada", "")
     # An OUT-of-class kind refuses the envelope outright.
     item["message"]["sender"] = {"account_id": "acc_ada", "kind": "admin"}
     assert screening.validate_envelope(_owner(), item) == (None, "envelope_malformed")
+    # The PAIR lane (no participant block at all) keeps its stored account, so
+    # its charge is attributed and no digest moves (round 1 S-2).
+    pair = _item()
+    envelope, problem = screening.validate_envelope(_owner(), pair)
+    assert problem is None and envelope is not None
+    assert (envelope.sender_account, envelope.sender_kind) == ("acc_sender1", "")
 
 
 # --------------------------- fail-closed accounting ---------------------------
 
 
-def test_unattributed_spend_counts_against_every_verified_sender(tmp_path: Path) -> None:
-    """Old-server spend is not a free unit: it spends every sender's allowance."""
+def test_unattributed_rows_do_not_deplete_a_named_sender(tmp_path: Path) -> None:
+    """Somebody else's unattributed work must not fence a named sender.
 
-    store, owner = _setup(tmp_path, screening_budget=SMALL)
+    Round 1 S-1, measured end to end by security: the inbox lane states an
+    account and no class, so its rows were unattributed and the two
+    ``COALESCE`` arms spent EVERY named sender's allowance with them — three
+    ordinary inbox screens then held a tier-3 person DM ``budget_exhausted``
+    while the account and tier ceilings still had room. Crossing senders is the
+    property, so it is asserted across senders: A's unattributed traffic must
+    not push B out of ``sender_exhausted``.
+    """
+
+    store, owner = _setup(
+        tmp_path,
+        screening_budget=ScreeningBudget(account=10, ambient=8, unaddressed=9, sender=2),
+    )
+    # TWO unattributed units is all the unattributed CALLER gets (it sees every
+    # row, so the sender ceiling bounds it directly); the third is refused.
     for index in range(2):
-        store.reserve_screening_attempt(owner, message_id=f"legacy{index}", fingerprint="f")
+        store.reserve_screening_attempt(owner, message_id=f"inbox{index}", fingerprint="f")
+    with pytest.raises(StoreRefused) as unattributed:
+        store.reserve_screening_attempt(owner, message_id="inbox_more", fingerprint="f")
+    assert unattributed.value.code == "sender_exhausted"
+    # B has spent nothing of its own, so B still reserves — twice, up to B's
+    # own share, and no further. Under the round-1 rule B was refused its FIRST
+    # unit here.
+    for index in range(2):
+        store.reserve_screening_attempt(
+            owner,
+            message_id=f"b_{index}",
+            fingerprint="f",
+            sender_account_id="acc_b",
+            sender_kind="human",
+        )
     with pytest.raises(StoreRefused) as refused:
         store.reserve_screening_attempt(
             owner,
-            message_id="new",
+            message_id="b_third",
             fingerprint="f",
-            sender_account_id="acc_ada",
-            sender_kind="agent",
+            sender_account_id="acc_b",
+            sender_kind="human",
         )
+    # B's OWN two units are what fenced B, not the six inbox rows.
     assert refused.value.code == "sender_exhausted"
 
 
@@ -375,11 +446,18 @@ def test_unattributed_work_sees_all_spend_and_gets_no_fresh_allowance(
     assert refused.value.code == "sender_exhausted"
 
 
-def test_a_row_without_a_verified_class_counts_as_unattributed(tmp_path: Path) -> None:
-    """A pre-upgrade row (NULL kind) is conservative, not invisible."""
+def test_a_verified_account_without_a_stated_class_is_charged_to_that_sender(
+    tmp_path: Path,
+) -> None:
+    """A pre-upgrade row (account, NULL kind) belongs to its sender, not to all.
+
+    Round 1 S-1 spent these against every sender; the account IS the attribution
+    (S-2), so one of them fences that account's share and nobody else's.
+    """
 
     store, owner = _setup(
-        tmp_path, screening_budget=ScreeningBudget(account=10, ambient=8, unaddressed=9, sender=1)
+        tmp_path,
+        screening_budget=ScreeningBudget(account=10, ambient=8, unaddressed=9, sender=1),
     )
     store.reserve_screening_attempt(
         owner, message_id="legacy", fingerprint="f", sender_account_id="acc_ada"
@@ -393,6 +471,29 @@ def test_a_row_without_a_verified_class_counts_as_unattributed(tmp_path: Path) -
             sender_kind="agent",
         )
     assert refused.value.code == "sender_exhausted"
+    # A DIFFERENT sender is untouched by those rows.
+    store.reserve_screening_attempt(
+        owner,
+        message_id="other",
+        fingerprint="f",
+        sender_account_id="acc_eve",
+        sender_kind="agent",
+    )
+
+
+def test_the_pair_lanes_verified_account_reaches_the_ledger(tmp_path: Path) -> None:
+    """The inbox/pair lane states an account and no class; it must be charged.
+
+    Round 1 S-2, measured: the envelope held ``acc_sender1`` and the row was
+    written ``('logical', None, None, ...)`` — a hub-verified identity validated
+    and then dropped one line later, which is what made S-1 reachable on the
+    live lane.
+    """
+
+    store, owner = _setup(tmp_path)
+    out = _run(owner, tmp_path, Runner())
+    assert out.disposition == "deliver"
+    assert _logical_rows(tmp_path) == [("acc_sender1", None)]
 
 
 # ------------------------ input refusal vs outage breaker ------------------------
@@ -441,6 +542,23 @@ def test_a_route_failure_still_opens_the_breaker(tmp_path) -> None:
         assert out.hold_code == "provider_error"
     state = store.screening_breaker_state(owner)
     assert state is not None and state["failures"] == 3 and state["open_until"] > time.time()
+
+
+def test_the_refusal_flag_survives_a_second_scrub() -> None:
+    """Round 1 M3: once the prose is gone the predicate has nothing to read.
+
+    Idempotent scrubbing is what keeps the class across a re-scrub, so a
+    refusal cannot turn into an outage advance by being handled twice.
+    """
+
+    from local_operator.providers.failover import ProviderError
+
+    once = _scrub_wire_failure(ProviderError(400, '{"code":"data_inspection_failed"}'))
+    twice = _scrub_wire_failure(once)
+    assert getattr(once, "tb_input_refusal", False) is True
+    assert getattr(twice, "tb_input_refusal", False) is True
+    ordinary = _scrub_wire_failure(_scrub_wire_failure(ProviderError(400, "bad image")))
+    assert getattr(ordinary, "tb_input_refusal", False) is False
 
 
 def test_the_typed_flag_is_decided_before_the_wire_text_is_scrubbed() -> None:

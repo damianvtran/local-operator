@@ -581,38 +581,38 @@ def validate_envelope(
         sender_account = ""
     if not isinstance(sender_account, str) or len(sender_account) > _ENVELOPE_LABEL_MAX:
         return None, "envelope_malformed"
-    # ALLOCATION identity comes from the server's stored message participant,
-    # never from the top-level display sender above: the pair DTO freezes
-    # AccountID/EndpointID from m.Sender (agent-server bridge_read_service.go)
-    # while a label is free text. Conversations build this participant ONLY
-    # from the gated classification body read, so this is the same read whose
-    # body is screened — a hub-verified claim, not client metadata. KIND is
-    # what completes it: without it the account is unknown provenance, and an
-    # older server omits it (agent-server #327 adds ``sender_account_id``).
+    # ALLOCATION identity comes from the server's stored message participant
+    # (the gated classification body read; the pair DTO freezes the same
+    # AccountID from m.Sender, agent-server bridge_read_service.go). The
+    # top-level block above is a LABEL, so it is never the attribution.
+    #
+    # ACCOUNT is the attribution: it is what the ledger charges, what the
+    # retained proof pins and what every dispatch is re-checked against. KIND is
+    # a property OF that account, never a gate on it — a hub-verified account
+    # whose class an older server did not state is still the sender the
+    # dispatch saw. Gating the charge on the class was security round 1's
+    # S-1/S-2: the inbox lane states an account and no class, so its charge was
+    # dropped, and the resulting unattributed rows then exhausted every named
+    # sender. Guessing a class instead is the other failure (round 1 M1: an
+    # ``endpoint_id`` was being read as ``agent``), so a class with no account
+    # now names nobody rather than being inferred.
     participant = message.get("sender")
     participant = participant if isinstance(participant, Mapping) else {}
     sender_kind = participant.get("kind", "")
-    if not sender_kind and participant.get("endpoint_id"):
-        # The pair DTO states an endpoint instead of a kind: an endpoint sender
-        # is another agent, which is the class the person reserve must exclude.
-        sender_kind = "agent"
     account = participant.get("account_id", "")
     if not isinstance(account, str) or len(account) > _ENVELOPE_LABEL_MAX:
         return None, "envelope_malformed"
     if sender_kind not in ("", "human", "agent"):
         return None, "envelope_malformed"
-    if not account or not sender_kind:
-        # BOTH or NEITHER: a half-stated identity is unknown, never a sender
-        # with a defaulted class — the class decides a reserve, so guessing it
-        # would let a caller choose its own pool.
+    if not account:
         sender_kind = ""
     if participant:
         # A participant BLOCK is this item's allocation identity and decides the
-        # envelope's sender outright (empty means unknown, never the label). An
-        # item WITHOUT one — the pair lane, whose stored sender arrives in the
-        # top-level block above — keeps the identity it already had, so an
-        # existing pair-lane digest does not move.
-        sender_account = account if sender_kind else ""
+        # envelope's sender outright (an empty account is unknown, never the
+        # display label). An item WITHOUT one — the pair lane, whose stored
+        # sender arrives in the top-level block above — keeps the identity it
+        # already had, so an existing pair-lane digest does not move.
+        sender_account = account
     sender_name = sender.get("name")
     if sender_name is None or sender_name == "":
         sender_display = sender_account
@@ -1266,9 +1266,10 @@ class _Prepared:
     fingerprint: str
     input_proof: dict[str, Any]
     provider: str
-    #: The hub-verified sender (allocation) and the conversation id, carried
-    #: ONLY for B4b's work-scope decision row (per-sender budget, S-6; the
-    #: release binds the conversation). Neither is a label.
+    #: The envelope's VERIFIED sender account — the one value the ledger charge
+    #: and B4b's per-sender hold budget both use (round 1 S-3) — plus the
+    #: conversation the work belongs to (its hold is released against it).
+    #: Neither is a display label.
     sender_account_id: str = ""
     conversation_id: str = ""
 
@@ -1613,7 +1614,7 @@ def _screen_prepare(
         # job states a different sender, so the sender a message is charged to
         # is the one that was screened. Both keys are ALWAYS written (empty
         # meaning unknown) so the registered field set stays closed.
-        "sender_account_id": envelope.sender_account if envelope.sender_kind else "",
+        "sender_account_id": envelope.sender_account,
         "sender_kind": envelope.sender_kind,
     }
 
@@ -1624,10 +1625,10 @@ def _screen_prepare(
         fingerprint=fingerprint,
         input_proof=input_proof,
         provider=_canonical_provider,
-        # B4b's work-scope decision row, NOT the screening charge: the charge is
-        # the envelope's VERIFIED identity (``_screen_spend``), because this hint
-        # is client-stamped and nothing downstream re-derived it.
-        sender_account_id=screening_allocation(item)[1],
+        # B4b's work-scope decision row AND (via ``_screen_spend``) the same
+        # envelope identity the charge uses, so the two surfaces cannot disagree
+        # (round 1 S-3/M2: they keyed on two different rules for one message).
+        sender_account_id=envelope.sender_account,
         conversation_id=_conversation_of(item),
     )
 
@@ -1657,7 +1658,7 @@ async def _screen_core(
     prepared = _screen_prepare(owner, item, config_dir=config_dir, policy=policy, runner=runner)
     if isinstance(prepared, ScreenResult):
         return prepared
-    tier, _hint_sender = screening_allocation(item)
+    tier = screening_allocation(item)
     return await _screen_spend(
         owner,
         prepared,
@@ -1688,28 +1689,32 @@ def _is_input_refusal(failure: BaseException) -> bool:
     )
 
 
-def screening_allocation(item: Mapping[str, Any]) -> tuple[int, str]:
-    """``(tier, verified sender)`` for the budget, from the item's hint.
+def screening_allocation(item: Mapping[str, Any]) -> int:
+    """The budget TIER for the item, from the item's hint — and only the tier.
 
     The connector stamps ``allocation`` from hub-verified facts only (the
-    feed's mention bit, the body read's sender kind and conversation kind,
-    and the hub's sender account id when it sends one); see
-    ``Store.SCREENING_TIER_*``. An item WITHOUT the hint -- the pair lane,
-    every caller that predates the split -- is the (agent-)addressed tier with
-    no sender: a pair message is addressed to this agent by construction, and
-    an unknown caller is never fenced by a pool it does not know about. It is
-    never HUMAN_ADDRESSED: the last reserve is reachable only by a hub-stated
+    feed's mention bit, the body read's sender kind and conversation kind);
+    see ``Store.SCREENING_TIER_*``. An item WITHOUT the hint -- the pair lane,
+    every caller that predates the split -- is the (agent-)addressed tier: a
+    pair message is addressed to this agent by construction, and an unknown
+    caller is never fenced by a pool it does not know about. It is never
+    HUMAN_ADDRESSED: the last reserve is reachable only by a hub-stated
     person's DM or mention (#3400 S-4).
+
+    The hint's OWN ``sender_account_id`` is deliberately not returned any
+    more: the charged sender is the envelope's verified account, and the two
+    readers this used to feed (the charge and B4b's work-scope row) now take
+    that one value, so there is no second identity rule to drift (round 1
+    S-3/M2).
     """
 
     raw = item.get("allocation")
     if not isinstance(raw, Mapping):
-        return Store.SCREENING_TIER_ADDRESSED, ""
+        return Store.SCREENING_TIER_ADDRESSED
     tier = raw.get("tier")
     if not isinstance(tier, int) or isinstance(tier, bool) or tier not in (0, 1, 2, 3):
-        tier = Store.SCREENING_TIER_ADDRESSED
-    sender = raw.get("sender_account_id")
-    return tier, sender if isinstance(sender, str) else ""
+        return Store.SCREENING_TIER_ADDRESSED
+    return tier
 
 
 def _budget_hold_code(code: str) -> str:
@@ -1755,7 +1760,7 @@ async def _screen_spend(
             # the item's allocation hint: that hint was a client-stamped claim
             # nothing re-derived, so charging it let a caller spend against a
             # sender that was never the dispatch.
-            sender_account_id=envelope.sender_account if envelope.sender_kind else "",
+            sender_account_id=envelope.sender_account,
             sender_kind=envelope.sender_kind,
         )
     except StoreRefused as failure:
@@ -1801,7 +1806,7 @@ async def _screen_spend(
         revision=snapshot.admission_revision,
         epoch=int(epoch),
         turn=turn,
-        sender_account_id=envelope.sender_account if envelope.sender_kind else "",
+        sender_account_id=envelope.sender_account,
         sender_kind=envelope.sender_kind,
     )
     fingerprint = job.digest
@@ -2556,7 +2561,7 @@ def _copy_work_scope_decision(
             prompt_version=str(source["prompt_version"]),
             categories=tuple(hr.decoded_categories(source)),
             policy_epoch=int(source["policy_epoch"]),
-            sender_digest=hr.sender_digest(screening_allocation(item)[1]),
+            sender_digest=hr.sender_digest(envelope.sender_account),
             now=_time.time(),
             screener_verdict=str(source.get("screener_verdict") or ""),
             screener_hop=_hop_of(source),
@@ -3344,7 +3349,7 @@ async def _screen_batch_core(
     # The CALL's tier is its highest message's: a DM riding with room chatter
     # must never be fenced by the ambient pool (the connector groups by tier,
     # so in practice a call is one tier).
-    tier = max(screening_allocation(items[index])[0] for index, _ in pending)
+    tier = max(screening_allocation(items[index]) for index, _ in pending)
     entries = [
         {
             "message_id": prepared.envelope.message_id,
@@ -3352,7 +3357,7 @@ async def _screen_batch_core(
             # The message's OWN verified identity, so a call charges each
             # participating sender exactly as its own single screen would.
             "sender_account_id": (
-                prepared.envelope.sender_account if prepared.envelope.sender_kind else ""
+                prepared.envelope.sender_account
             ),
             "sender_kind": prepared.envelope.sender_kind,
         }
@@ -3576,6 +3581,6 @@ def _job_for(entry: "tuple[int, _Prepared, str, str]", *, owner: OwnerSnapshot, 
         revision=snapshot.admission_revision,
         epoch=int(prepared.epoch),
         turn=turn,
-        sender_account_id=envelope.sender_account if envelope.sender_kind else "",
+        sender_account_id=envelope.sender_account,
         sender_kind=envelope.sender_kind,
     )

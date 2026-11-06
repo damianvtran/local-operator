@@ -900,7 +900,12 @@ def _scrub_wire_failure(failure: BaseException, *, sent: bool = True) -> BaseExc
     # the body. A provider rejecting THIS submission says nothing about route
     # health, and folding it into the generic failure path parks every other
     # inbound message on a breaker this submission did not break.
-    input_refusal = isinstance(failure, ProviderError) and is_input_refusal(failure)
+    # IDEMPOTENT (round 1 M3): a second scrub of an already-scrubbed failure
+    # must not lose the class, because the predicate has nothing left to read
+    # once the provider's prose is gone.
+    input_refusal = getattr(failure, "tb_input_refusal", False) is True or (
+        isinstance(failure, ProviderError) and is_input_refusal(failure)
+    )
     if isinstance(failure, ProviderError):
         scrub = ProviderError(
             failure.status or 0,

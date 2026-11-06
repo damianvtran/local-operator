@@ -861,11 +861,14 @@ def _decode_bound_proof(raw: Any) -> tuple[str, dict[str, Any]]:
     if (
         not isinstance(account, str)
         or not isinstance(kind, str)
-        or bool(account) != (kind in ("human", "agent"))
+        or kind not in ("", "human", "agent")
+        or (kind and not account)
     ):
         # The registered identity is what the charge is re-derived from, so a
-        # half-stated or mistyped pair refuses here rather than becoming an
-        # allowance:
+        # mistyped class, or a class naming no account, refuses here rather
+        # than becoming an allowance. An ACCOUNT with no class is valid: it is
+        # the sender, and its class is simply not stated (round 1 S-1/S-2 —
+        # requiring the class here dropped the inbox lane's verified account).
         raise StoreRefused("proof_corrupt", "registered sender provenance is invalid")
     for field in _PROOF_FIELDS:
         value = registered[field]
@@ -4844,28 +4847,29 @@ class Store:
                     "unaddressed_exhausted", f"{kind} unaddressed units/hour exhausted"
                 )
         for sender in set(senders):
-            # FAIL CLOSED ON UNATTRIBUTED SPEND (#3199 residual). This loop used
-            # to read ``{s for s in senders if s}``, which DROPPED an empty
-            # sender — so a caller with no verified provenance was exempt from
-            # the per-sender ceiling entirely, and the exemption was the wrong
-            # default in both directions it could be read:
-            #   * an unattributed NEW message must not get a fresh allowance:
-            #     with no sender it sees ALL spend, so losing provenance can
-            #     never buy capacity (``? = ''``);
-            #   * an unattributed EXISTING row must not be a free unit: it
-            #     counts against EVERY sender's allowance (the COALESCE arms),
-            #     which is what makes the sender ceiling hold for a busy sender
-            #     whose own rows are attributable.
-            # Rows whose kind is not a verified class are unattributed for the
-            # same reason, so a pre-upgrade row (NULL kind) is conservative
-            # until it ages out rather than invisible. A unit counts ONCE
-            # however many rows ride it (DISTINCT coalesce), so a batch never
-            # spends its senders' allowance more than the one call it made.
+            # FAIL CLOSED FOR UNATTRIBUTED WORK, WITHOUT FINING NAMED SENDERS
+            # (#3199 residual; security round 1 S-1). Two rules, and the second
+            # is why this query has TWO arms where the first version had three:
+            #   * an UNATTRIBUTED caller (``sender == ""``) sees ALL spend, so
+            #     losing provenance can never buy a fresh allowance. This arm is
+            #     what closes the evasion, and it is why the loop no longer
+            #     reads ``{s for s in senders if s}`` — that filter exempted
+            #     exactly the callers with no provenance.
+            #   * a NAMED sender is charged only its OWN units. Rows with no
+            #     attribution are somebody else's work: counting them here let
+            #     ordinary inbox volume — whose lane states an account and no
+            #     class on older hubs, and whose every pre-upgrade row is NULL —
+            #     exhaust EVERY named sender's share while the account and tier
+            #     ceilings still had room. Measured on the live lane as a tier-3
+            #     person DM held ``budget_exhausted`` with no row
+            #     (security round 1 S-1). Unattributed work is bounded by the
+            #     account and tier ceilings, exactly as it was before this PR.
+            # A unit counts ONCE however many rows ride it (DISTINCT coalesce),
+            # so a batch never spends a sender's allowance twice for one call.
             spent = conn.execute(
                 "SELECT COUNT(DISTINCT COALESCE(batch_id, attempt_id)) FROM screening_attempts "
                 "WHERE account_scope = ? AND kind = ? AND at > ? AND "
-                "(? = '' OR sender_account_id = ? OR COALESCE(sender_account_id, '') = '' "
-                "OR COALESCE(sender_kind, '') NOT IN ('human', 'agent'))",
+                "(? = '' OR sender_account_id = ?)",
                 (scope, kind, now - 3600.0, sender, sender),
             ).fetchone()[0]
             if int(spent) >= self.screening_budget.sender:
