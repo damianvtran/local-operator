@@ -224,7 +224,7 @@ Wire contract, which the desktop host implements as follows:
   `input_type` alone leaks a `redacted` host's value. The direction is
   deliberately fail-safe: a host that says `redacted` and still sends a value,
   or names `password` without redacting, is not trusted to have done it for us.
-  (The paired host at `cefd05708dc` sets `redacted` and omits `value`.)
+  (The paired host sets `redacted` and omits `value`.)
 - Native `<select>`: an option is matched by trimmed label, then option value,
   exact before case-insensitive; `multiple` requires exactly one match. No match
   (or an ambiguous one) is `element_not_found` with `data.reason` written the way
@@ -233,11 +233,11 @@ Wire contract, which the desktop host implements as follows:
 - `<input>`/`<textarea>`: the value is set through the prototype setter, then
   `input` and `change` are dispatched, in that order. `date`, `time`,
   `datetime-local`, `month` and `week` hold only the ISO spelling the DOM stores
-  and refuse a value the control cannot hold (a locale `01/03/2027` is not
-  translated); on a host older than that check the DOM keeps `""` and the result
-  carries `verified:false`, so the harness says `value unverified` and never
-  reports the write as clean. An empty `text` is a legitimate value (it clears an
-  input/textarea); presence is checked by type, never by truthiness.
+  and refuse a value they cannot hold (a locale `01/03/2027` is not translated);
+  a host predating that refusal keeps `""` and answers `verified:false` instead,
+  which the harness renders `value unverified` and never as a clean write. An
+  empty `text` is a legitimate value (it clears an input/textarea); presence is
+  checked by type, never by truthiness.
 - Refused, typed, before any mutation: a target that is not a form control
   (a `contenteditable` is `type`'s, a page-owned ARIA listbox is `select`'s), a
   disabled/inert/read-only control, and a file input (`upload`). A secret cannot
@@ -253,18 +253,17 @@ Wire contract, which the desktop host implements as follows:
     Writing the value would answer `verified:true` while the box stayed unticked,
     so it is refused; toggle it with `click`, which fires real activation.
   - `value_rejected` — the control's own sanitizer would not store the value as
-    asked, so the requested value is NOT what the control holds; the refusal
-    carries `input_type` plus `expected`, the format that type accepts
-    (`YYYY-MM-DD`, `HH:MM or HH:MM:SS`, `YYYY-MM-DDTHH:MM`, `YYYY-MM`,
+    asked; the refusal carries `input_type` plus `expected`, the format that type
+    accepts (`YYYY-MM-DD`, `HH:MM or HH:MM:SS`, `YYYY-MM-DDTHH:MM`, `YYYY-MM`,
     `YYYY-Www`, `a number`, `#rrggbb`). It is a refusal and not a coercion,
     because a `range` clamps and a `color` falls back rather than clearing, and
-    both were once the same silent success. What the field holds afterwards is
-    host-version dependent and must not be assumed: the host at `cefd05708dc`
-    writes through the setter and only then reads back, so a refused date write
-    leaves the field EMPTY and the page has already seen `input`/`change`; a host
-    that restores on refusal leaves the previous value in place. Re-read the
-    control before retrying rather than assuming either. (A host older than the
-    check entirely answers `value unverified` with the same emptied field.)
+    both were once the same silent success. The refusal is TOTAL: the host
+    snapshots the prior value, samples the write, and on rejection restores that
+    value through the same setter WITHOUT dispatching `input`/`change` — so the
+    control is exactly as it was and the page never saw the value. (A host
+    predating that restore writes first and refuses after: there the field keeps
+    the sanitizer's reading — usually empty — and the page has fired
+    `input`/`change`. Re-read the control if you may be on one.)
 - The option-list refusal has two reasons, and the harness renders the list for
   both: `option_not_found` and `option_ambiguous` (a `multiple` select whose
   label matched more than one option). One set, `_OPTION_LIST_REASONS`, so the

@@ -519,13 +519,12 @@ How a value is matched and what comes back:
   control's own sanitizer will not store it, so the host refuses the write as
   `value_rejected` and names the format it does accept (`expected`:
   `YYYY-MM-DD`). That refusal covers `number`, `range` and `color` too, because
-  a clamp and a fallback are the same failed write as a cleared date. Passing
-  ISO is the whole fix; when you do meet the refusal, read `expected` instead of
-  retrying the same string, and re-read the field before assuming it still holds
-  what it did — the current host writes before it refuses, so a refused date
-  write leaves it empty, while a host that restores on refusal keeps the old
-  value. A host older than the check entirely answers `value unverified` with
-  the same emptied field.
+  a clamp and a fallback are the same failed write as a cleared date. The
+  refusal changes nothing: the host restores the value the field had and
+  dispatches no `input`/`change`, so the page never saw the bad string — fix the
+  format from `expected` and retry. A host predating that restore is the one
+  case that is not clean: it writes first and refuses after, so the field keeps
+  the sanitizer's reading (usually empty) and the page has been notified.
 - **The result reports the read-back** — the value the control holds after the
   dispatch, which is not always what was asked for (a select maps a label onto
   its value; a masked field reports its own format). If the host could not read
