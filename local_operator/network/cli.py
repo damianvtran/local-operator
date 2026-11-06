@@ -7640,22 +7640,32 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             # durable append, not the turn: a turn that failed a second later on
             # that device was reported to nobody here, so the person watched a
             # conversation that never answered (measured on a real peer,
-            # 2026-11-06). The peer settles the turn when it can and sends the
-            # outcome; `--send` reads the same fact off a viewer stream, so this
-            # is the create's only route to it.
+            # 2026-11-06). `--send` reads the same fact off a viewer stream; a
+            # create has no stream, so the OWNER settles its own turn and this
+            # renders what it reported.
+            #
+            # THE THREE STATES ARE THE OWNER'S OWN WORDS, and `settled` is the
+            # only one that may say "completed": it is carried by an owner that
+            # honoured the wait, never inferred from this side having asked
+            # (agent review round 1, BLOCKER-1 — an older peer's append ack is
+            # byte-identical to a settling peer's success).
             turn = detail.get("turn")
             if isinstance(turn, dict):
                 state = str(turn.get("state") or "")
                 if state == "failed":
                     why = str(turn.get("detail") or "the turn ended in failure")
                     lines.append(f"turn failed on {peer}: {why}")
-                elif state == "running":
-                    lines.append(
-                        f"turn: running on {peer} — `network sessions --peer {peer} "
-                        f"--peek {minted}` reads how it ended"
-                    )
-                elif state == "ran":
+                elif state == "settled":
                     lines.append(f"turn: completed on {peer}")
+                elif state == "running":
+                    # NO "FOLLOW IT WITH --peek" HERE (agent review round 1,
+                    # MAJOR-2): over the real journal a failed turn's assistant row
+                    # is `content: null` and its cause is an incident record with no
+                    # `.text`, so the peek window filters both out and shows the
+                    # user their own message and nothing else — the dead end this
+                    # whole slice exists to end. Saying the outcome is NOT reported
+                    # is true; naming a read that silently cannot show it is not.
+                    lines.append(f"turn: running on {peer} — this receipt cannot see how it ends")
         else:
             lines.append(
                 "no prompt sent — the session exists on that device; "

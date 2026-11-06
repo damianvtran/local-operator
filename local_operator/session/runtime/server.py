@@ -8332,8 +8332,17 @@ class RuntimeServer:
             # first-prompt hop, whose receipt is the only thing that device's user
             # will ever see about a turn that ran on somebody else's machine
             # (``network.relay._prompt_on`` / ``_op_session_create``).
-            if "wait_complete" in parameters:
-                fields["wait_complete"] = bool(frame.get("wait_complete"))
+            #
+            # AND IT ANSWERS IN A SHAPE OLD OWNERS CANNOT EMIT: a handle that
+            # honours the wait returns ``settled: true`` beside ``detail``. An
+            # owner from before this field never hears ``wait_complete`` and acks
+            # at the durable append, so its reply is byte-identical to a settling
+            # owner's success — which is why the CALLER must key "the turn
+            # finished" off this marker and never off its own request (agent
+            # review round 1, BLOCKER-1).
+            honours_wait = "wait_complete" in parameters and bool(frame.get("wait_complete"))
+            if honours_wait:
+                fields["wait_complete"] = True
             if "command_id" in parameters:
                 fields["command_id"] = frame.get("command_id")
             # Silent input metadata (see ``Message.input_mode``), probed exactly
@@ -8366,7 +8375,16 @@ class RuntimeServer:
 
                     raise DocumentCarriageUnsupported()
                 fields["files"] = requested_files
-            return await h.prompt(frame["text"], **fields)
+            receipt = await h.prompt(frame["text"], **fields)
+            if not honours_wait:
+                return receipt
+            # THE RECEIPT A SETTLING OWNER OWNS, and the field is the whole point:
+            # a bare "prompt admitted" is what an owner that did NOT wait also
+            # says, so without this marker the caller cannot tell a settled turn
+            # from an append ack, and would report either one as a finished turn.
+            # ``AckDetail.fields`` merges into the ack frame beside ``detail``;
+            # a failing turn never reaches here (it raises ``FirstTurnFailed``).
+            return AckDetail(str(receipt), {}, {"settled": True})
         if op == "steer":
             fields = {"images": frame.get("images")}
             parameters = inspect.signature(h.steer).parameters

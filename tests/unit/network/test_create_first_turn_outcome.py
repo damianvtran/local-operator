@@ -114,8 +114,14 @@ async def test_a_failed_first_turn_crosses_as_its_own_code(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_clean_first_turn_still_answers_its_admission(tmp_path: Path) -> None:
-    """A turn that succeeds keeps the ack the create's receipt already reads."""
+async def test_a_settling_owner_marks_its_ack_so_skew_cannot_masquerade(tmp_path: Path) -> None:
+    """A settled turn keeps the sentence AND adds a field no old owner can emit.
+
+    The sentence alone is not evidence: ``"prompt admitted"`` is what an owner
+    that answered at the durable append also says, byte for byte. ``settled`` is
+    the whole discriminator the caller may key "the turn finished" off (agent
+    review round 1, BLOCKER-1).
+    """
     server, sent, conn, _session = _runtime_ok_rig(tmp_path)
     await server._on_request(
         {
@@ -130,7 +136,9 @@ async def test_a_clean_first_turn_still_answers_its_admission(tmp_path: Path) ->
     )
     replies = [frame for frame in sent if frame.get("op") != "error"]
     assert replies, sent
-    assert any("prompt admitted" in json.dumps(frame) for frame in replies), sent
+    ack = cast(dict[str, Any], json.loads(json.dumps(replies[0])))
+    assert ack["detail"] == "prompt admitted", ack
+    assert ack["settled"] is True, ack
 
 
 def _runtime_ok_rig(root: Path) -> tuple[RuntimeServer, list[dict[str, Any]], _ClientConn, Any]:
@@ -158,14 +166,19 @@ def _runtime_ok_rig(root: Path) -> tuple[RuntimeServer, list[dict[str, Any]], _C
 
 
 class _ScriptedDial:
-    """One dial whose exchange answers ``reply`` (or nothing, on a timeout)."""
+    """One dial whose exchange answers ``reply`` (or nothing) and reports ``eof``."""
 
-    def __init__(self, reply: dict[str, Any] | None) -> None:
+    def __init__(self, reply: dict[str, Any] | None, *, eof: bool = False) -> None:
         self.reply = reply
+        self.eof = False
+        self._eof_after = eof
         self.sent: list[dict[str, Any]] = []
 
     def exchange(self, frame: dict[str, Any], timeout_s: float = 0.0) -> Any:
         self.sent.append(frame)
+        # The real dial sets ``eof`` while it reads; a closed socket is the one
+        # case that must NOT read as "admitted and still running".
+        self.eof = self._eof_after
         return self.reply
 
     def close(self) -> None:
@@ -178,8 +191,10 @@ def _server(root: Path) -> relay.RelayServer:
     )
 
 
-def _dialed(server: relay.RelayServer, reply: dict[str, Any] | None) -> _ScriptedDial:
-    dial = _ScriptedDial(reply)
+def _dialed(
+    server: relay.RelayServer, reply: dict[str, Any] | None, *, eof: bool = False
+) -> _ScriptedDial:
+    dial = _ScriptedDial(reply, eof=eof)
     server._dial_owned = lambda *_args, **_kwargs: dial  # type: ignore[assignment]
     return dial
 
@@ -200,17 +215,43 @@ def test_a_failed_turn_is_not_reported_as_a_refusal(root: Path) -> None:
             "error_code": FirstTurnFailed.code,
         },
     )
-    outcome = server._prompt_on("sess00000001", "hello", None, wait_complete=True)  # noqa: SLF001
+    outcome = server._prompt_on("sess00000001", "hello", None)  # noqa: SLF001
     assert outcome["admitted"] is True, outcome
     assert outcome["state"] == "failed", outcome
     assert "rate-limited" in outcome["detail"], outcome
 
 
-def test_a_settled_turn_that_succeeded_reports_ran(root: Path) -> None:
+def test_a_settled_turn_reports_settled_only_on_the_owners_marker(root: Path) -> None:
+    """The OWNER's ``settled`` marker is what may claim completion.
+
+    This is the arm BLOCKER-1 was about: a reply that carries the sentence but no
+    marker is an owner that answered at the append, and it must read ``running``.
+    """
     server = _server(root)
-    _dialed(server, {"op": "ack", "req": 1, "detail": "prompt admitted"})
-    outcome = server._prompt_on("sess00000001", "hello", None, wait_complete=True)  # noqa: SLF001
-    assert (outcome["admitted"], outcome["state"]) == (True, "ran"), outcome
+    _dialed(server, {"op": "ack", "req": 1, "detail": "prompt admitted", "settled": True})
+    outcome = server._prompt_on("sess00000001", "hello", None)  # noqa: SLF001
+    assert (outcome["admitted"], outcome["state"]) == (True, "settled"), outcome
+
+
+def test_an_older_owner_that_acks_at_the_append_is_running_never_ran(root: Path) -> None:
+    """VERSION SKEW, pinned to the exact answer: an old peer is NOT a completed turn.
+
+    An owner from before ``wait_complete`` answers ``{"op": "ack", "detail":
+    "prompt admitted"}`` — byte-identical to a settling owner's success. Keying
+    "ran" off this side's request printed ``turn: completed`` for a turn nobody
+    waited for (agent review round 1, BLOCKER-1), so the assertion is the exact
+    state, not a set of acceptable ones.
+    """
+    server = _server(root)
+    dial = _dialed(server, {"op": "ack", "req": 1, "detail": "prompt admitted"})
+    outcome = server._prompt_on("sess00000001", "hello", None)  # noqa: SLF001
+    assert outcome == {
+        "admitted": True,
+        "state": "running",
+        "detail": "prompt admitted",
+    }, outcome
+    # ...and it did ask, so the field travelled even to an owner that ignores it.
+    assert dial.sent and dial.sent[0]["wait_complete"] is True, dial.sent
 
 
 def test_a_turn_that_outlives_the_budget_is_running_not_refused(root: Path) -> None:
@@ -223,18 +264,23 @@ def test_a_turn_that_outlives_the_budget_is_running_not_refused(root: Path) -> N
     """
     server = _server(root)
     _dialed(server, None)
-    outcome = server._prompt_on("sess00000001", "hello", None, wait_complete=True)  # noqa: SLF001
+    outcome = server._prompt_on("sess00000001", "hello", None)  # noqa: SLF001
     assert (outcome["admitted"], outcome["state"]) == (True, "running"), outcome
 
 
-def test_an_older_owner_that_ignores_the_wait_still_answers_its_ack(root: Path) -> None:
-    """Version skew: an owner that never heard of the field answers as it always did."""
+def test_a_dead_owner_socket_is_unreported_not_admitted_running(root: Path) -> None:
+    """A closed socket is not a timeout (agent review round 1, MINOR-4).
+
+    ``OwnerDial.exchange`` answers ``None`` for both, and ``dial.eof`` is the one
+    thing that distinguishes them: claiming durable admission for an owner that
+    died mid-turn asserts something nobody observed.
+    """
     server = _server(root)
-    dial = _dialed(server, {"op": "ack", "req": 1, "detail": "prompt admitted"})
-    outcome = server._prompt_on("sess00000001", "hello", None, wait_complete=True)  # noqa: SLF001
-    assert outcome["admitted"] is True, outcome
-    assert outcome["state"] in {"ran", "running"}, outcome
-    assert dial.sent and dial.sent[0]["wait_complete"] is True, dial.sent
+    _dialed(server, None, eof=True)
+    outcome = server._prompt_on("sess00000001", "hello", None)  # noqa: SLF001
+    assert outcome["admitted"] is False, outcome
+    assert outcome["state"] == "unreported", outcome
+    assert "unknown" in outcome["detail"], outcome
 
 
 def test_the_create_reply_carries_the_turn_block(root: Path) -> None:
@@ -354,13 +400,55 @@ def test_the_receipt_prints_the_failure(
 def test_the_receipt_says_a_running_turn_is_running(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Running says it cannot see the end — and names no read that cannot show one.
+
+    ``--peek`` was offered here until agent review round 1 (MAJOR-2): over the
+    real journal a failed turn's assistant row is ``content: null`` and its cause
+    is an incident record with no ``.text``, so the window filters both and shows
+    the user their own message. The receipt must not point at that dead end.
+    """
     from local_operator.network import cli as network_cli
 
     args = _args(monkeypatch, admitted=True, detail="", turn={"state": "running", "detail": ""})
     assert network_cli._cmd_sessions(args) == 0  # noqa: SLF001
     printed = capsys.readouterr().out
     assert "running on build-box" in printed, printed
-    assert "--peek sess00000001" in printed, printed
+    assert "cannot see how it ends" in printed, printed
+    assert "--peek" not in printed, printed
+
+
+def test_the_receipt_never_completes_a_turn_the_owner_did_not_settle(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """BLOCKER-1's user-visible half: no ``completed`` without the owner's marker.
+
+    The old-peer outcome is what ``_prompt_on`` now returns for that ack
+    (``running``); this pins the receipt's half of the pair, so neither the relay
+    nor the printer can reintroduce "turn: completed" for a turn nobody waited
+    for.
+    """
+    from local_operator.network import cli as network_cli
+
+    args = _args(
+        monkeypatch,
+        admitted=True,
+        detail="prompt admitted",
+        turn={"state": "running", "detail": ""},
+    )
+    assert network_cli._cmd_sessions(args) == 0  # noqa: SLF001
+    printed = capsys.readouterr().out
+    assert "completed" not in printed, printed
+
+
+def test_the_receipt_says_completed_when_the_owner_settled(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.network import cli as network_cli
+
+    args = _args(monkeypatch, admitted=True, detail="", turn={"state": "settled", "detail": ""})
+    assert network_cli._cmd_sessions(args) == 0  # noqa: SLF001
+    printed = capsys.readouterr().out
+    assert "turn: completed on build-box" in printed, printed
 
 
 def test_a_promptless_receipt_prints_no_turn(

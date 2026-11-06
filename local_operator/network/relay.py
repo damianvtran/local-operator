@@ -9257,7 +9257,7 @@ class RelayServer:
         prompt_state = ""
         prompt_detail = ""
         if prompt:
-            outcome = self._prompt_on(session_id, prompt, frame.get("images"), wait_complete=True)
+            outcome = self._prompt_on(session_id, prompt, frame.get("images"))
             admitted = bool(outcome["admitted"])
             prompt_state = str(outcome["state"])
             prompt_detail = str(outcome["detail"])
@@ -10727,24 +10727,33 @@ class RelayServer:
             return {"applied": False, "detail": str(reply.get("message") or "refused")}
         return {"applied": True, "detail": ""}
 
-    def _prompt_on(
-        self, session_id: str, text: str, images: Any, *, wait_complete: bool = False
-    ) -> dict[str, Any]:
+    def _prompt_on(self, session_id: str, text: str, images: Any) -> dict[str, Any]:
         """Admit the first prompt of a freshly created session, and say what became of it.
 
         Returns ``{"admitted": bool, "state": str, "detail": str}``, where
-        ``state`` is one of ``refused`` / ``failed`` / ``running`` / ``ran``:
+        ``state`` is one of ``refused`` / ``unreported`` / ``running`` /
+        ``failed`` / ``settled``:
 
         * ``refused`` — this device's runtime would not take the message at all
           (unreachable, or an admission gate said no). Nothing is in the
           transcript.
+        * ``unreported`` — the owner closed the connection before it answered, so
+          whether the message landed is UNKNOWN. Not a refusal: a refusal is a
+          fact, and this is the absence of one (``dial.eof`` is what tells the
+          two apart — a bare timeout is ``running``).
+        * ``running`` — admitted, and the turn had not settled within this
+          device's op budget, or the owner is one that answers at the append and
+          cannot settle at all. Not a failure and not a completion.
         * ``failed`` — the message IS in the transcript and the turn it opened
           ended in failure; ``detail`` is the provider's/runtime's own cause.
-        * ``running`` — admitted, and the turn had not settled within this
-          device's op budget. Not a failure and not a completion.
-        * ``ran`` — admitted, and the turn completed.
+        * ``settled`` — the OWNER reported that the turn finished. This is read
+          off the owner's own ``settled`` marker on the ack and never off this
+          device's request: an owner from before that marker acks at the durable
+          append with a reply byte-identical to a settling owner's success, so
+          keying on "we asked" printed ``turn: completed`` for a turn nobody
+          waited for (agent review round 1, BLOCKER-1).
 
-        THE TRI-STATE IS THE POINT, and it exists because the bare boolean this
+        THE OUTCOME IS THE POINT, and it exists because the bare boolean this
         returned was read as "the turn happened". ``prompt``'s reply is the
         DURABLE APPEND, not the outcome (``serving.ServingSessionHandle.prompt``
         says so in its own docstring), so a peer asked for a session with a first
@@ -10757,12 +10766,13 @@ class RelayServer:
         (``attached.prompt_and_wait``); a create has no stream, so it asks its own
         runtime to settle the turn and reports THAT.
 
-        ``wait_complete`` rides the existing prompt op (probed by the runtime, so
-        an older owner simply answers its usual admission ack and this reports
-        ``running`` — never a wrong claim), which is why no new wire op was
-        needed. The ``command_id`` is minted HERE and is a real idempotency key:
-        it rides the runtime's own durable-admission path, so a retry of this
-        create cannot run the turn twice.
+        ``wait_complete`` rides the existing prompt op, which is why no new wire op
+        was needed. It is sent unconditionally because this hop has exactly one
+        caller — a create that carries a first prompt — so a "do not wait" arm
+        would be a branch nothing can reach (agent review round 1, NIT-5). The
+        ``command_id`` is minted HERE and is a real idempotency key: it rides the
+        runtime's own durable-admission path, so a retry of this create cannot run
+        the turn twice.
         """
         try:
             dial = self._dial_owned(session_id, capabilities=("prompt",))
@@ -10776,29 +10786,33 @@ class RelayServer:
                     "command_id": str(uuid.uuid4()),
                     "text": text,
                     "images": list(images or []),
-                    "wait_complete": bool(wait_complete),
+                    "wait_complete": True,
                 },
                 timeout_s=self.settings.op_wait_s,
             )
+            # READ BEFORE THE CLOSE, and it is what separates the two silences:
+            # ``exchange`` answers ``None`` both for "quiet past the budget" and
+            # for "the owner's socket went away" (``dial.OwnerDial.eof`` says
+            # exactly this), and reporting a dead owner as admitted-and-running
+            # claimed durability nobody observed (agent review round 1, MINOR-4).
+            owner_gone = dial.eof
         finally:
             dial.close()
         if reply is None:
-            if wait_complete:
-                # NOT AN ADMISSION REFUSAL: the op reached a live owner and a
-                # ``wait_complete`` reply arrives only AFTER the turn, so silence
-                # means the turn outlived the budget — the message is durable and
-                # its turn is still going. Claiming "did not admit" here was the
-                # other half of the same untruth this method exists to remove.
+            if owner_gone:
                 return {
-                    "admitted": True,
-                    "detail": "",
-                    "state": "running",
+                    "admitted": False,
+                    "state": "unreported",
+                    "detail": (
+                        f"{session_id}'s owner closed the connection before it reported the "
+                        "first turn, so whether the message landed is unknown — read the "
+                        "session on that device before re-sending"
+                    ),
                 }
-            return {
-                "admitted": False,
-                "state": "refused",
-                "detail": "the runtime did not admit the prompt",
-            }
+            # A ``wait_complete`` reply arrives only AFTER the turn, so silence
+            # here means the turn outlived the budget: the message is durable and
+            # its turn is still going (the append precedes the settle).
+            return {"admitted": True, "state": "running", "detail": ""}
         if reply.get("op") == "error":
             message = str(reply.get("message") or "the runtime refused the prompt")
             if reply.get("error_code") == "turn_failed":
@@ -10807,10 +10821,12 @@ class RelayServer:
                 return {"admitted": True, "state": "failed", "detail": message}
             return {"admitted": False, "state": "refused", "detail": message}
         detail = reply.get("detail")
-        settled = "ran" if wait_complete else "running"
+        # THE OWNER'S OWN MARKER, never this device's request (BLOCKER-1): an
+        # owner that settled says so; an older owner's append ack cannot.
+        settled = reply.get("settled") is True
         return {
             "admitted": True,
-            "state": settled,
+            "state": "settled" if settled else "running",
             "detail": "" if detail is None else str(detail),
         }
 

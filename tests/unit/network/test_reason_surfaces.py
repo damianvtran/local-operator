@@ -297,9 +297,24 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.
     ("local_operator/network/cli.py", "_cmd_sessions", "detail"): (
-        4,
+        5,
         "the relay's own sentence — the 4th read is the model receipt's detail, which "
-        "says why a requested model was not applied",
+        "says why a requested model was not applied; the 5th is the first turn's CAUSE, "
+        "the owner runtime's own error sentence (the provider's reason, e.g. a rate "
+        "limit or an expired login), carried verbatim on purpose: it is the one fact "
+        "that tells the reader whether to retry, re-auth or pick another model",
+    ),
+    # ``_op_session_create`` hands the owner's first-turn cause to the requesting
+    # device (``_prompt_on``'s ``detail``). DELIBERATELY RAW, and the counter-example
+    # to this file's rule rather than an exception to its spirit: the value is the
+    # OWNER's own sentence — its runtime's ``FirstTurnFailed`` message, which is the
+    # provider's error text (agent review round 1, MAJOR-3) — and paraphrasing it
+    # here would replace the model's actual reason with this side's guess about it.
+    # The other ``detail`` values on this op stay the relay's own composed prose.
+    ("local_operator/network/relay.py", "RelayServer._op_session_create", "detail"): (
+        1,
+        "the owner's own sentence for a failed first turn — the provider's error text, "
+        "carried verbatim to the requester rather than paraphrased",
     ),
     # The move's arrival engage, when the caller asked for one (``engage_on_arrival``).
     # ``detail`` is the ENGAGE PATH'S OWN SENTENCE — ``RelayServer.engage_session``
