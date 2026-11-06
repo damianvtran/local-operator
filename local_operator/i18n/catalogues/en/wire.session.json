@@ -1,0 +1,3 @@
+{
+  "wire.session.status.scheduled": "Scheduled ({count, plural, one {# wake} other {# wakes}})"
+}

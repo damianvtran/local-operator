@@ -1,0 +1,7 @@
+{
+  "wire.session.status.scheduled": {
+    "role": "Status label for one session row in the desktop sidebar and the session picker, printed verbatim by the client (the row's contract forbids it re-deriving status). It is backend-generated copy, so it must arrive already in the product language.",
+    "tone": "terse, sentence case, no trailing period; one logical line",
+    "note": "count is the number of ARMED wakes on this session: always >= 1 (zero never reaches this key, the row falls through to another state). ICU plural, so render count with the locale's own CLDR categories rather than an English s suffix — the en source carries one/other only, and a locale that needs many/few/other (fr, ru) adds those arms in its own catalogue. Keep the parenthesised form and the leading word 'Scheduled'; the count is the only varying part. Latin digits per the RFC §2.9 policy."
+  }
+}

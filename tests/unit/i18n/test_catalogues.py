@@ -76,6 +76,14 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.exec",
         "wire.incidents",
         "wire.notices",
+        # The session row's armed-wake status label (this PR). It is a
+        # BACKEND-GENERATED label the desktop prints verbatim — its contract
+        # forbids the client re-deriving status — so it cannot be translated
+        # client-side and must render here (docs/I18N.md, RFC §2.6). Its own
+        # namespace is the English-only-child pattern above: the copy is one
+        # row label, not an edit to an audited `wire.settings`/`wire.slash`
+        # hash.
+        "wire.session",
         "wire.settings",
         "wire.settings.hub_defaults",
         # The org Agent Hub section (Radient Team only) is its own child so its
