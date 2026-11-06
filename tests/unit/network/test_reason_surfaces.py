@@ -735,6 +735,20 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the member's own receipt prose, passed into the origin's member row",
     ),
+    # The browser tool's bridge layer. A refused browser command carries the PAGE
+    # PROGRAM's own token in ``data.reason`` -- ``option_not_found``,
+    # ``option_ambiguous``, ``value_rejected``, ``not_a_value_control`` -- and this
+    # function reads it only to CHOOSE A HINT: whether to append the host's
+    # available-options list, and whether to carry the typed code onto the error so
+    # a caller can branch on it. The token itself is never printed; the reader gets
+    # the host's own sentence plus that list. Not a mesh surface at all: this
+    # function imports nothing from ``local_operator.network``'s vocabulary, it is
+    # collected here because every module naming the mesh joins this guard.
+    ("local_operator/tools/builtin.py", "_bridge_call", "reason"): (
+        2,
+        "the browser host's page-program refusal token, read to choose a hint "
+        "and to carry the typed code; never rendered to a person",
+    ),
 }
 
 _ROOT = Path(local_operator.__file__).parent
