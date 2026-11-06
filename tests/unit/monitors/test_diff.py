@@ -574,3 +574,37 @@ def test_an_indentation_only_change_is_still_a_change() -> None:
     # it, so a re-indent normalised identically and the change never surfaced.
     assert diff.normalize(after).count("\n") == 1
     assert f"{diff._RECORD_FIELD_SEPARATOR}        indent 8" in diff.normalize(after)
+
+
+def test_a_body_timestamp_stays_masked_while_the_header_clock_is_readable() -> None:
+    """The readable rendering is for HEADER fields only (review R2-MIN-A).
+
+    Body text is content the source wrote: an ``updated_at`` inside it is the
+    churn class the timestamp rule exists for, and leaving it readable let a
+    changing body stamp ride out ungated (a record watch skips the gate).
+    """
+    raw = _channel_envelope(_message_block("first para\n\nupdated 2026-11-05T21:00:00Z by the bot"))
+    record = _record_lines(diff.normalize(raw))[0]
+    assert "at 2026/11/05 20:10:00Z ===" in record, record
+    assert "updated <ts> by the bot" in record, record
+    assert "2026-11-05T21:00:00Z" not in record
+
+
+def test_a_single_record_with_paragraphs_is_still_one_record() -> None:
+    """A ONE-message log has no repeated lead, and must not fragment (R2-MIN-D).
+
+    The block fallback is for payloads with no record structure at all; a single
+    record's body may contain blank lines and is still one record.
+    """
+    raw = json.dumps(
+        {
+            "messages": _CHANNEL_HEADER
+            + "\n\n"
+            + _message_block("*Recap*\n\nSecond paragraph of the same message.")
+            + "\n"
+        }
+    )
+    lines = diff.normalize(raw).split("\n")
+    assert lines[0] == _CHANNEL_HEADER
+    assert len(lines) == 2, lines
+    assert "*Recap*" in lines[1] and "Second paragraph" in lines[1]

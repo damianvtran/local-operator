@@ -60,6 +60,7 @@ from local_operator.monitors.diff import (
     has_line_difference,
     is_pure_addition,
     is_record_log,
+    legacy_masked,
     normalize,
     render_delta,
 )
@@ -866,10 +867,12 @@ class MonitorScheduler:
         counters = entry.counters
         old_last_check = int(counters.get("last_check_at") or 0)
         skipped = _skipped_checks_since(old_last_check, spec.every_ms, now)
-        # Whether this source is a RECORD LOG decides the gate, not a setting:
-        # the record view has already separated records from bookkeeping, which
-        # is the separation the gate would otherwise be asked to make from
-        # opaque text (§8, and see ``_classify_change``).
+        # Whether THIS RESULT is a record log decides the gate, not a setting and
+        # not the source's provenance: the record view has already separated
+        # records from bookkeeping, which is the separation the gate would
+        # otherwise be asked to make from opaque text (§8, and see
+        # ``_classify_change``). A source that changes shape mid-stream is
+        # handled by the basis check below, not by this flag.
         record_view = is_record_log(text)
         normalized = normalize(
             text,
@@ -942,6 +945,11 @@ class MonitorScheduler:
                     normalize_timestamps=self._settings.normalize_timestamps,
                 )
 
+        # The right-hand side of the diff. It equals ``normalized`` except on a
+        # basis-change tick, where BOTH sides are compared in the legacy mask
+        # space (see below): the commit still stores the unmasked rendering.
+        diff_text = normalized
+
         diff_base: str | None
         if not old_hash:
             if blob is None or truncated:
@@ -968,7 +976,10 @@ class MonitorScheduler:
             # A full stored snapshot with a lost hash is still complete
             # content: diff against it, exactly as before — restated first when
             # an earlier normalizer wrote it.
-            diff_base = restated if restated is not None else blob_text
+            if restated is not None:
+                diff_base, diff_text = legacy_masked(restated), legacy_masked(normalized)
+            else:
+                diff_base = blob_text
         else:
             # The diff's old side is the FULL previous result. The stored
             # snapshot is clipped at ``snapshotMaxChars``; diffing against that
@@ -980,7 +991,15 @@ class MonitorScheduler:
             diff_base = self._previous_result(spec, counters, old_hash)
             if diff_base is None:
                 if restated is not None:
-                    diff_base = restated
+                    # The stored text was written by an earlier normalizer, so it
+                    # carries the OLD mask (``at <ts> EST``, ``Message TS:
+                    # <ts>.147170``) while today's rendering unmasks both. No
+                    # restatement can undo a mask, so the two are only comparable
+                    # in the mask space: mask BOTH sides and diff that, and only a
+                    # real content change survives (review round 2, R2-MAJ-A —
+                    # measured as a phantom ``+2/-2`` re-render on an unchanged
+                    # source, ``+25/-25`` on a 20-record window).
+                    diff_base, diff_text = legacy_masked(restated), legacy_masked(normalized)
                 elif unreadable_basis:
                     # A clipped legacy blob cannot be restated and no handle
                     # reproduced the hash: there is no comparable old side, so
@@ -1004,9 +1023,9 @@ class MonitorScheduler:
         # write lock). A bound that only covers one of two paths is not a bound.
         if diff_base is not None and (
             len(diff_base) > MAX_DIFF_CHARS
-            or len(normalized) > MAX_DIFF_CHARS
+            or len(diff_text) > MAX_DIFF_CHARS
             or diff_base.count("\n") > MAX_DIFF_LINES
-            or normalized.count("\n") > MAX_DIFF_LINES
+            or diff_text.count("\n") > MAX_DIFF_LINES
         ):
             logger.info(
                 "monitor %s result is too large to diff; delivering a checksum delta",
@@ -1022,7 +1041,7 @@ class MonitorScheduler:
             delta_text, changes = beyond_window_text(new_hash)
             delta_hidden = True
         else:
-            if not has_line_difference(diff_base, normalized):
+            if not has_line_difference(diff_base, diff_text):
                 # The hash disagreed while the content did not: the stored
                 # hash was TORN (a crash between the two writes), or a handle
                 # reproduced the same text under a different stored hash.
@@ -1031,10 +1050,10 @@ class MonitorScheduler:
                 counters["last_handle"] = handle or str(counters.get("last_handle") or "")
                 counters["next_due_at"] = self._advance(spec, now)
                 return None
-            pure_addition = is_pure_addition(diff_base, normalized)
+            pure_addition = is_pure_addition(diff_base, diff_text)
             rendered = render_delta(
                 diff_base,
-                normalized,
+                diff_text,
                 max_delta_lines=self._settings.max_delta_lines,
                 delta_max_chars=self._settings.delta_max_chars,
             )

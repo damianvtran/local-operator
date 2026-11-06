@@ -107,12 +107,18 @@ _RECORD_CLOCK_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})([T ])(?=\d{2}:\d{2})")
 
 
 def is_record_log(text: str) -> bool:
-    """Whether ``text`` is a JSON envelope holding a record LOG (not prose).
+    """Whether THIS RESULT is a JSON envelope holding a record log.
 
-    The same trigger :func:`unpack_records` uses, exposed because the decision
-    is what tells the scheduler this source is a record log rather than opaque
-    text — and a record log's delta is judged structurally, not by the
-    materiality gate (see :func:`unpack_records`).
+    The trigger is the shape of the result — the same one
+    :func:`unpack_records` uses — not the provenance of the source: a result
+    counts while it parses as an object with a blank-line-separated payload, and
+    a source that stops returning that shape stops counting on the next tick.
+    The decision is what tells the scheduler to judge the delta structurally
+    instead of by the materiality gate (see :func:`unpack_records`).
+
+    Consequence, stated where it bites: a plain-text source that STARTS
+    returning a record shape changes comparison basis mid-stream, so its next
+    tick skips the gate and delivers the whole payload once rather than a delta.
     """
     return _record_log_envelope(text) is not None
 
@@ -214,12 +220,21 @@ def _record_lines(payload: str) -> list[str]:
     """
     blocks = _payload_blocks(payload)
     lead = _record_lead(blocks)
-    if lead is None:
+
+    def starts_record(block: list[str]) -> bool:
+        if lead is not None:
+            return _block_lead(block) == lead
+        # No repeated lead: a ONE-record payload still has a record header, and
+        # the fallback below is for payloads with no record structure at all, not
+        # for a single-record log whose body happens to have blank lines.
+        return _is_record_header_block(block)
+
+    if not any(starts_record(block) for block in blocks):
         return [_RECORD_FIELD_SEPARATOR.join(_record_fields(block)) for block in blocks]
     lines: list[str] = []
     current: list[str] | None = None
     for block in blocks:
-        if _block_lead(block) == lead:
+        if starts_record(block):
             if current is not None:
                 lines.append(_RECORD_FIELD_SEPARATOR.join(current))
             current = _record_fields(block)
@@ -271,9 +286,82 @@ def _record_lead(blocks: list[list[str]]) -> str | None:
     return None
 
 
+#: The fields a record's rendering applies to: the ones that say WHO, WHEN and
+#: WHICH message. Another field — the message BODY — is content the source wrote,
+#: so its timestamps keep the global scrub (a body ``updated_at`` is exactly the
+#: churn class that rule exists for; review R2-MIN-A).
+_RECORD_HEADER_FIELD_RE = re.compile(
+    r"^(?:===.*===|Message TS:|Time:|Sent:|Date:|Sent at:)(?:\s|$)"
+)
+
+
+def _is_record_header_field(field: str) -> bool:
+    return bool(_RECORD_HEADER_FIELD_RE.match(field.strip()))
+
+
+def _is_record_header_block(block: list[str]) -> bool:
+    """Whether a block opens a record even without a repeated lead (R2-MIN-D).
+
+    The Slack rendering's lead is ``=== Message from … ===``. A ONE-record
+    payload has no repeated lead, so the lead rule cannot see it; the header
+    shape can.
+    """
+    return bool(block) and _is_record_header_field(block[0])
+
+
 def _record_fields(block: list[str]) -> list[str]:
-    """A block's fields with each record clock made readable (see the regex)."""
-    return [_RECORD_CLOCK_RE.sub(r"\1/\2/\3 ", field) for field in block]
+    """A block's fields with only its HEADER clock made readable.
+
+    A header's own clock and message id are the fields a reader of the wake
+    needs (``at 2026/11/05 20:37 EST``, ``Message TS: 1793908014.147179``).
+    Everything else in the record is body text: its timestamps stay masked, so a
+    changing body stamp cannot ride out ungated.
+    """
+    fields: list[str] = []
+    for field in block:
+        if _is_record_header_field(field):
+            fields.append(_RECORD_CLOCK_RE.sub(r"\1/\2/\3 ", field))
+        else:
+            # A dotted epoch pair would otherwise survive the global scrub; in a
+            # BODY it is just numbers that can churn.
+            fields.append(_LEGACY_DOTTED_EPOCH_RE.sub(_TS_MARKER, field))
+    return fields
+
+
+#: The pre-record-view MASK, applied to BOTH sides of a basis-change diff
+#: (:func:`legacy_masked`). A stored baseline written before the record view was
+#: already masked — ``at <ts> EST``, ``Message TS: <ts>.147170`` — and no
+#: restatement can unmask it, so comparing it against today's UNMASKED rendering
+#: reports every record as changed even when the source did not move (measured by
+#: review round 2 as a ``+2/-2`` phantom delta, and ``+25/-25`` on a 20-record
+#: window). Masking both sides keeps only real content changes.
+#: The readable clock form the record view renders, masked back to the shape the
+#: old pipeline stored. A trailing ``Z``/offset belongs to the clock (the ISO
+#: pattern swallowed it), so it is masked with it; a `` EST``-style zone was
+#: never part of the ISO match and stays.
+_LEGACY_SLASH_CLOCK_RE = re.compile(
+    r"\b\d{4}/\d{2}/\d{2} \d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+_LEGACY_DOTTED_EPOCH_RE = re.compile(r"\b\d{10}(?=\.\d{6})")
+_LEGACY_EPOCH_S_RE = re.compile(r"\b\d{10}\b")
+
+
+def legacy_masked(text: str) -> str:
+    """``text`` with the pre-record-view timestamp MASK applied to every line.
+
+    The basis-change diff compares in this space: the stored baseline is already
+    masked, and today's rendering is not, so masking both sides makes the two
+    comparable without undo-masking anything (the unmasked rendering is kept for
+    everything else — review MAJ-3 stays closed). Only real changes survive it.
+    """
+    masked: list[str] = []
+    for line in text.split("\n"):
+        line = _ISO_TS_RE.sub(_TS_MARKER, line)
+        line = _LEGACY_SLASH_CLOCK_RE.sub(_TS_MARKER, line)
+        line = _LEGACY_DOTTED_EPOCH_RE.sub(_TS_MARKER, line)
+        line = _EPOCH_MS_RE.sub(_mask_epoch_ms, line)
+        masked.append(_LEGACY_EPOCH_S_RE.sub(_mask_epoch_s, line))
+    return "\n".join(masked)
 
 
 def _envelope_scalar(value: object) -> str:
@@ -313,21 +401,22 @@ def normalize(
     return "\n".join(lines)
 
 
+def _mask_epoch_ms(match: re.Match[str]) -> str:
+    value = int(match.group(0))
+    return _TS_MARKER if _EPOCH_MS_FLOOR <= value <= _EPOCH_MS_CEIL else match.group(0)
+
+
+def _mask_epoch_s(match: re.Match[str]) -> str:
+    value = int(match.group(0))
+    return _TS_MARKER if _EPOCH_S_FLOOR <= value <= _EPOCH_S_CEIL else match.group(0)
+
+
 def _strip_timestamps(line: str) -> str:
     if not line:
         return line
     line = _ISO_TS_RE.sub(_TS_MARKER, line)
-
-    def _epoch_ms(match: re.Match[str]) -> str:
-        value = int(match.group(0))
-        return _TS_MARKER if _EPOCH_MS_FLOOR <= value <= _EPOCH_MS_CEIL else match.group(0)
-
-    def _epoch_s(match: re.Match[str]) -> str:
-        value = int(match.group(0))
-        return _TS_MARKER if _EPOCH_S_FLOOR <= value <= _EPOCH_S_CEIL else match.group(0)
-
-    line = _EPOCH_MS_RE.sub(_epoch_ms, line)
-    return _EPOCH_S_RE.sub(_epoch_s, line)
+    line = _EPOCH_MS_RE.sub(_mask_epoch_ms, line)
+    return _EPOCH_S_RE.sub(_mask_epoch_s, line)
 
 
 def content_hash(normalized: str) -> str:

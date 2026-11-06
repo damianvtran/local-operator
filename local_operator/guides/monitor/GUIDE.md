@@ -126,13 +126,18 @@ monitor({op:"create", name:"product-feedback-watch",
   IS the message: author, a readable clock (`at 2026/11/05 22:37 EST`) and the
   message id (`1793908014.147179`), so `mcp__slack_read_thread` can be called
   straight from the wake.
-- **A record watch does not go through the materiality gate.** That gate
-  separates signal from bookkeeping in opaque text; the record view has
-  already done it structurally — one line per record, the reply's paging
-  fields dropped, timestamps scrubbed. On real traffic the gate still called 5
+- **A record RESULT does not go through the materiality gate.** The decision
+  is the shape of the result, not the source: while a tool returns records, its
+  delta is judged structurally instead of by a model. That gate separates signal
+  from bookkeeping in opaque text, and the record view has already done it —
+  one line per record, the reply's paging fields dropped, header clocks readable
+  and body timestamps scrubbed. On real traffic the gate still called 5
   of 6 genuine changes `non-material-metadata` and swallowed a thread reply
   outright, so a record log's delta is delivered unjudged by design. The noise
   controls that remain are `ignore`, `limit` and the hourly delivery cap.
+  A source that CHANGES shape (a plain-text watch that starts answering in
+  records) re-delivers its whole payload once, because the comparison basis
+  moved — then it behaves as a record watch.
 - **Thread replies** surface on the parent message's record line as its
   `Thread: N replies (latest: …)` field changing — a CHANGED line, not an
   added one, which is exactly why a thread watch must not be gate-judged. Read
