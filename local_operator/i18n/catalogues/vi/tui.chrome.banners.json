@@ -1,0 +1,18 @@
+{
+  "tui.chrome.banners.body_approval": "Đang chờ phê duyệt",
+  "tui.chrome.banners.body_ask": "Đang chờ bạn trả lời",
+  "tui.chrome.banners.body_background": "Bạn đang ở phiên khác",
+  "tui.chrome.banners.body_background_digest": "Mở thanh bên phiên (Ctrl+B) để xem",
+  "tui.chrome.banners.body_complete": "Công việc đã hoàn tất",
+  "tui.chrome.banners.body_error": "Đã dừng do lỗi",
+  "tui.chrome.banners.body_interrupted": "Đã dừng trước khi xong",
+  "tui.chrome.banners.body_update": "Một tác nhân gửi cập nhật",
+  "tui.chrome.banners.context_attention": "Cần chú ý",
+  "tui.chrome.banners.context_complete": "Hoàn tất",
+  "tui.chrome.banners.context_input_required": "Cần bạn phản hồi",
+  "tui.chrome.banners.context_interrupted": "Bị gián đoạn",
+  "tui.chrome.banners.context_mixed": "Kết quả khác nhau",
+  "tui.chrome.banners.context_retired": "Đã ngừng",
+  "tui.chrome.banners.digest_title": "{total, plural, other {{count} phiên đã xong}}",
+  "tui.chrome.banners.fallback_title": "Một phiên đã xong"
+}

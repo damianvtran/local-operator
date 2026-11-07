@@ -1,0 +1,98 @@
+{
+  "tui.chrome.banners.context_complete": {
+    "role": "Desktop/OS notification subtitle for a turn that finished on its own",
+    "tone": "terse state category; a label, not a sentence",
+    "maxCells": 18,
+    "note": "EN-only context sidecar. Read on a lock screen or in a notification centre, out of context, beside a session name. Deliberately shorter and flatter than the body sentence that may sit under it. No full stop, no ICU arguments."
+  },
+  "tui.chrome.banners.context_input_required": {
+    "role": "Notification subtitle for a turn parked on an approval or a question",
+    "tone": "terse state category",
+    "maxCells": 18,
+    "note": "EN-only context sidecar. Approvals and asks deliberately SHARE this category because both mean the turn cannot advance until the operator returns; the body distinguishes them. No ICU arguments."
+  },
+  "tui.chrome.banners.context_attention": {
+    "role": "Notification subtitle for a turn that stopped with an error",
+    "tone": "terse state category",
+    "maxCells": 18,
+    "note": "EN-only context sidecar. Warning tier. Says attention is needed without asserting a cause the banner cannot know. No ICU arguments."
+  },
+  "tui.chrome.banners.context_interrupted": {
+    "role": "Notification subtitle for a turn that was stopped before it finished",
+    "tone": "terse state category",
+    "maxCells": 18,
+    "note": "EN-only context sidecar. Must NOT be folded into the error category: the operator (or a competing build) stopped this turn, so nothing failed. No ICU arguments."
+  },
+  "tui.chrome.banners.context_retired": {
+    "role": "Notification subtitle for a turn cut short because the app is being updated",
+    "tone": "terse state category",
+    "maxCells": 14,
+    "note": "EN-only context sidecar. Distinct from interrupted on purpose: an update retired this turn. Folding it into the error category would make every update-cut banner assert a failure. No ICU arguments."
+  },
+  "tui.chrome.banners.context_mixed": {
+    "role": "Subtitle for the digest banner standing in for several sessions that ended differently",
+    "tone": "terse state category; a property of a SET, not of one session",
+    "maxCells": 20,
+    "note": "EN-only context sidecar. Not reachable for a single session: a digest only takes this subtitle when the sessions it counts did not all end the same way. No ICU arguments."
+  },
+  "tui.chrome.banners.body_complete": {
+    "role": "Notification body for a turn that produced its answer",
+    "tone": "plain declarative fragment; no full stop",
+    "maxCells": 24,
+    "note": "EN-only context sidecar. States the OUTCOME only — the session name is the title, the routing fact is a separate body, so nothing here repeats either. No ICU arguments."
+  },
+  "tui.chrome.banners.body_approval": {
+    "role": "Notification body for a turn waiting on an approval decision",
+    "tone": "plain declarative fragment; no full stop",
+    "maxCells": 26,
+    "note": "EN-only context sidecar. Says what the turn needs, not who must act: the reader is implied. No ICU arguments."
+  },
+  "tui.chrome.banners.body_ask": {
+    "role": "Notification body for a turn waiting on the operator's answer to a question",
+    "tone": "plain declarative fragment; no full stop",
+    "maxCells": 26,
+    "note": "EN-only context sidecar. The sibling of body_approval for the ask kind; the two share a subtitle but must stay distinguishable in the body. No ICU arguments."
+  },
+  "tui.chrome.banners.body_error": {
+    "role": "Notification body for a turn that stopped with an error",
+    "tone": "plain declarative fragment; no full stop",
+    "maxCells": 26,
+    "note": "EN-only context sidecar. Deliberately vague about cause: the banner covers provider refusals, tool failures and crashes alike. No ICU arguments."
+  },
+  "tui.chrome.banners.body_interrupted": {
+    "role": "Notification body for a turn stopped before it finished",
+    "tone": "plain declarative fragment; no full stop",
+    "maxCells": 26,
+    "note": "EN-only context sidecar. Distinguishes `stopped` from `failed`, matching its subtitle. No ICU arguments."
+  },
+  "tui.chrome.banners.body_update": {
+    "role": "Notification body used when the operator has turned session names off",
+    "tone": "plain declarative fragment; no full stop",
+    "maxCells": 30,
+    "note": "EN-only context sidecar. Replaces the model-written body when banner text is disabled, so a lock screen learns only that something wants the operator — no conversation content may appear here. No ICU arguments."
+  },
+  "tui.chrome.banners.body_background_digest": {
+    "role": "Notification body for the digest banner standing in for several finished sessions",
+    "tone": "imperative; one instruction",
+    "maxCells": 45,
+    "note": "EN-only context sidecar. Names the route that exists on EVERY platform: `Ctrl+B` and not `Cmd+B`, because a banner cannot know which terminal is reading it. `Ctrl+B` is a literal chord token and stays Latin. No ICU arguments."
+  },
+  "tui.chrome.banners.body_background": {
+    "role": "Notification body for a finished session other than the one on screen",
+    "tone": "plain declarative fragment; no full stop",
+    "maxCells": 30,
+    "note": "EN-only context sidecar. Describes the ROUTING fact, not an outcome, and is the fallback whenever no session text may be shown — it must reveal nothing about the conversation. No ICU arguments."
+  },
+  "tui.chrome.banners.fallback_title": {
+    "role": "Notification title for a finished session that has no stored name",
+    "tone": "plain declarative fragment; no full stop",
+    "maxCells": 24,
+    "note": "EN-only context sidecar. Not the product name: the OS already attributes the banner to Local Operator by name and icon, and the sidebar paints these same rows as `Untitled conversation`, so a brand title would identify nothing. No ICU arguments."
+  },
+  "tui.chrome.banners.digest_title": {
+    "role": "Notification title for the digest banner, carrying the count of finished sessions",
+    "tone": "plain declarative fragment; no full stop",
+    "maxCells": 24,
+    "note": "EN-only context sidecar. TWO arguments: {total} is the whole-number count and is ONLY the plural selector, while {count} is str(total) and is what PRINTS. The count must be printed as raw digits, never through a number slot, because ICU groups 9999 as '9,999' where the shipped banner printed '9999' - the same split tui.small.draft.attachment_count records. Kept SHORT at every count because macOS clips a title at about 43 characters and clips the body first, so the count has to survive in the line that is not clipped. Absolute, never relative ('3 more' needs the banners it counts from). The singular arm is defensive only - production cannot reach a total of 1 - but a count that reads '1 sessions' is wrong wherever it surfaces."
+  }
+}

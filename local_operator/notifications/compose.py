@@ -37,13 +37,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from local_operator.tui import notify as _notify
 from local_operator.tui.notify import (
     APP_NAME,
-    BACKGROUND_FALLBACK_TITLE,
     BACKGROUND_SNIPPET_MAX_CHARS,
     BODIES,
-    BODY_COMPLETE,
-    CONTEXT_COMPLETE,
     CONTEXTS,
     MAX_TITLE_CHARS,
     sanitize_text,
@@ -51,6 +49,15 @@ from local_operator.tui.notify import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ``BACKGROUND_FALLBACK_TITLE``, ``BODY_COMPLETE`` and ``CONTEXT_COMPLETE`` are
+# read as ``_notify.<NAME>`` at the point of use, never imported by value.
+# ``tui.notify._reload_copy`` REBINDS those module globals on a live language
+# switch; a ``from … import NAME`` here would freeze the language this module
+# was first imported in, and after ``/language fr`` a fallback banner would pair
+# the French vocabulary (``BODIES``/``CONTEXTS`` are updated in place, so they
+# are safe by value) with an English title. ``APP_NAME`` and the budgets never
+# change with the locale, so they stay plain imports.
 
 #: The kinds a composed notification may carry. Deliberately the
 #: :data:`~local_operator.tui.notify.CONTEXTS` key set, so the vocabulary
@@ -135,7 +142,7 @@ def gate_body(kind: str, gate_title: str, gate_detail: str) -> str:
     subject = (gate_detail or "").strip()
     if subject and gate_title and not subject.lower().startswith(gate_title.lower()):
         subject = f"{gate_title}: {subject}".strip().rstrip(":").strip()
-    return subject or BODIES.get(kind, BODY_COMPLETE)
+    return subject or BODIES.get(kind, _notify.BODY_COMPLETE)
 
 
 #: ``focus_policy`` values a ``notification`` frame may carry.
@@ -251,7 +258,7 @@ def compose(
     for the rest of a session that had just turned it off.
     """
     names_ok = _names_allowed()
-    status = CONTEXTS.get(kind, CONTEXT_COMPLETE)
+    status = CONTEXTS.get(kind, _notify.CONTEXT_COMPLETE)
 
     title, title_is_session_name = _compose_title(
         kind, names_ok=names_ok, session_dir=session_dir, session_name=session_name
@@ -316,7 +323,7 @@ def _compose_title(
         return name, True
     if kind in ("ask", "approval"):
         return APP_NAME, False
-    return BACKGROUND_FALLBACK_TITLE, False
+    return _notify.BACKGROUND_FALLBACK_TITLE, False
 
 
 def _compose_body(
@@ -375,7 +382,7 @@ def _compose_body(
         # described. Do not "fix" this into leaking a snippet when names are
         # off. The same fallback covers ``kind != complete`` bodies (kept) and
         # a complete with no resolvable session dir.
-        return BODIES.get(kind, BODY_COMPLETE), False, False
+        return BODIES.get(kind, _notify.BODY_COMPLETE), False, False
     # `max_chars` is PASSED rather than applied afterwards, so the
     # word-boundary ellipsis `session_preview` computes lands against the
     # budget the banner actually has; trimming a 200-char preview down to 120
@@ -389,7 +396,7 @@ def _compose_body(
     snippet = sanitize_text(preview, BACKGROUND_SNIPPET_MAX_CHARS)
     if snippet:
         return snippet, True, False
-    return BODIES.get("complete", BODY_COMPLETE), False, False
+    return BODIES.get("complete", _notify.BODY_COMPLETE), False, False
 
 
 def _stored_title(session_dir: Path) -> str:
