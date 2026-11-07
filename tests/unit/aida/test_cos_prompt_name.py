@@ -17,6 +17,7 @@ persisted prefix epoch.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,8 @@ import pytest
 from local_operator.prompts_api import (
     build_system_blocks,
     identity_delta,
+    identity_record_name,
+    identity_restored,
     split_tail_sections,
 )
 
@@ -65,6 +68,23 @@ def _prefix_rows(session: Any) -> list[Any]:
         for entry in session._transcript.entries()
         if str(entry.payload.get("custom_type", "")) == "system_prefix"
     ]
+
+
+@pytest.fixture(autouse=True)
+def _own_analytics_writer(isolated_root: Path) -> Iterator[None]:
+    """Give each test its own analytics writer and stop it at teardown.
+
+    A session lazily starts the process-wide ``lo-analytics-writer`` thread
+    (a rename, a resumed title), which the thread-leak reporter then pins on
+    whichever test of the worker started it (review R2-2). Same pattern as
+    ``test_conversation_name_persistence``.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+
+    recorder = reset_recorder_for_test(AnalyticsStore(isolated_root / "analytics-test.db"))
+    yield
+    recorder.close()
 
 
 @pytest.fixture()
@@ -216,22 +236,86 @@ async def test_a_resume_after_a_rename_carries_the_name_in_its_prefix(
         await resumed.dispose()
 
 
+def _identity_rows(session: Any) -> list[str]:
+    return [
+        row.payload["details"]["blocks"]["3"]["identity"]
+        for row in _state_rows(session)
+        if "identity" in (row.payload["details"]["blocks"].get("3") or {})
+    ]
+
+
 @pytest.mark.asyncio
-async def test_renaming_back_ships_a_removal(isolated_root: Path, as_cos: None) -> None:
+@pytest.mark.parametrize(
+    ("head", "interim"),
+    [("Aida", "Jian-Yang"), ("Aida", "Aida, Chief of Staff"), ("Jian", "Jian, Yang")],
+    ids=["default-renamed-default", "comma-suffixed-default", "comma-suffixed-custom"],
+)
+async def test_renaming_back_restates_the_head_name_once(
+    isolated_root: Path, as_cos: None, head: str, interim: str
+) -> None:
+    """QA Q5 / review R2-1: a rename back ships ONE positive line, never ``(empty)``.
+
+    An emptied record that had said it supersedes the head left Haiku 4.5
+    nameless. The comma cases are the R2-1 trap: "Aida, Chief of Staff" once
+    read as a record for "Aida", and the rename back shipped nothing at all.
+    """
+    from local_operator.aida import naming
+
+    if head != "Aida":
+        naming.set_name(isolated_root, head)
+    session = await _session(isolated_root)
+    try:
+        await session._prepare_system_blocks()
+        naming.set_name(isolated_root, interim)
+        await session._prepare_system_blocks()
+        naming.set_name(isolated_root, head)
+        await session._prepare_system_blocks()
+        await session._prepare_system_blocks()  # nothing more on a quiet turn
+        assert _identity_rows(session) == [
+            identity_delta(interim, head),
+            identity_restored(head, interim),
+        ]
+        assert len(_prefix_rows(session)) == 1
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_resume_after_a_rename_back_journals_nothing_new(
+    isolated_root: Path, as_cos: None
+) -> None:
+    """The replayed restatement names the head's own name: nothing to settle."""
     from local_operator.aida import naming
 
     session = await _session(isolated_root)
     try:
+        session_id = session._session_id
         await session._prepare_system_blocks()
         naming.set_name(isolated_root, "Jian-Yang")
         await session._prepare_system_blocks()
         naming.set_name(isolated_root, "Aida")
         await session._prepare_system_blocks()
-        rows = _state_rows(session)
-        assert len(rows) == 2
-        assert rows[1].payload["details"]["blocks"] == {"3": {"identity": ""}}
     finally:
         await session.dispose()
+    resumed = await _session(isolated_root, resume=session_id)
+    try:
+        await resumed._prepare_system_blocks()
+        await resumed._prepare_system_blocks()
+        assert len(_identity_rows(resumed)) == 2
+    finally:
+        await resumed.dispose()
+
+
+@pytest.mark.parametrize(
+    ("name", "previous"),
+    [("Aida", "Jian-Yang"), ("Aida, Chief of Staff", "Aida"), ("Jian", "Jian, Yang"), ("Aida", "")],
+)
+def test_an_identity_record_names_exactly_the_name_it_was_rendered_for(
+    name: str, previous: str
+) -> None:
+    assert identity_record_name(identity_delta(name, previous)) == name
+    assert identity_record_name(identity_restored(name, previous)) == name
+    assert identity_record_name("<identity>\nYour name is now Aida.\n</identity>") == ""
 
 
 @pytest.mark.asyncio

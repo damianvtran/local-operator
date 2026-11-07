@@ -259,7 +259,8 @@ from local_operator.prompts_api import (
     STATE_SECTION_HEADINGS,
     TOOL_INVENTORY_HEADING,
     assemble_system_block_sections,
-    identity_delta_prefix,
+    identity_record_name,
+    identity_restored,
     render_tool_inventory_block,
     split_system_block_sections,
 )
@@ -6953,30 +6954,40 @@ class Session:
                     if name not in sections and text and name not in unknown
                 }
             )
-            if section_changes.get("identity") == "" and self._head_carries_rename(
-                str(prior.get("identity") or "")
-            ):
-                # A RESUME AFTER A MID-SESSION RENAME (review R1-2): the new
-                # process froze the new name into a new head epoch, so the
-                # replayed ``<identity>`` record and the head now agree. A
-                # removal would only say "forget the name you were just told
-                # again above". A genuine rename-back still ships its removal:
-                # there the head names a different name than the record.
-                del section_changes["identity"]
+            if section_changes.get("identity") == "":
+                self._settle_identity_removal(section_changes, str(prior.get("identity") or ""))
             if section_changes:
                 changes[str(index)] = section_changes
         return changes, compaction_id
 
-    def _head_carries_rename(self, record: str) -> bool:
-        """True when ``record`` (an ``<identity>`` rename section) names the
-        name this session's frozen head was built with.
+    def _settle_identity_removal(self, section_changes: dict[str, str], record: str) -> None:
+        """Decide what the ``<identity>`` record ``record`` becomes when the
+        live tail stops rendering one (the live name is the head's again).
 
-        The factory provider publishes that name as ``cos_identity_name`` at
-        its first render (``session_factory._make_system_blocks_provider``);
-        any other provider has none, and nothing is suppressed.
+        Keyed on the name the record was rendered FOR, read back exactly by
+        ``identity_record_name`` (review R2-1: a prefix match confused "Aida"
+        with "Aida, Chief of Staff"), against the name this session's frozen
+        head was built with. The factory provider publishes that name as
+        ``cos_identity_name`` at its first render
+        (``session_factory._make_system_blocks_provider``); any other provider
+        has none, and the plain removal ships as before.
+
+        - Record for the head's name: nothing ships. Either a resume froze the
+          renamed name into a new head epoch (review R1-2), or the rename back
+          was already restated below and this is its re-anchor.
+        - Record for another name, i.e. a genuine rename back to the head's
+          name: ship ONE positive line instead of ``(empty)``. An emptied
+          record that had said it supersedes the head left Haiku 4.5 with no
+          name at all (QA Q5).
         """
-        head_name = getattr(self._system_blocks_provider, "cos_identity_name", "")
-        return bool(head_name) and record.startswith(identity_delta_prefix(str(head_name)))
+        head_name = str(getattr(self._system_blocks_provider, "cos_identity_name", "") or "")
+        if not head_name:
+            return
+        recorded = identity_record_name(record)
+        if recorded == head_name:
+            del section_changes["identity"]
+        else:
+            section_changes["identity"] = identity_restored(head_name, recorded)
 
     def _visible_state_blocks(self) -> list[str]:
         """The system blocks as the model can see them in the LIVE context.

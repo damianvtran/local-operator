@@ -904,15 +904,9 @@ def _ask_queue_queued() -> bool:
     return policy.enabled()
 
 
-def identity_delta_prefix(name: str) -> str:
-    """The opening bytes of the ``<identity>`` rename section naming ``name``.
-
-    Shared with ``Session._system_state_delta``, which must recognise a
-    replayed record naming the name a rebuilt head already carries (see
-    :func:`identity_delta`) without parsing a name that may itself contain
-    commas.
-    """
-    return f"<identity>\nYour name is now {name},"
+# The closing clause every ``<identity>`` record ends on; ``identity_record_name``
+# reads the name back from it.
+_IDENTITY_SIGN = "introduce and sign as "
 
 
 def identity_delta(name: str, previous: str = "") -> str:
@@ -931,10 +925,65 @@ def identity_delta(name: str, previous: str = "") -> str:
     """
     replacing = previous if previous and previous != name else "the name"
     return (
-        f'{identity_delta_prefix(name)} replacing {replacing} under "Your name" above; this '
-        "supersedes that section and any earlier name or instruction calling you "
-        f"otherwise: introduce and sign as {name}.\n</identity>"
+        f'<identity>\nYour name is now {name}, replacing {replacing} under "Your name" '
+        "above; this supersedes that section and any earlier name or instruction "
+        f"calling you otherwise: {_IDENTITY_SIGN}{name}.\n</identity>"
     )
+
+
+def identity_restored(name: str, previous: str = "") -> str:
+    """The ONE-TIME record of a rename back to the head's own name ``name``.
+
+    WHY A POSITIVE LINE, NOT A REMOVAL (PR #3575 QA Q5): the rename record
+    already in history says it supersedes the head's "Your name" section, and
+    emptying it (``## Your name`` / ``(empty)``) left Haiku 4.5 with no name
+    at all in 5 of 5 sessions. So the rename back states the name again and
+    retires the rename it replaces. ``Session._system_state_delta`` journals it
+    in place of the removal; the live tail never renders it (live == head
+    emits no ``<identity>`` section), so it ships once, not every request.
+    ``previous`` is the name the replaced record was rendered for, when known.
+    """
+    earlier = f"the earlier rename to {previous}" if previous else "the earlier rename"
+    return (
+        f'<identity>\nYour name is {name} again, as under "Your name" above; {earlier} '
+        f"no longer applies: {_IDENTITY_SIGN}{name}.\n</identity>"
+    )
+
+
+def identity_record_name(record: str) -> str:
+    """The name an ``<identity>`` record was rendered FOR, or ``""``.
+
+    EXACT, NOT A PREFIX MATCH (review R2-1): a name may contain commas, so
+    "Your name is now Aida, Chief of Staff, …" also starts like a record for
+    "Aida". The candidate name is read from the closing "introduce and sign
+    as <name>." and accepted only when re-rendering :func:`identity_delta` or
+    :func:`identity_restored` with the parsed names reproduces ``record``
+    byte for byte. Anything else (another wording, a name that contains the
+    template's own phrases) is unrecognised and returns ``""``, so a caller
+    treats it as naming nobody and ships rather than suppresses.
+    """
+    end = ".\n</identity>"
+    if not record.endswith(end) or _IDENTITY_SIGN not in record:
+        return ""
+    name = record[: -len(end)].rsplit(_IDENTITY_SIGN, 1)[1]
+    for render, opening, closing in (
+        (
+            identity_delta,
+            f"<identity>\nYour name is now {name}, replacing ",
+            ' under "Your name" above; this supersedes',
+        ),
+        (
+            identity_restored,
+            f'<identity>\nYour name is {name} again, as under "Your name" above; '
+            "the earlier rename to ",
+            " no longer applies: ",
+        ),
+    ):
+        if record.startswith(opening):
+            previous = record[len(opening) :].rsplit(closing, 1)[0]
+            if render(name, previous) == record:
+                return name
+    return name if record == identity_restored(name) else ""
 
 
 def build_system_blocks(
@@ -977,8 +1026,9 @@ def build_system_blocks(
     caller passes the live name as ``renamed_to`` only while it DIFFERS from
     ``identity_name``; it rides the tail as an ``<identity>`` section, which
     ``Session._system_state_delta`` journals as ONE ``[session-state]``
-    section on the next turn. Renamed back, the section vanishes and ships as
-    an explicit removal, leaving the head sentence true again.
+    section on the next turn. Renamed back, the section vanishes and the
+    session journals ONE :func:`identity_restored` line in its place rather
+    than an empty removal (QA Q5), leaving the head sentence true again.
 
     These are the current desired blocks, not a promise of prefix cache
     stability: every system block precedes conversation history on the wire.
