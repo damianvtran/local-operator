@@ -966,6 +966,9 @@ class Resolution:
     #: unresolvable (``cd $(…)``, a glob or CDPATH ``cd``): it may be the one
     #: under ``sessions/``. ``classify`` ranks each HIGH (review R6-MINOR-1).
     blind: list[str] = field(default_factory=list)
+    #: The command turns on ``shopt -s globstar``: only then does ``**`` match
+    #: any depth (bash's default treats it as ``*``; review round 8, MAJOR-1).
+    globstar: bool = False
 
 
 def _operands(
@@ -1547,6 +1550,9 @@ class _Walker:
                 self._assign(a)
             return
         name = os.path.basename(words[0].text)
+        if name == "shopt" and any(w.text == "-s" for w in words[1:]):
+            if any(w.text == "globstar" for w in words[1:]):
+                self.result.globstar = True
         if name in _DECLARE_WORDS:
             for w in words[1:]:
                 if _ASSIGN_RE.match(w.text):
@@ -3070,7 +3076,9 @@ _MENTION_RE = re.compile(
     r"(?:\$\{?HOME\}?|~|\.{1,2})?/[^\s'\"`;|&<>(){}]*"
     # A relative run may not start mid-word (``-st/abs`` is the absolute
     # ``/abs`` glued to a flag, not a relative ``-st/…``).
-    r"|(?<![\w.~$-])[\w.][\w.-]*/[^\s'\"`;|&<>(){}]*"
+    # Its first component may itself be a glob (``lnk*/origin.json``,
+    # ``*/x``): that spelling skipped the backstop (review round 8, MAJOR-2).
+    r"|(?<![\w.~$*?\[\]-])[\w.*?\[][\w.*?\[\]-]*/[^\s'\"`;|&<>(){}]*"
 )
 
 

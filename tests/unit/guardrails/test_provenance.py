@@ -1311,3 +1311,101 @@ def test_evidence_names_case_globs_and_side_files(home: Path, name: str) -> None
 
     if "*" not in name and "lineage" not in name and "created" not in name:
         assert _is_evidence_name(name)
+
+
+# -- round 8: bash glob semantics, relative glob mentions --------------------------------
+
+
+def _py_tree(root: Path, dirs: int = 40, files: int = 20) -> None:
+    """A repo-shaped tree: ``pkg/<d>/<f>.py`` plus a dot dir and a .git."""
+    (root / ".git").mkdir()
+    (root / ".venv" / "lib").mkdir(parents=True)
+    for d in range(dirs):
+        sub = root / "pkg" / f"m{d}"
+        sub.mkdir(parents=True)
+        for f in range(files):
+            (sub / f"f{f}.py").write_text("")
+
+
+def _rank_in(cwd: Path, home: Path, command: str):
+    return classify_bash(command, cwd=str(cwd), env=_env(home), scratchpad=None, session_id=SID)
+
+
+@pytest.mark.parametrize(
+    ("command", "risk"),
+    [
+        # The review's latency table: ranks must equal the pre-round-7 base.
+        ("ruff check pkg/**/*.py", Risk.LOW),
+        ('sed -i "" s/a/b/ **/*.py', Risk.LOW),
+        ("touch pkg/**/f0.py", Risk.LOW),
+        ("black pkg/**/*.py", Risk.LOW),
+        ("rm -rf pkg/**/__pycache__", Risk.LOW),
+        ("ls **/*.py", Risk.LOW),
+        ("rm -f **/*.pyc", Risk.HIGH),  # a repository root, as on base
+    ],
+)
+def test_double_star_is_one_level_like_bash(home: Path, command: str, risk: Risk) -> None:
+    repo = home / "repo"
+    repo.mkdir()
+    _py_tree(repo)
+    assert _rank_in(repo, home, command).risk is risk
+
+
+@pytest.mark.slow
+def test_double_star_check_is_fast(home: Path) -> None:
+    """Loose bound: the round-7 walker cost 0.1-1.7 s here (review round 8)."""
+    import time
+
+    repo = home / "repo"
+    repo.mkdir()
+    _py_tree(repo, dirs=40, files=20)
+    _rank_in(repo, home, "ruff check pkg/**/*.py")  # warm
+    # Best of five: a shared, loaded host stalls single samples (seen at
+    # 70 ms once in three local runs); the regression was 10-30x this bound.
+    best = float("inf")
+    for _ in range(5):
+        t = time.monotonic()
+        _rank_in(repo, home, "ruff check pkg/**/*.py")
+        best = min(best, time.monotonic() - t)
+    assert best < 0.05
+
+
+def test_globstar_only_when_the_command_enables_it(home: Path) -> None:
+    """``**`` reaches a deep link only under ``shopt -s globstar``; a cap
+    overflow is HIGH, never CRITICAL by itself."""
+    from local_operator.guardrails import classify as cls
+
+    child = home / ".local-operator" / "sessions" / CHILD
+    (child / "origin.json").write_text("{}")
+    deep = home / "work" / "a" / "b"
+    deep.mkdir(parents=True)
+    os.symlink(child, deep / "lnk")
+    assert _verdict(home, "sed -i s/a/b/ ~/work/**/origin.json").risk is Risk.LOW
+    on = "shopt -s globstar; sed -i s/a/b/ ~/work/**/origin.json"
+    assert _verdict(home, on).risk is Risk.CRITICAL
+    cls_cap = cls._GLOB_WALK_CAP
+    try:
+        cls._GLOB_WALK_CAP = 1
+        assert _verdict(home, on).risk is Risk.HIGH
+    finally:
+        cls._GLOB_WALK_CAP = cls_cap
+
+
+def test_wildcards_skip_dot_entries_like_bash(home: Path) -> None:
+    child = home / ".local-operator" / "sessions" / CHILD
+    (child / "origin.json").write_text("{}")
+    (home / "work").mkdir()
+    os.symlink(child, home / "work" / ".hid")
+    assert _verdict(home, "sed -i s/a/b/ ~/work/*/origin.json").risk is Risk.LOW
+    assert _verdict(home, "sed -i s/a/b/ ~/work/.h*/origin.json").risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize("command", ["python3 x.py lnk*/origin.json", "python3 x.py */origin.json"])
+def test_relative_glob_first_component_is_a_mention(home: Path, command: str) -> None:
+    """MAJOR-2: a wildcard in the FIRST relative component is still a mention."""
+    child = home / ".local-operator" / "sessions" / CHILD
+    (child / "origin.json").write_text("{}")
+    work = home / "work"
+    work.mkdir()
+    os.symlink(child, work / "lnk1")
+    assert _rank_in(work, home, command).risk is Risk.HIGH

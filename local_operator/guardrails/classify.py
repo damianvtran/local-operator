@@ -313,7 +313,7 @@ def _evidence_reason(path: str, target: Target, prot: _Protected) -> str | None:
     return None
 
 
-def _touch_reason(target: Target, prot: _Protected) -> str | None:
+def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -> str | None:
     """Does ``target`` land in the guard's evidence?
 
     Evidence = anything at or under ``<state>/sessions/`` outside this
@@ -361,7 +361,7 @@ def _touch_reason(target: Target, prot: _Protected) -> str | None:
             # state (``ln -s ../../<child> $P/m`` then ``$P/m*/origin.json``),
             # so expand it now and judge each match by its realpath (review
             # round 7). Over the cap there is no way to know: protected.
-            return _glob_matches_evidence(target.pattern, prot)
+            return _glob_matches_evidence(target.pattern, prot, globstar=globstar)
     return None
 
 
@@ -372,23 +372,33 @@ _GLOB_CAP = 2000
 _GLOB_WALK_CAP = 20_000
 
 
-def _expand_glob(pattern: str) -> list[str] | None:
-    """Matches of ``pattern`` (``**`` = any depth), or ``None`` past a bound.
+def _expand_glob(pattern: str, *, globstar: bool = False) -> list[tuple[str, bool]] | None:
+    """Matches of ``pattern`` as BASH would expand it, or ``None`` past a bound.
 
-    Hand-rolled rather than ``glob.glob`` because that gives no way to bound
-    the WALK, only the results. ``**`` follows directory symlinks (fail
-    closed: some globbers do), each real directory once, so a link cycle
-    cannot loop.
+    Bash semantics, because that is what the command will do (review round
+    8, MAJOR-1: an any-depth ``**`` walked whole repositories, cost up to
+    1.7 s per call and ranked ordinary ``**/*.py`` commands HIGH/CRITICAL):
+
+    * ``**`` is ``*`` — one level — unless the command ran
+      ``shopt -s globstar``; then it is any depth, following directory links
+      once per real directory.
+    * A wildcard never matches a leading ``.`` unless the pattern component
+      itself starts with ``.`` (no ``dotglob``).
+
+    Hand-rolled rather than ``glob.glob`` because that bounds only results,
+    not the walk. Each match carries whether ANY component on its way was a
+    symlink: only those need a ``realpath`` (which costs ~8 lstats each and
+    dominated the check on an 800-match ``**/*.py``).
     """
     parts = [c for c in pattern.split("/") if c]
-    found: list[str] = []
+    found: list[tuple[str, bool]] = []
     visited = 0
-    stack: list[tuple[str, int]] = [("/", 0)]
-    walked: set[tuple[str, int]] = set()
+    walked: set[str] = set()
+    stack: list[tuple[str, int, bool]] = [("/", 0, False)]
     while stack:
-        base, k = stack.pop()
+        base, k, linked = stack.pop()
         if k == len(parts):
-            found.append(base)
+            found.append((base, linked))
             if len(found) > _GLOB_CAP:
                 return None
             continue
@@ -396,8 +406,14 @@ def _expand_glob(pattern: str) -> list[str] | None:
         if not any(ch in part for ch in "*?["):
             nxt = os.path.join(base, part)
             if os.path.lexists(nxt):
-                stack.append((nxt, k + 1))
+                stack.append((nxt, k + 1, linked or os.path.islink(nxt)))
             continue
+        deep = part == "**" and globstar
+        if deep:
+            real = os.path.realpath(base)
+            if real in walked:
+                continue
+            walked.add(real)
         try:
             entries = list(os.scandir(base))
         except OSError:
@@ -405,43 +421,58 @@ def _expand_glob(pattern: str) -> list[str] | None:
         visited += len(entries)
         if visited > _GLOB_WALK_CAP:
             return None
-        if part == "**":
-            key = (os.path.realpath(base), k)
-            if key in walked:
-                continue
-            walked.add(key)
-            stack.append((base, k + 1))  # zero directories
+        hidden_ok = part.startswith(".")
+        if deep:
+            # ``**`` = zero or more directories: try the NEXT part against
+            # these same entries (no second scan), and descend into each
+            # directory still inside ``**``.
+            nxt_part = parts[k + 1] if k + 1 < len(parts) else None
+            if nxt_part is None:
+                found.append((base, linked))
             for e in entries:
+                if e.name.startswith(".") and not hidden_ok:
+                    continue
+                via = linked or e.is_symlink()
+                if nxt_part is not None and _component_matches(e.name, nxt_part):
+                    stack.append((e.path, k + 2, via))
                 try:
-                    is_dir = e.is_dir()
+                    if e.is_dir():
+                        stack.append((e.path, k, via))
                 except OSError:
                     continue
-                if is_dir:
-                    stack.append((e.path, k))  # one more, still inside ``**``
             continue
+        match_part = "*" if part == "**" else part
         for e in entries:
-            if fnmatch.fnmatchcase(e.name, part):
-                stack.append((e.path, k + 1))
+            if e.name.startswith(".") and not hidden_ok:
+                continue
+            if fnmatch.fnmatchcase(e.name, match_part):
+                stack.append((e.path, k + 1, linked or e.is_symlink()))
     return found
 
 
-def _glob_matches_evidence(pattern: str, prot: _Protected) -> str | None:
-    matches = _expand_glob(pattern)
+def _component_matches(name: str, part: str) -> bool:
+    if not any(ch in part for ch in "*?["):
+        return name == part
+    if name.startswith(".") and not part.startswith("."):
+        return False
+    return fnmatch.fnmatchcase(name, part)
+
+
+#: The reason for a glob past the expansion bounds. Unknowable, not a proven
+#: write into evidence: ranked HIGH even where the target is write-shaped
+#: (review round 8, MAJOR-1).
+GLOB_TOO_WIDE = "a glob too wide to check against session state"
+
+
+def _glob_matches_evidence(pattern: str, prot: _Protected, *, globstar: bool = False) -> str | None:
+    matches = _expand_glob(pattern, globstar=globstar)
     if matches is None:
-        return "a glob too wide to check against session state"
-    for match in matches:
-        real = os.path.realpath(match)
-        for state in prot.state_roots:
-            if _under(real, os.path.join(state, _LEDGER_DIRNAME)):
-                return "the guardrail's own records (through a link)"
-            if _under(real, os.path.join(state, _SESSIONS_DIRNAME)) and not any(
-                _under(real, pad) for pad in prot.own_scratchpad
-            ):
-                return "session state (through a link)"
-    return None
-    if len(matches) > _GLOB_CAP:
-        return "a glob too wide to check against session state"
-    for match in matches:
+        return GLOB_TOO_WIDE
+    for match, linked in matches:
+        # No link on the way: the lexical path IS the real one, and the
+        # caller already checked it lexically.
+        if not linked:
+            continue
         real = os.path.realpath(match)
         for state in prot.state_roots:
             if _under(real, os.path.join(state, _LEDGER_DIRNAME)):
@@ -751,6 +782,7 @@ def classify_targets(
     touched: Sequence[Target] = (),
     created: Sequence[Creation] = (),
     blind: Sequence[str] = (),
+    globstar: bool = False,
 ) -> Verdict:
     prot = _protected(env, scratchpad, session_id) if (targets or touched or created) else None
     evidence_hits: list[RankedTarget] = []
@@ -766,15 +798,16 @@ def classify_targets(
             + [Target(path=c.path, op="write", program=c.kind) for c in created]
         )
         for t in writes:
-            reason = _touch_reason(t, prot)
+            reason = _touch_reason(t, prot, globstar=globstar)
             if reason is not None:
-                evidence_hits.append(RankedTarget(t, Risk.CRITICAL, reason))
+                risk = Risk.HIGH if reason == GLOB_TOO_WIDE else Risk.CRITICAL
+                evidence_hits.append(RankedTarget(t, risk, reason))
         critical = {h.target.path for h in evidence_hits}
         for t in touched:
             # A path already refused as a write needs no second, HIGH row.
             if t.op != "touch" or t.path in critical:
                 continue
-            reason = _touch_reason(t, prot)
+            reason = _touch_reason(t, prot, globstar=globstar)
             if reason is not None:
                 evidence_hits.append(
                     RankedTarget(t, Risk.HIGH, f"{reason}, handed to {t.program or 'a program'}")
@@ -826,4 +859,5 @@ def classify_bash(
         touched=resolution.touched,
         created=resolution.created,
         blind=resolution.blind,
+        globstar=resolution.globstar,
     )
