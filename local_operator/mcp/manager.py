@@ -1827,12 +1827,43 @@ class McpToolMeta(TypedDict, total=False):
 
 
 def _tool_to_cache_entry(tool: Tool) -> dict[str, Any]:
-    """Serialize one SDK ``Tool`` into the cache JSON shape."""
-    return {
+    """Serialize one SDK ``Tool`` into the cache JSON shape.
+
+    ``annotations`` must survive the round-trip: a cache-built tool is what a
+    just-booted runtime registers before the live ``tools/list`` lands, and the
+    monitor read-only rule (``annotations.readOnlyHint is True``) refused and
+    struck watches on such tools because the hint had been dropped here. The
+    dump is alias-spelled (``readOnlyHint``) because that is the wire key
+    ``build_agent_tool`` and the read-only evaluator read; the key is omitted
+    when the server declared none, so rows written before this field existed
+    and rows for hint-less tools load identically. The cache digest hashes the
+    server config only, never this payload, so adding the key neither
+    invalidates a usable cache nor forces a re-auth.
+    """
+    entry: dict[str, Any] = {
         "name": tool.name,
         "description": tool.description or "",
         "inputSchema": tool.input_schema or {},
     }
+    annotations = _dump_tool_annotations(getattr(tool, "annotations", None))
+    if annotations:
+        entry["annotations"] = annotations
+    return entry
+
+
+def _dump_tool_annotations(raw: Any) -> dict[str, Any] | None:
+    """Return wire-spelled annotations, or ``None`` when there are none."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return dict(raw) or None
+    dump = getattr(raw, "model_dump", None)
+    if dump is None:
+        return None
+    try:
+        return dict(dump(by_alias=True, exclude_none=True, mode="json")) or None
+    except Exception:  # noqa: BLE001 — an unreadable hint is "no hint"
+        return None
 
 
 class McpManager:

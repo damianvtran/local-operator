@@ -49,8 +49,13 @@ def mcp_tool(
     text: str = "ok",
     error: str | None = None,
     details: dict[str, Any] | None = None,
+    hint: bool = True,
 ) -> AgentTool:
-    """A stand-in MCP tool carrying the read-only hint the verdict gates on."""
+    """A stand-in MCP tool carrying the read-only hint the verdict gates on.
+
+    ``hint=False`` is a tool whose annotations were not (yet) known — the
+    shape a cache row written before annotations were cached builds.
+    """
 
     async def _exec(
         tool_call_id: str,
@@ -71,7 +76,7 @@ def mcp_tool(
         name=name or mcp_name(),
         approval_tier="read",
         parameters={"type": "object", "properties": {"query": {"type": "string"}}},
-        mcp_annotations={"readOnlyHint": True},
+        mcp_annotations={"readOnlyHint": True} if hint else None,
         execute=_exec,
     )
 
@@ -93,8 +98,10 @@ class FakeManager:
         suspended: bool = False,
         servers: list[str] | None = None,
         with_status_apis: bool = True,
+        deferred: bool = False,
     ) -> None:
         self._tools = list(tools or [])
+        self._deferred = deferred
         self._status = status
         self._settling = settling
         self._suspended = suspended
@@ -106,7 +113,7 @@ class FakeManager:
 
     def get_tool_meta(self, name: str) -> dict[str, Any] | None:
         if any(tool.name == name for tool in self._tools):
-            return {"server_name": SERVER, "mcp_tool_name": name, "deferred": False}
+            return {"server_name": SERVER, "mcp_tool_name": name, "deferred": self._deferred}
         return None
 
     def get_all_server_names(self) -> list[str]:
@@ -605,5 +612,134 @@ async def test_a_status_this_build_does_not_know_is_unavailable_and_named(tmp_pa
         state, detail = session._monitor_availability(mcp_name())
         assert state == "unavailable"
         assert 'reported status "warming-up"' in detail
+    finally:
+        await session.dispose()
+
+
+# --- A cache-built tool whose readOnlyHint is not known yet ---------------
+#
+# MEASURED (v0.101.7, 2026-11-05 23:43): session b96a7ed9353a's runtime rolled
+# over, its Slack tools were registered from the MCP tool cache (which then
+# dropped annotations) ahead of the live connect, and monitor m4's first tick
+# was refused "does not declare readOnlyHint" and STRUCK (1 -> 2). A minute
+# later the live ``tools/list`` carried the hint and the same call ticked
+# clean. Until the server is live the hint is unknown, so the tick waits; once
+# live, a tool that genuinely lacks the hint is refused and struck as before.
+
+
+async def _tick_through_scheduler(
+    session: Any, manager: Any, swap: Any, cwd: Any
+) -> dict[str, Any]:
+    """Arm against a hinted live tool, apply ``swap`` (the restart), tick once.
+
+    Arming goes through the real arm gate (which still refuses a hint-less
+    tool), so the watch is armed the way m4 was: against a live tool. The
+    counters come from the scheduler, i.e. what the ladder actually charged.
+    """
+    from tests.unit.monitors.support import drain_checks
+
+    clock = [1_756_000_000_000]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    created = await session._monitors.create(
+        {"name": "watch", "tool": mcp_name(), "arguments": {"query": "up"}},
+        cwd=str(cwd),
+    )
+    assert created.get("created"), created
+    swap(manager)
+    clock[0] += 120_000
+    await session._monitors.pump(now_ms=clock[0])
+    await drain_checks(session._monitors)
+    runtime = session._monitors.runtime(created["spec"].id)
+    assert runtime is not None
+    return runtime.counters
+
+
+def _restart_onto_cache(manager: Any, *, status: str, deferred: bool) -> None:
+    manager._tools = [mcp_tool(hint=False)]
+    manager._status = status
+    manager._deferred = deferred
+
+
+@pytest.mark.asyncio
+async def test_a_cache_built_tool_without_its_hint_waits_while_its_server_connects(
+    tmp_path: Any,
+) -> None:
+    manager = FakeManager([mcp_tool()])
+    session = _session(tmp_path, manager)
+    try:
+        _restart_onto_cache(manager, status="connecting", deferred=True)
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome["kind"] == "unavailable"
+        assert "readOnlyHint" in outcome["error"]
+        assert "not connected yet" in outcome["error"]
+
+        manager._tools = [mcp_tool()]
+        counters = await _tick_through_scheduler(
+            session,
+            manager,
+            lambda m: _restart_onto_cache(m, status="disconnected", deferred=True),
+            tmp_path,
+        )
+        assert counters["consecutive_failures"] == 0, counters
+        assert counters["unavailable_ticks"] == 1, counters
+        assert counters["last_note"] == "tool unavailable — retrying", counters
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_connected_server_still_serving_the_cached_tool_waits(tmp_path: Any) -> None:
+    """The instant between the connect landing and the live rebuild: the
+    server reads ``connected`` but the registry still holds the cache-built
+    (``deferred``) tool, whose hint is not the server's live answer yet.
+    """
+    manager = FakeManager([mcp_tool(hint=False)], status="connected", deferred=True)
+    session = _session(tmp_path, manager)
+    try:
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome["kind"] == "unavailable"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_live_tool_without_its_hint_is_still_refused_and_struck(tmp_path: Any) -> None:
+    """THE CONTROL: the safety rule is unchanged for a live-connected tool."""
+    manager = FakeManager([mcp_tool()])
+    session = _session(tmp_path, manager)
+    try:
+        counters = await _tick_through_scheduler(
+            session,
+            manager,
+            lambda m: _restart_onto_cache(m, status="connected", deferred=False),
+            tmp_path,
+        )
+        assert counters["consecutive_failures"] == 1, counters
+        assert "does not declare readOnlyHint" in str(counters["last_error"]), counters
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome.get("kind") is None
+        assert "does not declare readOnlyHint" in outcome["error"]
+        # Arm time is untouched: a hint-less tool still cannot be armed.
+        refused = await session._monitors.create(
+            {"name": "again", "tool": mcp_name(), "arguments": {"query": "up"}},
+            cwd=str(tmp_path),
+        )
+        assert not refused.get("created"), refused
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_waiting_tick_succeeds_once_the_live_tool_carries_the_hint(
+    tmp_path: Any,
+) -> None:
+    manager = FakeManager([mcp_tool(hint=False)], status="connecting", deferred=True)
+    session = _session(tmp_path, manager)
+    try:
+        assert (await session._run_monitor_check(_spec()))["kind"] == "unavailable"
+        manager._tools = [mcp_tool()]
+        manager._status = "connected"
+        manager._deferred = False
+        assert (await session._run_monitor_check(_spec()))["error"] is None
     finally:
         await session.dispose()

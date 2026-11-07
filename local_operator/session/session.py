@@ -236,6 +236,7 @@ from local_operator.monitors.delivery import (
     format_monitor_notice_text,
 )
 from local_operator.monitors.readonly import (
+    mcp_readonly_hint_missing,
     monitor_call_arguments,
     monitor_call_verdict,
 )
@@ -30928,6 +30929,56 @@ class Session:
             logger.debug("monitor server lookup failed for %s", name, exc_info=True)
         return None
 
+    def _monitor_hint_pending_connect(self, name: str) -> str | None:
+        """The wait detail when a tick's readOnlyHint refusal cannot be final yet.
+
+        MEASURED (v0.101.7, 2026-11-05 23:43): a runtime rolled over, its MCP
+        tools were registered from the tool cache ahead of the live connect,
+        and monitor m4's first tick was refused "does not declare readOnlyHint"
+        and STRUCK; a minute later the live ``tools/list`` carried the hint and
+        the same call ticked cleanly. The cache now keeps annotations, but a
+        row written before that (or a server that connects slowly) still
+        yields a tool whose hint is simply not known yet. The hint is the
+        server's to declare and only a live connection is authoritative, so
+        until then the tick WAITS — the same no-strike class as a server that
+        is still connecting (``_monitor_availability``).
+
+        THE SAFETY RULE IS UNCHANGED: this never admits a call. The tick is
+        still refused (nothing executes); it is only not charged. Once the
+        server reports ``connected`` a tool still lacking the hint returns
+        ``None`` here and is refused and struck exactly as before. Arm time
+        does not consult this, so an arm still refuses a hint-less tool. A
+        probe that cannot answer fails CLOSED (``None`` → strike), like
+        ``_monitor_availability``.
+        """
+        if not name.startswith("mcp__"):
+            return None
+        tool = self._resolve_monitor_tool(name)
+        if tool is None or not mcp_readonly_hint_missing(tool):
+            # Not the hint refusal (absent tool, or a shape refusal on a tool
+            # that does declare the hint): those keep their strike.
+            return None
+        manager = self.mcp_manager
+        server = self._monitor_server_for(name)
+        if manager is None or server is None:
+            return None
+        try:
+            status = manager.get_connection_status(server)
+            meta = manager.get_tool_meta(name)
+        except Exception:  # noqa: BLE001 — fail CLOSED: an unanswerable probe strikes
+            logger.debug("monitor hint probe failed for %s", name, exc_info=True)
+            return None
+        # ``deferred`` marks a tool built from the cache rather than from this
+        # connection's ``tools/list``; it covers the instant between the
+        # connect landing and the live rebuild replacing the cached tool.
+        cache_built = isinstance(meta, Mapping) and meta.get("deferred") is True
+        if status == "connected" and not cache_built:
+            return None
+        return (
+            f'MCP server "{server}" is not connected yet, so "{name}"\'s readOnlyHint '
+            "cannot be read from its live tool list"
+        )
+
     def _validate_monitor_call(self, tool_name: str, arguments: Mapping[str, Any]) -> str | None:
         """The gate, shared by arm-time validation and the run-time re-check
         (§6.1/§6.8): tool present, the harness's effective tier still ``read``,
@@ -30966,6 +31017,9 @@ class Session:
             return {"error": detail, "kind": "unavailable"}
         reason = self._validate_monitor_call(spec.tool, spec.arguments)
         if reason is not None:
+            pending = self._monitor_hint_pending_connect(spec.tool)
+            if pending is not None:
+                return {"error": pending, "kind": "unavailable"}
             return {"error": reason}
         tool = self._resolve_monitor_tool(spec.tool)
         if tool is None:  # pragma: no cover — validate() above covers this
