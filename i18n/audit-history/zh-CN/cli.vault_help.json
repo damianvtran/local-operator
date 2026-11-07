@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "cli.vault_help",
-  "history_sha256": "45c9e7c921176767ef84f72fa1286032b4d0d0a303d724bd1f5f41b755608b6d",
+  "history_sha256": "77f5b201ea3d96bfef8b94477770a19abbd18e355a23f87b06794bc682bf8120",
   "entries": [
     {
       "locale": "zh-CN",
@@ -24,6 +24,27 @@
       },
       "status": "passed",
       "note": "Independent audit (not the translator) of cli.vault_help at source hash 2b1ee0e09cb9: 7/7 keys present in en order; no placeholders in source or translation; Radient Vault, Radient Team, JSON and 600 kept verbatim; NFC, no bidi/zero-width controls; repo check.py --catalogues-only 0 problems. Help mood and default-value wording checked against this locale's other cli.*_help catalogues; credentials, agent and approvals against the glossary; fingerprint/key/console consistent with cli.vault in this locale. Verb-first help labels match zh-CN cli.*_help; '凭据' credentials and '指纹' fingerprint consistent with cli.vault. 0 findings. Single independent audit pass by a different agent on the SAME model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.vault_help",
+      "source_sha256": "3c5094de2590fe3103c87356f12371a672b1f16525e209ed19985221badaa3d0",
+      "translator": {
+        "agent": "i18n-translator (coder subagent, job 65ed0781eb77, round-1 remediation hand-update)",
+        "session": "cbcaa1d210f3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (translation-auditor, radientdev team subagent, round 2)",
+        "session": "45670e86d2b4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 delta audit (not the translator) of cli.vault_help at source hash 3c5094de2590 after remediation 4be71bb4 (supersedes the 0753443 row at the old hash). Scope is CHANGED/NEW keys only — 1 key: changed disconnect; unchanged keys carry the round-1 audit at 0753443 (transitive coverage, no full re-audit claimed); removed keys key_heading/status_open need no row. Checks: key set/order parity with en; ICU argument parity per repo check.py --catalogues-only (0 problems); backticked commands (`lop vault connect`, `lop vault disconnect`) byte-identical; Ctrl+C, Radient Vault and the '·' separator kept; NFC, no bidi/zero-width controls; plurals rendered with the repo formatter (disconnected at 1/2/5/21, waiting_seconds at 1/5/22). Safety meaning against en .context.json: compare/compare_stop keep compare-BEFORE-approving and stop-on-mismatch with no harness-verified claim; disconnected says the AGENT can no longer read; store_error says nothing was removed. disconnect keeps 'this machine's agent keys' (plural) and that access is revoked separately in the console. 0 findings. Unresolved blocker/major: 0. Single independent audit pass by a different agent on the same model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification."
     }
   ]
 }

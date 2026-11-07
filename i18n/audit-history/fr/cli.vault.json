@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "cli.vault",
-  "history_sha256": "8a6268167f47bc27ff596c22885cd48d9ff5c1391cf1951669bb55ec44d7543b",
+  "history_sha256": "b08ea744bdfd1975fbe6440f8eba0e2bc32ad27ae28e408e581df23d32d114f8",
   "entries": [
     {
       "locale": "fr",
@@ -24,6 +24,27 @@
       },
       "status": "passed",
       "note": "Independent audit (not the translator) of cli.vault at source hash 88cd0862f4e2: 24/24 keys present in en order; ICU placeholder names/kinds parity with en ({endpoint}, {org}, {minutes}, {until}, {url}); every backticked command (`lop vault connect`, `lop login radient`, `lop team-bridge setup`) byte-identical; Ctrl+C, Radient Vault, Radient Team, Local Operator, JSON and 600 kept verbatim; {url} stays last in revoke_hint; NFC, no bidi/zero-width controls; repo check.py --catalogues-only 0 problems. Safety meaning checked against en .context.json: compare tells the person to check the 16 groups on the approval page BEFORE approving and never claims the harness verified anything; unavailable/not_team carry no up-sell or retry advice; connected_until bounds READ access at {until}; disconnected/revoke_hint keep local-key removal distinct from console revocation. Glossary: agent, approvals, credentials, team plan and 'agent messages' (matches cli.team_bridge / cli.team_bridge_hold) checked against this locale's catalogues and style guide; 'vault' and 'fingerprint' have no prior catalogue rendering, so this namespace sets them. Register vous; U+202F before ':' and ';' verified by codepoint (8 keys); U+2019 apostrophes. Findings 0 blocker / 2 major / 2 minor, all majors fixed: (M) waiting lacked the required fr CLDR `many` arm — added `many {# de minutes}` (renders '1 000 000 de minutes'); (M) no_access rendered the product 'Vault membership' as 'adhésion au coffre' while not_approved says 'adhésion à Vault' — now 'votre adhésion à Vault'; (m, fixed) connected_until 'les coffres que vous lui avez partagés jusqu’au {until}' let the date attach to 'shared' and used the 'partager à qqn' calque — now 'Jusqu’au {until}, cet agent peut lire les coffres que vous avez partagés avec lui.' Minor deferred: endpoint is rendered 'point de terminaison' in key_heading while wire.settings keeps the Latin 'endpoint'; not a glossary row and the bep_ id beside it disambiguates, so left for a glossary decision. Unresolved blocker/major: 0. Plurals one/many/other rendered at 1/2/5/21/1000000 with the repo formatter. Single independent audit pass by a different agent on the SAME model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification. Corrections were applied by the auditor at the manager's instruction (team radientdev); the corrected strings have no second independent audit, and a separate re-audit of them is recommended."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.vault",
+      "source_sha256": "0da8f67568d315a26b9cb76068d0391f1960bbfb89e601f502e7dd2fea4047de",
+      "translator": {
+        "agent": "i18n-translator (coder subagent, job 65ed0781eb77, round-1 remediation hand-update)",
+        "session": "cbcaa1d210f3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (translation-auditor, radientdev team subagent, round 2)",
+        "session": "45670e86d2b4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "Independent round-2 delta audit (not the translator) of cli.vault at source hash 0da8f67568d3 after remediation 4be71bb4 (supersedes the 0753443 row at the old hash). Scope is CHANGED/NEW keys only — 16 keys: new title, endpoint_row, fingerprint_label, fingerprint_held, compare_stop, connected_scope, waiting_seconds, key_unreadable, store_error; changed compare, connected_until, no_access, frozen, status_not_connected, disconnected, revoke_hint; unchanged keys carry the round-1 audit at 0753443 (transitive coverage, no full re-audit claimed); removed keys key_heading/status_open need no row. Checks: key set/order parity with en; ICU argument parity per repo check.py --catalogues-only (0 problems); backticked commands (`lop vault connect`, `lop vault disconnect`) byte-identical; Ctrl+C, Radient Vault and the '·' separator kept; NFC, no bidi/zero-width controls; plurals rendered with the repo formatter (disconnected at 1/2/5/21, waiting_seconds at 1/5/22). Safety meaning against en .context.json: compare/compare_stop keep compare-BEFORE-approving and stop-on-mismatch with no harness-verified claim; disconnected says the AGENT can no longer read; store_error says nothing was removed. Findings: 0 blocker / 0 major / 3 minor. Register vous; one/many/other present for both plurals. (m, fixed) revoke_hint translated the console page title 'Agent access', but user-console is English-only (no i18n; page title 'Agent access' in src/lib/vault-agent-access.ts at user-console main cd7d559), so a translated name cannot be found on the page — now names the page verbatim in this locale's quotes, per the context note 'keep the console's term'. (m, fixed) seven hand-updated keys (no_access, status_not_connected, endpoint_row, fingerprint_label, fingerprint_held, waiting_seconds, store_error) used U+0020 before ':'/';' where fr.md requires U+202F (status_not_connected had U+202F at round 1) — replaced; verified by codepoint, no plain-space colon left in the namespace; revoke_hint guillemets carry U+202F inside. Note: endpoint_row/fingerprint_label/fingerprint_held translate the console field labels; acceptable for CLI labels (the person compares the 16 groups, not the label), recorded, not a finding. Minor accepted: store_error renders the local secret store with the same head noun as 'vault' in fr (coffre), ru (хранилище) and vi (kho); this follows existing catalogue precedent (cli.qwencloud_help.migrate, relay.asks) and 'local' disambiguates, so not changed. Unresolved blocker/major: 0. Single independent audit pass by a different agent on the same model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification. Corrections applied by the auditor at the manager's instruction; those corrected strings have no second independent audit."
     }
   ]
 }

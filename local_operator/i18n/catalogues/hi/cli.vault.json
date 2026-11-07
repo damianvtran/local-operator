@@ -20,7 +20,7 @@
   "cli.vault.status_not_connected": "कनेक्ट नहीं है: इस कुंजी के लिए कोई सक्रिय स्वीकृति नहीं है। `lop vault connect` चलाएँ।",
   "cli.vault.disconnected": "{count, plural, one {इस मशीन की एजेंट कुंजी हटा दी गई।} other {इस मशीन से # एजेंट कुंजियाँ हटा दी गईं।}} यह एजेंट अब कोई वॉल्ट नहीं पढ़ सकता।",
   "cli.vault.nothing_to_remove": "इस मशीन पर हटाने के लिए कोई एजेंट कुंजी नहीं है।",
-  "cli.vault.revoke_hint": "आपने जो एक्सेस दिया है उसे रद्द करने के लिए कंसोल में एजेंट एक्सेस खोलें:",
+  "cli.vault.revoke_hint": "आपने जो एक्सेस दिया है उसे रद्द करने के लिए कंसोल में “Agent access” पेज खोलें:",
   "cli.vault.title": "Radient Vault एजेंट एक्सेस · {org}",
   "cli.vault.endpoint_row": "एजेंट एंडपॉइंट: {endpoint}",
   "cli.vault.fingerprint_label": "कुंजी फ़िंगरप्रिंट:",

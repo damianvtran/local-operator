@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "cli.vault_help",
-  "history_sha256": "bd2ca08bb06b55ef8e5ec1b058a93a7506b035e10f1ae1a42193b8f53927ce7e",
+  "history_sha256": "8fa01c59c9c1fb25fcfc9e345e5684d2afee9f84b3b34c5cdb13d31ff18ce3fe",
   "entries": [
     {
       "locale": "ru",
@@ -24,6 +24,27 @@
       },
       "status": "passed",
       "note": "Independent audit (not the translator) of cli.vault_help at source hash 2b1ee0e09cb9: 7/7 keys present in en order; no placeholders in source or translation; Radient Vault, Radient Team, JSON and 600 kept verbatim; NFC, no bidi/zero-width controls; repo check.py --catalogues-only 0 problems. Help mood and default-value wording checked against this locale's other cli.*_help catalogues; credentials, agent and approvals against the glossary; fingerprint/key/console consistent with cli.vault in this locale. Infinitive help mood matches ru cli.*_help; 'учётные данные' = glossary credentials; 'отпечаток' fingerprint. Findings 0 blocker / 0 major / 1 minor, fixed: status 'доступен ли доступ агентов' tautology — now 'открыт ли доступ агентов', matching cli.vault.status_open. Unresolved blocker/major: 0. Single independent audit pass by a different agent on the SAME model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification. Corrections were applied by the auditor at the manager's instruction (team radientdev); the corrected strings have no second independent audit, and a separate re-audit of them is recommended."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.vault_help",
+      "source_sha256": "3c5094de2590fe3103c87356f12371a672b1f16525e209ed19985221badaa3d0",
+      "translator": {
+        "agent": "i18n-translator (coder subagent, job 65ed0781eb77, round-1 remediation hand-update)",
+        "session": "cbcaa1d210f3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (translation-auditor, radientdev team subagent, round 2)",
+        "session": "45670e86d2b4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 delta audit (not the translator) of cli.vault_help at source hash 3c5094de2590 after remediation 4be71bb4 (supersedes the 0753443 row at the old hash). Scope is CHANGED/NEW keys only — 1 key: changed disconnect; unchanged keys carry the round-1 audit at 0753443 (transitive coverage, no full re-audit claimed); removed keys key_heading/status_open need no row. Checks: key set/order parity with en; ICU argument parity per repo check.py --catalogues-only (0 problems); backticked commands (`lop vault connect`, `lop vault disconnect`) byte-identical; Ctrl+C, Radient Vault and the '·' separator kept; NFC, no bidi/zero-width controls; plurals rendered with the repo formatter (disconnected at 1/2/5/21, waiting_seconds at 1/5/22). Safety meaning against en .context.json: compare/compare_stop keep compare-BEFORE-approving and stop-on-mismatch with no harness-verified claim; disconnected says the AGENT can no longer read; store_error says nothing was removed. disconnect keeps 'this machine's agent keys' (plural) and that access is revoked separately in the console. 0 findings. Unresolved blocker/major: 0. Single independent audit pass by a different agent on the same model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification."
     }
   ]
 }

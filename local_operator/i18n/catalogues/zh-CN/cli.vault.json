@@ -20,7 +20,7 @@
   "cli.vault.status_not_connected": "未连接：此密钥没有有效的批准。运行`lop vault connect`。",
   "cli.vault.disconnected": "{count, plural, other {已从此机器删除#个智能体密钥。}}此智能体将无法再读取任何保险库。",
   "cli.vault.nothing_to_remove": "此机器没有可删除的智能体密钥。",
-  "cli.vault.revoke_hint": "如需撤销你授予的访问权限，请在控制台中打开“智能体访问”：",
+  "cli.vault.revoke_hint": "如需撤销你授予的访问权限，请在控制台中打开“Agent access”页面：",
   "cli.vault.title": "Radient Vault智能体访问 · {org}",
   "cli.vault.endpoint_row": "智能体端点：{endpoint}",
   "cli.vault.fingerprint_label": "密钥指纹：",

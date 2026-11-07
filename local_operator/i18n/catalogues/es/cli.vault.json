@@ -20,7 +20,7 @@
   "cli.vault.status_not_connected": "No conectado: esta clave no tiene ninguna aprobación activa. Ejecuta `lop vault connect`.",
   "cli.vault.disconnected": "{count, plural, one {Se eliminó la clave de agente de esta máquina.} many {Se eliminaron # de claves de agente de esta máquina.} other {Se eliminaron # claves de agente de esta máquina.}} Este agente ya no puede leer ninguna bóveda.",
   "cli.vault.nothing_to_remove": "Esta máquina no tiene ninguna clave de agente que eliminar.",
-  "cli.vault.revoke_hint": "Para revocar el acceso que diste, abre Acceso de agentes en la consola:",
+  "cli.vault.revoke_hint": "Para revocar el acceso que diste, abre la página “Agent access” de la consola:",
   "cli.vault.title": "Acceso de agentes a Radient Vault · {org}",
   "cli.vault.endpoint_row": "Punto de conexión del agente: {endpoint}",
   "cli.vault.fingerprint_label": "Huella de la clave:",

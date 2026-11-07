@@ -20,7 +20,7 @@
   "cli.vault.status_not_connected": "منسلک نہیں: اس کلید کی کوئی فعال منظوری نہیں۔ `lop vault connect` چلائیں۔",
   "cli.vault.disconnected": "{count, plural, one {اس مشین کی ایجنٹ کلید ہٹا دی گئی۔} other {اس مشین سے # ایجنٹ کلیدیں ہٹا دی گئیں۔}} یہ ایجنٹ اب کوئی والٹ نہیں پڑھ سکتا۔",
   "cli.vault.nothing_to_remove": "اس مشین پر ہٹانے کے لیے کوئی ایجنٹ کلید نہیں۔",
-  "cli.vault.revoke_hint": "آپ کی دی ہوئی رسائی منسوخ کرنے کے لیے کنسول میں ایجنٹ رسائی کھولیں:",
+  "cli.vault.revoke_hint": "آپ کی دی ہوئی رسائی منسوخ کرنے کے لیے کنسول میں “Agent access” کا صفحہ کھولیں:",
   "cli.vault.title": "Radient Vault ایجنٹ رسائی · {org}",
   "cli.vault.endpoint_row": "ایجنٹ اینڈ پوائنٹ: {endpoint}",
   "cli.vault.fingerprint_label": "کلید کا فنگر پرنٹ:",
