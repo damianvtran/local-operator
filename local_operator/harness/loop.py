@@ -7240,6 +7240,7 @@ class AgentLoop:
                 user_request=guard_check.last_user_request(context.messages),
                 intent=item.intent or "",
                 operator=operator,
+                messages=context.messages if tool.name == "bash" else None,
             )
             return await guard_check.check_tool_call(
                 tool.name,

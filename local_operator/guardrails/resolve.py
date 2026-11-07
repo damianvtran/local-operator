@@ -782,7 +782,11 @@ class Target:
     #: Absolute, normalised path; for a glob/opaque word, the deepest literal
     #: directory above the unknowable part. ``None`` when nothing literal remains.
     path: str | None
-    op: str  # "delete" | "move" | "overwrite" | "clean"
+    #: ``append`` is a write that destroys nothing (``>>``, ``tee -a``,
+    #: ``sqlite3 FILE``, a copy INTO a directory). It is ranked only where the
+    #: write itself is the danger: the guard's own evidence (transcripts,
+    #: lineage, ask store, ledger) — see ``classify._evidence_reason``.
+    op: str  # "delete" | "move" | "overwrite" | "clean" | "append"
     program: str
     pattern: str | None = None
     empty: list[str] = field(default_factory=list)
@@ -982,6 +986,7 @@ _SHRED_VALUE_FLAGS = frozenset({"-n", "-s", "--iterations", "--size"})
 _TRUNCATE_VALUE_FLAGS = frozenset({"-s", "-r", "--size", "--reference"})
 _MV_VALUE_FLAGS = frozenset({"-t", "-S", "--suffix", "--target-directory"})
 _RSYNC_VALUE_FLAGS = frozenset({"-e", "--rsh", "--exclude", "--include", "--filter", "-f"})
+_SQLITE_VALUE_FLAGS = frozenset({"-cmd", "-init", "-separator", "-newline", "-nullvalue"})
 _MKDIR_VALUE_FLAGS = frozenset({"-m", "--mode", "--context"})
 _MKTEMP_VALUE_FLAGS = frozenset({"-p", "--suffix"})
 _GIT_CLONE_VALUE_FLAGS = frozenset(
@@ -1492,11 +1497,11 @@ class _Walker:
                     self._isolated_walk(body, depth + 1)
         herestrings: list[str] = []
         for op, raw in redirects:
-            if op in (">", ">|"):
+            if op in (">", ">|", ">>"):
                 for exp in expand_all(raw, st.env, st.home):
                     if exp.text.startswith("/dev/"):
                         continue
-                    self._add(exp, "overwrite", ">")
+                    self._add(exp, "append" if op == ">>" else "overwrite", op)
             elif op == "<<<":
                 herestrings.append(expand(raw, st.env, st.home).text)
         # Leading prefix words and assignments.
@@ -1607,7 +1612,7 @@ class _Walker:
         if name in ("cp", "gcp", "install"):
             operands, _ = _operands(args, _MV_VALUE_FLAGS)
             if len(operands) >= 2:
-                self._add_overwrite_dest(operands[-1], name)
+                self._add_overwrite_dest(operands[-1], name, operands[:-1])
             return
         if name == "rsync":
             self._rsync(args)
@@ -1628,9 +1633,16 @@ class _Walker:
             return
         if name == "tee":
             operands, flags = _operands(args)
-            if not _has_short(flags, "a") and "--append" not in flags:
-                for w in operands:
-                    self._add(w, "overwrite", name)
+            appending = _has_short(flags, "a") or "--append" in flags
+            for w in operands:
+                self._add(w, "append" if appending else "overwrite", name)
+            return
+        if name == "sqlite3":
+            # ``sqlite3 FILE [SQL]`` writes FILE whatever the SQL says; the
+            # guard's ledger is a sqlite file (R1-MAJOR-1).
+            operands, _ = _operands(args, _SQLITE_VALUE_FLAGS)
+            if operands:
+                self._add(operands[0], "append", name)
             return
         if name in ("sed", "gsed") and _in_place_edit(name, args):
             self._in_place(name, args)
@@ -2005,7 +2017,7 @@ class _Walker:
         else:
             sources = operands[:-1]
             if len(operands) >= 2:
-                self._add_overwrite_dest(operands[-1], "mv")
+                self._add_overwrite_dest(operands[-1], "mv", sources)
         for w in sources:
             self._add(w, "move", "mv")
 
@@ -2165,12 +2177,24 @@ class _Walker:
                 self.result.targets.append(extra)
             del var
 
-    def _add_overwrite_dest(self, exp: Expanded, program: str) -> None:
+    def _add_overwrite_dest(
+        self, exp: Expanded, program: str, sources: list[Expanded] | None = None
+    ) -> None:
         if exp.opaque or exp.pattern is not None:
             return
         path, _ = _absolute(exp.text, self.state.cwd)
         if path is not None and os.path.isdir(path):
-            return  # moving/copying INTO a directory replaces nothing named here
+            # Moving/copying INTO a directory replaces nothing named here, but
+            # it CREATES ``dir/<source name>``: recorded as an append so a
+            # fake session directory moved into ``<state>/sessions/`` is ranked
+            # (``classify._evidence_reason``) and nothing else changes.
+            for src in sources or ():
+                if src.opaque or src.pattern is not None or not src.text:
+                    continue
+                name = os.path.basename(src.text.rstrip("/"))
+                if name:
+                    self._add(Expanded(text=os.path.join(path, name)), "append", program)
+            return
         self._add(exp, "overwrite", program)
 
     def _add_stdin(self, program: str) -> None:

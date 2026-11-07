@@ -17,10 +17,12 @@ bar for anything else:
    realpath AND ``st_dev``/``st_ino``, so a directory deleted and re-made by
    someone else, or swapped for a symlink, no longer matches.
 2. **Clean linked worktree.** ``git worktree remove <path>`` without
-   ``--force`` deletes nothing git cannot restore: git itself refuses a dirty
-   tree or the primary checkout. ``clean_linked_worktree`` proves that ahead
-   of time so the guard can rank it LOW.
-3. **Trusted words.** Only the operator's direct messages, and their answers
+   ``--force`` refuses tracked/untracked changes and the primary checkout by
+   itself, but takes ignored files and a detached HEAD's commits with it.
+   ``worktree_state`` proves those absent too (only regenerable ignored
+   output, HEAD on a branch or in some ref) before the guard ranks it LOW.
+3. **Trusted words.** Only the operator's direct messages (in a session the
+   operator opened — never a delegating agent's brief), and their answers
    to ``ask`` as recorded in the ask store, are consent. Team Bridge
    deliveries, peer-agent messages, hub notes and tool output are DATA: a
    compromised or confused agent can write anything into them. A peer message
@@ -48,6 +50,7 @@ from __future__ import annotations
 
 import fnmatch
 import glob as _glob
+import json
 import logging
 import os
 import re
@@ -84,8 +87,9 @@ _MAX_ASKS = 4
 #: another session's hop, not a human surface.
 TRUSTED_ASK_SURFACES = frozenset({"terminal", "tui", "desktop", "mirror"})
 
+#: Words that make an ask answer a refusal ("Leave them", "No, keep it").
+_DECLINE_RE = re.compile(r"(?i)\b(no|keep|cancel|don'?t|do not|stop|leave)\b")
 _ASK_ID_RE = re.compile(r"(?<![\w-])(a-[0-9a-f]{4,12})(?![\w-])")
-_SESSION_ID_RE = re.compile(r"(?<![0-9a-f])([0-9a-f]{12})(?![0-9a-f])")
 
 
 # -- ledger -------------------------------------------------------------------
@@ -344,14 +348,37 @@ def _git(args: Sequence[str], cwd: str) -> str | None:
     return proc.stdout if proc.returncode == 0 else None
 
 
+#: Ignored entries a clean-worktree removal may take with it: build and
+#: dependency output any checkout regenerates. Matched on the entry's basename.
+_REGENERABLE = frozenset(
+    {
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "build",
+        "dist",
+        ".next",
+        "target",
+        ".turbo",
+        "coverage",
+        ".tox",
+    }
+)
+
+
 def worktree_state(path: str) -> str:
     """``clean`` / ``dirty`` / ``not-linked`` / ``unknown`` for a worktree path.
 
     Linked = its ``.git`` is a FILE, its git-dir differs from the common dir,
     and the repository's ``git worktree list`` names it (not as the main
-    checkout). Clean = ``git status --porcelain --untracked-files=all`` prints
-    nothing; ignored files are not reported, matching what ``git worktree
-    remove`` itself refuses on.
+    checkout). Clean = ALL of: no tracked or untracked change, no ignored entry
+    outside :data:`_REGENERABLE`, and HEAD on a branch or contained in some
+    ref. Anything less is ``dirty`` and takes the ordinary ranking — where an
+    OWN worktree can still pass through the ledger or history evidence.
     """
     try:
         real = os.path.realpath(path)
@@ -382,7 +409,39 @@ def worktree_state(path: str) -> str:
     status = _git(["status", "--porcelain", "--untracked-files=all"], real)
     if status is None:
         return "unknown"
-    return "clean" if not status.strip() else "dirty"
+    if status.strip():
+        return "dirty"
+    # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
+    # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy
+    # of its history went with it). Only regenerable entries may remain; a
+    # nested repository inside an ignored directory surfaces as that
+    # directory, which is not on the list, so it also counts as dirty.
+    ignored = _git(["status", "--porcelain", "--ignored"], real)
+    if ignored is None:
+        return "unknown"
+    for line in ignored.splitlines():
+        if not line.startswith("!! "):
+            continue
+        name = os.path.basename(line[3:].strip().strip('"').rstrip("/"))
+        if name not in _REGENERABLE and not fnmatch.fnmatchcase(name, "*.pyc"):
+            return "dirty"
+    # A detached HEAD whose commit no ref contains is lost with the tree.
+    if _git(["symbolic-ref", "-q", "HEAD"], real) is None:
+        refs = _git(
+            [
+                "for-each-ref",
+                "--count=1",
+                "--contains",
+                "HEAD",
+                "refs/heads",
+                "refs/remotes",
+                "refs/tags",
+            ],
+            real,
+        )
+        if not (refs or "").strip():
+            return "dirty"
+    return "clean"
 
 
 def is_primary_checkout(path: str) -> bool:
@@ -479,7 +538,9 @@ def verified_ask(
         if q.get("secret"):
             continue
         chosen = [str(v) for v in (answers.get(str(q.get("id") or "")) or [])]
-        if not chosen:
+        if not chosen or any(_DECLINE_RE.search(v) for v in chosen):
+            # Deterministic veto (review R1-MINOR-3): a declining answer is
+            # never consent, whatever a judge that read the history concludes.
             continue
         options = "; ".join(
             str(o.get("label") or "") for o in (q.get("options") or []) if isinstance(o, Mapping)
@@ -507,6 +568,65 @@ def _text_of(message: Any) -> str:
     return str(details.get("body") or details.get("text") or "")
 
 
+def _origin(root: Path, session_id: str) -> dict[str, Any] | None:
+    """``origin.json`` of a session; ``{}`` when it has none (operator-opened)."""
+    path = root / "sessions" / session_id / "origin.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        return None  # unreadable: neither human nor a lineage pointer
+    return value if isinstance(value, dict) else None
+
+
+def session_lineage(
+    session_id: str,
+    ancestors: Sequence[str] = (),
+    *,
+    state_root: str | os.PathLike[str] | None = None,
+) -> tuple[list[str], bool]:
+    """``(lineage, operator_opened)`` for ``session_id``.
+
+    Lineage = the session, its harness-known ancestors, and every parent or
+    opener their ``origin.json`` names (``parent`` for a subagent,
+    ``opened_by.session`` for an agent-opened workstream), followed upward.
+    Those are the only ask stores a pointer may resolve in (review R1-MINOR-1:
+    a bare hex string must not aim the lookup at any session on disk).
+    ``origin.json`` writes rank CRITICAL, so the chain is not shell-forgeable.
+
+    ``operator_opened`` is True only for a session with NO ``origin.json``,
+    which is how every session a person opened (terminal, desktop, phone) is
+    stored; ``subagent``, ``agent-workstream``, ``agent-shell`` and the rest
+    were opened by an agent, so their user rows are the delegator's prose.
+    """
+    from local_operator.paths import config_dir
+
+    root = Path(state_root) if state_root is not None else config_dir()
+    valid = re.compile(r"[A-Za-z0-9_-]{1,64}")
+    lineage: list[str] = []
+    queue = [session_id, *ancestors]
+    operator_opened = False
+    while queue and len(lineage) < 32:
+        sid = queue.pop(0)
+        if not sid or sid in lineage or not valid.fullmatch(sid):
+            continue
+        lineage.append(sid)
+        origin = _origin(root, sid)
+        if sid == session_id:
+            operator_opened = origin == {}
+        if not origin:
+            continue
+        opened_by = origin.get("opened_by")
+        for nxt in (
+            origin.get("parent"),
+            opened_by.get("session") if isinstance(opened_by, Mapping) else None,
+        ):
+            if isinstance(nxt, str):
+                queue.append(nxt)
+    return lineage, operator_opened
+
+
 def operator_brief(
     messages: Any,
     *,
@@ -517,23 +637,28 @@ def operator_brief(
 ) -> OperatorBrief:
     """The trusted operator words in the recent transcript, newest first.
 
-    Trusted: a plain user row with no harness stamp (the operator typed it),
-    and an ask answered by a human surface (checked in the store, not the
-    transcript row). Everything else is excluded BY STAMP: harness injections
-    by ``harness_injected``; peer, hub and Team Bridge rows by their
-    ``custom_type``. Excluded peer/bridge/hub rows are counted by kind so the
-    judge knows something was left out, but their text never reaches it.
+    Trusted: a plain user row with no harness stamp — ONLY in a session the
+    operator opened (``session_lineage``): in a subagent or an agent-opened
+    workstream that row is the delegating agent's brief, which may relay a
+    Team Bridge or peer request (review R1-MAJOR-3 / QA Q3), so it is counted
+    as excluded and never quoted. And an ask answered by a human surface,
+    checked in the STORE of a session in this session's lineage. Everything
+    else is excluded BY STAMP: harness injections by ``harness_injected``;
+    peer, hub and Team Bridge rows by their ``custom_type``. Excluded rows are
+    counted by kind so the judge knows something was left out, but their text
+    never reaches it.
 
-    ``cited`` is extra text that may name an ask id (the call's intent): like a
-    peer message, it is a POINTER only — the store decides.
+    Ask ids (``a-xxxx``) cited anywhere — a peer body, an operator row, the
+    call's intent or command — are POINTERS only, resolved against the
+    lineage's ask stores; the store decides.
     """
     from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
     from local_operator.harness.rows import is_harness_chrome, is_harness_injection
 
     brief = OperatorBrief()
+    lineage, operator_opened = session_lineage(session_id, ancestors, state_root=state_root)
     direct = 0
-    pointers: list[tuple[str, str, str]] = []  # (ask_id, session, relayed_by)
-    seen_asks: set[tuple[str, str]] = set()
+    pointers: list[tuple[str, str]] = []  # (ask_id, relayed_by)
     try:
         rows = list(messages or ())[-_SCAN_LIMIT:]
     except Exception:  # noqa: BLE001
@@ -545,22 +670,18 @@ def operator_brief(
                 if custom_type == ASK_RESPONSE_MESSAGE_TYPE:
                     ask_id = str((getattr(message, "details", None) or {}).get("ask_id") or "")
                     if ask_id:
-                        pointers.append((ask_id, session_id, ""))
+                        pointers.append((ask_id, ""))
                     continue
                 kind = _custom_kind(str(custom_type))
                 if kind is None:
                     continue
                 brief.excluded[kind] = brief.excluded.get(kind, 0) + 1
-                body = _text_of(message)
                 details = getattr(message, "details", None) or {}
                 sender = details.get("sender") if isinstance(details, Mapping) else None
                 sender = sender if isinstance(sender, Mapping) else {}
-                sender_sid = str(sender.get("session_id") or "")
-                who = str(sender.get("conversation_name") or sender_sid or kind)
-                sessions = [s for s in [sender_sid, *_SESSION_ID_RE.findall(body)] if s]
-                for ask_id in _ASK_ID_RE.findall(body):
-                    for sid in dict.fromkeys(sessions):
-                        pointers.append((ask_id, sid, who))
+                who = str(sender.get("conversation_name") or sender.get("session_id") or kind)
+                for ask_id in _ASK_ID_RE.findall(_text_of(message)):
+                    pointers.append((ask_id, who))
                 continue
             if getattr(message, "role", None) != "user":
                 continue
@@ -569,40 +690,42 @@ def operator_brief(
             text = getattr(message, "text", "")
             if not isinstance(text, str) or not text.strip() or is_harness_chrome(text):
                 continue
+            pointers.extend((ask_id, "") for ask_id in _ASK_ID_RE.findall(text))
+            if not operator_opened:
+                kind = "delegating-agent message"
+                brief.excluded[kind] = brief.excluded.get(kind, 0) + 1
+                continue
             if direct < _MAX_DIRECT:
                 brief.words.append(OperatorWords(label="operator, direct", text=text))
                 direct += 1
-                for ask_id in _ASK_ID_RE.findall(text):
-                    for sid in dict.fromkeys([session_id, *_SESSION_ID_RE.findall(text)]):
-                        pointers.append((ask_id, sid, ""))
         except Exception:  # noqa: BLE001 — one odd row never breaks the brief
             continue
     for text in cited:
-        for ask_id in _ASK_ID_RE.findall(text or ""):
-            for sid in dict.fromkeys([session_id, *ancestors, *_SESSION_ID_RE.findall(text)]):
-                pointers.append((ask_id, sid, ""))
+        pointers.extend((ask_id, "") for ask_id in _ASK_ID_RE.findall(text or ""))
     asks = 0
-    for ask_id, sid, relayed_by in pointers:
-        if asks >= _MAX_ASKS or (ask_id, sid) in seen_asks:
-            continue
-        seen_asks.add((ask_id, sid))
-        found = verified_ask(sid, ask_id, state_root=state_root)
-        if found is None:
-            continue
-        label = found.label + (f" (relayed by {relayed_by})" if relayed_by else "")
-        if sid != session_id and not relayed_by:
-            label += f" (session {sid})"
-        brief.words.append(
-            OperatorWords(label=label, text=found.text, ask_id=ask_id, session_id=sid)
-        )
-        asks += 1
+    seen: set[tuple[str, str]] = set()
+    for ask_id, relayed_by in pointers:
+        for sid in lineage:
+            if asks >= _MAX_ASKS or (ask_id, sid) in seen:
+                continue
+            seen.add((ask_id, sid))
+            found = verified_ask(sid, ask_id, state_root=state_root)
+            if found is None:
+                continue
+            label = found.label + (f" (relayed by {relayed_by})" if relayed_by else "")
+            if sid != session_id:
+                label += f" (session {sid})"
+            brief.words.append(
+                OperatorWords(label=label, text=found.text, ask_id=ask_id, session_id=sid)
+            )
+            asks += 1
     return brief
 
 
 # -- naming --------------------------------------------------------------------
 
 _GLOBISH = re.compile(r"[*?\[]")
-_PATHISH = re.compile(r"[`'\"]?((?:~|/|\.{1,2}/)[^\s`'\",;)]*|[\w.-]+/[^\s`'\",;)]+)")
+_PATHISH = re.compile(r"[`'\"]?((?:~|/)[^\s`'\",;)]*)")
 
 
 def _expand_word(word: str, home: str, cwd: str | None) -> str | None:
@@ -612,9 +735,9 @@ def _expand_word(word: str, home: str, cwd: str | None) -> str | None:
             return None
         word = home + word[1:]
     elif not word.startswith("/"):
-        if cwd is None:
-            return None
-        word = os.path.join(cwd, word)
+        # Only absolute and ``~`` spellings name a path exactly (R1-MINOR-2).
+        del cwd
+        return None
     return os.path.normpath(word)
 
 
@@ -628,7 +751,9 @@ def names_path(
 ) -> bool:
     """Does ``text`` (operator words) name ``path``, literally or by a safe glob?
 
-    Literal: the exact path, its ``~`` form, or ``parent/basename``. A glob
+    Literal: the exact path (realpath or as spelled) or its ``~`` form —
+    never a ``parent/basename`` suffix, which names every same-named path in
+    every repository (review R1-MINOR-2), and never a cwd-relative word. A glob
     covers ``path`` only when (a) it matches the realpath with ``fnmatch``,
     component by component, (b) ``path`` sits under the glob's literal parent
     directory, (c) that parent is not ``$HOME``'s ancestor and not a
@@ -646,8 +771,6 @@ def names_path(
     for cand in list(candidates):
         if cand.startswith(home.rstrip("/") + "/"):
             candidates.add("~" + cand[len(home.rstrip("/")) :])
-    for cand in list(candidates):
-        candidates.add("/".join(cand.rstrip("/").split("/")[-2:]))
     protected = {os.path.normpath(p) for p in protected}
     for match in _PATHISH.finditer(text):
         word = match.group(1).rstrip("/.:")

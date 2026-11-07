@@ -55,24 +55,37 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   HIGH unless this session cloned it. `$HOME`, the state root and the protected
   roots are never recorded.
 - **Clean linked worktree.** `git worktree remove <exact path>` (no `--force`)
-  is LOW when the path is a registered linked worktree with an empty
-  `git status --porcelain --untracked-files=all`. Dirty, forced, or a primary
-  checkout → the ordinary ranking. Prefer this to `rm -rf .worktrees/<name>`.
+  is LOW when the path is a registered linked worktree with no tracked or
+  untracked change, no ignored entry beyond regenerable output (`node_modules`,
+  `.venv`, `__pycache__`, `build`, `dist` …), and HEAD on a branch or in some
+  ref. Anything else takes the ordinary ranking. Prefer this to
+  `rm -rf .worktrees/<name>`. A worktree this session created is its own:
+  through the ledger it ranks LOW even dirty or with `--force`, so commit or
+  push what you want to keep before removing your own tree.
 - **History evidence.** A HIGH delete goes to a judge forked from the session's
-  own prefix. Before it runs, the checkpoint extracts the session's (and its
-  descendants', found by `origin.json` parent pointers) real tool calls. A call
-  vouches for a directory when the directory was born inside the call's window
-  and the call's command, real output, or a script the same session wrote and
-  the call ran names it (its basename, or the literal prefix that produced it,
-  such as `qa-r5-dg-` in `f"qa-r5-dg-{os.getpid()}"`). The judge must answer
+  own prefix. Before it runs, the checkpoint extracts real tool calls: this
+  session's from the harness's memory, its descendants' (found by `origin.json`
+  parent pointers, created after it) from their transcripts. A call that is not
+  read-only vouches for a directory born inside its window when its command, or
+  a script the same session wrote and the call ran, names it (its basename, or
+  the literal prefix that produced it, such as `qa-r5-dg-` in
+  `f"qa-r5-dg-{os.getpid()}"`), or its output prints the directory's full path.
+  Transcripts, `origin.json`, ask stores and `<config_dir>/guardrails/` are
+  CRITICAL to write, append, move or delete from the shell; an interpreter
+  writing them (`python -c`, `node -e`) is the documented ceiling, as for any
+  interpreter delete. The judge must answer
   `ALLOW evidence=<ids>`, `ALLOW ask=<id>` or `ALLOW operator`. The checkpoint
   re-verifies each citation and refuses an ALLOW that does not cover every target.
 
-**Who can authorise a delete.** Only the operator: a message they typed, or their
-answer to `ask` as recorded in the ask store (`sessions/<id>/asks.jsonl`, answered
-on the terminal, desktop or phone). A peer message citing an ask id (`a-xxxx`)
-counts only once that ask is found answered in the store and its text names the
-path. A named glob (`~/qa-r5-dg-*`) covers its current matches when the wildcard
+**Who can authorise a delete.** Only the operator: a message they typed in a
+session they opened, or their answer to `ask` as recorded in the ask store
+(`sessions/<id>/asks.jsonl`, answered on the terminal, desktop or phone). In a
+subagent or an agent-opened workstream the user rows are the delegating agent's
+words, so there only store-verified asks count. An ask id (`a-xxxx`) cited by a
+peer message, the intent or the command is looked up only in this session's
+lineage (itself, its parents, the session that opened it), and counts once that
+ask is answered there, does not decline (`no`, `keep`, `leave`, `cancel` …), and
+names the path exactly (full or `~/` path). A named glob (`~/qa-r5-dg-*`) covers its current matches when the wildcard
 is in the last component with at least three literal characters (`~/*` names
 nothing). Team Bridge deliveries, peer and hub messages, and fetched or file
 content are never consent; the judge sees only how many were left out.

@@ -26,18 +26,30 @@ of the same session ran.
 
 A call covers a target ``T`` when (all of):
 
+* the call is not read-only (``ls``, ``cat``, ``find`` without ``-delete``,
+  ``git status``/``log`` … never create anything);
 * ``T``, or an ancestor ``A`` of ``T`` below the protected roots, is a
   directory whose birth time (``st_birthtime``; ``st_ctime`` where the
-  platform has none) falls inside ``[call start - slack, result + slack]``;
+  platform has none) falls inside the call's window;
 * and EITHER (B1) re-resolving the call's command yields a creation target
-  equal to ``A`` or an ancestor of it, OR (B2) the call's arguments, its real
-  output, or a script the same session wrote and the call names, contains
-  ``A``'s literal basename or the literal name prefix that produced it
-  (``qa-r5-dg-`` in ``f"qa-r5-dg-{os.getpid()}"``).
+  equal to ``A`` or an ancestor of it, OR (B2) the call's own command or a
+  script the same session wrote and the call ran contains ``A``'s literal
+  basename or the literal name prefix that produced it (``qa-r5-dg-`` in
+  ``f"qa-r5-dg-{os.getpid()}"``), OR the call's real output contains ``A``'s
+  FULL path (absolute or ``~/``). A bare name in output is a listing or a
+  log, not a creation (review R1-MAJOR-2).
 
-B2's name check is what rules out a directory another session created in the
-same window. CRITICAL targets and primary checkouts never reach this module
-(``classify`` ranks them first; the caller re-checks).
+The window and the name together rule out a directory another session
+created meanwhile. CRITICAL targets and primary checkouts never reach this
+module (``classify`` ranks them first; the caller re-checks).
+
+WHERE THE CALLS COME FROM. The CURRENT session's calls come from the
+harness's in-memory rows (``extract_live``), never its own transcript file.
+Descendants' calls come from their on-disk transcripts, which ``classify``
+ranks CRITICAL to write, append, move or delete, as it does ``origin.json``
+and the ask store. An interpreter writing them (``python -c``, ``node -e``)
+is not modelled by the shell resolver: that is the documented ceiling, the
+same one as ``python -c 'shutil.rmtree(...)'``.
 
 DESCENDANTS. A subagent's session directory carries ``origin.json`` with
 ``{"origin": "subagent", "parent": "<id>"}``. Descendants are found by those
@@ -155,19 +167,49 @@ def _children_index(sessions: Path) -> dict[str, list[str]]:
     return index
 
 
+def _session_created(sessions: Path, session_id: str) -> float | None:
+    """When ``session_id`` was created: ``created_at.json``, else its dir's birth."""
+    directory = sessions / session_id
+    try:
+        value = json.loads((directory / "created_at.json").read_text(encoding="utf-8"))
+        if isinstance(value, (int, float)):
+            return float(value)
+    except (OSError, ValueError):
+        pass
+    return _born(str(directory))
+
+
 def session_tree(state_root: str | os.PathLike[str], session_id: str) -> list[str]:
-    """``session_id`` followed by every descendant, by ``origin.json`` parent pointers."""
+    """``session_id`` followed by every descendant, by ``origin.json`` parent pointers.
+
+    A child is adopted only when its directory was created no earlier than the
+    session it claims as parent (``created_at``, slack allowed): a session
+    planted later under ``sessions/`` with a forged ``origin.json`` is newer
+    than its claimed parent too, so this bounds age, not forgery — writing
+    ``origin.json`` or a transcript is what ``classify`` ranks CRITICAL. A
+    session whose own creation time cannot be read adopts no children (fail
+    closed: no evidence, the old ranking).
+    """
     if not session_id:
         return []
-    index = _children_index(Path(state_root) / "sessions")
+    sessions = Path(state_root) / "sessions"
+    index = _children_index(sessions)
     out = [session_id]
     seen = {session_id}
+    created = {session_id: _session_created(sessions, session_id)}
     i = 0
     while i < len(out) and len(out) < _MAX_DESCENDANTS:
-        for child in index.get(out[i], ()):
-            if child not in seen:
-                seen.add(child)
-                out.append(child)
+        parent = out[i]
+        parent_created = created.get(parent)
+        for child in index.get(parent, ()):
+            if child in seen or parent_created is None:
+                continue
+            born = _born(str(sessions / child))
+            if born is None or born + _SLACK_S < parent_created:
+                continue
+            seen.add(child)
+            created[child] = _session_created(sessions, child)
+            out.append(child)
         i += 1
     return out
 
@@ -256,6 +298,15 @@ def extract(
                 if cid in calls:
                     calls[cid]["finished"] = ts
                     calls[cid]["output"] = _result_text(payload)
+    return _to_evidence(calls, order, session_id, root_session)
+
+
+def _to_evidence(
+    calls: Mapping[str, Mapping[str, object]],
+    order: Sequence[str],
+    session_id: str,
+    root_session: str,
+) -> list[Evidence]:
     out: list[Evidence] = []
     for cid in order:
         c = calls[cid]
@@ -285,6 +336,58 @@ def extract(
             )
         )
     return out
+
+
+def extract_live(messages: Sequence[object], session_id: str) -> list[Evidence]:
+    """The CURRENT session's calls, from the harness's in-memory rows.
+
+    WHY NOT THE DISK TRANSCRIPT. Its own transcript is a file the session can
+    reach with its shell; the in-memory list is what the loop itself appended
+    (review R1-MAJOR-1). Rows carry no timestamp, so the window comes from the
+    provider usage clock: an assistant row's ``usage.at_ms`` is when the model
+    call that produced the tool call finished (the call cannot have started
+    earlier), and the NEXT assistant row's ``usage.at_ms`` bounds when its
+    results were already in (else "now"). A call without a usage clock is not
+    evidence. Compacted-away rows are gone from this list, and so is their
+    evidence — the ledger still covers what was created through it.
+    """
+    calls: dict[str, dict[str, object]] = {}
+    order: list[str] = []
+    pending: list[str] = []
+    for message in messages:
+        role = getattr(message, "role", None)
+        if role == "assistant":
+            usage = getattr(message, "usage", None)
+            at_ms = getattr(usage, "at_ms", None) if usage is not None else None
+            stamp = float(at_ms) / 1000.0 if isinstance(at_ms, (int, float)) else None
+            if stamp is not None:
+                for cid in pending:
+                    calls[cid].setdefault("finished", stamp)
+                pending = []
+            for call in getattr(message, "tool_calls", None) or []:
+                cid = str(getattr(call, "id", "") or "")
+                name = str(getattr(call, "name", "") or "")
+                args = getattr(call, "arguments", None)
+                if not cid or stamp is None or name not in (*_CREATING_TOOLS, "write"):
+                    continue
+                if not isinstance(args, dict):
+                    continue
+                calls[cid] = {"tool": name, "args": args, "started": stamp}
+                order.append(cid)
+                pending.append(cid)
+        elif role in ("tool", "toolResult"):
+            cid = str(getattr(message, "tool_call_id", "") or "")
+            if cid in calls:
+                parts = [
+                    getattr(block, "text", "")
+                    for block in getattr(message, "content", None) or []
+                    if isinstance(getattr(block, "text", None), str)
+                ]
+                calls[cid]["output"] = "\n".join(parts)[:_MAX_TEXT]
+    now = time.time()
+    for cid in pending:
+        calls[cid].setdefault("finished", now)
+    return _to_evidence(calls, order, session_id, session_id)
 
 
 # -- verification ------------------------------------------------------------------
@@ -390,6 +493,8 @@ def covers(
     """Does ``ev`` verifiably cover ``target`` (see the module docstring)?"""
     if ev.tool not in _CREATING_TOOLS:
         return False
+    if ev.tool == "bash" and _read_only(ev.command):
+        return False
     texts: list[str] | None = None
     for anchor in _anchors(target, stop):
         if not os.path.isdir(anchor) or os.path.isdir(os.path.join(anchor, ".git")):
@@ -403,11 +508,96 @@ def covers(
         if _b1(ev, anchor, env):
             return True
         if texts is None:
-            texts = [ev.command, ev.output, *_scripts_named(ev, writes)]
+            # Basename/prefix matches count only where THIS call said what to
+            # make: its own arguments, or a script this session wrote and the
+            # call ran. Output only confirms with the FULL path — a listing or
+            # a test log naming ``data`` is not a creation (R1-MAJOR-2 / Q2).
+            texts = [ev.command, *_scripts_named(ev, writes)]
         name = os.path.basename(anchor)
-        if any(_names(t, name) for t in texts):
+        if any(_names(t, name) for t in texts) or _names_full_path(ev.output, anchor, env):
             return True
     return False
+
+
+def _names_full_path(output: str, anchor: str, env: Mapping[str, str]) -> bool:
+    if not output:
+        return False
+    home = (env.get("HOME") or os.path.expanduser("~")).rstrip("/")
+    spellings = {anchor}
+    if anchor.startswith(home + "/"):
+        spellings.add("~" + anchor[len(home) :])
+    return any(
+        re.search(r"(?<![\w./~-])" + re.escape(s) + r"(?![\w.-])", output) for s in spellings
+    )
+
+
+#: Programs that only read. A call made of nothing but these (and ``cd``) never
+#: creates anything, whatever its window or output (Q2: an ``ls ~`` overlapping
+#: another writer's ``mkdir`` was attributed the directory).
+_READ_ONLY = frozenset(
+    {
+        "ls",
+        "cat",
+        "stat",
+        "du",
+        "df",
+        "grep",
+        "rg",
+        "egrep",
+        "head",
+        "tail",
+        "wc",
+        "less",
+        "file",
+        "pwd",
+        "which",
+        "echo",
+        "printf",
+        "true",
+        "sleep",
+        "readlink",
+        "realpath",
+        "basename",
+        "dirname",
+        "sort",
+        "uniq",
+        "cut",
+        "jq",
+        "test",
+        "[",
+    }
+)
+_READ_ONLY_GIT = frozenset(
+    {"status", "log", "diff", "show", "branch", "worktree list", "rev-parse"}
+)
+
+
+def _read_only(command: str) -> bool:
+    """Is every segment of a bash ``command`` a read-only program? Conservative."""
+    if not command.strip() or "$(" in command or "`" in command or ">" in command:
+        return False
+    for segment in re.split(r"&&|\|\||;|\||\n", command):
+        words = segment.split()
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", words[0]):
+            words = words[1:]
+        if not words or words[0] in ("cd", "pushd", "popd"):
+            continue
+        name = os.path.basename(words[0])
+        if name == "find":
+            if any(
+                w in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint") for w in words
+            ):
+                return False
+            continue
+        if name == "git":
+            rest = [w for w in words[1:] if not w.startswith("-")]
+            sub = " ".join(rest[:2]) if rest[:1] == ["worktree"] else (rest[0] if rest else "")
+            if sub in _READ_ONLY_GIT:
+                continue
+            return False
+        if name not in _READ_ONLY:
+            return False
+    return True
 
 
 def gather(
@@ -417,8 +607,14 @@ def gather(
     env: Mapping[str, str],
     stop: Iterable[str],
     state_root: str | os.PathLike[str] | None = None,
+    messages: Sequence[object] | None = None,
 ) -> EvidenceSet:
-    """Extract the session tree's calls and map each target to covering calls."""
+    """Extract the session tree's calls and map each target to covering calls.
+
+    ``messages`` is the CURRENT session's in-memory history; when given, its
+    calls come from there and its disk transcript is not read. Without it
+    (preview, which never reads the conversation) the disk copy stands in.
+    """
     result = EvidenceSet()
     if not session_id or not targets:
         return result
@@ -433,6 +629,9 @@ def gather(
         not_before = min(births) if births else 0.0
         for sid in session_tree(root, session_id):
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sid):
+                continue
+            if sid == session_id and messages is not None:
+                result.calls.extend(extract_live(messages, session_id))
                 continue
             path = root / "sessions" / sid / TRANSCRIPT_FILENAME
             result.calls.extend(extract(path, sid, session_id, not_before=not_before))

@@ -56,6 +56,10 @@ class RankedTarget:
     target: Target
     risk: Risk
     reason: str
+    #: What a refusal or preview names instead of ``path``: for a glob whose
+    #: matches were vouched for, the matches — not the directory the glob
+    #: lives in, which read as though ``$HOME`` itself were owned (QA Q5).
+    shown: str = ""
 
     @property
     def path(self) -> str:
@@ -268,8 +272,56 @@ def _pattern_reaches(pattern: str, protected: str) -> bool:
     return all(fnmatch.fnmatchcase(p, q) for p, q in zip(prot, pat, strict=False))
 
 
+#: The files the provenance checks READ as evidence (``guardrails/evidence.py``,
+#: ``provenance.py``): a session's transcript, its lineage and its ask store,
+#: matched per ``<state>/sessions/<id>/``. Any write to them — including an
+#: append — could forge a creating call, a child, or an operator's answer
+#: (review R1-MAJOR-1), so every op on them is CRITICAL.
+_EVIDENCE_FILES = ("transcript.jsonl", "origin.json", "asks.jsonl", "subagent-roster*.json")
+_EVIDENCE_SAMPLES = {"subagent-roster*.json": "subagent-roster.v1.json"}
+
+
+def _evidence_reason(path: str, target: Target, prot: _Protected) -> str | None:
+    for state in prot.state_roots:
+        if _under(path, os.path.join(state, _LEDGER_DIRNAME)):
+            return "the guardrail's own records"
+        sessions = os.path.join(state, _SESSIONS_DIRNAME)
+        if not _under(path, sessions) or path == sessions:
+            continue
+        rel = path[len(sessions) + 1 :].split("/")
+        if len(rel) == 2 and any(fnmatch.fnmatchcase(rel[1], f) for f in _EVIDENCE_FILES):
+            return "a session's transcript, lineage or ask record"
+        if len(rel) == 1 and target.op in ("overwrite", "append"):
+            # Writing a directory INTO ``sessions/`` (``mv /tmp/x sessions/``)
+            # plants a session the lineage walk would read.
+            return "a session directory written in place"
+    return None
+
+
+def _evidence_by_pattern(target: Target, prot: _Protected) -> str | None:
+    if target.pattern is None:
+        return None
+    for state in prot.state_roots:
+        guard_dir = os.path.join(state, _LEDGER_DIRNAME, "x")
+        if _pattern_reaches(target.pattern, guard_dir):
+            return f"glob {target.pattern} reaches the guardrail's own records"
+        for name in _EVIDENCE_FILES:
+            sample = _EVIDENCE_SAMPLES.get(name, name)
+            pat = [c for c in target.pattern.split("/") if c]
+            tmpl = [c for c in os.path.join(state, _SESSIONS_DIRNAME, "*", sample).split("/") if c]
+            if len(pat) == len(tmpl) and all(
+                t == "*" or fnmatch.fnmatchcase(t, p) or p == "*"
+                for p, t in zip(pat, tmpl, strict=True)
+            ):
+                return f"glob {target.pattern} reaches session transcripts or lineage"
+    return None
+
+
 def _critical_reason(path: str, target: Target, prot: _Protected) -> str | None:
     destroying = target.op in _DESTROYING_OPS
+    evidence = _evidence_reason(path, target, prot)
+    if evidence is not None:
+        return evidence
     for cfg in prot.config_files:
         if path == cfg:
             return "the harness config file"
@@ -307,6 +359,9 @@ def _critical_reason(path: str, target: Target, prot: _Protected) -> str | None:
 def _critical_by_pattern(target: Target, prot: _Protected) -> str | None:
     if target.pattern is None:
         return None
+    evidence = _evidence_by_pattern(target, prot)
+    if evidence is not None:
+        return evidence
     candidates = [
         *prot.config_files,
         *prot.secrets_dirs,
@@ -322,6 +377,10 @@ def _critical_by_pattern(target: Target, prot: _Protected) -> str | None:
 
 
 def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
+    if target.op == "append":
+        # An append destroys nothing; it is ranked only as forged evidence,
+        # which ``_critical_reason`` already decided.
+        return None
     if target.op == "clean" and target.program == "git clean":
         return "git clean removes untracked work"
     if any(_under(path, own) for own in prot.own_session):
@@ -408,10 +467,11 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
     if notes and not in_own_pad:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes))
     if target.worktree_remove and not target.forced and target.pattern is None:
-        # ``git worktree remove`` without --force: git refuses a dirty tree and
-        # the primary checkout by itself, so a tree proven clean and linked
-        # loses nothing git cannot recreate. Anything else (dirty, unknown,
-        # not linked) falls through to the ordinary ranking below.
+        # ``git worktree remove`` without --force: git refuses tracked or
+        # untracked changes itself, but deletes IGNORED files and a detached
+        # HEAD's unreferenced commits. ``worktree_state`` proves those absent
+        # (only regenerable ignored output, HEAD reachable from a ref). Anything
+        # else (dirty, unknown, not linked) takes the ordinary ranking below.
         from local_operator.guardrails.provenance import worktree_state
 
         if worktree_state(path) == "clean":
@@ -431,14 +491,22 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
                 return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
             owned = _owned_by_session(target, path, prot, session_id)
             if owned is not None:
-                return RankedTarget(target, Risk.LOW, owned)
+                reason, matches = owned
+                shown = ""
+                if target.pattern is not None:
+                    shown = ", ".join(matches[:4]) + (
+                        f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
+                    )
+                return RankedTarget(target, Risk.LOW, reason, shown)
             return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     return RankedTarget(target, Risk.LOW, "ordinary path")
 
 
-def _owned_by_session(target: Target, path: str, prot: _Protected, session_id: str) -> str | None:
+def _owned_by_session(
+    target: Target, path: str, prot: _Protected, session_id: str
+) -> tuple[str, list[str]] | None:
     """A LOW reason when this session created what ``target`` destroys, else ``None``.
 
     Only reached for a target already ranked HIGH by ``_high_reason`` and
@@ -481,7 +549,8 @@ def _owned_by_session(target: Target, path: str, prot: _Protected, session_id: s
         first = first or record.describe()
     if first is None:
         return None
-    return first if len(paths) == 1 else f"{len(paths)} matches, all {first}"
+    reason = first if len(paths) == 1 else f"{len(paths)} matches, all {first}"
+    return reason, sorted(paths)
 
 
 #: ``*.log``, ``build-*.tmp``: a last component that ends in a literal
@@ -517,6 +586,9 @@ def classify_targets(
         return Verdict(Risk.LOW)
     prot = _protected(env, scratchpad, session_id)
     ranked = [_rank(t, prot, session_id) for t in targets]
+    # An append that is not forging evidence is not a destructive target at all:
+    # drop it so it adds no "destructive" annotation and no target text.
+    ranked = [r for r in ranked if not (r.target.op == "append" and r.risk is Risk.LOW)]
     risk = max((r.risk for r in ranked), default=Risk.LOW)
     if opaque_reasons:
         risk = max(risk, Risk.HIGH)

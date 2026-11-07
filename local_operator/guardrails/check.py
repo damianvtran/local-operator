@@ -200,11 +200,15 @@ class CallContext:
     #: The trusted operator words (``provenance.operator_brief``). ``None``
     #: falls back to ``user_request`` as the only operator row (old callers).
     operator: Any = None
+    #: The session's in-memory history: the CURRENT session's evidence is read
+    #: from here, never from its own (shell-reachable) transcript file.
+    #: ``None`` (preview) falls back to the disk copy.
+    messages: Any = None
 
 
 def _targets_text(verdict: Verdict) -> str:
     flagged = verdict.flagged_targets or verdict.targets
-    parts = [f"{t.path} ({t.reason})" for t in flagged[:6]]
+    parts = [f"{t.shown or t.path} ({t.reason})" for t in flagged[:6]]
     if len(flagged) > 6:
         parts.append(f"… and {len(flagged) - 6} more")
     return "; ".join(parts) or "an unresolvable target"
@@ -452,7 +456,9 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         operator = prov.OperatorBrief()
         if ctx.user_request:
             operator.words.append(prov.OperatorWords("operator, direct", ctx.user_request))
-    evidence = ev_mod.gather(paths, session_id=ctx.session_id, env=ctx.env, stop=stop)
+    evidence = ev_mod.gather(
+        paths, session_id=ctx.session_id, env=ctx.env, stop=stop, messages=ctx.messages
+    )
     facts: list[str] = []
     for path in [*paths, *operator_only][:_MAX_FACTS]:
         ids = [] if path in operator_only else (evidence.covers.get(path) or [])
