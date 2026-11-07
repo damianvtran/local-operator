@@ -268,6 +268,12 @@ def report_from_dict(data: Any) -> UsageReport | None:
             consecutive_failures = int(data.get("consecutive_failures") or 0)
         except (TypeError, ValueError):
             consecutive_failures = 0
+        # Defensive on purpose: rows written before this field existed decode to
+        # ``None``, and a hand-edited/hand-migrated payload must not make the
+        # whole report unparseable -- an absent ref only loses the exact-ref
+        # resolution, never the numbers.
+        raw_ref = data.get("credential_ref")
+        credential_ref = raw_ref.strip() if isinstance(raw_ref, str) and raw_ref.strip() else None
         return UsageReport(
             provider=str(data["provider"]),
             fetched_at=int(data.get("fetched_at", 0)),
@@ -279,6 +285,7 @@ def report_from_dict(data: Any) -> UsageReport | None:
             next_probe_at_ms=next_probe_at_ms,
             credential_invalid=bool(data.get("credential_invalid", False)),
             resets_available=_resets_available(data.get("resets_available")),
+            credential_ref=credential_ref,
         )
     except Exception:  # noqa: BLE001 — a bad row is a miss, not a failure
         logger.debug("usage cache: unparseable report row dropped", exc_info=True)

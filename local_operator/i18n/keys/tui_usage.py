@@ -70,8 +70,8 @@ def resets_accept() -> Msg:
     return Msg("tui.usage.resets.accept", {})
 
 
-def resets_already() -> Msg:
-    return Msg("tui.usage.resets.already", {})
+def resets_already(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.already", {"identity": identity})
 
 
 def resets_badge(*, count: int | float) -> Msg:
@@ -84,6 +84,10 @@ def resets_busy(*, identity: str) -> Msg:
 
 def resets_cancel() -> Msg:
     return Msg("tui.usage.resets.cancel", {})
+
+
+def resets_changed(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.changed", {"identity": identity})
 
 
 def resets_choose() -> Msg:
@@ -102,12 +106,20 @@ def resets_confirm_title(*, identity: str) -> Msg:
     return Msg("tui.usage.resets.confirm_title", {"identity": identity})
 
 
-def resets_done(*, count: int | float) -> Msg:
-    return Msg("tui.usage.resets.done", {"count": count})
+def resets_confirm_title_account(*, identity: str, account: str) -> Msg:
+    return Msg("tui.usage.resets.confirm_title_account", {"identity": identity, "account": account})
 
 
-def resets_failed() -> Msg:
-    return Msg("tui.usage.resets.failed", {})
+def resets_dismiss() -> Msg:
+    return Msg("tui.usage.resets.dismiss", {})
+
+
+def resets_done(*, count: int | float, identity: str) -> Msg:
+    return Msg("tui.usage.resets.done", {"count": count, "identity": identity})
+
+
+def resets_failed(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.failed", {"identity": identity})
 
 
 def resets_hint() -> Msg:
@@ -118,12 +130,16 @@ def resets_more(*, count: str) -> Msg:
     return Msg("tui.usage.resets.more", {"count": count})
 
 
-def resets_no_credit() -> Msg:
-    return Msg("tui.usage.resets.no_credit", {})
+def resets_no_credit(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.no_credit", {"identity": identity})
 
 
 def resets_nothing() -> Msg:
     return Msg("tui.usage.resets.nothing", {})
+
+
+def resets_recheck() -> Msg:
+    return Msg("tui.usage.resets.recheck", {})
 
 
 def resets_in(*, value: str) -> Msg:

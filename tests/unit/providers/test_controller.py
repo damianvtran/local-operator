@@ -414,6 +414,93 @@ class TestConsumeUsageReset:
         assert requests == []
 
     @pytest.mark.asyncio
+    async def test_two_logins_sharing_one_email_are_refused_rather_than_guessed(
+        self, controller, store, monkeypatch
+    ):
+        """R2: an email is NOT unique in the store (it dedupes on
+        ``org_id -> account_id -> email``), so two legitimately stored logins can
+        share the label the panel displays. ``next(...)`` over that label spent on
+        whichever row the store listed first -- an irreversible spend on an
+        account the user did not confirm. Ambiguity is a refusal."""
+        self._seed(store, "me@corp.com", "acct-1")
+        self._seed(store, "me@corp.com", "acct-2")
+        # The real store's dedupe key discriminates by account, which is what
+        # lets the two rows coexist; the fake keys on the email.
+        store.rows[0]["identity_key"] = "acct-1"
+        store.rows[1]["identity_key"] = "acct-2"
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset", "windows_reset": 1}, requests)
+
+        result = await controller.consume_usage_reset("openai", "me@corp.com", "r-1")
+
+        assert result.outcome == "failed"
+        assert result.detail == "ambiguous login"
+        assert requests == []
+
+    @pytest.mark.asyncio
+    async def test_the_credential_ref_spends_on_the_row_it_names(
+        self, controller, store, monkeypatch
+    ):
+        """R2: the ref the report carried resolves the row the label cannot."""
+        self._seed(store, "me@corp.com", "acct-1")
+        self._seed(store, "me@corp.com", "acct-2")
+        store.rows[0]["identity_key"] = "acct-1"
+        store.rows[1]["identity_key"] = "acct-2"
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset", "windows_reset": 2}, requests)
+
+        result = await controller.consume_usage_reset(
+            "openai", "me@corp.com", "r-1", credential_ref="acct-2"
+        )
+
+        assert result.outcome == "reset"
+        (request,) = requests
+        assert request.headers["Authorization"] == "Bearer tok-acct-2"
+        assert request.headers["ChatGPT-Account-Id"] == "acct-2"
+
+    @pytest.mark.asyncio
+    async def test_a_ref_that_matches_no_row_is_refused(self, controller, store, monkeypatch):
+        """A stale ref must refuse, not fall back to the label: the panel would
+        otherwise spend on a login it was told is not the confirmed one."""
+        self._seed(store, "me@corp.com", "acct-1")
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset"}, requests)
+
+        result = await controller.consume_usage_reset(
+            "openai", "me@corp.com", "r-1", credential_ref="cred:999"
+        )
+
+        assert result.outcome == "failed"
+        assert "no stored login" in result.detail
+        assert requests == []
+
+    @pytest.mark.asyncio
+    async def test_a_corrupt_row_cannot_break_the_resolution(self, controller, store, monkeypatch):
+        """R3's two holes: ``credential_identity`` and ``row.data.get`` both
+        raised on a row whose payload is not a mapping, out of a method that
+        promises never to raise -- which left the band on ``busy`` with no way
+        out. Such a row is unlabelled and unreadable, never fatal."""
+        self._seed(store, "first@example.com", "acct-1")
+        store.rows.append(
+            {
+                "id": 99,
+                "provider": "openai",
+                "credential_type": "oauth",
+                "data": ["not", "a", "mapping"],
+                "identity_key": None,
+            }
+        )
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset"}, requests)
+
+        result = await controller.consume_usage_reset("openai", "first@example.com", "r-1")
+
+        assert result.outcome == "reset"
+        assert requests[0].headers["ChatGPT-Account-Id"] == "acct-1"
+        # The defensive read itself: an unreadable payload is "not reported".
+        assert controller._row_account_id(types.SimpleNamespace(data=["x"])) is None
+
+    @pytest.mark.asyncio
     async def test_a_spent_credit_drops_the_cached_row(self, controller, store, monkeypatch):
         """The cache is shared by every lop session on the machine and now
         states a count and windows that are no longer true; leaving it would
@@ -515,6 +602,64 @@ class TestUsageIsPerAccount:
         first = [r.identity for r in await controller.fetch_usage(["anthropic"])]
         second = [r.identity for r in await controller.fetch_usage(["anthropic"])]
         assert first == second == ["first@example.com", "second@example.com"]
+
+    @pytest.mark.asyncio
+    async def test_each_account_report_carries_its_own_credential_ref(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """R2: the ref the panel spends by has to ride the REPORT -- the panel
+        never sees the store. It is the row's dedupe key, the same spelling the
+        usage cache key is built from, so a spend can name one row exactly."""
+        store.upsert_credential(
+            "anthropic", {"type": "oauth", "access": "a-1", "refresh": "r-1", "email": "one@x"}
+        )
+        store.upsert_credential(
+            "anthropic", {"type": "oauth", "access": "a-2", "refresh": "r-2", "email": "two@x"}
+        )
+        store.oauth_accounts["anthropic"] = [
+            types.SimpleNamespace(
+                access_token="tok-1",
+                credential_id=1,
+                account_id=None,
+                email="one@x",
+                org_id=None,
+                api_endpoint=None,
+                kind="oauth",
+                raw=None,
+                credential_invalid=False,
+            ),
+            types.SimpleNamespace(
+                access_token="tok-2",
+                credential_id=2,
+                account_id=None,
+                email="two@x",
+                org_id=None,
+                api_endpoint=None,
+                kind="oauth",
+                raw=None,
+                credential_invalid=False,
+            ),
+        ]
+
+        async def fake_fetch(
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
+        ):
+            return UsageReport(provider=provider, limits=[], resets_available=2)
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["anthropic"])
+
+        assert [(r.identity, r.credential_ref) for r in reports] == [
+            ("one@x", "one@x"),
+            ("two@x", "two@x"),
+        ]
 
     @pytest.mark.asyncio
     async def test_one_failing_account_does_not_hide_the_others(

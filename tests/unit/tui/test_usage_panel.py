@@ -38,6 +38,7 @@ from local_operator.tui.widgets.usage_panel import (
     PANEL_WIDTH_MARGIN,
     RESET_CHOOSE_MAX,
     UsagePanel,
+    UsageRefreshRequested,
     UsageResetRequested,
     _account_status_note,
     _fit_status_note,
@@ -778,6 +779,9 @@ class _PanelHost(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self.reset_requests: list[UsageResetRequested] = []
+        #: Every `r`, so a panel test can prove the key actually refetches
+        #: rather than only dismissing the receipt that named it.
+        self.refresh_requests: list[UsageRefreshRequested] = []
 
     def compose(self) -> ComposeResult:
         with Container(id="usage-host"):
@@ -786,6 +790,10 @@ class _PanelHost(App[None]):
     def on_usage_reset_requested(self, message: UsageResetRequested) -> None:
         message.stop()
         self.reset_requests.append(message)
+
+    def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
+        message.stop()
+        self.refresh_requests.append(message)
 
 
 @asynccontextmanager
@@ -3169,7 +3177,8 @@ async def test_the_confirm_band_names_the_account_and_its_cost() -> None:
 @pytest.mark.asyncio
 async def test_the_choose_band_lists_five_and_states_the_remainder() -> None:
     """Five digit keys is the keyboard half of the choice; a sixth account is
-    stated rather than silently unselectable."""
+    stated rather than silently unselectable, and the band's keys live in the
+    footer so they cost the list no row."""
     async with _panel_app(size=(120, 30)) as panel:
         panel.show_reports(_reset_reports(accounts=7, extra=0))
         panel.action_reset()
@@ -3182,7 +3191,10 @@ async def test_the_choose_band_lists_five_and_states_the_remainder() -> None:
     assert "5. account4@example.com" in band, band
     assert "account5@example.com" not in band, band
     assert "…and 2 more" in band, band
-    assert "1-5 choose · esc cancel" in band, band
+    # The keys are the FOOTER's job while a band is up (D4/U5): one line claims
+    # each key, so `esc cancel` cannot sit one row above an `esc close`.
+    assert rows[-1] == "esc cancel · 1-5 choose", rows[-1]
+    assert "esc close" not in "\n".join(rows), rows
 
 
 def test_x_with_one_candidate_asks_for_confirmation_directly() -> None:
@@ -3234,20 +3246,34 @@ def test_a_digit_outside_the_band_does_nothing() -> None:
     assert panel._reset_state == "choose"
 
 
-def test_busy_ignores_every_key() -> None:
-    """The request is already on the wire; there is nothing left to cancel and a
-    second press must not mint a second id."""
+def test_busy_ignores_every_panel_action_but_escape() -> None:
+    """The request is already on the wire, so the panel's own actions are inert
+    and a second press must not mint a second id.
+
+    ``esc`` is the exception (R3): refusing it left a card where nothing at all
+    worked and the only recovery was quitting the app. Leaving the band changes
+    nothing about the spend, and the pending id survives so a retry is the same
+    request.
+    """
     panel = UsagePanel()
     panel._reports = _reset_reports(accounts=1, extra=1)
     panel.action_reset()
     panel.action_confirm_reset()
     assert panel._reset_state == "busy"
-    panel.action_dismiss()
     panel.action_refresh()
     panel.action_scroll_rows(1)
+    panel.action_scroll_home()
+    panel.action_select_reset(1)
+    panel.action_confirm_reset()
     panel.action_reset()
-    panel.cancel_reset()
     assert panel._reset_state == "busy"
+    assert len(panel._pending_redeem) == 1
+    pending = dict(panel._pending_redeem)
+    panel.action_dismiss()
+    assert panel._reset_state is None
+    # Escape left the band, not the card, and the id that makes a retry
+    # idempotent is untouched.
+    assert panel._pending_redeem == pending
 
 
 def test_any_key_dismisses_the_result_band_without_scrolling() -> None:
@@ -3339,19 +3365,22 @@ async def test_escape_cancels_the_band_without_closing_the_card() -> None:
 @pytest.mark.parametrize(
     ("outcome", "windows", "copy"),
     [
-        ("reset", 2, "Reset applied — 2 windows cleared"),
-        ("reset", 1, "Reset applied — 1 window cleared"),
-        ("nothing_to_reset", 0, "nothing to reset"),
-        ("no_credit", 0, "No reset credits left on this account"),
-        ("already_redeemed", 0, "That reset was already applied"),
-        ("failed", 0, "Couldn't confirm the reset"),
+        ("reset", 2, "Reset applied for account0@example.com — 2 windows cleared"),
+        ("reset", 1, "Reset applied for account0@example.com — 1 window cleared"),
+        # `=0` is a legitimate success whose window list was empty: "0 windows
+        # cleared" next to "uses 1 of 2 credits" read as a wasted spend (R6/U7).
+        ("reset", 0, "Reset applied for account0@example.com — no window needed clearing"),
+        ("nothing_to_reset", 0, "No window is at its limit — nothing to reset"),
+        ("no_credit", 0, "No reset credits left for account0@example.com"),
+        ("already_redeemed", 0, "That reset for account0@example.com was already applied"),
+        ("failed", 0, "Reset not confirmed for account0@example.com"),
     ],
 )
 @pytest.mark.asyncio
 async def test_each_outcome_states_its_own_truth(outcome, windows, copy) -> None:
-    """``failed`` is the one that must NOT overclaim: it says the reset could not
-    be confirmed and points at the key that fetches the truth, rather than
-    implying the credit survived."""
+    """Every receipt NAMES the account it is about, and ``failed`` is the one that
+    must not overclaim: it says the reset could not be confirmed and points at the
+    key that fetches the truth, rather than implying the credit survived."""
     async with _panel_app(size=(120, 30)) as panel:
         panel.show_reports(_reset_reports(accounts=1, extra=2))
         panel.show_reset_result(
@@ -3362,7 +3391,7 @@ async def test_each_outcome_states_its_own_truth(outcome, windows, copy) -> None
     assert panel._reset_state == "result"
     assert copy in rows, rows
     if outcome == "failed":
-        assert "press r" in rows, rows
+        assert "press r to re-check" in rows, rows
 
 
 @pytest.mark.asyncio
@@ -3381,7 +3410,9 @@ async def test_a_confirmed_reset_runs_once_and_forces_one_refresh() -> None:
     calls: list[tuple[str, str, str]] = []
 
     class _ResetController(FakeProviderController):
-        async def consume_usage_reset(self, provider, identity, redeem_request_id):
+        async def consume_usage_reset(
+            self, provider, identity, redeem_request_id, credential_ref=None
+        ):
             calls.append((provider, identity, redeem_request_id))
             return ResetConsumeResult(outcome="reset", windows_reset=2)
 
@@ -3412,14 +3443,15 @@ async def test_a_confirmed_reset_runs_once_and_forces_one_refresh() -> None:
         assert panel.is_open
         assert len(calls) == 1, calls
         assert len(ctrl.usage_calls) == before + 1, ctrl.usage_calls
-    assert "Reset applied — 2 windows cleared" in rows, rows
+    assert "Reset applied for account0@example.com — 2 windows cleared" in rows, rows
 
 
 def test_a_short_card_degrades_the_choose_band_rather_than_growing(monkeypatch) -> None:
-    """The ladder from the design contract: candidate rows go down to one plus
-    the keys row. The title still states how many accounts CAN reset — a card
-    that lists fewer is short, not wrong — and only the listed prefix is
-    addressable, so a digit never names an account the band did not show."""
+    """The ladder from the design contract: candidate rows go down to one, the
+    remainder row survives them (D5/U2), and the keys live in the footer. The
+    title still states how many accounts CAN reset -- a card that lists fewer is
+    short, not wrong -- and only the listed prefix is addressable, so a digit
+    never names an account the band did not show."""
     panel = UsagePanel()
     panel._reports = _reset_reports(accounts=3, extra=0)
     panel.action_reset()
@@ -3429,7 +3461,10 @@ def test_a_short_card_degrades_the_choose_band_rather_than_growing(monkeypatch) 
     assert rows[0] == "3 accounts can reset", rows
     assert rows[1].startswith("1. account0@example.com"), rows
     assert len(rows) == 3, rows
-    assert "1 choose" in rows[-1], rows
+    # The remainder row survives (D5/U2): the title counts three, so the band
+    # must account for the two it cannot list. The keys are in the footer.
+    assert rows[-1] == "…and 2 more", rows
+    assert panel._band_key_row().plain == "esc cancel · 1 choose", panel._band_key_row().plain
     listed, _ = panel._reset_choose_plan()
     assert [candidate.identity for candidate in listed] == ["account0@example.com"]
     panel.action_select_reset(2)
@@ -3448,3 +3483,346 @@ def test_a_late_result_timer_cannot_clear_a_band_opened_after_it() -> None:
     assert panel._reset_state == "confirm"
     panel._reset_result_expired()
     assert panel._reset_state == "confirm"
+
+
+# -- review round 1: the band's footer takeover, its renderability floor, its
+# -- click target, and what a refresh landing under it must do -----------------
+def test_the_footer_is_the_bands_key_line_and_nothing_else() -> None:
+    """D4/U5: one line claims each key.
+
+    The panel's own receipts contradicted the band one row above it (`esc close`
+    next to `esc cancel`), and `x reset` there *cancelled* the reset question
+    instead of opening one. The band's keys move into the footer row the card
+    already reserves, so the takeover costs no height.
+    """
+    panel = UsagePanel()
+    panel._reports = _reset_reports(accounts=2, extra=1)
+    assert "esc close" in panel._hint_row(False).plain
+
+    panel.action_reset()
+    assert panel._reset_state == "choose"
+    assert panel._hint_row(False).plain == "esc cancel · 1-2 choose"
+
+    panel.action_select_reset(1)
+    assert panel._reset_state == "confirm"
+    assert panel._hint_row(False).plain == "esc cancel · enter reset"
+    assert "x reset" not in panel._hint_row(False).plain
+
+    panel.action_confirm_reset()
+    assert panel._reset_state == "busy"
+    # The band's own row carries the in-flight sentence; a second copy here is
+    # the duplication the takeover exists to remove.
+    assert panel._hint_row(False).plain == ""
+
+    panel.show_reset_result(ResetConsumeResult(outcome="reset", windows_reset=1), identity="a")
+    assert panel._hint_row(False).plain == "esc dismiss"
+
+    panel.show_reset_result(ResetConsumeResult(outcome="failed"), identity="a")
+    assert panel._hint_row(False).plain == "esc dismiss · r re-check"
+
+
+def test_escape_leaves_the_busy_band_and_keeps_the_pending_id() -> None:
+    """R3: a band the card painted must be dismissable whatever state it is in.
+
+    Refusing `esc` from `busy` left every key inert and only quitting the app
+    recovered it; the request is already on the wire either way, and the id --
+    which is what makes a retry safe -- is not the band's to forget.
+    """
+    panel = UsagePanel()
+    panel._reports = _reset_reports(accounts=1, extra=1)
+    panel.action_reset()
+    panel.action_confirm_reset()
+    pending = dict(panel._pending_redeem)
+    assert panel._reset_state == "busy"
+    assert pending
+
+    panel.cancel_reset()
+
+    assert panel._reset_state is None
+    assert panel._pending_redeem == pending
+
+
+def test_a_band_that_cannot_paint_its_rows_is_not_armed(monkeypatch) -> None:
+    """R4/U1: an irreversible spend must never be one `enter` away from a card
+    that looks idle."""
+    panel = UsagePanel()
+    panel._reports = _reset_reports(accounts=1, extra=1)
+    monkeypatch.setattr(panel, "_band_room", lambda: 1)
+
+    panel.action_reset()
+
+    assert panel._reset_state is None
+    panel.action_confirm_reset()
+    assert panel._reset_state is None
+
+
+def test_confirm_refuses_when_the_question_is_no_longer_painted(monkeypatch) -> None:
+    """A resize between the question and the key that answers it is the realistic
+    route: the state stays `confirm` while the band loses its rows."""
+    panel = UsagePanel()
+    panel._reports = _reset_reports(accounts=1, extra=1)
+    panel.action_reset()
+    assert panel._reset_state == "confirm"
+    monkeypatch.setattr(panel, "_band_room", lambda: 0)
+
+    panel.action_confirm_reset()
+
+    assert panel._reset_state is None
+
+
+@pytest.mark.asyncio
+async def test_a_resize_repaint_cancels_a_band_it_took_the_rows_from(monkeypatch) -> None:
+    """The guard lives in `_repaint`, so EVERY path that re-measures -- resize,
+    sync_layout, a taller dock -- drops the question instead of painting a
+    partial one."""
+    async with _panel_app(size=(120, 30)) as panel:
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        panel.action_reset()
+        assert panel._reset_state == "confirm"
+        assert panel._reset_band_rows()
+        monkeypatch.setattr(panel, "_band_room", lambda: 0)
+        panel._repaint()
+    assert panel._reset_state is None
+
+
+@pytest.mark.asyncio
+async def test_the_footer_never_advertises_a_reset_the_card_cannot_ask_about(monkeypatch) -> None:
+    """F: `x` is only advertised when pressing it would show the question."""
+    async with _panel_app(size=(120, 30)) as panel:
+        panel.show_reports(_reset_reports(accounts=2, extra=2))
+        assert "x reset" in panel.render_lines_for_test()[-1]
+        monkeypatch.setattr(panel, "_band_room", lambda: 0)
+        row = panel.render_lines_for_test()[-1]
+    assert "x reset" not in row, row
+
+
+@pytest.mark.parametrize("cols", [80, 120])
+@pytest.mark.parametrize("rows", list(range(12, 26)))
+@pytest.mark.asyncio
+async def test_every_height_either_shows_the_band_or_spends_nothing(cols, rows) -> None:
+    """The UX height scan (12-25 rows at both widths): `x` may arm a question
+    only where the card can paint it, so `enter` can never emit a spend for a
+    confirmation that is not on screen -- and no height silently swallows the
+    band while leaving `enter` live."""
+    app = _PanelHost()
+    async with app.run_test(size=(cols, rows)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_reset_reports(accounts=2, extra=3))
+        await pilot.pause()
+        panel.action_reset()
+        painted = panel._reset_band_rows()
+        if panel._reset_state is None:
+            assert painted == [], (cols, rows, painted)
+            assert "x reset" not in panel.render_lines_for_test()[-1]
+        else:
+            assert painted, (cols, rows, panel._reset_state)
+            # A painted band states the account it would spend on.
+            assert any("reset" in row for row in (r.plain for r in painted)), (cols, rows)
+        panel.action_confirm_reset()
+        for _ in range(3):
+            await pilot.pause()
+        if app.reset_requests:
+            # Whatever was emitted came from a question that was on screen.
+            assert painted, (cols, rows)
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_choose_band_accounts_for_every_account_it_counts(monkeypatch) -> None:
+    """D5/U2: at 60x20 the real app measures three band rows, and the band then
+    said "5 accounts can reset", listed ONE, and accounted for the other four
+    nowhere -- digits 2-5 were inert and nothing said why. The remainder row now
+    outranks another candidate row, and the footer numbers exactly what is
+    listed, so the band never claims an account it does not account for."""
+    async with _panel_app(size=(60, 20)) as panel:
+        panel.show_reports(_reset_reports(accounts=5, extra=0))
+        panel.action_reset()
+        assert panel._reset_state == "choose"
+        monkeypatch.setattr(panel, "_band_room", lambda: 3)
+        rows = [row.plain for row in panel._reset_band_rows()]
+        shown, more = panel._reset_choose_plan()
+        assert rows[0] == "5 accounts can reset", rows
+        assert rows[-1] == "…and 4 more", rows
+        assert len(rows) == 3, rows
+        assert len(shown) == 1
+        assert more == 4
+        assert panel._band_key_row().plain == "esc cancel · 1 choose"
+        # Every listed index selects the account it numbers; every unlisted one
+        # is inert rather than selecting something the band never showed.
+        panel.action_select_reset(1)
+        assert panel._reset_state == "confirm"
+        assert panel._reset_account is not None
+        assert panel._reset_account.identity == shown[0].identity
+        panel.cancel_reset()
+        for index in (2, 3, 4, 5):
+            # `x` toggles: with the band already up it cancels, so each probe
+            # opens it fresh (that is the keyboard contract, not a workaround).
+            panel.cancel_reset()
+            panel.action_reset()
+            assert panel._reset_state == "choose"
+            panel.action_select_reset(index)
+            assert panel._reset_state == "choose", index
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_that_removes_the_credit_withdraws_the_question() -> None:
+    """U4: the confirmation said "Uses 1 of 2 reset credits" while the heading
+    beneath it had lost its chip, and `enter` spent against an intent the panel
+    already knew was stale."""
+    async with _panel_app(size=(120, 30)) as panel:
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        panel.action_reset()
+        assert panel._reset_state == "confirm"
+        panel.show_reports([_reset_report("account0@example.com", 0)] + _many_reports(2))
+        rows = "\n".join(panel.render_lines_for_test())
+    assert panel._reset_state == "result"
+    assert "Reset credits changed for account0@example.com — nothing was spent" in rows, rows
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_that_keeps_the_credit_updates_the_question() -> None:
+    """The other half of U4: the band must not keep stating a count the heading
+    contradicts, so a surviving candidate is re-resolved with its new count."""
+    async with _panel_app(size=(120, 30)) as panel:
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        panel.action_reset()
+        panel.show_reports([_reset_report("account0@example.com", 1)] + _many_reports(2))
+        band = "\n".join(row.plain for row in panel._reset_band_rows())
+    assert panel._reset_state == "confirm"
+    assert "Uses your last reset credit" in band, band
+    assert "Uses 1 of 2 reset credits" not in band, band
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_mid_choose_band_withdraws_it_too() -> None:
+    async with _panel_app(size=(120, 30)) as panel:
+        panel.show_reports(_reset_reports(accounts=2, extra=2))
+        panel.action_reset()
+        assert panel._reset_state == "choose"
+        panel.show_reports([_reset_report("account1@example.com", 2)] + _many_reports(2))
+    assert panel._reset_state == "result"
+
+
+@pytest.mark.asyncio
+async def test_r_dismisses_the_result_and_refetches() -> None:
+    """D3/U3: the failure copy names `r`, so the first press must do what the
+    sentence says. Swallowing it as a dismissal left a vanished sentence and the
+    stale numbers that raised the question."""
+    app = _PanelHost()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        panel.show_reset_result(ResetConsumeResult(outcome="failed"), identity="a")
+        await pilot.press("r")
+        await pilot.pause()
+    assert panel._reset_state is None
+    assert len(app.refresh_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_outcome_outlives_its_timer_and_clears_on_a_refresh() -> None:
+    """D8/U9: the `failed` receipt is the only record of a possible spend, so it
+    does not self-erase six seconds later -- a SUCCESSFUL refresh is what tells
+    the truth it was waiting for."""
+    async with _panel_app(size=(120, 30)) as panel:
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        panel.show_reset_result(
+            ResetConsumeResult(outcome="failed"), identity="account0@example.com"
+        )
+        assert panel._reset_failed is True
+        # No timer was ARMED for it, which is the guarantee: nothing in the card
+        # can make an unknown outcome disappear on its own.
+        assert panel._reset_timer is None
+        assert panel._reset_state == "result"
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        assert panel._reset_state is None
+        # A definitive outcome keeps its six-second courtesy timer.
+        panel.show_reset_result(
+            ResetConsumeResult(outcome="reset", windows_reset=1), identity="account0@example.com"
+        )
+        assert panel._reset_timer is not None
+
+
+def test_two_logins_sharing_a_label_get_distinct_ids_and_a_numbered_question() -> None:
+    """R2 at the surface: two reports carrying one label are two accounts. The
+    chooser lists both, the pending id is filed per credential ref (so a retry
+    cannot repeat the wrong account's request), and the confirmation says WHICH
+    of the two it would spend on."""
+    first = _reset_report("me@corp.com", 2)
+    first.credential_ref = "acct-1"
+    second = _reset_report("me@corp.com", 2)
+    second.credential_ref = "acct-2"
+
+    panel = UsagePanel()
+    panel._reports = [first, second]
+    panel.action_reset()
+    assert panel._reset_state == "choose"
+
+    panel.action_select_reset(2)
+    assert panel._reset_state == "confirm"
+    assert panel._reset_account is not None
+    assert panel._reset_account.key == "acct-2"
+    assert panel._reset_title(panel._reset_account) == ("Reset usage for me@corp.com · account 2?")
+
+    panel.action_confirm_reset()
+    assert panel._reset_state == "busy"
+    assert set(panel._pending_redeem) == {"acct-2"}, panel._pending_redeem
+    assert panel._reset_account is not None
+    assert panel._reset_account.key == "acct-2"
+
+
+def test_a_report_without_a_ref_falls_back_to_its_label() -> None:
+    """Old cache rows carry no ref, so the label is the only handle -- and the
+    controller refuses rather than guessing when it names two logins."""
+    legacy = _reset_report("me@corp.com", 2)
+    panel = UsagePanel()
+    panel._reports = [legacy]
+    panel.action_reset()
+    assert panel._reset_state == "confirm"
+    assert panel._reset_account is not None
+    assert panel._reset_account.key == "me@corp.com"
+    assert panel._reset_title(panel._reset_account) == "Reset usage for me@corp.com?"
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_the_chip_asks_about_that_account() -> None:
+    """D1: the accent chip is a real target, not a second number. It opens THAT
+    account's confirmation directly -- the click already named it."""
+    app = _PanelHost()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_reset_reports(accounts=2, extra=2))
+        await pilot.pause()
+        hits = [hit for hit in panel._chip_hits if hit[3] == "account1@example.com"]
+        assert hits, panel._chip_hits
+        row, start, end, _key = hits[0]
+        await pilot.click(UsagePanel, offset=(start + 1, row))
+        await pilot.pause()
+        assert panel._reset_state == "confirm", panel.render_lines_for_test()
+        assert panel._reset_account is not None
+        assert panel._reset_account.identity == "account1@example.com"
+        # A press elsewhere in the card is not a chip.
+        panel.cancel_reset()
+        await pilot.click(UsagePanel, offset=(0, 0))
+        await pilot.pause()
+        assert panel._reset_state is None
+
+
+def test_the_chip_sheds_its_noun_rather_than_being_cut_in_half() -> None:
+    """D6/U6: `[2…` states neither the number nor the noun. The heading yields
+    its cells instead, and past that the chip is absent rather than partial."""
+    long_identity = "damian.tran.with.a.long.alias@gominerva.com"
+    # 20 cells: the noun no longer fits beside a heading worth reading, so the
+    # datum keeps its place and the label goes.
+    at_20 = _lines([_reset_report(long_identity, 2)], width=20)[0]
+    assert at_20.endswith("[2]"), at_20
+    # 15: not even the datum fits beside that heading, so the chip is absent
+    # rather than cut.
+    at_15 = _lines([_reset_report(long_identity, 2)], width=15)
+    assert "[" not in at_15[0], at_15[0]
+    assert max(cell_len(line) for line in at_15) <= 15, at_15
+    # Wide enough, the noun survives.
+    wide = _lines([_reset_report("d@example.com", 2)], width=60)[0]
+    assert wide.endswith("[2 resets]"), wide

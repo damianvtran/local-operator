@@ -157,28 +157,48 @@
     "note": "{identity} names the account being reset. The request is already sent, so no key cancels it."
   },
   "tui.usage.resets.done": {
-    "role": "result",
+    "role": "spent-credit receipt naming the account",
     "tone": "factual",
-    "note": "{count} is how many rate-limit windows the vendor cleared (0 is possible and does not mean failure)."
+    "note": "Reports a SPENT credit. The =0 arm states that the reset succeeded and no window needed clearing; it must not read as a failure."
   },
   "tui.usage.resets.nothing": {
-    "role": "result",
-    "tone": "factual",
-    "note": "The credit was not spent because every window is below its limit."
+    "role": "refusal receipt: no window is at its limit",
+    "tone": "States the condition, not time: 'no window is at its limit', never 'not reached yet'.",
+    "note": "Names no account: the sentence is about the card's windows and a label would push it past the 50-cell band."
   },
   "tui.usage.resets.no_credit": {
-    "role": "result",
-    "tone": "factual",
-    "note": "The account has no reset credits left; nothing was spent."
+    "role": "refusal receipt naming the account",
+    "tone": "Factual, short enough for a 50-cell row.",
+    "note": "The vendor reports no spendable credit on this login."
   },
   "tui.usage.resets.already": {
-    "role": "result",
-    "tone": "factual",
-    "note": "The vendor reports this redemption already happened — a retried request, not a second spend."
+    "role": "idempotent-retry receipt naming the account",
+    "tone": "Factual; the retry was safe, nothing was charged twice.",
+    "note": "The vendor answered already_redeemed: this redeem id was applied before."
   },
   "tui.usage.resets.failed": {
-    "role": "result",
-    "tone": "honest, non-committal",
-    "note": "MUST NOT claim the credit survived, because the outcome is unknown. Points at the limits row and at `r`, the key that refreshes the panel."
+    "role": "unknown-outcome receipt naming the account",
+    "tone": "Never claims the credit survived. Names the key (`r`) that re-checks.",
+    "note": "The outcome is UNKNOWN, not failed-and-refunded. Stays on screen until dismissed or a refresh succeeds, because it is the only record of a possible spend."
+  },
+  "tui.usage.resets.confirm_title_account": {
+    "role": "confirmation question when two logins share one display label",
+    "tone": "Same as confirm_title; the suffix only disambiguates.",
+    "note": "Appended `· account N` is 1-based among accounts that share the label, in the panel's body order. Only used when the label alone cannot identify the login."
+  },
+  "tui.usage.resets.dismiss": {
+    "role": "key verb: leave the result receipt",
+    "tone": "Imperative, one word, lowercase to match the other key verbs.",
+    "note": "esc in the result band only dismisses; it never refreshes."
+  },
+  "tui.usage.resets.recheck": {
+    "role": "key verb: refetch after an unknown reset outcome",
+    "tone": "Imperative, lowercase, matches the `r` the failure sentence names.",
+    "note": "The same key refreshes and dismisses the receipt in one press."
+  },
+  "tui.usage.resets.changed": {
+    "role": "receipt: an armed confirmation was withdrawn because the credits moved",
+    "tone": "States both facts: the account's credits changed and nothing was spent.",
+    "note": "Shown when a refresh lands under an open band and the account it named no longer holds a credit."
   }
 }

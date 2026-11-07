@@ -51945,9 +51945,24 @@ class OperatorApp(App[None]):
         """Perform one reset and paint its outcome, if the panel still owns it."""
         if self._providers is None:
             return
-        result = await self._providers.consume_usage_reset(
-            message.provider, message.identity, message.redeem_request_id
-        )
+        from local_operator.providers.usage import ResetConsumeResult
+
+        try:
+            result = await self._providers.consume_usage_reset(
+                message.provider,
+                message.identity,
+                message.redeem_request_id,
+                credential_ref=message.credential_ref,
+            )
+        except Exception:  # noqa: BLE001 -- the band must ALWAYS be answered
+            # Textual does not re-raise a worker exception (it records it and
+            # moves the worker to ERROR), so an unguarded await left the band on
+            # `busy` with no way out: every key inert, `cancel_reset` refusing,
+            # and nothing repainting it. The library's "never raises" contract
+            # has holes this caller cannot see (a corrupt store row, a future
+            # transport change), so the outcome is answered here unconditionally
+            # -- an unknown result is exactly what `failed` means.
+            result = ResetConsumeResult(outcome="failed", detail="worker error")
         if not panel.is_open or panel.surface_generation != surface:
             # The card was closed (or reopened) while the request was on the
             # wire. The credit may well be spent; painting an outcome into a
@@ -51955,7 +51970,9 @@ class OperatorApp(App[None]):
             # as if they had just asked. The pending id survives on the panel
             # either way, so a retry is still idempotent.
             return
-        panel.show_reset_result(result, identity=message.identity)
+        panel.show_reset_result(
+            result, identity=message.identity, credential_ref=message.credential_ref
+        )
         if getattr(result, "outcome", "failed") in RESET_DEFINITIVE_OUTCOMES:
             self._force_usage_refresh(panel)
 

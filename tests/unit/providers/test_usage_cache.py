@@ -113,6 +113,34 @@ def test_round_trip_keeps_the_reset_credit_count() -> None:
     assert restored.resets_available == 0
 
 
+def test_round_trip_keeps_the_credential_ref() -> None:
+    """Same field-by-field hazard as the credit count: a ref the decoder forgets
+    would be present on a cold `/usage` and gone on every warm one, so a reset
+    would resolve by a label two logins can share exactly when the cache answers.
+    """
+    report = _report()
+    report.credential_ref = "acct-7"
+    restored = report_from_dict(report_to_dict(report))
+    assert restored is not None
+    assert restored.credential_ref == "acct-7"
+
+
+def test_a_row_written_before_the_ref_existed_decodes_to_none() -> None:
+    """Rows already on disk predate the field, and a hand-migrated value must
+    not make the report unparseable: an absent ref only loses exact-ref
+    resolution (the panel then refuses an ambiguous label)."""
+    payload = report_to_dict(_report())
+    payload.pop("credential_ref")
+    restored = report_from_dict(payload)
+    assert restored is not None
+    assert restored.credential_ref is None
+    for junk in (42, "", "   ", {"x": 1}, None):
+        payload["credential_ref"] = junk
+        restored = report_from_dict(payload)
+        assert restored is not None, junk
+        assert restored.credential_ref is None, junk
+
+
 def test_a_cached_row_written_before_the_field_existed_decodes_as_absent() -> None:
     payload = report_to_dict(_report())
     payload.pop("resets_available", None)

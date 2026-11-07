@@ -441,6 +441,22 @@ class UsageReport:
     #: clears a spent window, not quota the account can serve requests with, so
     #: counting it as headroom would report an exhausted plan as serviceable.
     resets_available: int | None = None
+    #: The stable per-CREDENTIAL ref this report was fetched with, or ``None``
+    #: on reports that came from anywhere else (the API-key route, the Muse
+    #: projection, a cache row written before this field existed).
+    #:
+    #: ``identity`` cannot do this job. It is a DISPLAY label
+    #: (:func:`credential_identity`: email, then account id, then org name) and
+    #: an email is not unique in the store, which dedupes on
+    #: ``org_id -> account_id -> email``: two legitimately stored logins can
+    #: share one label. Spending a reset credit resolves to a credential ROW,
+    #: so the panel needs a ref that names that row, not the label it shares.
+    #:
+    #: Same spelling the usage cache key and the account fingerprint already
+    #: build for a row -- ``identity_key`` when the store has one, else
+    #: ``cred:<row id>`` (see ``ProviderController._credential_ref``). Carried on
+    #: the report because the panel only has reports: it never sees the store.
+    credential_ref: str | None = None
 
 
 def usage_report_state(report: UsageReport) -> str:

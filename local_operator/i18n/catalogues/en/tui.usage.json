@@ -30,9 +30,13 @@
   "tui.usage.resets.confirm_title": "Reset usage for {identity}?",
   "tui.usage.resets.confirm_detail": "{count, plural, one {Uses your last reset credit; clears this account's rate-limit windows.} other {Uses 1 of {count} reset credits; clears this account's rate-limit windows.}}",
   "tui.usage.resets.busy": "Resetting usage for {identity}…",
-  "tui.usage.resets.done": "{count, plural, one {Reset applied — 1 window cleared} other {Reset applied — {count} windows cleared}}",
-  "tui.usage.resets.nothing": "Limits aren't reached yet — nothing to reset",
-  "tui.usage.resets.no_credit": "No reset credits left on this account",
-  "tui.usage.resets.already": "That reset was already applied",
-  "tui.usage.resets.failed": "Couldn't confirm the reset — check your limits, then press r to refresh"
+  "tui.usage.resets.done": "{count, plural, =0 {Reset applied for {identity} — no window needed clearing} one {Reset applied for {identity} — 1 window cleared} other {Reset applied for {identity} — {count} windows cleared}}",
+  "tui.usage.resets.nothing": "No window is at its limit — nothing to reset",
+  "tui.usage.resets.no_credit": "No reset credits left for {identity}",
+  "tui.usage.resets.already": "That reset for {identity} was already applied",
+  "tui.usage.resets.failed": "Reset not confirmed for {identity} — press r to re-check",
+  "tui.usage.resets.confirm_title_account": "Reset usage for {identity} · account {account}?",
+  "tui.usage.resets.dismiss": "dismiss",
+  "tui.usage.resets.recheck": "re-check",
+  "tui.usage.resets.changed": "Reset credits changed for {identity} — nothing was spent"
 }
