@@ -47,6 +47,7 @@ rename can show the user what was wrong.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +102,52 @@ def display_name(config_dir: Path | str | None = None) -> str:
         return validate_name(raw)
     except (ValueError, TypeError):
         logger.warning("aida: aida.name=%r is not a usable name; using %r", raw, DEFAULT_NAME)
+        return DEFAULT_NAME
+
+
+def name_from_values(values: Mapping[str, Any]) -> str:
+    """``aida.name`` from an already-parsed config ``values`` mapping.
+
+    The same defaulting as :func:`display_name` (absent, non-string or
+    unusable → :data:`DEFAULT_NAME`), for callers that hold the config
+    WATCHER's snapshot instead of a ``ConfigManager``. One function for both
+    the Team Bridge label (``team_bridge.cos_name``) and the model prompt
+    (:func:`live_display_name`), so the name teammates see beside her messages
+    and the name she is told she has cannot be resolved by two rule sets.
+    """
+    section = values.get("aida") if isinstance(values, Mapping) else None
+    raw = section.get("name", DEFAULT_NAME) if isinstance(section, Mapping) else DEFAULT_NAME
+    if not isinstance(raw, str):
+        return DEFAULT_NAME
+    try:
+        return validate_name(raw)
+    except (ValueError, TypeError):
+        return DEFAULT_NAME
+
+
+def live_display_name(config_dir: Path | str | None = None) -> str:
+    """The configured name read from the config watcher's last-good snapshot.
+
+    WHY NOT :func:`display_name`: that reader constructs a ``ConfigManager``,
+    which moves a malformed ``config.yml`` aside — acceptable on a gesture,
+    not on a hot read path. This one runs once per model step for her session
+    (``session_factory._make_system_blocks_provider``), the same posture as
+    the Team Bridge label (``team_bridge.cos_name``, review R1-4). ``poll_now``
+    is one ``stat`` when nothing moved, and it is what makes a rename written
+    by ANOTHER process (``/settings`` in the desktop, ``lop config edit``) land
+    on the very next turn even where no watcher poll task is running.
+
+    Never raises; :data:`DEFAULT_NAME` on any read problem.
+    """
+    try:
+        from local_operator.config_watch import process_watcher
+
+        root = Path(config_dir) if config_dir is not None else None
+        watcher = process_watcher(root)
+        watcher.poll_now()
+        return name_from_values(watcher.values)
+    except Exception:  # noqa: BLE001 — a display name must not break a model turn
+        logger.debug("aida: could not read the live aida.name; using the default", exc_info=True)
         return DEFAULT_NAME
 
 

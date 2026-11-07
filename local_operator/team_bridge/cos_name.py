@@ -158,14 +158,9 @@ def _aida_name(values: Mapping[str, Any]) -> str:
 
     from local_operator.aida import naming as aida_naming
 
-    section = values.get("aida")
-    raw = section.get("name", aida_naming.DEFAULT_NAME) if isinstance(section, Mapping) else None
-    if not isinstance(raw, str):
-        return aida_naming.DEFAULT_NAME
-    try:
-        return aida_naming.validate_name(raw)
-    except (ValueError, TypeError):
-        return aida_naming.DEFAULT_NAME
+    # Delegated so the bridge label and her prompt's "your name is" line
+    # (``naming.live_display_name``) share one rule set.
+    return aida_naming.name_from_values(values)
 
 
 def cos_display_name(config_dir: Path | str | None) -> str | None:

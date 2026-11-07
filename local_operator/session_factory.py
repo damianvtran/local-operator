@@ -4076,6 +4076,33 @@ def _make_system_blocks_provider(
     from local_operator.prompts_api import host_capability_probes
 
     host_has_browser, host_has_console = host_capability_probes()
+    # THE CHIEF OF STAFF'S NAME (``build_system_blocks`` ``identity_name`` /
+    # ``renamed_to``). The predicate is ``aida/state.json``'s ``session_id``
+    # (``aida.state.is_aida_session``), not the agent role: it is the same gate
+    # ``team_bridge.cos_name`` uses before it publishes ``aida.name`` as her
+    # bridge label, so a session is told the configured name exactly when
+    # teammates see it beside her messages. The role would be wrong both ways —
+    # a user can run the ``aida`` profile in a scratch session (not their
+    # chief of staff), and an older install's CoS may carry a hub-pulled copy
+    # under another id. Decided ONCE here: bootstrap writes the state before it
+    # creates her session directory, so the answer is already final at
+    # construction, and every other session pays nothing per turn.
+    #
+    # ``identity_name`` is frozen with the head block (read-once, like
+    # ``language_line``); the live name is re-read per step and passed as
+    # ``renamed_to`` only while it differs, so a rename reaches the NEXT turn
+    # as a one-section ``[session-state]`` delta without moving the persisted
+    # prefix and without touching (re-seeding) her profile.
+    from local_operator.aida import naming as aida_naming
+    from local_operator.aida import state as aida_state
+    from local_operator.paths import config_dir as _config_dir
+
+    identity_name = ""
+    try:
+        if session_id and aida_state.is_aida_session(_config_dir(), session_id):
+            identity_name = aida_naming.live_display_name()
+    except Exception:  # noqa: BLE001 — a display name must never block a session
+        logger.debug("could not decide whether this session is the chief of staff", exc_info=True)
     cached_key: tuple[Any, ...] | None = None
     cached_blocks: list[str] = []
 
@@ -4165,7 +4192,12 @@ def _make_system_blocks_provider(
         # (unknown must not ship as a removal), because only that layer can see the
         # section the model is already reading (QA round 1, Q2).
         open_asks = goal_state.open_asks() if goal_state is not None else None
+        renamed_to = ""
+        if identity_name:
+            live_name = aida_naming.live_display_name()
+            renamed_to = live_name if live_name != identity_name else ""
         key = (
+            renamed_to,
             knowledge_block,
             date_str,
             goal,
@@ -4213,6 +4245,8 @@ def _make_system_blocks_provider(
             has_notify=has_notify,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
+            identity_name=identity_name,
+            renamed_to=renamed_to,
         )
         cached_key = key
         return list(cached_blocks)

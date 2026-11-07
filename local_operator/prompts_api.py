@@ -926,8 +926,26 @@ def build_system_blocks(
     deferred_tools: Collection[str] = (),
     open_asks: str = "",
     has_notify: bool | None = None,
+    identity_name: str = "",
+    renamed_to: str = "",
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
+
+    ``identity_name`` / ``renamed_to`` carry the chief of staff's configured
+    display name (``aida.name``) and are ``""`` for every other session, which
+    keeps those sessions' bytes identical to a build without them. The
+    operator renames her ("Jian-Yang"), Team Bridge labels her by that name,
+    yet her profile body only ever said "Aida" — so she introduced herself
+    as Aida under a label reading Jian-Yang. ``identity_name`` is the name in
+    force when the session's prefix was built: a HEAD-block sentence with the
+    ``language_line`` read-once discipline, so it costs no cache churn turn to
+    turn. A rename mid-session must not rewrite block 0 (a changed head starts
+    a new persisted prefix epoch — a cold cache for a cosmetic edit), so the
+    caller passes the live name as ``renamed_to`` only while it DIFFERS from
+    ``identity_name``; it rides the tail as an ``<identity>`` section, which
+    ``Session._system_state_delta`` journals as ONE ``[session-state]``
+    section on the next turn. Renamed back, the section vanishes and ships as
+    an explicit removal, leaving the head sentence true again.
 
     These are the current desired blocks, not a promise of prefix cache
     stability: every system block precedes conversation history on the wire.
@@ -1138,6 +1156,21 @@ def build_system_blocks(
             "direct instruction in the conversation still wins.\n\n"
             f"<user_instructions>\n{safe}\n</user_instructions>"
         )
+    if identity_name.strip():
+        # AFTER the custom instructions, deliberately the opposite of the
+        # language line: her profile prompt rides ``user_instructions`` and a
+        # hub-pulled or pre-rename copy of it may still say "You are Aida"
+        # (seeds are never rewritten under a user's edits), so this sentence
+        # must be the later, more specific statement and say outright which
+        # one wins. Model-facing English by design.
+        name = identity_name.strip()
+        instructions = (
+            f"{instructions}\n\n## Your name\n\n"
+            f"Your name is {name}. It is the name the operator chose for you "
+            "(the same one Team Bridge and the sidebar show). Any instruction "
+            "above that calls you Aida is using your default name: introduce "
+            f"yourself, sign messages and refer to yourself as {name}."
+        )
     # ``deferred_tools``: see ``render_tool_inventory_block``. A live session
     # re-renders this block against its own deferral state
     # (``Session._reconcile_tool_inventory``), so only a caller with no session
@@ -1195,6 +1228,19 @@ def build_system_blocks(
         # ``session.goal.GoalState.run_brief`` — and a reader must be able to
         # tell the operator's persona from the harness's boundary.
         tail = f"{tail}\n\n<configuration-run>\n{run_brief.strip()}\n</configuration-run>"
+    if renamed_to.strip():
+        # A mid-session rename (see the docstring): tail, not head, so the
+        # persisted prefix and its cache survive. Placed after the run brief
+        # and before ``<interactivity>`` to match ``_TAIL_SECTION_MARKERS``,
+        # whose order the splitter walks. Model-facing English by design.
+        name = renamed_to.strip()
+        # ONE line on purpose: it is re-sent with every later request of the
+        # session, so it states only the new fact; the head sentence already
+        # says how to use a name.
+        tail = (
+            f"{tail}\n\n<identity>\nRenamed this session: your name is now {name} "
+            "(supersedes the name above).\n</identity>"
+        )
     if interactive is not None:
         # WHO CAN ANSWER, stated in BOTH directions rather than only the negative
         # one. A question asked now is answered when the operator LOOKS, not when
@@ -1321,6 +1367,11 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
     ("team", "<team>"),
     ("agent", "<agent>"),
     ("run", "<configuration-run>"),
+    # The chief of staff's mid-session rename (``build_system_blocks``
+    # ``renamed_to``). Its own section so a rename journals as one small
+    # record. Added 2026-11: no record predating it contains the marker at a
+    # piece start, so older records re-split exactly as before.
+    ("identity", "<identity>"),
     ("interactivity", "<interactivity>"),
     # The open-asks reminder (design §16/SA-D3). Its own section because it is
     # the one tail piece that can move on EVERY user message while asks are open:
@@ -1389,6 +1440,7 @@ STATE_SECTION_HEADINGS: dict[str, str] = {
     "team": "Team",
     "agent": "Agent",
     "run": "Configuration run",
+    "identity": "Your name",
     "interactivity": "Interactivity",
     "open_asks": "Open asks",
     "credentials": "Session credentials",
