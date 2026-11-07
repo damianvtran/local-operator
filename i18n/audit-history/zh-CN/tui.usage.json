@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.usage",
+  "history_sha256": "a873623134b386f03f7a5b4cf00aa0a0a29bc688c7112f3e41e1be47cefc81d6",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.usage",
+      "source_sha256": "8cf8bb67be0510b3d707b89dc0db7adddfe681a6a670c07ca10d1ae604d9b755",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent a7088e0fa893)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent ae8183d4cc6c)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "19 new tui.usage.resets.* keys; the 21 pre-existing entries were verified byte-identical against the base. Independent audit read the complete namespace and passed with 0 blocker / 0 major, 0 minor and 3 nit wording findings. Deferred NIT: badge could read as completed resets (proposed 可重置{count}次), confirm_detail could add an =1 arm for 'last credit', 'already' phrasing. Not edited after the audit, so this receipt's provenance stays on the exact audited bytes."
+    }
+  ]
+}

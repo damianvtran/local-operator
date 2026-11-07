@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "tui.usage",
+  "history_sha256": "5441071a6afda3cf93a099ae46893fa28c62d5311ea283933c012b6519643662",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "tui.usage",
+      "source_sha256": "8cf8bb67be0510b3d707b89dc0db7adddfe681a6a670c07ca10d1ae604d9b755",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent 861ad90d3960)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent d05e6e2f0da3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "19 new tui.usage.resets.* keys; the 21 pre-existing entries were verified byte-identical against the base. Independent audit read the complete namespace and passed with 0 blocker / 0 major, 3 minor and 4 nit wording findings. Deferred MINOR: confirm_title/confirm_title_account/busy use 'de {identity}' (would elide to 'd`' before a vowel; auditor proposed 'pour'); no_credit reads ambiguously without 'ne' (proposed 'Aucun crédit de réinit. restant pour'). Deferred NIT: 'changed' wording, 'more' wording, 'failed' brevity, confirm_detail 'vide' calque. Not edited after the audit, so this receipt's provenance stays on the exact audited bytes."
+    }
+  ]
+}

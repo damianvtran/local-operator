@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.usage",
+  "history_sha256": "5350769eca477ca61de7a8eb697bf3a66aaab24b8b6d47df80e1579e9db5514d",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "tui.usage",
+      "source_sha256": "8cf8bb67be0510b3d707b89dc0db7adddfe681a6a670c07ca10d1ae604d9b755",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent 06e5409db942)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent 3b18185e59ad)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06",
+        "result": "passed",
+        "findings": 6,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "19 new tui.usage.resets.* keys; the 21 pre-existing entries were verified byte-identical against the base. Independent audit read the complete namespace and passed with 0 blocker / 0 major, 4 minor and 2 nit wording findings. Deferred MINOR: confirm_detail lacks a =1 'last credit' arm and runs 83 cells; nothing is 55 cells against a 50 budget; failed can read as 'you did not confirm' (proposed 'Chưa rõ kết quả đặt lại…'); changed says the turn changed rather than the count. Deferred NIT: already repeats 'đó'; dismiss wording is fine. Not edited after the audit, so this receipt's provenance stays on the exact audited bytes."
+    }
+  ]
+}

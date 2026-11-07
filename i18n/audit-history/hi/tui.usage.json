@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "tui.usage",
+  "history_sha256": "f70cae44bb4c71166087d4fbf6e0d640e8ac4404eff6b883fad7816f39538cd0",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "tui.usage",
+      "source_sha256": "8cf8bb67be0510b3d707b89dc0db7adddfe681a6a670c07ca10d1ae604d9b755",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent c38aa06c10d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent 3c0c9d612d3a)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "19 new tui.usage.resets.* keys; the 21 pre-existing entries were verified byte-identical against the base. Independent audit read the complete namespace and passed with 0 blocker / 0 major, 1 minor and 2 nit wording findings. Deferred MINOR: failed uses 'पुष्ट नहीं' where every other Hindi catalogue says 'अपुष्ट' (proposed 'अपुष्ट', 48 cells). Deferred NIT: dismiss drift vs tui.notifications ('बंद करें' preferred here), recheck wording. Not edited after the audit, so this receipt's provenance stays on the exact audited bytes."
+    }
+  ]
+}
