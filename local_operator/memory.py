@@ -259,12 +259,16 @@ _B64_RUN = re.compile(r"(?<![\w+/=-])[A-Za-z0-9+/_-]{40,}={0,2}(?![\w+/=-])")
 # commit SHA, a tunnel hostname label or a content-addressed attachment name look the
 # same. So the opaque rule classifies by shape PLUS CONTEXT, in this order:
 #   1. named as a secret (``token``, ``api_key``, ``password``...) right before it, or the
-#      dict field holding it is a secret name -> refused;
-#   2. named as a public identifier (commit/sha/digest/hash, session/job/ask/run/... id,
-#      uuid) right before it, or the field holding it is such a name -> stored;
-#   3. structurally a LOCATOR, not a value: a DNS label of a hostname
-#      (``<32hex>-lop.radienthq.com``) or a path component (``.../attachments/<hex>.bin``)
-#      -> stored;
+#      dict field holding it is a secret name -> refused. The secret name is searched
+#      ANYWHERE in the run's clause, not only as the nearest word: "Stripe API key (ref
+#      <hex>)" and "deploy token for job <hex>" put an id word between the secret name
+#      and its value, and the secret name must win (agent review round 1, B2);
+#   2. a HEX run named as a public identifier (commit/sha/digest/hash, session/job/ask/
+#      run/... id, uuid) right before it, or held by such a field -> stored. Never a
+#      base64/alnum run: a 40-char mixed-case token after "id" is not a commit;
+#   3. structurally a LOCATOR, not a value: a DNS label followed by a real hostname tail
+#      (``<32hex>-lop.radienthq.com``) or a harness attachment blob in a LOCAL path
+#      (``~/.local-operator/attachments/<hex>.bin``) -> stored;
 #   4. otherwise (bare and unnamed) -> refused: that is how a leaked key would be kept.
 # Vendor-prefixed keys, JWTs, PEM blocks, bearer headers and ``name=value`` assignments
 # never reach this rule's leniency: the shared ``redaction_shapes`` table refuses them
@@ -287,15 +291,32 @@ _SECRET_NAME_CONTEXT = re.compile(
     r"(?<![A-Za-z0-9])"
     r"(?:secret|token|passw(?:or)?d|pwd|passphrase|api[\s_-]?key|access[\s_-]?key"
     r"|private[\s_-]?key|signing[\s_-]?key|credentials?|auth(?:orization)?|bearer|cookie"
-    r"|key)\W{0,4}\Z",
+    r"|key)s?(?![A-Za-z0-9])",
     re.I,
 )
+# The clause a secret name is looked for in: back to the last line break or sentence end,
+# at most this many characters before the run (a name further away is another clause).
+_CLAUSE_LOOKBACK = 64
+_CLAUSE_BREAK = re.compile(r"\n|[.!?;]\s")
 # What may follow a run for it to be a DNS label: optional rest of the label
 # (``-lop``), then at least one more dot-separated label ending in an alphabetic TLD.
 # Two labels minimum after the run, so ``<run>.py`` / ``<run>.bin`` (a file name, judged
 # as one) is not mistaken for ``<run>.example.com``.
 _HOST_TAIL = re.compile(
-    r"(?:-[A-Za-z0-9-]*)?(?:\.[A-Za-z0-9-]+)+\.[A-Za-z]{2,63}(?![A-Za-z0-9-]|\.[A-Za-z0-9])"
+    r"(?:-[A-Za-z0-9-]*)?(?:\.[A-Za-z0-9-]+)+\.(?P<tld>[A-Za-z]{2,63})"
+    r"(?![A-Za-z0-9-]|\.[A-Za-z0-9])"
+)
+# Final suffixes that make ``<run>.tar.gz`` / ``<run>.min.js`` a FILE name, not a host
+# (agent review round 1, m2). Not exhaustive: a file named like a host still reads as
+# one, which is why a secret name in the clause is checked first.
+_FILE_SUFFIXES = frozenset(
+    "gz bz2 xz zst zip tgz tar 7z json yaml yml toml txt log md csv tsv py js ts mjs cjs "
+    "html css png jpg jpeg gif webp svg pdf bin dat db sqlite pem key crt env cfg conf ini".split()
+)
+# A harness attachment blob, judged as part of a LOCAL path token (no ``scheme://``):
+# the store mints exactly ``<hex digest>.bin`` (session/attachments.py).
+_LOCAL_ATTACHMENT_PREFIX = re.compile(
+    r"(?:^|[\s(\"'`=])(?:~|\.{1,2}|[A-Za-z]:)?[^\s:]*[/\\]attachments[/\\]\Z"
 )
 # Back-compat alias: the digest vocabulary is now part of the public-id context.
 _DIGEST_CONTEXT = _PUBLIC_ID_CONTEXT
@@ -698,28 +719,41 @@ def _mixed_token(chunk: str) -> bool:
     return False
 
 
-def _opaque_verdict(text: str, start: int, end: int, field: str | None) -> str | None:
+def _opaque_verdict(
+    text: str, start: int, end: int, field: str | None, *, hex_run: bool = True
+) -> str | None:
     """Classify the opaque run ``text[start:end]``: None = identifier/locator, else a kind.
 
     See the ordered rules above ``_PUBLIC_ID_CONTEXT``. ``field`` is the dict key path
     that held the string (``body``, ``sha``, ``source.session``...); its LAST segment is
     the nearest name a structured value has, exactly as a prose word before the run is.
     """
-    before = text[max(0, start - 24) : start]
+    window = text[max(0, start - _CLAUSE_LOOKBACK) : start]
+    breaks = list(_CLAUSE_BREAK.finditer(window))
+    clause = window[breaks[-1].end() :] if breaks else window
     leaf = (field or "").rsplit(".", 1)[-1]
-    if _SECRET_NAME_CONTEXT.search(before) or (leaf and _SECRET_NAME_CONTEXT.search(leaf)):
+    if _SECRET_NAME_CONTEXT.search(clause) or (leaf and _SECRET_NAME_CONTEXT.search(leaf)):
         return "named-secret"
-    if _PUBLIC_ID_CONTEXT.search(before) or (leaf and _PUBLIC_ID_CONTEXT.search(leaf)):
+    if hex_run:
+        before = text[max(0, start - 24) : start]
+        if _PUBLIC_ID_CONTEXT.search(before) or (leaf and _PUBLIC_ID_CONTEXT.search(leaf)):
+            return None
+        if (
+            text.startswith(".bin", end)
+            and not re.match(r"[A-Za-z0-9]", text[end + 4 : end + 5])
+            and _LOCAL_ATTACHMENT_PREFIX.search(text[max(0, start - 512) : start])
+        ):
+            # A content-addressed attachment blob in a LOCAL path: the harness mints
+            # that name and shows it to the agent. A URL (``https://…/attachments/…``)
+            # or any other segment stays refused: webhook and signed-URL secrets live
+            # there (agent review round 1, m1).
+            return None
+    tail = _HOST_TAIL.match(text, end)
+    if tail and tail.group("tld").lower() not in _FILE_SUFFIXES:
+        # A DNS label (``<hex>-lop.radienthq.com``, ``a.<hex>.example.com``). A run after
+        # a dot with NO hostname tail (``dp.st.dev.<run>``, ``v1.<run>``) is a prefixed
+        # token, not a label, and is refused (agent review round 1, M1).
         return None
-    if re.search(r"(?:^|[/\\])attachments[/\\]\Z", text[max(0, start - 64) : start]):
-        # A content-addressed attachment blob (``.../attachments/<digest>.bin``): the
-        # harness mints that name and shows it to the agent. A run in any OTHER path
-        # or URL segment stays refused: webhook and signed-URL secrets live there.
-        return None
-    if start and text[start - 1] == "." and re.search(r"[A-Za-z0-9-]\.\Z", text[:start]):
-        return None  # an inner label of a hostname (``a.<hex>.example.com``)
-    if _HOST_TAIL.match(text, end):
-        return None  # a DNS label (``<hex>-lop.radienthq.com``)
     return "opaque"
 
 
@@ -776,7 +810,7 @@ def _rule_spans(text: str, field: str | None = None) -> list[tuple[str, int, int
             and token.count("/") <= 3
             and sum(token.count(c) for c in "-_") <= 3
         ):
-            verdict = _opaque_verdict(text, match.start(), match.end(), field)
+            verdict = _opaque_verdict(text, match.start(), match.end(), field, hex_run=False)
             if verdict:
                 spans.append(("opaque-base64" if verdict == "opaque" else verdict, *match.span()))
     return spans
@@ -1038,7 +1072,7 @@ def guard(value: Any, *, field: str | None = None) -> None:
 #: (session/attachments.py, 32 hex today; up to 64 accepted for a full sha256).
 # Matched as a PREFIX of the last component: in a JSON spelling of the fact (the
 # ``guard(_dump(fact))`` pass) the path token runs on into an escaped ``\n``.
-_ATTACHMENT_BLOB = re.compile(r"[0-9a-f]{32,64}(?:\.[A-Za-z0-9]{1,8})?(?![A-Za-z0-9])")
+_ATTACHMENT_BLOB = re.compile(r"[0-9a-f]{32,64}\.bin(?![A-Za-z0-9]|\.[A-Za-z0-9])")
 
 
 def _is_attachment_reference(word: str, rule: str) -> bool:

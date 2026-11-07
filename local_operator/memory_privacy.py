@@ -80,6 +80,18 @@ def _check(name: str, arguments: Any, raw: str | None) -> None:
 _MAX_MASKED_SPANS = 16
 
 
+def _neutral(length: int) -> str:
+    """A same-length stand-in for a masked span that can never act as context or value.
+
+    ``[redacted]`` is the marker the shared shape table already treats as masked (its
+    ``_NOT_ALREADY_MASKED`` guard), so ``key: [redacted]###`` is not re-read as a
+    credential assignment, and ``redacted`` is in neither the secret-name nor the
+    public-id vocabulary. Spans shorter than the marker are blanked with ``#``.
+    """
+    marker = "[redacted]"
+    return marker + "#" * (length - len(marker)) if length >= len(marker) else "#" * length
+
+
 def _masked(name: str, arguments: Any) -> dict[str, Any] | None:
     """The call with ONLY its offending spans replaced by ``[redacted:<kind>]``, or None.
 
@@ -99,27 +111,55 @@ def _masked(name: str, arguments: Any) -> dict[str, Any] | None:
     # is a different address, so those keep the whole-call redaction.
     if name != "memory" or not isinstance(arguments, dict):
         return None
-    masked = dict(arguments)
+    # Residue is decided on the ORIGINAL text, never on the labelled copy: a label such
+    # as ``[redacted:aws-access-key-id]`` ends in ``id``, and re-checking the labelled
+    # copy let that word act as public-id context for the AWS secret beside it (agent
+    # review round 1, B1). So: take EVERY span the guard reports, blank each with a
+    # same-length neutral placeholder (``_neutral``: offsets stay in original coordinates),
+    # re-check that neutral copy until it passes, and only then write the labels into
+    # the original at the collected spans. The labelled copy is never judged.
+    neutral = dict(arguments)
+    spans: dict[str, list[tuple[int, int, str]]] = {}
     for _ in range(_MAX_MASKED_SPANS + 1):
         try:
-            _check(name, masked, None)
-            return masked
+            _check(name, neutral, None)
+            break
         except SensitiveValueError as exc:
-            span = exc.spans[0] if exc.spans else None
-            if (
-                span is None
-                or span.start is None
-                or span.end is None
-                or not span.complete
-                or not isinstance(span.field, str)
-                or not isinstance(masked.get(span.field), str)
-            ):
+            if not exc.spans:
                 return None
-            text = masked[span.field]
-            masked[span.field] = text[: span.start] + f"[redacted:{span.kind}]" + text[span.end :]
+            for span in exc.spans:
+                if (
+                    span.start is None
+                    or span.end is None
+                    or not span.complete
+                    or not isinstance(span.field, str)
+                    or not isinstance(neutral.get(span.field), str)
+                ):
+                    return None
+                text = neutral[span.field]
+                neutral[span.field] = (
+                    text[: span.start] + _neutral(span.end - span.start) + text[span.end :]
+                )
+                spans.setdefault(span.field, []).append((span.start, span.end, span.kind))
+            if sum(len(found) for found in spans.values()) > _MAX_MASKED_SPANS:
+                return None
         except MemoryError:
             return None
-    return None
+    else:
+        return None
+    masked = dict(arguments)
+    for key, found in spans.items():
+        merged: list[list[Any]] = []
+        for start, end, kind in sorted(found):
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end, kind])
+        text = masked[key]
+        for start, end, kind in reversed(merged):
+            text = text[:start] + f"[redacted:{kind}]" + text[end:]
+        masked[key] = text
+    return masked
 
 
 def _raw_is_sound(name: str, raw: str | None) -> bool:

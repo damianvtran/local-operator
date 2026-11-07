@@ -451,3 +451,72 @@ def test_a_live_attachment_blob_path_is_a_locator_and_nothing_else_in_config_is(
     assert refused(f"see {config_dir() / 'memory' / 'bank.sqlite'}")
     with pytest.raises(SensitiveValueError, match=r"Sensitive path refused \(value: "):
         guard(f"see {config_dir() / 'memory'}")
+
+
+# --- Agent review round 1 (B1, B2, M1, m1, m2) and QA round 1 (Q-M1) -------------------
+# Deterministic synthetic values: mixed-case alnum (an AWS-secret / API-key shape) and
+# lowercase hex, neither drawn from any real credential.
+ALNUM40 = "NnqT7xV2bLk9QzR4wE1yUa8sJd3fGh6mPc5oKi0v"
+HEX40 = "9c1e5b7a3f2d8e4c6a0b9d7f1e3c5a7b9d2f4e6a"
+AKIA20 = "AKIA" + "Q7XK2M9PLR4TB8WZ"
+
+# Every row has a secret NAME in the clause before the value; an id word sitting between
+# them (ref / job / host / run / id) must not turn the value into a public identifier.
+SECRET_NAME_WINS = [
+    f"AWS secret for the CI build: {ALNUM40}",
+    f"Stripe API key (ref {HEX40})",
+    f"the deploy token for job {HEX40}",
+    f"password for host {ALNUM40}",
+    f"OpenAI key used by run {ALNUM40}",
+    f"secret access key, id {ALNUM40}",
+    f"doppler service token dp.st.prd.{ALNUM40}",
+    f"webhook secret is v1.{HEX40}",
+]
+# A dotted prefix with no hostname tail is a prefixed token, not a DNS label (M1); a
+# URL's /attachments/ segment is not the harness store (m1); a file name is not a host
+# (m2); the store mints only ``.bin`` blobs (Q-M1).
+NOT_A_LOCATOR = [
+    f"use value.{HEX40}",
+    f"login cfg.{ALNUM40}",
+    f"dp.st.dev.{ALNUM40}",
+    f"v1.{HEX40}",
+    f"https://hooks.example.com/attachments/{DIGEST64}",
+    f"https://hooks.example.com/attachments/{DIGEST64}.bin",
+    f"archive {HEX40}.tar.gz",
+    f"x ~/.local-operator/attachments/{DIGEST64}.env",
+    f"x ~/.local-operator/attachments/{DIGEST64}.bin.env",
+    f"id {ALNUM40}",
+]
+
+
+@pytest.mark.parametrize("text", SECRET_NAME_WINS + NOT_A_LOCATOR)
+def test_review_round_1_rows_are_refused_on_every_path(text):
+    assert refused(text), text
+    assert refusal_message("memory", {"op": "store", "text": text}) is not None
+
+
+@pytest.mark.parametrize("text", SECRET_NAME_WINS)
+def test_a_secret_name_anywhere_in_the_clause_names_the_value(text):
+    with pytest.raises(SensitiveValueError) as caught:
+        guard(text, field="text")
+    assert any(s.kind == "named-secret" for s in caught.value.spans) or any(
+        s.kind.startswith("opaque") for s in caught.value.spans
+    )
+
+
+def test_a_secret_name_in_an_earlier_clause_does_not_poison_a_later_id():
+    assert not refused(f"Rotated the token yesterday.\nCommit {HEX40} fixed the build")
+
+
+def test_retention_never_judges_its_own_mask_labels():
+    """B1: ``[redacted:aws-access-key-id]`` ends in ``id``; it must not make the AWS
+    secret beside it look like a public id in the retained transcript."""
+    args = {"op": "store", "text": f"{AKIA20} / {ALNUM40}"}
+    kept, raw, masked = retained_arguments("memory", args)
+    assert masked is True
+    assert ALNUM40 not in json.dumps(kept) and ALNUM40 not in (raw or "")
+    assert AKIA20 not in json.dumps(kept)
+    assert kept == {
+        "op": "store",
+        "text": "[redacted:aws-access-key-id] / [redacted:opaque-base64]",
+    }
