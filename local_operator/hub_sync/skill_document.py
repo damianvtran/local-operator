@@ -236,6 +236,26 @@ def parse_frontmatter(text: str) -> dict[str, Any]:
     return meta
 
 
+def _yaml_scalar(key: str, value: str) -> str:
+    """Render ``value`` for splicing after ``key: `` without changing its meaning.
+
+    Scalar-span replacement keeps the rest of the frontmatter byte for byte, but
+    the spliced text must still parse back to ``value``: plain prose like
+    ``Use when: asked # really`` is broken (``: ``) or comment-truncated (`` #``)
+    YAML as a plain scalar. Plain prose that round-trips is kept unquoted so a
+    simple edit stays a simple diff; anything else takes PyYAML's quoted form,
+    on one line (``width`` unbounded) so it cannot fold into the next key.
+    """
+
+    try:
+        if yaml.safe_load(f"{key}: {value}") == {key: value}:
+            return value
+    except yaml.YAMLError:
+        pass
+    rendered = yaml.safe_dump({key: value}, allow_unicode=True, width=float("inf"))
+    return rendered[len(key) + 2 :].rstrip("\n")
+
+
 @dataclass(frozen=True)
 class SkillFile:
     path: str
@@ -416,7 +436,7 @@ class SkillDocument:
                 separator = (
                     "\r\n" if replaced.endswith("\r\n") else "\n" if replaced.endswith("\n") else ""
                 )
-                content = content[:left] + value + separator + content[right:]
+                content = content[:left] + _yaml_scalar(key, value) + separator + content[right:]
             files.append(SkillFile(file.path, content))
         name = value if key == "name" else self.name
         description = value if key == "description" else self.description
