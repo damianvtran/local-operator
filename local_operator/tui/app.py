@@ -14363,7 +14363,12 @@ class OperatorApp(App[None]):
             from local_operator.hub_org import eligibility
             from local_operator.paths import config_dir
 
-            eligibility.refresh(config_dir(), boundary="tui-start")
+            if eligibility.refresh(config_dir(), boundary="tui-start"):
+                # The Radient Vault agent gate is meaningful only for a
+                # team-plan account; its own 6 h TTL bounds the network.
+                from local_operator.vault_agent import eligibility as vault_gate
+
+                vault_gate.refresh(config_dir(), boundary="tui-start")
         except Exception:  # noqa: BLE001 — a surface start never fails for this
             pass
 

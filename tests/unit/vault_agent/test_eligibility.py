@@ -174,3 +174,17 @@ def test_refresh_without_force_honours_the_ttl(config_dir, refreshing) -> None:
     eligibility.refresh(config_dir, boundary="explicit", force=True)
     assert eligibility.refresh(config_dir, boundary="timer").state == "open"
     assert len(refreshing.calls) == 1
+
+
+@pytest.mark.parametrize("orgs", [[], [hub.OrgRef(tenant_id=TENANT, tenant_name="Acme", role="member")]])
+def test_hub_boundaries_refresh_the_vault_gate_only_for_a_team_account(config_dir, monkeypatch, orgs) -> None:
+    from local_operator.hub_org import enrol
+
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(hub, "refresh", lambda _root, boundary, force=False: orgs)
+    monkeypatch.setattr(enrol, "auto_enrol_enabled", lambda _root: False)
+    monkeypatch.setattr(
+        eligibility, "refresh", lambda _root, boundary, force=False: calls.append((boundary, force))
+    )
+    enrol.run_boundary(config_dir, "sign-in", force=True)
+    assert calls == ([("sign-in", True)] if orgs else [])

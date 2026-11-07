@@ -52,6 +52,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "peer-messaging",
         "projects",
         "qwencloud",
+        "radient-vault",
         "scratchpad",
         "sessions",
         "skills",
@@ -1074,7 +1075,9 @@ def test_credentials_guide_keeps_local_first_and_names_vault_only_for_teammates(
     assert "when you do not know, do not pitch it" in prose
     assert "goes in Radient Vault" not in prose
     assert "https://console.radienthq.com/dashboard/vaults" in prose
-    assert "cannot yet create or read" in prose
+    # Reading is conditional on the gated verb; creating stays the user's.
+    assert "You cannot create Vault items" in prose
+    assert "only when the `secret` tool offers `vault_resolve`" in prose
     assert "Team Bridge message" in prose
     assert "shared or committed file" in prose
     # Concise by requirement: a few lines, not a second guide.
@@ -1132,8 +1135,38 @@ def test_org_hub_guide_is_gated_on_the_radient_team_predicate(tmp_path) -> None:
 
     guides = discover_guides()
     gated = {g.name: g.requires for g in guides if g.requires}
-    assert gated == {"org-hub": "radient-team"}
-    assert "org-hub" not in {g.name for g in guides_available(guides, tmp_path)}
-    assert "org-hub" not in {g.name for g in guides_available(guides, None)}
+    assert gated == {"org-hub": "radient-team", "radient-vault": "radient-vault"}
+    for name in gated:
+        assert name not in {g.name for g in guides_available(guides, tmp_path)}
+        assert name not in {g.name for g in guides_available(guides, None)}
     typo = [guides[0].model_copy(update={"requires": "radient-teem"})]
     assert guides_available(typo, tmp_path) == []
+
+
+def test_radient_vault_guide_is_gated_concise_and_keeps_local_first(monkeypatch, tmp_path) -> None:
+    """Advertised only with access; recommended only for teammate/remote use.
+
+    Operator requirements: the vault capability appears only for a signed-in
+    Team-plan user with access (the guide shares the `secret` tool's gate), it is
+    recommended only for sharing with teammates or remote use (its description is
+    what the recommender matches), and the local store stays the default.
+    """
+    from local_operator.guides.discovery import guides_available
+    from local_operator.vault_agent import eligibility
+
+    guides = discover_guides()
+    (guide,) = [g for g in guides if g.name == "radient-vault"]
+    assert "teammate" in guide.description and "another machine" in guide.description
+    assert "local secret store" in guide.description
+    monkeypatch.setattr(eligibility, "is_open", lambda _root: True)
+    assert "radient-vault" in {g.name for g in guides_available(guides, tmp_path)}
+    monkeypatch.setattr(eligibility, "is_open", lambda _root: False)
+    assert "radient-vault" not in {g.name for g in guides_available(guides, tmp_path)}
+
+    body = guide.file_path.read_text(encoding="utf-8")
+    prose = " ".join(body.replace("**", "").split())
+    assert "stays the default" in prose
+    assert "lop vault connect" in prose
+    assert "session credential" in prose and "never shown to you" in prose
+    assert "cannot create or upload" in prose
+    assert len(body.splitlines()) <= 40
