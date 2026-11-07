@@ -208,10 +208,7 @@ def test_a_turn_past_the_first_turn_budget_says_it_stopped_waiting(
     session_id = detail["session_id"]
     assert "cannot see" not in receipt, receipt
     lines = receipt.splitlines()
-    assert (
-        "turn: still running on device-b after 1.5 s — its reply shows here once it arrives:"
-        in (lines)
-    ), (receipt)
+    assert "turn: still running on device-b after 1.5 s — its reply shows here:" in (lines), receipt
     # D1: the follow-up is ALONE on an indented line, with no backticks a shell
     # would run as a command substitution when the line is pasted.
     assert f"  lop network sessions --peer device-b --peek {session_id}" in lines, receipt
@@ -274,8 +271,10 @@ def test_the_first_turn_wait_fits_inside_the_requesters_hop() -> None:
     # 50 s gone: the floor is min(op_wait_s, remaining), so it still ends before due.
     late = relay.first_turn_wait_s(due, op_wait, arrival + 50.0)
     assert late == deadline - 50.0 - slack and arrival + 50.0 + late <= due
-    # Nothing left: answer at once rather than after the requester gave up.
-    assert relay.first_turn_wait_s(due, op_wait, due + 3.0) == 0.0
+    # Nothing left: the shortest wait that still READS the owner's reply
+    # (review MINOR-2 on #3547), never 0, which sent the prompt blind.
+    assert relay.first_turn_wait_s(due, op_wait, due + 3.0) == relay.FIRST_TURN_MIN_WAIT_S
+    assert 0 < relay.FIRST_TURN_MIN_WAIT_S < slack
 
 
 def test_the_help_names_the_relays_first_turn_wait() -> None:
@@ -290,6 +289,110 @@ def test_the_help_names_the_relays_first_turn_wait() -> None:
 
     source = inspect.getsource(network_cli.add_parser)
     assert f"still running after up to {relay.FIRST_TURN_WAIT_S:g} s" in source
+
+
+def _sessions_help(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], columns: int
+) -> str:
+    """``lop network sessions --help`` as argparse prints it ``columns`` wide."""
+    import argparse
+
+    from local_operator.network import cli as network_cli
+
+    monkeypatch.setenv("COLUMNS", str(columns))
+    parser = argparse.ArgumentParser(prog="lop")
+    network_cli.add_parser(parser.add_subparsers(dest="command"))
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["network", "sessions", "--help"])
+    return capsys.readouterr().out
+
+
+def test_the_help_says_runtime_start_up_shortens_the_wait(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """NIT-2 on #3547: the README says the 45 s is less the runtime's start-up, and
+    the help said only "up to 45 s" — so a receipt reading "after 31 s" looked like
+    a broken promise. The rendered help says what the budget really is, at 80
+    columns, with no line past them."""
+    rendered = _sessions_help(monkeypatch, capsys, 80)
+    flat = " ".join(rendered.split())
+    assert "still running after up to 45 s, less any time spent starting its runtime" in flat
+    assert all(len(line) <= 80 for line in rendered.splitlines()), [
+        line for line in rendered.splitlines() if len(line) > 80
+    ]
+
+
+def _still_running_receipt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], peer: str
+) -> list[str]:
+    """The receipt the CLI prints for an owner's "still running after 45 s" reply."""
+    from local_operator.network import cli as network_cli
+
+    detail = {
+        "session_id": "3f139cd73849",
+        "admitted": True,
+        "detail": "prompt admitted",
+        "turn": {"state": "running", "waited_s": relay.FIRST_TURN_WAIT_S},
+    }
+    monkeypatch.setattr(network_cli, "_relay_answer", lambda *_a, **_k: {"ok": True, **detail})
+    args: Any = SimpleNamespace(
+        peer=peer,
+        create=True,
+        name="",
+        prompt="Reply with exactly BASE_OK",
+        cwd="",
+        model="",
+        profile="",
+        agent="",
+        agent_id="",
+        team="",
+        effort="",
+        yolo=False,
+        json=False,
+        **{key: "" for key in ("stop", "engage", "send", "steer", "slash", "peek")},
+    )
+    capsys.readouterr()
+    assert network_cli._cmd_sessions(args) == 0  # noqa: SLF001
+    return capsys.readouterr().out.splitlines()
+
+
+@pytest.mark.parametrize("peer", ["device-b", "macbook-pro", "damians-mac-mini"])
+def test_the_still_running_receipt_fits_80_columns(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], peer: str
+) -> None:
+    """D4 on #3547: the line above the ``--peek`` command was 83-93 columns for
+    ordinary peer names, so it wrapped on an 80-column terminal right above the
+    line meant to be copied. Every line of the receipt now fits."""
+    lines = _still_running_receipt(monkeypatch, capsys, peer)
+    print("\n".join(f"{len(line):3d} | {line}" for line in lines))  # evidence (-s)
+    assert f"turn: still running on {peer} after 45 s — its reply shows here:" in lines
+    assert f"  lop network sessions --peer {peer} --peek 3f139cd73849" in lines
+    assert all(len(line) <= 80 for line in lines), lines
+
+
+def test_with_no_time_left_the_owner_still_reads_the_turns_reply(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """MINOR-2 on #3547: an engage that ate the whole budget left a wait of 0, and
+    ``exchange(timeout_s=0)`` sent the prompt without reading anything. The
+    receipt then claimed "admitted" and "still running … after 0 s" for a turn
+    that had in fact completed at once. With the 1 s floor the owner reads the
+    reply: a fast turn reports completed, and no receipt names a 0 s wait."""
+
+    class _Fast(_TimedHandle):
+        delay_s = 0.0
+
+    # "The engage left nothing": the create reads its remaining lane time here.
+    monkeypatch.setattr(relay, "slow_op_remaining_s", lambda: 0.0)
+    detail, receipt = _create_receipt(_pair_of(request), monkeypatch, capsys, _Fast)
+    turn = detail["turn"]
+    assert "after 0 s" not in receipt, receipt
+    assert turn.get("waited_s", relay.FIRST_TURN_MIN_WAIT_S) >= relay.FIRST_TURN_MIN_WAIT_S
+    assert turn["state"] == "settled", detail
+    assert "turn: completed on device-b" in receipt, receipt
 
 
 # ---------------------------------------------------------------------------
