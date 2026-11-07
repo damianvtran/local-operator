@@ -2320,7 +2320,9 @@ def cached_available_models(
     return merge_models(rows, live_rows, include_static_only=not authoritative), "cached"
 
 
-def offered_model_ids(provider_id: str, *, cache_dir: Path | None = None) -> set[str] | None:
+def offered_model_ids(
+    provider_id: str, *, cache_dir: Path | None = None, root: Path | None = None
+) -> set[str] | None:
     """The model ids ``provider_id``'s catalogue offers, or ``None`` when that
     question cannot be answered without the network.
 
@@ -2345,6 +2347,12 @@ def offered_model_ids(provider_id: str, *, cache_dir: Path | None = None) -> set
     provider's own documents is the same sweep ``invalidate_documents``
     documents, for the same reason: one credential identity owns several
     documents and the caller cannot know which one the next read will pick.
+
+    ``root`` is the config root whose shared-catalogue receipt answers for
+    ``openai`` (``None``: the ambient one). A runtime switch passes its SESSION's
+    root, the same one ``shared_catalogue.prepare_selection`` just refreshed;
+    reading the ambient receipt there could miss it and fall back to the static
+    rows, refusing the very id the owner had offered.
     """
     definition = get_provider_definition(provider_id)
     if definition is None:
@@ -2354,7 +2362,7 @@ def offered_model_ids(provider_id: str, *, cache_dir: Path | None = None) -> set
     if provider_id == "openai":
         from local_operator.providers import shared_catalogue
 
-        receipt = shared_catalogue.cached()
+        receipt = shared_catalogue.cached(root)
         if receipt is not None:
             # A current account-native set owns this namespace, not an additive
             # sweep of static/unscoped listings or older account incarnations.

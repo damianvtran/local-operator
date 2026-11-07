@@ -454,6 +454,34 @@ def _switch_executor() -> concurrent.futures.ThreadPoolExecutor:
         return _switch_executor_pool
 
 
+def _require_offered(provider: str, model_id: str, root: Path | None) -> None:
+    """Refuse ``provider``/``model_id`` when this device's catalogue does not offer it.
+
+    The membership half of ``configure.validate_model_selection`` — the ONE
+    validator the desktop draft and the mobile peer switch already refuse
+    through — read from the session's own root right after
+    ``prepare_selection`` refreshed it. The rest of that validator is already
+    here: ``require_owner_provider`` and ``build_model_spec`` refuse unknown and
+    non-chat providers on this path. ``None`` from ``offered_model_ids`` (an
+    aggregator, a local endpoint, nothing cached) ACCEPTS: "we have not looked"
+    is not "it does not exist", and an owner that could not be reached has
+    already refused upstream as "catalogue metadata unavailable".
+
+    The ``<hosting>/`` spelling ``build_model_spec`` canonicalises is accepted
+    too, so this never refuses a pair that switch would have built.
+    """
+    from local_operator.model.configure import model_unknown_refusal
+    from local_operator.model.discovery import offered_model_ids
+    from local_operator.model.registry import _hosting_qualified_bare_id
+
+    offered = offered_model_ids(provider, root=root)
+    if offered is None or model_id in offered:
+        return
+    if _hosting_qualified_bare_id(provider, model_id) in offered:
+        return
+    raise model_unknown_refusal(provider, model_id)
+
+
 #: THE RUNG-4 RETRY LADDER (review round 1, R7).
 #:
 #: The only attempt used to be the turn-settled task, so a spawn that failed
@@ -5898,7 +5926,14 @@ class ServingSessionHandle(SessionHandle):
         return await self.set_model_effort(provider, model_id, None)
 
     @_on_session_loop
-    async def set_model_effort(self, provider: str, model_id: str, effort: str | None) -> str:
+    async def set_model_effort(
+        self,
+        provider: str,
+        model_id: str,
+        effort: str | None,
+        *,
+        offered_only: bool = False,
+    ) -> str:
         """Switch the owner onto ``provider``/``model_id`` AT ``effort``.
 
         ``effort`` is the other half of a BIRTH selection: a viewer that chose a
@@ -5918,6 +5953,15 @@ class ServingSessionHandle(SessionHandle):
         (the create/preview routes answer 422); by the time a level reaches here
         it is a stored decision, and failing a send over it would turn a stale
         record into a dead turn.
+
+        ``offered_only`` refuses a ``model_id`` this device's catalogue does not
+        offer, with ``ModelSelectionRefused("model_unknown")`` and before anything
+        is mutated. Only a remote create sets it (``relay._set_model_on``): that
+        requester never saw this catalogue, so an unoffered id is a typo, and
+        applying it ran the first turn into a provider 404 or quietly on the
+        device default (QA round 1, Q2 on #3554). Every other caller keeps the
+        historical accept-anything switch: a local ``/model <provider>/<id>`` is
+        the documented escape hatch for an id newer than the cached catalogue.
         """
         self._check_loop_thread()
         from local_operator.model.configure import build_model_spec
@@ -5979,6 +6023,10 @@ class ServingSessionHandle(SessionHandle):
                 # can observe a store-instance override.
                 local_ready=warm_info is not None,
             )
+            if offered_only:
+                await self._loop.run_in_executor(
+                    _switch_executor(), _require_offered, provider, model_id, self._config_dir
+                )
             if warm_info is not None:
                 spec = build_model_spec(provider, model_id, info=warm_info)
             else:

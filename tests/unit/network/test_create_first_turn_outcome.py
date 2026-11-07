@@ -524,13 +524,15 @@ _NOT_APPLIED = (
     ("turn", "lead"),
     [
         ({"state": "settled", "detail": ""}, "see which model replied:"),
-        ({"state": "running", "detail": ""}, "see which model replies:"),
+        # #3556 round 1, review n-1: the present-tense lead's one remaining
+        # reader, a peer from before #3547 that sends no ``turn`` block at all.
+        (None, "see which model replies:"),
     ],
 )
 def test_an_unapplied_model_points_at_the_read_that_names_the_server(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    turn: dict[str, Any],
+    turn: dict[str, Any] | None,
     lead: str,
 ) -> None:
     """Design round 1 on #3554, D1: the receipt names the read that answers "which model".
@@ -565,6 +567,10 @@ def test_an_unapplied_model_points_at_the_read_that_names_the_server(
         ({"applied": True, "detail": ""}, {"state": "settled", "detail": ""}),
         ({"applied": False, "detail": ""}, {"state": "settled", "detail": ""}),
         ({"applied": False, "detail": _NOT_APPLIED}, {"state": "failed", "detail": "boom"}),
+        # Review m2 on #3554: an OLD owner's running turn (no ``waited_s``). The
+        # line above it says the receipt cannot see how it ends, so a pointer
+        # promising a reply would reintroduce the dead end #3547 removed.
+        ({"applied": False, "detail": _NOT_APPLIED}, {"state": "running", "detail": ""}),
     ],
 )
 def test_no_model_pointer_when_the_choice_landed_or_no_reply_exists(
@@ -573,7 +579,8 @@ def test_no_model_pointer_when_the_choice_landed_or_no_reply_exists(
     model: dict[str, Any],
     turn: dict[str, Any],
 ) -> None:
-    """Applied, nothing asked, or a FAILED turn (no reply row to show): no pointer."""
+    """Applied, nothing asked, a FAILED turn (no reply row to show), or a turn the
+    receipt cannot follow: no pointer."""
     from local_operator.network import cli as network_cli
 
     args = _args(monkeypatch, admitted=True, detail="", model=model, turn=turn)

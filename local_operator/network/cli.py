@@ -8033,8 +8033,19 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 and admitted
                 and minted
                 and state != "failed"
+                # Nor for an OLD owner's running turn (no ``waited_s``; review m2
+                # on #3554): the line above just said this receipt cannot see how
+                # it ends, and a failed turn's peek shows nothing — the dead end
+                # MAJOR-2 removed ``--peek`` from that branch to avoid.
+                and not (
+                    state == "running"
+                    and isinstance(turn, dict)
+                    and not isinstance(turn.get("waited_s"), (int, float))
+                )
                 and peek_command not in lines
             ):
+                # "replies" is now reached only from a peer older than #3547, which
+                # sends no ``turn`` block (review n-1 on #3556; a test pins it).
                 lines.append(
                     "see which model replied:" if state == "settled" else "see which model replies:"
                 )

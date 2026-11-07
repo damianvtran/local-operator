@@ -471,14 +471,27 @@ async def prepare_selection(
         return
     import asyncio
 
+    now = time.monotonic()
     timeout = (
-        SELECTION_WAIT_S
-        if deadline is None
-        else max(0.001, min(SELECTION_WAIT_S, deadline - time.monotonic()))
+        SELECTION_WAIT_S if deadline is None else max(0.001, min(SELECTION_WAIT_S, deadline - now))
     )
+    # THE WORKER'S CLOCK STARTS HERE, AT SUBMISSION (review m1 on #3554). It used
+    # to start when a pool thread picked the job up, while ``wait_for`` below
+    # starts now: queueing on the default executor (the one the lanes saturate),
+    # or an outer deadline already part-spent, let this wait expire while the
+    # fetch still believed it had its full 5.5 s, abandoning the worker mid-write.
+    # Keeping the same margin under THIS timeout means the fetch's own typed
+    # refusal always lands first, whatever the queue cost.
+    fetch_deadline = now + max(0.0, timeout - (SELECTION_WAIT_S - SELECTION_FETCH_S))
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(prepare_selection_sync, provider, root, local_ready=local_ready),
+            asyncio.to_thread(
+                prepare_selection_sync,
+                provider,
+                root,
+                local_ready=local_ready,
+                deadline=fetch_deadline,
+            ),
             timeout,
         )
     except TimeoutError as error:
@@ -486,7 +499,11 @@ async def prepare_selection(
 
 
 def prepare_selection_sync(
-    provider: str, root: Path | None = None, *, local_ready: bool = False
+    provider: str,
+    root: Path | None = None,
+    *,
+    local_ready: bool = False,
+    deadline: float | None = None,
 ) -> None:
     """Worker-only twin for existing synchronous/off-loop birth validators.
 
@@ -497,6 +514,11 @@ def prepare_selection_sync(
     the warm path answers None for the catalogue provider. It is a seam, not a
     behaviour change, and it is never a bypass — the caller's own validation
     still runs afterwards.
+
+    ``deadline`` is the ``time.monotonic()`` instant the whole selection must
+    finish by, set by :func:`prepare_selection` at submission. ``None`` (the
+    synchronous hosts, already on their own worker) starts the
+    :data:`SELECTION_FETCH_S` budget now.
     """
     provider = provider.strip().lower()
     if provider != "openai" or local_ready or source(root, strict=True) is None:
@@ -507,7 +529,7 @@ def prepare_selection_sync(
                 root,
                 fresh=True,
                 fetch_s=SELECTION_FETCH_S,
-                deadline=time.monotonic() + SELECTION_FETCH_S,
+                deadline=time.monotonic() + SELECTION_FETCH_S if deadline is None else deadline,
             )
             is None
         ):
