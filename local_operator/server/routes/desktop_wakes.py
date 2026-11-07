@@ -745,9 +745,11 @@ async def _via_files(
             # R9). It is what lets a later attempt of the same request ask "did my
             # write land?" by identity rather than by comparing fields the wake's own
             # firing changes — the duplicate-row class the round-4 review drove. The
-            # edit and cancel ops deliberately do not stamp: a row's origin is the
-            # arm that created it, and their own identity is the row's absence (or
-            # value), which is exact already.
+            # edit and cancel ops deliberately do not stamp a REQUEST id: identity is
+            # the arm that created the row, and their own identity is the row's absence
+            # (or value), which is exact already. (An edit does stamp its AUTHOR —
+            # ``editor_origin`` — but only when it replaces the message; that field is
+            # who wrote the text, which a reword does change.)
             return await arm_wake(
                 root,
                 session_id,
@@ -760,7 +762,16 @@ async def _via_files(
                 origin="desktop",
             )
         if op == "edit":
-            return await edit_wake(root, session_id, wake_id, wake_request, cwd=cwd)
+            # ``editor_origin="desktop"``: the PATCH body is the operator's own
+            # replacement text, so an edit that rewords a MODEL-armed row makes
+            # those words the operator's — otherwise the delivery reads as
+            # model-authored and the divergence guard tells them their own
+            # sentence is new to the session (review round 6, R6-MAJOR-1). The
+            # stamp lands only when the text actually changed, which is
+            # ``build_wake_edit``'s rule, so re-timing a row keeps its author.
+            return await edit_wake(
+                root, session_id, wake_id, wake_request, cwd=cwd, editor_origin="desktop"
+            )
         if op == "cancel":
             return await cancel_wake(root, session_id, wake_id, cwd=cwd)
         raise WakeWriteError(f"unknown wake operation {op!r}", status=422, code="wake_invalid")

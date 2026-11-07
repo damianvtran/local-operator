@@ -29081,9 +29081,7 @@ class Session:
         self._resume_catchup_author = (
             "operator"
             if catchup_authors == {"operator"}
-            else "model"
-            if catchup_authors == {"model"}
-            else ""
+            else "model" if catchup_authors == {"model"} else ""
         )
         if getattr(self, "_aida_duty", False):
             # Keep the original row, not the scheduler's grace-shifted copy.

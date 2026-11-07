@@ -34,6 +34,7 @@ from local_operator.divergence import (
 )
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.rows import divergence_notice
+from local_operator.harness.wake_types import WakeOrigin
 from local_operator.harness.types import (
     AgentMessage,
     AgentTool,
@@ -1176,9 +1177,7 @@ def test_a_listed_tools_stored_record_is_excluded_and_an_unlisted_tools_is_not(
             arguments={"path": "~/squeeze/app.py"},
             messages=[
                 Message.user("review the tunnels MR"),
-                Message(
-                    role="tool", tool_name="bash", content=[TextContent(text=stored_record)]
-                ),
+                Message(role="tool", tool_name="bash", content=[TextContent(text=stored_record)]),
             ],
             system_blocks=["You are a personal assistant."],
         )
@@ -2552,12 +2551,25 @@ async def test_a_legacy_wake_row_hedges_its_live_delivery_end_to_end(
         (("cli",), "operator", False, False),
         (("cli", "tool"), "", True, True),
         (("tool",), "model", True, False),
+        # R6-NIT-1: the R5-MAJOR shape itself, a row written before ``origin``
+        # existed. Alone and folded with an operator row it must hedge too, and
+        # neither member may be able to borrow the other's author.
+        ((None,), "", True, True),
+        (("cli", None), "", True, True),
+        (("tool", None), "", True, True),
     ],
-    ids=["operator-only", "mixed", "tool-only"],
+    ids=[
+        "operator-only",
+        "mixed",
+        "tool-only",
+        "legacy-only",
+        "operator-legacy",
+        "tool-legacy",
+    ],
 )
 @pytest.mark.asyncio
 async def test_a_resume_catchup_attributes_its_fold_only_when_every_row_agrees(
-    authors: tuple[str, ...],
+    authors: tuple[WakeOrigin | None, ...],
     expected_author: str,
     expect_row: bool,
     expect_hedge: bool,
@@ -2610,26 +2622,32 @@ async def test_a_resume_catchup_attributes_its_fold_only_when_every_row_agrees(
         await first.dispose()
 
     for origin in authors:
+        # ``None`` is the LEGACY member: a row written by a build that predates
+        # the field. Armed as the model's, then stripped in the snapshot below,
+        # which is exactly the bytes such a build left behind (``arm_wake``
+        # refuses an unknown literal, and only the stored row may carry no
+        # ``origin`` at all).
         await arm_wake(
             config_dir,
             "sess",
             {"message": f"check {root}/src and report", "in": "2s"},
-            origin=origin,
+            origin="tool" if origin is None else origin,
         )
     overdue = int(time.time() * 1000) - 60_000
+    legacy = [index for index, origin in enumerate(authors) if origin is None]
 
     def make_overdue(rows: list[dict[str, Any]]) -> None:
-        for row in rows:
+        for index, row in enumerate(rows):
             # Overdue at load is what routes a row into the catch-up fold.
             row["next_due_at"] = overdue
+            if index in legacy:
+                row.pop("origin", None)
 
     rewritten = await _rewrite_schedules(session_dir, make_overdue)
     assert len(rewritten) == len(authors)
 
     session = build(
-        _WakePathStream(
-            root=root, create_wake=None, trigger="(alarm) The session resumed"
-        )
+        _WakePathStream(root=root, create_wake=None, trigger="(alarm) The session resumed")
     )
     try:
         # ``_prepare_missed_wake_catchup`` ran in __init__; the take is held
@@ -2673,3 +2691,184 @@ async def test_a_resume_catchup_attributes_its_fold_only_when_every_row_agrees(
         assert rows[0]["unseen"] == [], "every folded row was model-written"
         assert "could not be checked" not in text
         assert "wake-catchup-root" in text
+
+
+async def _patch_wake_over_http(
+    config_dir: Path, session_id: str, wake_id: str, body: dict[str, Any]
+) -> Any:
+    """Drive the desktop's PATCH route against the real app, as the client does.
+
+    The route is a surface in its own right: it is where the operator's body is
+    accepted, and the only place that decides which writer the request reaches.
+    One app, one request, torn down with the ``with`` — the rig rule for a
+    scripted browser applies in spirit to any server a test starts.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.config import ConfigManager
+    from local_operator.server.routes import desktop_wakes
+
+    app = FastAPI()
+    app.include_router(desktop_wakes.router)
+    app.state.config_manager = ConfigManager(config_dir)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer divergence-edit-token"},
+    ) as client:
+        response = await client.patch(f"/v1/desktop/wakes/{session_id}/{wake_id}", json=body)
+    return response
+
+
+@pytest.mark.parametrize("surface", ["tui", "desktop-route", "desktop-owner"])
+@pytest.mark.asyncio
+async def test_an_operator_reword_of_a_model_armed_row_is_the_operators_end_to_end(
+    surface: str, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6-MAJOR-1, through each of the three surfaces that can reach it.
+
+    ``origin`` is documented as who WROTE ``message``, and every edit surface
+    replaces ``message``. Until this round the row kept ``tool``, the delivery
+    stamped ``wake_author="model"``, and the guard told the operator their own
+    sentence was "new to this session" — the false notice the whole module
+    exists to prevent. Each leg drives the surface's OWN writer (the page's save
+    through the session's one writer; the desktop PATCH over HTTP; the live
+    runtime's ``wake`` branch), then the real scheduler fires the edited row and
+    the real judge reads the delivery.
+
+    The assertion is the strongest one available: the delivery names the
+    operator, the woken turn still runs and writes (non-vacuity), and there is
+    NO row at all — their own text is a source the guard can find.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.registry import create_tools
+    from local_operator.wakes.arm import arm_wake
+
+    scratch = home.parent
+    config_dir = scratch / "config"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "divergence-edit-token")
+    recorder = reset_recorder_for_test(AnalyticsStore(scratch / "analytics.db"))
+    monkeypatch.setattr("local_operator.session.spec.volatile_roots", lambda: ())
+    model_root = "~/wake-edit-model-root"
+    operator_root = "~/wake-edit-operator-root"
+    model_message = f"check {model_root}/src and report"
+    operator_message = f"check {operator_root}/src and report"
+    # The two live surfaces (page, runtime branch) need the row to exist at
+    # boot, then take a margin the edit fits inside; the cold route edits before
+    # anything loads the row, so it fires on load like the legacy case.
+    live = surface in ("tui", "desktop-owner")
+    now_ms = int(time.time() * 1000)
+    # The desktop's own id shape (``^[a-f0-9]{12}$``, the sessions store's
+    # admission rule): a shorter id is refused by the route before any wake is
+    # read, which would make the cold-path leg assert the wrong refusal.
+    session_id = "a1b2c3d4e5f6"
+
+    def build(stream_fn: Any) -> Any:
+        return Session(
+            model=MODEL,
+            stream_fn=stream_fn,
+            tools=create_tools(ToolContext(), enabled=["bash"]),
+            transcript=Transcript(config_dir / "sessions" / session_id),
+            session_id=session_id,
+            system_blocks_provider=lambda: ["You are a personal assistant."],
+            yolo=True,
+            compaction_settings=CompactionSettings(enabled=False),
+        )
+
+    first = build(_WakePathStream(root=operator_root, create_wake=None))
+    try:
+        await first.prompt("hello there")
+    finally:
+        await first.dispose()
+
+    # Armed by the MODEL: ``arm_wake``'s default is what the agent's own
+    # ``wake`` tool stamps, and it is the author the edit has to replace.
+    armed = await arm_wake(
+        config_dir,
+        session_id,
+        {"message": model_message, "in": "10s" if live else "2s"},
+        origin="tool",
+    )
+    assert armed.schedules[0].origin == "tool"
+
+    if surface == "desktop-route":
+        status = await _patch_wake_over_http(
+            config_dir, session_id, "w1", {"message": operator_message}
+        )
+        assert status.status_code == 200, status.text
+
+    session = build(_WakePathStream(root=operator_root, create_wake=None))
+    try:
+        if surface == "tui":
+            # The page's own ``_save``/``_commit`` pair, minus the widgets: the
+            # pure model on the rows the page owns, then the session's ONE
+            # writer — no second persistence path is invented here.
+            from local_operator.tui import schedule as schedule_model
+
+            rows = list(session.wake_scheduler.schedules)
+            target = next(row for row in rows if row.id == "w1")
+            values = schedule_model.prefilled(target)
+            result = schedule_model.edit(
+                schedule_model.FormValues(
+                    message=operator_message,
+                    when=values.when,
+                    repeat=values.repeat,
+                    ends=values.ends,
+                    notify=values.notify,
+                ),
+                rows,
+                "w1",
+                now_ms,
+            )
+            assert result.ok and result.schedule is not None, result.error
+            await session.set_wake_schedules(schedule_model.with_schedule(rows, result.schedule))
+        elif surface == "desktop-owner":
+            # The ladder word the route sends when a live runtime owns the
+            # session (``route_shared_slash("wake", …)``); the dispatch to it is
+            # pinned in ``tests/unit/session/runtime/test_serving_wake_command``.
+            from local_operator.session.frontend_state import SlashResult
+            from local_operator.session.runtime.serving import ServingSessionHandle
+
+            handle = ServingSessionHandle.__new__(ServingSessionHandle)
+            outcome = await handle._wake_slash(
+                session,
+                json.dumps(
+                    {"op": "edit", "wake_id": "w1", "request": {"message": operator_message}}
+                ),
+                SlashResult,
+            )
+            assert outcome.kind == "notice", outcome.text
+
+        assert await _wait_until(
+            lambda: _wake_carriers(session)
+        ), f"the wake edited through the {surface} surface never fired"
+        carriers = _wake_carriers(session)
+        target_file = home / "wake-edit-operator-root" / "src" / "app.py"
+        assert await _wait_until(
+            lambda: target_file.exists()
+        ), "the woken turn never wrote the root the operator named"
+        events = list(session._divergence_judge._events)
+    finally:
+        await session.dispose()
+        recorder.close()
+        reset_recorder_for_test(AnalyticsStore(scratch / "analytics-2.db")).close()
+
+    assert carriers, "the woken turn must have received the wake_prompt carrier"
+    delivered = carriers[0].details["text"]
+    assert operator_message in delivered, "the row that fired is not the edited one"
+    assert model_message not in delivered
+    assert carriers[0].details["wake_author"] == "operator", (
+        "the operator's replacement text delivered as model authorship — the "
+        f"false notice this round exists to close (surface {surface})"
+    )
+    # NON-VACUITY: the turn ran and wrote (above), so an empty audit means the
+    # operator's own words explain the root — not that the judge was blind.
+    assert _divergence_rows(config_dir) == []
+    assert events == []

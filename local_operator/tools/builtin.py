@@ -14854,6 +14854,8 @@ async def _wake_edit(
     request: dict[str, Any],
     scheduler: WakeSchedulerProtocol,
     now_ms: int,
+    *,
+    editor_origin: WakeOrigin | None = None,
 ) -> ToolResult:
     """Reword or re-bound one existing schedule, keeping its identity.
 
@@ -14864,6 +14866,10 @@ async def _wake_edit(
     built from a fixed keyword list cannot express that for a caller that did
     not come through the model.
 
+    ``editor_origin`` is the surface doing the editing (the desktop passes
+    ``"desktop"``); the builder stamps it only when the message is replaced, so
+    a bounds-only edit keeps the row's author.
+
     Deliberately NOT wired to a ``wake`` tool op: the agent's tool has
     create/list/cancel, and adding a fourth op is a change to what the model
     is offered rather than a change to how a wake is written. Everything that
@@ -14871,7 +14877,7 @@ async def _wake_edit(
     route-less arm path also calls — so the two writers cannot diverge.
     """
     existing = list(scheduler.schedules)
-    outcome = build_wake_edit(request, existing, wake_id, now_ms)
+    outcome = build_wake_edit(request, existing, wake_id, now_ms, editor_origin=editor_origin)
     if "error" in outcome:
         if outcome["malformed"]:
             return _invalid_arguments(tool_call_id, "wake", outcome["error"])

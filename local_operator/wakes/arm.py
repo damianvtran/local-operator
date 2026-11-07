@@ -306,6 +306,7 @@ async def edit_wake(
     now_ms: int | None = None,
     request_id: str = "",
     expected_request_id: str | None = None,
+    editor_origin: WakeOrigin | None = None,
 ) -> WakeWriteOutcome:
     """Change an existing schedule's message and/or bounds.
 
@@ -314,6 +315,11 @@ async def edit_wake(
     request get that for free from ``exclude_unset=True`` — the distinction is
     the difference between "leave the limit" and "remove the limit", so a
     plain dump is not equivalent.
+
+    ``editor_origin`` names the surface doing the editing and is stamped ONLY
+    when this edit replaces the row's message (see :func:`build_wake_edit`).
+    The desktop route is the operator; the cadence engines that call this to
+    re-time their own rows pass nothing and keep the row's own author.
     """
 
     def mutate(
@@ -329,7 +335,7 @@ async def edit_wake(
             raise WakeWriteError(
                 "wake origin changed before edit", status=STATUS_CONFLICT, code="wake_conflict"
             )
-        built = build_wake_edit(dict(request), existing, wake_id, now)
+        built = build_wake_edit(dict(request), existing, wake_id, now, editor_origin=editor_origin)
         if "error" in built:
             raise _refusal(built)
         row = built["schedule"]

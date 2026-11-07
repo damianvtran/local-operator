@@ -191,8 +191,8 @@ def create(values: FormValues, existing: Sequence[WakeSchedule], now_ms: int) ->
     person typing it is the author of the message (``WakeSchedule.origin``).
     The scheduler persists it, the wake fires, and the divergence guard folds
     the delivery as the operator's own instruction instead of telling them it
-    never said so. An EDIT deliberately does not pass through here —
-    ``build_wake_edit`` carries the existing origin forward.
+    never said so. An EDIT reaches the builder directly rather than through
+    here, and it stamps its own author there (:func:`edit`).
     """
     outcome = build_wake_schedule(_request(values), list(existing), now_ms)
     if "error" in outcome:
@@ -223,13 +223,20 @@ def edit(
     must not silently drop the other. Any other text is a deliberate choice, and
     :func:`ends_request` then supplies both keys so switching type CLEARS the
     previous bound instead of retaining it hidden (round-1 review F1).
+
+    THE PERSON TYPING THE NEW TEXT IS ITS AUTHOR, so this page passes
+    ``editor_origin="tui"``. The builder stamps it only when the message
+    actually changed, so saving the form with a new time and the same words
+    leaves a model-armed row model-authored — and re-wording one makes the new
+    words the operator's, instead of the delivery being read as model text and
+    the guard telling them their own sentence was new to the session.
     """
     request = _request(values)
     target = next((row for row in existing if row.id == wake_id), None)
     if target is not None and values.ends.strip() == ends_prefill(target).strip():
         request.pop("limit", None)
         request.pop("until", None)
-    outcome = build_wake_edit(request, list(existing), wake_id, now_ms)
+    outcome = build_wake_edit(request, list(existing), wake_id, now_ms, editor_origin="tui")
     if "error" in outcome:
         return SaveResult(error=outcome["error"], sentence=outcome["error"])
     schedule = outcome["schedule"]

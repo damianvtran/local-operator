@@ -29,6 +29,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
+from local_operator.harness.wake import WakeSchedule
 from local_operator.server.routes import desktop_wakes
 from local_operator.wakes.store import read_entry
 from tests.unit.legacy_skill_payload import legacy_skill_payload
@@ -438,6 +439,52 @@ async def test_a_patch_rewords_a_wake_and_keeps_its_handle(desktop) -> None:
     assert response.json()["result"]["wake_id"] == "w1"
     rows = _rows_on_disk(directory)
     assert rows[0]["message"] == "second wording"
+
+
+@pytest.mark.asyncio
+async def test_a_patch_of_a_model_armed_row_makes_the_new_words_the_operators(desktop) -> None:
+    """R6-MAJOR-1 at the route: the PATCH body is the operator's text.
+
+    The row was armed by the model (``arm_wake``'s default ``tool``), then the
+    operator replaced its message. Keeping ``tool`` delivered their sentence as
+    model authorship — the divergence guard called their own words new to the
+    session. A PATCH that only re-times the row changes no words and keeps the
+    model's authorship, which is the second test below.
+    """
+    from local_operator.wakes.arm import arm_wake
+
+    client, root = desktop
+    directory = _session(root, "aaaaaaaaaaaa")
+    armed = await arm_wake(root, "aaaaaaaaaaaa", {"message": "check the build", "in": "30m"})
+    assert armed.schedules[0].origin == "tool"
+
+    response = await client.patch(
+        "/v1/desktop/wakes/aaaaaaaaaaaa/w1",
+        json={"message": "deploy the fix at 09:00"},
+    )
+
+    assert response.status_code == 200, response.text
+    row = _rows_on_disk(directory)[0]
+    assert row["message"] == "deploy the fix at 09:00"
+    assert row["origin"] == "desktop", "the operator's replacement stayed model-authored"
+    assert WakeSchedule.model_validate(row).message_author == "operator"
+
+
+@pytest.mark.asyncio
+async def test_a_patch_that_only_moves_the_time_keeps_the_rows_author(desktop) -> None:
+    from local_operator.wakes.arm import arm_wake
+
+    client, root = desktop
+    directory = _session(root, "aaaaaaaaaaaa")
+    await arm_wake(root, "aaaaaaaaaaaa", {"message": "check the build", "in": "30m"})
+
+    response = await client.patch("/v1/desktop/wakes/aaaaaaaaaaaa/w1", json={"in": "2h"})
+
+    assert response.status_code == 200, response.text
+    row = _rows_on_disk(directory)[0]
+    assert row["message"] == "check the build"
+    assert row["origin"] == "tool"
+    assert WakeSchedule.model_validate(row).message_author == "model"
 
 
 @pytest.mark.asyncio
