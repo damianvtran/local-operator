@@ -2781,8 +2781,10 @@ exists so the exception cannot swallow a product change: PR #156
 (local-operator-mobile) spent 40 rounds on a product finished at round 3, and 20
 of its 36 failed native attempts came after the last product-code commit. It is a
 reachability classifier made safe by failing closed — not a proof that a harness
-change cannot alter behaviour. Rules, manifest format and the split trigger:
-`guide://delivery`.
+change cannot alter behaviour. A manifest `gate:` entry is a checker that ships no
+bytes: product if edited, seeding no closure, and a harness file only a gate names
+is `gate-run` and gets the full review lens at that check. Rules, manifest format
+and the split trigger: `guide://delivery`.
 
 **Review economy.** Across the last ~75 merged non-release PRs in each repo
 (manager measurement, 2026-11-02, from `gh pr view --json comments`), lop ran a

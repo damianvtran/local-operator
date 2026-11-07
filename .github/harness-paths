@@ -25,7 +25,6 @@
 # Ship: everything the wheel, sdist and release pipeline consume.
 ship: pyproject.toml
 ship: MANIFEST.in
-ship: Makefile
 ship: local_operator/**
 ship: packaging/**
 # Workflows that can publish, sign or deploy something — the release pipeline
@@ -35,11 +34,9 @@ ship: packaging/**
 # `.github/workflows/**` harness glob for a NEW workflow to hide behind.
 ship: .github/workflows/publish.yml
 ship: .github/workflows/release-gate.yml
-ship: .github/workflows/ci.yml
 ship: .github/workflows/chrome-web-store.yml
 ship: .github/workflows/chrome-web-store-promote.yml
 ship: .github/workflows/extension.yml
-ship: .github/workflows/mobile-web.yml
 ship: .github/workflows/helpdesk.yml
 # Scheduled `actions: write` on every queued run: it can cancel a release run.
 ship: .github/workflows/reap-superseded.yml
@@ -49,7 +46,21 @@ harness: scripts/**
 harness: benchmarks/**
 harness: evals/**
 harness: fixtures/**
-# The only workflow here, and by EXACT filename: a verifier with no secrets, no
-# publish step and no environment. The proof rejects any wildcard harness glob
-# under `.github/` (exit 2), so an unlisted — hence new — workflow is product.
-harness: .github/workflows/windows-anchor.yml
+
+# Gate tier: runs checks, contributes no bytes to anything published. A gate
+# file is PRODUCT for change detection (editing it opens a round) and its text
+# seeds no ship closure, so the probes it runs are exempt-able. The script
+# fails closed (exit 2) if a gate's artifact, cache or job output is consumed by
+# a ship workflow, and a gate file a ship workflow NAMES stops being a gate —
+# its text joins the closure and the exemption evaporates.
+#
+# Checked 2026-11-06 before declaring each one: neither `publish.yml` nor
+# `release-gate.yml` invokes `make` or names `ci.yml`; `publish.yml`'s
+# `download-artifact` steps consume artifacts its own jobs uploaded (no name
+# overlap with `ci.yml`'s coverage shards); `release-gate.yml` repeats the
+# invariant scripts instead of sharing them, in its own words, so the publish
+# path does not depend on its shape.
+gate: .github/workflows/ci.yml
+gate: .github/workflows/mobile-web.yml
+gate: .github/workflows/windows-anchor.yml
+gate: Makefile

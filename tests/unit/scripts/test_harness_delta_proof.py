@@ -551,3 +551,109 @@ def test_deleted_harness_test_is_judged_not_crashed(tmp_path: Path) -> None:
     head2 = _commit(repo2, {"e2e/plain.spec.ts": None}, "test(e2e): drop plain")
     result2 = _run(repo2, reviewed2, head2)
     assert result2.returncode == 0, result2.stdout + result2.stderr
+
+
+# --- round-2 gate tier ---------------------------------------------------------
+# A `gate:` file runs checks but contributes no bytes to a shipped artifact. Its
+# text does not seed the ship closure, so the harness scripts it runs (and names)
+# are exempt-able again; it is itself product, so editing it opens a round, and a
+# gate that feeds an artifact into a ship workflow is exit 2.
+
+GATE_MANIFEST = MANIFEST + "gate: .github/workflows/native.yml\ngate: Makefile\n"
+
+
+def test_gate_file_edit_is_product(tmp_path: Path) -> None:
+    """(a) A gate file is product for change detection: editing it is a round."""
+    repo, reviewed = _setup(tmp_path, manifest=GATE_MANIFEST)
+    head = _commit(
+        repo, {".github/workflows/native.yml": "steps:\n  - run: echo changed\n"}, "ci: gate edit"
+    )
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "product path changed: `.github/workflows/native.yml` (gate)" in result.stdout
+
+
+def test_gate_file_that_feeds_a_ship_artifact_is_exit_two(tmp_path: Path) -> None:
+    """(b) A gate whose artifact a ship workflow downloads cannot be a gate."""
+    repo, _ = _setup(
+        tmp_path,
+        manifest=GATE_MANIFEST.replace(
+            "ship: package.json",
+            "ship: package.json\nship: .github/workflows/publish.yml",
+        )
+        + "",
+    )
+    reviewed = _commit(
+        repo,
+        {
+            # The gate uploads an artifact…
+            ".github/workflows/native.yml": (
+                "steps:\n  - uses: actions/upload-artifact@v7\n    with:\n      name: wheel\n"
+            ),
+            # …and a ship workflow downloads it.
+            ".github/workflows/publish.yml": (
+                "steps:\n  - uses: actions/download-artifact@v8\n    with:\n      name: wheel\n"
+            ),
+        },
+        "ci: gate feeds publish",
+    )
+    head = _commit(repo, {"e2e/probe.ts": "p\n"}, "test: probe")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "gate file feeds ship" in result.stderr
+
+
+def test_harness_file_named_by_a_ship_file_beats_a_gate(tmp_path: Path) -> None:
+    """(c) Ship naming wins: the gate tier never rescues a ship-reachable file."""
+    repo, _ = _setup(tmp_path, manifest=GATE_MANIFEST)
+    reviewed = _commit(
+        repo,
+        {
+            ".github/workflows/native.yml": "steps:\n  - run: bun scripts/ci/check.ts\n",
+            "src/boot3.ts": "import '../scripts/ci/check';\nexport const z = 1;\n",
+        },
+        "feat: ship imports the check",
+    )
+    head = _commit(repo, {"scripts/ci/check.ts": "console.log('changed');\n"}, "ci: tweak")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "ship-reachable: `scripts/ci/check.ts`" in result.stdout
+
+
+def test_harness_file_named_only_by_a_gate_is_exempt_and_labelled(tmp_path: Path) -> None:
+    """(d) A gate-run harness file is exempt-able AND named for the merge gate."""
+    repo, reviewed = _setup(tmp_path, manifest=GATE_MANIFEST)
+    _commit(repo, {"Makefile": "check:\n\tbun scripts/ci/new-gate-probe.ts\n"}, "build: gate")
+    reviewed = _git(repo, "rev-parse", "HEAD")
+    head = _commit(repo, {"scripts/ci/new-gate-probe.ts": "console.log(1);\n"}, "ci: probe")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "gate-run via `Makefile`" in result.stdout
+    assert "FULL review lens" in result.stdout
+
+
+def test_gate_a_ship_workflow_triggers_on_is_exit_two(tmp_path: Path) -> None:
+    """`workflow_run` on a gate makes the gate's run shipping input → exit 2.
+
+    The `needs.<job>.outputs` half of the feed check was unsound and removed: a
+    ship workflow's own job of that name tripped it (mobile android.yml naming
+    ci.yml during the PR #156 replay). Same-workflow `needs.` cannot be a
+    cross-file feed; `workflow_run` can.
+    """
+    repo, _ = _setup(
+        tmp_path,
+        manifest=GATE_MANIFEST + "ship: .github/workflows/publish.yml\n",
+    )
+    reviewed = _commit(
+        repo,
+        {
+            ".github/workflows/publish.yml": (
+                "on:\n  workflow_run:\n    workflows: [native]\n    types: [completed]\n"
+            ),
+        },
+        "ci: publish follows the gate",
+    )
+    head = _commit(repo, {"e2e/probe.ts": "p\n"}, "test: probe")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "workflow_run" in result.stderr
