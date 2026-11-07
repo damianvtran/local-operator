@@ -661,7 +661,8 @@ def vet_url_spelling(url: str) -> str:
     guard itself runs behind: the agent tool's enrichment probes (``/p.md`` is a
     buildable sibling of ``/p#x\\x00``, so it was looked up and fetched before the
     refusal — security S-7), and the link preview's cache key. The key drops the
-    fragment and re-encodes the query, so a refusal decided from the RAW string
+    fragment and keys the path and query as httpx sends them, so a refusal
+    decided from the RAW string
     and then cached under the key would deny the legitimate twin its card
     (security S-5); the preview therefore calls this on the raw target before the
     key exists and caches nothing. One function, so the three places cannot
@@ -674,12 +675,21 @@ def vet_url_spelling(url: str) -> str:
     a bounded LRU keyed by that string and nothing derived from it: a key that
     normalised anything (case, the fragment, the query) would let one spelling's
     verdict answer for another, the poisoning shape S-5 and S-8 closed.
+
+    A SPELLING CARRYING CREDENTIALS IS NEVER MEMOISED (security S-11). The memo
+    is process-global and outlives the request, so keeping
+    ``https://user:secret@host/`` as a key would retain the credential — the one
+    thing nothing in the fetch or preview path may cache. Such a spelling is
+    judged fresh every time; it is refused anyway, so the parse it re-pays is the
+    cheap credential check.
     """
-    if len(url) > _SPELLING_MEMO_MAX_CHARS:
-        # Bounds the memo's memory by entries x this length; a URL this long is
-        # rare enough that paying the parse again costs nothing that matters.
-        return _vet_url_spelling_uncached(url)
-    host, refusal = _memoised_spelling_verdict(url)
+    if len(url) > _SPELLING_MEMO_MAX_CHARS or _may_carry_credentials(url):
+        # Over the length cap: bounds the memo's memory by entries x this length;
+        # a URL this long is rare enough that paying the parse again costs
+        # nothing that matters.
+        host, refusal = _spelling_verdict(url)
+    else:
+        host, refusal = _memoised_spelling_verdict(url)
     if refusal is not None:
         message, reason = refusal
         # A fresh exception per call: a raised one carries a traceback and must
@@ -688,24 +698,52 @@ def vet_url_spelling(url: str) -> str:
     return host
 
 
-#: How many exact spellings the verdict memo holds, and the longest it will hold.
-#: A rendered screen carries a few dozen links; 512 x 4,096 characters keeps the
-#: worst case to a few megabytes however hostile the strings are.
+#: How many exact spellings the verdict memo holds, the longest spelling it will
+#: hold, and the longest refusal message it keeps. A rendered screen carries a few
+#: dozen links. The worst case is MEASURED, not estimated (security S-12): a
+#: 4,096-character key of astral characters is ~16 KiB on its own, and an
+#: uncapped refusal message embeds ``repr(url)`` twice (ours and httpx's) while
+#: ``repr`` expands a non-printable astral character tenfold — security measured
+#: ~53 MB across 512 slots that way. The message is therefore capped. With the
+#: cap, the hostile fill in ``test_the_verdict_memo_stays_inside_its_stated_bound``
+#: retained ~11 MiB (CPython 3.12, measured); the bound that test enforces is
+#: 16 MiB, leaving room for allocator differences between versions.
 _SPELLING_MEMO_SIZE = 512
 _SPELLING_MEMO_MAX_CHARS = 4096
+_SPELLING_MEMO_MESSAGE_CHARS = 512
 
 
-@functools.lru_cache(maxsize=_SPELLING_MEMO_SIZE)
-def _memoised_spelling_verdict(url: str) -> tuple[str, tuple[str, str] | None]:
+def _may_carry_credentials(url: str) -> bool:
+    """Whether ``url`` might carry credentials, erring towards yes.
+
+    A netloc ``urlparse`` cannot split (brackets inside the credential) cannot be
+    shown free of one, and its refusal message would embed it via ``repr(url)``.
+    """
+    try:
+        return url_has_credentials(url)
+    except ValueError:
+        return True
+
+
+def _spelling_verdict(url: str) -> tuple[str, tuple[str, str] | None]:
     """``(host, None)`` or ``("", (message, reason))`` for one exact spelling.
 
     Only :class:`PolicyRefusal` is part of the verdict; anything else raised is
-    a bug and propagates uncached.
+    a bug and propagates uncached. The message is capped for the memo's bound and
+    keeps both ends — the head names the URL, the tail carries the reason — so
+    the memoised and unmemoised paths raise the same text.
     """
     try:
         return _vet_url_spelling_uncached(url), None
     except PolicyRefusal as refusal:
-        return "", (str(refusal), refusal.reason)
+        message = str(refusal)
+        if len(message) > _SPELLING_MEMO_MESSAGE_CHARS:
+            keep = (_SPELLING_MEMO_MESSAGE_CHARS - 1) // 2
+            message = f"{message[:keep]}…{message[-keep:]}"
+        return "", (message, refusal.reason)
+
+
+_memoised_spelling_verdict = functools.lru_cache(maxsize=_SPELLING_MEMO_SIZE)(_spelling_verdict)
 
 
 def _vet_url_spelling_uncached(url: str) -> str:

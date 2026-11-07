@@ -53,7 +53,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Coroutine, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Final
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import httpx
 
@@ -185,6 +185,15 @@ def canonical_url(url: str) -> str:
     The on-wire form is httpx's own encoding, so ``?a=é`` and ``?a=%C3%A9``,
     which ARE one request, still share an entry.
 
+    THE PATH AND QUERY ARE ONE VALUE: httpx's ``raw_path``, the request target it
+    writes on the request line (security S-13). Rebuilding them from ``urlsplit``
+    dropped an empty query, so ``/p?`` and ``/p`` shared a key though httpx sends
+    ``GET /p?`` and ``GET /p``. ``raw_path`` also carries httpx's dot-segment
+    removal and path percent-encoding, so ``/./p``, ``/a/../p`` and ``/p`` — and
+    ``/é`` and ``/%C3%A9`` — now share one entry; each pair was measured sending an
+    identical request line to a capturing socket, so merging them saves fetches
+    without ever merging two different requests.
+
     USERINFO IS DROPPED. ``https://user:pass@host/x`` is the same resource as
     ``https://host/x``; keeping credentials in a cache key would put them in a
     structure that outlives the request they arrived with, which is the one thing
@@ -224,21 +233,20 @@ def canonical_url(url: str) -> str:
     netloc = f"[{host}]" if ":" in host else host
     if port is not None:
         netloc = f"{netloc}:{port}"
-    query = _query_as_sent(url.strip(), parts.query)
-    return urlunsplit((scheme, netloc, parts.path or "/", query, ""))
+    return urlunsplit((scheme, netloc, "", "", "")) + _target_as_sent(url.strip(), parts)
 
 
-def _query_as_sent(url: str, written: str) -> str:
-    """The query httpx puts on the wire for ``url`` (see :func:`canonical_url`).
+def _target_as_sent(url: str, parts: SplitResult) -> str:
+    """The path and query httpx puts on the request line (see :func:`canonical_url`).
 
-    A key function must be total, so a URL httpx cannot parse keeps its query as
-    written — the fetcher refuses such a URL before any request, and the entry it
-    would key is one no fetch fills.
+    A key function must be total, so a URL httpx cannot parse keeps its path and
+    query as written — the fetcher refuses such a URL before any request, and the
+    entry it would key is one no fetch fills.
     """
     try:
-        return httpx.URL(url).query.decode("ascii")
+        return httpx.URL(url).raw_path.decode("ascii")
     except (httpx.InvalidURL, UnicodeError, ValueError):
-        return written
+        return urlunsplit(("", "", parts.path or "/", parts.query, ""))
 
 
 def key_for(scope: PreviewScope, url: str) -> PreviewKey:

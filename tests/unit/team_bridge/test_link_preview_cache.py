@@ -75,6 +75,17 @@ def _error() -> LinkPreviewResolution:
         # httpx percent-encodes what it must, so these ARE the same request.
         ("https://example.com/p?a=\u00e9", "https://example.com/p?a=%C3%A9"),
         ("https://example.com/p?a b", "https://example.com/p?a%20b"),
+        # An empty query is still sent (``GET /p?``), so it is its own request
+        # and its own key (security S-13).
+        ("https://example.com/p?", "https://example.com/p?"),
+        ("https://example.com/p?#f", "https://example.com/p?"),
+        # The PATH is keyed as sent too: httpx removes dot segments and
+        # percent-encodes before the request line is written — measured against
+        # a socket capturing ``GET /p`` for all three spellings, and ``GET
+        # /%C3%A9`` for both of the last pair — so these ARE one request.
+        ("https://example.com/./p", "https://example.com/p"),
+        ("https://example.com/a/../p", "https://example.com/p"),
+        ("https://example.com/\u00e9", "https://example.com/%C3%A9"),
         # Credentials are not part of what the page is, and must not become key
         # material that outlives the request they arrived with.
         ("https://user:sekret@example.com/x", "https://example.com/x"),

@@ -340,6 +340,74 @@ def test_the_spelling_verdict_is_memoised_by_the_exact_string(
         assert len(calls) == 2
 
 
+def test_a_credentialed_spelling_never_enters_the_verdict_memo() -> None:
+    """A URL carrying userinfo is judged fresh and never retained (security S-11).
+
+    The memo is process-global and outlives the request, so keeping
+    ``https://user:secret@host/`` as a key would break the package's rule that
+    credentials are never cached. That covers both credential arms: the plain
+    refusal, and a netloc ``urlparse`` cannot split, where the bracketed userinfo
+    would otherwise sit in the key AND in the refusal's ``repr(url)``.
+    """
+    run = uuid.uuid4().hex
+    memo = service._memoised_spelling_verdict
+    for url in (
+        f"https://user:pw-{run}@{run}.test/p",
+        f"https://user:p[w-{run}@{run}.test/p",
+    ):
+        before = memo.cache_info()
+        for _ in range(2):
+            with pytest.raises(service.PolicyRefusal) as refused:
+                service.vet_url_spelling(url)
+            assert refused.value.reason == "host"
+        after = memo.cache_info()
+        assert (after.currsize, after.hits) == (before.currsize, before.hits), url
+
+
+#: The memo's worst-case footprint, as stated beside ``_SPELLING_MEMO_SIZE``.
+_SPELLING_MEMO_BOUND_BYTES = 16 * 1024 * 1024
+
+
+def test_the_verdict_memo_stays_inside_its_stated_bound() -> None:
+    """Filling every slot with the most expensive spellings stays under the bound.
+
+    Security S-12 measured ~53 MB, not "a few megabytes": the refusal message
+    embeds ``repr(url)`` twice (ours and httpx's) and ``repr`` expands one
+    non-printable astral character to ten. The cached message is now capped, so
+    the key — at most 4,096 characters, four bytes each when astral, plus the
+    UTF-8 copy CPython may cache beside it — is what the bound counts.
+    """
+    import tracemalloc
+
+    memo = service._memoised_spelling_verdict
+    run = uuid.uuid4().hex
+    # The two shapes S-12 found most expensive per entry: an astral host (the
+    # longest message) and an astral fragment behind a control byte (the
+    # largest key plus message). Both refuse fast, so 512 slots fill in ~1 s.
+    shapes = (
+        lambda i: f"https://{i}{run}" + "\U000e0001" * 4096,
+        lambda i: f"https://{i}.{run}.test/p#\x01" + "\U000e0001" * 4096,
+    )
+    longest_message = 0
+    memo.cache_clear()
+    tracemalloc.start()
+    try:
+        baseline = tracemalloc.get_traced_memory()[0]
+        for index in range(service._SPELLING_MEMO_SIZE):
+            url = shapes[index % 2](index)[: service._SPELLING_MEMO_MAX_CHARS]
+            with pytest.raises(service.PolicyRefusal) as refused:
+                service.vet_url_spelling(url)
+            longest_message = max(longest_message, len(str(refused.value)))
+            del url, refused
+        retained = tracemalloc.get_traced_memory()[0] - baseline
+    finally:
+        tracemalloc.stop()
+        memo.cache_clear()
+    assert memo.cache_info().maxsize == service._SPELLING_MEMO_SIZE
+    assert retained <= _SPELLING_MEMO_BOUND_BYTES, f"{retained / 2**20:.1f} MiB retained"
+    assert longest_message <= service._SPELLING_MEMO_MESSAGE_CHARS
+
+
 def test_the_pin_carries_the_port_the_guard_judged() -> None:
     """``_pin_request`` reads the port from the parser the guard used (R2-1).
 
