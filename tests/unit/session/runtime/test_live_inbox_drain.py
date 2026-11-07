@@ -340,9 +340,25 @@ async def test_a_live_queued_steer_keeps_its_backup_across_later_ticks(tmp_path:
         rows = peek_inbox(directory)
         assert [r.command_id for r in rows] == ["existing-1", "queued-steer-1"]
         assert all(r.mode == "mailbox" for r in rows), "both are durability backups now"
-        _, successor, _ = await _boot_successor(tmp_path)
+        successor_session, successor, _ = await _boot_successor(tmp_path)
         try:
+            # WAIT FOR THE SUCCESSOR'S TURN, THEN COUNT. The boot drain replays
+            # ``existing-1`` first, which queues it as the successor's turn; since
+            # #3566 a ``wait_for_turn=False`` prompt meeting a queued or streaming
+            # command is refused with ``TurnInFlight`` up front instead of being
+            # queued behind it, so the drain STEERS ``queued-steer-1`` into that
+            # turn (``process._run_owner_prompt``'s steer arm) rather than running
+            # it as a second prompt. A steer's transcript row is written at the
+            # turn's next boundary (``Session._drain_steering``), not when the
+            # drain returns -- and until then the re-spooled insurance row
+            # (``ServingSessionHandle._admit_steer``) is its durable copy. The
+            # guarantee under test is that the backup is delivered exactly once,
+            # not that it lands synchronously, so the count is taken once the
+            # successor is idle.
+            await asyncio.wait_for(_idle(successor_session, successor), 10)
+            assert len(_rows_produced_by(directory, "existing-1")) == 1
             assert len(_rows_produced_by(directory, "queued-steer-1")) == 1
+            assert peek_inbox(directory) == [], "a delivered backup must be consumed"
         finally:
             await _stop_quietly(successor)
     finally:
