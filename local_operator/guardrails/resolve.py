@@ -1569,8 +1569,12 @@ class _Walker:
             if _DELETE_WORD_RE.search(joined):
                 self.result.opaque_reasons.append("env -S runs a command string")
             return
+        # Kept for the backstop: a wrapper's own flags can carry a path
+        # (``env -Q<path>``, ``xargs -a <path>``) that peeling would hide.
+        unpeeled = words
         words, stdin_fed = _peel_wrappers(words)
         if not words:
+            self._backstop(os.path.basename(unpeeled[0].text), unpeeled, raw_assigns, set())
             return
         name = os.path.basename(words[0].text)
         args = words[1:]
@@ -1578,7 +1582,10 @@ class _Walker:
         # under a read-only subcommand (``GIT_PAGER=sh git log``).
         assigned = [a.split("=", 1)[0] for a in raw_assigns]
         if not read_only_argv(name, [w.text for w in args], assigned=assigned):
-            self._touch(name, args)
+            exempt = self._touch(name, args)
+            # The program word too: after ``env``/``xargs`` peeling a path can
+            # BE the program (``xargs -Q <path>``).
+            self._backstop(name, unpeeled, raw_assigns, exempt)
         if name in _SHELL_C_WORDS:
             self._shell(
                 args,
@@ -2082,31 +2089,68 @@ class _Walker:
         root = cwd_override or Expanded(text=".")
         self._add(root, "clean", "git clean")
 
-    def _touch(self, name: str, args: list[Expanded]) -> None:
-        """Record write destinations and unknown-program paths (``touched``).
+    def _touch(self, name: str, args: list[Expanded]) -> set[int]:
+        """Record a known writer's destinations as ``write`` touches.
 
-        Fails closed (review R4-MAJOR-1): only a FULLY modelled call — see
-        ``_write_surface`` — skips the path-shaped HIGH fallback.
+        Returns the ids of words that are POSITIVELY identified sources of a
+        fully modelled copy (``cp``/``rsync``/``zip``/``tar -c`` with its
+        destination also identified): the only non-read-only words the
+        backstop below may skip.
         """
         st = self.state
         surface = _write_surface(name, args, st.home)
-        if surface is not None:
-            dests, fully = surface
-            for w in dests:
-                if w.text and not w.vanished:
-                    self.result.touched.append(_target(w, "write", name, st))
-            if fully:
-                return
-        for w in args:
-            text = w.text
-            if text.startswith("-") and "=" not in text:
-                continue  # a bare flag; its value, if any, is the next word
-            if "=" in text and not w.opaque:
-                w = Expanded(text=_tilde_value(text.split("=", 1)[1], st.home), empty=w.empty)
-            # Only words that LOOK like paths: a bare ``commit`` or ``update
-            # notes`` resolved against a cwd under ``sessions/`` is not one.
-            if w.text and not w.vanished and (w.opaque or _path_shaped(w.text)):
+        if surface is None:
+            return set()
+        dests, fully = surface
+        for w in dests:
+            if w.text and not w.vanished:
+                self.result.touched.append(_target(w, "write", name, st))
+        if (
+            fully
+            and dests
+            and name in _COPY_FAMILY
+            and (name not in ("tar", "gtar", "bsdtar") or _tar_mode(args) == "create")
+        ):
+            dest_ids = {id(w) for w in dests}
+            return {id(w) for w in args if id(w) not in dest_ids}
+        return set()
+
+    def _backstop(
+        self, name: str, args: list[Expanded], assigns: list[str], exempt: set[int]
+    ) -> None:
+        """THE INVARIANT (review R5): a non-read-only call that MENTIONS
+        protected state ranks at least HIGH.
+
+        WHY A BACKSTOP. The writer table above is best-effort: five review
+        waves each found a parser gap (a cluster, a dashless key, a glued
+        value, a script-embedded ``w``) that turned a write into LOW. This
+        pass does not parse programs at all. It marks, as a ``touch`` (HIGH
+        in ``classify``), every path-looking SUBSTRING of every argument and
+        inline assignment — so a path inside a quoted script (``1w <p>``,
+        ``--pager=tee <p>``) or a glued value still counts — plus the
+        effective cwd. ``classify._touch_reason`` keeps only those under
+        ``<state>/sessions/`` (outside this session's scratchpad) or
+        ``<state>/guardrails/``. Exempt: a strictly read-only program (never
+        reaches here) and the identified sources of a fully modelled copy.
+        A misparse can therefore cost a judge call, never a LOW.
+        """
+        st = self.state
+        words = [w for w in args if id(w) not in exempt]
+        texts = [w.text for w in words] + [a.split("=", 1)[1] for a in assigns if "=" in a]
+        for text in texts:
+            for raw in _MENTION_RE.findall(text):
+                if OPAQUE_MARK in raw or TEMP_MARK in raw:
+                    continue  # an opaque part: the word itself is added below
+                path = _mention_path(raw, st.home, st.cwd)
+                if path is not None:
+                    self.result.touched.append(
+                        Target(path=path, op="touch", program=name or "a program")
+                    )
+        for w in words:
+            if w.opaque:
                 self.result.touched.append(_target(w, "touch", name, st))
+        if st.cwd and not st.private_cwd:
+            self.result.touched.append(Target(path=st.cwd, op="touch", program=name))
 
     # -- creation (provenance ledger) ------------------------------------------
     def _literal_dir(self, exp: Expanded, base: str | None = None) -> str | None:
@@ -2352,6 +2396,32 @@ _FIND_WRITES = frozenset(
 )
 
 
+def _sed_read_only(argv: list[str]) -> bool:
+    """``sed -n`` whose every script is provably read-only (no in-place, no
+    ``w``/``W``/``e``, no script file)."""
+    scripts: list[str] = []
+    operands: list[str] = []
+    it = iter(argv)
+    for a in it:
+        if a in ("-e", "--expression"):
+            scripts.append(next(it, ""))
+        elif a.startswith("--expression="):
+            scripts.append(a.split("=", 1)[1])
+        elif a.startswith("-e") and len(a) > 2:
+            scripts.append(a[2:])
+        elif a in ("-n", "--quiet", "--silent", "-E", "-r", "--regexp-extended", "-u", "-z"):
+            continue
+        elif a.startswith("-"):
+            return False  # -i, -f, -s… or anything unknown
+        else:
+            operands.append(a)
+    if not scripts:
+        if not operands:
+            return False
+        scripts.append(operands[0])
+    return all(_SED_READ_ONLY_RE.match(sc) for sc in scripts)
+
+
 def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) -> bool:
     """Is ``name argv…`` a provably read-only invocation? Conservative: unknown → no."""
     if name in READ_ONLY_PROGRAMS:
@@ -2360,6 +2430,8 @@ def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) 
         return not any(a in _FIND_WRITES for a in argv)
     if name == "sqlite3":
         return "-readonly" in argv
+    if name in ("sed", "gsed"):
+        return _sed_read_only(argv)
     if name == "git":
         if any(_GIT_UNSAFE_ENV_RE.match(a) for a in assigned):
             return False
@@ -2671,7 +2743,17 @@ _SED_FLAGS = _Flags(
     frozenset({"-e", "--expression", "-f", "--file", "-l"}),
 )
 #: A sed script that writes a file of its own (``w FILE``, ``s/a/b/w FILE``).
-_SED_WRITES_RE = re.compile(r"(^|[;}\n/\s])[wW]\s*\S|\be\b")
+_SED_WRITES_RE = re.compile(r"[wWe]")
+#: A path-looking filename after a ``w``/``W`` (``1w /x``, ``s/a/b/gw ~/x``).
+_SED_W_PATH_RE = re.compile(r"[wW]\s*((?:/|~|\$\{?HOME\}?)[^\s;}'\"]*)")
+#: A ``sed`` script made ONLY of read commands: addresses (line numbers,
+#: ``$``, ``/re/``) with ``p``/``d``/``q``/``=``/``l``/``n``, or ``s///``
+#: with print/global/case/number flags. Anything else (``w``, ``W``, ``e``,
+#: ``r``…) is not provably read-only (review R5).
+_SED_READ_ONLY_RE = re.compile(
+    r"^\s*(?:(?:(?:\d+|\$|/[^/\n]*/)(?:\s*,\s*(?:\d+|\$|/[^/\n]*/))?)?\s*"
+    r"(?:[pdq=ln]|s/[^/\n]*/[^/\n]*/[gpI0-9]*)\s*(?:;|$))+\s*$"
+)
 _DD_KEYS = frozenset(
     {
         "if",
@@ -2713,7 +2795,10 @@ def _plain_operands(args: list[Expanded], spec: _Flags) -> list[Expanded]:
 
 
 def _copy_dest(args: list[Expanded], spec: _Flags) -> list[Expanded]:
-    target_dir = _flag_value(args, "-t", "--target-directory")
+    # Cluster-aware: GNU ``-at<dir>`` / ``-st<dir>`` glue the value after
+    # other letters (review R5-MINOR-3). ``-t`` only means a target directory
+    # where the program's own table says so.
+    target_dir = _cluster_value(args, "t", "--target-directory") if "-t" in spec.values else []
     if target_dir:
         return target_dir
     operands = _plain_operands(args, spec)
@@ -2743,12 +2828,19 @@ def _write_surface(
     if name in ("sed", "gsed"):
         # ``-i`` operands are resolver targets; a script's own ``w`` is not.
         scripts = " ".join(w.text for w in args if not w.text.startswith("-"))
-        return [], _flags_known(args, _SED_FLAGS) and not _SED_WRITES_RE.search(scripts)
+        # Its own ``w``/``W`` commands write: a parseable filename there is a
+        # destination (review R5-MINOR-1); a script that is not a provably
+        # read-only one is never fully modelled, so the backstop sees it.
+        dests = [
+            Expanded(text=_tilde_value(m, home))
+            for m in _SED_W_PATH_RE.findall(" ".join(w.text for w in args))
+        ]
+        return dests, _flags_known(args, _SED_FLAGS) and not _SED_WRITES_RE.search(scripts)
     if name in ("cp", "gcp"):
         return _copy_dest(args, _CP_FLAGS), _flags_known(args, _CP_FLAGS)
     if name in ("ln", "gln"):
         operands = _plain_operands(args, _LN_FLAGS)
-        dest = _flag_value(args, "-t", "--target-directory")
+        dest = _cluster_value(args, "t", "--target-directory")
         if not dest and len(operands) == 1:
             # ``ln -s TARGET`` links into the cwd under the target's basename.
             dest = [Expanded(text=os.path.basename(operands[0].text.rstrip("/")) or ".")]
@@ -2760,7 +2852,9 @@ def _write_surface(
     if name == "ditto":
         return _copy_dest(args, _DITTO_FLAGS), _flags_known(args, _DITTO_FLAGS)
     if name in ("install", "ginstall"):
-        if any(w.text in ("-d", "--directory") for w in args):
+        # ``-d`` may sit inside a cluster (``-dv``, ``-dm755``): a regression
+        # in round 4 read only the bare spelling (review R5-MAJOR-1).
+        if any(w.text == "--directory" or _short_has(w.text, "d", _INSTALL_FLAGS) for w in args):
             return _plain_operands(args, _INSTALL_FLAGS), _flags_known(args, _INSTALL_FLAGS)
         return _copy_dest(args, _INSTALL_FLAGS), _flags_known(args, _INSTALL_FLAGS)
     if name in ("touch", "gtouch"):
@@ -2783,6 +2877,10 @@ def _write_surface(
         operands = _plain_operands(args, _ZIP_FLAGS)
         return out + operands[:1], _flags_known(args, _ZIP_FLAGS)
     if name in ("tar", "gtar", "bsdtar"):
+        if args and args[0].text.isalpha():
+            # Old-style key (``tar cf OUT src``): the first word IS a flag
+            # cluster, so read it as one (review R5-MAJOR-2).
+            args = [Expanded(text="-" + args[0].text, empty=args[0].empty), *args[1:]]
         mode = _tar_mode(args)
         known = _flags_known(args, _TAR_FLAGS)
         if mode == "extract":
@@ -2819,6 +2917,18 @@ def _cluster_value(args: list[Expanded], letter: str, long: str) -> list[Expande
         elif k + 1 < len(args):
             out.append(args[k + 1])
     return out
+
+
+def _short_has(text: str, letter: str, spec: _Flags) -> bool:
+    """Is ``-<letter>`` inside the short cluster ``text`` (before any value)?"""
+    if not text.startswith("-") or text.startswith("--"):
+        return False
+    for c in text[1:]:
+        if c == letter:
+            return True
+        if f"-{c}" in spec.values:
+            return False  # the rest of the cluster is that flag's value
+    return False
 
 
 def _perl_inplace(args: list[Expanded]) -> list[Expanded]:
@@ -2915,8 +3025,29 @@ def _tar_mode(args: list[Expanded]) -> str:
     return "extract"
 
 
-def _path_shaped(text: str) -> bool:
-    return "/" in text or text.startswith((".", "~", "$"))
+#: Programs whose sources the backstop may skip once ``_write_surface`` has
+#: identified their destination (review R5 exemption (b)).
+_COPY_FAMILY = frozenset({"cp", "gcp", "rsync", "zip", "tar", "gtar", "bsdtar"})
+#: A path-looking run inside any word: absolute, ``~/``, ``$HOME``/``${HOME}``,
+#: or a relative run containing ``/``. Deliberately over-matching.
+_MENTION_RE = re.compile(
+    r"(?:\$\{?HOME\}?|~|\.{1,2})?/[^\s'\"`;|&<>(){}]*"
+    # A relative run may not start mid-word (``-st/abs`` is the absolute
+    # ``/abs`` glued to a flag, not a relative ``-st/…``).
+    r"|(?<![\w.~$-])[\w.][\w.-]*/[^\s'\"`;|&<>(){}]*"
+)
+
+
+def _mention_path(raw: str, home: str, cwd: str | None) -> str | None:
+    """An absolute, normalised spelling of a ``_MENTION_RE`` match, or None."""
+    text = re.sub(r"^\$\{?HOME\}?", home, raw)
+    if text.startswith("~/"):
+        text = home + text[1:]
+    if not text.startswith("/"):
+        if cwd is None:
+            return None
+        text = os.path.join(cwd, text)
+    return os.path.normpath(text)
 
 
 def resolve_command(

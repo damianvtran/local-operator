@@ -95,7 +95,13 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   `--config-env`, `--ext-diff`, `--textconv`, `--git-dir`/`--work-tree`, a
   pager flag or a `GIT_*`/`PAGER` assignment. A path there handed to any other
   program (`python3 ana.py <transcript>`, `awk`, `sort`) ranks HIGH and goes
-  to the context-free judge, which can let a read through. The `write`, `edit` and `browser` (screenshot/recording `path`)
+  to the context-free judge, which can let a read through. That HIGH is a
+  backstop over the writer list: any command that is not strictly read-only
+  and mentions those trees anywhere — an operand, a glued flag value, a path
+  inside a quoted script or pager setting, or a working directory there — is
+  at least HIGH, so a misparsed writer costs a judge call, never a silent
+  LOW. `sed` counts as read-only only for `-n` with print/delete/quit and
+  `s///` scripts (no `w`, `W` or `e`). The `write`, `edit` and `browser` (screenshot/recording `path`)
   tools refuse those files the same way. An interpreter that computes the path
   itself (`python -c`, `node -e`) is the documented ceiling, as for any
   interpreter delete. The judge must answer

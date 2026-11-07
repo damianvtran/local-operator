@@ -199,10 +199,12 @@ def session_tree(state_root: str | os.PathLike[str], session_id: str) -> list[st
     ``created_at`` (slack allowed). A session whose own creation time cannot
     be read adopts no legacy children (fail closed: no evidence, the old
     ranking). Forgery is narrowed elsewhere (``classify._touch_reason``): a
-    write-shaped shell touch of ``sessions/`` (a redirection, a known
-    writer's destination, git ``-C`` into it) ranks CRITICAL, a path handed
-    to any other program ranks HIGH, and an interpreter that computes the
-    path itself is the documented ceiling (review R4-MINOR-1).
+    write-shaped shell touch of ``sessions/`` (a redirection, or a
+    destination of the writers ``resolve._write_surface`` models, git ``-C``
+    into it) ranks CRITICAL; any other non-read-only call that mentions it
+    (operand, glued value, quoted script, cwd) ranks HIGH through the
+    ``resolve._backstop`` invariant; an interpreter that computes the path
+    itself is the documented ceiling (review R4-MINOR-1, R5-NIT-1).
     """
     if not session_id:
         return []

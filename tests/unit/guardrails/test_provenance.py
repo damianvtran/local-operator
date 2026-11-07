@@ -970,8 +970,12 @@ _READS = [
     (f"tar -czf ~/work/b.tgz ~/.local-operator/sessions/{CHILD}", Risk.LOW),
     (f"tar -C ~/.local-operator/sessions -czf ~/work/b2.tgz {CHILD}", Risk.LOW),
     (f"python3 ~/.local-operator/sessions/{OTHER}/scratchpad/rig.py", Risk.HIGH),
-    (f"cd ~/.local-operator/sessions/{OTHER}/scratchpad && git commit -m 'update notes'", Risk.LOW),
-    (f"cd ~/.local-operator/sessions/{CHILD} && npm test", Risk.LOW),
+    # Round 5 invariant: a cwd under another session's state is a mention.
+    (
+        f"cd ~/.local-operator/sessions/{OTHER}/scratchpad && git commit -m 'update notes'",
+        Risk.HIGH,
+    ),
+    (f"cd ~/.local-operator/sessions/{CHILD} && npm test", Risk.HIGH),
     (f"git -C ~/.local-operator/sessions/{CHILD} status", Risk.LOW),
     ("sqlite3 -readonly ~/.local-operator/guardrails/created.sqlite 'select 1'", Risk.LOW),
     ("cat ~/.local-operator/guardrails/lineage.jsonl", Risk.LOW),
@@ -1091,3 +1095,94 @@ def test_writer_with_unknown_flag_or_subcommand_is_never_low(
         argv = f"{unknown} {path}" if position == "first" else f"{path} {unknown}"
         command = f"{program} {argv}"
         assert _verdict(home, command).risk is not Risk.LOW, command
+
+
+# -- round 5: the mention invariant ----------------------------------------------------
+
+_R5_CRITICAL = [
+    f"install -dv {_S}/../new000000003",
+    "install -dm755 ~/.local-operator/sessions/new000000004",
+    "install -d ~/.local-operator/sessions/new000000005",
+    f"tar cf {_S}/origin.json src",
+    "tar czf ~/.local-operator/guardrails/x.tgz src",
+    f'sed -n "1w {_H}/origin.json" f',
+    f"sed -n '$w {_S}/origin.json' f",
+    f"sed -n '1,5w {_S}/origin.json' f",
+    f'sed "s/a/b/gw {_H}/origin.json" f',
+    f'sed -n "/x/w {_H}/origin.json" f',
+    f'sed -n -e "1w{_H}/origin.json" f',
+    f"gcp -at{_H} f",
+    f"gln -st{_H} /evil",
+]
+
+
+@pytest.mark.parametrize("command", _R5_CRITICAL)
+def test_round5_writers_are_critical(home: Path, command: str) -> None:
+    assert _verdict(home, command).risk is Risk.CRITICAL, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'git -c core.pager="tee {_H}/origin.json" log -1',
+        f'GIT_PAGER="tee {_H}/origin.json" git log -1',
+    ],
+)
+def test_pager_value_naming_session_state_is_not_low(home: Path, command: str) -> None:
+    assert _verdict(home, command).risk is not Risk.LOW, command
+
+
+#: Every program in the writer table plus ten arbitrary ones.
+_ANY_PROGRAMS = [*_WRITERS, "awk", "python3", "node", "ruby", "make", "npm", "xargs", "env",
+                 "sh -c", "busybox"]  # fmt: skip
+
+
+def _forms(program: str) -> list[str]:
+    path = f"{_S}/origin.json"
+    abs_path = f"{_H}/origin.json"
+    return [
+        f"{program} -Q {path}",  # dashed flag, path operand
+        f"{program} Q {path}",  # dashless word, path operand
+        f"{program} -Q{abs_path}",  # glued short value
+        f"{program} --zz={abs_path}",  # glued long value
+        f"{program} 'x {abs_path} y'",  # inside a quoted script
+        f'{program} "1w {abs_path}"',  # sed-style script
+        f"cd {_S} && {program} -Q x",  # cwd under session state
+    ]
+
+
+@pytest.mark.parametrize("program", _ANY_PROGRAMS)
+def test_mention_invariant_is_never_low(home: Path, program: str) -> None:
+    """THE backstop: whatever the writer table makes of these, a call that
+    mentions session state (operand, glued value, quoted script or cwd) and
+    is not strictly read-only is never LOW."""
+    for command in _forms(program):
+        if program in ("zip", "tar") and " Q " in command:
+            # Exemption (b): ``zip Q <s>`` / ``tar Q <s>`` name ``Q`` as the
+            # archive and the session path as a SOURCE — a read.
+            continue
+        assert _verdict(home, command).risk is not Risk.LOW, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"cat {_S}/transcript.jsonl",
+        f"grep -r x {_S}",
+        f"sed -n 1p {_S}/transcript.jsonl",
+        f"sed -n '/error/p' {_S}/transcript.jsonl",
+        "sqlite3 -readonly ~/.local-operator/guardrails/created.sqlite 'select 1'",
+        f"git -C {_S} status",
+        f"cp {_S}/transcript.jsonl ~/work/t.jsonl",
+        f"rsync -a {_S}/ ~/work/bk/",
+        f"echo x > ~/.local-operator/sessions/{SID}/scratchpad/n.md",
+        f"cd ~/.local-operator/sessions/{SID}/scratchpad && python3 rig.py",
+    ],
+)
+def test_strict_reads_and_own_scratchpad_stay_low(home: Path, command: str) -> None:
+    (home / "work").mkdir(exist_ok=True)
+    scratch = str(home / ".local-operator" / "sessions" / SID / "scratchpad")
+    verdict = classify_bash(
+        command, cwd=str(home), env=_env(home), scratchpad=scratch, session_id=SID
+    )
+    assert verdict.risk is Risk.LOW, (command, verdict.reasons)

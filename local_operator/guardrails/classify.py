@@ -640,8 +640,10 @@ def classify_targets(
             reason = _touch_reason(t, prot)
             if reason is not None:
                 evidence_hits.append(RankedTarget(t, Risk.CRITICAL, reason))
+        critical = {h.target.path for h in evidence_hits}
         for t in touched:
-            if t.op != "touch":
+            # A path already refused as a write needs no second, HIGH row.
+            if t.op != "touch" or t.path in critical:
                 continue
             reason = _touch_reason(t, prot)
             if reason is not None:
