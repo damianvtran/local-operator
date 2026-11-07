@@ -1,0 +1,14 @@
+{
+  "relay.usage_reset.badge": "Сброс · {count}",
+  "relay.usage_reset.confirm_title": "{provider} · аккаунт {index} из {count}",
+  "relay.usage_reset.confirm_prompt": "{count, plural, =1 {Будет потрачен последний кредит сброса; окна лимитов этого аккаунта очистятся.} one {Будет потрачен 1 из # кредита сброса; окна лимитов этого аккаунта очистятся.} few {Будет потрачен 1 из # кредитов сброса; окна лимитов этого аккаунта очистятся.} many {Будет потрачен 1 из # кредитов сброса; окна лимитов этого аккаунта очистятся.} other {Будет потрачен 1 из # кредита сброса; окна лимитов этого аккаунта очистятся.}}",
+  "relay.usage_reset.cancel": "Отмена",
+  "relay.usage_reset.confirm": "Сбросить",
+  "relay.usage_reset.busy": "Сброс…",
+  "relay.usage_reset.outcome_reset": "{count, plural, =0 {Сброс применён.} one {Сброс применён — очищено # окно.} few {Сброс применён — очищено # окна.} many {Сброс применён — очищено # окон.} other {Сброс применён — очищено # окна.}}",
+  "relay.usage_reset.outcome_already_redeemed": "Этот сброс уже был применён.",
+  "relay.usage_reset.outcome_no_credit": "Кредитов сброса не осталось.",
+  "relay.usage_reset.outcome_nothing_to_reset": "Ни один лимит не был превышен, поэтому очищать окна не потребовалось.",
+  "relay.usage_reset.outcome_failed": "Не удалось узнать, применён ли сброс. Повторите для проверки — второй кредит не спишется.",
+  "relay.usage_reset.refused": "Ничего не списано — сброс отклонён. Обновите список."
+}

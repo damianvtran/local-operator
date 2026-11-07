@@ -1,0 +1,14 @@
+{
+  "relay.usage_reset.badge": "Đặt lại · {count}",
+  "relay.usage_reset.confirm_title": "{provider} · Tài khoản {index}/{count}",
+  "relay.usage_reset.confirm_prompt": "{count, plural, =1 {Dùng lượt đặt lại cuối cùng; xóa các cửa sổ giới hạn tốc độ của tài khoản này.} other {Dùng 1 trong # lượt đặt lại; xóa các cửa sổ giới hạn tốc độ của tài khoản này.}}",
+  "relay.usage_reset.cancel": "Hủy",
+  "relay.usage_reset.confirm": "Đặt lại",
+  "relay.usage_reset.busy": "Đang đặt lại…",
+  "relay.usage_reset.outcome_reset": "{count, plural, =0 {Đã đặt lại.} other {Đã đặt lại — đã xóa # cửa sổ.}}",
+  "relay.usage_reset.outcome_already_redeemed": "Lượt đặt lại này đã được áp dụng trước đó.",
+  "relay.usage_reset.outcome_no_credit": "Không còn lượt đặt lại nào.",
+  "relay.usage_reset.outcome_nothing_to_reset": "Không cửa sổ nào vượt giới hạn nên không cần xóa cửa sổ nào.",
+  "relay.usage_reset.outcome_failed": "Chưa xác định được kết quả đặt lại. Hãy thử lại để kiểm tra — thử lại không tốn thêm lượt nào.",
+  "relay.usage_reset.refused": "Chưa dùng lượt nào — đặt lại bị từ chối. Hãy làm mới danh sách."
+}

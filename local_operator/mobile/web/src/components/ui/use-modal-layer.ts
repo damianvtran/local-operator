@@ -3,9 +3,14 @@
  * destination drawer from behaving differently from an object action sheet. */
 import { useEffect, useRef, type RefObject } from "react";
 
-export function useModalLayer({ open, onClose, returnFocusRef, initialFocusRef }: {
+export function useModalLayer({ open, onClose, onEscape, returnFocusRef, initialFocusRef }: {
     open: boolean;
     onClose: () => void;
+    /** Notified FIRST on Escape; returning true means "handled, do not close".
+        The usage sheet uses it to dismiss its inline confirmation before the
+        sheet itself (U8), while the ✕, the scrim and the drag still close the
+        sheet in one gesture (U11). Absent on every other sheet. */
+    onEscape?: () => boolean;
     returnFocusRef?: RefObject<HTMLElement | null>;
     initialFocusRef?: RefObject<HTMLElement | null>;
 }) {
@@ -14,6 +19,8 @@ export function useModalLayer({ open, onClose, returnFocusRef, initialFocusRef }
 	const openerRef = useRef<HTMLElement | null>(null);
 	const onCloseRef = useRef(onClose);
 	onCloseRef.current = onClose;
+	const onEscapeRef = useRef(onEscape);
+	onEscapeRef.current = onEscape;
 
 	useEffect(() => {
 		if (!open) return;
@@ -55,6 +62,7 @@ export function useModalLayer({ open, onClose, returnFocusRef, initialFocusRef }
 		const onKey = (event: KeyboardEvent) => {
 			if (event.key === "Escape") {
 				event.preventDefault();
+				if (onEscapeRef.current?.() === true) return;
 				onCloseRef.current();
 				return;
 			}

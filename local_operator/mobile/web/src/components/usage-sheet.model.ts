@@ -18,7 +18,12 @@
  * shared plan stay the daemon's verdicts, exactly as before the redesign; the
  * phone never infers eligibility from a positive wallet.
  */
-import type { PhoneUsageLimit, PhoneUsageReport, PhoneUsageTone } from "../api";
+import type {
+	PhoneUsageLimit,
+	PhoneUsageReport,
+	PhoneUsageResetOutcome,
+	PhoneUsageTone,
+} from "../api";
 
 export type UsageRowKind = "included" | "family" | "paid";
 
@@ -222,4 +227,275 @@ export function refreshPhase(
 	if (refresh.status === "failed") return { kind: "failed" };
 	if (refresh.status === "timeout") return { kind: "timeout" };
 	return { kind: "ok", at: refreshedAt ?? null };
+}
+
+/* -- reset credits ----------------------------------------------------------
+ *
+ * WHAT THE PHONE MAY SPEND AND HOW IT NAMES IT. A reset spends something that
+ * cannot be refunded, on ONE login the operator confirms. The phone still never
+ * sees that login's name: it sends back the `account_index`/`account_count`
+ * pair the daemon itself displayed plus the ALIAS the daemon published for the
+ * row it showed. So the target here carries the DAEMON's numbering, never the
+ * card's rendered position -- those diverge the moment an older daemon omits
+ * `account_index`, and a request built from the wrong one could spend on a
+ * sibling.
+ */
+
+/** One spendable reset: what the card offers and what a request must carry. */
+export type ResetTarget = {
+	provider: string;
+	/** 0-based index the projection sent -- the daemon's own numbering. */
+	index: number;
+	/** Accounts the phone displayed for this provider; the daemon re-checks it. */
+	count: number;
+	/** Spendable credits, always >= 1 (the badge's number). */
+	available: number;
+	/** The alias of the one login this card showed (`r1:<hex>`). REQUIRED: the
+	 *  daemon refuses a spend it cannot attribute to a row, so a card without
+	 *  one is not offered at all (Q1). */
+	ref: string;
+};
+
+/** Spendable reset credits on a report, mirroring Python's exact-int rule.
+ *
+ * A JSON boolean is `typeof "boolean"`, a float is not `Number.isInteger`, and a
+ * negative count is not a count. `null`/absent means the vendor reported
+ * nothing trustworthy -- "not reported" and "none left" are both unspendable,
+ * and neither may reach a button that spends. */
+export function resetsAvailable(report: PhoneUsageReport): number {
+	const count = report.resets_available;
+	if (typeof count !== "number" || !Number.isInteger(count) || count <= 0) return 0;
+	return count;
+}
+
+/** The account a reset would spend on, or null when none may be offered.
+ *
+ * NO FALLBACK NUMBERING (R6). A target built from the card's rendered position
+ * is a different address from the one the daemon displayed, and one that
+ * silently spends on whichever login sits there -- so a report without the
+ * daemon's own `account_index`/`account_count` offers nothing at all.
+ *
+ * NO UNATTRIBUTED SPEND (Q1). The alias is required too: the daemon refuses a
+ * request that cannot name a row (resolving by position is exactly how a card
+ * showing one login's numbers spent another's credit), so a count published
+ * without an alias offers no badge. The daemon withholds the count in that case
+ * as well -- this is the second half of the same rule, for an older bundle. */
+export function resetTarget(account: UsageAccount): ResetTarget | null {
+	const available = resetsAvailable(account.report);
+	if (available === 0) return null;
+	const index = account.report.account_index;
+	const count = account.report.account_count;
+	if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return null;
+	if (typeof count !== "number" || !Number.isInteger(count) || count < 1) return null;
+	const ref = account.report.credential_ref;
+	if (typeof ref !== "string" || ref === "") return null;
+	return {
+		provider: account.report.provider,
+		index,
+		count,
+		available,
+		ref,
+	};
+}
+
+/** A card's identity across re-renders: provider plus its displayed number. */
+export function accountKey(account: UsageAccount): string {
+	return `${account.report.provider}#${account.number}`;
+}
+
+/** ONE reset interaction for the whole sheet, so a second card's tap cancels
+ *  the first card's confirmation instead of stacking two irreversible prompts.
+ *
+ *  The TARGET is snapshotted into the flow at confirm time. The card re-derives
+ *  its offer from the latest numbers, and spending the LAST credit repaints it
+ *  with zero -- a panel that read the live target would unmount exactly when
+ *  its outcome arrived (D1/Q2). Only the BADGE depends on a positive count. */
+export type ResetFlow =
+	| { kind: "idle" }
+	| { kind: "confirm"; key: string; target: ResetTarget }
+	| { kind: "busy"; key: string; target: ResetTarget; redeemRequestId: string }
+	| {
+			kind: "result";
+			key: string;
+			target: ResetTarget;
+			outcome: PhoneUsageResetOutcome;
+			windowsReset: number;
+			/** Kept only for an UNKNOWN outcome, where a retry must reuse it. */
+			redeemRequestId: string | null;
+			/** The daemon refused before spending anything; nothing was attempted. */
+			refused?: boolean;
+			/** The spend's own re-fetch did not produce current numbers (R5). */
+			numbersStale?: boolean;
+	  };
+
+export const RESET_FLOW_IDLE: ResetFlow = { kind: "idle" };
+
+/** Close a confirmation (or a result) without spending anything. */
+export function resetFlowCancel(): ResetFlow {
+	return { kind: "idle" };
+}
+
+export function resetFlowConfirm(key: string, target: ResetTarget): ResetFlow {
+	return { kind: "confirm", key, target };
+}
+
+export function resetFlowStart(key: string, redeemRequestId: string, target: ResetTarget): ResetFlow {
+	return { kind: "busy", key, target, redeemRequestId };
+}
+
+/** Settle a busy flow with the outcome the daemon reported.
+ *
+ * A late answer for a flow that is no longer busy is IGNORED: the operator
+ * moved on (or a refusal already landed), and painting an outcome into a card
+ * they had left would state it as if they had just asked. Only a definitive
+ * outcome clears the redeem id -- `failed` keeps it so a retry is idempotent
+ * and cannot spend a second credit. `refused` is definitive: nothing was sent.
+ *
+ * A settled `result` also stays on screen whatever the credit count is now, so
+ * spending the last credit still says so. */
+export function resetFlowSettle(
+	flow: ResetFlow,
+	outcome: PhoneUsageResetOutcome,
+	windowsReset: number,
+	numbersStale = false,
+): ResetFlow {
+	if (flow.kind !== "busy") return flow;
+	const unknown = outcome === "failed";
+	return {
+		kind: "result",
+		key: flow.key,
+		target: flow.target,
+		outcome,
+		windowsReset: Number.isInteger(windowsReset) && windowsReset > 0 ? windowsReset : 0,
+		redeemRequestId: unknown ? flow.redeemRequestId : null,
+		...(outcome === "refused" ? { refused: true } : {}),
+		...(numbersStale ? { numbersStale: true } : {}),
+	};
+}
+
+/** A refusal the daemon answered with an HTTP status (accounts changed, no
+ *  reset product): nothing was spent, so the id is dropped and a retry mints a
+ *  new one. NOT for `in_flight` (R7): that answers about an EARLIER request
+ *  which may still spend. */
+export function resetFlowRefused(flow: ResetFlow): ResetFlow {
+	return resetFlowSettle(flow, "refused", 0);
+}
+
+/** Settle a spend whose answer arrived after the sheet was closed and reopened.
+ *
+ * The reopen resets the flow to idle, so there is nothing for
+ * `resetFlowSettle` to settle -- but the ATTEMPT outlives the flow (that is
+ * the whole point of it, see below), and this answer is that attempt's. Painting
+ * it onto the card it belongs to is what U10 asks for: the re-entered card was
+ * showing "Resetting…" and must say how it ended rather than quietly repaint
+ * the old count. The settle rules are the same ones, including "only a
+ * definitive outcome drops the id". */
+export function resetFlowLate(
+	key: string,
+	target: ResetTarget,
+	redeemRequestId: string,
+	outcome: PhoneUsageResetOutcome,
+	windowsReset: number,
+	numbersStale = false,
+): ResetFlow {
+	return resetFlowSettle(
+		{ kind: "busy", key, target, redeemRequestId },
+		outcome,
+		windowsReset,
+		numbersStale,
+	);
+}
+
+/* -- the pending attempt ----------------------------------------------------
+ *
+ * WHY NOT IN THE FLOW. `ResetFlow` is the one card being interacted with right
+ * now: another card's tap replaces it, Cancel clears it, and closing the sheet
+ * resets it. The IDEMPOTENCY ID must outlive all of that, because a retry after
+ * an unconfirmed outcome that minted a NEW id is exactly how a second credit is
+ * spent. So the id lives in its own per-account map, owned by the sheet. */
+export type ResetAttempt = {
+	redeemRequestId: string;
+	/** A request for this account is outstanding right now. */
+	busy: boolean;
+};
+export type ResetAttempts = Readonly<Record<string, ResetAttempt>>;
+
+export const RESET_ATTEMPTS_EMPTY: ResetAttempts = {};
+
+/** The id this attempt must send: a pending one, or a fresh one. */
+export function resetAttemptStart(
+	attempts: ResetAttempts,
+	key: string,
+	mint: () => string,
+): { attempts: ResetAttempts; redeemRequestId: string } {
+	const pending = attempts[key];
+	const redeemRequestId = pending?.redeemRequestId ?? mint();
+	return { attempts: { ...attempts, [key]: { redeemRequestId, busy: true } }, redeemRequestId };
+}
+
+/** The outcome landed. A definitive one forgets the attempt; an UNKNOWN one
+ *  keeps its id so a retry can be idempotent. */
+export function resetAttemptSettled(
+	attempts: ResetAttempts,
+	key: string,
+	outcome: PhoneUsageResetOutcome,
+): ResetAttempts {
+	const entry = attempts[key];
+	if (!entry) return attempts;
+	const next = { ...attempts };
+	if (outcome === "failed") next[key] = { redeemRequestId: entry.redeemRequestId, busy: false };
+	else delete next[key];
+	return next;
+}
+
+/** The request finished, whatever it answered: `busy` tracks the request, not
+ *  the outcome, so a late answer cannot leave a card looking in flight. */
+export function resetAttemptDone(attempts: ResetAttempts, key: string): ResetAttempts {
+	const entry = attempts[key];
+	if (!entry?.busy) return attempts;
+	return { ...attempts, [key]: { redeemRequestId: entry.redeemRequestId, busy: false } };
+}
+
+/** Any spend outstanding in this sheet: while one is, every badge is inert, so
+ *  a second card cannot replace the flow that is showing the first one's
+ *  outcome (U1/R2). */
+export function resetAttemptBusy(attempts: ResetAttempts): boolean {
+	return Object.values(attempts).some((entry) => entry.busy);
+}
+
+/** The status line after a reset's own re-fetch.
+ *
+ * A reset is not a refresh the operator asked for. Its throttle or failure must
+ * never sit beside the outcome sentence -- "Reset applied" next to "Couldn't
+ * refresh" reads as a contradiction -- and the cooldown note a throttle would
+ * print is noise for a fetch the spend itself caused (R5/Q6). Both collapse to
+ * the neutral freshness line, and the panel says the numbers are old instead. */
+export function resetRefreshPhase(
+	refresh: { status: "ok" | "throttled" | "failed" | "timeout" } | undefined,
+	refreshedAt: number | null | undefined,
+): { phase: RefreshPhase; numbersStale: boolean } {
+	if (!refresh) return { phase: { kind: "idle" }, numbersStale: false };
+	if (refresh.status === "ok") return { phase: { kind: "ok", at: refreshedAt ?? null }, numbersStale: false };
+	return { phase: { kind: "idle" }, numbersStale: true };
+}
+
+/** The catalogue key for one outcome. `reset` is the only one that varies with
+ *  a count, so callers pass `windowsReset` to it alone. */
+export type ResetOutcomeKey =
+	| "relay.usage_reset.outcome_reset"
+	| "relay.usage_reset.outcome_already_redeemed"
+	| "relay.usage_reset.outcome_no_credit"
+	| "relay.usage_reset.outcome_nothing_to_reset"
+	| "relay.usage_reset.outcome_failed"
+	| "relay.usage_reset.refused";
+
+export function resetOutcomeKey(outcome: PhoneUsageResetOutcome): ResetOutcomeKey {
+	switch (outcome) {
+		case "reset": return "relay.usage_reset.outcome_reset";
+		case "already_redeemed": return "relay.usage_reset.outcome_already_redeemed";
+		case "no_credit": return "relay.usage_reset.outcome_no_credit";
+		case "nothing_to_reset": return "relay.usage_reset.outcome_nothing_to_reset";
+		case "refused": return "relay.usage_reset.refused";
+		default: return "relay.usage_reset.outcome_failed";
+	}
 }

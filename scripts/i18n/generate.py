@@ -223,6 +223,12 @@ OWNED_SPA_NAMESPACES = (
     # frozen-bytes reason above: relay.chrome carries the composer chrome and
     # must not stale.
     "relay.composer",
+    # Spendable usage-reset credits on the phone's /usage sheet: the card's
+    # affordance, its inline confirmation and the five outcomes. Its own
+    # namespace for the frozen-bytes reason above -- relay.shell carries the
+    # sheet's existing copy and every locale's passed ledger row for it must not
+    # stale. en-only at landing; the translator/auditor wave fills the rest.
+    "relay.usage_reset",
 )
 
 GENERATED_HEADER = (

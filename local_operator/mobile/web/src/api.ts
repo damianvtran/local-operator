@@ -184,6 +184,19 @@ export type PhoneUsageReport = {
 	account_count?: number;
 	state?: "available" | "partial" | "unavailable" | "reauth_required";
 	credential_invalid?: boolean;
+	/* Spendable reset credits: a non-negative count, or null/absent when the
+	   vendor reported nothing trustworthy; only the count crosses the tunnel for
+	   a row with nothing to spend. */
+	resets_available?: number | null;
+	/* An ALIAS for the one stored login this row describes: `r1:<hex>`, an HMAC
+	   of the row's identity key under a secret the daemon never publishes.
+	   Published ONLY on a row with a credit to spend. It names no person and is
+	   not reversible without that secret (Q7); its whole job is to survive a
+	   login churn: an index is a position, so a login removed and replaced
+	   elsewhere would move a spend onto a sibling. Echo it back with the reset.
+	   null/absent means the daemon offered no spend on this row at all -- do not
+	   offer a badge for it, and do not send an index-only request (Q1). */
+	credential_ref?: string | null;
 };
 export type PhoneUsageRefreshStatus = "ok" | "throttled" | "failed" | "timeout";
 export type PhoneUsageEnvelope = {
@@ -211,6 +224,90 @@ export function refreshUsage(force: boolean): Promise<PhoneUsageEnvelope> {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ force }),
+	});
+}
+
+/** The outcomes a reset credit's spend can report. `failed` is the honest
+    "could not confirm" state: the attempt reached the vendor, so the credit may
+    or may not be spent, and a retry MUST reuse the same `redeemRequestId`.
+    `refused` is its opposite: the daemon decided before anything was sent, so
+    nothing was spent and a retry is a NEW attempt. */
+export type PhoneUsageResetOutcome =
+	| "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed" | "failed" | "refused";
+
+/** The typed codes `POST /api/usage/reset` answers with, as a value so a caller
+    decides on the code and never on prose. `in_flight` is listed because the
+    daemon sends it, but it is NOT a "nothing was spent" refusal -- see
+    `isUsageResetRefusal` and `isUsageResetInFlight`. */
+export const USAGE_RESET_REFUSAL_CODES = ["accounts_changed", "in_flight", "not_supported"] as const;
+export type UsageResetRefusalCode = (typeof USAGE_RESET_REFUSAL_CODES)[number];
+
+/** Whether an error is a refusal of a reset attempt: a typed code, or any 4xx
+    at all.
+
+    The daemon answers 4xx only BEFORE it reaches a vendor -- a malformed body,
+    the pairing gate, an account list that moved, a provider with no reset
+    product -- so nothing was spent and the caller may drop the idempotency id.
+    408 is the one exception: a request timeout can hide a 200, so it keeps the
+    unknown-outcome treatment along with 5xx and transport errors.
+
+    `in_flight` IS NOT COVERED, and must not be read through this predicate
+    (R7): the daemon's single-flight claim is keyed by account, not by redeem
+    id, so a 409 can mean an EARLIER request for that account is still spending.
+    Dropping the id there mints a second credit on the next tap. Use
+    `isUsageResetInFlight` first. */
+export function isUsageResetRefusal(reason: unknown): reason is HttpError {
+	if (!(reason instanceof HttpError)) return false;
+	if (isUsageResetInFlight(reason)) return false;
+	if ((USAGE_RESET_REFUSAL_CODES as readonly string[]).includes(reason.code)) return true;
+	return reason.status >= 400 && reason.status < 500 && reason.status !== 408;
+}
+
+/** Whether the daemon's `409 in_flight` answered: the same account already has
+    a reset running, and that request may still spend.
+
+    Treated as the UNKNOWN outcome, not a refusal (R7). The pending id is kept
+    so any retry is idempotent, and nothing claims "nothing was spent" about a
+    request that is quite possibly still in the vendor call. */
+export function isUsageResetInFlight(reason: unknown): boolean {
+	return reason instanceof HttpError && reason.code === "in_flight";
+}
+
+/** One reset's answer: the outcome, plus the usage envelope the daemon could
+    re-read. `reports` is absent when the post-spend refresh could not answer,
+    in which case the sheet keeps the numbers it already shows. */
+export type PhoneUsageResetEnvelope = Partial<PhoneUsageEnvelope> & {
+	reset: { outcome: PhoneUsageResetOutcome; windows_reset: number };
+};
+
+/** Spend ONE reset credit on the account the phone named.
+
+    `accountIndex`/`accountCount` are the pair the card displayed and the daemon
+    re-checks them; `credentialRef` is the ALIAS the daemon published beside
+    that row's count, and it is what actually names the login. When it is
+    present the daemon resolves by ROW, so a login removed and replaced (count
+    unchanged) is a 409 `accounts_changed` instead of a sibling's credit. When
+    it is absent the daemon refuses: an index can only be resolved by position,
+    which is how a shared-label card ends up spending a sibling's credit (Q1). */
+export function resetUsage(input: {
+	provider: string;
+	accountIndex: number;
+	accountCount: number;
+	redeemRequestId: string;
+	credentialRef?: string | null;
+	signal?: AbortSignal;
+}): Promise<PhoneUsageResetEnvelope> {
+	return request("/api/usage/reset", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			provider: input.provider,
+			account_index: input.accountIndex,
+			account_count: input.accountCount,
+			redeem_request_id: input.redeemRequestId,
+			...(input.credentialRef ? { credential_ref: input.credentialRef } : {}),
+		}),
+		signal: input.signal,
 	});
 }
 

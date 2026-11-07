@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "relay.usage_reset",
+  "history_sha256": "b987fcc2e78a496df8e74f271ce13698c0aacea6b066a004d8b4b0f86bc09729",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "relay.usage_reset",
+      "source_sha256": "4c18df36457dfb787443036688aa4d37d41bf00511a64ca3e56805b1b73efab0",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; phone slice)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent a826f3746582)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "12-key phone usage-reset sheet, all keys audited against the English source and its context sidecar: the failed outcome reads as UNKNOWN with the no-second-credit reassurance, refused is distinct, nothing-to-reset is distinct from no-credit, placeholders and plural arms match, widths fit maxCells. Deferred minors: glossary consistency for 'window'/'reset credit' with each locale's relay.shell wording, and fr' outcome_failed phrasing."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.usage_reset",
+      "source_sha256": "4c18df36457dfb787443036688aa4d37d41bf00511a64ca3e56805b1b73efab0",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; phone slice) - lop subagent b9255a30b659",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent a826f3746582)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "12-key phone usage-reset sheet, all keys audited against the English source and its context sidecar: the failed outcome reads as UNKNOWN with the no-second-credit reassurance, refused is distinct, nothing-to-reset is distinct from no-credit, placeholders and plural arms match, widths fit maxCells. Deferred minor (ur's own): relay.shell calls the same event 'بحالی' ('recovery', 'بحالی: {when}') while this namespace says 'ری سیٹ'; the two are not interchangeable in the row label and the badge, so the shell's wording should follow before either is extended."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.usage_reset",
+      "source_sha256": "bf65e8762769356d071899fe4d017c43eb8633802210af1e68f71394bfcbd97b",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent b9255a30b659)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagents a826f3746582 then e297f58a2103 for the refused rewrite)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "12-key phone usage-reset sheet. Round-1 audit read the complete namespace against the English source and its context sidecar (failed outcome honest and retry-safe, refused distinct, nothing-to-reset distinct from no-credit, placeholders/plural arms exact, widths inside maxCells). This row also covers the later `refused` rewrite ('Nothing was spent — the reset was refused. Refresh the list.'), re-audited in all seven locales: passed. Deferred MINOR: the old refused opened with «وہ» copying English 'That'; dropped in the rewrite. Deferred NIT: outcome_failed sits at 95 of 96 cells."
+    }
+  ]
+}

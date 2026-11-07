@@ -52,6 +52,8 @@ describe("retainConfigStream", () => {
 		// line renders on a cold open with no catalogue fetch.
 		// relay.composer is the composer's button vocabulary (send/steer/stop/...)
 		// and the working line's Stop.
+		// relay.usage_reset is the phone /usage sheet's spendable reset credits:
+		// the card's affordance, its inline confirmation and the five outcomes.
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
@@ -70,6 +72,7 @@ describe("retainConfigStream", () => {
 			"relay.shell",
 			"relay.skills",
 			"relay.transcript",
+			"relay.usage_reset",
 		]);
 		const registrations = Object.values(BUNDLED_OWNED).reduce(
 			(count, locales) => count + Object.keys(locales).length,

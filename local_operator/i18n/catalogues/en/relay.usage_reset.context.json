@@ -1,0 +1,74 @@
+{
+  "relay.usage_reset.badge": {
+    "role": "usage sheet reset affordance",
+    "tone": "plain, compact",
+    "maxCells": 16,
+    "note": "Text button at the right end of one account card's header row in the phone's /usage sheet; opens that account's inline confirmation. {count} is the number of spendable reset credits (1 or more, no plural word). Keep the middle dot and single spaces; it must not wrap or truncate, because the number is the point."
+  },
+  "relay.usage_reset.confirm_title": {
+    "role": "usage sheet reset confirmation heading",
+    "tone": "plain",
+    "maxCells": 40,
+    "note": "Names the account a reset will spend on, inside the inline confirmation: {provider} is the provider's own product name from the backend (for example ChatGPT), {index} is that account's 1-based number and {count} the total the phone shows. Keep the middle dot separator."
+  },
+  "relay.usage_reset.confirm_prompt": {
+    "role": "usage sheet reset consequence line",
+    "tone": "plain, factual",
+    "maxCells": 88,
+    "note": "One sentence under the confirmation heading stating exactly what confirming does: it spends ONE vendor reset credit out of the {count} available and clears this account's rate-limit windows. Plural arm for {count} = 1 says it is the last credit. Avoid 'delete', 'erase' or 'cancel' wording; a vendor reset opens limits early, it does not remove the account."
+  },
+  "relay.usage_reset.cancel": {
+    "role": "usage sheet reset confirmation button",
+    "tone": "plain",
+    "maxCells": 16,
+    "note": "Dismisses the inline confirmation without spending anything. Same word the rest of the phone's sheets use."
+  },
+  "relay.usage_reset.confirm": {
+    "role": "usage sheet reset confirmation button",
+    "tone": "plain",
+    "maxCells": 16,
+    "note": "The button that actually spends one reset credit; it is the destructive action of this confirmation and must read as an action, not a description. Also labels the retry after an unconfirmed outcome."
+  },
+  "relay.usage_reset.busy": {
+    "role": "usage sheet reset in-flight status",
+    "tone": "plain",
+    "maxCells": 24,
+    "note": "Shown in place of the confirmation buttons while the reset request is on the wire. The ellipsis is U+2026, not three dots."
+  },
+  "relay.usage_reset.outcome_reset": {
+    "role": "usage sheet reset result",
+    "tone": "plain, factual",
+    "maxCells": 64,
+    "note": "The vendor confirmed the reset was applied. {count} is how many rate-limit windows it cleared; the =0 arm is used when it cleared none (still applied). Never claim a window was cleared when the count is 0."
+  },
+  "relay.usage_reset.outcome_already_redeemed": {
+    "role": "usage sheet reset result",
+    "tone": "plain, factual",
+    "maxCells": 64,
+    "note": "A retry with the same request id found the reset already applied by an earlier attempt. Nothing was spent twice. Past tense, no 'again'."
+  },
+  "relay.usage_reset.outcome_no_credit": {
+    "role": "usage sheet reset result",
+    "tone": "plain, factual",
+    "maxCells": 48,
+    "note": "The vendor says this account has no reset credits left, so nothing was spent. State the fact, do not apologise or tell the user to buy credits."
+  },
+  "relay.usage_reset.outcome_nothing_to_reset": {
+    "role": "usage sheet reset result",
+    "tone": "plain, factual",
+    "maxCells": 72,
+    "note": "The vendor accepted the request but no rate-limit window was over its limit, so no credit was needed. 'window' means a rate-limit window (for example the 5-hour or weekly limit)."
+  },
+  "relay.usage_reset.outcome_failed": {
+    "role": "usage sheet reset result",
+    "tone": "plain, honest about uncertainty",
+    "maxCells": 96,
+    "note": "The attempt reached the vendor but its result could not be established, so the credit's fate is unknown. It must NOT say the reset failed, and must offer the retry, which reuses the same request id and therefore cannot spend a second credit. 'confirm' here means establish, not approve."
+  },
+  "relay.usage_reset.refused": {
+    "role": "usage sheet reset refusal",
+    "tone": "plain, factual",
+    "maxCells": 64,
+    "note": "The daemon refused before reaching the vendor: the account list changed under the sheet, a reset for that account was already running, or this account offers no resets at all. Nothing was spent. 'Refresh the list' refers to the sheet's own refresh action."
+  }
+}

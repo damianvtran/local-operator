@@ -512,6 +512,22 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.transcript.turn.took": "Took {duration}",
     },
   },
+  "relay.usage_reset": {
+    "en": {
+      "relay.usage_reset.badge": "Reset \u00b7 {count}",
+      "relay.usage_reset.busy": "Resetting\u2026",
+      "relay.usage_reset.cancel": "Cancel",
+      "relay.usage_reset.confirm": "Reset",
+      "relay.usage_reset.confirm_prompt": "{count, plural, one {Uses your last reset credit; clears this account\u2019s rate-limit windows.} other {Uses 1 of # reset credits; clears this account\u2019s rate-limit windows.}}",
+      "relay.usage_reset.confirm_title": "{provider} \u00b7 Account {index} of {count}",
+      "relay.usage_reset.outcome_already_redeemed": "This reset had already been applied.",
+      "relay.usage_reset.outcome_failed": "Couldn\u2019t confirm the reset. Try again to check \u2014 a retry will not use a second credit.",
+      "relay.usage_reset.outcome_no_credit": "No reset credits are left.",
+      "relay.usage_reset.outcome_nothing_to_reset": "Nothing was over its limit, so no window needed clearing.",
+      "relay.usage_reset.outcome_reset": "{count, plural, =0 {Reset applied.} one {Reset applied \u2014 1 window cleared.} other {Reset applied \u2014 # windows cleared.}}",
+      "relay.usage_reset.refused": "Nothing was spent \u2014 the reset was refused. Refresh the list.",
+    },
+  },
 };
 
 /** Each complete shipped locale as a lazily loaded chunk. A locale absent

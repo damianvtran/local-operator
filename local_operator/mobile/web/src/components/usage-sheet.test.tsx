@@ -8,8 +8,15 @@ import { BUNDLED_OWNED } from "../i18n/bundled.gen";
 
 vi.mock("../api", async () => {
 	// The real HttpError, so the sheet's `instanceof` check sees the same class.
-	const { HttpError } = await vi.importActual<typeof import("../api")>("../api");
-	return { getUsage: vi.fn(), refreshUsage: vi.fn(), HttpError };
+	const actual = await vi.importActual<typeof import("../api")>("../api");
+	const { HttpError } = actual;
+	return {
+		HttpError,
+		isUsageResetRefusal: actual.isUsageResetRefusal,
+		getUsage: vi.fn(),
+		refreshUsage: vi.fn(),
+		resetUsage: vi.fn(),
+	};
 });
 beforeEach(() => {
 	// Default: the on-open refresh never answers, so a test sees the GET paint.

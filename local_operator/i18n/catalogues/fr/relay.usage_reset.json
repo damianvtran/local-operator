@@ -1,0 +1,14 @@
+{
+  "relay.usage_reset.badge": "Réinit. · {count}",
+  "relay.usage_reset.confirm_title": "{provider} · Compte {index} sur {count}",
+  "relay.usage_reset.confirm_prompt": "{count, plural, one {Utilise le dernier crédit de réinitialisation ; vide les fenêtres de limite du compte.} many {Utilise 1 crédit de réinitialisation sur # ; vide les fenêtres de limite du compte.} other {Utilise 1 crédit de réinitialisation sur # ; vide les fenêtres de limite du compte.}}",
+  "relay.usage_reset.cancel": "Annuler",
+  "relay.usage_reset.confirm": "Réinitialiser",
+  "relay.usage_reset.busy": "Réinitialisation…",
+  "relay.usage_reset.outcome_reset": "{count, plural, =0 {Réinitialisation appliquée.} one {Réinitialisation appliquée — 1 fenêtre vidée.} many {Réinitialisation appliquée — # de fenêtres vidées.} other {Réinitialisation appliquée — # fenêtres vidées.}}",
+  "relay.usage_reset.outcome_already_redeemed": "Cette réinitialisation avait déjà été appliquée.",
+  "relay.usage_reset.outcome_no_credit": "Plus aucun crédit de réinitialisation.",
+  "relay.usage_reset.outcome_nothing_to_reset": "Rien n’avait dépassé sa limite : aucune fenêtre à vider.",
+  "relay.usage_reset.outcome_failed": "Réinitialisation non confirmée. Réessayez pour vérifier — aucun second crédit ne sera utilisé.",
+  "relay.usage_reset.refused": "Rien n’a été débité — réinit. refusée. Actualisez la liste."
+}
