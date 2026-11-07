@@ -77,6 +77,37 @@ from .tool import BridgeRuntime
 
 logger = logging.getLogger(__name__)
 
+#: The ``bridge_credential_pin_gone`` refusals (model-facing tool results, like
+#: every sentence in ``_admission_refusal``). The pinned login row is gone but
+#: a Radient login IS present, so "sign in to Radient" would be false — the
+#: operator is signed in. Two wordings, chosen by running the heal's OWN proof
+#: (``heal.pin_gone_self_repairs``), because "a login is present" is weaker
+#: than that proof: two same-account logins or a different account make the
+#: heal decline, and promising a repair there is a lie (QA round 1, Q1).
+#:
+#: TIMING. A running receiver re-runs the heal at its next owner recheck
+#: (``connector.loop.OWNER_RECHECK_S``, 60 s), a stopped one when it starts;
+#: an already-open session stays fenced (``owner_changed``) until reopened —
+#: no silent rebind. No CLI is named: ``lop team-bridge setup`` does not
+#: inspect the pin, so pointing at it would report "ready" either way.
+PIN_GONE_SELF_REPAIR_SENTENCE = (  # i18n: ignore model-facing tool refusal, like its siblings
+    "agent messages are enrolled with a Radient login that is no longer on this "
+    "device; the login now here is the same account, so the agent-message receiver "
+    "re-points the enrollment to it by itself (within about a minute while it runs, "
+    "otherwise when it next starts). Reopen this session afterwards: an open "
+    "session keeps refusing until it is reopened"
+)
+#: The unprovable case: no repair is promised, only the remedies that work —
+#: one login to the enrolled account, or the app-only enrolment (``setup_cli``:
+#: consent is never granted from a terminal) for a different account.
+PIN_GONE_SENTENCE = (  # i18n: ignore model-facing tool refusal, like its siblings
+    "agent messages are enrolled with a Radient login that is no longer on this "
+    "device, and the logins here do not prove the same account, so it is not "
+    "repaired automatically. Sign in as the account that owns the enrollment and "
+    "keep exactly one login to it on this device, or enrol this account by turning "
+    "agent messages on in the Local Operator app; then reopen this session"
+)
+
 __all__ = [
     "admission_refusal",
     "admit_bridge_runtime",
@@ -221,7 +252,14 @@ async def _admission_fetch(runtime: BridgeRuntime) -> None:
         payload = await runtime.client.status()
     except BridgeSignInRequired:
         runtime.admission = "signin"
-        runtime.admission_note = "signin_required"
+        # A pin whose row is gone while a login IS present is not "signed
+        # out": a same-identity re-login replaced the row (team_bridge.heal).
+        if not runtime.client.pin_gone_with_login_present():
+            runtime.admission_note = "signin_required"
+        elif runtime.client.pin_gone_self_repairs():
+            runtime.admission_note = "pin_gone_self_repair"
+        else:
+            runtime.admission_note = "pin_gone"
         return
     except BridgeUnreachable:
         # Transport only: nothing was answered. Stays VISIBLY pending
@@ -314,6 +352,17 @@ def admission_refusal(runtime: BridgeRuntime, *, is_read: bool = False) -> dict[
             ),
         }
     if state == "signin":
+        if runtime.admission_note in ("pin_gone", "pin_gone_self_repair"):
+            # One stable code for both wordings: callers branch on the code,
+            # the model reads the sentence.
+            return {
+                "code": "bridge_credential_pin_gone",
+                "error": (
+                    PIN_GONE_SELF_REPAIR_SENTENCE
+                    if runtime.admission_note == "pin_gone_self_repair"
+                    else PIN_GONE_SENTENCE
+                ),
+            }
         return {
             "code": "bridge_signin_required",
             "error": "sign in to Radient to use agent messages",
