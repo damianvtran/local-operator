@@ -821,3 +821,133 @@ def test_harness_workflow_gaining_release_powers_opens_a_round(
     assert result.returncode == 1, result.stdout + result.stderr
     assert "harness workflow `.github/workflows/native.yml` can ship:" in result.stdout
     assert reason in result.stdout
+
+
+# --- #3540 round 2: comments after events, CRLF, YAML indirection ----------------------
+# Raw-text matching sees bytes before YAML decodes them. Every construct by which
+# YAML makes the parsed value differ from the raw spelling — a backslash escape
+# or line join inside a double-quoted scalar, an anchor/alias, an explicit tag,
+# a complex key — now opens a round on a changed harness workflow (fail closed);
+# ship files are scanned raw AND with double-quoted escapes decoded.
+
+_S = _SAFE_NATIVE
+_BS = "\\"
+
+
+@pytest.mark.parametrize(
+    ("head_text", "reason"),
+    [
+        # Review R2-m1 / QA Q6: a trailing comment or CRLF after an event.
+        (
+            _S.replace("on:\n  pull_request:\n  workflow_dispatch:\n", "on: push # x\n"),
+            "trigger `push`",
+        ),
+        (
+            _S.replace(
+                "on:\n  pull_request:\n  workflow_dispatch:\n",
+                "on:\n  - pull_request\n  - push  # also main\n",
+            ),
+            "trigger `push`",
+        ),
+        (
+            _S.replace(
+                "on:\n  pull_request:\n  workflow_dispatch:\n",
+                "on:\n  - pull_request\n  - workflow_dispatch\n  - 'push' # x\n",
+            ),
+            "trigger `push`",
+        ),
+        (
+            _S.replace(
+                "on:\n  pull_request:\n  workflow_dispatch:\n",
+                "on:\n  - pull_request\n  - push\n",
+            ).replace("\n", "\r\n"),
+            "trigger `push`",
+        ),
+        # Review R2-M1 / QA Q7: double-quoted escapes and line joins.
+        (_S + f'      - run: "echo ${{{{ {_BS}x73ecrets.NPM_TOKEN }}}} | npm publish"\n', "escape"),
+        (_S + f'      - run: "echo ${{{{ se{_BS}\n          crets.NPM_TOKEN }}}}"\n', "escape"),
+        (_S.replace("contents: read", f'contents: "wr{_BS}x69te"'), "escape"),
+        (_S.replace("contents: read", f'contents: "{_BS}x77rite"'), "escape"),
+        (_S.replace("contents: read", f'contents: read\n  id-token: "wr{_BS}u0069te"'), "escape"),
+        (_S.replace("permissions:", f'"perm{_BS}x69ssions":'), "escape"),
+        (
+            _S.replace(
+                "on:\n  pull_request:\n  workflow_dispatch:\n",
+                f'on:\n  - pull_request\n  - workflow_dispatch\n  - "{_BS}x70ush"\n',
+            ),
+            "escape",
+        ),
+        # QA Q8: anchors and aliases; plus tags and complex keys (same class).
+        (
+            _S.replace(
+                "on:\n  pull_request:\n  workflow_dispatch:\n",
+                "env:\n  EV: &ev push\non:\n  - *ev\n  - workflow_dispatch\n",
+            ),
+            "anchor/alias",
+        ),
+        (_S.replace("contents: read", "contents: !!str read"), "tag"),
+        (
+            _S.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  ? pull_request\n"),
+            "complex key",
+        ),
+        (
+            _S.replace("  workflow_dispatch:\n", '  workflow_dispatch:\n  "unterminated\n'),
+            "unterminated",
+        ),
+    ],
+    ids=[
+        "scalar-event-comment",
+        "seq-item-comment",
+        "quoted-seq-item-comment",
+        "crlf",
+        "dq-escape-secret",
+        "dq-linejoin-secret",
+        "dq-escape-write",
+        "qa-n4-write",
+        "dq-unicode-id-token",
+        "dq-escape-permissions-key",
+        "qa-n3-escaped-event",
+        "qa-n6-anchor-alias",
+        "tag",
+        "complex-key",
+        "unterminated-dq",
+    ],
+)
+def test_harness_workflow_yaml_indirection_opens_a_round(
+    tmp_path: Path, head_text: str, reason: str
+) -> None:
+    result = _native_delta(tmp_path, head_text)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "harness workflow `.github/workflows/native.yml` can ship:" in result.stdout
+    assert reason in result.stdout
+
+
+def test_shell_backslashes_and_plain_scalar_quotes_are_not_indirection(tmp_path: Path) -> None:
+    """Negative: backslashes in a `run: |` block scalar (shell line joins,
+    `printf "a\\n"`) and a plain scalar holding quotes are literal text to YAML —
+    only a DOUBLE-QUOTED scalar decodes escapes, so these stay harness-only."""
+    edited = _S.replace(
+        "      - run: bun scripts/ci/check.ts\n",
+        "      - run: |\n"
+        f"          bun scripts/ci/check.ts {_BS}\n"
+        "            --fast\n"
+        f'          printf "a{_BS}n" | grep -E "x{_BS}.y"\n'
+        "        shell: bash\n"
+        f'      - run: echo "plain {_BS}t scalar"\n',
+    )
+    _exempt(_native_delta(tmp_path, edited))
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    [
+        f'jobs:\n  r:\n    steps:\n      - uses: "{_BS}x2e/scripts/ci"\n',
+        f'jobs:\n  r:\n    steps:\n      - uses: "{_BS}u002e/scripts/ci"\n',
+        "jobs:\n  r:\n    steps:\n      - uses: ./scripts/ci\r\n",
+    ],
+    ids=["dq-escaped-dot", "dq-unicode-dot", "crlf"],
+)
+def test_ship_reference_through_yaml_escapes_reaches(tmp_path: Path, workflow: str) -> None:
+    """Review R2-M1: a ship file is scanned raw AND with double-quoted escapes
+    decoded, so `"\\x2e/scripts/ci"` still names the local action directory."""
+    _reached(_reach(tmp_path, {".github/workflows/release.yml": workflow}))

@@ -583,7 +583,7 @@ def ship_closure(repo: Path, head: str, manifest: Manifest) -> Closure:
             text = blobs.get(tree[path][1])
             if text is None:
                 continue
-            for named in sorted(index.named_by(path, text, spent)):
+            for named in sorted(index.named_by(path, reference_text(text), spent)):
                 if named not in origin:
                     origin[named] = path
         added_link = False
@@ -645,11 +645,12 @@ _TRIGGER_EVENTS = (
 ).split()
 #: An event as a YAML key (`push:`, `"push":`), a sequence item (`- push`), a
 #: flow item (`[pull_request, push]`, `{push: …}`) or a scalar (`on: push`),
-#: quoted or not. Bounded: the event is a literal, the gaps are `[ \t]*`.
+#: quoted or not, with or without a trailing comment (`- push  # nightly`) or CR
+#: (#3540 round 2). Bounded: the event is a literal, the gaps are `[ \t]*`.
 _EVENT = re.compile(
     r"""(?m)(?:^|[-\[{,:])[ \t]*["']?("""
     + "|".join(_TRIGGER_EVENTS)
-    + r""")["']?[ \t]*(?=[:,\]}]|$)"""
+    + r""")["']?[ \t]*(?=[:,\]}#\r]|$)"""
 )
 #: Any `secrets` other than the exact `secrets.GITHUB_TOKEN`: `secrets.X`,
 #: `secrets['X']`, `toJSON(secrets)`, `secrets: inherit` quoted or not. GitHub
@@ -668,6 +669,128 @@ _PUBLISH_RUN = re.compile(
     r"gpg [^\n]*--sign|notarytool|altool|docker push|aws s3 (?:cp|sync)|gsutil|"
     r"wrangler (?:deploy|publish)|vercel|netlify deploy)\b"
 )
+
+
+#: Value indicators after which (plus a space) a YAML node may start; a node may
+#: also start at the line's indent and inside a flow collection. A quote, `&`,
+#: `*`, `!` or `?` there is YAML syntax; the same character inside a plain
+#: scalar (`run: echo "x"`, `if: ${{ !cancelled() }}`) is literal text.
+_NODE_START = frozenset(":-?")
+#: A block scalar header (`key: |`, `- >-`, `run: |2 # x`) ends its line.
+_BLOCK_HEADER = re.compile(r"""[:-][ \t]+[|>][-+0-9]*$""")
+
+
+def yaml_indirection(text: str) -> list[str]:
+    """Constructs by which YAML makes a parsed value differ from its raw bytes.
+
+    The power checks read raw text, so anything YAML DECODES defeats them: a
+    backslash escape or line join inside a double-quoted scalar (`"wr\\x69te"`,
+    `"se\\⏎crets"`), an anchor/alias (`&ev push` … `*ev`), an explicit tag
+    (`!!str`), a complex key (`? push`) — #3540 round 2 (review R2-M1, QA Q7/Q8).
+    Each one opens a round instead of being decoded here: the checker must not
+    become a YAML implementation to be trusted. Block scalars (`run: |`) are
+    skipped, because their backslashes and `&`/`*` are literal shell; a quote
+    that never closes is reported too (fail closed, not guessed).
+    """
+    found: set[str] = set()
+    lines = text.split("\n")
+    block_col: int | None = None
+    quote: str | None = None  # an open quoted scalar spanning lines
+    flow = 0  # open flow collections ([ / {), which may span lines
+    for line in lines:
+        indent = len(line) - len(line.lstrip(" \t"))
+        if quote is None and block_col is not None:
+            if not line.strip() or indent > block_col:
+                continue
+            block_col = None
+        i, at_start = (0, True) if quote else (indent, True)
+        comment_at = len(line)
+        while i < len(line):
+            c = line[i]
+            if quote == '"':
+                if c == "\\":
+                    found.add("double-quoted escape or line join")
+                    i += 2
+                    continue
+                if c == '"':
+                    quote, at_start = None, False
+                i += 1
+                continue
+            if quote == "'":
+                if c == "'" and line[i + 1 : i + 2] == "'":
+                    i += 2
+                    continue
+                if c == "'":
+                    quote, at_start = None, False
+                i += 1
+                continue
+            if c == "#" and (i == 0 or line[i - 1] in " \t"):
+                comment_at = i
+                break
+            if at_start and c in "\"'":
+                quote = c
+                i += 1
+                continue
+            if at_start and c in "&*" and re.match(r"[&*][^\s,\[\]{}]", line[i:]):
+                found.add("anchor/alias")
+            elif at_start and c == "!":
+                found.add("tag")
+            elif at_start and c == "?" and line[i + 1 : i + 2] in ("", " ", "\t"):
+                found.add("complex key")
+            if c in " \t":
+                at_start = at_start or line[i - 1 : i] in _NODE_START
+            elif c in "[{" and (at_start or flow):
+                # A flow collection opens only where a node may start: inside a
+                # plain scalar (`if: ${{ !cancelled() }}`) a brace is literal.
+                flow, at_start = flow + 1, True
+            elif c in "]}" and flow:
+                flow, at_start = flow - 1, False
+            else:
+                at_start = c == "," and flow > 0
+            i += 1
+        if quote == '"' and line.endswith("\\"):
+            found.add("double-quoted escape or line join")
+        if quote is None and _BLOCK_HEADER.search(line[:comment_at].rstrip()):
+            # Content must be indented past the KEY, not past the line's `- `:
+            # the wider skip would swallow a sibling key such as `shell:`.
+            block_col = len(line) - len(re.sub(r"^[ \t]*(?:-[ \t]+)*", "", line))
+    if quote:
+        found.add("unterminated quoted scalar")
+    return sorted(found)
+
+
+#: YAML double-quoted escapes that spell a different character than their bytes.
+_YAML_ESCAPE = re.compile(
+    r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(/)|\n[ \t]*)"
+)
+
+
+def _decoded_escapes(text: str) -> str | None:
+    """``text`` with YAML double-quoted escapes decoded, or None if one cannot
+    be (the caller then keeps the raw text alone, which is the whole file)."""
+    if "\\" not in text:
+        return ""
+
+    def one(match: re.Match[str]) -> str:
+        hexa = match.group(1) or match.group(2) or match.group(3)
+        if hexa:
+            return chr(int(hexa, 16))
+        return "/" if match.group(4) else ""
+
+    try:
+        return _YAML_ESCAPE.sub(one, text)
+    except (ValueError, OverflowError):
+        return None
+
+
+def reference_text(text: str) -> str:
+    """What a ship file's reachability scan reads: the raw text with CRLF
+    normalised, plus — when it holds backslashes — the same text with YAML
+    double-quoted escapes decoded (#3540 R2-M1: `uses: "\\x2e/scripts/ci"`).
+    An undecodable escape leaves the raw text, which already counts in full."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    decoded = _decoded_escapes(text)
+    return text if not decoded else text + "\n" + decoded
 
 
 def _is_workflow(path: str) -> bool:
@@ -693,7 +816,9 @@ def workflow_powers(head_text: str, reviewed_text: str | None) -> list[str]:
     publishing steps only when new against the reviewed text (an evidence upload
     the clean round already saw is not new power).
     """
+    head_text = head_text.replace("\r\n", "\n").replace("\r", "\n")
     found = [f"trigger `{event}`" for event in sorted(set(_EVENT.findall(head_text)))]
+    found += [f"YAML indirection `{kind}`" for kind in yaml_indirection(head_text)]
     others = _SECRETS.findall(_GITHUB_TOKEN.sub("", head_text))
     if others:
         named = sorted(set(re.findall(r"(?i)\bsecrets\.(\w+)", head_text)) - {"GITHUB_TOKEN"})
