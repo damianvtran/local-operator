@@ -30,19 +30,24 @@ INVARIANTS (each pinned in tests/unit/team_bridge/test_screening_observation.py)
   ``features.team_bridge_screening_observation: 1``: a client that has not seen
   it omits the block. The memo below is fed by status reads this process
   ALREADY makes (no extra read). The one thing read back is a 400 to a body
-  that carried the block, which clears the memo for that hub (a stale
-  advertisement after a rollback); nothing else in an ack/admit response is
-  read about it.
+  that carried the block (a stale advertisement after a rollback, or a rolling
+  update serving both decoders behind one origin). It latches the block OFF
+  for that origin for :data:`REFUSAL_COOLDOWN_S`, outranking every fresh
+  advertisement meanwhile, and the request that drew it is sent ONCE more
+  without the block (``client._send_observed``) so telemetry never costs a
+  message its admission; nothing else in an ack/admit response is read.
 """
 
 from __future__ import annotations
 
 import functools
 import threading
+import time
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
+from local_operator.providers.registry import credential_provider_id
 from local_operator.team_bridge.types import OBSERVATION_STAGES, ScreeningObservation
 
 #: The block's wire version (§8.5). Any other version is dropped by the hub.
@@ -56,7 +61,36 @@ WIRE_KEY = "screening_observation"
 #: input to any decision except "attach a telemetry key or not". Overwritten
 #: on every status read, so a hub that stops advertising stops receiving it.
 _HUB_SUPPORT: dict[str, bool] = {}
+#: Hub origin -> monotonic deadline before which the block stays OFF there,
+#: whatever a status read advertises (review Q-2). Process memory only, like
+#: the advertisement memo it masks.
+_REFUSED_UNTIL: dict[str, float] = {}
 _HUB_LOCK = threading.Lock()
+
+#: How long a 400 to a block-carrying request outranks fresh advertisements.
+#:
+#: WHY a latch at all: the conversation lane reads status before EVERY admit
+#: (``run_screening_cycle`` -> ``verified_status_capture``), so behind one
+#: origin serving two hub versions (a rolling update, a partial rollback) the
+#: post-#332 pod's advertisement would re-open the gate before each request,
+#: and each one landing on a pre-#332 pod would 400 again.
+#:
+#: WHY 15 minutes: an agent-server release is an Argo sync (~3 min) plus a
+#: rolling update of a couple of pods, so a version-mixed window is minutes;
+#: 15 covers it with margin. Longer buys little — after a PERMANENT rollback
+#: the latch simply re-arms on its next 400, and since that request is resent
+#: without the block (no hold, no re-screen), each expiry costs one extra
+#: request, never a paid screen. Shorter would let a slow rollout 400 every few
+#: minutes. Losing telemetry for the whole window costs nothing.
+#:
+#: Only the cool-down releases the latch. A successful request WITHOUT the
+#: block there proves nothing about the block — it is exactly what the resend
+#: after the 400 is — so it must not re-open the gate.
+REFUSAL_COOLDOWN_S = 15 * 60.0
+
+#: Indirection so tests can move the clock; monotonic so a wall-clock jump can
+#: neither extend nor end a latch.
+_monotonic = time.monotonic
 
 
 def _hub_key(base_url: str) -> str:
@@ -81,32 +115,44 @@ def note_hub_status(base_url: str, payload: Any) -> None:
 
 
 def note_hub_refused(base_url: str) -> None:
-    """A 400 answered a request that carried the block: stop sending it here.
+    """A 400 answered a request that carried the block: latch it off here.
 
     An advertisement can go stale under a running process — a rollback below
     #332, or a rolling update serving both decoders behind one origin — and a
-    pre-#332 admit decoder answers the unknown key with a 400. Only a status
-    read would otherwise clear the memo, and the conversation lane reads
-    status per message only when files ride it, so the stale ``True`` could
-    keep failing every re-drive for up to the status cache's TTL. Each failed
-    re-drive of an unsent FALLBACK allow retires it and screens again: a
-    second paid call that may land on another model (review S-1/m1).
+    pre-#332 admit decoder answers the unknown key with a 400. Clearing the
+    memo alone does not hold: the conversation lane reads status before EVERY
+    admit (``scheduler.run_screening_cycle`` -> ``verified_status_capture``),
+    so a post-#332 pod's advertisement would re-open the gate before the next
+    request and a pre-#332 pod would refuse it again (review Q-2; the round-1
+    docstring wrongly said status was read only when files ride a message).
+    So the refusal latches the block off for this origin until
+    :data:`REFUSAL_COOLDOWN_S` elapses, and advertisements meanwhile are
+    recorded but do not re-open it.
 
-    Clearing is the safe direction whatever caused the 400: losing telemetry
-    until the next advertising status read costs nothing. No retry is added
-    here; the caller's existing hold/re-drive (or the admit's own bounded
-    retry) simply goes out without the block.
+    Latching off is the safe direction whatever caused the 400: losing
+    telemetry costs nothing. The request itself is resent once without the
+    block by the client (``_send_observed``), so the refusal never becomes a
+    hold — whose re-drive would retire and re-screen an unsent FALLBACK allow,
+    a second paid call that may land on another model (review S-1/m1).
     """
 
+    key = _hub_key(base_url)
     with _HUB_LOCK:
-        _HUB_SUPPORT[_hub_key(base_url)] = False
+        _HUB_SUPPORT[key] = False
+        _REFUSED_UNTIL[key] = _monotonic() + REFUSAL_COOLDOWN_S
 
 
 def hub_accepts(base_url: str) -> bool:
-    """Whether THIS hub has advertised the block to this process."""
+    """Whether THIS hub advertised the block and no refusal latch masks it."""
 
+    key = _hub_key(base_url)
     with _HUB_LOCK:
-        return _HUB_SUPPORT.get(_hub_key(base_url), False)
+        until = _REFUSED_UNTIL.get(key)
+        if until is not None:
+            if _monotonic() < until:
+                return False
+            del _REFUSED_UNTIL[key]
+        return _HUB_SUPPORT.get(key, False)
 
 
 def reset_hub_support() -> None:
@@ -114,6 +160,7 @@ def reset_hub_support() -> None:
 
     with _HUB_LOCK:
         _HUB_SUPPORT.clear()
+        _REFUSED_UNTIL.clear()
 
 
 @functools.lru_cache(maxsize=1)
@@ -149,8 +196,13 @@ def from_answered_hop(runner: Any, actual_model: str | None) -> ScreeningObserva
     # Stage 1 of ``resolve_screening_chain`` stamps ``preferred=True``; every
     # stage-2 hop (the receiver's default and its fallbackChains) is the
     # failover cascade.
+    # The provider is folded to the one its credential is stored under, so a
+    # login flavour (``anthropic-key``, ``radient-key``) reports the endpoint
+    # it authenticates rather than an id the hub counts as OTHER; the client
+    # owns that alias table (#343 review) and the eligibility check already
+    # folds the same way. The model is never folded: it is what answered.
     return ScreeningObservation(
-        provider=str(hop.provider or ""),
+        provider=credential_provider_id(str(hop.provider or "")),
         model=actual_model,
         selection_stage="preferred" if hop.preferred else "fallback",
     )
@@ -177,7 +229,9 @@ def from_release_row(release: Mapping[str, Any]) -> ScreeningObservation | None:
         provider, model, release.get("screener_preferred") == 1
     )
     return ScreeningObservation(
-        provider=provider,
+        # Folded for the hub only, as in ``from_answered_hop``; the signed row
+        # and the preferred check above keep the stored literal.
+        provider=credential_provider_id(provider),
         model=model,
         selection_stage="preferred" if preferred else "unknown",
     )

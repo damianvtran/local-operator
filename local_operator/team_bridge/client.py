@@ -2031,9 +2031,10 @@ class TeamBridgeClient:
         if response.status_code >= 400:
             if response.status_code == 400 and body is not None and _observation.WIRE_KEY in body:
                 # The one choke point every ack and admit passes: a 400 to a
-                # body that carried the observe-only block clears this hub's
-                # gate, so the next attempt omits it (screening_observation.
-                # note_hub_refused). The refusal itself is raised unchanged.
+                # body that carried the observe-only block latches it off for
+                # this hub's origin (screening_observation.note_hub_refused).
+                # The refusal itself is raised unchanged; ``_send_observed``
+                # decides whether the request is resent without the block.
                 _observation.note_hub_refused(self.base_url)
             raise _refusal(response)
         if empty_result:
@@ -2046,6 +2047,36 @@ class TeamBridgeClient:
             if isinstance(envelope, dict) and isinstance(envelope.get("msg"), str):
                 return {}
         return _envelope_result(response)
+
+    async def _send_observed(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """``_send`` for an ack/admit body that may carry the observe-only block.
+
+        A 400 to a body that carried ``screening_observation`` is answered by
+        sending the SAME request once more without it — the exact pre-#332
+        body, same ``client_ref``. A pre-#332 hub refuses the unknown key at
+        decode, before recording anything, so the resend is the request it
+        would have accepted. Without it the 400 became a hold, and the hold's
+        re-drive retires and re-screens an unsent fallback allow: a paid call
+        caused by telemetry (review Q-2). ``_send`` has already latched the
+        block off, so the resend and every request meanwhile omit it. A body
+        without the block is sent exactly once, as before; a resend that 400s
+        too is raised as the hub's answer.
+        """
+
+        try:
+            return await self._send(method, path, body=body, **kwargs)
+        except BridgeRefusal as refusal:
+            if refusal.http_status != 400 or _observation.WIRE_KEY not in body:
+                raise
+        resend = {k: v for k, v in body.items() if k != _observation.WIRE_KEY}
+        return await self._send(method, path, body=resend, **kwargs)
 
     async def _authorized(
         self,
@@ -2315,12 +2346,13 @@ class TeamBridgeClient:
 
         ``screening_observation`` is TELEMETRY beside the verdict, never in it
         (agent-server §8.5): attached only when this hub advertised the block,
-        and only a 400 to a body carrying it is read back (it clears the gate).
+        and only a 400 to a body carrying it is read back (it latches the block
+        off and the ack is resent once without it, ``_send_observed``).
         """
 
         body = {"state": state, "screening": dict(screening), "client_ref": client_ref}
         _attach_observation(body, self.base_url, screening_observation)
-        return await self._send(
+        return await self._send_observed(
             "POST",
             f"/messaging/messages/{message_id}/ack",
             params={"tenant_id": tenant_id},
@@ -4226,9 +4258,10 @@ class TeamBridgeClient:
         ``screening_observation`` is the observe-only screener provenance (§8.5),
         attached only once this hub has advertised it: a pre-#332 hub decodes this
         body strictly and would refuse the unknown key, which must never cost a
-        message its admission. It never changes which attempt is made: a 400 to a
-        body that carried it clears this hub's gate, so the bounded retry below and
-        any later re-drive go out without it (review S-1).
+        message its admission. A 400 to a body that carried it latches it off for
+        this hub's origin (review S-1/Q-2): the ``refusal_class`` retry below already
+        resends without it, and a block-carrying attempt that is the LAST one is
+        resent once without it (``_send_observed``) instead of becoming a hold.
         """
 
         if (attachments_hash is not None or files_hash is not None) != (
@@ -4282,11 +4315,11 @@ class TeamBridgeClient:
                 if refusal.http_status != 400:
                     raise
             # That 400 may have been the block's (a stale advertisement), and
-            # ``_send`` has cleared the gate if so: re-apply it, so the existing
+            # ``_send`` has latched it off if so: re-apply it, so the existing
             # retry carries the block only while the hub still accepts it.
             body.pop(_observation.WIRE_KEY, None)
             _attach_observation(body, self.base_url, screening_observation)
-        return await self._send(
+        return await self._send_observed(
             "POST",
             path,
             params=params,

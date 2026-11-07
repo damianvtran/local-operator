@@ -134,6 +134,31 @@ def test_a_quota_refusal_reports_the_fallback_that_actually_answered(tmp_path, m
     assert [s["model"] for s in wire.sends] == ["deepseek-flash"]
 
 
+def test_a_login_flavour_fallback_reports_the_provider_it_authenticates(
+    tmp_path, monkeypatch
+) -> None:
+    """#343 review: ``anthropic-key`` is a way to log in to ``anthropic``.
+
+    The hub counts an unknown provider string as OTHER, so the client folds
+    the flavour through its own alias table. The model is never folded.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _cascade_config(tmp_path, ["anthropic-key/claude-sonnet-5-5"])
+    wire = _Wire({"claude-sonnet-5-5": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire, failover={"gpt-5.4": _blocked_credential()})
+
+    result = _cycle(tmp_path, owner)
+
+    assert result.receipt.observation == ScreeningObservation(
+        "anthropic", "claude-sonnet-5-5", "fallback"
+    )
+    released = obs.from_release_row(
+        {"screener_provider": "radient-key", "screener_model": "claude-sonnet-5-5"}
+    )
+    assert released == ScreeningObservation("radient", "claude-sonnet-5-5", "unknown")
+
+
 def test_a_wire_429_on_the_preferred_hop_also_reports_fallback(tmp_path, monkeypatch) -> None:
     _store, owner = _setup(tmp_path)
     _cascade_config(tmp_path, ["deepseek/deepseek-flash"])
@@ -444,62 +469,180 @@ async def test_the_bounded_retries_make_the_same_attempts_with_or_without_the_bl
     assert [(obs.WIRE_KEY in b) for b in with_block] == [True, False]
 
 
-@pytest.mark.asyncio
-async def test_a_400_to_a_request_carrying_the_block_clears_that_hubs_gate() -> None:
-    """S-1 / m1: an advertisement gone stale (a rollback below #332, or a
-    rolling update serving both decoders) is cleared by the 400 it causes.
+_INVALID = {"error": "invalid request body", "code": "invalid"}
 
-    The admit that drew the 400 still fails — no retry is added for it — but
-    the connector's existing hold/re-drive then goes out without the block.
-    That matters for a fallback allow: an unsent one is retired and screened
-    again on re-drive, a second paid call that may land on another model.
+
+class _Clock:
+    """The latch's monotonic clock, moved by hand."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _admits(seen: list[httpx.Request]) -> list[httpx.Request]:
+    return [r for r in seen if r.url.path.endswith("/admit")]
+
+
+def _carried(request: httpx.Request) -> bool:
+    return obs.WIRE_KEY.encode() in request.content
+
+
+def test_a_full_rollback_admits_on_the_first_drive_and_never_re_screens(
+    tmp_path, monkeypatch
+) -> None:
+    """Q-2, full rollback: the hub advertised, then every pod went pre-#332.
+
+    The quota-refused preferred screener leaves a FALLBACK allow — the receipt
+    whose unsent re-drive is retired and screened again. The 400 the block
+    draws must not become that re-drive: the admit is resent once without the
+    block and recorded, so the vendor is called exactly once, and nothing
+    after the 400 carries the block again.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _cascade_config(tmp_path, ["deepseek/deepseek-flash"])
+    wire = _Wire({"deepseek-flash": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire, failover={"gpt-5.4": _blocked_credential()})
+    result = _cycle(tmp_path, owner)
+    assert result.receipt.observation == ScreeningObservation(
+        "deepseek", "deepseek-flash", "fallback"
+    )
+
+    rolled_back = {"done": False}
+    seen: list[httpx.Request] = []
+
+    def hub(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/messaging/status"):
+            features = {} if rolled_back["done"] else {obs.OBSERVATION_FEATURE: 1}
+            return _ok({"features": features})
+        if _carried(request):
+            return httpx.Response(400, json=_INVALID)
+        return _ok({"status": "recorded"})
+
+    async def drive() -> list[Any]:
+        client = _make_client(hub)
+        await client.status()
+        rolled_back["done"] = True  # lands between the status read and the admit
+        answers = [await _admit(client, result.receipt.observation)]
+        for _ in range(2):  # later messages on the rolled-back hub
+            await client.status()
+            answers.append(await _admit(client, result.receipt.observation))
+        return answers
+
+    assert asyncio.run(drive()) == [{"status": "recorded"}] * 3
+    assert [_carried(r) for r in _admits(seen)] == [True, False, False, False]
+    assert len(wire.sends) == 1  # one paid screen: no hold, no re-screen
+
+
+@pytest.mark.asyncio
+async def test_two_hub_versions_behind_one_origin_keep_the_block_off_across_re_drives() -> None:
+    """Q-2, mixed versions: status keeps advertising, admits alternate pods.
+
+    The conversation lane reads status before EVERY admit, so a fresh
+    advertisement precedes each one; the latch must outrank it, or each admit
+    that lands on the pre-#332 pod 400s again.
     """
 
     seen: list[httpx.Request] = []
+    pods = iter(["pre", "post"] * 4)
 
-    def mixed_hub(request: httpx.Request) -> httpx.Response:
+    def hub(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         if request.url.path.endswith("/messaging/status"):
             return _ok({"features": {obs.OBSERVATION_FEATURE: 1}})
-        if obs.WIRE_KEY.encode() in request.content:
-            return httpx.Response(400, json={"error": "invalid request body", "code": "invalid"})
-        if request.url.path.endswith("/ack"):
-            return _ok({"delivery": {"state": "read", "state_at": "t"}})
+        if next(pods) == "pre" and _carried(request):
+            return httpx.Response(400, json=_INVALID)
         return _ok({"status": "recorded"})
 
-    client = _make_client(mixed_hub)
-    await client.status()
-    with pytest.raises(tb_client.BridgeRefusal) as refused:
-        await _admit(client, PREFERRED)
-    assert refused.value.http_status == 400
-    assert len(seen) == 2  # the refused admit was not retried here
+    client = _make_client(hub)
+    for _ in range(3):
+        await client.status()
+        assert await _admit(client, PREFERRED) == {"status": "recorded"}
+
+    assert [_carried(r) for r in _admits(seen)] == [True, False, False, False]
     assert obs.hub_accepts(client.base_url) is False
 
-    assert await _admit(client, PREFERRED) == {"status": "recorded"}
-    assert obs.WIRE_KEY.encode() not in seen[-1].content
-
-    # The pair ack the same way; a later advertisement re-opens the gate.
+    # The pair ack shares the origin's latch.
     await client.status()
-    with pytest.raises(tb_client.BridgeRefusal):
-        await _ack(client, PREFERRED)
-    assert obs.hub_accepts(client.base_url) is False
     await _ack(client, PREFERRED)
-    assert obs.WIRE_KEY.encode() not in seen[-1].content
+    assert not _carried(seen[-1])
 
 
 @pytest.mark.asyncio
-async def test_a_400_to_a_request_without_the_block_leaves_the_gate_alone() -> None:
-    """A 400 the block did not ride says nothing about the block."""
+async def test_the_block_returns_only_once_the_cool_down_has_elapsed(monkeypatch) -> None:
+    clock = _Clock()
+    # raising=False: the same test must fail on the pre-latch head by behaviour.
+    monkeypatch.setattr(obs, "_monotonic", clock, raising=False)
+    seen: list[httpx.Request] = []
+    upgraded = {"done": False}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def hub(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
         if request.url.path.endswith("/messaging/status"):
             return _ok({"features": {obs.OBSERVATION_FEATURE: 1}})
-        return httpx.Response(400, json={"error": "invalid request body", "code": "invalid"})
+        if not upgraded["done"] and _carried(request):
+            return httpx.Response(400, json=_INVALID)
+        return _ok({"status": "recorded"})
+
+    client = _make_client(hub)
+    await client.status()
+    await _admit(client, PREFERRED)  # 400, then resent without the block
+    upgraded["done"] = True
+
+    clock.now += obs.REFUSAL_COOLDOWN_S - 1
+    await client.status()
+    await _admit(client, PREFERRED)
+    assert not _carried(seen[-1])  # an advertisement inside the window is outranked
+
+    clock.now += 2
+    await client.status()
+    await _admit(client, PREFERRED)
+    assert _carried(seen[-1])  # the latch expired: the advertisement counts again
+    assert [_carried(r) for r in _admits(seen)] == [True, False, False, True]
+
+
+@pytest.mark.asyncio
+async def test_a_400_to_a_request_without_the_block_changes_nothing(monkeypatch) -> None:
+    """A 400 the block did not ride says nothing about the block.
+
+    It is raised after one request (no resend), opens no latch, and neither
+    clears nor extends one already running.
+    """
+
+    clock = _Clock()
+    # raising=False: the same test must fail on the pre-latch head by behaviour.
+    monkeypatch.setattr(obs, "_monotonic", clock, raising=False)
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/messaging/status"):
+            return _ok({"features": {obs.OBSERVATION_FEATURE: 1}})
+        return httpx.Response(400, json=_INVALID)
 
     client = _make_client(handler)
     await client.status()
     with pytest.raises(tb_client.BridgeRefusal):
         await _admit(client, None)
+    assert len(_admits(seen)) == 1
+    assert obs.hub_accepts(client.base_url) is True
+
+    # Open a latch (the block's 400 and its resend's 400), then a plain 400
+    # late in the window: the latch neither ends nor is pushed back.
+    with pytest.raises(tb_client.BridgeRefusal):
+        await _admit(client, PREFERRED)
+    await client.status()
+    assert obs.hub_accepts(client.base_url) is False
+    clock.now += obs.REFUSAL_COOLDOWN_S - 1
+    await client.status()
+    with pytest.raises(tb_client.BridgeRefusal):
+        await _admit(client, None)
+    assert obs.hub_accepts(client.base_url) is False
+    clock.now += 2
     assert obs.hub_accepts(client.base_url) is True
 
 
