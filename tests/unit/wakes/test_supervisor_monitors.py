@@ -312,3 +312,20 @@ def test_a_session_due_both_ways_is_engaged_once(tmp_path: Path) -> None:
         schedules=[{"id": "w1", "message": "x", "next_due_at": NOW_MS - 2_000, "created_at": 1}],
     )
     assert [row[0] for row in _due(tmp_path)] == ["bothways0001"]
+
+
+def test_an_orphaned_overdue_monitor_does_not_pin_the_sleep(tmp_path: Path) -> None:
+    """MINOR-2: a ghost entry (no transcript) is never engaged, so its overdue
+    due time must not size the sleep — it would hold the loop at one 10 s slice
+    forever beside a real watch due an hour out."""
+    real_due = NOW_MS + 3_600_000
+    _arm(tmp_path, "realwatch001", index_due=real_due, counters_due=real_due)
+    _arm(
+        tmp_path,
+        "orphanmon001",
+        index_due=NOW_MS - DAY_MS,
+        counters_due=NOW_MS - DAY_MS,
+        ghost=True,
+    )
+    index, _deliveries, _spooled, _triggers, monitors = _state(tmp_path)
+    assert _next_wake_ms(index, monitors=monitors, config_dir=tmp_path) == real_due

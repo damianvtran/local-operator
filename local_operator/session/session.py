@@ -29574,8 +29574,14 @@ class Session:
         # installed exactly as an armed wake does (the `_persist_wake_schedules`
         # hook). Only when a row can still fire: a list of disabled or expired
         # rows owes no engagement, and the install is not free (launchd/systemd).
+        #
+        # OFF THE LOOP AND OUTSIDE THE SCHEDULER'S WRITE LOCK: this coroutine is
+        # awaited by ``MonitorScheduler.update`` while it holds ``_write_lock``,
+        # and the install can stat/write a plist and run ``launchctl`` — blocking
+        # here would stall every tick and arm queued behind the lock. Spawned
+        # in the background on a worker thread; the hook never raises.
         if self._monitors.next_monitor_due_at() is not None:
-            self._ensure_wake_supervisor()
+            self._spawn_background(asyncio.to_thread(self._ensure_wake_supervisor))
 
     def _rebuild_monitor_index_entry(self) -> None:
         """Open-time rewrite of the index from the scheduler's adopted rows.

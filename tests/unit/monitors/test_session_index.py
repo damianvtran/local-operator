@@ -491,9 +491,15 @@ async def test_a_monitor_persist_installs_the_wake_supervisor(
     monkeypatch.setattr(wake_install, "ensure_supervisor_installed", fake_install)
     session = _open(tmp_path)
     try:
+        import asyncio
+
+        # The install runs as a background worker-thread task (off the loop and
+        # outside the scheduler's write lock), so settle it before asserting.
         await session.set_monitor_schedules([_spec()])
+        await asyncio.gather(*list(session._background_tasks))
         assert calls == [config_dir]
         await session.set_monitor_schedules([])
+        await asyncio.gather(*list(session._background_tasks))
         assert calls == [config_dir], "an empty persist must not try to install"
     finally:
         await session.dispose()

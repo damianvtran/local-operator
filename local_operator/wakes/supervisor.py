@@ -635,21 +635,23 @@ def _due_monitor_rows(
 
 
 def _next_monitor_ms(
-    monitors: Mapping[str, dict[str, Any]] | None, now_ms: int | None = None
+    monitors: Mapping[str, dict[str, Any]] | None,
+    now_ms: int | None = None,
+    *,
+    config_dir: Path | None = None,
 ) -> int | None:
-    """Earliest armed monitor due time across non-held entries, or ``None``.
+    """Earliest armed monitor due time across live entries, or ``None``.
 
-    No ghost check here (it is a per-slice sleep sizing read, and the retirement
-    predicate already excludes ghosts); the loop only uses this to wake up.
+    The same live/held/ghost rule as :func:`_due_sessions` (via
+    :func:`_monitor_entry_live`): a ghost — an orphaned entry whose session has
+    no transcript — is never engaged, so letting its overdue due time size the
+    sleep would pin the loop to one slice forever beside a real far-off watch.
+    ``config_dir`` absent skips the ghost check, erring towards waking.
     """
-    from local_operator.monitors.store import is_held
-
     moment = int(time.time() * 1000) if now_ms is None else now_ms
     earliest: int | None = None
-    for entry in (monitors or {}).values():
-        if not isinstance(entry, Mapping) or is_held(entry):
-            continue
-        for due, _monitor_id in _armed_monitor_dues(entry, moment):
+    for session_id, entry in (monitors or {}).items():
+        for due, _monitor_id in _monitor_entry_live(session_id, entry, moment, config_dir):
             if earliest is None or due < earliest:
                 earliest = due
     return earliest
@@ -828,8 +830,6 @@ def _due_sessions(
         # Only the common spawn boundary may default it after reading a move.
         cwd = entry.get("cwd")
         due.append((session_id, cwd if isinstance(cwd, str) else "", fireable))
-    # Older first: if several are due at once, the one that has waited
-    # longest gets its runtime first.
     # MONITORS, after the wakes (a session owed both is engaged once, on its wake
     # row) and before spooled turns/triggers. No staleness bound and no ledger:
     # see the section comment above `_MonitorBackoff`.
@@ -897,6 +897,8 @@ def _due_sessions(
                 int(noted) if isinstance(noted, int) and not isinstance(noted, bool) else now_ms,
             )
         )
+    # Older first: if several are due at once, the one that has waited
+    # longest gets its runtime first.
     due.sort(key=lambda row: row[2])
     return due
 
@@ -1057,6 +1059,7 @@ def _next_wake_ms(
     index: dict[str, dict[str, Any]],
     *,
     monitors: Mapping[str, dict[str, Any]] | None = None,
+    config_dir: Path | None = None,
 ) -> int | None:
     """Earliest due time across the whole index — and the armed monitors — or None.
 
@@ -1066,7 +1069,7 @@ def _next_wake_ms(
     """
     from local_operator.wakes.store import next_due_at
 
-    earliest: int | None = _next_monitor_ms(monitors)
+    earliest: int | None = _next_monitor_ms(monitors, config_dir=config_dir)
     for entry in index.values():
         if not isinstance(entry, dict) or _is_held_entry(entry):
             continue
@@ -2974,7 +2977,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             ):
                 continue  # retirement is decided at the top, with its grace
 
-            upcoming = _next_wake_ms(index, monitors=monitors)
+            upcoming = _next_wake_ms(index, monitors=monitors, config_dir=config_dir)
             now_ms = int(time.time() * 1000)
             if upcoming is None:
                 delay = MAX_SLEEP_S
@@ -3157,7 +3160,7 @@ async def _sleep_in_slices(
         monitors = await asyncio.to_thread(_read_monitor_index, config_dir)
         if not _has_fireable_wakes(index, config_dir=config_dir, monitors=monitors):
             return  # retirement (with its grace) is decided by the caller's loop
-        earliest = _next_wake_ms(index, monitors=monitors)
+        earliest = _next_wake_ms(index, monitors=monitors, config_dir=config_dir)
         if earliest is None:
             return
         if upcoming is None or earliest < upcoming or earliest <= int(time.time() * 1000):
