@@ -104,10 +104,7 @@ R..H takes no `### Agent review — round N` when
 `.github/harness-paths` present and unchanged; every changed path (added,
 modified, deleted, both sides of a rename, mode) under a `harness:` glob; nothing
 ship-reachable. That proves the one invariant: *no byte the shipping pipeline
-consumes differs between R and H*. Manifest `gate:` entries (checks that ship no bytes) are
-product if edited and seed no closure, so the probes they run stay exempt-able; a harness
-file only a gate names is listed `gate-run` and gets the FULL review lens at the merge gate.
-Instead, ONE `### Harness delta check — R..H`
+consumes differs between R and H*. Instead, ONE `### Harness delta check — R..H`
 at the merge gate by an independent reviewer reading for gate weakening (deleted
 or loosened assertions, skips, widened tolerances, `continue-on-error`, a probe
 that cannot fail) AND for any harness change that runs with release triggers,

@@ -34,16 +34,6 @@ HARNESS-ONLY (exit 0) requires ALL of:
    to it (tsconfig ``paths``/``baseUrl`` first, then .ts .tsx .js .mjs .cjs
    .json .py .sh and /index.*, then a trailing-segment match).
 
-THE `gate:` TIER. A manifest may declare `gate: <exact path>` for a workflow or
-the `Makefile` that runs checks but contributes no bytes to a shipped artifact. A
-gate file is PRODUCT for change detection (editing it opens a round) and its text
-seeds no ship closure, so the probes it runs are exempt-able; a changed harness
-file that only a gate names is still shown as ``gate-run`` because the merge-gate
-``### Harness delta check`` must read it with the full review lens, not only for
-gate weakening. It fails closed: exit 2 when a gate's artifact, cache or job
-output is consumed by a ship workflow, and a gate file a SHIP file names stops
-being a gate (its text joins the closure).
-
 WHAT THE CARVE-OUT IS NOT. It is a reachability classifier made safe by failing
 closed — not a proof that a harness change cannot alter behaviour. It exempts
 only manifest-declared harness files that nothing in the ship closure names, and
@@ -198,14 +188,17 @@ def _glob_regex(glob: str) -> re.Pattern[str]:
         else:
             out.append(re.escape(glob[i]))
             i += 1
-    return re.compile("".join(out) + r"\Z")
+    # DOTALL: ``**`` becomes ``.*``, and a path may contain a newline (git allows
+    # it; setuptools packages it). Without DOTALL `ship: pkg/**` failed to match
+    # `pkg/a\nb.py`, that file classified product, and the payload it runs left
+    # the closure — a fail-open one layer above the batch protocol (review R2).
+    return re.compile("".join(out) + r"\Z", re.DOTALL)
 
 
 @dataclass
 class Manifest:
     harness: list[str] = field(default_factory=list)
     ship: list[str] = field(default_factory=list)
-    gate: list[str] = field(default_factory=list)
     source: str = ""
 
     @classmethod
@@ -216,17 +209,13 @@ class Manifest:
             if not line:
                 continue
             kind, sep, glob = line.partition(":")
-            if not sep or kind.strip() not in ("harness", "ship", "gate") or not glob.strip():
+            if not sep or kind.strip() not in ("harness", "ship") or not glob.strip():
                 raise ProofError(
-                    f"manifest line {number} is not 'harness: <glob>', 'ship: <glob>' "
-                    "or 'gate: <exact path>'"
+                    f"manifest line {number}: unknown keyword "
+                    f"'{kind.strip() or line}' — only 'harness: <glob>' and 'ship: <glob>' "
+                    "exist"
                 )
             kind, glob = kind.strip(), glob.strip()
-            if kind == "gate" and re.search(r"[*?]", glob):
-                raise ProofError(
-                    f"manifest line {number}: a gate entry must be an exact path (got "
-                    f"'{glob}'): the check that it feeds no shipped artifact is per file"
-                )
             if kind == "harness" and glob.startswith(_GITHUB_PREFIX) and re.search(r"[*?]", glob):
                 raise ProofError(
                     f"manifest line {number}: a harness glob under {_GITHUB_PREFIX} must be an "
@@ -237,14 +226,7 @@ class Manifest:
         return manifest
 
     def classify(self, path: str) -> str:
-        """``ship`` | ``harness`` | ``gate`` | ``product``.
-
-        A ``gate:`` entry is checked first and wins over every glob: a gate file
-        runs checks but ships no bytes, and it is PRODUCT for change detection —
-        editing it always opens a round (round-2 design, ``gate:`` tier).
-        """
-        if path in self.gate:
-            return "gate"
+        """``ship`` | ``harness`` | ``product`` — most specific matching glob."""
 
         def best(globs: list[str]) -> int:
             hits = [
@@ -555,7 +537,6 @@ class Closure:
     origin: dict[str, str]
     problems: list[str]
     index: _Index
-    gate_texts: dict[str, str] = field(default_factory=dict)
 
 
 def ship_closure(repo: Path, head: str, manifest: Manifest) -> Closure:
@@ -568,7 +549,6 @@ def ship_closure(repo: Path, head: str, manifest: Manifest) -> Closure:
     """
     tree = _tree(repo, head)
     base_url, aliases, problem = _tsconfig_aliases(repo, head, tree)
-    gate_paths = set(manifest.gate)
     index = _Index(list(tree), base_url, aliases)
     origin: dict[str, str] = {p: "ship glob" for p in tree if manifest.classify(p) == "ship"}
     problems: list[str] = [problem] if problem else []
@@ -587,14 +567,6 @@ def ship_closure(repo: Path, head: str, manifest: Manifest) -> Closure:
             if text is None:
                 continue
             for named in sorted(index.named_by(path, text, spent)):
-                # A gate file a SHIP file names (a reusable workflow called via
-                # `uses:`) stops being a pure gate: its text joins the closure and
-                # everything it names becomes ship-reachable — the exemption
-                # simply evaporates, no error. A doc that merely mentions the
-                # gate ("see the Makefile") does not escalate it: docs name the
-                # tooling constantly and that mention ships no bytes.
-                if named in gate_paths and manifest.classify(path) != "ship":
-                    continue
                 if named not in origin:
                     origin[named] = path
         added_link = False
@@ -624,110 +596,7 @@ def ship_closure(repo: Path, head: str, manifest: Manifest) -> Closure:
                     added_link = True
         if not fresh and not added_link:
             break
-    gate_texts = {
-        gate: _blobs(repo, {tree[gate][1]}).get(tree[gate][1], "")
-        for gate in manifest.gate
-        if gate in tree and tree[gate][0] not in (SYMLINK_MODE, GITLINK_MODE)
-    }
-    _gate_feeds_ship(repo, tree, origin, manifest, gate_texts)
-    return Closure(origin, problems, index, gate_texts)
-
-
-#: An upload/download step's artifact name, and a cache step's key, within the
-#: handful of lines a workflow step body occupies.
-_ARTIFACT_NAME = re.compile(r"(?m)^\s*name:\s*([A-Za-z0-9_.${}/-]+)\s*$")
-_CACHE_KEY = re.compile(r"(?m)^\s*key:\s*([A-Za-z0-9_.${}/-]+)\s*$")
-
-
-def _step_values(text: str, action: str) -> set[str]:
-    """``name:`` values belonging to steps that use ``action`` (cache: ``key:``)."""
-    field = _CACHE_KEY if "cache" in action else _ARTIFACT_NAME
-    values: set[str] = set()
-    lines = text.splitlines()
-    for number, line in enumerate(lines):
-        if action not in line:
-            continue
-        for follow in lines[number + 1 : number + 9]:
-            found = field.search(follow)
-            if found:
-                values.add(found.group(1))
-                break
-            if "uses:" in follow:
-                break
-    return values
-
-
-def _gate_feeds_ship(
-    repo: Path,
-    tree: dict[str, tuple[str, str]],
-    origin: dict[str, str],
-    manifest: Manifest,
-    gate_texts: dict[str, str],
-) -> list[str]:
-    """A gate may not feed an artifact, cache or job output INTO a ship workflow.
-
-    The point of the tier is that a gate decides whether shipping proceeds while
-    contributing no bytes; the moment a ship workflow downloads what a gate
-    uploaded (or restores its cache, or reads its job outputs), the gate's text is
-    shipping input and the tier would be a hole. The comparison is by NAME, not by
-    the mere presence of ``upload-artifact``: publish.yml downloads artifacts its
-    own jobs uploaded, which says nothing about a gate.
-    """
-    if not gate_texts:
-        return
-    # Consumers are files the shipping pipeline actually runs — those the
-    # manifest classifies `ship:` — not every file the closure reaches: a test
-    # that asserts a workflow's wiring quotes `needs.x.outputs` without consuming
-    # it, and reading that as a feed would make every gate un-declarable.
-    shipped = {
-        path: oid
-        for path, (mode, oid) in tree.items()
-        if path in origin
-        and path not in gate_texts
-        and mode not in (SYMLINK_MODE, GITLINK_MODE)
-        and manifest.classify(path) == "ship"
-    }
-    texts = _blobs(repo, set(shipped.values()))
-    for gate, gate_text in gate_texts.items():
-        uploads = _step_values(gate_text, "upload-artifact")
-        caches = _step_values(gate_text, "actions/cache")
-
-        for path, oid in shipped.items():
-            text = texts.get(oid)
-            if text is None:
-                continue
-            if uploads and "download-artifact" in text:
-                shared = uploads & _step_values(text, "download-artifact")
-                if shared:
-                    raise ProofError(
-                        f"gate file feeds ship: `{gate}` uploads {sorted(shared)[0]!r}, "
-                        f"which `{path}` downloads"
-                    )
-            if caches and "actions/cache" in text:
-                shared = caches & _step_values(text, "actions/cache")
-                if shared:
-                    raise ProofError(
-                        f"gate file feeds ship: `{gate}` caches {sorted(shared)[0]!r}, "
-                        f"which `{path}` restores"
-                    )
-            # `needs.<job>.outputs` only ever refers to a job in the SAME
-            # workflow, so it cannot be a cross-file feed — a ship workflow with
-            # its own job of that name tripped this rule (mobile android.yml).
-            # Cross-workflow consumption is `workflow_run` on the gate, which
-            # makes the gate's run shipping input.
-            # `workflow_run.workflows` names the workflow's `name:` or its file,
-            # so both spellings count.
-            gate_names = {
-                posixpath.basename(gate),
-                posixpath.basename(gate).rsplit(".", 1)[0],
-            }
-            if "workflow_run:" in text and any(
-                re.search(rf"workflows:[^\n]*{re.escape(name)}", text) for name in gate_names
-            ):
-                raise ProofError(
-                    f"gate file feeds ship: `{path}` triggers on `workflow_run` of gate "
-                    f"`{gate}`, so the gate's run is shipping input"
-                )
+    return Closure(origin, problems, index)
 
 
 # --- proof ----------------------------------------------------------------------
@@ -749,14 +618,6 @@ def _split(repo: Path, mb: str, head: str, manifest: Manifest) -> tuple[int, int
         else:
             product += lines
     return product, harness
-
-
-def _gate_names(path: str, closure: Closure) -> str | None:
-    """The gate file that names ``path``, if any (a label, never a pass)."""
-    for gate, text in closure.gate_texts.items():
-        if path in closure.index.named_by(gate, text, set()):
-            return gate
-    return None
 
 
 def _test_guards_ship(
@@ -815,6 +676,15 @@ def prove(
 
     changes = _changed(repo, reviewed_sha, head_sha)
     closure = ship_closure(repo, head_sha, manifest)
+    # DOTALL makes the globs match a path that contains a newline; the batch
+    # protocol now speaks ids. The remaining risk is a consumer built on those
+    # paths (a shell step, a `git show rev:path`), so a newline or CR anywhere the
+    # proof has to classify is exit 2 rather than a verdict it cannot defend.
+    for path in (*sorted(changes), *closure.origin):
+        if "\n" in path or "\r" in path:
+            raise ProofError(
+                f"path contains a newline or CR: {path!r} — no verdict is computed for it"
+            )
 
     reasons: list[str] = []
     if mb_reviewed != mb_head:
@@ -829,7 +699,6 @@ def prove(
     reasons.extend(f"fail-closed: {problem}" for problem in closure.problems)
 
     rows: list[str] = []
-    gate_runs: list[str] = []
     for path in sorted(changes):
         old_mode, new_mode, _old_oid, _new_oid = changes[path]
         kind = manifest.classify(path)
@@ -860,11 +729,6 @@ def prove(
                 reasons.append(f"product path changed: `{guard}`")
                 rows.append(f"  - `{path}` — harness test, product: {guard}")
                 continue
-        gate_by = _gate_names(path, closure)
-        if gate_by:
-            gate_runs.append(f"`{path}` (via `{gate_by}`)")
-            rows.append(f"  - `{path}` — harness, gate-run via `{gate_by}`")
-            continue
         rows.append(f"  - `{path}` — harness")
 
     harness_only = not reasons
@@ -889,15 +753,6 @@ def prove(
         "ship symlink leaving the repo → round; unreadable object → exit 2; "
         "`.github/` harness globs must be exact filenames; harness test guarding ship code → "
         "product; added workflow unmatched by the manifest → product",
-        f"- Gate tier: {len(manifest.gate)} gate file(s) seed no ship closure; "
-        + (
-            "gate-run harness files — "
-            + ", ".join(sorted(gate_runs))
-            + " — must be read at the merge gate with the FULL review lens, not only for "
-            "gate weakening"
-            if gate_runs
-            else "no changed harness file is gate-run"
-        ),
         f"- Changed paths ({len(changes)}):",
         *(rows or ["  - (none)"]),
     ]

@@ -339,37 +339,69 @@ def test_gitlink_bump_under_a_ship_path_opens_a_round(tmp_path: Path, monkeypatc
     assert "src/vendor" in result.stdout and "gitlink" in result.stdout
 
 
-def test_ship_file_with_a_newline_in_its_path_still_names_payload(tmp_path: Path) -> None:
-    """R2: `cat-file --batch` keyed by path misparses a newline and failed open."""
+def test_newline_in_a_ship_path_is_exit_two(tmp_path: Path) -> None:
+    """R2: `**` compiles to `.*`, so without DOTALL a newline path was invisible.
+
+    It classified `product`, never seeded the closure, and the payload it ran left
+    the closure — a fail-open one layer above the batch protocol. With DOTALL the
+    glob matches, and a newline/CR path anywhere the proof must classify is exit 2
+    rather than a verdict it cannot defend.
+    """
+    sys.path.insert(0, str(SCRIPT.parent))
+    try:
+        from harness_delta_proof import Manifest as _Manifest
+    finally:
+        sys.path.pop(0)
+    manifest = _Manifest.parse(MANIFEST, "unit")
+    assert manifest.classify("src/a\nb.py") == "ship"
+
     repo, reviewed = _setup(tmp_path)
-    reviewed = _commit(
+    head = _commit(
         repo,
-        {"src/a\nb.py": "open('scripts/payload.sh').read()\n", "scripts/payload.sh": "echo 1\n"},
+        {
+            "src/a\nb.py": "open('scripts/ci/payload.sh').read()\n",
+            "scripts/ci/payload.sh": "echo 1\n",
+        },
         "feat: newline path",
     )
-    head = _commit(repo, {"scripts/payload.sh": "echo 2\n"}, "chore: payload")
     result = _run(repo, reviewed, head)
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "scripts/payload.sh" in result.stdout
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "newline" in result.stderr
+
+
+def test_newline_ship_path_at_head_is_exit_two_even_when_unchanged(tmp_path: Path) -> None:
+    """The ship SET is checked too, not only paths the delta touches."""
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(repo, {"src/a\nb.py": "print(1)\n"}, "feat: newline path")
+    head = _commit(repo, {"scripts/ci/payload.sh": "echo 2\n"}, "ci: payload")
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "newline" in result.stderr
 
 
 def test_ship_symlink_to_a_harness_directory_pulls_its_contents(tmp_path: Path) -> None:
-    """R3: a ship symlink into a harness directory hid every file under it."""
+    """R3: a ship symlink into a HARNESS directory hid every file under it.
+
+    The payload sits under `src/testing/**` (harness) and the symlink under
+    `app/**` (ship): with the payload under a product path the test passed for the
+    wrong reason, which round 2 called out.
+    """
     repo, _ = _setup(tmp_path)
     reviewed = _commit(
         repo,
-        {"fixtures/zzpay/PAYLOAD.md": "p1\n", "src/lib.ts": "export const x = 2;\n"},
+        {"src/testing/zzpay/PAYLOAD.md": "p1\n", "app/main.ts": "export const a = 1;\n"},
         "feat: fixture",
     )
-    (repo / "src").mkdir(exist_ok=True)
-    (repo / "src" / "zzpay").symlink_to("../fixtures/zzpay")
+    (repo / "app").mkdir(exist_ok=True)
+    (repo / "app" / "zzpay").symlink_to("../src/testing/zzpay")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "feat: ship symlink")
     reviewed = _git(repo, "rev-parse", "HEAD")
-    head = _commit(repo, {"fixtures/zzpay/PAYLOAD.md": "p2\n"}, "chore: payload")
+    head = _commit(repo, {"src/testing/zzpay/PAYLOAD.md": "p2\n"}, "chore: payload")
     result = _run(repo, reviewed, head)
     assert result.returncode == 1, result.stdout + result.stderr
-    assert "fixtures/zzpay/PAYLOAD.md" in result.stdout
+    assert "src/testing/zzpay/PAYLOAD.md" in result.stdout
+    assert "harness" in result.stdout.split("src/testing/zzpay/PAYLOAD.md")[1][:40]
 
 
 def test_ship_symlink_that_escapes_the_repo_opens_a_round(tmp_path: Path) -> None:
@@ -553,107 +585,42 @@ def test_deleted_harness_test_is_judged_not_crashed(tmp_path: Path) -> None:
     assert result2.returncode == 0, result2.stdout + result2.stderr
 
 
-# --- round-2 gate tier ---------------------------------------------------------
-# A `gate:` file runs checks but contributes no bytes to a shipped artifact. Its
-# text does not seed the ship closure, so the harness scripts it runs (and names)
-# are exempt-able again; it is itself product, so editing it opens a round, and a
-# gate that feeds an artifact into a ship workflow is exit 2.
-
-GATE_MANIFEST = MANIFEST + "gate: .github/workflows/native.yml\ngate: Makefile\n"
-
-
-def test_gate_file_edit_is_product(tmp_path: Path) -> None:
-    """(a) A gate file is product for change detection: editing it is a round."""
-    repo, reviewed = _setup(tmp_path, manifest=GATE_MANIFEST)
-    head = _commit(
-        repo, {".github/workflows/native.yml": "steps:\n  - run: echo changed\n"}, "ci: gate edit"
-    )
-    result = _run(repo, reviewed, head)
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "product path changed: `.github/workflows/native.yml` (gate)" in result.stdout
-
-
-def test_gate_file_that_feeds_a_ship_artifact_is_exit_two(tmp_path: Path) -> None:
-    """(b) A gate whose artifact a ship workflow downloads cannot be a gate."""
-    repo, _ = _setup(
-        tmp_path,
-        manifest=GATE_MANIFEST.replace(
-            "ship: package.json",
-            "ship: package.json\nship: .github/workflows/publish.yml",
-        )
-        + "",
-    )
-    reviewed = _commit(
-        repo,
-        {
-            # The gate uploads an artifact…
-            ".github/workflows/native.yml": (
-                "steps:\n  - uses: actions/upload-artifact@v7\n    with:\n      name: wheel\n"
-            ),
-            # …and a ship workflow downloads it.
-            ".github/workflows/publish.yml": (
-                "steps:\n  - uses: actions/download-artifact@v8\n    with:\n      name: wheel\n"
-            ),
-        },
-        "ci: gate feeds publish",
-    )
+def test_manifest_unknown_keyword_is_exit_two(tmp_path: Path) -> None:
+    """`gate:` was removed (round-2 decision): a manifest carrying it is exit 2."""
+    repo, reviewed = _setup(tmp_path, manifest=MANIFEST + "gate: Makefile\n")
     head = _commit(repo, {"e2e/probe.ts": "p\n"}, "test: probe")
     result = _run(repo, reviewed, head)
     assert result.returncode == 2, result.stdout + result.stderr
-    assert "gate file feeds ship" in result.stderr
+    assert "unknown keyword" in result.stderr
 
 
-def test_harness_file_named_by_a_ship_file_beats_a_gate(tmp_path: Path) -> None:
-    """(c) Ship naming wins: the gate tier never rescues a ship-reachable file."""
-    repo, _ = _setup(tmp_path, manifest=GATE_MANIFEST)
+def test_bare_directory_word_is_not_a_path(tmp_path: Path) -> None:
+    """A word is not a path: only a directory SPELLED as one pulls its contents.
+
+    publish.yml's prose `scripts` pulled all 327 files under scripts/ into the
+    closure and made every probe ship-reachable (measured round 2). The narrowing
+    is independent of the removed gate tier, so it stays.
+    """
+    repo, _ = _setup(tmp_path)
     reviewed = _commit(
         repo,
-        {
-            ".github/workflows/native.yml": "steps:\n  - run: bun scripts/ci/check.ts\n",
-            "src/boot3.ts": "import '../scripts/ci/check';\nexport const z = 1;\n",
-        },
-        "feat: ship imports the check",
+        {"src/notes.py": "# the scripts below are evidence only\n", "scripts/ci/probe.ts": "x\n"},
+        "feat: prose mention",
     )
-    head = _commit(repo, {"scripts/ci/check.ts": "console.log('changed');\n"}, "ci: tweak")
-    result = _run(repo, reviewed, head)
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "ship-reachable: `scripts/ci/check.ts`" in result.stdout
-
-
-def test_harness_file_named_only_by_a_gate_is_exempt_and_labelled(tmp_path: Path) -> None:
-    """(d) A gate-run harness file is exempt-able AND named for the merge gate."""
-    repo, reviewed = _setup(tmp_path, manifest=GATE_MANIFEST)
-    _commit(repo, {"Makefile": "check:\n\tbun scripts/ci/new-gate-probe.ts\n"}, "build: gate")
-    reviewed = _git(repo, "rev-parse", "HEAD")
-    head = _commit(repo, {"scripts/ci/new-gate-probe.ts": "console.log(1);\n"}, "ci: probe")
+    head = _commit(repo, {"scripts/ci/probe.ts": "y\n"}, "ci: probe")
     result = _run(repo, reviewed, head)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "gate-run via `Makefile`" in result.stdout
-    assert "FULL review lens" in result.stdout
+    assert "HARNESS-ONLY" in result.stdout
 
-
-def test_gate_a_ship_workflow_triggers_on_is_exit_two(tmp_path: Path) -> None:
-    """`workflow_run` on a gate makes the gate's run shipping input → exit 2.
-
-    The `needs.<job>.outputs` half of the feed check was unsound and removed: a
-    ship workflow's own job of that name tripped it (mobile android.yml naming
-    ci.yml during the PR #156 replay). Same-workflow `needs.` cannot be a
-    cross-file feed; `workflow_run` can.
-    """
-    repo, _ = _setup(
-        tmp_path,
-        manifest=GATE_MANIFEST + "ship: .github/workflows/publish.yml\n",
+    # The same mention spelled as a directory does pull the contents.
+    (tmp_path / "b").mkdir()
+    repo2, _ = _setup(tmp_path / "b")
+    reviewed2 = _commit(
+        repo2,
+        {"src/runner3.py": "CMD = 'bash scripts/ci/'\n", "scripts/ci/probe.ts": "x\n"},
+        "feat: directory spelling",
     )
-    reviewed = _commit(
-        repo,
-        {
-            ".github/workflows/publish.yml": (
-                "on:\n  workflow_run:\n    workflows: [native]\n    types: [completed]\n"
-            ),
-        },
-        "ci: publish follows the gate",
-    )
-    head = _commit(repo, {"e2e/probe.ts": "p\n"}, "test: probe")
-    result = _run(repo, reviewed, head)
-    assert result.returncode == 2, result.stdout + result.stderr
-    assert "workflow_run" in result.stderr
+    head2 = _commit(repo2, {"scripts/ci/probe.ts": "y\n"}, "ci: probe")
+    result2 = _run(repo2, reviewed2, head2)
+    assert result2.returncode == 1, result2.stdout + result2.stderr
+    assert "scripts/ci/probe.ts" in result2.stdout
