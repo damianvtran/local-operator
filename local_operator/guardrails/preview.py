@@ -44,6 +44,7 @@ from local_operator.guardrails.check import (
     BUILTIN_REFUSE_CREDENTIAL,
     BUILTIN_REFUSE_CRITICAL,
     DANGEROUS_DELETE_RULE,
+    FILE_DESTINATION_TOOLS,
     CallContext,
     GuardSettings,
     _critical_text,
@@ -51,6 +52,7 @@ from local_operator.guardrails.check import (
     _targets_text,
     build_delete_case,
     builtin_branch,
+    evidence_write_verdict,
     read_settings,
     review_text,
     rule_block_text,
@@ -341,6 +343,14 @@ def preview_tool_call(
                 builtin_text = review_text(
                     DANGEROUS_DELETE_RULE, "<judge reason>", _targets_text(verdict)
                 )
+
+    elif tool_name in FILE_DESTINATION_TOOLS:
+        # The checkpoint refuses a write/edit of the guard's own evidence
+        # before any rule; report that same branch and text.
+        verdict = evidence_write_verdict(tool_name, args, context)
+        if verdict is not None:
+            effect = BUILTIN_REFUSE_CRITICAL
+            builtin_text = _critical_text(verdict)
 
     base: dict[str, Any] = {
         "tool": tool_name,

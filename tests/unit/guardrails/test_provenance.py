@@ -748,3 +748,45 @@ def test_owned_glob_names_its_matches_not_home(home: Path) -> None:
     assert (
         "qa-rig-o1" in verdict.targets[0].shown and str(home) + " " not in verdict.targets[0].shown
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "path"),
+    [
+        ("write", "~/.local-operator/sessions/aaaaaaaaaaaa/transcript.jsonl"),
+        ("edit", "~/.local-operator/sessions/bbbbbbbbbbbb/origin.json"),
+        ("write", ".local-operator/sessions/cccccccccccc/asks.jsonl"),  # cwd-relative
+        ("write", "~/.local-operator/sessions/aaaaaaaaaaaa/subagent-roster.v1.json"),
+        ("edit", "~/.local-operator/guardrails/created.sqlite"),
+        ("browser", "~/.local-operator/guardrails/x.png"),
+    ],
+)
+async def test_file_tools_cannot_write_the_guards_evidence(
+    home: Path, tool: str, path: str
+) -> None:
+    """write/edit (and browser's destination ``path``) reach the evidence files
+    without a shell; they are refused CRITICAL with the bash refusal family,
+    and the preview reports the same branch and text."""
+    ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=SID)
+    args = {"path": path, "content": "{}"}
+    outcome = await check_tool_call(tool, args, ctx, judge=None, settings=GuardSettings())
+    assert outcome is not None and outcome.blocked and outcome.risk == "critical"
+    assert outcome.text.startswith(f"{BLOCK_MARKER} dangerous-delete (critical)")
+    report = preview_tool_call(tool, args, ctx, settings=GuardSettings())
+    assert report.action == "refuse" and report.builtin_text == outcome.text
+
+
+@pytest.mark.asyncio
+async def test_file_tools_elsewhere_are_unchanged(home: Path) -> None:
+    ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=SID)
+    for tool, path in [
+        ("write", "~/notes.md"),
+        ("edit", "~/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/n.md"),
+        ("write", "scratchpad://transcript.jsonl"),
+        ("write", "~/proj/transcript.jsonl"),
+    ]:
+        outcome = await check_tool_call(
+            tool, {"path": path}, ctx, judge=None, settings=GuardSettings()
+        )
+        assert outcome is None or not outcome.blocked, (tool, path)

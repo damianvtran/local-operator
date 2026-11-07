@@ -319,3 +319,43 @@ async def test_loop_records_what_a_bash_call_created(home: Path) -> None:
     judge = _Judge("BLOCK: should never be asked")
     _, executed = await _run(home, f"rm -rf {made}", judge=judge)
     assert len(executed) == 1 and judge.calls == []
+
+
+@pytest.mark.asyncio
+async def test_loop_refuses_a_write_tool_call_onto_a_transcript(home: Path) -> None:
+    """The checkpoint runs for every tool; a ``write`` onto a session transcript
+    is refused before the tool runs, with the CRITICAL refusal text."""
+    executed: list[dict[str, Any]] = []
+
+    async def execute(call_id: str, args: dict[str, Any], *_: Any) -> ToolResult:
+        executed.append(args)
+        return ToolResult(tool_call_id=call_id, tool_name="write", content=[TextContent(text="ok")])
+
+    tool = AgentTool(
+        name="write",
+        parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+        execute=execute,
+        approval_tier="write",
+    )
+    state = home / ".local-operator"
+    context = LoopContext(
+        messages=[Message.user("hi")],
+        tool_context=ToolContext(cwd=str(home), session_id="own"),
+    )
+    config = LoopConfig(
+        model=MODEL,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=lambda *_: None,
+    )
+    for path, refused in (
+        (str(state / "sessions" / "own" / "transcript.jsonl"), True),
+        (str(home / "notes.md"), False),
+    ):
+        args = {"path": path, "content": "{}"}
+        call = ToolCall(id="w1", name="write", arguments=args, raw_arguments=json.dumps(args))
+        result = await AgentLoop()._runner_result(
+            _PlannedCall(call=call, tool=tool, args=args), context, config, None, asyncio.Queue()
+        )
+        if refused:
+            assert _text(result).startswith("BLOCKED by guardrail dangerous-delete (critical)")
+    assert [a["path"] for a in executed] == [str(home / "notes.md")]

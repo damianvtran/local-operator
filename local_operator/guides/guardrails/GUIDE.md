@@ -71,7 +71,9 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   the literal prefix that produced it, such as `qa-r5-dg-` in
   `f"qa-r5-dg-{os.getpid()}"`), or its output prints the directory's full path.
   Transcripts, `origin.json`, ask stores and `<config_dir>/guardrails/` are
-  CRITICAL to write, append, move or delete from the shell; an interpreter
+  CRITICAL to write, append, move or delete from the shell, and the `write`,
+  `edit` and `browser` (screenshot/recording `path`) tools refuse them the same
+  way; an interpreter
   writing them (`python -c`, `node -e`) is the documented ceiling, as for any
   interpreter delete. The judge must answer
   `ALLOW evidence=<ids>`, `ALLOW ask=<id>` or `ALLOW operator`. The checkpoint

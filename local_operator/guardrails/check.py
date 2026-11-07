@@ -501,6 +501,48 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     )
 
 
+#: Builtins that write a file at a path argument, and that argument's key. The
+#: shell resolver ranks bash writes; these tools write without a shell, so the
+#: guard's own evidence (transcripts, lineage, ask stores, the ledger — see
+#: ``classify._evidence_reason``) would otherwise be forgeable with one
+#: ``write`` call (round-1 follow-up to R1-MAJOR-1). Only those files are
+#: refused here; every other write/edit keeps its existing behaviour.
+FILE_DESTINATION_TOOLS: Mapping[str, str] = {"write": "path", "edit": "path", "browser": "path"}
+
+
+def evidence_write_verdict(
+    tool_name: str, args: Mapping[str, Any], ctx: CallContext
+) -> Verdict | None:
+    """A CRITICAL verdict when this file-writing call targets the guard's evidence."""
+    from local_operator.guardrails.classify import (
+        RankedTarget,
+        _evidence_reason,
+        _protected,
+    )
+    from local_operator.guardrails.classify import _spellings as spellings
+    from local_operator.guardrails.resolve import Target
+
+    key = FILE_DESTINATION_TOOLS.get(tool_name)
+    raw = args.get(key) if key else None
+    if not isinstance(raw, str) or not raw.strip() or "://" in raw:
+        # Empty, or an internal URL (``scratchpad://`` lands in the session's
+        # own pad; other schemes are refused by the tool itself).
+        return None
+    home = ctx.env.get("HOME") or os.path.expanduser("~")
+    text = home + raw[1:] if raw == "~" or raw.startswith("~/") else raw
+    if not os.path.isabs(text):
+        text = os.path.join(ctx.cwd or os.getcwd(), text)
+    target = Target(path=os.path.normpath(text), op="overwrite", program=tool_name)
+    prot = _protected(ctx.env, ctx.scratchpad, ctx.session_id)
+    for spelling in spellings(text):
+        reason = _evidence_reason(spelling, target, prot)
+        if reason is not None:
+            return Verdict(
+                risk=Risk.CRITICAL, targets=[RankedTarget(target, Risk.CRITICAL, reason)]
+            )
+    return None
+
+
 async def _dangerous_delete(
     args: Mapping[str, Any],
     ctx: CallContext,
@@ -681,6 +723,17 @@ async def _check_tool_call(
         outcome = await _dangerous_delete(args, ctx, settings, judge, builtin, forked_judge)
         if outcome is not None and outcome.blocked:
             return outcome
+    elif tool_name in FILE_DESTINATION_TOOLS:
+        verdict = evidence_write_verdict(tool_name, args, ctx)
+        if verdict is not None:
+            targets = _targets_text(verdict)
+            _journal(DANGEROUS_DELETE_RULE, "critical", "block", 0.0, targets)
+            return GuardOutcome(
+                blocked=True,
+                text=_critical_text(verdict),
+                rule=DANGEROUS_DELETE_RULE,
+                risk="critical",
+            )
     warnings: list[str] = []
     for rule in rules.user:
         if not rule.matches(tool_name, args):
