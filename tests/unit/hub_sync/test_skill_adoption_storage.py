@@ -159,6 +159,40 @@ def test_full_diffs_and_keep_local_preview_are_truthful(tmp_path):
     assert read_tree(tree.root).tree_hash == tree.tree_hash
 
 
+def test_keep_local_projection_ambiguous_ref_is_kept_verbatim(tmp_path):
+    """Only ``on_ambiguous="verbatim"`` in ``local_projection`` saves this read (#3393).
+
+    references/local.md names ``sub/requirements.md`` while root requirements.md
+    relocates, and references/sub/ does not exist: the ref is neither a bare
+    sibling (the stationary-destination exception) nor resolvable, so a
+    refusing projection would raise "ambiguous inline filepath" and adopt,
+    snapshot and fingerprint of the managed skill would all fail. Flipping the
+    projection to "refuse" must turn this case red.
+    """
+    identity, document, baseline, storage, tree, snapshot = _setup(tmp_path)
+    (tree.root / "requirements.md").write_text("# Requirements\n")
+    (tree.root / "references").mkdir(exist_ok=True)
+    (tree.root / "references/local.md").write_text("Defined in `sub/requirements.md`.\n")
+    assert not (tree.root / "references/sub").exists()
+    raw = read_tree(tree.root)
+    snapshot = durable_snapshot(storage.config_dir, document.name, raw)
+    transaction = storage.adopt(
+        identity,
+        document.name,
+        None,
+        baseline,
+        expected_tree_hash=raw.tree_hash,
+        snapshot=snapshot,
+        carried_paths=("assets/local.bin",),
+    )
+    assert transaction.phase == "complete"
+    projected = storage.snapshot(identity.local_id).document
+    files = {f.path: f.content for f in projected.files}
+    assert files["references/local.md"] == "Defined in `sub/requirements.md`.\n"
+    assert files["references/requirements.md"] == "# Requirements\n"
+    assert storage._fingerprint_path(tree.root, alias=document.name) == projected.fingerprint
+
+
 def test_keep_local_projection_with_sibling_ref_stays_readable(tmp_path):
     """Storage reads/fingerprints of a keep-local projection never refuse.
 
