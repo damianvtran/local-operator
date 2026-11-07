@@ -30929,6 +30929,15 @@ class Session:
         without the hint is refused and struck exactly as before, and arm
         time never consults this.
 
+        Side effect beyond the cache case: a LIVE-built tool whose server is
+        not connected (dropped, re-auth, breaker open) also waits instead of
+        running. With the hint it previously ran, hit the dead transport and
+        was classified ``unavailable`` after the fact (``_mcp_call_lost_its_
+        server``); now nothing is attempted. Without the hint (lost via
+        ``tools/list_changed`` before the drop) it previously struck at once;
+        now it waits, bounded by the 24 h unavailable ladder, and strikes on
+        the first tick after the reconnect. Nothing executes either way.
+
         Fail closed: a manager that cannot report status or tool origin
         produces a STRIKE, never a wait (which would suspend the ladder
         forever) and never a pass (which would run an unproven tool). Names
