@@ -570,9 +570,15 @@ async def _serve_the_connector_and_read_status(
         async with httpx.AsyncClient(trust_env=False) as client:
             for _ in range(200):
                 await asyncio.sleep(0.05)
-                reply = await client.get(
-                    f"http://127.0.0.1:{stored['gateway_port']}/_lop_tunnel/health"
-                )
+                try:
+                    reply = await client.get(
+                        f"http://127.0.0.1:{stored['gateway_port']}/_lop_tunnel/health"
+                    )
+                except httpx.ConnectError:
+                    # Not bound yet: `run()` reconciles its pin (a store read,
+                    # off-thread) before it binds, so the first probes can
+                    # land before the listener exists.
+                    continue
                 health = reply.json()
                 if health.get("ok") is True and health.get("connected") is True:
                     break
@@ -652,6 +658,7 @@ def test_the_real_login_command_brings_the_tunnel_back_with_no_connect_call(
     assert receipt["old_credential_id"] == gone and receipt["new_credential_id"] == fresh
     assert receipt["tunnel_id"] == connection["tunnel"]["id"]
     assert receipt["account_id"] == ACCOUNT
+    assert receipt["trigger"] == install.HEAL_TRIGGER_LOGIN == "login"
     assert isinstance(receipt["at"], int) and receipt["at"] > 0
 
     # The connector the restart launches, run for real: it reads the re-pointed
@@ -791,3 +798,162 @@ def test_a_heal_that_cannot_start_the_connector_says_which_reason(
     assert payload["login"]["state"] == "ok", "the login is fine; this is not a sign-in problem"
     assert payload["remedy"]["command"] == gateway.TERMINAL_REMEDY[gateway.LOCAL_PREREQUISITE]
     assert gateway.reason_label(payload["connector"]["reason"]) == "prerequisite missing"
+
+
+# ---------------------------------------------------------------------------
+# START-TIME RECONCILE (2026-11-06, v0.101.6). The operator signed out and back
+# in as the same account while the machine still ran a build with no heal, so
+# the pin went 136 -> 137 with nothing to re-point it; the update that shipped
+# the login heal found the connector parked `login_required` / `owner_missing`
+# with the OLD build's sentence in `state.json`, and stayed there, because the
+# login heal only runs from a verified sign-in. These pin the connector's own
+# start-time reconcile (`install.heal_pin_at_start`, called by `service.run`)
+# and the update refresh that starts a parked connector for it.
+# ---------------------------------------------------------------------------
+
+# What the pre-#3519 build persisted, verbatim in shape: a sentence the current
+# vocabulary no longer says, so a re-park on THIS build is visible as a change.
+_OLD_BUILD_DETAIL = (
+    "Your Radient login needs attention. The connector stopped and will not retry"
+    " by itself. Signing in again starts it again on its own."
+)
+
+
+def _no_login_may_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The acceptance is "no sign-in": any login-path heal call fails the test."""
+
+    def refuse(**_kwargs: Any) -> str:
+        pytest.fail("the start-time heal must not depend on a login")
+
+    monkeypatch.setattr(install, "heal_pin_after_login", refuse)
+
+
+def _live_shape(connection: dict[str, Any]) -> tuple[int, int, dict[str, Any]]:
+    """Pin -> gone row; the sole same-account row was written while NO heal ran.
+
+    The successor is signed in BEFORE the tunnel configuration exists, so the
+    login hook finds nothing to re-point — the exact position an install that
+    broke on an older build is in when the new build first starts.
+    """
+    gone = _seed_gone_pin()
+    fresh = _sign_in()
+    stored = _incident_tunnel(connection, gone, harness_port=_synthetic_port())
+    config.save(stored)
+    state.mark_parked(reason=gateway.LOGIN_REQUIRED, detail=_OLD_BUILD_DETAIL, credential_id=gone)
+    return gone, fresh, stored
+
+
+def test_the_connector_heals_a_replaced_pin_when_it_starts_with_no_sign_in(
+    sandbox, connection, monkeypatch
+) -> None:
+    """Acceptance: the live v0.101.6 state comes back by the connector starting."""
+    from local_operator.tunnels import cli
+
+    gone, fresh, stored = _live_shape(connection)
+    assert fresh != gone
+    offline = AsyncMock()
+    offline.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: offline)
+    parser = _status_parser()
+    before = json.loads(asyncio.run(dispatch(parser.parse_args(["tunnel", "status", "--json"]))))
+    assert before["connector"]["state"] == "parked"
+    assert before["connector"]["detail"] == _OLD_BUILD_DETAIL
+    assert before["login"]["state"] == gateway.OWNER_MISSING
+    _no_login_may_run(monkeypatch)
+
+    after = asyncio.run(
+        _serve_the_connector_and_read_status(connection, stored, parser, monkeypatch)
+    )
+
+    assert config.load() == {
+        **stored,
+        "credential_id": fresh,
+        "stopped": True,
+    }, "only the pin moved (`stopped` is the helper's own teardown)"
+    receipt = install.last_heal_receipt()
+    assert receipt is not None
+    assert {k: receipt[k] for k in ("old_credential_id", "new_credential_id", "trigger")} == {
+        "old_credential_id": gone,
+        "new_credential_id": fresh,
+        "trigger": "connector_start",
+    }
+    assert receipt["account_id"] == ACCOUNT
+    assert receipt["tunnel_id"] == connection["tunnel"]["id"]
+    assert after["connector"]["state"] == "connected", after["connector"]
+    assert after["login"]["credential_id"] == fresh, after["login"]
+    assert after["login"]["state"] == "ok", after["login"]
+    assert after["remedy"] is None
+    # The serving connector withdrew the old build's park (asserted inside the
+    # helper too): no surface still carries the stale sentence.
+    assert state.read() is None
+
+
+def test_two_replacements_heal_to_the_newest_row(sandbox) -> None:
+    """Any number of sign-outs while no heal ran: the sole live row wins."""
+    gone = _seed_gone_pin()
+    _seed_gone_pin()  # the intermediate row, itself signed out since
+    fresh = _sign_in()
+    _configure(gone, record={"id": "tunnel-1", "owner_account_id": ACCOUNT})
+
+    assert install.heal_pin_at_start() == fresh
+    assert config.load()["credential_id"] == fresh
+    receipt = install.last_heal_receipt()
+    assert receipt is not None and receipt["old_credential_id"] == gone
+    assert receipt["trigger"] == install.HEAL_TRIGGER_CONNECTOR_START
+    assert sandbox["kicks"] == [], "the connector heals in-process; nothing is kicked"
+
+
+def test_a_live_pin_is_a_no_op_at_start(sandbox) -> None:
+    fresh = _sign_in()
+    before = _configure(fresh, record={"id": "tunnel-1", "owner_account_id": ACCOUNT})
+    assert install.heal_pin_at_start() is None
+    assert config.load() == before
+    assert install.last_heal_receipt() is None
+
+
+def _run_the_connector_to_its_park(monkeypatch: pytest.MonkeyPatch) -> int:
+    """`service.main()` for real, with only the relay replaced by a login refusal.
+
+    The refusal is the one the relay gives a pin it cannot authenticate, so the
+    connector parks through its own classification — the detail it writes is
+    THIS build's sentence, which is the stale-detail half of the acceptance.
+    """
+    from local_operator.tunnels import service
+
+    relay = AsyncMock()
+    relay.request.side_effect = service.LoginRequired("Radient login required.")
+    monkeypatch.setattr(service, "RadientTunnels", lambda *_: relay)
+    monkeypatch.setattr(service, "cloudflared_binary", lambda *_: "/trusted/cloudflared")
+    return service.main()
+
+
+@pytest.mark.parametrize("shape", ["different_account", "two_same_account_rows"])
+def test_a_declined_start_heal_changes_nothing_and_re_parks_with_the_current_sentence(
+    sandbox, connection, monkeypatch, shape: str
+) -> None:
+    gone = _seed_gone_pin()
+    if shape == "different_account":
+        _sign_in("someone-else")
+    else:
+        fresh = _sign_in()
+        with closing(AuthStore()) as store:
+            store._conn.execute(
+                "INSERT INTO auth_credentials (provider, credential_type, data, identity_key,"
+                " created_at, updated_at) SELECT provider, credential_type, data, NULL,"
+                " created_at, updated_at FROM auth_credentials WHERE id = ?",
+                (fresh,),
+            )
+            store._conn.commit()
+    stored = _incident_tunnel(connection, gone, harness_port=_synthetic_port())
+    config.save(stored)
+    state.mark_parked(reason=gateway.LOGIN_REQUIRED, detail=_OLD_BUILD_DETAIL, credential_id=gone)
+    _no_login_may_run(monkeypatch)
+
+    assert _run_the_connector_to_its_park(monkeypatch) == 0
+
+    assert config.load() == stored, "no re-point"
+    assert install.last_heal_receipt() is None, "no receipt"
+    parked = state.parked()
+    assert parked is not None and parked["reason"] == gateway.LOGIN_REQUIRED
+    assert parked["detail"] == gateway.TERMINAL_DETAIL[gateway.LOGIN_REQUIRED]
+    assert parked["detail"] != _OLD_BUILD_DETAIL, "re-parked with the CURRENT sentence"
