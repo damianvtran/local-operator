@@ -536,6 +536,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Textual TranscriptView.remove unmounts failed preparation; no filesystem path",
     ),
     (
+        # The keys legend drops optional hint segments by `list.remove` on `kept`, a
+        # plain list of integer role indexes into the segment tuple; the guard sees
+        # only a literal receiver, not the name's type. Two call sites (scroll hint
+        # when not scrolled, then the width-fit loop).
+        "local_operator/tui/widgets/keys_legend.py::KeysLegend._hint_row",
+        "<path>.remove",
+        "list.remove on a Python list of int hint-segment indexes; never a filesystem path",
+        2,
+    ),
+    (
         "local_operator/tui/widgets/projects_view.py::ProjectsView._close_send_picker",
         "<path>.remove",
         "Textual SendTargetCard.remove unmounts the widget; no filesystem path",

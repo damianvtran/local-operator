@@ -69,6 +69,14 @@ def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict[str,
             namespace,
             "stale audit against the current English bytes",
         )
+        # The latest row is the one ``generate.py`` ships, so it is the one that has
+        # to have passed. An earlier ``failed`` row is honest history (an independent
+        # audit that failed, was remediated, and was followed by a ``passed`` row at the
+        # current bytes) and must not redden the gate; a ``failed`` row LAST still does.
+        assert entries[-1]["status"] == "passed", (
+            namespace,
+            "the latest audit row did not pass",
+        )
         # An exact duplicate is the defect this catches (the same audit appended
         # twice); a second row at the SAME hash with different provenance is a
         # re-audit of the translation and is normal history.
@@ -139,7 +147,9 @@ def test_active_ledger_carries_the_released_chinese_candidate(i18n_generate) -> 
     # fails). That set equality is what forbids an unaudited or missing
     # namespace; a total adds nothing it does not already catch.
     assert chinese, "the released candidate carries no zh-CN rows"
-    assert all(entry["status"] == "passed" for entry in chinese)
+    # "Every row passed" was stricter than the requirement stated above: the history is
+    # append-only and legitimately keeps a failed audit that was remediated. The latest
+    # row per namespace passing is asserted inside the helper below.
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(chinese)
@@ -205,7 +215,7 @@ def test_active_ledger_carries_the_released_chinese_candidate(i18n_generate) -> 
     # Same conversion as zh-CN above: the cardinality was a running tally of
     # landed waves, not a property. The structural clauses below are the gate.
     assert hindi, "the active hi rows disappeared"
-    assert all(entry["status"] == "passed" for entry in hindi)
+    # Same relaxation as zh-CN: the latest row per namespace passing is asserted by the helper.
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 
 
