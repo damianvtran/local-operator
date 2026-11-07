@@ -124,7 +124,7 @@
       "description": "The Library's organizing agent: names, describes and tags the assets the operator keeps, learns their vocabulary, and keeps the global catalog usable.",
       "when_to_use": "Organizing the Library — naming and tagging saved assets, finding what needs attention, or asking what the Library holds.",
       "version": "1.1.1",
-      "instructions_sha256": "a5f7acb0f31e9730243c0ef1f7ed900857a0f2368bc18a58e4f4f0b4c44a0099",
+      "instructions_sha256": "d8d94c4128d1989e5ae950903ccfbd578a6bd6e5a4af675b0cce0071e15cecd4",
       "instructions_chars": 4724,
       "tools": [
         "library",
