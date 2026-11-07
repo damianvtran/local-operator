@@ -1,0 +1,4 @@
+{
+  "wire.outcome_notices.closed": "Completed — runtime retired/disposed",
+  "wire.outcome_notices.retired": "Retired for an update — a turn was in flight and was cut; its earlier output is kept"
+}

@@ -139,7 +139,14 @@ def test_active_ledger_carries_the_released_chinese_candidate(i18n_generate) -> 
     # fails). That set equality is what forbids an unaudited or missing
     # namespace; a total adds nothing it does not already catch.
     assert chinese, "the released candidate carries no zh-CN rows"
-    assert all(entry["status"] == "passed" for entry in chinese)
+    # The history is append-only, so an honest `failed` audit that was remediated
+    # stays on record beneath the later `passed` row. What ships is the LAST row per
+    # namespace (generate.py reads last-wins), so that is the row that must have
+    # passed; demanding every row passed would forbid recording a failed audit.
+    latest_zh: dict[str, dict[str, Any]] = {}
+    for entry in chinese:
+        latest_zh[entry["namespace"]] = entry
+    assert all(entry["status"] == "passed" for entry in latest_zh.values())
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(chinese)

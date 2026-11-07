@@ -1,0 +1,3 @@
+{
+  "wire.push_alert.attention_count": "{total, plural, other {{count} cuộc trò chuyện đang chờ bạn}}"
+}

@@ -1,0 +1,3 @@
+{
+  "wire.push_alert.attention_count": "{total, plural, one {{count} conversación te necesita} many {{count} de conversaciones te necesitan} other {{count} conversaciones te necesitan}}"
+}
