@@ -502,6 +502,52 @@ def test_the_set_model_hop_carries_the_desktops_reasoning_effort(
     assert frames[0].get("effort") == sent, frames[0]
 
 
+@pytest.mark.parametrize(
+    ("reply", "reason"),
+    [
+        (
+            {"op": "error", "message": "catalogue metadata unavailable"},
+            "catalogue metadata unavailable",
+        ),
+        (None, "the runtime did not answer"),
+    ],
+)
+def test_an_unapplied_model_says_the_session_keeps_its_own(
+    root: Path,
+    reply: dict[str, Any] | None,
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator report, 2026-11-07: the receipt named the reason, not the consequence.
+
+    ``--create --model openai/gpt-6.1-sol`` on a peer printed a bare
+    ``catalogue metadata unavailable`` and its first turn ran the session's own
+    model. The sentence now names the pair that was NOT applied and says what
+    the session runs instead, keeping the runtime's own reason verbatim.
+    """
+    identity.mint(root, name="cloud-node-1")
+    server = _warmed_server(root)
+
+    class _Dial:
+        def exchange(self, frame: dict[str, Any], *, timeout_s: float) -> dict[str, Any] | None:
+            return reply
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(server, "_dial_owned", lambda *args, **kwargs: _Dial())
+
+    result = server._set_model_on(  # noqa: SLF001
+        SESSION, {"provider": "openai", "model_id": "gpt-6.1-sol"}
+    )
+
+    assert result == {
+        "applied": False,
+        "detail": f"model openai/gpt-6.1-sol was not applied ({reason}); "
+        "the session keeps the model it started with",
+    }
+
+
 def test_effort_rides_the_model_choice_so_a_team_only_create_keeps_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

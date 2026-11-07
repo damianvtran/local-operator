@@ -27,6 +27,32 @@ from local_operator.network.types import MeshRefusal
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.Lock] = {}
 
+#: Leg-1 budget for a PICKER refresh (``controller.shared_catalogue``): a list
+#: that is drawn while the user waits keeps the short bound it always had, and a
+#: slow owner there only leaves the shared rows out of one listing.
+LISTING_FETCH_S = 3.0
+
+#: Leg-1 budget for a SELECTION refresh (:func:`prepare_selection_sync`).
+#:
+#: WHY IT IS LONGER THAN THE LISTING'S (operator report, 2026-11-07): a peer
+#: create with ``--model openai/...`` on a device-scoped share answered
+#: "catalogue metadata unavailable" and ran its first turn on the device default.
+#: The selection reused the listing's 3 s cap, but a selection is a cold owner
+#: round trip — the borrower's own relay, the WAN link to the owner (dialled if
+#: it had closed), the owner's authority re-reads on either side of a native
+#: models GET (measured 0.3-1.0 s from the owner alone) — and the two-relay
+#: rig shows the exact sentence the moment that round trip passes 3.0 s. Every
+#: OTHER bound on this path is wider: :func:`prepare_selection` allows 6.1 s and
+#: the runtime's whole switch 8 s (``serving._MODEL_SWITCH_RESOLVE_S``), and
+#: the relay's own owner hop allows ``client.CLIENT_DEADLINE_S``. So the 3 s
+#: leg-1 cap was the only thing that could fail a selection the outer budget
+#: would have let finish.
+#:
+#: CONSTRAINT: strictly below :func:`prepare_selection`'s 6.1 s ``wait_for``, so
+#: a slow owner surfaces as this fetch's own typed refusal rather than the outer
+#: timeout racing it (a timeout there abandons the worker thread mid-write).
+SELECTION_FETCH_S = 5.5
+
 
 def device_scope_share_command(device: str, network_id: str, key: str = "openai") -> str:
     """The ONE spelling of the remedy for a catalogue a session-scoped share cannot feed.
@@ -319,7 +345,11 @@ def cached(root: Path | None = None, *, cache_dir: Path | None = None) -> dict[s
 
 
 def refresh(
-    root: Path | None = None, *, fresh: bool = False, cache_dir: Path | None = None
+    root: Path | None = None,
+    *,
+    fresh: bool = False,
+    cache_dir: Path | None = None,
+    fetch_s: float = LISTING_FETCH_S,
 ) -> dict[str, Any] | None:
     """Bounded worker-thread fetch; coalesce normal TTL reads, no auth fallback.
 
@@ -348,7 +378,9 @@ def refresh(
             raise MeshRefusal("owner_offline", "catalogue relay unavailable")
         if CAPABILITY not in record.capabilities:
             raise MeshRefusal("catalogue_unsupported", "catalogue relay is unsupported")
-        client.deadline_s = min(client.deadline_s, 3)
+        # ``fetch_s`` is the caller's leg-1 budget: see LISTING_FETCH_S and
+        # SELECTION_FETCH_S for why a picker and a selection differ.
+        client.deadline_s = min(client.deadline_s, fetch_s)
         document = client.fetch_catalogue_metadata("openai", ttl=60)
         current = source(root)
         if current is None:
@@ -448,7 +480,7 @@ def prepare_selection_sync(
     if provider != "openai" or local_ready or source(root, strict=True) is None:
         return
     try:
-        if refresh(root, fresh=True) is None:
+        if refresh(root, fresh=True, fetch_s=SELECTION_FETCH_S) is None:
             raise MeshRefusal("owner_offline", "catalogue metadata unavailable")
     except MeshRefusal:
         raise

@@ -943,3 +943,74 @@ async def test_the_readiness_fact_is_the_gates_own_first_rungs(borrower, monkeyp
     assert shared_catalogue.catalogue_authority(mesh.b.root) == "local"
     shared_catalogue.prepare_selection_sync("openai", mesh.b.root)  # no refusal
     assert state["gets"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_selection_outlasts_an_owner_round_trip_the_listing_cap_refuses(
+    borrower, tmp_path, monkeypatch
+):
+    """Operator report, 2026-11-07: ``catalogue metadata unavailable`` on a peer create.
+
+    A ``--model openai/...`` create on a device-scoped borrower was refused with
+    exactly that sentence and the first turn ran the device default. The
+    selection reused the picker's 3 s leg-1 cap, while every surrounding bound
+    (``prepare_selection``'s 6.1 s, the runtime switch's 8 s) is wider: an owner
+    round trip just past 3 s failed a selection its own budget would have let
+    finish. The owner here answers after 3.3 s, over the real relays.
+
+    The picker keeps its short bound (the control half): the same slow owner
+    still refuses a listing refresh rather than holding a drawn list hostage.
+    """
+    import time as clock
+    from concurrent.futures import ThreadPoolExecutor
+
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.model.configure import invalidate_model_info_cache
+    from local_operator.network.types import MeshRefusal
+    from local_operator.providers import shared_catalogue
+    from local_operator.session.runtime import serving
+    from tests.unit.session.runtime.test_daemon_serving_plane import (
+        _boot,
+        _recording_stream,
+    )
+
+    mesh, plain, controller, state = borrower
+    invalidate_model_info_cache()
+    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fixture-slow-owner-switch")
+    monkeypatch.setattr(serving, "_switch_executor_pool", pool)
+    state["during_get"] = lambda: clock.sleep(3.3)
+    # THE LIVE FAILURE'S OWN SITE: the borrower runtime's ``set_model`` op, the
+    # call a peer create's ``_set_model_on`` makes before the first prompt.
+    calls: list[int] = []
+    session, handle, runtime = await _boot(tmp_path, _recording_stream(calls))
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        await client.connect(runtime.record, runtime.record.session_id)
+        await client.set_model("openai", "gpt-fixture-sol")
+        assert (session.model.provider, session.model.model_id) == ("openai", "gpt-fixture-sol")
+    finally:
+        await client.detach()
+        runtime.close()
+        await session.dispose()
+        pool.shutdown(wait=True, cancel_futures=True)
+    assert state["gets"] == 1
+    document = shared_catalogue.cached(mesh.b.root)
+    assert document is not None, "the selection left no receipt behind"
+    assert [row["id"] for row in document["models"]] == ["gpt-fixture-sol"]
+
+    with pytest.raises(MeshRefusal) as refused:
+        shared_catalogue.refresh(mesh.b.root, fresh=True)
+    assert refused.value.code == "catalogue_unavailable"
+
+
+def test_the_selection_budget_sits_between_the_listing_cap_and_the_outer_wait():
+    """The ordering the slow-owner fix rests on, pinned without a clock.
+
+    Above the listing cap (else a selection fails where it should wait) and
+    strictly below ``prepare_selection``'s 6.1 s ``wait_for`` (else the outer
+    timeout races the fetch and abandons its worker mid-write).
+    """
+    from local_operator.providers import shared_catalogue
+
+    assert shared_catalogue.LISTING_FETCH_S == 3.0
+    assert shared_catalogue.LISTING_FETCH_S < shared_catalogue.SELECTION_FETCH_S < 6.1

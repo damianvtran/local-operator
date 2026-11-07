@@ -7396,6 +7396,7 @@ async def _pilot_peek(
         ) from exc
     readable = [row for row in rows if str(getattr(row, "text", "") or "").strip()]
     shown = readable[-steps:]
+    served = [_peek_served_model(row) for row in shown]
     payload: dict[str, Any] = {
         "ok": True,
         "session_id": session_id,
@@ -7406,8 +7407,11 @@ async def _pilot_peek(
             {
                 "role": str(getattr(row, "role", "") or ""),
                 "text": _clip(str(getattr(row, "text", "") or "")),
+                # ADDED ONLY WHEN KNOWN, so a row from an owner that never
+                # stamped a serving identity keeps the exact shape it had.
+                **({"model": model} if model else {}),
             }
-            for row in shown
+            for row, model in zip(shown, served)
         ],
         # WHETHER THIS IS THE WHOLE CONVERSATION, SAID HONESTLY: true when the
         # window holds more than the slice shows. It says nothing about rows
@@ -7425,12 +7429,51 @@ async def _pilot_peek(
         + (" (older steps are loaded here too)" if payload["has_older"] else "")
         + ":"
     ]
-    for index, row in enumerate(shown, start=1):
+    for index, (row, model) in enumerate(zip(shown, served), start=1):
+        role = str(getattr(row, "role", "") or "?")
         lines.append(
-            f"{index}. {str(getattr(row, 'role', '') or '?')}: "
+            f"{index}. {role}{f' ({model})' if model else ''}: "
             f"{_clip(str(getattr(row, 'text', '') or ''))}"
         )
     return payload, lines
+
+
+#: Longest serving label ``--peek`` will print. Real ``provider/model-id`` pairs
+#: are far shorter; the bound exists because the value arrives from a peer.
+_PEEK_MODEL_MAX = 128
+
+
+def _peek_served_model(row: Any) -> str:
+    """``provider/model-id`` that served an assistant row, or ``""`` when unknown.
+
+    WHY (operator report, 2026-11-07): a ``--create --model openai/...`` on a
+    peer printed a model refusal, ``--peek`` then showed ``assistant: SOL_OK``,
+    and nothing on the origin said WHICH model had produced it — the peer had in
+    fact run its default. ``--peek`` was text-only.
+
+    THE SOURCE is the assistant message's ``usage.provider``/``usage.model_id``:
+    the serving identity the failover layer stamps from the request that
+    actually went out, which is the same channel the per-call analytics record
+    (#3514) reads for its ``provider``/``model_id``. It is already on the durable
+    row and in the display window the owner serves, so no wire field is added:
+    an owner that never stamped it (an older build, a row from before the
+    stamp) yields ``""`` and the row renders exactly as before.
+
+    MODEL ID ONLY: the same ``usage`` also carries ``account_ref`` and billing
+    facts, and none of that is read here. The value is a peer's, so anything
+    that is not one short printable token is dropped rather than echoed.
+    """
+    if str(getattr(row, "role", "") or "") != "assistant":
+        return ""
+    usage = getattr(row, "usage", None)
+    provider = str(getattr(usage, "provider", "") or "").strip()
+    model_id = str(getattr(usage, "model_id", "") or "").strip()
+    if not provider or not model_id:
+        return ""
+    label = f"{provider}/{model_id}"
+    if len(label) > _PEEK_MODEL_MAX or not label.isprintable() or any(c.isspace() for c in label):
+        return ""
+    return label
 
 
 #: The dests of the flags that only describe a session being CREATED (each one's

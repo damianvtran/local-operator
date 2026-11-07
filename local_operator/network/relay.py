@@ -10882,11 +10882,27 @@ class RelayServer:
             )
         finally:
             dial.close()
+        # THE SENTENCE SAYS WHAT HAPPENED TO THE SESSION, not only why (operator
+        # report, 2026-11-07). The runtime's refusal alone printed as a bare
+        # "catalogue metadata unavailable" under "created on <peer>", and the
+        # first turn then ran on this device's default model — the origin's
+        # receipt never said the model it asked for was NOT the one running.
+        # Naming the pair and the consequence makes the substitution visible on
+        # every reader of ``model.detail`` (CLI receipt, ``--json``, desktop). It
+        # names no device ("this device" read as the ORIGIN on the receipt);
+        # an older requester prints this sentence verbatim, as it did the bare one.
+        wanted = f"{model.get('provider')}/{model.get('model_id')}"
         if reply is None:
-            return {"applied": False, "detail": "the runtime did not answer"}
-        if reply.get("op") == "error":
-            return {"applied": False, "detail": str(reply.get("message") or "refused")}
-        return {"applied": True, "detail": ""}
+            reason = "the runtime did not answer"
+        elif reply.get("op") == "error":
+            reason = str(reply.get("message") or "refused")
+        else:
+            return {"applied": True, "detail": ""}
+        return {
+            "applied": False,
+            "detail": f"model {wanted} was not applied ({reason}); "
+            "the session keeps the model it started with",
+        }
 
     def _prompt_on(
         self, session_id: str, text: str, images: Any, *, due: float | None = None

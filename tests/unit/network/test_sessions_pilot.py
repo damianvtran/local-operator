@@ -1278,6 +1278,75 @@ def test_a_peek_reads_the_requested_tail_window(
     assert viewer.bound is True and viewer.disposed is True
 
 
+def test_a_peek_names_the_model_that_served_each_assistant_row(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Operator report, 2026-11-07: a peer turn's text, but not WHICH model wrote it.
+
+    A ``--create --model openai/...`` on a peer was refused there and ran the
+    device default; ``--peek`` showed ``assistant: SOL_OK`` and nothing else. The
+    serving identity stamped on the assistant row's ``usage`` (the channel the
+    per-call analytics record reads) is now shown, in the text and ``--json``.
+    Only the pair crosses: the ``account_ref`` beside it is never read.
+    """
+    from local_operator.harness.types import Usage
+
+    served = _Message("assistant", "SOL_OK")
+    served.usage = Usage(  # type: ignore[attr-defined]
+        provider="openai", model_id="gpt-6.1-sol", account_ref="acct-must-not-leak"
+    )
+    viewer = _FakeViewer(rows=[_Message("user", "Reply with exactly: SOL_OK"), served])
+    _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION]) == 0
+    out = capsys.readouterr().out
+    payload = ok(out)
+    assert payload["rows"] == [
+        {"role": "user", "text": "Reply with exactly: SOL_OK"},
+        {"role": "assistant", "text": "SOL_OK", "model": "openai/gpt-6.1-sol"},
+    ], payload
+    assert "acct-must-not-leak" not in out
+
+    viewer = _FakeViewer(rows=[_Message("user", "Reply with exactly: SOL_OK"), served])
+    _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--peer", PEER, "--peek", SESSION]) == 0
+    text = capsys.readouterr().out
+    assert "2. assistant (openai/gpt-6.1-sol): SOL_OK" in text, text
+    assert "1. user: Reply with exactly: SOL_OK" in text, text
+
+
+def test_a_peek_of_an_owner_that_stamps_no_model_renders_as_before(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Mixed versions: an older owner's rows carry no serving identity.
+
+    Absent, half-filled or peer-garbled values all leave the row exactly as it
+    printed before this field existed — no ``model`` key, no parentheses.
+    """
+    from local_operator.harness.types import Usage
+
+    half = _Message("assistant", "half")
+    half.usage = Usage(provider="openai")  # type: ignore[attr-defined]
+    garbled = _Message("assistant", "garbled")
+    garbled.usage = Usage(provider="openai", model_id="x\x1b[2Jy")  # type: ignore[attr-defined]
+    rows = [_Message("assistant", "plain"), half, garbled]
+    viewer = _FakeViewer(rows=list(rows))
+    _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["rows"] == [
+        {"role": "assistant", "text": "plain"},
+        {"role": "assistant", "text": "half"},
+        {"role": "assistant", "text": "garbled"},
+    ], payload
+
+    viewer = _FakeViewer(rows=list(rows))
+    _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--peer", PEER, "--peek", SESSION]) == 0
+    text = capsys.readouterr().out
+    assert "1. assistant: plain" in text and "3. assistant: garbled" in text, text
+    assert "(" not in text.split("step(s)")[-1], text
+
+
 def test_a_peek_defaults_to_twelve_steps(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
