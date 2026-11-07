@@ -1,0 +1,14 @@
+{
+  "relay.usage_reset.badge": "Reset · {count}",
+  "relay.usage_reset.confirm_title": "{provider} · Account {index} of {count}",
+  "relay.usage_reset.confirm_prompt": "{count, plural, one {Uses your last reset credit; clears this account’s rate-limit windows.} other {Uses 1 of # reset credits; clears this account’s rate-limit windows.}}",
+  "relay.usage_reset.cancel": "Cancel",
+  "relay.usage_reset.confirm": "Reset",
+  "relay.usage_reset.busy": "Resetting…",
+  "relay.usage_reset.outcome_reset": "{count, plural, =0 {Reset applied.} one {Reset applied — 1 window cleared.} other {Reset applied — # windows cleared.}}",
+  "relay.usage_reset.outcome_already_redeemed": "This reset had already been applied.",
+  "relay.usage_reset.outcome_no_credit": "No reset credits are left.",
+  "relay.usage_reset.outcome_nothing_to_reset": "Nothing was over its limit, so no window needed clearing.",
+  "relay.usage_reset.outcome_failed": "Couldn’t confirm the reset. Try again to check — a retry will not use a second credit.",
+  "relay.usage_reset.refused": "That reset was refused. Refresh the list and try again."
+}

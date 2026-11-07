@@ -184,6 +184,10 @@ export type PhoneUsageReport = {
 	account_count?: number;
 	state?: "available" | "partial" | "unavailable" | "reauth_required";
 	credential_invalid?: boolean;
+	/* Spendable reset credits: a non-negative count, or null/absent when the
+	   vendor reported nothing trustworthy. Only a count crosses the tunnel --
+	   never the login it would be spent on. */
+	resets_available?: number | null;
 };
 export type PhoneUsageRefreshStatus = "ok" | "throttled" | "failed" | "timeout";
 export type PhoneUsageEnvelope = {
@@ -211,6 +215,56 @@ export function refreshUsage(force: boolean): Promise<PhoneUsageEnvelope> {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ force }),
+	});
+}
+
+/** The outcomes a reset credit's spend can report. `failed` is the honest
+    "could not confirm" state: the attempt reached the vendor, so the credit may
+    or may not be spent, and a retry MUST reuse the same `redeemRequestId`. */
+export type PhoneUsageResetOutcome =
+	| "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed" | "failed";
+
+/** The refusal codes `POST /api/usage/reset` answers with, as a value so a
+    caller decides on the code and never on prose. */
+export const USAGE_RESET_REFUSAL_CODES = ["accounts_changed", "in_flight", "not_supported"] as const;
+export type UsageResetRefusalCode = (typeof USAGE_RESET_REFUSAL_CODES)[number];
+
+/** Whether an error is a typed refusal of a reset attempt. */
+export function isUsageResetRefusal(reason: unknown): reason is HttpError {
+	return reason instanceof HttpError
+		&& (USAGE_RESET_REFUSAL_CODES as readonly string[]).includes(reason.code);
+}
+
+/** One reset's answer: the outcome, plus the usage envelope the daemon could
+    re-read. `reports` is absent when the post-spend refresh could not answer,
+    in which case the sheet keeps the numbers it already shows. */
+export type PhoneUsageResetEnvelope = Partial<PhoneUsageEnvelope> & {
+	reset: { outcome: PhoneUsageResetOutcome; windows_reset: number };
+};
+
+/** Spend ONE reset credit on the account the phone named by index.
+
+    The phone never names a person: `accountIndex`/`accountCount` are the pair
+    the card displayed, and the daemon resolves them against its own login order.
+    A mismatch is a 409 `accounts_changed` refusal rather than a reset on a
+    sibling, so the caller refreshes and lets the operator confirm again. */
+export function resetUsage(input: {
+	provider: string;
+	accountIndex: number;
+	accountCount: number;
+	redeemRequestId: string;
+	signal?: AbortSignal;
+}): Promise<PhoneUsageResetEnvelope> {
+	return request("/api/usage/reset", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			provider: input.provider,
+			account_index: input.accountIndex,
+			account_count: input.accountCount,
+			redeem_request_id: input.redeemRequestId,
+		}),
+		signal: input.signal,
 	});
 }
 

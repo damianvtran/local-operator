@@ -21,9 +21,18 @@
  *
  * Ordering, tone and binding-window derivation live in `usage-sheet.model.ts`
  * (pure, unit-tested); this file is layout and copy only.
+ *
+ * RESET CREDITS. A card whose account reports spendable reset credits carries
+ * ONE text affordance at the right end of its header line (`Reset · N`), so no
+ * row is added when there are none and none is pushed down when there are.
+ * Tapping it turns that card into an inline confirmation -- no nested modal,
+ * because the confirmation must name the account whose numbers sit behind it.
+ * Only one card can confirm at a time (one flow object for the sheet), the
+ * default focus is Cancel rather than the button that spends, and the phone
+ * sends the ACCOUNT INDEX the daemon displayed: it never learns a login name.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getUsage, HttpError, refreshUsage, type PhoneUsageEnvelope, type PhoneUsageLimit, type PhoneUsageTone } from "../api";
+import { getUsage, HttpError, isUsageResetRefusal, refreshUsage, resetUsage, type PhoneUsageEnvelope, type PhoneUsageLimit, type PhoneUsageResetOutcome, type PhoneUsageTone } from "../api";
 import { Sheet } from "./ui/sheet";
 import { Button } from "./ui/button";
 import { ChromeIcon } from "./ui/chrome-icon";
@@ -31,8 +40,10 @@ import { Spinner } from "./spinner";
 import { messageRuntime, useLocaleSnapshot } from "../store";
 import { cn } from "../lib/cn";
 import {
-	buildUsageModel, countdown, refreshPhase,
-	type RefreshPhase, type UsageAccount, type UsageRow,
+	accountKey, buildUsageModel, countdown, refreshPhase, resetFlowCancel, resetFlowConfirm,
+	resetFlowRefused, resetFlowSettle, resetFlowStart, resetOutcomeKey, resetRequestId, resetTarget,
+	RESET_FLOW_IDLE,
+	type RefreshPhase, type ResetFlow, type ResetTarget, type UsageAccount, type UsageRow,
 } from "./usage-sheet.model";
 
 const t = messageRuntime.t;
@@ -191,27 +202,123 @@ function Note({ glyph, tone, children }: { glyph: string; tone: string; children
 	return <p className={cn("flex gap-1.5 text-meta", tone)}><span aria-hidden>{glyph}</span><span>{children}</span></p>;
 }
 
-function AccountCard({ account, now, locale }: { account: UsageAccount; now: number; locale: string }) {
+/** One outcome's sentence. Only `reset` varies with a count, so only it takes
+ *  one: a `windows_reset` of 0 still says the reset was APPLIED rather than
+ *  claiming a window was cleared. */
+function outcomeText(outcome: PhoneUsageResetOutcome, windowsReset: number): string {
+	const key = resetOutcomeKey(outcome);
+	return key === "relay.usage_reset.outcome_reset"
+		? t(key, { count: windowsReset })
+		: t(key);
+}
+
+/** ONE account's reset interaction, in place of the badge it was opened from.
+ *
+ * INLINE, NOT A NESTED MODAL: the confirmation has to name the account it will
+ * spend on, and the card already is that account. A sheet over a sheet would
+ * hide the numbers the operator is confirming about.
+ *
+ * FOCUS: Cancel is the default focus and the side-effecting button is not,
+ * because a stray Enter on a freshly opened confirmation would spend a credit
+ * that cannot be refunded. `autoFocus` on a stable element inside an existing
+ * card also keeps the card's own controls reachable. */
+function ResetPanel({ flow, target, name, busy, onCancel, onConfirm }: {
+	flow: Extract<ResetFlow, { kind: "confirm" | "busy" | "result" }>;
+	target: ResetTarget;
+	name: string;
+	busy: boolean;
+	onCancel: () => void;
+	onConfirm: () => void;
+}) {
+	const heading = t("relay.usage_reset.confirm_title", {
+		provider: name, index: String(target.index + 1), count: String(target.count),
+	});
+	// INERT, NOT DISABLED (the refresh button's rule, UX round 1 U1): native
+	// `disabled` drops keyboard focus to <body>, which would strand a keyboard
+	// user inside a confirmation whose buttons no longer take focus.
+	const inert = busy;
+	return <div role="group" aria-label={heading} aria-busy={busy || undefined}
+		className="flex flex-col gap-2 rounded-sm bg-sunken px-2.5 py-2">
+		<p className="min-w-0 text-meta font-medium text-ink">{heading}</p>
+		{flow.kind === "result"
+			? <div className="flex flex-col gap-2">
+				<p aria-live="polite" className={cn("text-meta",
+					flow.refused || flow.outcome === "failed" ? "text-warning" : "text-ink-muted")}>
+					{flow.refused ? t("relay.usage_reset.refused") : outcomeText(flow.outcome, flow.windowsReset)}
+				</p>
+				{/* An unconfirmed outcome is the one that offers a retry: it reuses
+				    the request id, so the vendor answers `already_redeemed` instead of
+				    spending a second credit. */}
+				{flow.outcome === "failed" && !flow.refused && <div className="flex flex-wrap items-center justify-end gap-2">
+					<Button variant="tonal" onClick={onConfirm}>{t("relay.usage_reset.confirm")}</Button>
+				</div>}
+			</div>
+			: <p className="text-meta text-ink-muted">{busy ? t("relay.usage_reset.busy") : t("relay.usage_reset.confirm_prompt", { count: target.available })}</p>}
+		{flow.kind !== "result" && <div className="flex flex-wrap items-center justify-end gap-2">
+			<Button variant="ghost" autoFocus aria-disabled={inert || undefined}
+				className={cn(inert && "!text-ink-disabled")}
+				onClick={() => { if (!inert) onCancel(); }}>
+				{t("relay.usage_reset.cancel")}
+			</Button>
+			<Button variant="tonal" aria-disabled={inert || undefined} aria-busy={busy || undefined}
+				className={cn(inert && "!text-ink-disabled")}
+				onClick={() => { if (!inert) onConfirm(); }}>
+				{t("relay.usage_reset.confirm")}
+			</Button>
+		</div>}
+	</div>;
+}
+
+function AccountCard({ account, name, now, locale, flow, onResetOpen, onResetCancel, onResetConfirm }: {
+	account: UsageAccount;
+	name: string;
+	now: number;
+	locale: string;
+	flow: ResetFlow;
+	onResetOpen: (key: string) => void;
+	onResetCancel: () => void;
+	onResetConfirm: (key: string, target: ResetTarget) => void;
+}) {
 	const binding = account.binding;
 	// Reauth and unavailable rows show last-known numbers, so their fills go
 	// dim: the colour must not claim a current reading it does not have.
 	const dim = account.reauth || account.state === "unavailable";
 	const percent = binding?.remaining != null ? Math.round(binding.remaining * 100) : null;
+	const key = accountKey(account);
+	const target = resetTarget(account);
+	// A dead grant cannot authenticate a spend, so its card offers none: the
+	// attempt would come back unconfirmed when nothing was ever sent.
+	const offer = target !== null && !account.reauth;
+	const mine = flow.kind !== "idle" && flow.key === key ? flow : null;
 	return <div className="flex flex-col gap-3 rounded-md bg-surface px-3 py-2.5">
 		<div className="flex min-w-0 items-start justify-between gap-3">
 			<span className="min-w-0 truncate text-meta text-ink-muted">
 				{account.count > 1 ? t("relay.shell.usage.account", { index: account.number }) : null}
 			</span>
-			{account.reauth
-				? <span className="shrink-0 text-meta font-medium text-warning">{t("relay.shell.usage.reauth_short")}</span>
-				: binding && <div className="flex shrink-0 flex-col items-end">
-					<span className={cn("text-meta font-medium", dim ? "text-ink-dim" : TONE_TEXT[binding.tone])}>
-						{binding.tone === "exhausted" && <span aria-hidden>✕ </span>}
-						{toneWord(binding.tone)}
-						{percent !== null && <span className="ms-1.5 font-mono text-mono-sm tabular-nums">{t("relay.shell.usage.remaining_percent", { value: percent / 100 })}</span>}
-					</span>
-				</div>}
+			<div className="flex min-w-0 shrink-0 items-center gap-2">
+				{/* The ONE reset affordance: the same header line the card already
+				    draws, so no row is added when absent and no limit row is pushed
+				    down when present. `-my-3` keeps the 44px tap target from growing
+				    that row; the label beside it truncates, this never does. */}
+				{offer && (mine === null || mine.kind === "result") && <button type="button"
+					className="-my-3 inline-flex min-h-11 shrink-0 items-center whitespace-nowrap text-meta font-medium text-accent underline decoration-accent decoration-dotted underline-offset-4"
+					onClick={() => onResetOpen(key)}>
+					{t("relay.usage_reset.badge", { count: String(target.available) })}
+				</button>}
+				{account.reauth
+					? <span className="shrink-0 text-meta font-medium text-warning">{t("relay.shell.usage.reauth_short")}</span>
+					: binding && <div className="flex shrink-0 flex-col items-end">
+						<span className={cn("text-meta font-medium", dim ? "text-ink-dim" : TONE_TEXT[binding.tone])}>
+							{binding.tone === "exhausted" && <span aria-hidden>✕ </span>}
+							{toneWord(binding.tone)}
+							{percent !== null && <span className="ms-1.5 font-mono text-mono-sm tabular-nums">{t("relay.shell.usage.remaining_percent", { value: percent / 100 })}</span>}
+						</span>
+					</div>}
+			</div>
 		</div>
+		{offer && mine !== null && <ResetPanel flow={mine} target={target} name={name}
+			busy={mine.kind === "busy"} onCancel={onResetCancel}
+			onConfirm={() => onResetConfirm(key, target)} />}
 		{account.rows.map((row, index) => <LimitRow key={index} row={row} dim={dim} now={now} locale={locale} />)}
 		{(account.reauth || account.state === "unavailable" || account.continues || account.familyRestricted) && <div className="flex flex-col gap-1">
 			{account.reauth && <Note glyph="↻" tone="text-warning">{t("relay.shell.usage.reauth")}</Note>}
@@ -274,6 +381,10 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 	const [now, setNow] = useState(() => Date.now());
 	// A late answer from a closed/reopened sheet must not paint over a newer one.
 	const generation = useRef(0);
+	// ONE reset interaction for the whole sheet: opening a second card's
+	// confirmation replaces the first, so two irreversible prompts can never be
+	// open at once.
+	const [flow, setFlow] = useState<ResetFlow>(RESET_FLOW_IDLE);
 
 	const refresh = useCallback((force: boolean) => {
 		const mine = generation.current;
@@ -315,6 +426,7 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 		if (!open) { generation.current += 1; return; }
 		setData(null);
 		setFreshAt(null);
+		setFlow(RESET_FLOW_IDLE);
 		load();
 	}, [open, load]);
 
@@ -329,6 +441,49 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 
 	const collator = useMemo(() => new Intl.Collator(locale.uiLocale), [locale.uiLocale]);
 	const providers = useMemo(() => data ? buildUsageModel(data.reports, collator) : null, [data, collator]);
+
+	/** Spend one credit on the account the operator confirmed.
+	 *
+	 * The id comes from the flow, not from this call: after an UNCONFIRMED
+	 * outcome (:func:`resetRequestId`) the retry reuses the same id, and the
+	 * vendor then answers `already_redeemed` instead of spending a second
+	 * credit. The sheet's generation guards the late answer, so a closed and
+	 * reopened sheet never paints an outcome into a surface the operator left. */
+	const confirmReset = useCallback((key: string, target: ResetTarget) => {
+		const mine = generation.current;
+		const redeemRequestId = resetRequestId(flow, key, () => crypto.randomUUID());
+		setFlow(resetFlowStart(key, redeemRequestId));
+		resetUsage({
+			provider: target.provider,
+			accountIndex: target.index,
+			accountCount: target.count,
+			redeemRequestId,
+		}).then((answer) => {
+			if (generation.current !== mine) return;
+			setNow(Date.now());
+			// The answer carries the envelope the daemon could re-read. When it
+			// carries none -- or an EMPTY one, which is what a dropped cache row
+			// plus a failed re-fetch looks like -- the numbers on screen stay:
+			// they are the last thing the daemon measured, and blanking them
+			// would hide the account the outcome is about.
+			if (answer.reports && answer.reports.length > 0) {
+				setData(answer as PhoneUsageEnvelope);
+				const next = refreshPhase(answer.refresh, answer.refreshed_at, Date.now());
+				if (next.kind === "ok" && next.at !== null) setFreshAt(next.at);
+				setPhase(next);
+			}
+			setFlow((current) => resetFlowSettle(current, answer.reset.outcome, answer.reset.windows_reset));
+		}).catch((reason: unknown) => {
+			if (generation.current !== mine) return;
+			setNow(Date.now());
+			// A typed refusal spent NOTHING (the daemon answered before reaching
+			// the vendor), so its id is dropped. Anything else may have spent a
+			// credit: the flow keeps the id and shows the unconfirmed copy, whose
+			// retry is idempotent.
+			if (isUsageResetRefusal(reason)) setFlow((current) => resetFlowRefused(current));
+			else setFlow((current) => resetFlowSettle(current, "failed", 0));
+		});
+	}, [flow]);
 	const refreshing = phase.kind === "refreshing";
 	const unsupported = phase.kind === "unsupported";
 	// The freshness sentence the status line returns to. A refresh's
@@ -376,7 +531,11 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 				? <p className="text-body-sm text-ink-dim">{t("relay.shell.usage.empty")}</p>
 				: providers.map((provider) => <section key={provider.provider} className="flex flex-col gap-2">
 					<h3 className="min-w-0 truncate text-body-sm font-medium text-ink">{provider.name}</h3>
-					{provider.accounts.map((account) => <AccountCard key={account.number} account={account} now={now} locale={locale.uiLocale} />)}
+					{provider.accounts.map((account) => <AccountCard key={account.number} account={account}
+						name={provider.name} now={now} locale={locale.uiLocale} flow={flow}
+						onResetOpen={(key) => setFlow(resetFlowConfirm(key))}
+						onResetCancel={() => setFlow(resetFlowCancel())}
+						onResetConfirm={confirmReset} />)}
 					{/* "Account 2" names no login on purpose (no emails cross the
 					    tunnel); this says how to find it on the computer (U6). */}
 					{provider.accounts.some((account) => account.count > 1) && <p className="text-meta text-ink-dim">{t("relay.shell.usage.accounts_order")}</p>}

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
@@ -13,7 +14,12 @@ from local_operator.providers.controller import (
     ProviderController,
     ReadOnlyUsageSnapshot,
 )
-from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+from local_operator.providers.usage import (
+    ResetConsumeResult,
+    UsageAmount,
+    UsageLimit,
+    UsageReport,
+)
 
 
 def test_phone_usage_gate_precedes_cached_data(monkeypatch):
@@ -591,3 +597,355 @@ def test_refresh_updated_time_counts_only_reports_this_refresh_fetched(monkeypat
     stale = asyncio.run(mobile._refresh_phone_usage(True))
     assert stale["source"] == "cached" and stale["refreshed_at"] is None
     assert stale["as_of"] == yesterday - 1
+
+
+# -- reset credits: the projection field ---------------------------------------
+
+
+def test_projection_carries_resets_available_with_the_exact_int_rule():
+    """A count, never a name -- and only a plain non-negative int.
+
+    ``bool`` is an ``int`` in Python, so ``True`` would otherwise reach a button
+    that SPENDS something as "1 credit". Anything untrustworthy is ``None``,
+    which every surface reads as "no reset to offer".
+    """
+    reports = [
+        UsageReport(provider="openai", limits=[], fetched_at=1, resets_available=2),
+        UsageReport(provider="openai", limits=[], fetched_at=1, resets_available=0),
+        UsageReport(provider="openai", limits=[], fetched_at=1),
+        UsageReport(provider="openai", limits=[], fetched_at=1, resets_available=True),
+        UsageReport(provider="openai", limits=[], fetched_at=1, resets_available=-1),
+    ]
+    rows = mobile._phone_usage_projection(reports, [(0, 5)] * 5)
+    assert [row["resets_available"] for row in rows] == [2, 0, None, None, None]
+    # Additive: the original keys are untouched for older phone builds.
+    assert rows[0]["provider"] == "openai" and "limits" in rows[0]
+
+
+# -- POST /api/usage/reset -----------------------------------------------------
+
+
+def _reset_body(**extra):
+    body = {
+        "provider": "openai",
+        "account_index": 1,
+        "account_count": 2,
+        "redeem_request_id": "redeem-1",
+    }
+    body.update(extra)
+    return body
+
+
+def _patch_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    identity: str | None = "second@example.test",
+    outcome: str = "reset",
+    windows_reset: int = 1,
+):
+    """Patch the two helpers the route delegates to and record what it asked."""
+    calls = {"identity": [], "consume": [], "refresh": []}
+
+    def resolve(provider, account_index, account_count):
+        calls["identity"].append((provider, account_index, account_count))
+        return identity
+
+    async def consume(provider, who, redeem):
+        calls["consume"].append((provider, who, redeem))
+        return ResetConsumeResult(outcome=outcome, windows_reset=windows_reset)
+
+    async def refresh(force):
+        calls["refresh"].append(force)
+        return _refresh_body(reports=[{"provider": "openai", "limits": []}])
+
+    monkeypatch.setattr(mobile, "_phone_reset_identity", resolve)
+    monkeypatch.setattr(mobile, "_consume_phone_usage_reset", consume)
+    monkeypatch.setattr(mobile, "_refresh_phone_usage", refresh)
+    return calls
+
+
+def _cached_usage():
+    return {
+        "reports": [{"provider": "openai", "limits": []}],
+        "source": "cached",
+        "may_be_stale": False,
+        "cached_at": 7,
+    }
+
+
+def test_reset_requires_pairing_and_same_origin(monkeypatch):
+    calls = _patch_reset(monkeypatch)
+    with TestClient(_app(), follow_redirects=False) as client:
+        assert client.post("/api/usage/reset", json=_reset_body()).status_code == 401
+        client.post("/login", data={"password": "fixture-password"})
+        crossed = client.post(
+            "/api/usage/reset",
+            json=_reset_body(),
+            headers={"origin": "https://someone-else.example.test"},
+        )
+        assert crossed.status_code == 403
+    assert calls["identity"] == []
+    assert calls["consume"] == []
+
+
+def test_reset_spends_the_indexed_account_and_answers_a_fresh_envelope(monkeypatch):
+    calls = _patch_reset(monkeypatch, identity="second@example.test")
+    with _authed_client(_app()) as client:
+        answer = client.post("/api/usage/reset", json=_reset_body())
+    assert answer.status_code == 200
+    assert answer.json()["reset"] == {"outcome": "reset", "windows_reset": 1}
+    assert answer.json()["reports"] == [{"provider": "openai", "limits": []}]
+    # The phone named an INDEX; the daemon resolved it and spent on that login.
+    assert calls["identity"] == [("openai", 1, 2)]
+    assert calls["consume"] == [("openai", "second@example.test", "redeem-1")]
+    # A spent credit dropped the shared cache row, so the answer re-fetched.
+    assert calls["refresh"] == [True]
+
+
+def test_reset_refuses_when_the_account_list_moved(monkeypatch):
+    """An unresolvable index asks the phone to refresh; it never resets a sibling."""
+    calls = _patch_reset(monkeypatch, identity=None)
+    with _authed_client(_app()) as client:
+        answer = client.post("/api/usage/reset", json=_reset_body())
+    assert answer.status_code == 409
+    assert answer.json()["code"] == "accounts_changed"
+    assert calls["consume"] == []
+    assert calls["refresh"] == []
+
+
+def test_reset_refuses_a_provider_without_resets(monkeypatch):
+    calls = _patch_reset(monkeypatch)
+    with _authed_client(_app()) as client:
+        answer = client.post("/api/usage/reset", json=_reset_body(provider="anthropic"))
+    assert answer.status_code == 422
+    assert answer.json()["code"] == "not_supported"
+    assert calls["identity"] == []
+
+
+def test_reset_refuses_a_body_that_is_not_an_exact_index(monkeypatch):
+    """`true`/`1.0`/`"1"` are wire bugs: coercing one onto an account spends a
+    credit the operator did not confirm."""
+    calls = _patch_reset(monkeypatch)
+    with _authed_client(_app()) as client:
+        for bad in (True, 1.0, "1", -1):
+            answer = client.post("/api/usage/reset", json=_reset_body(account_index=bad))
+            assert answer.status_code == 400, bad
+        assert client.post("/api/usage/reset", json=_reset_body(account_count=0)).status_code == 400
+        assert (
+            client.post("/api/usage/reset", json=_reset_body(redeem_request_id="")).status_code
+            == 400
+        )
+        assert client.post("/api/usage/reset", content=b"not json").status_code == 400
+    assert calls["identity"] == []
+
+
+def test_reset_is_single_flight_for_the_same_account(monkeypatch):
+    """A double tap on one card loses at the claim; a sibling index does not."""
+    release = asyncio.Event()
+    seen = []
+
+    def resolve(provider, account_index, account_count):
+        return f"account-{account_index}"
+
+    async def consume(provider, identity, redeem):
+        seen.append(identity)
+        await release.wait()
+        return ResetConsumeResult(outcome="reset", windows_reset=1)
+
+    async def refresh(force):
+        return _refresh_body()
+
+    monkeypatch.setattr(mobile, "_phone_reset_identity", resolve)
+    monkeypatch.setattr(mobile, "_consume_phone_usage_reset", consume)
+    monkeypatch.setattr(mobile, "_refresh_phone_usage", refresh)
+    app = _app()
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://phone") as client:
+            await client.post("/login", data={"password": "fixture-password"})
+            first = asyncio.create_task(client.post("/api/usage/reset", json=_reset_body()))
+            await asyncio.sleep(0.05)
+            second = await client.post(
+                "/api/usage/reset", json=_reset_body(redeem_request_id="redeem-2")
+            )
+            release.set()
+            done = await first
+            sibling = await client.post(
+                "/api/usage/reset",
+                json=_reset_body(account_index=0, redeem_request_id="redeem-3"),
+            )
+            return done, second, sibling
+
+    done, second, sibling = asyncio.run(scenario())
+    assert done.status_code == 200
+    assert second.status_code == 409 and second.json()["code"] == "in_flight"
+    assert sibling.status_code == 200
+    # One spend per attempt, in arrival order, on the accounts they named.
+    assert seen == ["account-1", "account-0"]
+
+
+@pytest.mark.parametrize(
+    "outcome,windows,refreshes",
+    [
+        ("reset", 2, True),
+        ("already_redeemed", 0, True),
+        ("nothing_to_reset", 0, False),
+        ("no_credit", 0, False),
+        ("failed", 0, False),
+    ],
+)
+def test_reset_answers_every_outcome_without_claiming_more_than_it_saw(
+    monkeypatch, outcome, windows, refreshes
+):
+    calls = _patch_reset(monkeypatch, outcome=outcome, windows_reset=windows)
+    monkeypatch.setattr(mobile, "_cached_phone_usage", _cached_usage)
+    with _authed_client(_app()) as client:
+        answer = client.post("/api/usage/reset", json=_reset_body())
+    assert answer.status_code == 200
+    assert answer.json()["reset"] == {"outcome": outcome, "windows_reset": windows}
+    assert answer.json()["reports"] == [{"provider": "openai", "limits": []}]
+    assert bool(calls["refresh"]) is refreshes
+    if not refreshes:
+        # No spend: the cached numbers are still true and no vendor call is made.
+        assert answer.json()["source"] == "cached"
+
+
+def test_an_unnameable_outcome_reads_as_failed(monkeypatch):
+    """A wire change is an UNKNOWN spend, never an implied success."""
+    calls = _patch_reset(monkeypatch, outcome="reset_pending", windows_reset=0)
+    monkeypatch.setattr(mobile, "_cached_phone_usage", _cached_usage)
+    with _authed_client(_app()) as client:
+        answer = client.post("/api/usage/reset", json=_reset_body())
+    assert answer.json()["reset"] == {"outcome": "failed", "windows_reset": 0}
+    assert calls["refresh"] == []
+
+
+def test_reset_answers_without_an_envelope_when_the_cache_cannot_be_read(monkeypatch):
+    """The spend is the fact; the numbers are what could not be re-read."""
+    _patch_reset(monkeypatch, outcome="no_credit", windows_reset=0)
+
+    def unavailable():
+        raise RuntimeError("cached usage unavailable")
+
+    monkeypatch.setattr(mobile, "_cached_phone_usage", unavailable)
+    with _authed_client(_app()) as client:
+        answer = client.post("/api/usage/reset", json=_reset_body())
+    assert answer.status_code == 200
+    assert answer.json() == {"reset": {"outcome": "no_credit", "windows_reset": 0}}
+
+
+def test_reset_answers_the_reset_alone_when_the_post_spend_refresh_fails(monkeypatch):
+    """A timeout after a spend still says what happened; it invents no numbers."""
+    _patch_reset(monkeypatch, outcome="reset", windows_reset=1)
+
+    async def broken(force):
+        raise RuntimeError("vendor refused")
+
+    def unavailable():
+        raise RuntimeError("cached usage unavailable")
+
+    monkeypatch.setattr(mobile, "_refresh_phone_usage", broken)
+    monkeypatch.setattr(mobile, "_cached_phone_usage", unavailable)
+    with _authed_client(_app()) as client:
+        answer = client.post("/api/usage/reset", json=_reset_body())
+    assert answer.status_code == 200
+    assert answer.json() == {"reset": {"outcome": "reset", "windows_reset": 1}}
+
+
+# -- index -> login resolution --------------------------------------------------
+
+
+class _FakeResetStore:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def list_credentials(self, provider=None):
+        return list(self._rows)
+
+    def close(self):
+        pass
+
+
+class _FakeResetController:
+    def __init__(self, snapshot, rows):
+        self._snapshot = snapshot
+        self.auth_store = _FakeResetStore(rows)
+        self.closed = False
+
+    def cached_persisted_usage_reports_read_only(self, provider=None):
+        return self._snapshot
+
+    def close(self):
+        self.closed = True
+
+
+def _fake_row(row_id, email=None, kind="oauth"):
+    return SimpleNamespace(
+        id=row_id, credential_type=kind, identity_key=f"oauth:{row_id}", data={"email": email}
+    )
+
+
+def _snapshot(count, unavailable=False, with_positions=True):
+    reports = [UsageReport(provider="openai", limits=[], fetched_at=1) for _ in range(count)]
+    positions = [(index, count) for index in range(count)] if with_positions else []
+    return ReadOnlyUsageSnapshot(
+        reports=reports, unavailable=unavailable, account_positions=positions
+    )
+
+
+def _serve_reset_controller(monkeypatch, controller):
+    monkeypatch.setattr(
+        ProviderController,
+        "read_only_for_persisted_usage",
+        staticmethod(lambda *args, **kwargs: controller),
+    )
+
+
+def test_reset_identity_resolves_the_index_in_login_row_order(monkeypatch):
+    """Row id order is the ranking key the projection numbers by -- not the
+    alphabetical order of the labels, which would renumber on a rename."""
+    controller = _FakeResetController(
+        _snapshot(2),
+        [_fake_row(7, "zeta@example.test"), _fake_row(3, "alpha@example.test")],
+    )
+    _serve_reset_controller(monkeypatch, controller)
+    assert mobile._phone_reset_identity("openai", 0, 2) == "alpha@example.test"
+    assert mobile._phone_reset_identity("openai", 1, 2) == "zeta@example.test"
+    assert controller.closed is True
+
+
+def test_reset_identity_refuses_when_the_displayed_count_moved(monkeypatch):
+    controller = _FakeResetController(_snapshot(1), [_fake_row(1, "only@example.test")])
+    _serve_reset_controller(monkeypatch, controller)
+    assert mobile._phone_reset_identity("openai", 0, 2) is None
+
+
+def test_reset_identity_refuses_when_the_stored_logins_disagree(monkeypatch):
+    controller = _FakeResetController(
+        _snapshot(2), [_fake_row(1, "one@example.test"), _fake_row(2, "two@example.test")]
+    )
+    _serve_reset_controller(monkeypatch, controller)
+    assert mobile._phone_reset_identity("openai", 0, 3) is None
+
+
+def test_reset_identity_refuses_an_index_past_the_displayed_accounts(monkeypatch):
+    controller = _FakeResetController(
+        _snapshot(2), [_fake_row(1, "one@example.test"), _fake_row(2, "two@example.test")]
+    )
+    _serve_reset_controller(monkeypatch, controller)
+    assert mobile._phone_reset_identity("openai", 2, 2) is None
+
+
+def test_reset_identity_refuses_an_unreadable_snapshot(monkeypatch):
+    controller = _FakeResetController(_snapshot(0, unavailable=True), [_fake_row(1, "x@y.z")])
+    _serve_reset_controller(monkeypatch, controller)
+    assert mobile._phone_reset_identity("openai", 0, 1) is None
+
+
+def test_reset_identity_refuses_an_api_key_row_and_an_unlabelled_one(monkeypatch):
+    key_only = _FakeResetController(_snapshot(1), [_fake_row(1, None, kind="api_key")])
+    _serve_reset_controller(monkeypatch, key_only)
+    assert mobile._phone_reset_identity("openai", 0, 1) is None
+    unlabelled = _FakeResetController(_snapshot(1), [_fake_row(1, None)])
+    _serve_reset_controller(monkeypatch, unlabelled)
+    assert mobile._phone_reset_identity("openai", 0, 1) is None

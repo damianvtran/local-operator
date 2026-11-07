@@ -450,6 +450,18 @@ export type MessageParams = {
   "relay.transcript.turn.completed": undefined;
   "relay.transcript.turn.condensed": undefined;
   "relay.transcript.turn.took": { "duration": string };
+  "relay.usage_reset.badge": { "count": string };
+  "relay.usage_reset.busy": undefined;
+  "relay.usage_reset.cancel": undefined;
+  "relay.usage_reset.confirm": undefined;
+  "relay.usage_reset.confirm_prompt": { "count": number };
+  "relay.usage_reset.confirm_title": { "provider": string; "index": string; "count": string };
+  "relay.usage_reset.outcome_already_redeemed": undefined;
+  "relay.usage_reset.outcome_failed": undefined;
+  "relay.usage_reset.outcome_no_credit": undefined;
+  "relay.usage_reset.outcome_nothing_to_reset": undefined;
+  "relay.usage_reset.outcome_reset": { "count": number };
+  "relay.usage_reset.refused": undefined;
   "wire.aida_cadence.interval_hours.help": undefined;
   "wire.aida_cadence.interval_hours.label": undefined;
   "wire.console.description": undefined;

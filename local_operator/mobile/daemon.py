@@ -9509,6 +9509,13 @@ def build_app(daemon: MobileDaemon):
     # and per-account backoff. Lives in this closure so each app has its own.
     usage_refresh: dict[str, Any] = {"task": None, "task_forced": False, "last_forced_ms": 0}
 
+    # ONE reset per (provider, account index) at a time, also per daemon. Keyed
+    # by the phone's own index rather than an identity because that is all a
+    # request may carry (see ``_phone_reset_identity``); two taps on the same
+    # card therefore collide here, while a sibling account's index does not.
+    # The value is the claim's bookkeeping only -- never a token or a name.
+    usage_resets: dict[tuple[str, int], bool] = {}
+
     async def api_usage_refresh(request: Request) -> Response:
         """``POST /api/usage/refresh`` -- the phone sheet's refresh, body ``{force}``.
 
@@ -9518,23 +9525,36 @@ def build_app(daemon: MobileDaemon):
         respects the 5-minute cache, lease and backoff; ``force:true`` (the
         button) is floored at ``desktop_quota.REFRESH_FLOOR_MS``.
 
-        The task is NEVER cancelled: ``wait_for(shield(task))`` stops waiting
-        after :data:`PHONE_REFRESH_BOUND_S`, but a refresh cancelled mid OAuth
-        rotation could lose a refresh token the vendor already replaced. It
-        finishes in the background and its cache write serves the next open.
-        On timeout/failure the answer is the cached projection plus that status,
-        so the last good numbers stay on screen.
+        The work itself lives in :func:`_answer_phone_refresh`, which the reset
+        route shares: a reset's answer must carry the envelope a refresh would
+        have produced, and a second copy of the lease/floor/status rules is how
+        the two would come to disagree about what "fresh" means.
         """
         denied = gate(request)
         if denied is not None:
             return denied
-        from local_operator.server.routes.desktop_quota import REFRESH_FLOOR_MS
 
         try:
             payload = await request.json()
         except Exception:  # noqa: BLE001 - an empty/garbled body is a plain refresh
             payload = {}
         want_force = isinstance(payload, dict) and payload.get("force") is True
+        body = await _answer_phone_refresh(want_force)
+        if body is None:
+            return JSONResponse({"error": "Cached usage unavailable"}, status_code=503)
+        return JSONResponse(body)
+
+    async def _answer_phone_refresh(want_force: bool) -> dict[str, Any] | None:
+        """Run (or JOIN) ONE bounded phone refresh; ``None`` = no cache either.
+
+        Returns the usage envelope with its ``refresh`` status block. ``None``
+        means the refresh failed AND the cached projection could not be read
+        as a fallback: the refresh route refuses with 503, while the reset
+        route answers the reset alone (the spend is the fact it must report;
+        the numbers are the part it could not re-read).
+        """
+        from local_operator.server.routes.desktop_quota import REFRESH_FLOOR_MS
+
         now_ms = int(time.time() * 1000)
         retry_after_ms: int | None = None
         throttled = False
@@ -9579,7 +9599,7 @@ def build_app(daemon: MobileDaemon):
             try:
                 body = await asyncio.to_thread(_cached_phone_usage)
             except Exception:  # noqa: BLE001
-                return JSONResponse({"error": "Cached usage unavailable"}, status_code=503)
+                return None
             body["refreshed_at"] = None
         elif status == "ok" and forced and body.get("source") != "live":
             # A FORCED refresh exists to reach vendors. The controller isolates
@@ -9596,6 +9616,128 @@ def build_app(daemon: MobileDaemon):
             "joined": joined,
             "retry_after_ms": retry_after_ms,
         }
+        return body
+
+    async def api_usage_reset(request: Request) -> Response:
+        """``POST /api/usage/reset`` -- spend ONE usage-reset credit, body
+        ``{provider, account_index, account_count, redeem_request_id}``.
+
+        IDENTITY-FREE. The phone never names a person: ``account_index`` is the
+        0-based number its own card showed and ``account_count`` the total it
+        displayed, both from the projection this daemon sent. The daemon turns
+        that index back into a stored login itself
+        (:func:`_phone_reset_identity`) so no email, hash or credential id ever
+        crosses the tunnel -- in either direction.
+
+        WHY AN INDEX MISMATCH REFUSES (409 ``accounts_changed``) instead of
+        resolving anyway: an index is a position in a list that can change
+        (a login added or removed since the sheet painted). Resolving the same
+        index against a shorter list silently SPENDS the credit on the sibling
+        that moved into that position -- an irreversible action on an account
+        the operator did not confirm. The refusal asks the phone to refresh,
+        which re-numbers the cards and lets the operator confirm again.
+
+        POST, not GET, for the reason the refresh route gives: this reaches a
+        vendor and writes (a spent credit, dropped cache row, rotated tokens),
+        and ``cross_origin_mutation`` only checks Origin on non-GET methods.
+
+        Answers 200 with ``{"reset": {"outcome", "windows_reset"}}`` plus the
+        usage envelope, EXCEPT the refusals above (409) and a provider with no
+        reset product (422) -- see the codes in the body. ``outcome=failed``
+        stays a 200 because the attempt DID reach the vendor: the credit's fate
+        is unknown, and the phone must show "couldn't confirm" with a retry
+        that reuses ``redeem_request_id`` rather than a refusal that implies
+        nothing was spent.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001 - a garbled body is a refusal, never a crash
+            payload = None
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"error": "Invalid reset request", "code": "bad_request"}, status_code=400
+            )
+        provider = payload.get("provider")
+        account_index = payload.get("account_index")
+        account_count = payload.get("account_count")
+        redeem_request_id = payload.get("redeem_request_id")
+        # EXACT types, never ``isinstance``: ``bool`` is an ``int`` in Python, so
+        # a ``true`` index would otherwise resolve to account 1, and a float or
+        # numeric string is a wire bug rather than a number the daemon may
+        # coerce onto some login.
+        if (
+            not isinstance(provider, str)
+            or not provider
+            or len(provider) > 64
+            or type(account_index) is not int
+            or account_index < 0
+            or type(account_count) is not int
+            or account_count < 1
+            or not isinstance(redeem_request_id, str)
+            or not redeem_request_id
+            or len(redeem_request_id) > 200
+        ):
+            return JSONResponse(
+                {"error": "Invalid reset request", "code": "bad_request"}, status_code=400
+            )
+        # The SAME set the controller refuses on, imported rather than repeated:
+        # two copies of "which providers sell resets" is how the phone would
+        # come to offer a button the controller answers with a generic failure.
+        from local_operator.providers.controller import _RESET_CREDIT_PROVIDERS
+
+        if provider not in _RESET_CREDIT_PROVIDERS:
+            logger.info("phone usage reset: refused for a provider without resets")
+            return JSONResponse(
+                {"error": "This account has no usage resets", "code": "not_supported"},
+                status_code=422,
+            )
+        claim = (provider, account_index)
+        if usage_resets.get(claim):
+            return JSONResponse(
+                {"error": "A reset is already in flight", "code": "in_flight"}, status_code=409
+            )
+        # Claim BEFORE the first await: the resolution below yields to the loop,
+        # and a double tap must lose here rather than spend two credits.
+        usage_resets[claim] = True
+        try:
+            identity = await asyncio.to_thread(
+                _phone_reset_identity, provider, account_index, account_count
+            )
+            if identity is None:
+                logger.info("phone usage reset: refused, the account list moved")
+                return JSONResponse(
+                    {"error": "The account list changed", "code": "accounts_changed"},
+                    status_code=409,
+                )
+            result = await _consume_phone_usage_reset(provider, identity, redeem_request_id)
+        finally:
+            usage_resets.pop(claim, None)
+        outcome = result.outcome if result.outcome in _PHONE_RESET_OUTCOMES else "failed"
+        windows_reset = result.windows_reset
+        if type(windows_reset) is not int or windows_reset < 0:
+            windows_reset = 0
+        body: dict[str, Any] = {}
+        if outcome in _PHONE_RESET_REFRESH_OUTCOMES:
+            # The credit is spent and the shared cache row was dropped: the
+            # numbers on the phone are stale by construction, so the answer
+            # re-fetches through the refresh route's own bounded path. A
+            # timeout still answers this route's envelope-less reset.
+            refreshed = await _answer_phone_refresh(True)
+            if refreshed is not None:
+                body = refreshed
+        else:
+            # Nothing was spent, so the cached numbers are still true and no
+            # vendor call is needed. A reset whose fate is UNKNOWN (``failed``)
+            # deliberately skips the refresh: re-reading would quietly replace
+            # the numbers under the sentence that says they are unconfirmed.
+            try:
+                body = await asyncio.to_thread(_cached_phone_usage)
+            except Exception:  # noqa: BLE001 - the reset stands without the numbers
+                body = {}
+        body["reset"] = {"outcome": outcome, "windows_reset": windows_reset}
         return JSONResponse(body)
 
     async def api_models(request: Request) -> Response:
@@ -10747,6 +10889,9 @@ def build_app(daemon: MobileDaemon):
         # The ONLY phone usage path that reaches vendors and writes the cache;
         # GET /api/usage above stays write-free (see PAID_USAGE.md "Refresh").
         Route("/api/usage/refresh", api_usage_refresh, methods=["POST"]),
+        # Spending a reset credit from the phone. POST for the same reason: it
+        # reaches a vendor and writes (credit, cache row, rotated token).
+        Route("/api/usage/reset", api_usage_reset, methods=["POST"]),
         Route("/api/config/events", api_config_events),
         Route("/api/settings/account-routing", api_account_routing, methods=["GET", "PATCH"]),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),
@@ -11049,6 +11194,118 @@ def _default_start_cwd() -> str:
     return str(Path.home())
 
 
+#: The five answers a phone's reset card may show. Anything else the controller
+#: cannot name reads as ``failed``: an unknown outcome is an UNKNOWN spend, and
+#: that is the one outcome whose copy says so.
+_PHONE_RESET_OUTCOMES = frozenset(
+    {"reset", "nothing_to_reset", "no_credit", "already_redeemed", "failed"}
+)
+
+#: Outcomes after which the shared usage-cache row is GONE (see
+#: :meth:`ProviderController.consume_usage_reset`), so the reset route re-fetches
+#: instead of serving numbers the spend invalidated.
+_PHONE_RESET_REFRESH_OUTCOMES = frozenset({"reset", "already_redeemed"})
+
+
+def _phone_reset_identity(provider: str, account_index: int, account_count: int) -> str | None:
+    """The stored login the phone's "Account N" numbers, or ``None`` when it cannot be proven.
+
+    The phone sends an INDEX, never a name (no email, hash or credential id may
+    cross the tunnel in either direction), so the daemon turns that index back
+    into the identity :meth:`ProviderController.consume_usage_reset` selects a
+    credential by -- here, and only in this process.
+
+    Resolution mirrors the projection exactly, and checks BOTH halves before
+    naming anyone:
+
+    * the provider's cached reports must still number ``account_count`` accounts
+      -- the count the phone displayed. If the list moved since it painted, the
+      same index names a different login now.
+    * the stored oauth rows must be exactly those accounts, ordered by
+      credential row id: that is the ranking key
+      :meth:`ProviderController.order_persisted_usage_reports` sorts by, and
+      the reason "Account N" stays stable across reads.
+
+    Any disagreement is ``None`` -- a refusal, never a guess. A reset cannot be
+    refunded on the wrong login, so an unresolvable index must ask the phone to
+    refresh rather than reset a sibling.
+    """
+    from typing import cast
+
+    from local_operator.providers.auth_store import AuthStore, credential_identity
+    from local_operator.providers.controller import ProviderController
+
+    try:
+        controller = ProviderController.read_only_for_persisted_usage()
+    except Exception:  # noqa: BLE001 -- an unopenable store cannot prove an index
+        return None
+    try:
+        try:
+            snapshot = controller.cached_persisted_usage_reports_read_only(provider)
+        except Exception:  # noqa: BLE001 -- unreadable is not "no accounts"
+            return None
+        if snapshot.unavailable or len(snapshot.reports) != account_count:
+            return None
+        # ``account_positions`` is empty only on the early (Muse-only) answer,
+        # which carries no resets anyway; a populated list that disagrees with
+        # the count the phone showed means a different account set was read.
+        if snapshot.account_positions and any(
+            count != account_count for _, count in snapshot.account_positions
+        ):
+            return None
+        if account_index >= account_count:
+            return None
+        rows = controller.auth_store.list_credentials(provider)
+    finally:
+        try:
+            controller.close()
+        finally:
+            # The read-only factory always builds the concrete AuthStore, whose
+            # Protocol type omits close (the same note the cached GET carries).
+            cast(AuthStore, controller.auth_store).close()
+    oauth = sorted(
+        (row for row in rows if getattr(row, "credential_type", None) == "oauth"),
+        key=lambda row: int(getattr(row, "id", 0) or 0),
+    )
+    if len(oauth) != account_count:
+        return None
+    try:
+        return credential_identity(oauth[account_index])
+    except Exception:  # noqa: BLE001 -- an unlabelled row cannot be named, so no reset
+        return None
+
+
+async def _consume_phone_usage_reset(provider: str, identity: str, redeem_request_id: str) -> Any:
+    """Spend one credit through a WRITING persisted-only controller.
+
+    A different factory from the read-only seam on purpose: the spend rotates the
+    account's OAuth token in ``auth.db`` and drops the shared usage-cache row,
+    neither of which a read-only handle may do. Built and used on the loop thread
+    (the SQLite handles are thread-affine, as the refresh path notes) and closed
+    in the same call, so no handle outlives the request.
+
+    ``identity`` is resolved by the caller from the phone's index and is used
+    ONLY here -- it never reaches the response.
+    """
+    from typing import cast
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.controller import ProviderController
+    from local_operator.providers.usage import ResetConsumeResult
+
+    try:
+        controller = ProviderController.for_persisted_usage_refresh()
+    except Exception:  # noqa: BLE001 -- an unopenable store is an UNCONFIRMED attempt
+        return ResetConsumeResult(outcome="failed", detail="store unavailable")
+    try:
+        return await controller.consume_usage_reset(provider, identity, redeem_request_id)
+    finally:
+        try:
+            controller.close()
+        finally:
+            cast(AuthStore, controller.auth_store).close()
+
+
 def _cached_phone_usage() -> dict[str, Any]:
     """Minimum paired-phone display payload, never credentials or live usage.
 
@@ -11102,8 +11359,9 @@ def _phone_usage_projection(
 
     Every key added after the first release (``account_index``,
     ``account_count``, ``state``, ``credential_invalid``, ``provider_name``,
-    and per limit ``remaining_fraction``/``tone``) is ADDITIVE: older phone
-    builds read only the original keys and must keep working.
+    ``resets_available``, and per limit ``remaining_fraction``/``tone``) is
+    ADDITIVE: older phone builds read only the original keys and must keep
+    working.
     """
     import math
 
@@ -11204,6 +11462,16 @@ def _phone_usage_projection(
                     "tone": tone,
                 }
             )
+        # Spendable reset credits, or None when the vendor reported no
+        # trustworthy count. The SAME exact-int rule the fetcher and the panel
+        # apply: ``bool`` is an ``int`` in Python, and a count that reaches a
+        # button which SPENDS something must be a plain non-negative int. The
+        # count travels; the identity it would be spent on never does -- the
+        # phone addresses an account by index and the daemon resolves it
+        # (``_phone_reset_identity``).
+        resets_available = getattr(report, "resets_available", None)
+        if type(resets_available) is not int or resets_available < 0:
+            resets_available = None
         result.append(
             {
                 "provider": provider,
@@ -11219,6 +11487,7 @@ def _phone_usage_projection(
                 "account_count": account_count,
                 "state": usage_report_state(report),
                 "credential_invalid": report.credential_invalid,
+                "resets_available": resets_available,
             }
         )
     return result
