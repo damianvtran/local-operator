@@ -10877,7 +10877,12 @@ class RelayServer:
 
         Deliberately NOT parsed here: the runtime validates a model selection
         against the provider catalogue it actually has, and a second validator in
-        the relay would be a second answer to "is this model usable". A refusal
+        the relay would be a second answer to "is this model usable". That
+        validation is ASKED FOR with ``offered_only``: a bare ``set_model``
+        applies any id (the local ``/model`` escape hatch), so a remote create
+        with an id the catalogue here does not serve used to apply silently and
+        fail its first turn (QA round 1, Q2 on #3554). A runtime from before the
+        flag ignores it and applies as it always did. A refusal
         is reported (never swallowed) because a create that silently ran a
         different model than the caller asked for is the kind of quiet wrongness
         that costs a session.
@@ -10906,6 +10911,7 @@ class RelayServer:
                     "provider": str(model.get("provider")),
                     "model_id": str(model.get("model_id")),
                     **({"effort": level} if level else {}),
+                    "offered_only": True,
                 },
                 timeout_s=self.settings.op_wait_s,
             )
@@ -10921,10 +10927,14 @@ class RelayServer:
                 "detail": _model_not_applied(model, "no reply from the session", certain=False),
             }
         if reply.get("op") == "error":
-            return {
-                "applied": False,
-                "detail": _model_not_applied(model, str(reply.get("message") or "refused")),
-            }
+            reason = str(reply.get("message") or "refused")
+            if reply.get("model_refusal") == "model_unknown":
+                # The way OUT, worded here because only this hop knows the device
+                # a person must open: the runtime's sentence names no device, and
+                # "this device" reads as the origin on the receipt (design D2 on
+                # #3554). Its own line, the house form, so neither soft-wraps.
+                reason += f"\nlist them: /model in a lop session on {self._own_label()}"
+            return {"applied": False, "detail": _model_not_applied(model, reason)}
         return {"applied": True, "detail": ""}
 
     def _prompt_on(

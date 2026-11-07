@@ -1120,6 +1120,9 @@ async def test_the_device_scope_remedy_survives_the_runtime_error_frame(
     assert len(message) <= 400, len(message)
     assert message.endswith(f"\n`{command}`"), message
     assert message.startswith("catalogue needs a device-scoped share")
+    # Design D4 = QA Q4: the clause naming WHERE to run it survives the cut.
+    lead = message.splitlines()[-2]
+    assert "To allow it, run on " in lead and lead.endswith(":"), message
 
     # The relay's receipt, from that exact frame (only the dial is scripted).
     class _Dial:
@@ -1189,3 +1192,153 @@ def test_an_error_without_a_trailing_command_is_cut_as_before():
     assert bounded_error_message(short) == short
     kept = bounded_error_message("why " * 120 + "\n`lop network credential share openai`")
     assert len(kept) <= 400 and kept.endswith("…\n`lop network credential share openai`")
+
+
+def test_a_cut_reason_keeps_the_lead_in_that_says_where_to_run_the_command():
+    """Design D4 = QA Q4 on #3554: the cut dropped "To allow it, run on <owner>:".
+
+    Keeping only the command left a reader with a pasteable line and no word on
+    WHICH device to paste it on. The reason's last sentence, when it ends in
+    ``:``, now travels with the command, and the cut falls mid-reason instead.
+    """
+    from local_operator.session.runtime.server import bounded_error_message
+
+    command = "`lop network credential share openai --with dev-b --network n1 --scope device`"
+    text = (
+        "catalogue needs a device-scoped share: "
+        + "why " * 90
+        + ("is owner-a's decision. To allow it, run on owner-a:\n" + command)
+    )
+    kept = bounded_error_message(text)
+    assert len(text) > 400 >= len(kept), (len(text), len(kept))
+    assert kept.startswith("catalogue needs a device-scoped share: ")
+    assert kept.endswith("… To allow it, run on owner-a:\n" + command), kept
+    # A last sentence that does not introduce the command keeps the old cut.
+    plain = "why " * 120 + "the end.\n" + command
+    assert bounded_error_message(plain).endswith("…\n" + command)
+
+
+@pytest.mark.asyncio
+async def test_the_worker_spends_a_deadline_fixed_at_submission(monkeypatch, tmp_path):
+    """Review m1 on #3554: the 5.5 s clock started when a pool thread picked the job up.
+
+    ``prepare_selection``'s outer wait starts at submission, so pool queueing (or
+    a caller's deadline already part-spent) let it expire while the fetch still
+    thought it had its full budget. The deadline is now computed at submission
+    and handed in, with the fetch's margin under whatever the outer wait is.
+    """
+    from local_operator.providers import shared_catalogue
+
+    seen: list[dict[str, Any]] = []
+
+    def worker(provider: str, root: Any, **kwargs: Any) -> None:
+        seen.append(kwargs)
+
+    monkeypatch.setattr(shared_catalogue, "prepare_selection_sync", worker)
+    margin = shared_catalogue.SELECTION_WAIT_S - shared_catalogue.SELECTION_FETCH_S
+
+    before = time.monotonic()
+    await shared_catalogue.prepare_selection("openai", tmp_path)
+    after = time.monotonic()
+    assert "deadline" in seen[-1], seen
+    assert (
+        before + shared_catalogue.SELECTION_FETCH_S
+        <= seen[-1]["deadline"]
+        <= after + shared_catalogue.SELECTION_FETCH_S
+    )
+
+    before = time.monotonic()
+    await shared_catalogue.prepare_selection("openai", tmp_path, deadline=before + 3.0)
+    # Never past the outer wait minus the fetch's own margin.
+    assert seen[-1]["deadline"] <= before + 3.0 - margin + 1e-6, (seen[-1], before)
+
+
+def test_an_offered_only_switch_refuses_only_what_the_catalogue_rules_out(monkeypatch):
+    """QA round 1, Q2 on #3554: the membership check, and its three accepting cases."""
+    from local_operator.model import discovery
+    from local_operator.model.configure import ModelSelectionRefused
+    from local_operator.session.runtime import serving
+
+    offered: dict[str, set[str] | None] = {"openai": {"gpt-fixture-sol"}, "openrouter": None}
+    monkeypatch.setattr(
+        discovery, "offered_model_ids", lambda provider, **_kw: offered.get(provider)
+    )
+    serving._require_offered("openai", "gpt-fixture-sol", None)  # noqa: SLF001
+    # The ``<hosting>/`` spelling ``build_model_spec`` canonicalises is the same model.
+    serving._require_offered("openai", "openai/gpt-fixture-sol", None)  # noqa: SLF001
+    # A catalogue that cannot be enumerated offline accepts: unlooked is not absent.
+    serving._require_offered("openrouter", "anything/at-all", None)  # noqa: SLF001
+    with pytest.raises(ModelSelectionRefused) as refused:
+        serving._require_offered("openai", "gpt-qa-nope", None)  # noqa: SLF001
+    assert refused.value.code == "model_unknown"
+    assert str(refused.value) == "unknown model for openai"
+
+
+@pytest.mark.asyncio
+async def test_a_remote_create_refuses_a_model_the_owner_does_not_offer(
+    borrower, tmp_path, monkeypatch
+):
+    """QA round 1, Q2 on #3554: ``--create --model openai/<unknown>`` applied silently.
+
+    The real borrower runtime and the real relay hop: the relay's ``set_model``
+    now asks for ``offered_only``, the runtime refreshes the owner's catalogue
+    and refuses an id it does not offer BEFORE switching, and the receipt says
+    so in the not-applied form with the way to list what is offered. The valid
+    id is the control, and a bare ``set_model`` (the local ``/model`` escape
+    hatch) still applies an unlisted id as it always did.
+    """
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.model.configure import invalidate_model_info_cache
+    from local_operator.network import relay
+    from local_operator.session.runtime import serving
+    from tests.unit.session.runtime.test_daemon_serving_plane import (
+        _boot,
+        _recording_stream,
+    )
+
+    mesh, plain, controller, state = borrower
+    invalidate_model_info_cache()
+    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fixture-unknown-switch")
+    monkeypatch.setattr(serving, "_switch_executor_pool", pool)
+    calls: list[int] = []
+    session, handle, runtime = await _boot(tmp_path, _recording_stream(calls))
+    server = relay.RelayServer(
+        root=mesh.b.root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    monkeypatch.setattr(server, "_session_record", lambda _sid: runtime.record)
+    sid = runtime.record.session_id
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        started_on = f"{session.model.provider}/{session.model.model_id}"
+        unknown = await asyncio.to_thread(
+            server._set_model_on, sid, {"provider": "openai", "model_id": "gpt-qa-nope"}
+        )
+        after_unknown = f"{session.model.provider}/{session.model.model_id}"
+        known = await asyncio.to_thread(
+            server._set_model_on, sid, {"provider": "openai", "model_id": "gpt-fixture-sol"}
+        )
+        after_known = f"{session.model.provider}/{session.model.model_id}"
+        await client.connect(runtime.record, sid)
+        await client.set_model("openai", "gpt-qa-local-escape")
+        after_bare = f"{session.model.provider}/{session.model.model_id}"
+    finally:
+        await client.detach()
+        runtime.close()
+        await session.dispose()
+        pool.shutdown(wait=True, cancel_futures=True)
+    label = server._own_label()  # noqa: SLF001
+    assert unknown == {
+        "applied": False,
+        "detail": (
+            "model: openai/gpt-qa-nope not applied — the session keeps its own model\n"
+            "why: unknown model for openai\n"
+            f"list them: /model in a lop session on {label}"
+        ),
+    }, unknown
+    assert after_unknown == started_on != "openai/gpt-qa-nope"
+    assert known == {"applied": True, "detail": ""}, known
+    assert after_known == "openai/gpt-fixture-sol"
+    assert after_bare == "openai/gpt-qa-local-escape"
