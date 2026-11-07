@@ -530,3 +530,130 @@ def test_an_unparseable_query_body_is_not_a_verdict(monkeypatch: pytest.MonkeyPa
         None,
         "registered; the status field could not be read",
     )
+
+
+# --------------------------------------------------------------------------
+# Specifier escaping (QA finding Q4 on PR #3069): a ``%`` in a home, config or
+# log path must reach systemd as ``%%``, or systemd expands it as a specifier.
+# --------------------------------------------------------------------------
+
+#: A path segment carrying both hazards: ``%h`` is a REAL specifier (it would
+#: silently become the home directory) and the space splits unquoted values.
+_HOSTILE = "ho%h me"
+
+
+def _lone_percent(value: str) -> bool:
+    """Whether ``value`` still holds a ``%`` systemd would read as a specifier."""
+    return "%" in value.replace("%%", "")
+
+
+def test_escape_specifiers_doubles_every_percent_and_round_trips() -> None:
+    raw = "/home/a%b/%h/100%"
+    escaped = supervisors.escape_specifiers(raw)
+    assert escaped == "/home/a%%b/%%h/100%%"
+    assert not _lone_percent(escaped)
+    assert supervisors.unescape_specifiers(escaped) == raw
+
+
+def test_append_lines_escape_the_percent_and_leave_the_space_bare(tmp_path: Path) -> None:
+    """``append:`` takes the rest of the line verbatim: no quotes, only ``%%``.
+
+    systemd.exec(5) parses ``StandardOutput=append:path`` as one path with
+    specifier expansion and no quote removal, so quoting would put a literal
+    ``"`` in the filename while a space is already safe.
+    """
+    log = tmp_path / _HOSTILE / "logs" / "network.log"
+    lines = supervisors.append_redirect_lines(log)
+    escaped = str(log).replace("%", "%%")
+    assert lines == [f"StandardOutput=append:{escaped}", f"StandardError=append:{escaped}"]
+    for line in lines:
+        value = line.split("append:", 1)[1]
+        assert not _lone_percent(value) and '"' not in value
+        assert supervisors.unescape_specifiers(value) == str(log)
+
+
+def test_relay_unit_for_a_hostile_config_root_escapes_every_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The Q4 reproduction: the relay unit for a root containing ``%h``.
+
+    Before the fix ``StandardOutput=append:…/ho%h me/…`` was emitted raw;
+    systemd expanded ``%h`` and the relay died at spawn with ``209/STDOUT``.
+    Every line that carries a path must now hold no lone ``%``.
+    """
+    from local_operator.network import relay
+
+    root = tmp_path / _HOSTILE / ".local-operator"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setattr(supervisors, "systemd_version", lambda: 255)
+    unit = relay.render_systemd(4099)
+    for line in unit.splitlines():
+        assert not _lone_percent(line), line
+    redirects = [line for line in unit.splitlines() if "append:" in line]
+    assert len(redirects) == 2
+    for line in redirects:
+        assert supervisors.unescape_specifiers(line.split("append:", 1)[1]) == str(relay.log_path())
+    assert f'Environment="LOCAL_OPERATOR_CONFIG_DIR={str(root).replace("%", "%%")}"' in unit
+
+
+def test_browser_unit_quotes_its_interpreter_and_escapes_its_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The one renderer that built ``ExecStart`` and ``append:`` by hand."""
+    from local_operator import procname
+    from local_operator.browser_bridge import install
+
+    image = tmp_path / _HOSTILE / "bin" / "python3"
+    log = tmp_path / _HOSTILE / "logs" / "browser.log"
+    monkeypatch.setattr(procname, "supervised_image", lambda: image)
+    monkeypatch.setattr(install, "log_path", lambda: log)
+    unit = install.render_systemd(4099, version=255)
+    lines = unit.splitlines()
+    escaped_image = str(image).replace("%", "%%")
+    assert (
+        f'ExecStart="{escaped_image}" -m local_operator.browser_bridge.daemon --port 4099' in lines
+    )
+    assert f"StandardOutput=append:{str(log).replace('%', '%%')}" in lines
+    for line in lines:
+        assert not _lone_percent(line), line
+
+
+@pytest.mark.skipif(
+    shutil.which("systemd-analyze") is None, reason="needs systemd-analyze (Linux CI)"
+)
+def test_systemd_analyze_accepts_the_escaped_unit_and_rejects_the_raw_one(tmp_path: Path) -> None:
+    """Real-systemd proof, on the Linux CI runner where ``systemd-analyze`` exists.
+
+    The interpreter sits under a directory literally named ``ho%h me``. The
+    escaped, quoted ``ExecStart`` must verify; the raw spelling this replaced is
+    the negative control — systemd splits it at the space and expands ``%h``, so
+    ``verify`` reports a non-executable command. Without the control a verify
+    that never checked executability would pass vacuously.
+    """
+    home = tmp_path / _HOSTILE
+    (home / "bin").mkdir(parents=True)
+    image = home / "bin" / "python3"
+    image.symlink_to(os.path.realpath(shutil.which("python3") or "/usr/bin/python3"))
+    log = home / "logs" / "x.log"
+
+    def verify(exec_start: str, redirects: list[str]) -> subprocess.CompletedProcess[str]:
+        unit = tmp_path / "lop-escape-probe.service"
+        unit.write_text(
+            supervisors.render_systemd_unit(
+                description="probe", exec_start=exec_start, post_lines=redirects
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["systemd-analyze", "verify", str(unit)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    good = verify(f"{supervisors.quoted(str(image))} -V", supervisors.append_redirect_lines(log))
+    assert "not executable" not in good.stderr, good.stderr
+    assert "specifier" not in good.stderr.lower(), good.stderr
+    bad = verify(f"{image} -V", [f"StandardOutput=append:{log}"])
+    assert "not executable" in bad.stderr or bad.returncode != 0, bad.stderr

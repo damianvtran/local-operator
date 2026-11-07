@@ -317,6 +317,24 @@ def systemd_writes_log_file() -> bool:
     return version is not None and version >= MIN_SYSTEMD_APPEND_VERSION
 
 
+def escape_specifiers(value: str) -> str:
+    """Double every ``%`` so systemd reads it literally (systemd.unit(5), "Specifiers").
+
+    systemd expands ``%h``/``%u``/... in almost every directive, quoted or not,
+    and a lone ``%`` before an unknown letter makes the line invalid. A store,
+    home or log path is user data, so any of them reaching a unit must pass
+    through here — directly for directives whose value is taken verbatim (the
+    ``append:`` path in :func:`append_redirect_lines`), or via :func:`quoted` for
+    the ones that also split on whitespace.
+    """
+    return value.replace("%", "%%")
+
+
+def unescape_specifiers(value: str) -> str:
+    """Inverse of :func:`escape_specifiers`, for code that reads a unit back."""
+    return value.replace("%%", "%")
+
+
 def quoted(value: str) -> str:
     """Quote one value for systemd's OWN grammar, which is not shell escaping.
 
@@ -342,7 +360,7 @@ def quoted(value: str) -> str:
     the task XML: an interpreter or store path is user data, and every grammar
     that carries it needs its own escaping rather than a shared guess.
     """
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+    return '"' + escape_specifiers(value.replace("\\", "\\\\").replace('"', '\\"')) + '"'
 
 
 def output_redirect_lines(log: Path) -> list[str]:
@@ -354,7 +372,23 @@ def output_redirect_lines(log: Path) -> list[str]:
     """
     if not systemd_writes_log_file():
         return []
-    return [f"StandardOutput=append:{log}", f"StandardError=append:{log}"]
+    return append_redirect_lines(log)
+
+
+def append_redirect_lines(log: Path) -> list[str]:
+    """The two ``append:`` lines for ``log``, with no systemd version gate.
+
+    ``StandardOutput=append:<path>`` takes the rest of the line as the path —
+    no quote removal, so quoting it would put literal ``"`` in the filename,
+    and a space is already safe — but it DOES expand specifiers. Measured as
+    QA finding Q4 on PR #3069: a config root containing ``%h`` rendered an
+    unescaped log path, systemd expanded it to the home directory, and the
+    relay died at spawn with ``209/STDOUT``. So the path is percent-escaped and
+    nothing else. Split from :func:`output_redirect_lines` because the browser
+    bridge applies its own (test-injectable) version gate.
+    """
+    path = escape_specifiers(str(log))
+    return [f"StandardOutput=append:{path}", f"StandardError=append:{path}"]
 
 
 def systemd_path() -> str:
