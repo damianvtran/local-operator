@@ -13473,8 +13473,10 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
                 "  Settle it by choosing a side for each conflicted file (that side's whole file):"
             )
             for side in ("local", "remote"):
-                # i18n: ignore a runnable command line, a technical identifier
-                print(f"    lop skills sync --name {_safe(item.get('name'))} --prefer {side}")
+                print(
+                    # i18n: ignore a runnable command line, a technical identifier
+                    f"    lop skills sync --name {_safe(item.get('name'))} --prefer {side}"
+                )
     return exit_code
 
 
