@@ -27,18 +27,24 @@ from local_operator.prompts_api import build_system_blocks, split_tail_sections
 HEAD_MARKER = "## Your name"
 
 
-def _args() -> argparse.Namespace:
+def _args(resume: str | None = None) -> argparse.Namespace:
     return argparse.Namespace(
-        hosting="test", model="test", agent_name=None, agent_id=None, yolo=True, train=False
+        hosting="test",
+        model="test",
+        agent_name=None,
+        agent_id=None,
+        yolo=True,
+        train=False,
+        resume=resume,
     )
 
 
-async def _session(root: Path) -> Any:
+async def _session(root: Path, resume: str | None = None) -> Any:
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
     from local_operator.session_factory import create_session
 
-    return await create_session(_args(), ConfigManager(root), AgentRegistry(root))
+    return await create_session(_args(resume), ConfigManager(root), AgentRegistry(root))
 
 
 def _state_rows(session: Any) -> list[Any]:
@@ -82,8 +88,8 @@ async def test_a_renamed_cos_reads_her_name_in_the_head_block(
         blocks = await session._prepare_system_blocks()
     finally:
         await session.dispose()
-    assert "Your name is Jian-Yang." in blocks[0]
-    assert "introduce yourself, sign messages and refer to yourself as Jian-Yang" in blocks[0]
+    assert "Your name is Jian-Yang, chosen by the operator" in blocks[0]
+    assert "introduce and sign as Jian-Yang" in blocks[0]
     # After the profile body, so a stale "You are Aida" in it is the earlier,
     # overridden statement.
     assert blocks[0].rindex(HEAD_MARKER) > blocks[0].find("<user_instructions>")
@@ -150,10 +156,7 @@ async def test_a_mid_session_rename_is_one_delta_and_the_prefix_stays(
         details = rows[0].payload["details"]
         assert details["blocks"] == {
             "3": {
-                "identity": (
-                    "<identity>\nRenamed this session: your name is now Jian-Yang "
-                    "(supersedes the name above).\n</identity>"
-                )
+                "identity": "<identity>\nYour name is now Jian-Yang.\n</identity>"
             }
         }
         assert "## Your name" in details["text"]
@@ -174,8 +177,41 @@ async def test_a_mid_session_rename_is_one_delta_and_the_prefix_stays(
         blocks = await fresh._prepare_system_blocks()
     finally:
         await fresh.dispose()
-    assert "Your name is Jian-Yang." in blocks[0]
+    assert "Your name is Jian-Yang," in blocks[0]
     assert "<identity>" not in blocks[3]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_after_a_rename_carries_the_name_in_its_prefix(
+    isolated_root: Path, as_cos: None
+) -> None:
+    """A new process (resume) freezes the CURRENT name into the head itself.
+
+    This harness keeps one persisted prefix across compactions (a compaction
+    re-anchors tail state, it does not rebuild block 0), so the prefix-rebuild
+    path a rename reaches is the next provider: a fresh session or a resume.
+    A resume whose stored prefix named the old name starts ONE new prefix
+    epoch — the same rule as an edited AGENTS.md — and carries no tail delta.
+    """
+    from local_operator.aida import naming
+
+    session = await _session(isolated_root)
+    try:
+        session_id = session._session_id
+        first = await session._prepare_system_blocks()
+        assert "Your name is Aida." in first[0]
+    finally:
+        await session.dispose()
+    naming.set_name(isolated_root, "Jian-Yang")
+    resumed = await _session(isolated_root, resume=session_id)
+    try:
+        blocks = await resumed._prepare_system_blocks()
+        assert "Your name is Jian-Yang," in blocks[0]
+        assert "<identity>" not in blocks[3]
+        assert len(_prefix_rows(resumed)) == 2
+        assert all("<identity>" not in str(row.payload) for row in _state_rows(resumed))
+    finally:
+        await resumed.dispose()
 
 
 @pytest.mark.asyncio
@@ -194,6 +230,13 @@ async def test_renaming_back_ships_a_removal(isolated_root: Path, as_cos: None) 
         assert rows[1].payload["details"]["blocks"] == {"3": {"identity": ""}}
     finally:
         await session.dispose()
+
+
+def test_the_default_sentence_tracks_the_packaged_default_name() -> None:
+    from local_operator.aida.naming import DEFAULT_NAME
+
+    blocks = build_system_blocks([], "<skills/>", "", "2026-11-07", identity_name=DEFAULT_NAME)
+    assert blocks[0].endswith(f"## Your name\n\nYour name is {DEFAULT_NAME}.")
 
 
 def test_builder_is_byte_identical_without_a_name() -> None:

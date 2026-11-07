@@ -1164,13 +1164,20 @@ def build_system_blocks(
         # must be the later, more specific statement and say outright which
         # one wins. Model-facing English by design.
         name = identity_name.strip()
-        instructions = (
-            f"{instructions}\n\n## Your name\n\n"
-            f"Your name is {name}. It is the name the operator chose for you "
-            "(the same one Team Bridge and the sidebar show). Any instruction "
-            "above that calls you Aida is using your default name: introduce "
-            f"yourself, sign messages and refer to yourself as {name}."
-        )
+        # Kept to one sentence: it is in every request of her session (cached,
+        # but still billed at the cache-read rate), so it says only the name
+        # and, once renamed, that it beats the default "Aida" an older profile
+        # may still use. The unrenamed case has nothing to override. The
+        # literal mirrors ``aida.naming.DEFAULT_NAME`` (this module stays off
+        # her package's import path, R17); ``test_cos_prompt_name`` pins them.
+        if name == "Aida":
+            sentence = "Your name is Aida."
+        else:
+            sentence = (
+                f"Your name is {name}, chosen by the operator; where text above "
+                f"calls you Aida, that is the default: introduce and sign as {name}."
+            )
+        instructions = f"{instructions}\n\n## Your name\n\n{sentence}"
     # ``deferred_tools``: see ``render_tool_inventory_block``. A live session
     # re-renders this block against its own deferral state
     # (``Session._reconcile_tool_inventory``), so only a caller with no session
@@ -1237,10 +1244,7 @@ def build_system_blocks(
         # ONE line on purpose: it is re-sent with every later request of the
         # session, so it states only the new fact; the head sentence already
         # says how to use a name.
-        tail = (
-            f"{tail}\n\n<identity>\nRenamed this session: your name is now {name} "
-            "(supersedes the name above).\n</identity>"
-        )
+        tail = f"{tail}\n\n<identity>\nYour name is now {name}.\n</identity>"
     if interactive is not None:
         # WHO CAN ANSWER, stated in BOTH directions rather than only the negative
         # one. A question asked now is answered when the operator LOOKS, not when
