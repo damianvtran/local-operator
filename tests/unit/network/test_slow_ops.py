@@ -341,7 +341,14 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # Trusted-peer memory sync (network/memory.py): a bounded batch apply into the
             # SQLite store, 60 s like the other whole-bundle appliers.
             "net_memory",
+            # The one CORE op on the lane (relay.py, not a slice): a create holds its
+            # first turn for up to ``FIRST_TURN_WAIT_S``, which inline stalled the
+            # whole link (#3547 review MAJOR-1/2).
+            "net_session_create",
         }
+        assert server.slow_op_deadline("net_session_create") == relay.create_op_deadline_s(
+            server.settings.op_wait_s
+        )
         assert server.slow_op_deadline("net_sync") == sync.SYNC_OP_DEADLINE_S
         assert server.slow_op_deadline("net_definitions") == definitions.DEFINITIONS_OP_DEADLINE_S
         # NIT (agent review round 1): the MCP slice joined the slow set but was

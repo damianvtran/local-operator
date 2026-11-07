@@ -25,6 +25,10 @@ the cells assert, not the absolute numbers.
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -75,6 +79,40 @@ def _pair_of(request: pytest.FixtureRequest) -> Devices:
     return pair
 
 
+@contextmanager
+def _link_to_owner(
+    peer_pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    handle_type: type[plane._Handle],  # noqa: SLF001
+) -> Iterator[tuple[relay.PeerLink, relay.RelayServer]]:
+    """A live A→B link with B serving runtimes of ``handle_type``; yields (link, B)."""
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    # THE HISTORICAL BUDGET, shrunk: before this fix the first turn was waited
+    # for ``op_wait_s``; the slow cells' turns outlive it.
+    monkeypatch.setattr(server_b, "settings", replace(server_b.settings, op_wait_s=1.0))
+    host_b, port_b = plane._listen(server_b)  # noqa: SLF001
+    monkeypatch.setattr(plane, "_Handle", handle_type)
+    served = plane._serve(monkeypatch, server_b.root)  # noqa: SLF001
+    link = plane._dial_to(server_a, record, host_b, port_b)  # noqa: SLF001
+    try:
+        yield link, server_b
+    finally:
+        link.close("test")
+        plane._stop_all(served)  # noqa: SLF001
+
+
+def _create_frame(req: int) -> dict[str, Any]:
+    return {
+        "op": "net_session_create",
+        "req": req,
+        "locality": "remote",
+        "cwd": "",
+        "name": "",
+        "prompt": "Reply with exactly BASE_OK",
+    }
+
+
 def _create_receipt(
     peer_pair: Devices,
     monkeypatch: pytest.MonkeyPatch,
@@ -82,30 +120,9 @@ def _create_receipt(
     handle_type: type[plane._Handle],  # noqa: SLF001
 ) -> tuple[dict[str, Any], str]:
     """Create with a first prompt across the pair; return (reply detail, receipt)."""
-    server_a, server_b, _host_a, _port_a = peer_pair
-    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
-    # THE HISTORICAL BUDGET, shrunk: before this fix the first turn was waited
-    # for ``op_wait_s``; the slow cell's turn outlives it.
-    monkeypatch.setattr(server_b, "settings", replace(server_b.settings, op_wait_s=1.0))
-    host_b, port_b = plane._listen(server_b)  # noqa: SLF001
-    monkeypatch.setattr(plane, "_Handle", handle_type)
-    served = plane._serve(monkeypatch, server_b.root)  # noqa: SLF001
-    try:
-        link = plane._dial_to(server_a, record, host_b, port_b)  # noqa: SLF001
-        reply = link.request(
-            {
-                "op": "net_session_create",
-                "req": 7,
-                "locality": "remote",
-                "cwd": str(server_b.root),
-                "name": "",
-                "prompt": "Reply with exactly BASE_OK",
-            },
-            timeout=60.0,
-        )
-        link.close("test")
-    finally:
-        plane._stop_all(served)  # noqa: SLF001
+    with _link_to_owner(peer_pair, monkeypatch, handle_type) as (link, server_b):
+        frame = {**_create_frame(7), "cwd": str(server_b.root)}
+        reply = link.request(frame, timeout=60.0)
     assert reply is not None and reply["op"] == "ack", reply
     detail = reply["detail"]
 
@@ -190,8 +207,15 @@ def test_a_turn_past_the_first_turn_budget_says_it_stopped_waiting(
     assert detail["turn"]["state"] == "running", detail
     session_id = detail["session_id"]
     assert "cannot see" not in receipt, receipt
-    assert "turn: still running on device-b after 1.5 s" in receipt, receipt
-    assert f"--peek {session_id}" in receipt, receipt
+    lines = receipt.splitlines()
+    assert (
+        "turn: still running on device-b after 1.5 s — its reply shows here once it arrives:"
+        in (lines)
+    ), (receipt)
+    # D1: the follow-up is ALONE on an indented line, with no backticks a shell
+    # would run as a command substitution when the line is pasted.
+    assert f"  lop network sessions --peer device-b --peek {session_id}" in lines, receipt
+    assert "`" not in receipt, receipt
 
 
 def test_a_failed_turn_reports_its_cause(
@@ -230,19 +254,153 @@ def test_a_genuinely_old_owner_still_says_it_cannot_see(
 def test_the_first_turn_wait_fits_inside_the_requesters_hop() -> None:
     """The budget arithmetic: long enough for a normal first turn, never past the hop.
 
-    A fresh create gets the full ``FIRST_TURN_WAIT_S`` (well past the 10 s
-    ``op_wait_s`` that misreported same-build turns); a slow engage eats into it
-    so the reply still lands inside the requester's ``engage_hop_bound_s``; and
-    the floor is the historical ``op_wait_s``, never less.
+    ``due`` is the create's arrival plus its slow-op deadline. A fresh create gets
+    the full ``FIRST_TURN_WAIT_S`` (well past the 10 s ``op_wait_s`` that
+    misreported same-build turns); a slow engage eats into it; and the
+    ``op_wait_s`` floor never pushes the wait past ``due`` (review MINOR-1).
     """
     op_wait = relay.wire.OP_WAIT_S
     hop = relay.engage_hop_bound_s(op_wait)
-    assert relay.first_turn_wait_s(100.0, op_wait, 100.0) == relay.FIRST_TURN_WAIT_S
+    deadline = relay.create_op_deadline_s(op_wait)
+    assert deadline == hop - relay.FIRST_TURN_REPLY_MARGIN_S
+    slack = relay.FIRST_TURN_FINISH_SLACK_S
+    arrival = 100.0
+    due = arrival + deadline
+    assert relay.first_turn_wait_s(due, op_wait, arrival) == relay.FIRST_TURN_WAIT_S
     assert relay.FIRST_TURN_WAIT_S >= 3 * op_wait
-    assert relay.FIRST_TURN_WAIT_S + relay.FIRST_TURN_REPLY_MARGIN_S <= hop
-    # A 20 s engage leaves hop - margin - 20 for the turn.
-    clipped = relay.first_turn_wait_s(100.0, op_wait, 120.0)
-    assert clipped == hop - relay.FIRST_TURN_REPLY_MARGIN_S - 20.0
-    assert 20.0 + clipped + relay.FIRST_TURN_REPLY_MARGIN_S == hop
-    # An engage that already spent the hop still gets the historical floor.
-    assert relay.first_turn_wait_s(100.0, op_wait, 100.0 + hop) == op_wait
+    assert relay.FIRST_TURN_WAIT_S + slack <= deadline
+    # A 20 s engage leaves the rest of the deadline, less the finish slack.
+    assert relay.first_turn_wait_s(due, op_wait, arrival + 20.0) == deadline - 20.0 - slack
+    # 50 s gone: the floor is min(op_wait_s, remaining), so it still ends before due.
+    late = relay.first_turn_wait_s(due, op_wait, arrival + 50.0)
+    assert late == deadline - 50.0 - slack and arrival + 50.0 + late <= due
+    # Nothing left: answer at once rather than after the requester gave up.
+    assert relay.first_turn_wait_s(due, op_wait, due + 3.0) == 0.0
+
+
+def test_the_help_names_the_relays_first_turn_wait() -> None:
+    """``--prompt``'s help spells the wait out (D2); it must stay the relay's number.
+
+    Read from the parser's SOURCE because the CLI imports the relay lazily, which
+    is why the help spells the number rather than formatting the constant.
+    """
+    import inspect
+
+    from local_operator.network import cli as network_cli
+
+    source = inspect.getsource(network_cli.add_parser)
+    assert f"still running after up to {relay.FIRST_TURN_WAIT_S:g} s" in source
+
+
+# ---------------------------------------------------------------------------
+# The link stays live while a first turn runs (review MAJOR-1/2, QA Q1/Q2)
+# ---------------------------------------------------------------------------
+
+
+class _ThreeSecondTurn(_TimedHandle):
+    delay_s = 3.0
+
+
+def _scale_the_hop(monkeypatch: pytest.MonkeyPatch, server_b: relay.RelayServer) -> float:
+    """Shrink the requester's 60 s hop to 4 s, keeping every ratio; return it.
+
+    The create's slow-op deadline is read at relay construction, so it is
+    re-derived here — ONLY where the create is already on the slow lane, so this
+    rig cannot put a build that dispatches it inline onto the lane by itself.
+    """
+    # ``op_wait_s`` 2 s is the bound every OTHER caller on the link uses here, and
+    # it is the floor of the pre-fix budget: two inline 2.5 s waits (the second
+    # floored at 2 s) cannot both answer inside the 4 s hop, which is Q1.
+    monkeypatch.setattr(server_b, "settings", replace(server_b.settings, op_wait_s=2.0))
+    monkeypatch.setattr(relay, "ENGAGE_DEADLINE_S", 4.0)
+    monkeypatch.setattr(relay, "FIRST_TURN_WAIT_S", 2.5)
+    monkeypatch.setattr(relay, "FIRST_TURN_REPLY_MARGIN_S", 0.5)
+    monkeypatch.setattr(relay, "FIRST_TURN_FINISH_SLACK_S", 0.5, raising=False)
+    slow = server_b._slow_ops  # noqa: SLF001
+    if "net_session_create" in slow:
+        monkeypatch.setitem(
+            slow, "net_session_create", relay.create_op_deadline_s(server_b.settings.op_wait_s)
+        )
+    return relay.engage_hop_bound_s(server_b.settings.op_wait_s)
+
+
+def test_two_concurrent_slow_creates_on_one_link_both_get_receipts(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1 / MAJOR-1: the second create used to queue behind the first's wait.
+
+    Inline on the reader, create #2 started only when #1 answered, then took a
+    fresh budget of its own, and its requester (waiting the hop from when it
+    SENT) gave up: no receipt for a session that existed and whose turn ran.
+    """
+    with _link_to_owner(_pair_of(request), monkeypatch, _ThreeSecondTurn) as (link, server_b):
+        hop = _scale_the_hop(monkeypatch, server_b)
+        replies: dict[int, Any] = {}
+
+        def _create(req: int) -> None:
+            replies[req] = link.request(
+                {**_create_frame(req), "cwd": str(server_b.root)}, timeout=hop
+            )
+
+        threads = [threading.Thread(target=_create, args=(req,)) for req in (101, 102)]
+        # STAGGERED BY 0.3 s, past #1's engage: this rig's stand-in engage
+        # (``plane._serve``) can wedge when two in-process runtimes publish at
+        # once, which is the fake's limit, not the relay's (production engages
+        # spawn processes). The overlap that matters is the two TURN waits, and
+        # #2 still arrives while #1's turn is held.
+        for thread in threads:
+            thread.start()
+            time.sleep(0.3)
+        for thread in threads:
+            thread.join(timeout=hop + 5.0)
+    for req in (101, 102):
+        reply = replies.get(req)
+        assert reply is not None and reply["op"] == "ack", (req, replies)
+        assert reply["detail"]["turn"]["state"] == "running", (req, reply)
+        assert "waited_s" in reply["detail"]["turn"], (req, reply)
+
+
+def test_the_link_answers_other_ops_while_a_first_turn_runs(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q2 / MAJOR-2: a ping and a history read are not held behind the turn.
+
+    Each is asked 0.2 s into a 3 s first turn with ``op_wait_s`` (2 s) as its
+    bound — the budget every other caller on a link uses. Inline, the reader was
+    parked in the create until the turn's wait ended, so both timed out and the
+    peer read as unreachable.
+    """
+    pair = _pair_of(request)
+    plane._seed_journal(pair[1].root, plane.SESSION, ["an earlier question"])  # noqa: SLF001
+    with _link_to_owner(pair, monkeypatch, _ThreeSecondTurn) as (link, server_b):
+        hop = _scale_the_hop(monkeypatch, server_b)
+        bound = server_b.settings.op_wait_s
+        created: dict[str, Any] = {}
+        creator = threading.Thread(
+            target=lambda: created.update(
+                reply=link.request({**_create_frame(201), "cwd": str(server_b.root)}, timeout=hop)
+            )
+        )
+        creator.start()
+        time.sleep(0.2)
+        began = time.monotonic()
+        pong = link.request({"op": "ping", "req": 202}, timeout=bound)
+        ping_s = time.monotonic() - began
+        began = time.monotonic()
+        page = link.request(
+            {
+                "op": "net_session_history",
+                "req": 203,
+                "locality": "remote",
+                "session_id": plane.SESSION,
+                "limit": 50,
+            },
+            timeout=bound,
+        )
+        peek_s = time.monotonic() - began
+        creator.join(timeout=hop + 5.0)
+    assert pong is not None and pong["op"] == "ack", (pong, ping_s)
+    assert page is not None and page["op"] == "ack", (page, peek_s)
+    assert ping_s < bound and peek_s < bound, (ping_s, peek_s)
+    reply = created.get("reply")
+    assert reply is not None and reply["detail"]["turn"]["state"] == "running", created

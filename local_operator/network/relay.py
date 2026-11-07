@@ -4153,25 +4153,50 @@ def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any
 #: precedes the turn. A wait that outlived the hop would turn a slow turn into
 #: "stopped answering before it replied" — no receipt at all, which is worse than
 #: an honest "still running".
+#:
+#: WHY THE CREATE IS A SLOW OP (agent review / QA round 1 on #3547, MAJOR-1/2,
+#: Q1/Q2): a wait this long on the link's READER stalled every other op on the
+#: link for its whole length (a ping took 26.8 s, a listing read the peer as
+#: unreachable) and queued a second create behind the first until its requester
+#: had given up. ``net_session_create`` is therefore registered in ``_slow_ops``
+#: with :func:`create_op_deadline_s`, and its budget is measured from the frame's
+#: arrival on the reader, not from when a worker picked it up.
 FIRST_TURN_WAIT_S = 45.0
 
 #: Reserved under the requester's hop bound for the reply's own trip back (and
 #: clock skew between the two relays' views of when the create began).
 FIRST_TURN_REPLY_MARGIN_S = 5.0
 
+#: Reserved between the end of the first-turn wait and the create's slow-op
+#: deadline, for the work the handler still does after the turn (the row it
+#: reports, the reply it builds). Without it the lane's own overdue sentence
+#: ("did not finish within …") could win the race against the real receipt.
+FIRST_TURN_FINISH_SLACK_S = 2.0
 
-def first_turn_wait_s(started: float, op_wait_s: float, now: float) -> float:
-    """The wait budget for a create's first turn, given when the create began.
 
-    At most :data:`FIRST_TURN_WAIT_S`, and never past the requester's hop bound
-    minus :data:`FIRST_TURN_REPLY_MARGIN_S` measured from ``started`` (the
-    create's arrival, so a slow engage eats into the turn's share rather than
-    pushing the reply past the hop). FLOORED at ``op_wait_s``, the budget this
-    hop had before the first-turn wait existed: below it the runtime may not even
-    have answered the append, and that floor is what every earlier build paid.
+def create_op_deadline_s(op_wait_s: float = wire.OP_WAIT_S) -> float:
+    """The owner-side deadline of ``net_session_create`` on the slow-op lane.
+
+    The requester's hop bound less :data:`FIRST_TURN_REPLY_MARGIN_S`, so even the
+    lane's overdue sentence reaches a requester that is still listening.
     """
-    remaining = started + engage_hop_bound_s(op_wait_s) - FIRST_TURN_REPLY_MARGIN_S - now
-    return max(min(FIRST_TURN_WAIT_S, remaining), min(op_wait_s, FIRST_TURN_WAIT_S))
+    return engage_hop_bound_s(op_wait_s) - FIRST_TURN_REPLY_MARGIN_S
+
+
+def first_turn_wait_s(due: float, op_wait_s: float, now: float) -> float:
+    """The wait budget for a create's first turn, given when the create must answer.
+
+    ``due`` is the ``time.monotonic()`` instant the create's reply is owed by: its
+    ARRIVAL plus :func:`create_op_deadline_s`, so an engage, a queue for a worker
+    and the runtime dial all eat into the turn's share rather than pushing the
+    reply past the requester's hop. At most :data:`FIRST_TURN_WAIT_S`; floored at
+    ``op_wait_s`` (the budget this hop had before the first-turn wait existed)
+    only while that floor still fits — the floor is ``min(op_wait_s, remaining)``,
+    so the reply can never be scheduled after ``due``. Nothing left answers at
+    once (``0``): an honest "still running" beats a reply nobody is waiting for.
+    """
+    remaining = max(0.0, due - FIRST_TURN_FINISH_SLACK_S - now)
+    return max(min(FIRST_TURN_WAIT_S, remaining), min(op_wait_s, remaining))
 
 
 def engage_hop_bound_s(op_wait_s: float = wire.OP_WAIT_S) -> float:
@@ -5372,7 +5397,14 @@ class RelayServer:
         }
         #: Peer op -> owner-side deadline (s) for ops whose handler runs OFF the
         #: link's reader; see ``register_ops`` and ``_dispatch_slow``.
-        self._slow_ops: dict[str, float] = {}
+        self._slow_ops: dict[str, float] = {
+            # THE ONE CORE OP ON THE LANE: a create holds its first turn for up
+            # to ``FIRST_TURN_WAIT_S``, which inline would stall the whole link
+            # (see ``FIRST_TURN_WAIT_S``). Its requester passes its own hop bound
+            # explicitly (``_local_peer_call``), so this deadline only has to sit
+            # inside that bound, which ``create_op_deadline_s`` guarantees.
+            "net_session_create": create_op_deadline_s(self.settings.op_wait_s),
+        }
         #: Control-socket ops a slice module registered (``register_ops``).
         self._local_slice_handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}
         #: Every op name a slice has claimed, so a second claim is refused.
@@ -7606,6 +7638,12 @@ class RelayServer:
                 )
             )
 
+        # ONE INSTANT FOR BOTH CLOCKS, taken on the reader as the frame is
+        # dispatched: the overdue timer below and ``slow_op_remaining_s`` inside
+        # the handler must agree, and stamping the handler's at WORKER start told
+        # a queued handler it had its whole deadline when the timer had already
+        # spent part of it (the create's first-turn budget reads this — #3547).
+        due = time.monotonic() + deadline_s
         timer = threading.Timer(deadline_s, _overdue)
         timer.daemon = True
 
@@ -7615,7 +7653,7 @@ class RelayServer:
                     if state["answered"]:
                         return
                     state["started"] = True
-                with _serving_link(link.link_id), _slow_deadline(time.monotonic() + deadline_s):
+                with _serving_link(link.link_id), _slow_deadline(due):
                     reply = self._run_handler(link, frame, handler, granted)
                 _answer(reply)
             finally:
@@ -8911,10 +8949,15 @@ class RelayServer:
         idle sweep could reap), stamp `mesh.json` with `home_device = self`,
         engage a runtime, then admit the optional first prompt.
         """
-        # THE CREATE'S ARRIVAL, the origin of the requester's hop bound: the first
-        # turn's wait is clipped against it (``first_turn_wait_s``) so the engage
-        # below and the turn share one budget the requester is still waiting on.
-        started = time.monotonic()
+        # WHEN THIS CREATE MUST HAVE ANSWERED, read off the slow-op lane, whose
+        # clock started as the frame was dispatched on the reader (its arrival):
+        # the engage below, any queue for a worker and the turn all share that one
+        # budget the requester is still waiting on (``first_turn_wait_s``). Called
+        # inline (tests, a direct call) it is a full create deadline from now.
+        remaining = slow_op_remaining_s()
+        due = time.monotonic() + (
+            create_op_deadline_s(self.settings.op_wait_s) if remaining is None else remaining
+        )
         if frame.get("session_id"):
             raise MeshRefusal(
                 "protocol_error",
@@ -9299,7 +9342,7 @@ class RelayServer:
         prompt_detail = ""
         waited: dict[str, float] = {}
         if prompt:
-            outcome = self._prompt_on(session_id, prompt, frame.get("images"), started=started)
+            outcome = self._prompt_on(session_id, prompt, frame.get("images"), due=due)
             admitted = bool(outcome["admitted"])
             prompt_state = str(outcome["state"])
             prompt_detail = str(outcome["detail"])
@@ -10785,12 +10828,14 @@ class RelayServer:
         return {"applied": True, "detail": ""}
 
     def _prompt_on(
-        self, session_id: str, text: str, images: Any, *, started: float | None = None
+        self, session_id: str, text: str, images: Any, *, due: float | None = None
     ) -> dict[str, Any]:
         """Admit the first prompt of a freshly created session, and say what became of it.
 
-        ``started`` is when the create arrived (``time.monotonic()``); the wait
-        for the turn is :func:`first_turn_wait_s` from it. ``None`` means now.
+        ``due`` is the ``time.monotonic()`` instant the create's reply is owed by;
+        the wait for the turn is :func:`first_turn_wait_s` against it, computed
+        AFTER the runtime dial so the dial's own time is inside the budget.
+        ``None`` means a full :func:`create_op_deadline_s` from now.
 
         Returns ``{"admitted": bool, "state": str, "detail": str}``, plus
         ``waited_s`` when the turn outlived that wait, where
@@ -10839,14 +10884,15 @@ class RelayServer:
         runtime's own durable-admission path, so a retry of this create cannot run
         the turn twice.
         """
-        now = time.monotonic()
-        wait_s = first_turn_wait_s(
-            now if started is None else started, self.settings.op_wait_s, now
-        )
+        if due is None:
+            due = time.monotonic() + create_op_deadline_s(self.settings.op_wait_s)
         try:
             dial = self._dial_owned(session_id, capabilities=("prompt",))
         except session_dial.OwnerUnreachable as exc:
             return {"admitted": False, "state": "refused", "detail": str(exc)}
+        # After the dial, so connecting to the runtime is paid out of the budget
+        # rather than added on top of it (agent review round 1, MINOR-2).
+        wait_s = first_turn_wait_s(due, self.settings.op_wait_s, time.monotonic())
         try:
             reply = dial.exchange(
                 {
