@@ -21,34 +21,206 @@ def is_memory(name: str, arguments: Any) -> bool:
     )
 
 
-def guard_encoded(value: Any, depth: int = 0) -> None:
-    from local_operator.memory import guard
+def guard_encoded(value: Any, depth: int = 0, field: str | None = None) -> None:
+    """Guard a tool call's arguments as their DECODED values, plus their spellings.
 
-    guard(value)
-    # Numeric document/card values can occur in an invalid structured payload;
-    # inspect its JSON spelling too, before another validator can echo it.
-    if isinstance(value, (dict, list)):
-        guard(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    Every string value is judged by ``guard`` at its own field, exactly as the store
+    judges it, which is what keeps one rule. A string that is itself JSON (a write's
+    ``content``, an edit's ``new_text``) is decoded and its values are judged the same
+    way; the JSON text of it, and of each dict/list, gets ``guard_spelling`` only (every
+    rule but the context-sensitive opaque run, see its docstring). ``field`` follows the
+    value down as the context and the name a refusal reports.
+    """
+    from local_operator.memory import guard, guard_spelling
+
     if isinstance(value, dict):
-        # Same free-text fields the store applies its opaque-token rule to, so a
-        # refused unnamed hex/base64 token is also redacted from the journal.
-        for key in ("title", "body", "subject", "tags", "aliases", "text"):
-            if key in value:
-                guard(value[key], opaque=True)
-    if depth >= 4:
-        return
-    if isinstance(value, dict):
-        for child in value.values():
-            guard_encoded(child, depth + 1)
+        for key, child in value.items():
+            guard(key, field=field)
+            child_field = f"{field}.{key}" if field and isinstance(key, str) else key
+            child_field = child_field if isinstance(child_field, str) else field
+            if depth >= 4:
+                guard(child, field=child_field)
+            else:
+                guard_encoded(child, depth + 1, child_field)
     elif isinstance(value, list):
         for child in value:
-            guard_encoded(child, depth + 1)
-    elif isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+            if depth >= 4:
+                guard(child, field=field)
+            else:
+                guard_encoded(child, depth + 1, field)
+    if isinstance(value, (dict, list)):
+        # Numeric document/card values can occur in an invalid structured payload;
+        # inspect its JSON spelling too, before another validator can echo it. AFTER the
+        # values, so a hit is reported at its own field with offsets into that value.
+        guard_spelling(json.dumps(value, ensure_ascii=False, separators=(",", ":")), field)
+    elif isinstance(value, str) and depth < 4 and value.lstrip().startswith(("{", "[")):
         try:
             decoded = json.loads(value)
         except (ValueError, TypeError):
-            return
-        guard_encoded(decoded, depth + 1)
+            decoded = None
+        if isinstance(decoded, (dict, list)):
+            guard_encoded(decoded, depth + 1, field)
+            guard_spelling(value, field)
+        else:
+            guard(value, field=field)
+    else:
+        guard(value, field=field)
+
+
+def _check(name: str, arguments: Any, raw: str | None) -> None:
+    """Raise ``MemoryError`` when this memory call may not be retained verbatim."""
+    from local_operator.memory import MemoryError, valid_memory_tool_arguments
+
+    if name == "memory" and not valid_memory_tool_arguments(arguments):
+        raise MemoryError("Invalid memory argument shape is not retained.")
+    guard_encoded(arguments)
+    if raw is not None:
+        # A streamed call may end inside a JSON escape/token, before a value
+        # can be inspected. Known memory calls fail CLOSED for retention;
+        # the private call still carries the exact original execution input.
+        # Decoding failure must not turn escaped IDs or opaque text into an
+        # alternate journal/event/provider-payload carrier (R6/Q9).
+        if raw.strip():
+            try:
+                decoded = json.loads(raw)
+                if name == "memory" and not valid_memory_tool_arguments(decoded):
+                    raise MemoryError("Invalid raw memory argument shape is not retained.")
+            except (ValueError, TypeError):
+                raise MemoryError("Unparseable memory arguments are not retained.") from None
+            # The raw TEXT is a spelling: every rule but the opaque run. Its decoded
+            # values (which may differ from the typed arguments: duplicate keys keep the
+            # last) are then judged at their own fields, like the typed ones.
+            from local_operator.memory import guard_spelling
+
+            guard_spelling(raw)
+            guard_encoded(decoded)
+
+
+#: Upper bound on spans masked in one call before retention gives up and redacts the
+#: whole call: the cumulative number of distinct sensitive spans an explainable refusal
+#: may carry. Each re-check pass blanks EVERY span it reports with a same-length neutral
+#: stand-in, so offsets never shift; the pass count is bounded by the same number.
+_MAX_MASKED_SPANS = 16
+
+
+def _neutral(length: int) -> str:
+    """A same-length stand-in for a masked span that can never act as context or value.
+
+    ``[redacted]`` is the marker the shared shape table already treats as masked (its
+    ``_NOT_ALREADY_MASKED`` guard), so ``key: [redacted]###`` is not re-read as a
+    credential assignment, and ``redacted`` is in neither the secret-name nor the
+    public-id vocabulary. Spans shorter than the marker are blanked with ``#``.
+    """
+    marker = "[redacted]"
+    return marker + "#" * (length - len(marker)) if length >= len(marker) else "#" * length
+
+
+def _masked(name: str, arguments: Any) -> dict[str, Any] | None:
+    """The call with ONLY its offending spans replaced by ``[redacted:<kind>]``, or None.
+
+    Why: a whole-call ``{"memory_arguments_redacted": true}`` left the agent's own
+    transcript with nothing to correct, so after compaction it could neither see what
+    tripped the guard nor recover the rest of the fact. Masking is attempted only where
+    it is provably complete: a span in a TOP-LEVEL string argument, located in the
+    original text, whose rule says the mask removes the whole credential. The masked
+    copy must then pass the full retention check again; anything else (nested/decoded
+    JSON, folded-only matches, partial masks, too many spans) returns None and the
+    caller keeps the fail-closed whole-call redaction.
+    """
+    from local_operator.memory import MemoryError, SensitiveValueError
+
+    # Only the ``memory`` tool's own arguments (``text``, ``i``...) are free text. A
+    # ``read``/``write``/``edit`` ``memory://`` call's path is a locator: a masked locator
+    # is a different address, so those keep the whole-call redaction.
+    if name != "memory" or not isinstance(arguments, dict):
+        return None
+    # Residue is decided on the ORIGINAL text, never on the labelled copy: a label such
+    # as ``[redacted:aws-access-key-id]`` ends in ``id``, and re-checking the labelled
+    # copy let that word act as public-id context for the AWS secret beside it (agent
+    # review round 1, B1). So: take EVERY span the guard reports, blank each with a
+    # same-length neutral placeholder (``_neutral``: offsets stay in original coordinates),
+    # re-check that neutral copy until it passes, and only then write the labels into
+    # the original at the collected spans. The labelled copy is never judged.
+    neutral = dict(arguments)
+    spans: dict[str, list[tuple[int, int, str]]] = {}
+    for _ in range(_MAX_MASKED_SPANS + 1):
+        try:
+            _check(name, neutral, None)
+            break
+        except SensitiveValueError as exc:
+            if not exc.spans:
+                return None
+            for span in exc.spans:
+                if (
+                    span.start is None
+                    or span.end is None
+                    or not span.complete
+                    or not isinstance(span.field, str)
+                    or not isinstance(neutral.get(span.field), str)
+                ):
+                    return None
+                text = neutral[span.field]
+                neutral[span.field] = (
+                    text[: span.start] + _neutral(span.end - span.start) + text[span.end :]
+                )
+                spans.setdefault(span.field, []).append((span.start, span.end, span.kind))
+            if sum(len(found) for found in spans.values()) > _MAX_MASKED_SPANS:
+                return None
+        except MemoryError:
+            return None
+    else:
+        return None
+    masked = dict(arguments)
+    for key, found in spans.items():
+        merged: list[list[Any]] = []
+        for start, end, kind in sorted(found):
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end, kind])
+        text = masked[key]
+        for start, end, kind in reversed(merged):
+            text = text[:start] + f"[redacted:{kind}]" + text[end:]
+        masked[key] = text
+    return masked
+
+
+def _raw_is_sound(name: str, raw: str | None) -> bool:
+    """Whether ``raw`` passes the fail-closed parse/shape checks ``_check`` applies.
+
+    ``_check`` guards the typed arguments BEFORE it parses raw, so a sensitive span can
+    be reported for a call whose raw is also unparseable; that call must still be
+    redacted whole, never masked.
+    """
+    from local_operator.memory import valid_memory_tool_arguments
+
+    if raw is None or not raw.strip():
+        return True
+    try:
+        decoded = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return name != "memory" or valid_memory_tool_arguments(decoded)
+
+
+def refusal_message(name: str, arguments: Any, raw: str | None = None) -> str | None:
+    """The value-free reason this memory call is refused, or None when it is not.
+
+    ``SensitiveValueError`` names field, kind and character span so the agent can fix
+    the call. Other refusals (unparseable/invalid shape, size cap) keep the generic
+    text the loop always gave: their internal wording is about retention, not the fact.
+    """
+    from local_operator.memory import MemoryError, SensitiveValueError
+
+    if not is_memory(name, arguments):
+        return None
+    try:
+        _check(name, arguments, raw)
+    except SensitiveValueError as exc:
+        return str(exc)
+    except MemoryError:
+        return "Sensitive value refused. Use lop secret; memory may hold its NAME only."
+    return None
 
 
 def retained_arguments(
@@ -56,27 +228,17 @@ def retained_arguments(
 ) -> tuple[Any, str | None, bool]:
     if not is_memory(name, arguments):
         return arguments, raw, False
-    from local_operator.memory import MemoryError, guard, valid_memory_tool_arguments
+    from local_operator.memory import MemoryError, SensitiveValueError, guard
 
     try:
-        if name == "memory" and not valid_memory_tool_arguments(arguments):
-            raise MemoryError("Invalid memory argument shape is not retained.")
-        guard_encoded(arguments)
-        if raw is not None:
-            # A streamed call may end inside a JSON escape/token, before a value
-            # can be inspected. Known memory calls fail CLOSED for retention;
-            # the private call still carries the exact original execution input.
-            # Decoding failure must not turn escaped IDs or opaque text into an
-            # alternate journal/event/provider-payload carrier (R6/Q9).
-            if raw.strip():
-                try:
-                    decoded = json.loads(raw)
-                    if name == "memory" and not valid_memory_tool_arguments(decoded):
-                        raise MemoryError("Invalid raw memory argument shape is not retained.")
-                except (ValueError, TypeError):
-                    raise MemoryError("Unparseable memory arguments are not retained.") from None
-            guard_encoded(raw)
-    except MemoryError:
+        _check(name, arguments, raw)
+    except MemoryError as exc:
+        if isinstance(exc, SensitiveValueError) and _raw_is_sound(name, raw):
+            # Raw text is not masked span-by-span: re-encode the masked arguments
+            # instead, so the retained raw is exactly the retained dict.
+            masked = _masked(name, arguments)
+            if masked is not None:
+                return masked, json.dumps(masked, ensure_ascii=False), True
         safe: dict[str, Any] = {"memory_arguments_redacted": True}
         if name == "memory":
             # Malformed calls are recognised BEFORE validators can echo values. A

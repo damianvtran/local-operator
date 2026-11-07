@@ -255,13 +255,73 @@ _PASSPHRASE_WORDS = re.compile(
 )
 _HEX_RUN = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])")
 _B64_RUN = re.compile(r"(?<![\w+/=-])[A-Za-z0-9+/_-]{40,}={0,2}(?![\w+/=-])")
-# A long hex digest is legitimate when it is NAMED as one (commit/sha/checksum);
-# a bare one is indistinguishable from an API key.
-_DIGEST_CONTEXT = re.compile(
-    r"(?:commit|sha(?:1|256|512)?|rev(?:ision)?|merge|cherry-pick|checksum|digest|hash|tag)"
-    r"\W{0,4}\Z",
+# A long opaque run (hex or base64) is ambiguous by SHAPE ALONE: an API key and a
+# commit SHA, a tunnel hostname label or a content-addressed attachment name look the
+# same. So the opaque rule classifies by shape PLUS CONTEXT, in this order:
+#   1. named as a secret (``token``, ``api_key``, ``password``...) right before it, or the
+#      dict field holding it is a secret name -> refused. The secret name is searched
+#      ANYWHERE in the run's clause, not only as the nearest word: "Stripe API key (ref
+#      <hex>)" and "deploy token for job <hex>" put an id word between the secret name
+#      and its value, and the secret name must win (agent review round 1, B2);
+#   2. a HEX run named as a public identifier (commit/sha/digest/hash, session/job/ask/
+#      run/... id, uuid) right before it, or held by such a field -> stored. Never a
+#      base64/alnum run: a 40-char mixed-case token after "id" is not a commit;
+#   3. structurally a LOCATOR, not a value: a DNS label followed by a real hostname tail
+#      (``<32hex>-lop.radienthq.com``) or a harness attachment blob in a LOCAL path
+#      (``~/.local-operator/attachments/<hex>.bin``) -> stored;
+#   4. otherwise (bare and unnamed) -> refused: that is how a leaked key would be kept.
+# Vendor-prefixed keys, JWTs, PEM blocks, bearer headers and ``name=value`` assignments
+# never reach this rule's leniency: the shared ``redaction_shapes`` table refuses them
+# first, whatever their context (see :func:`sensitive_spans`).
+_PUBLIC_ID_CONTEXT = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?:commit|sha(?:1|256|512)?|rev(?:ision)?|merge|cherry-pick|checksum|digest|hash|tag"
+    r"|fingerprint|etag|uuid|guid|id|ids|session|job|ask|run|task|trace|span|request|event"
+    r"|attachment|artifact|blob|object|ref|build|pipeline|device|tunnel|host(?:name)?"
+    # memory's own relation fields: a fact ``replaces``/``supersedes`` another by its
+    # minted id, and a revision/version token is an op id (UUID or promoted 64-hex).
+    # A memory ``edit``'s ``old_text`` IS that revision token by the tool's contract
+    # (memory_tools: "old_text is the revision token"); naming it here keeps the typed
+    # arguments and the raw JSON carrier (``"old_text":"<hex>"``) judged alike.
+    r"|replaces|supersedes|superseded[\s_-]?by|entity|op|version|parent|old[\s_-]?text)"
+    r"(?:[\s_-]?ids?)?\W{0,4}\Z",
     re.I,
 )
+_SECRET_NAME_CONTEXT = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?:secret|token|passw(?:or)?d|pwd|passphrase|api[\s_-]?key|access[\s_-]?key"
+    r"|private[\s_-]?key|signing[\s_-]?key|credentials?|auth(?:orization)?|bearer|cookie"
+    r"|key)s?(?![A-Za-z0-9])",
+    re.I,
+)
+# The clause a secret name is looked for in: back to the last line break or sentence end,
+# at most this many characters before the run (a name further away is another clause).
+_CLAUSE_LOOKBACK = 64
+_CLAUSE_BREAK = re.compile(r"[\n\r]|[.!?;]\s")
+
+
+# What may follow a run for it to be a DNS label: optional rest of the label
+# (``-lop``), then at least one more dot-separated label ending in an alphabetic TLD.
+# Two labels minimum after the run, so ``<run>.py`` / ``<run>.bin`` (a file name, judged
+# as one) is not mistaken for ``<run>.example.com``.
+_HOST_TAIL = re.compile(
+    r"(?:-[A-Za-z0-9-]*)?(?:\.[A-Za-z0-9-]+)+\.(?P<tld>[A-Za-z]{2,63})"
+    r"(?![A-Za-z0-9-]|\.[A-Za-z0-9])"
+)
+# Final suffixes that make ``<run>.tar.gz`` / ``<run>.min.js`` a FILE name, not a host
+# (agent review round 1, m2). Not exhaustive: a file named like a host still reads as
+# one, which is why a secret name in the clause is checked first.
+_FILE_SUFFIXES = frozenset(
+    "gz bz2 xz zst zip tgz tar 7z json yaml yml toml txt log md csv tsv py js ts mjs cjs "
+    "html css png jpg jpeg gif webp svg pdf bin dat db sqlite pem key crt env cfg conf ini".split()
+)
+# A harness attachment blob, judged as part of a LOCAL path token (no ``scheme://``):
+# the store mints exactly ``<hex digest>.bin`` (session/attachments.py).
+_LOCAL_ATTACHMENT_PREFIX = re.compile(
+    r"(?:^|[\s(\"'`=])(?:~|\.{1,2}|[A-Za-z]:)?[^\s:]*[/\\]attachments[/\\]\Z"
+)
+# Back-compat alias: the digest vocabulary is now part of the public-id context.
+_DIGEST_CONTEXT = _PUBLIC_ID_CONTEXT
 _SYMBOLS = set("!@$%^&*")
 # Cyrillic/Greek look-alikes of Latin letters, so a keyword like "pаssport" (Cyrillic
 # a) still matches. Matching copy only; the stored text is never rewritten.
@@ -661,53 +721,185 @@ def _mixed_token(chunk: str) -> bool:
     return False
 
 
-def _looks_sensitive(text: str, *, opaque: bool) -> bool:
-    """Heuristic pattern guard over the FOLDED text. Not proof of absence.
+def _opaque_verdict(
+    text: str, start: int, end: int, field: str | None, *, hex_run: bool = True
+) -> str | None:
+    """Classify the opaque run ``text[start:end]``: None = identifier/locator, else a kind.
 
-    ``opaque`` ENABLES the long-hex / base64 rule. It is on only for free-text fact fields
-    (title/body/tags/aliases/subject): structural fields (op ids, body hashes, entity
-    ids) are legitimately 64-hex, and a search for a commit SHA is ordinary, while storing
-    an unnamed 40-hex string is how a leaked API key would be kept.
+    See the ordered rules above ``_PUBLIC_ID_CONTEXT``. ``field`` is the dict key path
+    that held the string (``body``, ``sha``, ``source.session``...); its LAST segment is
+    the nearest name a structured value has, exactly as a prose word before the run is.
     """
-    if _SSN.search(text):
-        return True
+    window = text[max(0, start - _CLAUSE_LOOKBACK) : start]
+    breaks = list(_CLAUSE_BREAK.finditer(window))
+    clause = window[breaks[-1].end() :] if breaks else window
+    leaf = (field or "").rsplit(".", 1)[-1]
+    if _SECRET_NAME_CONTEXT.search(clause) or (leaf and _SECRET_NAME_CONTEXT.search(leaf)):
+        return "named-secret"
+    if hex_run:
+        before = text[max(0, start - 24) : start]
+        if _PUBLIC_ID_CONTEXT.search(before) or (leaf and _PUBLIC_ID_CONTEXT.search(leaf)):
+            return None
+        if (
+            text.startswith(".bin", end)
+            and not re.match(r"[A-Za-z0-9]", text[end + 4 : end + 5])
+            and _LOCAL_ATTACHMENT_PREFIX.search(text[max(0, start - 512) : start])
+        ):
+            # A content-addressed attachment blob in a LOCAL path: the harness mints
+            # that name and shows it to the agent. A URL (``https://…/attachments/…``)
+            # or any other segment stays refused: webhook and signed-URL secrets live
+            # there (agent review round 1, m1).
+            return None
+    tail = _HOST_TAIL.match(text, end)
+    # Only a run that CAN be a DNS label gets the hostname reading: hex, or lowercase
+    # letters/digits/hyphens of label length. A mixed-case or ``+/_=`` run followed by
+    # ``.evil.example`` is a key shape, not a label (agent review round 2, m-1).
+    # 63 is the DNS label limit (RFC 1035); a longer run cannot be a label (round 3, m-2).
+    label = (hex_run and end - start <= 63) or re.fullmatch(
+        r"[0-9a-z-]{1,63}", text[start:end]
+    ) is not None
+    if label and tail and tail.group("tld").lower() not in _FILE_SUFFIXES:
+        # A DNS label (``<hex>-lop.radienthq.com``, ``a.<hex>.example.com``). A run after
+        # a dot with NO hostname tail (``dp.st.dev.<run>``, ``v1.<run>``) is a prefixed
+        # token, not a label, and is refused (agent review round 1, M1).
+        return None
+    return "opaque"
+
+
+def _rule_spans(
+    text: str, field: str | None = None, *, opaque: bool = True
+) -> list[tuple[str, int, int]]:
+    """``(kind, start, end)`` for every memory-specific sensitive shape in FOLDED text.
+
+    Heuristic pattern guard. Not proof of absence. The kinds are value-free labels so a
+    refusal can say WHAT tripped and WHERE without echoing the value. One rule for every
+    caller: the opaque long-hex/base64 rule used to be opt-in (``opaque=True`` on fact
+    free-text fields only), so ``guard(text)`` and the tool path disagreed on the same
+    string; it is now always on and context-classified (:func:`_opaque_verdict`), which
+    is what lets structural ids and hashes pass without a per-call flag.
+    """
+    spans: list[tuple[str, int, int]] = []
+    for match in _SSN.finditer(text):
+        spans.append(("ssn", *match.span()))
     for match in _CARDISH.finditer(text):
         digits = re.sub(r"\D", "", match.group())
         if 13 <= len(digits) <= 19 and _card_issuer_range(digits) and _luhn(digits):
-            return True
+            spans.append(("payment-card", *match.span()))
     for match in _ANCHORED.finditer(text):
         if sum(c.isdigit() for c in match.group()) >= 5:
-            return True
+            spans.append(("document-number", *match.span()))
     for match in _ACCOUNT.finditer(text):
         if sum(c.isdigit() for c in match.group()) >= 5:
-            return True
+            spans.append(("account-number", *match.span()))
     for match in _IBAN.finditer(text):
         compact = match.group().replace(" ", "")
         if 15 <= len(compact) <= 34:
             rearranged = compact[4:] + compact[:4]
             number = "".join(str(int(c, 36)) for c in rearranged.upper())
             if int(number) % 97 == 1:
-                return True
+                spans.append(("iban", *match.span()))
     for match in _PROSE_SECRET.finditer(text):
         if _mixed_token(match.group(1)):
-            return True
-    if _PASSPHRASE_WORDS.search(text):
-        return True
-    if opaque:
-        for match in _HEX_RUN.finditer(text):
-            if not _DIGEST_CONTEXT.search(text[max(0, match.start() - 16) : match.start()]):
-                return True
-        for match in _B64_RUN.finditer(text):
-            token = match.group()
-            if (
-                any(c.isdigit() for c in token)
-                and any(c.isupper() for c in token)
-                and any(c.islower() for c in token)
-                and token.count("/") <= 3
-                and sum(token.count(c) for c in "-_") <= 3
-            ):
-                return True
-    return False
+            spans.append(("named-secret", *match.span(1)))
+    for match in _PASSPHRASE_WORDS.finditer(text):
+        spans.append(("passphrase", *match.span()))
+    if not opaque:
+        return spans
+    view = text
+    for match in _HEX_RUN.finditer(view):
+        # A key or digest drawn at random uses most of the 16 hex digits (two or fewer
+        # distinct in 32 draws has probability < 1e-30); a run like ``aaaa…`` or
+        # ``0101…`` is padding or a placeholder, not a credential.
+        if len(set(match.group().lower())) < 3:
+            continue
+        verdict = _opaque_verdict(view, match.start(), match.end(), field)
+        if verdict:
+            spans.append(("opaque-hex" if verdict == "opaque" else verdict, *match.span()))
+    for match in _B64_RUN.finditer(view):
+        token = match.group()
+        if (
+            any(c.isdigit() for c in token)
+            and any(c.isupper() for c in token)
+            and any(c.islower() for c in token)
+            and token.count("/") <= 3
+            and sum(token.count(c) for c in "-_") <= 3
+        ):
+            verdict = _opaque_verdict(view, match.start(), match.end(), field, hex_run=False)
+            if verdict:
+                spans.append(("opaque-base64" if verdict == "opaque" else verdict, *match.span()))
+    return spans
+
+
+def _looks_sensitive(text: str) -> bool:
+    return bool(_rule_spans(text))
+
+
+@dataclass(frozen=True)
+class SensitiveSpan:
+    """One refused span: WHERE and WHAT, never the value.
+
+    ``start``/``end`` index the caller's ORIGINAL string (Python characters). They are
+    ``None`` when the match exists only in the folded copy (invisible or look-alike
+    characters moved the offsets): the refusal still names the field and kind, and a
+    retention mask must then fail closed. ``complete`` is False when masking
+    ``[start, end)`` is not known to remove the whole credential.
+    """
+
+    field: str | None
+    kind: str
+    start: int | None
+    end: int | None
+    complete: bool = True
+
+
+def sensitive_spans(
+    text: str, *, field: str | None = None, opaque: bool = True
+) -> list[SensitiveSpan]:
+    """Every sensitive span in ``text``: the shared credential table, then memory rules.
+
+    The shared ``redaction_shapes`` table (vendor key prefixes, JWT, PEM, bearer
+    headers, ``name=value`` credential assignments...) is the ONE secret detector this
+    reuses; its labels are reported verbatim. Memory adds PII and opaque-run rules.
+    """
+    from local_operator.redaction_shapes import scrub_shapes_with_hits
+
+    found: list[SensitiveSpan] = []
+    seen: set[str] = set()
+    for hit in scrub_shapes_with_hits(text)[1]:
+        seen.add(hit.label)
+        window_at = text.find(hit.window) if hit.window else -1
+        value_at = text.find(hit.value, window_at if window_at >= 0 else 0) if hit.value else -1
+        if value_at >= 0:
+            found.append(
+                SensitiveSpan(field, hit.label, value_at, value_at + len(hit.value), hit.complete)
+            )
+        elif window_at >= 0:
+            found.append(
+                SensitiveSpan(
+                    field, hit.label, window_at, window_at + len(hit.window), hit.complete
+                )
+            )
+        else:
+            found.append(SensitiveSpan(field, hit.label, None, None, False))
+    folded = _fold(text)
+    if folded != text:
+        for label in match_shape_names(folded):
+            if label not in seen:
+                found.append(SensitiveSpan(field, label, None, None, False))
+    exact = folded == text
+    shared: list[tuple[int, int]] = []
+    for span in found:
+        if span.start is not None and span.end is not None:
+            shared.append((span.start, span.end))
+    for kind, start, end in _rule_spans(folded, field, opaque=opaque):
+        if exact and any(a <= start and end <= b for a, b in shared):
+            continue  # one span, one report: the first (most specific) label wins
+        if exact:
+            found.append(SensitiveSpan(field, kind, start, end))
+            shared.append((start, end))
+        else:
+            found.append(SensitiveSpan(field, kind, None, None, False))
+    return found
 
 
 #: Words that carry no discriminating evidence. Public because the read-only
@@ -725,6 +917,46 @@ STOP_WORDS = frozenset(
 
 class MemoryError(ValueError):
     """Safe, value-free actionable refusal suitable for user/tool surfaces."""
+
+
+class SensitiveValueError(MemoryError):
+    """A refusal that can EXPLAIN itself: field, kind and span of each hit, never a value.
+
+    The old one-line refusal gave the agent nothing to correct, and the transcript kept
+    only a redaction marker, so it retried blind or dropped the fact. ``spans`` lets the
+    message (and the retained-transcript mask in ``memory_privacy``) point at exactly
+    what tripped.
+    """
+
+    def __init__(self, spans: list[SensitiveSpan]) -> None:
+        self.spans = spans
+        super().__init__(_refusal_text(spans))
+
+
+def _refusal_text(spans: list[SensitiveSpan]) -> str:
+    parts = []
+    for span in spans[:6]:
+        where = span.field or "value"
+        if len(where) > 64 or not re.fullmatch(r"[\w.\[\]-]+", where):
+            where = "a field"
+        at = (
+            f"chars {span.start}-{span.end}"
+            if span.start is not None
+            else "a span with invisible or look-alike characters"
+        )
+        parts.append(f"{where}: {span.kind} at {at}")
+    more = f" (+{len(spans) - 6} more)" if len(spans) > 6 else ""
+    where = "; ".join(parts) + more
+    if all(span.kind.startswith("sensitive-path:") for span in spans):
+        return (
+            f"Sensitive path refused ({where}); retain a safe locator or secret NAME "
+            "instead. The path is never echoed."
+        )
+    return (
+        f"Sensitive value refused ({where}). Store the value with lop secret and keep "
+        "only its NAME here (e.g. 'uses secret GITHUB_TOKEN'), then retry with that span "
+        "removed or renamed; the value is never echoed."
+    )
 
 
 @functools.lru_cache(maxsize=1)
@@ -751,7 +983,10 @@ def safe_segment(value: Any, *, structural: bool = False) -> str:
     # adding no protection: the _SAFE shape above is the actual constraint
     # on an identifier. Callers validating fact *content* keep guard().
     if not structural:
-        guard(value)
+        # A segment IS an identifier by position, so it is guarded in id context: a
+        # bare digest (a promoted row's 64-hex id) passes the opaque-run rule, while
+        # PII shapes and vendor-prefixed keys are still refused.
+        guard(value, field="id")
     return value
 
 
@@ -795,45 +1030,110 @@ def structural_reference(value: Any) -> bool:
     return isinstance(value, str) and any(shape.fullmatch(value) for shape in _REFERENCE_SHAPES)
 
 
-def guard(value: Any, *, opaque: bool = False) -> None:
+def guard(value: Any, *, field: str | None = None) -> None:
     """Inspect every string, including metadata and wire-only fields, without echo.
 
     This is a PATTERN guard, not proof: a secret with no recognisable shape or label
     can still be stored (and journaled). Lop secrets hold values; memory holds NAMEs.
+
+    ONE rule for every caller. There used to be an ``opaque`` flag that enabled the
+    long-hex/base64 rule only on some fields, so ``guard(text)`` passed what the tool
+    path refused and a guard test could not predict the tool. The opaque rule now
+    decides by context instead (see ``_opaque_verdict``), and ``field`` — the dict key
+    path, filled in by the recursion — is that context for structured values, and the
+    name a refusal reports.
     """
     if isinstance(value, dict):
         for key, child in value.items():
-            guard(key, opaque=opaque)
-            guard(child, opaque=opaque)
+            guard(key, field=field)
+            child_field = f"{field}.{key}" if field and isinstance(key, str) else key
+            guard(child, field=child_field if isinstance(child_field, str) else field)
     elif isinstance(value, (list, tuple)):
         for child in value:
-            guard(child, opaque=opaque)
+            guard(child, field=field)
     elif isinstance(value, str):
-        if len(value.encode("utf-8")) > ITEM_BYTES:
-            raise MemoryError("Memory field exceeds the 8192-byte cap; split into atomic facts.")
-        folded = _fold(value)
-        if (
-            match_shape_names(value)
-            or (folded != value and match_shape_names(folded))
-            or _looks_sensitive(folded, opaque=opaque)
-        ):
-            raise MemoryError(
-                "Sensitive value refused. Store it with lop secret and keep only its NAME here "
-                "(e.g. 'uses secret GITHUB_TOKEN'); never the value."
+        _guard_string(value, field, opaque=True)
+
+
+def guard_spelling(text: str, field: str | None = None) -> None:
+    """Guard a SERIALIZED spelling (a JSON dump or raw tool-call JSON) of values that are
+    themselves guarded decoded, at their own field.
+
+    The opaque long-hex/base64 rule decides by CONTEXT: the field that holds a run and
+    the clause before it. A spelling has neither: its escapes (``\\n``) glue and hide
+    words, and its keys sit where prose would. Judging the opaque rule there made the
+    loop pre-check refuse facts the field guard stored (agent review round 2, M-1), and
+    patching that with an escape-decoding view let a value's own literal backslash-n
+    cut a clause (round 3, R3-M1). So a spelling gets every OTHER rule (cards, SSN,
+    IBAN, vendor key shapes, sensitive paths...), whose matches survive serialization,
+    and never the opaque rule; every caller also guards the decoded values, where the
+    opaque rule runs exactly as ``guard(value)`` runs it. That is what keeps one rule.
+    """
+    _guard_string(text, field, opaque=False)
+
+
+def _guard_string(value: str, field: str | None, *, opaque: bool) -> None:
+    if len(value.encode("utf-8")) > ITEM_BYTES:
+        raise MemoryError("Memory field exceeds the 8192-byte cap; split into atomic facts.")
+    folded = _fold(value)
+    spans = sensitive_spans(value, field=field, opaque=opaque)
+    if spans:
+        raise SensitiveValueError(spans)
+    # Check path-like tokens, not the complete prose (which can contain a
+    # harmless reference beside a sensitive path). Never persist the latter.
+    # A drive letter starts a token, not the suffix of a URL scheme: matching
+    # `s://example...` in https:// made benign URLs resolve relative to the
+    # session cwd and fail whenever that cwd was under a protected root.
+    # The boundary belongs ONLY to the drive-letter arm. Unix separators
+    # inside relative locators must still expose sensitive components such
+    # as docs/.env or deploy/kubeconfig-prod (R7).
+    exact = folded == value
+    for match in re.finditer(r"(?:~?/|(?<![\w])[A-Za-z]:[/\\])[^\s<>\"']{1,512}", folded):
+        word = match.group()
+        rule = is_sensitive(word)
+        if rule and not _is_attachment_reference(word, rule):
+            raise SensitiveValueError(
+                [
+                    SensitiveSpan(
+                        field,
+                        f"sensitive-path:{rule}",
+                        match.start() if exact else None,
+                        match.end() if exact else None,
+                        exact,
+                    )
+                ]
             )
-        # Check path-like tokens, not the complete prose (which can contain a
-        # harmless reference beside a sensitive path). Never persist the latter.
-        # A drive letter starts a token, not the suffix of a URL scheme: matching
-        # `s://example...` in https:// made benign URLs resolve relative to the
-        # session cwd and fail whenever that cwd was under a protected root.
-        # The boundary belongs ONLY to the drive-letter arm. Unix separators
-        # inside relative locators must still expose sensitive components such
-        # as docs/.env or deploy/kubeconfig-prod (R7).
-        for word in re.findall(r"(?:~?/|(?<![\w])[A-Za-z]:[/\\])[^\s<>\"']{1,512}", folded):
-            if is_sensitive(word):
-                raise MemoryError(
-                    "Sensitive path refused; retain a safe locator or secret NAME instead."
-                )
+
+
+#: A content-addressed attachment blob name: the store writes ``<hex digest>.bin``
+#: (session/attachments.py, 32 hex today; up to 64 accepted for a full sha256).
+# Matched as a PREFIX of the last component: in a JSON spelling of the fact (the
+# ``guard(_dump(fact))`` pass) the path token runs on into an escaped ``\n``.
+_ATTACHMENT_BLOB = re.compile(r"[0-9a-f]{32,64}\.bin(?![A-Za-z0-9]|\.[A-Za-z0-9])")
+
+
+def _is_attachment_reference(word: str, rule: str) -> bool:
+    """Whether a config-dir path is a harness attachment blob, which is a locator.
+
+    The config dir is denied wholesale because it holds secrets, sessions and the
+    memory bank itself. An attachment blob path is different: its name is a content
+    digest the harness mints and shows the agent (screenshots, uploads), so an agent
+    recording "the screenshot at <path>" stores a reference, not a credential. Only
+    the config-dir ROOT verdict is lifted, and only for a direct child of the live
+    attachment store whose basename is a digest; any other rule (``.env``, token
+    names...) still refuses.
+    """
+    from local_operator.supplements.denylist import RULE_CONFIG_DIR
+
+    if rule != RULE_CONFIG_DIR:
+        return False
+    from local_operator.session.attachments import attachments_dir
+
+    path = Path(os.path.normpath(os.path.expanduser(word)))
+    if not _ATTACHMENT_BLOB.match(path.name):
+        return False
+    store = attachments_dir()
+    return any(str(path.parent) == str(root) for root in {str(store), os.path.realpath(store)})
 
 
 def origin_label(fact: dict[str, Any]) -> str:
@@ -1041,10 +1341,7 @@ def validate_fact(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise MemoryError("Memory content must be a JSON object; read guide://memory.")
     guard(raw)
-    guard(_dump(raw))
-    for key in ("title", "body", "subject", "tags", "aliases"):
-        if key in raw:
-            guard(raw[key], opaque=True)
+    guard_spelling(_dump(raw))
     allowed = {
         "title",
         "body",

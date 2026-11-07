@@ -576,9 +576,8 @@ def test_opaque_rule_withholds_what_the_write_path_refuses(rig):
     """title/body use the SAME guard pass as ``validate_fact``, not the plain one."""
     root, identity, store = rig
     for value in (OPAQUE_TITLE, OPAQUE_BODY):
-        guard(value)  # the plain pass genuinely accepts these ...
         with pytest.raises(MemoryError):
-            guard(value, opaque=True)  # ... and the write path's pass refuses them
+            guard(value)  # one rule: the write path's guard refuses them
     with pytest.raises(MemoryError):
         validate_fact({"title": OPAQUE_TITLE, "body": "safe body"})
     with pytest.raises(MemoryError):

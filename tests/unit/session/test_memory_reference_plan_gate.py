@@ -100,6 +100,19 @@ PROSE_FACT = {"title": "Host", "body": "staging host is stage-2"}
 #: refusal differently, and that difference is exactly how a seam refusal is told apart
 #: from a tool that ran.
 PLAN_GATE_REFUSAL = "Sensitive value refused. Use lop secret; memory may hold its NAME only."
+
+
+def _is_plan_refusal(text: str) -> bool:
+    """The plan gate's refusal: the generic sentence, or the explainable one.
+
+    A sensitive span is now refused with its field, kind and character span (never the
+    value), so the exact sentence is no longer the only spelling of a plan-gate refusal.
+    """
+    return text == PLAN_GATE_REFUSAL or text.startswith(
+        ("Sensitive value refused (", "Sensitive path refused (")
+    )
+
+
 #: The ``memory`` tool's OWN refusal, verbatim, kept as an assertion of ABSENCE: it is
 #: the wording a recall came back with before `#2524` exempted the ``text`` position, and
 #: the recall test asserts it no longer appears (a tool refusal there is now the
@@ -333,7 +346,7 @@ async def test_a_colliding_reference_recall_reaches_the_executor(tmp_path, monke
     run = await _run_one_call(tmp_path, monkeypatch, "memory", {"op": "recall", "text": DEVICE_ID})
     assert len(run.starts) == 1, run.result_text
     assert not run.synthetic, run.result_text
-    assert PLAN_GATE_REFUSAL not in run.result_text, run.result_text
+    assert not _is_plan_refusal(run.result_text), run.result_text
     answered = run.result_text.lstrip().startswith("{")
     refused_at_the_tool = TOOL_RECALL_REFUSAL in run.result_text
     assert answered or refused_at_the_tool, run.result_text
@@ -396,7 +409,7 @@ async def test_a_raw_carrier_the_round_trip_cannot_carry_is_still_refused(tmp_pa
     )
     assert len(run.starts) == 0, run.result_text
     assert run.synthetic, run.result_text
-    assert run.result_text == PLAN_GATE_REFUSAL, run.result_text
+    assert _is_plan_refusal(run.result_text), run.result_text
     assert run.row["tool_name"] == "read"
 
 
@@ -451,7 +464,7 @@ async def test_a_value_the_guard_cannot_encode_is_refused_rather_than_raising(
 
     run = await _run_one_call(tmp_path, monkeypatch, "read", args, raw=raw)
     assert len(run.starts) == 0, run.result_text
-    assert run.synthetic and run.result_text == PLAN_GATE_REFUSAL, run.result_text
+    assert run.synthetic and _is_plan_refusal(run.result_text), run.result_text
     details = (run.row.get("provider_payload") or {}).get("details") or {}
     assert details == {"__fault": "invalid_arguments", "__synthetic": True}, details
     assert run.row["tool_name"] == "read"
@@ -522,7 +535,7 @@ async def test_a_nested_json_surrogate_in_a_sibling_is_refused_rather_than_raisi
 
     run = await _run_one_call(tmp_path, monkeypatch, "read", args, raw=raw)
     assert len(run.starts) == 0, run.result_text
-    assert run.synthetic and run.result_text == PLAN_GATE_REFUSAL, run.result_text
+    assert run.synthetic and _is_plan_refusal(run.result_text), run.result_text
     details = (run.row.get("provider_payload") or {}).get("details") or {}
     assert details == {"__fault": "invalid_arguments", "__synthetic": True}, details
     assert run.row["tool_name"] == "read"
@@ -593,7 +606,7 @@ async def test_a_masked_call_that_is_still_sensitive_is_still_refused(tmp_path, 
         # Byte-identical to today: the SAME plan-gate text, still zero starts. The masked
         # copy removed the admitted value and the path-like-token arm refused the rest.
         assert len(run.starts) == 0, (query, run.result_text)
-        assert run.synthetic and run.result_text == PLAN_GATE_REFUSAL, run.result_text
+        assert run.synthetic and _is_plan_refusal(run.result_text), run.result_text
 
 
 @pytest.mark.asyncio
@@ -697,7 +710,10 @@ _RETENTION_CORPUS: list[tuple[str, Any, str | None, bool]] = [
     ),
     ("read", {"path": f"memory://global?q={DEVICE_ID}&limit=5"}, None, True),
     ("read", {"path": f"memory://global?q={ENTITY_ID}"}, None, False),
-    ("read", {"path": f"memory://global?q={PLAIN_DEVICE_ID}"}, None, False),
+    # Admitted since the opaque flag went: ``guard`` now applies its one opaque-run
+    # rule to a read's path too, so this unnamed hex is refused for retention there
+    # exactly as in a recall's text, and the plan gate's reference exemption admits it.
+    ("read", {"path": f"memory://global?q={PLAIN_DEVICE_ID}"}, None, True),
     ("memory", {"op": "recall", "text": DEVICE_ID}, None, True),
     (
         "memory",
@@ -808,7 +824,12 @@ _RETENTION_CORPUS: list[tuple[str, Any, str | None, bool]] = [
 #: Re-measured for the 40-row corpus (the two duplicate-key rows are appended): base tree
 #: ``b0bd40404`` and this head agree, which is what ``memory_privacy`` being untouched
 #: means — the two carriers' raws are decoded by the SAME code on both sides.
-_RETENTION_DIGEST = "9491d7cd6234109de5d670e7cf17f6088753f625ed38fff3dd23bfae1d4255d0"
+#: Re-pinned DELIBERATELY when retention began masking only the offending span of a
+#: ``memory`` call (``[redacted:<kind>]``) instead of redacting the whole call, and when
+#: ``guard`` lost its opaque flag (one rule for every field): what retention RETAINS
+#: changed on purpose, and ``test_the_plan_gate_changes_its_verdict_for_admitted_references_only``
+#: still pins that the plan gate moves no other verdict.
+_RETENTION_DIGEST = "263a95735a9fb3565eee7228de55f86004fab161c7a2ec11719273f9eeb85e07"
 
 
 def _retention_rows() -> list[list[Any]]:
