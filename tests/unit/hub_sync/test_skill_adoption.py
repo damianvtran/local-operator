@@ -11,7 +11,7 @@ from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import skill_adoption as adoption
 from local_operator.hub_sync.identity import LinkError
 from local_operator.hub_sync.merge import ConflictProposal, ConflictRequest
-from local_operator.hub_sync.skill_document import SkillDocument
+from local_operator.hub_sync.skill_document import SkillDocument, parse_frontmatter
 
 from .test_skill_state import ALIAS, HUB_ID, _record, _rig
 
@@ -452,3 +452,149 @@ def test_merged_skill_md_keeps_terminal_newline(tmp_path: Path) -> None:
     assert proposal.document is not None
     skill = {f.path: f.content for f in proposal.document.files}["SKILL.md"]
     assert skill.endswith("\n") and not skill.endswith("\n\n\n")
+
+
+# --- Take-hub installs the Hub's SKILL.md bytes verbatim (#3423) ---
+#
+# Seen on a real folder: a take-hub adoption re-dumped the frontmatter through
+# PyYAML, which folds a long ``description`` at width 80. Parsed metadata stayed
+# equal, but the installed bytes -- and therefore the fingerprint -- no longer
+# matched the Hub row, so the fresh link classified ``local-only``. Both Hub
+# shapes matter: a long single line PyYAML would fold, and a description the Hub
+# ALREADY folds in its own style, which a re-dump would re-wrap differently.
+
+_LONG_DESCRIPTION = (
+    "Municipal procurement guidance for verifying deadlines, clerk contacts and audit "
+    "evidence against official notices before any pilot is proposed to a municipality"
+)
+_HUB_FRONTMATTERS = {
+    "single-line": f"---\nname: {ALIAS}\ndescription: {_LONG_DESCRIPTION}\nlicense: MIT\n---\n",
+    "hub-folded": (
+        f"---\nname: {ALIAS}\ndescription: >-\n"
+        "  Municipal procurement guidance for verifying deadlines, clerk contacts\n"
+        # Deliberately wider than PyYAML's width-80 fold: a re-dump re-wraps it.
+        "  and audit evidence against official notices before any pilot is "
+        "proposed to a municipality\n"
+        "license: MIT\n---\n"
+    ),
+}
+
+
+def _long_description(tmp_path: Path, shape: str, *, same_body: bool):
+    hub_body = "# Municipal procurement\n\nPreserve the procurement audit evidence.\n"
+    local_body = hub_body if same_body else "# Municipal procurement\n\nKeep the POC clerk.\n"
+    remote = SkillDocument.from_json(
+        {
+            "document_version": 1,
+            "name": ALIAS,
+            "description": _LONG_DESCRIPTION,
+            "files": [{"path": "SKILL.md", "content": _HUB_FRONTMATTERS[shape] + hub_body}],
+        }
+    )
+    local_head = f"---\nname: {ALIAS}\ndescription: {_LONG_DESCRIPTION}\nlicense: MIT\n---\n"
+    folder = _authored(
+        tmp_path, {"files": [{"path": "SKILL.md", "content": local_head + local_body}]}
+    )
+    return folder, remote
+
+
+@pytest.mark.parametrize("same_body", [False, True], ids=["taken-hub", "same-body"])
+@pytest.mark.parametrize("shape", sorted(_HUB_FRONTMATTERS))
+def test_take_hub_proposal_is_the_hub_document_verbatim(
+    tmp_path: Path, shape: str, same_body: bool
+) -> None:
+    folder, remote = _long_description(tmp_path, shape, same_body=same_body)
+
+    proposal = adoption.build_proposal(
+        ALIAS,
+        adoption.read_tree(folder),
+        remote,
+        resolver=None,
+        allow_llm=False,
+        strategy="take-hub",
+    )
+
+    assert proposal.document is not None
+    assert proposal.document == remote
+    assert proposal.document.fingerprint == remote.fingerprint
+
+
+# ``same-body`` with a hub-folded description is EQUAL after normalization
+# (parsed metadata and normalized body match), yet the local bytes differ from
+# the Hub's. An equal adoption must still install the Hub bytes, or the folder
+# keeps its own frontmatter style and the link lands local-only (QA Q1, #3568).
+# Merge reaches the same equal state, so it is held to the same outcome.
+@pytest.mark.parametrize(
+    ("strategy", "same_body"),
+    [("take-hub", False), ("take-hub", True), ("merge", True)],
+    ids=["take-hub-taken", "take-hub-equal", "merge-equal"],
+)
+@pytest.mark.parametrize("shape", sorted(_HUB_FRONTMATTERS))
+def test_service_take_hub_installs_hub_bytes_and_fingerprint(
+    tmp_path: Path, shape: str, strategy: Literal["take-hub", "merge"], same_body: bool
+) -> None:
+    ctx, manager, remote, base, _document = _rig(tmp_path)
+    folder, document = _long_description(manager.config_dir, shape, same_body=same_body)
+    remote.document = document.to_json()
+
+    preview = _install(ctx, base, dry_run=True, adoption_strategy=strategy, allow_llm=False)
+    result = _install(
+        ctx,
+        base,
+        confirm=True,
+        adoption_receipt=preview["adoption_receipt"],
+        adoption_strategy=strategy,
+        allow_llm=False,
+    )
+
+    assert result["reports"][0]["applied"] is True
+    # The operator-visible symptom first: the fresh link must not read as local
+    # edits. An in-sync check persists no publish-side mark (``_state_of``).
+    from local_operator.hub_sync.store import StatusStore
+
+    rows = StatusStore(manager.config_dir).load()["items"]
+    assert [row.get("classification") for row in rows.values()] == [None]
+    remote_skill = next(f.content for f in document.files if f.path == "SKILL.md")
+    assert (folder / "SKILL.md").read_bytes() == remote_skill.encode("utf-8")
+    installed = SkillDocument.from_directory(folder)
+    assert installed.fingerprint == document.fingerprint
+
+
+# A merged description is applied by scalar-span replacement, so YAML-significant
+# prose (``: `` or `` #``) must come out quoted rather than as a broken or
+# comment-truncated plain scalar (review R1-1, #3568).
+@pytest.mark.parametrize(
+    "merged",
+    ["Use when: asked # really", "Route here #first before any other skill", "- leading dash"],
+)
+def test_merged_description_needing_quotes_is_written_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, merged: str
+) -> None:
+    folder, remote = _long_description(tmp_path, "hub-folded", same_body=True)
+    monkeypatch.setattr(adoption, "_merge_description", lambda *a, **k: (merged, "merged"))
+
+    proposal = adoption.build_proposal(
+        ALIAS, adoption.read_tree(folder), remote, resolver=None, allow_llm=False
+    )
+
+    assert proposal.document is not None
+    assert proposal.document.description == merged
+    skill = next(f.content for f in proposal.document.files if f.path == "SKILL.md")
+    assert parse_frontmatter(skill)["description"] == merged
+    # Only the description scalar changed: the rest of the Hub frontmatter stays.
+    assert skill.endswith("license: MIT\n---\n" + skill.split("---\n", 2)[2])
+
+
+def test_with_description_keeps_round_tripping_plain_prose_unquoted() -> None:
+    doc = SkillDocument.from_json(
+        {
+            "document_version": 1,
+            "name": ALIAS,
+            "description": "old",
+            "files": [
+                {"path": "SKILL.md", "content": f"---\nname: {ALIAS}\ndescription: old\n---\nB\n"}
+            ],
+        }
+    )
+    skill = doc.with_description("Plain routing prose, no YAML syntax").files[0].content
+    assert "description: Plain routing prose, no YAML syntax\n" in skill
