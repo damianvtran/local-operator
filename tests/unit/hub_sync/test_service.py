@@ -2181,27 +2181,36 @@ def test_a_team_mid_swap_keeps_its_row(env) -> None:
 # -- a stale ``no-credential`` after the operator signed in ------------------------------
 
 
-def _record_signed_out_check(ctx: svc.HubSyncContext, local_id: str) -> None:
+def _record_signed_out_check(
+    ctx: svc.HubSyncContext, local_id: str, *, checked_at: str = "2026-11-06T10:00:00Z"
+) -> None:
     """What a check that ran while signed out leaves on the item (check.py)."""
 
     def mark(doc: dict[str, Any]) -> None:
         item = doc.setdefault("items", {}).setdefault(f"agent:{local_id}", {})
+        # A real check stores the item's identity beside its error; the status
+        # projection keys its rows by it.
+        item.setdefault("kind", "agent")
+        item.setdefault("local_id", local_id)
         item.update(
             error_class="no-credential",
             last_error="sign in to the hub (`lop login radient`)",
-            last_checked_at="2026-11-06T10:00:00Z",
+            last_checked_at=checked_at,
         )
 
     assert ctx.store().mutate(mark)
 
 
-def _sign_in(root: Path, *, kind: str = "oauth") -> None:
+def _sign_in(root: Path, *, kind: str = "oauth", verdict: str | None = None) -> None:
+    """Store a synthetic Radient login; ``verdict`` then writes a terminal tombstone
+    the hub's resolver refuses (``dead`` = IdP ``invalid_grant``, ``moved`` = the
+    refresh family moved to another device) through the store's own writers."""
     from local_operator.providers.auth_store import AuthStore
 
     store = AuthStore(db_path=root / "auth.db", config_dir=root)
     try:
         if kind == "oauth":
-            store.upsert_credential(
+            row = store.upsert_credential(
                 "radient",
                 {
                     "type": "oauth",
@@ -2212,6 +2221,10 @@ def _sign_in(root: Path, *, kind: str = "oauth") -> None:
                     "email": "q@example.test",
                 },
             )
+            if verdict == "dead":
+                assert store._mark_grant_dead(row.id, rejected_refresh_token=None)
+            elif verdict == "moved":
+                assert store.mark_family_moved(row.id)
         else:
             store.upsert_credential(
                 "radient", {"type": "api_key", "key": "synthetic-key", "source": "login"}
@@ -2261,3 +2274,52 @@ def test_a_pasted_radient_key_is_not_a_hub_sign_in(env) -> None:
     _sign_in(root, kind="api_key")
 
     assert _pull_status(ctx, row.id)["error_class"] == "no-credential"
+
+
+@pytest.mark.parametrize("verdict", ["dead", "moved"])
+def test_a_login_the_hub_resolver_refuses_still_says_sign_in(env, verdict: str) -> None:
+    """Review M1 / QA Q1: a stored OAuth row whose grant the IdP refused (or whose
+    family moved away) is NOT a sign-in. The hub's resolver refuses it, so every
+    check records ``no-credential`` again; masking it would hide the only remedy."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    _record_signed_out_check(ctx, row.id)
+    _sign_in(root, verdict=verdict)
+
+    pull = _pull_status(ctx, row.id)
+
+    assert (pull["state"], pull["error_class"]) == ("failed", "no-credential")
+
+
+def test_a_no_credential_recorded_after_the_login_is_not_stale(env) -> None:
+    """A check that ran AFTER the login and still found no usable credential is a
+    current fact about that login, not a leftover from before it: reported as is."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    _sign_in(root)
+    _record_signed_out_check(ctx, row.id, checked_at="2999-01-01T00:00:00Z")
+
+    assert _pull_status(ctx, row.id)["error_class"] == "no-credential"
+
+
+def test_status_snapshot_agrees_with_links_about_a_stale_no_credential(env) -> None:
+    """Review m1: ``/hub/status`` (``status_snapshot``) and ``/hub/links`` apply ONE
+    rule, so the two endpoints never disagree about the same item."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    _record_signed_out_check(ctx, row.id)
+
+    def status_item() -> dict[str, Any] | None:
+        items = svc.status_snapshot(ctx)["items"]
+        return next((i for i in items if i["local_id"] == row.id), None)
+
+    signed_out = status_item()
+    assert signed_out is not None and signed_out["error_class"] == "no-credential"
+
+    _sign_in(root)
+    signed_in = status_item()
+    assert signed_in is None or signed_in["error_class"] is None
+    assert _pull_status(ctx, row.id)["error_class"] is None

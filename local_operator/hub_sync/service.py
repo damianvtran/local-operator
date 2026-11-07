@@ -2151,7 +2151,16 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     counts = {"available": 0, "failed": 0, "updating": 0, "up-to-date": 0, "applied": 0}
     items: list[dict[str, Any]] = []
-    for item in doc.get("items", {}).values():
+    # The SAME stale-sign-in rule ``links_snapshot`` applies (review m1): a
+    # ``no-credential`` recorded before a usable login is withdrawn here too, so
+    # ``/hub/status`` and ``/hub/links`` never disagree about one item while the
+    # woken check is on its way. ``credential`` below stays the last tick's
+    # record -- it reports what that tick ran with, not the login now.
+    login_since = _radient_login_since(ctx, doc.get("items", {}).values())
+    for stored in doc.get("items", {}).values():
+        item = stored
+        if _no_credential_is_stale(stored, login_since):
+            item = {**stored, "error_class": None, "error_subclass": None, "last_error": None}
         kind = item.get("kind", "agent")
         if kind not in ("agent", "team", "skill"):
             # Skill failures are part of the updates surface now (the operator's
@@ -2455,16 +2464,9 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
     now = datetime.now(timezone.utc)
     links: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
-    # Probed only when a stored ``no-credential`` could be stale, so a snapshot
-    # with none never opens the auth store (see ``_direction_status``).
-    signed_in = (
-        _radient_login_present(ctx)
-        if any(
-            isinstance(item, Mapping) and item.get("error_class") == "no-credential"
-            for item in items.values()
-        )
-        else False
-    )
+    # One login probe per snapshot; each item is then ordered against it
+    # (``_no_credential_is_stale``, see ``_direction_status``).
+    login_since = _radient_login_since(ctx, items.values())
     for record in prov.iter_baselines(ctx.config_dir):
         if kinds is not None and record.kind not in kinds:
             continue
@@ -2537,10 +2539,20 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 "baseline_state": record.recorded_by,
                 "remote_revision": record.remote_revision,
                 "pull": _direction_status(
-                    item, "pull", policy, now, capability, signed_in=signed_in
+                    item,
+                    "pull",
+                    policy,
+                    now,
+                    capability,
+                    signed_in=_no_credential_is_stale(item, login_since),
                 ),
                 "push": _direction_status(
-                    item, "push", policy, now, capability, signed_in=signed_in
+                    item,
+                    "push",
+                    policy,
+                    now,
+                    capability,
+                    signed_in=_no_credential_is_stale(item, login_since),
                 ),
             }
         )
@@ -3215,36 +3227,57 @@ def record_outbound_receipt(
     prov.write_baseline(ctx.config_dir, replace(record, outbound=receipt))
 
 
-def _radient_login_present(ctx: HubSyncContext) -> bool:
-    """Whether a Radient login the hub could use is stored NOW. Local, no network.
+def _radient_login_since(ctx: HubSyncContext, items: Any) -> int | None:
+    """When the newest Radient login the hub could use was stored (epoch ms), or
+    ``None``. Local, no network; probed only when some item carries a stored
+    ``no-credential`` (the one error a sign-in can make stale), so a snapshot with
+    none never opens the auth store.
 
-    The links inventory is a local read, so this cannot run the hub's own
-    resolver (``resolve_radient_oauth_access`` may refresh a token over the
-    network). It mirrors that resolver's local gates instead: the configured
-    destination may receive an org bearer, and the store holds an ENABLED
-    Radient OAuth row -- a pasted ``radient-key`` API key does not satisfy the
-    hub, so it does not count. Never raises: any doubt reads as signed out,
-    which only keeps the stored ``no-credential`` as it was.
+    The projections are local reads, so this cannot run the hub's own resolver
+    (``resolve_radient_oauth_access`` may refresh a token over the network). It
+    asks ``radient_oauth_login_usable_since``, which applies that resolver's LOCAL
+    refusals -- destination guard, OAuth-only, dead grant, moved family,
+    delegation -- so a login the hub would refuse never counts as a sign-in
+    (PR #3536 review M1 / QA Q1). Never raises: doubt reads as signed out, which
+    only keeps the stored ``no-credential`` as it was.
     """
 
     try:
-        from local_operator.providers.auth_store import AuthStore
+        if ctx.config_manager is None or not any(
+            isinstance(item, Mapping) and item.get("error_class") == "no-credential"
+            for item in items
+        ):
+            return None
         from local_operator.providers.radient_credentials import (
             configured_radient_base_url,
-            org_oauth_destination_allowed,
+            radient_oauth_login_usable_since,
         )
 
-        if ctx.config_manager is None:
-            return False
-        if not org_oauth_destination_allowed(configured_radient_base_url(ctx.config_manager)):
-            return False
-        store = AuthStore.open_read_only(Path(ctx.config_dir) / "auth.db")
-        try:
-            return any(row.credential_type == "oauth" for row in store.list_credentials("radient"))
-        finally:
-            store.close()
+        return radient_oauth_login_usable_since(
+            Path(ctx.config_dir), configured_radient_base_url(ctx.config_manager)
+        )
     except Exception:  # noqa: BLE001 - a status read must never fail on a probe
+        return None
+
+
+def _no_credential_is_stale(item: Mapping[str, Any], login_since: int | None) -> bool:
+    """Whether this item's stored ``no-credential`` predates a usable login.
+
+    Only a refusal recorded BEFORE the login is stale: the remedy it names was
+    done afterwards. A check that ran after the login and still found no usable
+    credential is a current fact (a refresh that failed, a block, anything only
+    the network decides), so it is reported as is. An item with no readable
+    check time cannot be ordered against the login and is treated as older --
+    it was written by a check, and every check stamps its time.
+    """
+
+    if login_since is None or item.get("error_class") != "no-credential":
         return False
+    checked = item.get("last_checked_at")
+    parsed = _parse_iso(checked) if isinstance(checked, str) else None
+    if parsed is None:
+        return True
+    return login_since > int(parsed.timestamp() * 1000)
 
 
 def _direction_status(
@@ -3261,10 +3294,10 @@ def _direction_status(
     A failure in one direction cannot overwrite the other's receipt or error;
     whole-row health is a derived view, not the source of truth.
 
-    ``signed_in`` is a FRESH local lookup of the Radient login
-    (``_radient_login_present``). A stored ``no-credential`` was recorded by a
-    check that ran while signed out and persists until the next successful
-    check; reporting it as ``failed`` after the operator signed in told them to
+    ``signed_in`` says this item's stored ``no-credential`` is STALE: a login
+    the hub could use was stored after the check that recorded it
+    (``_no_credential_is_stale``). That refusal persists until the next
+    successful check; reporting it as ``failed`` after the operator signed in told them to
     sign in again for up to a whole interval. With a login present now, that
     remedy is already done, so the error is withdrawn and the direction falls
     through to its ordinary state (normally ``idle``) until the check the sign-in

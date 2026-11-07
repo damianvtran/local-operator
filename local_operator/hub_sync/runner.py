@@ -181,7 +181,9 @@ class HubSyncRunner:
 
         It shortens the sleep, it does not add a check path: what runs is the
         ordinary ``tick`` (same lock, policy gates and first-run grace), and the
-        interval restarts after it. Idempotent (a burst of wakes is one early
+        interval restarts after it. A wake during the boot-time startup delay
+        cuts that delay short too (the same interruptible sleep), which is
+        still exactly one ordinary tick under the lock. Idempotent (a burst of wakes is one early
         tick), safe from any thread, and never raises; a no-op before
         ``run_forever`` has started or after ``stop()``.
         """

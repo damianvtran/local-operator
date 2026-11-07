@@ -281,3 +281,59 @@ def test_oauth_access_sync_bridge_uses_the_store(tmp_path) -> None:
 
 def test_oauth_access_sync_bridge_is_empty_with_nothing_stored(tmp_path) -> None:
     assert resolve_radient_oauth_access_sync(tmp_path, URL) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scenario", ["usable", "dead", "moved", "delegated", "api_key", "none", "refused"]
+)
+async def test_the_local_login_probe_agrees_with_the_hub_resolver(
+    tmp_path, monkeypatch, scenario: str
+) -> None:
+    """``radient_oauth_login_usable_since`` is the no-network twin of
+    ``resolve_radient_oauth_access`` (PR #3536 review M1 / QA Q1): for every LOCAL
+    refusal the resolver makes, the probe must answer "no usable login" too, and
+    a login the resolver accepts must count. Every scenario is refused before any
+    refresh, so the resolver runs here without a network."""
+    from local_operator.providers.radient_credentials import (
+        ORG_ALLOW_NONCANONICAL_ENV,
+        radient_oauth_login_usable_since,
+    )
+
+    monkeypatch.delenv(ORG_ALLOW_NONCANONICAL_ENV, raising=False)
+    base = "https://gateway.example.test/v1" if scenario == "refused" else URL
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        if scenario == "api_key":
+            store.upsert_credential(
+                "radient", {"type": "api_key", "source": "login", "key": "login-fixture"}
+            )
+        elif scenario != "none":
+            now_ms = int(time.time() * 1000)
+            row = store.upsert_credential(
+                "radient",
+                {
+                    "type": "oauth",
+                    "access": "oauth-fixture",
+                    "refresh": "refresh-fixture",
+                    # A delegated row only refuses a token that needs a refresh.
+                    "expires": now_ms - 1 if scenario == "delegated" else now_ms + 3600000,
+                },
+            )
+            if scenario == "dead":
+                assert store._mark_grant_dead(row.id, rejected_refresh_token=None)
+            elif scenario == "moved":
+                assert store.mark_family_moved(row.id)
+            elif scenario == "delegated":
+                assert store.set_refresh_delegate(
+                    row.id,
+                    {"device": "peer-synthetic", "state": "active", "not_after": time.time() + 600},
+                )
+        resolved = await resolve_radient_oauth_access(tmp_path, base, store=store)
+    finally:
+        store.close()
+
+    since = radient_oauth_login_usable_since(tmp_path, base)
+
+    assert (since is not None) == (resolved is not None)
+    assert (since is not None) == (scenario == "usable")
