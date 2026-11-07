@@ -318,7 +318,7 @@ def _touch_reason(target: Target, prot: _Protected) -> str | None:
         lexical.add(os.path.realpath(path))
     except OSError:
         pass
-    if not any(
+    if target.pattern is None and not any(
         _SESSIONS_DIRNAME in p.casefold() or _LEDGER_DIRNAME in p.casefold() for p in lexical
     ):
         return None
@@ -331,10 +331,34 @@ def _touch_reason(target: Target, prot: _Protected) -> str | None:
             ):
                 return "session state (transcripts, lineage, ask stores)"
         if target.pattern is not None:
+            prefix = target.path or ""
+            # A glob cannot climb out of its literal directory (``*`` never
+            # crosses ``/``), so one rooted in this session's scratchpad stays
+            # there.
+            if prefix and any(_under(prefix, pad) for pad in prot.own_scratchpad):
+                return None
             for state in prot.state_roots:
-                if _pattern_reaches(target.pattern, os.path.join(state, _SESSIONS_DIRNAME)):
+                if _pattern_hits(target.pattern, os.path.join(state, _LEDGER_DIRNAME)):
+                    return "the guardrail's own records"
+                if _pattern_hits(target.pattern, os.path.join(state, _SESSIONS_DIRNAME)):
+                    return "session state (transcripts, lineage, ask stores)"
+                if prefix and _under(prefix, state):
+                    # A glob whose literal part already sits in the state root
+                    # (``~/.local-operator/*``) may land anywhere in it.
                     return "session state (transcripts, lineage, ask stores)"
     return None
+
+
+def _pattern_hits(pattern: str, root: str) -> bool:
+    """Could ``pattern`` match ``root``, an ancestor of it, or anything under it?
+
+    Component-wise over the shared length, so ``~/.local-operator/sess*/x/f``
+    reaches ``sessions`` (``_pattern_reaches`` alone stops at patterns no
+    longer than ``root``). Over-matches dotfiles on purpose: fail closed.
+    """
+    pat = [c for c in pattern.split("/") if c]
+    prot = [c for c in root.split("/") if c]
+    return all(fnmatch.fnmatchcase(p, q) for p, q in zip(prot, pat, strict=False))
 
 
 def _evidence_by_pattern(target: Target, prot: _Protected) -> str | None:
@@ -622,6 +646,7 @@ def classify_targets(
     session_id: str = "",
     touched: Sequence[Target] = (),
     created: Sequence[Creation] = (),
+    blind: Sequence[str] = (),
 ) -> Verdict:
     prot = _protected(env, scratchpad, session_id) if (targets or touched or created) else None
     evidence_hits: list[RankedTarget] = []
@@ -650,6 +675,15 @@ def classify_targets(
                 evidence_hits.append(
                     RankedTarget(t, Risk.HIGH, f"{reason}, handed to {t.program or 'a program'}")
                 )
+    for name in dict.fromkeys(blind):
+        evidence_hits.append(
+            RankedTarget(
+                Target(path=None, op="touch", program=name, unknown_cwd=True),
+                Risk.HIGH,
+                f"names {name} while the working directory cannot be determined",
+                shown=name,
+            )
+        )
     if not targets and not opaque_reasons and not evidence_hits:
         return Verdict(Risk.LOW)
     prot = prot or _protected(env, scratchpad, session_id)
@@ -687,4 +721,5 @@ def classify_bash(
         session_id=session_id,
         touched=resolution.touched,
         created=resolution.created,
+        blind=resolution.blind,
     )

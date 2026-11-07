@@ -33,6 +33,7 @@ scrutiny (opaque, empty, unknown cwd), never less.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -960,6 +961,11 @@ class Resolution:
     #:
     #: Sources (``cp``/``rsync``/``zip``/``tar -c`` inputs) are not touches.
     touched: list[Target] = field(default_factory=list)
+    #: Words naming a guard evidence file (``origin.json``, ``transcript.jsonl``
+    #: …) handed to a non-read-only program while the working directory is
+    #: unresolvable (``cd $(…)``, a glob or CDPATH ``cd``): it may be the one
+    #: under ``sessions/``. ``classify`` ranks each HIGH (review R6-MINOR-1).
+    blind: list[str] = field(default_factory=list)
 
 
 def _operands(
@@ -1547,6 +1553,10 @@ class _Walker:
                     self._assign(w.text)
             return
         if name in ("cd", "pushd"):
+            if any(a.startswith("CDPATH=") for a in raw_assigns):
+                # ``CDPATH=… cd rel`` resolves ``rel`` against CDPATH, which
+                # this resolver does not model (review R6-MINOR-2).
+                st.env["CDPATH"] = OPAQUE_MARK
             self._cd(words[1:])
             return
         if name == "popd":
@@ -1923,8 +1933,17 @@ class _Walker:
             path = st.home
         else:
             w = operands[0]
-            if w.opaque or w.pattern is not None:
+            if w.pattern is not None:
+                # A glob cd lands somewhere the resolver cannot name; if the
+                # pattern can reach session state, that is a mention (R6-MAJOR-2).
+                self.result.touched.append(
+                    Target(path=w.text, op="touch", program="cd", pattern=w.pattern)
+                )
                 path = None
+            elif w.opaque:
+                path = None
+            elif st.env.get("CDPATH") and not w.text.startswith(("/", "~", "./", "../")):
+                path = None  # CDPATH search: unresolvable (R6-MINOR-2)
             elif w.text == "-":
                 # Bash updates OLDPWD after each cd, including cd -. Track it
                 # in the existing env snapshot so subshells/pipelines cannot
@@ -2142,10 +2161,27 @@ class _Walker:
                 if OPAQUE_MARK in raw or TEMP_MARK in raw:
                     continue  # an opaque part: the word itself is added below
                 path = _mention_path(raw, st.home, st.cwd)
-                if path is not None:
+                if path is None:
+                    continue
+                if _GLOB_CHARS.search(path):
+                    # ``sess*``, ``s[e]ssions``, ``se?sions``: compared as a
+                    # PATTERN in classify, never as a literal prefix (R6-MAJOR-2).
+                    self.result.touched.append(
+                        Target(
+                            path=_literal_prefix(path),
+                            op="touch",
+                            program=name or "a program",
+                            pattern=path,
+                        )
+                    )
+                else:
                     self.result.touched.append(
                         Target(path=path, op="touch", program=name or "a program")
                     )
+            if st.cwd is None:
+                for part in re.split(r"[\s/'\"=]+", text):
+                    if part and any(fnmatch.fnmatchcase(part, n) for n in _EVIDENCE_NAMES):
+                        self.result.blind.append(part)
         for w in words:
             if w.opaque:
                 self.result.touched.append(_target(w, "touch", name, st))
@@ -2312,23 +2348,25 @@ class _Walker:
 #: Interpreters are never here — what ``python x.py <path>`` does with a path
 #: is unknowable. ``echo``/``printf`` write only through a redirection, which
 #: is checked separately for every program.
+#:
+#: STRICT (review R6): only programs that cannot write a file or run another
+#: program by ANY flag. ``rg --pre``, ``less -o``, ``file -C``, ``sqlite3
+#: .once/.shell`` and ``sed``'s own ``w`` each did, so they are not here: a
+#: call to them that mentions session state goes through the backstop (HIGH,
+#: liftable by the judge) instead of being trusted.
 READ_ONLY_PROGRAMS = frozenset(
     {
         "ls",
         "cat",
         "head",
         "tail",
-        "less",
-        "more",
         "grep",
         "egrep",
         "fgrep",
-        "rg",
         "stat",
         "du",
         "df",
         "wc",
-        "file",
         "jq",
         "echo",
         "printf",
@@ -2396,42 +2434,12 @@ _FIND_WRITES = frozenset(
 )
 
 
-def _sed_read_only(argv: list[str]) -> bool:
-    """``sed -n`` whose every script is provably read-only (no in-place, no
-    ``w``/``W``/``e``, no script file)."""
-    scripts: list[str] = []
-    operands: list[str] = []
-    it = iter(argv)
-    for a in it:
-        if a in ("-e", "--expression"):
-            scripts.append(next(it, ""))
-        elif a.startswith("--expression="):
-            scripts.append(a.split("=", 1)[1])
-        elif a.startswith("-e") and len(a) > 2:
-            scripts.append(a[2:])
-        elif a in ("-n", "--quiet", "--silent", "-E", "-r", "--regexp-extended", "-u", "-z"):
-            continue
-        elif a.startswith("-"):
-            return False  # -i, -f, -s… or anything unknown
-        else:
-            operands.append(a)
-    if not scripts:
-        if not operands:
-            return False
-        scripts.append(operands[0])
-    return all(_SED_READ_ONLY_RE.match(sc) for sc in scripts)
-
-
 def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) -> bool:
     """Is ``name argv…`` a provably read-only invocation? Conservative: unknown → no."""
     if name in READ_ONLY_PROGRAMS:
         return True
     if name == "find":
         return not any(a in _FIND_WRITES for a in argv)
-    if name == "sqlite3":
-        return "-readonly" in argv
-    if name in ("sed", "gsed"):
-        return _sed_read_only(argv)
     if name == "git":
         if any(_GIT_UNSAFE_ENV_RE.match(a) for a in assigned):
             return False
@@ -2746,14 +2754,6 @@ _SED_FLAGS = _Flags(
 _SED_WRITES_RE = re.compile(r"[wWe]")
 #: A path-looking filename after a ``w``/``W`` (``1w /x``, ``s/a/b/gw ~/x``).
 _SED_W_PATH_RE = re.compile(r"[wW]\s*((?:/|~|\$\{?HOME\}?)[^\s;}'\"]*)")
-#: A ``sed`` script made ONLY of read commands: addresses (line numbers,
-#: ``$``, ``/re/``) with ``p``/``d``/``q``/``=``/``l``/``n``, or ``s///``
-#: with print/global/case/number flags. Anything else (``w``, ``W``, ``e``,
-#: ``r``…) is not provably read-only (review R5).
-_SED_READ_ONLY_RE = re.compile(
-    r"^\s*(?:(?:(?:\d+|\$|/[^/\n]*/)(?:\s*,\s*(?:\d+|\$|/[^/\n]*/))?)?\s*"
-    r"(?:[pdq=ln]|s/[^/\n]*/[^/\n]*/[gpI0-9]*)\s*(?:;|$))+\s*$"
-)
 _DD_KEYS = frozenset(
     {
         "if",
@@ -2818,7 +2818,10 @@ def _write_surface(
     if name in DELETE_PROGRAMS:
         return [], True  # every operand is the resolver's own delete target
     if name in ("mv", "gmv"):
-        return [], _flags_known(args, _MV_FLAGS)  # sources + destination: resolver targets
+        # Sources and a literal destination are resolver targets; a GLOB
+        # destination is not (``_add_overwrite_dest`` skips patterns), so name
+        # it here too (review R6-MAJOR-2: ``mv f <state>/s[e]ssions/…``).
+        return _copy_dest(args, _MV_FLAGS), _flags_known(args, _MV_FLAGS)
     if name in ("tee",):
         return [], _flags_known(args, _TEE_FLAGS)  # resolver targets
     if name in ("mkdir", "gmkdir"):
@@ -2894,9 +2897,12 @@ def _write_surface(
         # with a path is unknowable, so its paths also go to the fallback.
         return _perl_inplace(args), False
     if name == "sqlite3":
-        # ``.output FILE`` and friends write elsewhere: never fully modelled.
+        # ``.output FILE``, ``.once``, ``.shell`` write or run elsewhere even
+        # under ``-readonly``: never fully modelled, so a mention of session
+        # state is HIGH through the backstop (review R6, pre-existing escapes).
         operands, _ = _operands(args, _SQLITE_VALUE_FLAGS)
-        return operands[:1], False
+        readonly = any(w.text == "-readonly" for w in args)
+        return ([] if readonly else operands[:1]), False
     if name == "git":
         return _git_writes(args), False
     return None
@@ -3036,6 +3042,28 @@ _MENTION_RE = re.compile(
     # ``/abs`` glued to a flag, not a relative ``-st/…``).
     r"|(?<![\w.~$-])[\w.][\w.-]*/[^\s'\"`;|&<>(){}]*"
 )
+
+
+_GLOB_CHARS = re.compile(r"[*?\[{]")
+#: Basenames of the files the guard reads as evidence (``classify``'s
+#: ``_EVIDENCE_FILES`` plus the ``guardrails/`` records).
+_EVIDENCE_NAMES = (
+    "origin.json",
+    "transcript.jsonl",
+    "asks.jsonl",
+    "subagent-roster*",
+    "created.sqlite",
+    "lineage.jsonl",
+)
+
+
+def _literal_prefix(pattern: str) -> str:
+    """The deepest directory of ``pattern`` above its first glob component."""
+    parts = pattern.split("/")
+    for k, part in enumerate(parts):
+        if _GLOB_CHARS.search(part):
+            return "/".join(parts[:k]) or "/"
+    return os.path.dirname(pattern) or "/"
 
 
 def _mention_path(raw: str, home: str, cwd: str | None) -> str | None:

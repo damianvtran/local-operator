@@ -89,8 +89,8 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   `git log/show/diff --output`, `mkdir`, `touch`, `truncate`, `dd of=`, `tee`,
   `sed -i`, `perl -i`, `sqlite3` without `-readonly`) and any `rm`/`rmdir`/
   `unlink` or `rsync --delete` there. Reading is not writing: sources of `cp`,
-  `rsync`, `zip` and `tar -c` are fine, as are `ls`, `cat`, `sed -n`, `grep`,
-  `find` (no `-delete`/`-exec`), `jq`, `sqlite3 -readonly` and
+  `rsync`, `zip` and `tar -c` are fine, as are `ls`, `cat`, `head`, `tail`,
+  `wc`, `stat`, `du`, `grep`, `jq`, `find` (no `-delete`/`-exec`) and
   `git status/log/show/diff/rev-parse/ls-files` without `--output`, `-c`,
   `--config-env`, `--ext-diff`, `--textconv`, `--git-dir`/`--work-tree`, a
   pager flag or a `GIT_*`/`PAGER` assignment. A path there handed to any other
@@ -100,8 +100,12 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   and mentions those trees anywhere — an operand, a glued flag value, a path
   inside a quoted script or pager setting, or a working directory there — is
   at least HIGH, so a misparsed writer costs a judge call, never a silent
-  LOW. `sed` counts as read-only only for `-n` with print/delete/quit and
-  `s///` scripts (no `w`, `W` or `e`). The `write`, `edit` and `browser` (screenshot/recording `path`)
+  LOW. A glob counts when it could reach those trees (`~/.local-operator/sess*`).
+  `sed`, `sqlite3 -readonly`, `rg`, `less` and `file` are not trusted there
+  (`w`, `.once`/`.shell`, `--pre`, `-o`, `-C` all write or run something), so
+  they rank HIGH when they name session state. Under a working directory that
+  cannot be determined (`cd $(…)`, a glob `cd`, `CDPATH`), naming an evidence
+  file (`origin.json`, `transcript.jsonl` …) is HIGH. The `write`, `edit` and `browser` (screenshot/recording `path`)
   tools refuse those files the same way. An interpreter that computes the path
   itself (`python -c`, `node -e`) is the documented ceiling, as for any
   interpreter delete. The judge must answer

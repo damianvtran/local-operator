@@ -958,7 +958,8 @@ def test_write_shaped_planters_stay_critical(home: Path, command: str) -> None:
 _READS = [
     (f"python3 ana.py ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
     (f"python3 ana.py ~/.local-operator/sessions/{SID}/transcript.jsonl", Risk.HIGH),
-    (f"sed -n 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.LOW),
+    # Round 6: sed/sqlite3 are not strict read-only; a session mention is HIGH.
+    (f"sed -n 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
     (f"awk 'NR==1' ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
     (f"sort ~/.local-operator/sessions/{CHILD}/transcript.jsonl | uniq -c", Risk.HIGH),
     (f"xxd ~/.local-operator/sessions/{CHILD}/transcript.jsonl | head", Risk.HIGH),
@@ -977,7 +978,7 @@ _READS = [
     ),
     (f"cd ~/.local-operator/sessions/{CHILD} && npm test", Risk.HIGH),
     (f"git -C ~/.local-operator/sessions/{CHILD} status", Risk.LOW),
-    ("sqlite3 -readonly ~/.local-operator/guardrails/created.sqlite 'select 1'", Risk.LOW),
+    ("sqlite3 -readonly ~/.local-operator/guardrails/created.sqlite 'select 1'", Risk.HIGH),
     ("cat ~/.local-operator/guardrails/lineage.jsonl", Risk.LOW),
     ("python3 rig.py --out=~/.local-operator/sessions/newid", Risk.HIGH),
 ]
@@ -1148,6 +1149,13 @@ def _forms(program: str) -> list[str]:
         f"{program} 'x {abs_path} y'",  # inside a quoted script
         f'{program} "1w {abs_path}"',  # sed-style script
         f"cd {_S} && {program} -Q x",  # cwd under session state
+        # Round 6 (R6-MAJOR-2): the protected component as a glob.
+        f"{program} -Q ~/.local-operator/sess*/{CHILD}/origin.json",
+        f"{program} -Q ~/.local-operator/s[e]ssions/{CHILD}/origin.json",
+        f"{program} -Q ~/.local-operator/se?sions/{CHILD}/origin.json",
+        f"{program} -Q ~/.local-operator/guard*/created.sqlite",
+        f"{program} -Q ~/.local-operator/{{sessions,x}}/{CHILD}/origin.json",
+        f"cd ~/.local-operator/sess*/{CHILD} && {program} -Q origin.json",
     ]
 
 
@@ -1169,9 +1177,9 @@ def test_mention_invariant_is_never_low(home: Path, program: str) -> None:
     [
         f"cat {_S}/transcript.jsonl",
         f"grep -r x {_S}",
-        f"sed -n 1p {_S}/transcript.jsonl",
-        f"sed -n '/error/p' {_S}/transcript.jsonl",
-        "sqlite3 -readonly ~/.local-operator/guardrails/created.sqlite 'select 1'",
+        f"head -3 {_S}/transcript.jsonl",
+        f"wc -l {_S}/transcript.jsonl",
+        f"jq . {_S}/origin.json",
         f"git -C {_S} status",
         f"cp {_S}/transcript.jsonl ~/work/t.jsonl",
         f"rsync -a {_S}/ ~/work/bk/",
@@ -1186,3 +1194,61 @@ def test_strict_reads_and_own_scratchpad_stay_low(home: Path, command: str) -> N
         command, cwd=str(home), env=_env(home), scratchpad=scratch, session_id=SID
     )
     assert verdict.risk is Risk.LOW, (command, verdict.reasons)
+
+
+# -- round 6: shrink trust ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd ~/.local-operator && sed -n '/a\\/p;/w guardrails/p' f",
+        "cd ~/.local-operator && sed -n '/a\\/p;/w sessions/p' f",
+        f"cd ~/.local-operator && sed -n '/a\\/p;s/w sessions/{CHILD}/g' f",
+        f"python3 x.py ~/.local-operator/sess*/{CHILD}/origin.json",
+        f"cd ~/.local-operator/sess*/{CHILD} && touch origin.json",
+        f"cd $(echo ~/.local-operator/sessions/{CHILD}) && touch origin.json",
+        "CDPATH=~/.local-operator cd sessions && touch origin.json",
+        f'sqlite3 -readonly db ".once {_S}/origin.json" "select 1"',
+        f'sqlite3 -readonly db ".shell touch {_S}/origin.json"',
+        f"rg --pre=./evil x {_S}",
+        f"less -o {_S}/origin.json f",
+        f"file -C -m {_S}/origin",
+    ],
+)
+def test_round6_rows_are_not_low(home: Path, command: str) -> None:
+    assert _verdict(home, command).risk is not Risk.LOW, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"cp ~/work/f ~/.local-operator/sess*/{CHILD}/origin.json",
+        f"mv ~/work/f ~/.local-operator/s[e]ssions/{CHILD}/origin.json",
+        f"touch ~/.local-operator/se?sions/{CHILD}/origin.json",
+        "cp ~/work/f ~/.local-operator/guard*/created.sqlite",
+    ],
+)
+def test_glob_destinations_into_evidence_are_critical(home: Path, command: str) -> None:
+    assert _verdict(home, command).risk is Risk.CRITICAL, command
+
+
+def test_operator_goal_cleanups_stay_low(home: Path, repo: Path) -> None:
+    """The operator's request: own scratch, own $HOME rig, own worktree and
+    own clone clean up without an ask, through the ledger."""
+    scratch = str(home / ".local-operator" / "sessions" / SID / "scratchpad")
+    own = classify_bash(
+        f"rm -rf {scratch}/rig && mkdir -p {scratch}/rig",
+        cwd=str(home),
+        env=_env(home),
+        scratchpad=scratch,
+        session_id=SID,
+    )
+    assert own.risk is Risk.LOW
+    _create(home, "mkdir ~/qa-rig6")
+    assert _verdict(home, "rm -rf ~/qa-rig6").risk is Risk.LOW
+    _create(home, f"git -C {repo} worktree add -q -b r6 ~/r6-wt")
+    assert _verdict(home, f"git -C {repo} worktree remove ~/r6-wt").risk is Risk.LOW
+    assert _verdict(home, "rm -rf ~/r6-wt").risk is Risk.LOW
+    _create(home, f"git clone -q {repo} ~/r6-clone")
+    assert _verdict(home, "rm -rf ~/r6-clone").risk is Risk.LOW
