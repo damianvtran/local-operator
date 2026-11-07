@@ -33,7 +33,108 @@ def credential_id(selected: int | None = None) -> int:
         return rows[0].id
 
 
-def usable_credential_id(selected: object) -> int | None:
+#: The hub every tunnel request goes to (``RadientTunnels.request`` below posts to
+#: ``DEFAULT_API_URL + "/v1/tunnels"``), in the spelling a Radient sign-in stamps
+#: into a row's ``api_endpoint`` (``https://api.radienthq.com/v1``). A successor
+#: row must be bound to THIS hub: an account label on another hub is a different
+#: binding (``auth_store._radient_account_identity``), and re-pointing the tunnel
+#: at it would send this tunnel's requests with a bearer minted elsewhere.
+TUNNEL_HUB = DEFAULT_API_URL + "/v1"
+
+
+def _hub(endpoint: object) -> str | None:
+    """A row's stamped hub, trailing slash folded; ``None`` when it carries none."""
+    if not isinstance(endpoint, str) or not endpoint.strip():
+        return None
+    return endpoint.strip().rstrip("/")
+
+
+def _account(data: object) -> str | None:
+    account = data.get("account_id") if isinstance(data, dict) else None
+    return account if isinstance(account, str) and account.strip() else None
+
+
+def same_account_successor(
+    pin: object, *, owner_account: object = None, fresh_id: int | None = None
+) -> int | None:
+    """The live row that should own this tunnel instead of a dead ``pin``, if PROVABLE.
+
+    WHY THIS EXISTS (the 2026-11-06 incident). A sign-in writes the row its
+    identity key names, and a row written before sign-ins stamped
+    ``api_endpoint`` carries a LEGACY key — so a fresh sign-in to the very same
+    Radient account lands on a NEW row while ``tunnel/config.json`` keeps
+    pinning the old one, whose grant the IdP has refused. Every surface then
+    reports ``login_required`` and offers a sign-in, which writes the new row
+    again and changes nothing: the loop issue #1711 describes for a pin that is
+    GONE, here for a pin that is PRESENT BUT DEAD.
+
+    WHY RE-POINTING IS SAFE HERE WITHOUT THE CLOUD READ ``report.login_verdict``
+    says a general re-point needs: the tunnel is owned by a Radient ACCOUNT, and
+    every condition below is local proof that the successor is that same
+    account on that same hub — so the re-point changes which row carries the
+    bearer, never who owns the tunnel. Anything short of proof answers ``None``
+    and the surfaces keep their honest verdict.
+
+    The proof, all of it required:
+
+    * the account: the pinned row's own ``account_id`` when it has one, else
+      the cached record's ``owner_account_id`` (``owner_account``, written at
+      the last create/connect/configure) — for a gone pin AND for a
+      pre-identity pin row that never carried an account (agent review round
+      1, m-4): the cached owner is the tunnel's owner itself, which is the
+      fact the re-point has to preserve. When both exist they must agree;
+      when neither does there is nothing to compare and the answer is ``None``.
+    * the pin is NOT USABLE: gone, or present with a dead-grant tombstone or a
+      disabled cause. A live pin is the operator's choice (two logins to one
+      account are a legitimate setup) and is never second-guessed.
+    * the pin's hub, when it carries one, is the tunnel's hub — a missing
+      endpoint is the legacy shape, which ``_radient_account_identity``
+      deliberately does not invent, and the tunnel itself only ever spoke to
+      :data:`TUNNEL_HUB`.
+    * exactly ONE enabled, non-dead Radient oauth row other than the pin carries
+      that account on :data:`TUNNEL_HUB`. Two would be a choice this function
+      must not make — and that holds on the login path too (agent review round
+      1, m-2): ``fresh_id`` is a MEMBERSHIP check (the one candidate must be
+      the row the login just wrote), never a filter that would let a fresh
+      sign-in win over another live same-account row the status and configure
+      paths would call ambiguous. One rule, so the heal never re-points a
+      store those surfaces would refuse to choose in.
+
+    Store reads only — no network — because the credential-write hook calls it
+    and that hook is cheap by construction (see ``install.rearm_if_parked``).
+    """
+    if not isinstance(pin, int) or isinstance(pin, bool):
+        return None
+    owner = owner_account if isinstance(owner_account, str) and owner_account.strip() else None
+    with closing(AuthStore()) as store:
+        row = store.get_credential(pin)
+        if row is not None and row.provider == "radient" and row.credential_type == "oauth":
+            account = _account(row.data) or owner
+            if account is None or (owner is not None and owner != account):
+                return None
+            if row.disabled_cause is None and not store.grant_is_dead(pin):
+                return None
+            if _hub(row.data.get("api_endpoint")) not in (None, TUNNEL_HUB):
+                return None
+        else:
+            account = owner
+            if account is None:
+                return None
+        candidates = [
+            other.id
+            for other in store.list_credentials("radient")
+            if other.id != pin
+            and other.credential_type == "oauth"
+            and _account(other.data) == account
+            and _hub(other.data.get("api_endpoint")) == TUNNEL_HUB
+            and not store.grant_is_dead(other.id)
+        ]
+    if len(candidates) != 1 or (fresh_id is not None and candidates[0] != fresh_id):
+        return None
+    return candidates[0]
+
+
+def usable_credential_id(selected: object, *, owner_account: object = None) -> int | None:
     """``selected`` when it names a Radient oauth row this device still has.
 
     The predicate the tunnel commands' DEFAULT selection needs before trusting a
@@ -45,9 +146,19 @@ def usable_credential_id(selected: object) -> int | None:
     (``credential_id(None)``'s own rule); an EXPLICIT ``--credential-id`` is
     deliberately not routed through it, because selecting an id that names
     nothing is a typo or a stale note, and it must keep failing loudly.
+
+    A PIN THAT IS PRESENT BUT DEAD, or gone, yields to its provable same-account
+    successor (:func:`same_account_successor`) first: a dead-grant pin used to be
+    returned as-is, so bare `lop tunnel configure` re-proposed the very row the
+    IdP refused, and with two Radient logins on the device ``credential_id(None)``
+    could not pick one either. ``owner_account`` is the cached record's
+    ``owner_account_id``, the only same-account evidence left for a gone pin.
     """
     if not isinstance(selected, int) or isinstance(selected, bool):
         return None
+    successor = same_account_successor(selected, owner_account=owner_account)
+    if successor is not None:
+        return successor
     with closing(AuthStore()) as store:
         row = store.get_credential(selected)
     if row is None or row.provider != "radient" or row.credential_type != "oauth":

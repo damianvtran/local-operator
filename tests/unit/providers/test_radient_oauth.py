@@ -238,7 +238,7 @@ def test_a_pre_identity_radient_row_is_not_rebound_without_account_proof(tmp_pat
     """
     from local_operator.providers.auth_store import AuthStore
 
-    monkeypatch.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *args: None)
+    monkeypatch.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *args, **kwargs: None)
     store = AuthStore(tmp_path / "auth.db")
     old = store.upsert_credential(
         "radient", {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}

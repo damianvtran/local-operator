@@ -231,7 +231,7 @@ async def test_verified_restore_releases_only_matching_automatic_state(
     monkeypatch.setattr(
         store,
         "_rearm_parked_tunnel_login",
-        lambda provider, row: notifications.append((row.id, row.disabled_cause)),
+        lambda provider, row, **_kwargs: notifications.append((row.id, row.disabled_cause)),
     )
     restored = store.complete_radient_login(await _verified_login_result())
     assert restored.id == known.id and restored.disabled_cause is None
