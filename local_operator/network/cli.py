@@ -597,9 +597,11 @@ def add_parser(
         help=(
             "with --create: its first turn, run on that device once its runtime is up. "
             "The receipt reports whether it settled — completed, failed (with the cause), "
-            "or still running — so a failure is reported here whenever that owner can "
-            "settle the turn; against an older owner the receipt says it cannot see the "
-            "end instead of claiming one"
+            # "45 s" is ``relay.FIRST_TURN_WAIT_S``, spelled out because the relay
+            # module is imported lazily here; a test pins the two together.
+            "or still running after up to 45 s, with the --peek that shows its reply — so a "
+            "failure is reported here whenever that owner can settle the turn; against an "
+            "older owner the receipt says it cannot see the end instead of claiming one"
         ),
     )
     # WHO THE SESSION IS (definitions.py). Three flags, each naming a DISTINCT
@@ -7923,7 +7925,35 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                     lines.append(f"turn failed on {peer}: {why}")
                 elif state == "settled":
                     lines.append(f"turn: completed on {peer}")
+                elif state == "running" and isinstance(turn.get("waited_s"), (int, float)):
+                    # THIS SIDE STOPPED WAITING; IT IS NOT BLIND (2026-11-06/07, two
+                    # same-build pairs): the owner settles turns, its wait simply ran
+                    # out (``relay.FIRST_TURN_WAIT_S``) before a slow first turn did.
+                    # Telling that person the receipt "cannot see how it ends" was
+                    # false — the turn completed seconds later. The wait is named so
+                    # "still running" carries its own evidence, and ``--peek`` is the
+                    # follow-up because it shows the reply once one lands; it cannot
+                    # show a FAILED turn's cause (MAJOR-2 below), which is why the
+                    # line promises the reply, not the outcome.
+                    #
+                    # THE COMMAND ON ITS OWN INDENTED LINE (design round 1, D1): inline
+                    # it soft-wrapped mid-token at 80 columns, and a triple-click took
+                    # the prose and the backticks with it — backticks a shell runs as a
+                    # command substitution. Alone and unquoted it selects and pastes
+                    # as-is. Safe to add a line here: ``--json`` prints the payload and
+                    # never these lines (``_emit``), and the agent's network tool hands
+                    # the text back verbatim; no reader parses the receipt by line.
+                    waited = round(float(turn["waited_s"]), 1)
+                    lines.append(
+                        f"turn: still running on {peer} after {waited:g} s — "
+                        "its reply shows here once it arrives:"
+                    )
+                    lines.append(f"  lop network sessions --peer {peer} --peek {minted}")
                 elif state == "running":
+                    # THE GENUINE OLD-OWNER CASE: an ack with no ``settled`` marker and
+                    # no ``waited_s`` comes from an owner that answers at the append,
+                    # so this side really cannot see the end.
+                    #
                     # NO "FOLLOW IT WITH --peek" HERE (agent review round 1,
                     # MAJOR-2): over the real journal a failed turn's assistant row
                     # is `content: null` and its cause is an incident record with no
