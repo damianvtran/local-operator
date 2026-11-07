@@ -1542,10 +1542,10 @@ def test_concurrent_stamp_migration_is_tolerated(home: Path) -> None:
         def __init__(self, conn: sqlite3.Connection) -> None:
             self._conn = conn
 
-        def execute(self, sql: str, *args: object):
+        def execute(self, sql: str, parameters: Any = ()) -> sqlite3.Cursor:
             if sql.startswith("ALTER TABLE"):
                 self._conn.execute(sql)  # the "other" process wins first
-            return self._conn.execute(sql, *args)
+            return self._conn.execute(sql, parameters)
 
         def __getattr__(self, name: str):
             return getattr(self._conn, name)
