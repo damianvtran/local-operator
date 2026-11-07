@@ -87,6 +87,13 @@ CAPABILITY_RESILIENCE = "resilience"
 #: this report named only the RELAY's build — the relay is not the process that
 #: runs the sessions. ``lop services status`` knew; ``ready`` did not.
 CAPABILITY_SERVE_DAEMON = "serve_daemon"
+#: (j) model switching on a borrow-only peer. A session-scoped share runs turns,
+#: but the model catalogue a ``/model`` switch reads is only shared with a
+#: DEVICE-scoped holder (``docs/design/mesh-catalogue-metadata.md``, "Normal
+#: consumers"), so the switch is refused there. Added 2026-11-06 after an
+#: operator met that refusal on lop-remote-node-2 with ``ready`` reporting the
+#: peer fine: the report names the owner's decision before anyone hits it.
+CAPABILITY_MODEL_SWITCH = "model_switch"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -130,6 +137,9 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # will run work — on the wrong build, or until the next reboot. Warn with
         # the remedy; the update/restart path is its point of use.
         CAPABILITY_SERVE_DAEMON,
+        # Turns on the borrowed model still run; only switching is refused, and
+        # widening the share is the owner's access decision, never a gate here.
+        CAPABILITY_MODEL_SWITCH,
     }
 )
 
@@ -3677,6 +3687,67 @@ def model_credential_row(
     return row
 
 
+def model_switch_row(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    viewer: Viewer,
+    peer_label: str,
+    network_id: str,
+) -> dict[str, Any] | None:
+    """(j) Would a ``/model`` switch to openai on this peer be refused for scope?
+
+    Predicts ``shared_catalogue._share``'s strict refusal: the peer holds this
+    device's openai share at SESSION scope, so its turns borrow fine while the
+    catalogue a switch must read is refused. Only the OWNER can widen a share,
+    so the row is emitted only when the viewer owns the placement and is the
+    device that would run the remedy — read from this device's own document,
+    which a peer that has not pulled yet cannot contradict. ``None`` (no row)
+    everywhere else: no share, a device-scoped one, or a peer whose default
+    openai login is its own (a local login outranks the share, so nothing is
+    refused). It never offers a share the operator has not made; it names the
+    widening of one that exists, as a decision, and writes nothing.
+    """
+    if not network_id or not getattr(viewer, "device_id", ""):
+        return None
+    own = viewer.placement(provider="openai")
+    if str(own.get("owner_device") or "") != viewer.device_id:
+        return None
+    holder = next(
+        (
+            row
+            for row in own.get("holders") or []
+            if isinstance(row, Mapping) and row.get("device") == member.device_id
+        ),
+        None,
+    )
+    if holder is None or holder.get("scope") == "device":
+        return None
+    model = facts.get("default_model")
+    hosting = str(model.get("hosting") or "") if isinstance(model, Mapping) else ""
+    if hosting.lower() == "openai" and facts.get("has_local") is True:
+        return None
+    from local_operator.providers.shared_catalogue import device_scope_share_command
+
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_MODEL_SWITCH,
+        ok=False,
+        code="session_scoped_share",
+        detail=(
+            f"model switching on {peer_label} needs a device-scoped share of openai: "
+            f"it borrows openai from this device per session, so turns run but a "
+            f"`/model openai/...` switch there is refused"
+        ),
+        remedies=[
+            f"to allow it (your decision: it lends openai to every session on "
+            f"{peer_label}), run here: " + device_scope_share_command(member.device_id, network_id)
+        ],
+        source=SOURCE_LOCAL,
+    )
+
+
 def _default_pair(model: Mapping[str, Any]) -> str:
     hosting = _bounded(model.get("hosting") or "", 120)
     name = _bounded(model.get("model_name") or "", 200)
@@ -5484,6 +5555,15 @@ def _peer_checks(
     rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
+    switch_row = model_switch_row(
+        member,
+        facts,
+        viewer=viewer,
+        peer_label=peer_label,
+        network_id=str(getattr(record, "network_id", "") or ""),
+    )
+    if switch_row is not None:
+        rows.append(switch_row)
     selected = facts.get("selected_model_access")
     if selected_row is not None:
         selected = (

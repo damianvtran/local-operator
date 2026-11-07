@@ -28,6 +28,55 @@ _locks_guard = threading.Lock()
 _locks: dict[str, threading.Lock] = {}
 
 
+def device_scope_share_command(device: str, network_id: str, key: str = "openai") -> str:
+    """The ONE spelling of the remedy for a catalogue a session-scoped share cannot feed.
+
+    WHY IT EXISTS. A model switch on a borrow-only device refused with "catalogue
+    needs a device-scoped share" and nothing else, while readiness said the peer
+    was fine (a turn there borrows per session and works). The gate itself is the
+    design (``docs/design/mesh-catalogue-metadata.md``, "Normal consumers"): a
+    receipt here is machine-wide, so only an explicit device-scoped holder may
+    populate it. Widening a share is the OWNER's access decision, never this
+    device's, so the product names the exact command and changes nothing.
+
+    Shared by the refusal below and ``network.readiness`` so the sentence a
+    switch prints and the one ``lop network ready`` predicts cannot drift. It
+    names the device by ID (``--with`` accepts a name or an id; an id cannot be
+    ambiguous) and the network explicitly, because the share verb refuses to
+    guess one on an owner that belongs to several.
+    """
+    return (
+        f"lop network credential share {key} --with {device} --network {network_id} "
+        "--scope device"
+    )
+
+
+def _device_scope_refusal(
+    client: MeshCredentialClient, entry: Any, root: Path | None
+) -> MeshRefusal:
+    """The strict refusal, carrying who must decide and what they would run.
+
+    Keeps the historical leading clause (``catalogue needs a device-scoped
+    share``) so existing readers keyed on it still match. Names only device and
+    network identifiers already on this device's placement copy; reads no
+    credential.
+    """
+    owner = str(getattr(entry, "owner_device_name", "") or "") or str(entry.owner_device)
+    try:
+        member = store.load(client.network_id, root).member(client.self_device)
+        here = (member.name if member is not None else "") or client.self_device
+    except (OSError, ValueError):
+        here = client.self_device
+    command = device_scope_share_command(client.self_device, client.network_id)
+    return MeshRefusal(
+        "catalogue_unsupported",
+        "catalogue needs a device-scoped share: "
+        f"{here} borrows openai from {owner} per session, which runs turns but does not "
+        f"share the model list a switch reads. Widening it is {owner}'s decision; to allow "
+        f"model switching here, run on {owner}: {command}",
+    )
+
+
 def _share(
     root: Path | None = None, *, strict: bool = False
 ) -> tuple[MeshCredentialClient, int, int] | None:
@@ -69,7 +118,7 @@ def _share(
             return None
         if holder.scope != "device" or reconcile.is_derived(holder):
             if strict:
-                raise MeshRefusal("catalogue_unsupported", "catalogue needs a device-scoped share")
+                raise _device_scope_refusal(client, entry, root)
             return None
         network = store.load(client.network_id, root)
         owner = network.member(entry.owner_device)

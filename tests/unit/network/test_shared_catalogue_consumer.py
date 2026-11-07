@@ -862,3 +862,57 @@ async def test_desktop_usable_scope_offers_the_approved_owner_model(
     assert ("openai", "gpt-fixture-sol") in offered
     # The owner row is offered as metadata, never as a local bearer.
     assert plain.list_credentials("openai") == []
+
+
+@pytest.mark.asyncio
+async def test_a_session_scoped_switch_names_the_owner_remedy_then_succeeds_after_it(
+    borrower, monkeypatch
+):
+    """The remote ``/model`` refusal must name the owner's decision, exactly.
+
+    2026-11-06: ``/model openai/gpt-6.1-sol`` on a peer holding a SESSION-scoped
+    openai share answered only "catalogue needs a device-scoped share". The gate
+    stays (a machine-wide catalogue is device-scoped by design); what changes is
+    that the sentence carries the one command the OWNER would run, and running
+    that very command is what makes the switch succeed. Nothing is widened by
+    the refusal itself: no owner RPC happens before it.
+    """
+    import asyncio
+
+    from local_operator.mobile.peer_model import validate_peer_selection
+    from local_operator.model.configure import ModelSelectionRefused
+    from local_operator.network.types import MeshRefusal
+    from local_operator.providers import shared_catalogue
+
+    mesh, plain, controller, state = borrower
+    with placement.mutate(mesh.network_id, self_device=mesh.owner, root=mesh.a.root) as doc:
+        doc.revoke("openai", mesh.borrower, by=mesh.owner)
+        doc.grant("openai", mesh.borrower, by=mesh.owner, scope="session")
+    transport.helpers._pull(mesh)
+
+    command = (
+        f"lop network credential share openai --with {mesh.borrower} "
+        f"--network {mesh.network_id} --scope device"
+    )
+    with pytest.raises(MeshRefusal) as direct:
+        shared_catalogue.prepare_selection_sync("openai", mesh.b.root)
+    assert direct.value.code == "catalogue_unsupported"
+    assert str(direct.value).startswith("catalogue needs a device-scoped share")
+    assert str(direct.value).endswith(command)
+    with pytest.raises(ModelSelectionRefused) as refused:
+        await asyncio.to_thread(validate_peer_selection, "openai", "gpt-fixture-sol")
+    assert refused.value.code == "catalogue_unsupported"
+    assert command in str(refused.value)
+    assert state["gets"] == 0 and len(mesh.idp.posts) == 0
+    print(f"BEFORE: {refused.value}")
+
+    # The operator's decision, typed on the OWNER exactly as the sentence spells it.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(mesh.a.root))
+    assert transport.helpers._lop_network(*command.split()[2:]) == 0
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(mesh.b.root))
+    transport.helpers._pull(mesh)
+
+    spec = await asyncio.to_thread(validate_peer_selection, "openai", "gpt-fixture-sol")
+    assert (spec.provider, spec.model_id) == ("openai", "gpt-fixture-sol")
+    assert state["gets"] == 1
+    print(f"AFTER: {spec.provider}/{spec.model_id}")

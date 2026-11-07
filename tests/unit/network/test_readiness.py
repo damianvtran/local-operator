@@ -4506,3 +4506,62 @@ def test_peer_strings_are_terminal_safe_and_the_row_is_bounded() -> None:
     assert not any(0x7F <= ord(ch) <= 0x9F for ch in rendered)
     assert "more" in rendered
     assert len(json.dumps(row["observed"])) < 2048
+
+
+# --- (j) model switching on a borrow-only peer -------------------------------
+
+
+def _switch_rows(viewer: Any, facts: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    return readiness.model_switch_row(
+        _member(),
+        facts or {"default_model": {"hosting": "anthropic", "resolved": True}},
+        viewer=viewer,
+        peer_label="cloud-node-1",
+        network_id="n_fixture",
+    )
+
+
+def test_model_switch_row_names_the_owner_decision_for_a_session_scoped_share() -> None:
+    """A session-scoped openai share runs turns but refuses ``/model`` switches.
+
+    The row predicts ``shared_catalogue._share``'s strict refusal BEFORE the
+    operator meets it, spells the exact owner-side command, reads ``warn`` (it
+    never gates onboarding: turns work) and writes nothing.
+    """
+    viewer = _FakeViewer(
+        placement={"owner_device": VIEWER, "holders": [{"device": PEER, "scope": "session"}]}
+    )
+    row = _switch_rows(viewer)
+    assert row is not None
+    assert row["capability"] == readiness.CAPABILITY_MODEL_SWITCH
+    assert row["detail"].startswith(
+        "model switching on cloud-node-1 needs a device-scoped share of openai"
+    )
+    assert row["remedies"][0].endswith(
+        f"lop network credential share openai --with {PEER} --network n_fixture --scope device"
+    )
+    assert readiness.row_state(row) == readiness.ROW_STATE_WARN
+    assert readiness.onboarding_failures([row]) == []
+    print("\n".join(readiness.render_check_lines([row])))
+
+
+@pytest.mark.parametrize(
+    ("placement", "facts"),
+    [
+        # Already device-scoped: the switch is allowed.
+        ({"owner_device": VIEWER, "holders": [{"device": PEER, "scope": "device"}]}, None),
+        # Not a holder: readiness never offers a share the operator has not made.
+        ({"owner_device": VIEWER, "holders": []}, None),
+        # Another device owns it: only its owner can widen it, so not from here.
+        ({"owner_device": THIRD, "holders": [{"device": PEER, "scope": "session"}]}, None),
+        # The peer's own openai login outranks the share: nothing is refused.
+        (
+            {"owner_device": VIEWER, "holders": [{"device": PEER, "scope": "session"}]},
+            {"default_model": {"hosting": "openai", "resolved": True}, "has_local": True},
+        ),
+    ],
+)
+def test_model_switch_row_is_silent_where_no_switch_is_refused(
+    placement: dict[str, Any], facts: dict[str, Any] | None
+) -> None:
+    assert _switch_rows(_FakeViewer(placement=placement), facts) is None

@@ -166,6 +166,14 @@ def configure_cli_logging() -> None:
     configure_console_logging(
         level=logging.INFO, fmt=CLI_LOG_FORMAT, advisories_require_terminal=True
     )
+    # THE CLI'S INFO FLOOR MUST NOT REACH THE WIRE CLIENTS. The console
+    # configurator sets them to the ROOT level, which here is INFO — the level at
+    # which httpx logs one record per request — so any command that touched a
+    # provider printed ``- INFO - HTTP Request: GET .../v1/models`` among its
+    # answer (2026-11-06: interleaved into a `lop network sessions --slash`
+    # result). The pin belongs to the clients, not the destination; our own INFO
+    # records still print exactly as before.
+    quiet_wire_clients()
 
 
 def quiet_wire_clients(level: Optional[int] = None) -> None:
