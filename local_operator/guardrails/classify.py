@@ -40,6 +40,9 @@ _CONFIG_FILE = "config.yml"
 _SECRETS_DIRNAME = "secrets"
 _SESSIONS_DIRNAME = "sessions"
 _DESTROYING_OPS = frozenset({"delete", "move", "clean"})
+# Spelled here rather than imported: ``provenance`` imports this module.
+_LEDGER_DIRNAME = "guardrails"
+_LEDGER_FILENAME = "created.sqlite"
 
 
 class Risk(enum.IntEnum):
@@ -186,6 +189,10 @@ class _Protected:
     homes: set[str]
     own_session: set[str]
     own_scratchpad: set[str]
+    #: The provenance ledger(s) (``provenance.ledger_path``): CRITICAL to
+    #: overwrite or delete, because a session that could rewrite it could
+    #: claim any directory as its own creation.
+    ledger_files: set[str] = field(default_factory=set)
 
 
 def _protected(env: Mapping[str, str], scratchpad: str | None, session_id: str) -> _Protected:
@@ -245,6 +252,7 @@ def _build_protected(env: Mapping[str, str], scratchpad: str | None, session_id:
         homes=homes,
         own_session=own_session,
         own_scratchpad=own_pad,
+        ledger_files={os.path.join(s, _LEDGER_DIRNAME, _LEDGER_FILENAME) for s in states},
     )
 
 
@@ -265,6 +273,9 @@ def _critical_reason(path: str, target: Target, prot: _Protected) -> str | None:
     for cfg in prot.config_files:
         if path == cfg:
             return "the harness config file"
+    for ledger in prot.ledger_files:
+        if path == ledger:
+            return "the guardrail creation ledger"
     for sec in prot.secrets_dirs:
         if _under(path, sec):
             return "the encrypted secret store"
@@ -285,6 +296,11 @@ def _critical_reason(path: str, target: Target, prot: _Protected) -> str | None:
     for home in prot.homes:
         if _is_ancestor_or_self(path, home):
             return "the home directory" if path == home else "an ancestor of the home directory"
+    for ledger in prot.ledger_files:
+        # After the state root: deleting ``<state>/guardrails`` is named for
+        # what it destroys, and the state root itself keeps its own reason.
+        if _is_ancestor_or_self(path, ledger):
+            return "the guardrail creation ledger"
     return None
 
 
@@ -294,6 +310,7 @@ def _critical_by_pattern(target: Target, prot: _Protected) -> str | None:
     candidates = [
         *prot.config_files,
         *prot.secrets_dirs,
+        *prot.ledger_files,
         *(prot.state_roots if target.op in _DESTROYING_OPS else ()),
         *(prot.install_roots if target.op in _DESTROYING_OPS else ()),
         *(prot.homes if target.op in _DESTROYING_OPS else ()),
@@ -348,7 +365,7 @@ def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
     return None
 
 
-def _rank(target: Target, prot: _Protected) -> RankedTarget:
+def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarget:
     path = target.path
     notes: list[str] = list(target.empty)
     if target.climbs:
@@ -390,6 +407,15 @@ def _rank(target: Target, prot: _Protected) -> RankedTarget:
         return RankedTarget(target, Risk.LOW, "fresh temporary path ($(mktemp))")
     if notes and not in_own_pad:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes))
+    if target.worktree_remove and not target.forced and target.pattern is None:
+        # ``git worktree remove`` without --force: git refuses a dirty tree and
+        # the primary checkout by itself, so a tree proven clean and linked
+        # loses nothing git cannot recreate. Anything else (dirty, unknown,
+        # not linked) falls through to the ordinary ranking below.
+        from local_operator.guardrails.provenance import worktree_state
+
+        if worktree_state(path) == "clean":
+            return RankedTarget(target, Risk.LOW, "a clean linked git worktree")
     for spelling in _spellings(path):
         reason = _high_reason(spelling, target, prot)
         if reason is not None:
@@ -403,10 +429,59 @@ def _rank(target: Target, prot: _Protected) -> RankedTarget:
                 # HIGH, because their contents are the data a confused
                 # predicate would destroy.
                 return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
+            owned = _owned_by_session(target, path, prot, session_id)
+            if owned is not None:
+                return RankedTarget(target, Risk.LOW, owned)
             return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     return RankedTarget(target, Risk.LOW, "ordinary path")
+
+
+def _owned_by_session(target: Target, path: str, prot: _Protected, session_id: str) -> str | None:
+    """A LOW reason when this session created what ``target`` destroys, else ``None``.
+
+    Only reached for a target already ranked HIGH by ``_high_reason`` and
+    already cleared of CRITICAL ancestry, credential derivation and opaque or
+    empty parts (those returned earlier in ``_rank``). The ledger
+    (``provenance.owned_record``) must cover the target by realpath AND inode.
+    Still HIGH: anything in the state root (another session's files), a
+    primary checkout this session did not clone, and a glob with any on-disk
+    match the session does not own (or no match at all — then it destroys
+    nothing the ledger can vouch for).
+    """
+    if not session_id or target.credential_derived or target.opaque or target.unknown_cwd:
+        return None
+    from local_operator.guardrails import provenance
+
+    if target.pattern is not None:
+        import glob as _glob
+
+        try:
+            matches = _glob.glob(target.pattern)
+        except (OSError, ValueError):
+            return None
+        if not matches:
+            return None
+        paths = matches
+    else:
+        paths = [path]
+    first: str | None = None
+    for candidate in paths:
+        real = os.path.realpath(candidate)
+        if any(_under(real, st) for st in prot.state_roots):
+            return None
+        record = provenance.owned_record(real, session_id)
+        if record is None:
+            return None
+        if provenance.is_primary_checkout(real) and not (
+            record.kind == "clone" and record.path == real
+        ):
+            return None
+        first = first or record.describe()
+    if first is None:
+        return None
+    return first if len(paths) == 1 else f"{len(paths)} matches, all {first}"
 
 
 #: ``*.log``, ``build-*.tmp``: a last component that ends in a literal
@@ -441,7 +516,7 @@ def classify_targets(
     if not targets and not opaque_reasons:
         return Verdict(Risk.LOW)
     prot = _protected(env, scratchpad, session_id)
-    ranked = [_rank(t, prot) for t in targets]
+    ranked = [_rank(t, prot, session_id) for t in targets]
     risk = max((r.risk for r in ranked), default=Risk.LOW)
     if opaque_reasons:
         risk = max(risk, Risk.HIGH)

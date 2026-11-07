@@ -1109,6 +1109,52 @@ class _PlannedCall:
 DESTRUCTIVE_TIMEOUT_NOTE = "Command killed mid-run — verify what changed before retrying."
 
 
+def _plan_guard_creations(tool_name: str, args: Any, tool_context: Any) -> Any:
+    """Snapshot what a bash call may create, for the guardrail's creation ledger.
+
+    WHY HERE. The ledger (``guardrails/provenance.py``) lets a session delete
+    the directories it made itself without a judge; "made itself" is only
+    provable around the real execution, so the loop snapshots the candidates
+    just before ``tool.execute`` and records the survivors just after. Never
+    raises and never delays a call it cannot parse: provenance is an
+    optimisation of the guard, not a gate.
+    """
+    if tool_name != "bash" or not isinstance(args, Mapping):
+        return None
+    command = args.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    try:
+        from local_operator.guardrails.provenance import plan_creations
+        from local_operator.tools.builtin import bash_guard_environment
+
+        env, _scratchpad = bash_guard_environment(tool_context)
+        cwd = (getattr(tool_context, "cwd", None) if tool_context is not None else None) or (
+            os.getcwd()
+        )
+        return plan_creations(command, cwd=cwd, env=env)
+    except Exception:  # noqa: BLE001 — the ledger never fails a call
+        logger.debug("guardrail creation snapshot failed", exc_info=True)
+        return None
+
+
+def _commit_guard_creations(pending: Any, tool_context: Any) -> None:
+    try:
+        from local_operator.guardrails.provenance import commit_creations
+        from local_operator.tools.builtin import bash_guard_environment
+
+        env, scratchpad = bash_guard_environment(tool_context)
+        commit_creations(
+            pending,
+            session_id=str(getattr(tool_context, "session_id", "") or ""),
+            ancestors=tuple(getattr(tool_context, "ancestor_session_ids", ()) or ()),
+            env=env,
+            scratchpad=scratchpad,
+        )
+    except Exception:  # noqa: BLE001 — the ledger never fails a call
+        logger.debug("guardrail creation record failed", exc_info=True)
+
+
 def _annotate_guarded_result(result: ToolResult, guard: Any) -> ToolResult:
     """Fold a non-blocking guard outcome into the result the tool returned."""
     notes: list[str] = []
@@ -6216,7 +6262,13 @@ class AgentLoop:
                         )
                     }
                 )
+            pending_creations = _plan_guard_creations(tool.name, item.args, execution_context)
             result = await tool.execute(call.id, item.args, signal, on_update, execution_context)
+            if pending_creations is not None:
+                # Recorded whatever the exit status: ``mkdir -p a b`` can create
+                # ``a`` and then fail on ``b``. Only directories that exist NOW
+                # and did not before the call are written (``provenance``).
+                _commit_guard_creations(pending_creations, execution_context)
             if guard is not None:
                 result = _annotate_guarded_result(result, guard)
             result = self._capture_one_turn_secret(
@@ -7165,16 +7217,37 @@ class AgentLoop:
                 from local_operator.tools.builtin import bash_guard_environment
 
                 env, scratchpad = bash_guard_environment(tool_context)
+            session_id = (tool_context.session_id if tool_context is not None else "") or ""
+            operator = None
+            if tool.name == "bash":
+                from local_operator.guardrails.provenance import operator_brief
+
+                # Trusted operator rows only (direct messages, store-verified ask
+                # answers); peer/bridge/hub rows are counted, never quoted. The
+                # intent and command may POINT at an ask id; the store decides.
+                command = item.args.get("command") if isinstance(item.args, Mapping) else ""
+                operator = operator_brief(
+                    context.messages,
+                    session_id=session_id,
+                    ancestors=tuple(getattr(tool_context, "ancestor_session_ids", ()) or ()),
+                    cited=(item.intent or "", command if isinstance(command, str) else ""),
+                )
             ctx = guard_check.CallContext(
                 cwd=(tool_context.cwd if tool_context is not None else None) or os.getcwd(),
                 env=env,
                 scratchpad=scratchpad,
-                session_id=(tool_context.session_id if tool_context is not None else "") or "",
+                session_id=session_id,
                 user_request=guard_check.last_user_request(context.messages),
                 intent=item.intent or "",
+                operator=operator,
             )
             return await guard_check.check_tool_call(
-                tool.name, item.args, ctx, judge=config.guard_judge, settings=settings
+                tool.name,
+                item.args,
+                ctx,
+                judge=config.guard_judge,
+                settings=settings,
+                forked_judge=config.guard_judge_forked,
             )
         except asyncio.CancelledError:
             raise

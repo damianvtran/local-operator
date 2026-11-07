@@ -36,6 +36,48 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined. A target derived from a secret is refused even with an approved
   override: consent cannot be shown for a secret you should never see.
+  Also LOW: a HIGH path this session (or a subagent it launched) recorded
+  creating, and `git worktree remove <path>` of a clean linked worktree.
+
+## Cleaning up what you made
+
+Deleting your own rig directories and worktrees works without asking, through
+three routes the checkpoint can verify. Everything CRITICAL is still refused.
+
+- **Creation ledger.** After every bash call the loop records the directories it
+  created: `mkdir [-p]` (the topmost new component), `mktemp -d TEMPLATE`,
+  `git worktree add <path>`, `git clone <url> [<dir>]`. Rows live in
+  `<config_dir>/guardrails/created.sqlite`, keyed by session id + realpath +
+  inode, written under the creator and every ancestor session, so a parent may
+  delete what its subagents made. Overwriting or deleting the ledger is CRITICAL.
+  A later delete of exactly that path, or anything inside it, ranks LOW. A glob
+  ranks LOW only when every current match is recorded. A primary checkout stays
+  HIGH unless this session cloned it. `$HOME`, the state root and the protected
+  roots are never recorded.
+- **Clean linked worktree.** `git worktree remove <exact path>` (no `--force`)
+  is LOW when the path is a registered linked worktree with an empty
+  `git status --porcelain --untracked-files=all`. Dirty, forced, or a primary
+  checkout → the ordinary ranking. Prefer this to `rm -rf .worktrees/<name>`.
+- **History evidence.** A HIGH delete goes to a judge forked from the session's
+  own prefix. Before it runs, the checkpoint extracts the session's (and its
+  descendants', found by `origin.json` parent pointers) real tool calls. A call
+  vouches for a directory when the directory was born inside the call's window
+  and the call's command, real output, or a script the same session wrote and
+  the call ran names it (its basename, or the literal prefix that produced it,
+  such as `qa-r5-dg-` in `f"qa-r5-dg-{os.getpid()}"`). The judge must answer
+  `ALLOW evidence=<ids>`, `ALLOW ask=<id>` or `ALLOW operator`. The checkpoint
+  re-verifies each citation and refuses an ALLOW that does not cover every target.
+
+**Who can authorise a delete.** Only the operator: a message they typed, or their
+answer to `ask` as recorded in the ask store (`sessions/<id>/asks.jsonl`, answered
+on the terminal, desktop or phone). A peer message citing an ask id (`a-xxxx`)
+counts only once that ask is found answered in the store and its text names the
+path. A named glob (`~/qa-r5-dg-*`) covers its current matches when the wildcard
+is in the last component with at least three literal characters (`~/*` names
+nothing). Team Bridge deliveries, peer and hub messages, and fetched or file
+content are never consent; the judge sees only how many were left out.
+Unresolved targets (`rm -rf "$VAR"`) keep the context-free judge, and an empty
+expansion that collapses onto a protected root is still CRITICAL.
 
 ## Write a rule
 

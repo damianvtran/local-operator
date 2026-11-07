@@ -807,6 +807,36 @@ class Target:
     # A judge cannot approve a root deliberately hidden for privacy. Keep this
     # distinct from ordinary opaque substitutions that can receive review.
     credential_derived: bool = False
+    #: ``git worktree remove <path>``: git itself refuses a dirty or primary
+    #: checkout unless forced, so the classifier may rank a CLEAN linked
+    #: worktree LOW (see ``provenance.clean_linked_worktree``).
+    worktree_remove: bool = False
+    #: ``--force``/``-f`` on that removal: git deletes uncommitted work, so the
+    #: clean-worktree exemption no longer holds and the ordinary ranking applies.
+    forced: bool = False
+
+
+@dataclass(frozen=True)
+class Creation:
+    """A directory a command may CREATE, for the provenance ledger.
+
+    WHY. The dangerous-delete guard ranks ``~/<name>`` and repository roots
+    HIGH, which used to refuse an agent cleaning up the rig directories and
+    worktrees it had made itself. The ledger (``guardrails/provenance.py``)
+    remembers what a session created so a later delete of exactly that can rank
+    LOW. Only literal, statically known paths qualify: a glob or substitution
+    could name anything, and a creation record must never be a guess.
+
+    ``path`` is an exact directory (``mkdir``, ``git worktree add``,
+    ``git clone``). For ``mktemp -d TEMPLATE`` the name is random, so ``path``
+    is ``None`` and ``parent``/``pattern`` describe where to look: the ledger
+    snapshots the matches before the call and records only new ones after it.
+    """
+
+    kind: str  # "mkdir" | "mktemp" | "worktree" | "clone"
+    path: str | None = None
+    parent: str | None = None
+    pattern: str | None = None
 
 
 @dataclass
@@ -904,6 +934,9 @@ class Resolution:
     #: The parser met a construct it cannot follow that MAY delete (``eval`` of a
     #: deleting word, an unbalanced quote around one): reasons, for the judge.
     opaque_reasons: list[str] = field(default_factory=list)
+    #: Directories the command may create (see :class:`Creation`). Never used
+    #: to rank THIS command; the loop records them after it runs.
+    created: list[Creation] = field(default_factory=list)
 
 
 def _operands(
@@ -949,6 +982,31 @@ _SHRED_VALUE_FLAGS = frozenset({"-n", "-s", "--iterations", "--size"})
 _TRUNCATE_VALUE_FLAGS = frozenset({"-s", "-r", "--size", "--reference"})
 _MV_VALUE_FLAGS = frozenset({"-t", "-S", "--suffix", "--target-directory"})
 _RSYNC_VALUE_FLAGS = frozenset({"-e", "--rsh", "--exclude", "--include", "--filter", "-f"})
+_MKDIR_VALUE_FLAGS = frozenset({"-m", "--mode", "--context"})
+_MKTEMP_VALUE_FLAGS = frozenset({"-p", "--suffix"})
+_GIT_CLONE_VALUE_FLAGS = frozenset(
+    {
+        "-b",
+        "--branch",
+        "-o",
+        "--origin",
+        "--depth",
+        "--reference",
+        "-c",
+        "--config",
+        "--template",
+        "--separate-git-dir",
+        "-u",
+        "--upload-pack",
+        "--shallow-since",
+        "--shallow-exclude",
+        "--filter",
+        "-j",
+        "--jobs",
+        "--reference-if-able",
+    }
+)
+_GIT_WORKTREE_ADD_VALUE_FLAGS = frozenset({"-b", "-B", "--reason", "--orphan"})
 #: find: the predicates that make a match destructive.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: find predicates that select a SUBSET of the walk (R6).
@@ -1554,6 +1612,12 @@ class _Walker:
         if name == "rsync":
             self._rsync(args)
             return
+        if name in ("mkdir", "gmkdir"):
+            self._mkdir(args)
+            return
+        if name in ("mktemp", "gmktemp"):
+            self._mktemp(args)
+            return
         if name == "git":
             self._git(args)
             return
@@ -1966,6 +2030,9 @@ class _Walker:
                 args = args[2:]
                 continue
             args = args[1:]
+        if args and args[0].text in ("worktree", "clone"):
+            self._git_tree(args, cwd_override)
+            return
         if not args or args[0].text != "clean":
             return
         _operands_, flags = _operands(args[1:])
@@ -1975,6 +2042,95 @@ class _Walker:
             return
         root = cwd_override or Expanded(text=".")
         self._add(root, "clean", "git clean")
+
+    # -- creation (provenance ledger) ------------------------------------------
+    def _literal_dir(self, exp: Expanded, base: str | None = None) -> str | None:
+        """The absolute path a LITERAL word names, or ``None`` if not literal."""
+        if exp.opaque or exp.pattern is not None or exp.empty or not exp.text:
+            return None
+        if self.state.private_cwd and not exp.text.startswith("/"):
+            return None
+        path, _unknown = _absolute(exp.text, base if base is not None else self.state.cwd)
+        return path
+
+    def _create(self, kind: str, path: str | None) -> None:
+        if path is not None:
+            self.result.created.append(Creation(kind=kind, path=path))
+
+    def _mkdir(self, args: list[Expanded]) -> None:
+        operands, _flags = _operands(args, _MKDIR_VALUE_FLAGS)
+        for w in operands:
+            self._create("mkdir", self._literal_dir(w))
+
+    def _mktemp(self, args: list[Expanded]) -> None:
+        operands, flags = _operands(args, _MKTEMP_VALUE_FLAGS)
+        if not (_has_short(flags, "d") or "--directory" in flags):
+            return
+        if _has_short(flags, "tu") or "--dry-run" in flags or len(operands) != 1:
+            # No template (a random name under $TMPDIR, already LOW) or a form
+            # whose placement this parser does not model: record nothing.
+            return
+        template = operands[0]
+        base = self.state.cwd
+        for i, w in enumerate(args):
+            t = w.text
+            if t == "-p" and i + 1 < len(args):
+                base = self._literal_dir(args[i + 1]) or None
+            elif t.startswith("--tmpdir="):
+                base = self._literal_dir(Expanded(text=t.split("=", 1)[1])) or None
+        path = self._literal_dir(template, base)
+        if path is None or "XXX" not in os.path.basename(path):
+            return
+        name = os.path.basename(path)
+        stem = name.rstrip("X")
+        pattern = _glob_escape(stem) + "?" * (len(name) - len(stem))
+        self.result.created.append(
+            Creation(kind="mktemp", parent=os.path.dirname(path), pattern=pattern)
+        )
+
+    def _git_tree(self, args: list[Expanded], cwd_override: Expanded | None) -> None:
+        base = self.state.cwd
+        if cwd_override is not None:
+            base = self._literal_dir(cwd_override)
+            if base is None:
+                return
+        if args[0].text == "clone":
+            operands, _ = _operands(args[1:], _GIT_CLONE_VALUE_FLAGS)
+            if not operands:
+                return
+            if len(operands) >= 2:
+                self._create("clone", self._literal_dir(operands[1], base))
+                return
+            url = operands[0]
+            if url.opaque or url.pattern is not None:
+                return
+            # git's own default: the URL's last component minus ``.git``.
+            name = re.split(r"[/:]", url.text.rstrip("/"))[-1]
+            name = name[:-4] if name.endswith(".git") else name
+            if name and name not in (".", ".."):
+                self._create("clone", self._literal_dir(Expanded(text=name), base))
+            return
+        if len(args) < 2:
+            return
+        sub = args[1].text
+        if sub == "add":
+            operands, _ = _operands(args[2:], _GIT_WORKTREE_ADD_VALUE_FLAGS)
+            if operands:
+                self._create("worktree", self._literal_dir(operands[0], base))
+        elif sub == "remove":
+            operands, flags = _operands(args[2:])
+            forced = _has_short(flags, "f") or "--force" in flags
+            for w in operands:
+                saved = self.state.cwd
+                self.state.cwd = base
+                try:
+                    before = len(self.result.targets)
+                    self._add(w, "delete", "git worktree remove")
+                    for target in self.result.targets[before:]:
+                        target.worktree_remove = True
+                        target.forced = forced
+                finally:
+                    self.state.cwd = saved
 
     # -- recording ---------------------------------------------------------------
     def _add(self, exp: Expanded, op: str, program: str, *, selected: bool = False) -> None:

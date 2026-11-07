@@ -85,6 +85,7 @@ async def _run(
     approve: bool | None = True,
     authorised: bool = False,
     tool_text: str = "ok",
+    user_text: str = "please clean up the ds* scratch files",
 ) -> tuple[ToolResult, list[dict[str, Any]]]:
     executed: list[dict[str, Any]] = []
 
@@ -93,7 +94,7 @@ async def _run(
 
     state = home / ".local-operator"
     context = LoopContext(
-        messages=[Message.user("please clean up the ds* scratch files")],
+        messages=[Message.user(user_text)],
         tool_context=ToolContext(
             cwd=str(home),
             session_id="own",
@@ -155,8 +156,22 @@ async def test_authorised_override_downgrades_to_judge_only(home: Path) -> None:
     result, executed = await _run(home, "rm -rf ~/.local-operator", judge=blocker, authorised=True)
     assert executed == [] and len(blocker.calls) == 1
     assert "the user never asked" in _text(result)
+    # An ALLOW must cite what it rests on, and for an overridden CRITICAL root
+    # only the operator's own words naming it can verify.
     allower = _Judge("ALLOW")
     result, executed = await _run(home, "rm -rf ~/.local-operator", judge=allower, authorised=True)
+    assert executed == [] and "could not be verified" in _text(result)
+    allower = _Judge("ALLOW evidence=e1")
+    result, executed = await _run(home, "rm -rf ~/.local-operator", judge=allower, authorised=True)
+    assert executed == []
+    allower = _Judge("ALLOW operator")
+    result, executed = await _run(
+        home,
+        "rm -rf ~/.local-operator",
+        judge=allower,
+        authorised=True,
+        user_text="yes, delete ~/.local-operator entirely",
+    )
     assert len(executed) == 1
 
 
@@ -168,8 +183,18 @@ async def test_high_runs_only_on_allow(home: Path) -> None:
     assert _text(result).startswith("BLOCKED by guardrail dangerous-delete (review)")
     assert "not requested" in _text(result)
     assert "please clean up" in blocker.calls[0][1]  # the user's own words reach the judge
-    allower = _Judge("ALLOW")
-    result, executed = await _run(home, "rm -rf ~/projects-x", judge=allower)
+    # An uncited ALLOW is a claim the checkpoint cannot verify: refused.
+    result, executed = await _run(home, "rm -rf ~/projects-x", judge=_Judge("ALLOW"))
+    assert executed == [] and "could not be verified" in _text(result)
+    # Citing the operator verifies only when a direct operator row names the path.
+    result, executed = await _run(home, "rm -rf ~/projects-x", judge=_Judge("ALLOW operator"))
+    assert executed == []
+    result, executed = await _run(
+        home,
+        "rm -rf ~/projects-x",
+        judge=_Judge("ALLOW operator"),
+        user_text="please delete ~/projects-x",
+    )
     assert len(executed) == 1 and not result.is_error
 
 
@@ -241,4 +266,56 @@ async def test_unauthorised_rules_disable_is_ignored(home: Path) -> None:
 async def test_q1_fd_duplication_runs_with_zero_judge_calls(home: Path, command: str) -> None:
     judge = _Judge("BLOCK: should never be asked")
     result, executed = await _run(home, command, judge=judge)
+    assert len(executed) == 1 and judge.calls == []
+
+
+@pytest.mark.asyncio
+async def test_loop_records_what_a_bash_call_created(home: Path) -> None:
+    """The loop snapshots creation candidates before the call and records after.
+
+    The fake tool really creates the directory, so this exercises the same
+    plan -> execute -> commit order the live bash tool goes through; the next
+    delete of that directory then ranks LOW with no judge call.
+    """
+    from local_operator.guardrails import provenance
+
+    made = home / "qa-rig-loop"
+    executed: list[dict[str, Any]] = []
+    base = _tool(executed)
+
+    async def execute(call_id: str, args: dict[str, Any], *rest: Any) -> ToolResult:
+        made.mkdir()
+        return await base.execute(call_id, args, *rest)
+
+    tool = AgentTool(
+        name="bash",
+        parameters=base.parameters,
+        execute=execute,
+        approval_tier="exec",
+    )
+    state = home / ".local-operator"
+    context = LoopContext(
+        messages=[Message.user("set up a rig")],
+        tool_context=ToolContext(
+            cwd=str(home),
+            session_id="own",
+            ancestor_session_ids=("parent1",),
+            scratchpad_dir=str(state / "sessions" / "own" / "scratchpad"),
+        ),
+    )
+    config = LoopConfig(
+        model=MODEL,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=lambda *_: None,
+    )
+    args = {"command": f"mkdir {made}"}
+    call = ToolCall(id="c1", name="bash", arguments=args, raw_arguments=json.dumps(args))
+    await AgentLoop()._runner_result(
+        _PlannedCall(call=call, tool=tool, args=args), context, config, None, asyncio.Queue()
+    )
+    for owner in ("own", "parent1"):
+        record = provenance.owned_record(str(made), owner)
+        assert record is not None and record.kind == "mkdir", owner
+    judge = _Judge("BLOCK: should never be asked")
+    _, executed = await _run(home, f"rm -rf {made}", judge=judge)
     assert len(executed) == 1 and judge.calls == []
