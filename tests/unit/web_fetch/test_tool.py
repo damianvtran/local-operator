@@ -389,19 +389,34 @@ async def test_ssrf_direct_returns_error_result(context: ToolContext, monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url", ["https://ex\u00adample.com/", "https://example.com/p#x\x00"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://ex\u00adample.com/",
+        "https://example.com/p#x\x00",
+        "https://example.com:65536/p",
+        "https://xn--zz.example.com/p",
+    ],
+)
 async def test_a_url_no_request_can_be_built_from_is_an_error_result_not_a_crash(
-    url: str, context: ToolContext
+    url: str, context: ToolContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The agent tool gets the guard's refusal as a clean error, not an exception.
 
     Both URLs used to raise ``httpx.InvalidURL`` out of ``run_fetch`` while the
     pinned request was being built — the tool's defensive "unexpected transport
     bug" arm caught it, after a real lookup. It is now the guard's own refusal,
-    before any lookup. (A fragment-free enrichment probe such as ``/p.md`` may
-    still go out — it is a different, buildable URL — so the assertion is that
-    the refused URL's own path was never requested.)
+    before any lookup AND before the enrichment probes (security S-7): ``/p.md``
+    is a buildable sibling of ``/p#x\x00``, so it used to be looked up and fetched
+    ahead of the refusal. Enrichment is switched ON here so that order is tested.
     """
+    monkeypatch.setattr(
+        service, "DEFAULT_WEB_FETCH_CONFIG", {**service.DEFAULT_WEB_FETCH_CONFIG, "enrich": True}
+    )
+    looked_up: list[str] = []
+    monkeypatch.setattr(
+        service, "_resolve_host_ips", lambda host: looked_up.append(host) or ["93.184.216.34"]
+    )
     paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -414,7 +429,8 @@ async def test_a_url_no_request_can_be_built_from_is_an_error_result_not_a_crash
     assert is_error is True
     assert "refusing" in preview
     assert "no request can be built" in preview
-    assert "/p" not in paths and "/" not in paths
+    assert paths == []
+    assert looked_up == []
 
 
 @pytest.mark.asyncio

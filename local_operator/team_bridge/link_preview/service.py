@@ -72,6 +72,7 @@ from local_operator.web_fetch.service import (
     PolicyRefusal,
     WebFetchService,
     url_has_credentials,
+    vet_url_spelling,
 )
 
 if TYPE_CHECKING:
@@ -589,6 +590,19 @@ def _target_refusal(target: str) -> AbsentReason | None:
         # The codec checks each label (<= 63) but not the total, so five legal
         # labels would still cost a lookup for a name DNS cannot hold (S-4).
         return "blocked-host"
+    # EVERY OTHER REFUSAL THE FETCHER CAN DECIDE FROM THE STRING, ON THE RAW TARGET
+    # (security S-5). The cache key drops the fragment and re-encodes the query, so
+    # ``page#\x01`` and ``page`` (or ``?a=\x01`` and ``?a=%01``) are ONE key; had
+    # the fetcher refused the raw spelling and the answer been cached under that
+    # key, one sender's unrequestable link would deny every reader the legitimate
+    # card for ``NEGATIVE_TTL_S``. Refused here, before the key exists, it is
+    # never cached — the credential refusal's placement, for the same reason.
+    # Only refusals that are a property of the NORMALISED URL (a name that does
+    # not exist, a private address, an unusable redirect hop) reach the cache.
+    try:
+        vet_url_spelling(target)
+    except PolicyRefusal as refusal:
+        return _policy_reason(refusal.reason)
     return None
 
 

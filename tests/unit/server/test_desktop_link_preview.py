@@ -80,6 +80,19 @@ def _plane(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test its own full per-account bucket.
+
+    The route reads the PROCESS throttle, which outlives a test, so without this
+    a test's outcome depended on how many resolves the tests before it spent and
+    how fast the box refilled them — measured: adding the round-2 parametrised
+    cases turned thirteen unrelated tests into ``429 rate_limited``. Tests of the
+    throttle itself still install their own, which wins because it is set later.
+    """
+    monkeypatch.setattr(desktop_link_preview, "get_resolve_throttle", ResolveThrottle)
+
+
+@pytest.fixture(autouse=True)
 def _pinned_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin every name the fixtures use; IP literals keep their own identity.
 
@@ -529,6 +542,11 @@ _UNBUILDABLE_TARGETS = [
     "https://\uff25\uff38\uff21\uff2d\uff30\uff2c\uff25.com/",  # fullwidth letters
     "http://0177.0.0.1/",  # octal IPv4: platforms disagree on what it means
     "https://preview.test/page#x\x00",  # a NUL in the fragment
+    # An A-label httpx cannot decode passed the guard, cost a lookup and then
+    # raised at request time — a 500 (security S-1a); a port httpx accepts but
+    # no socket can use is the same class (review R2-1).
+    "https://xn--zz.preview.test/",
+    "https://preview.test:99999/",
 ]
 
 
@@ -584,6 +602,11 @@ async def test_an_idn_host_carries_its_punycode_in_the_host_header(
         '<link rel="icon" href="https://a..b/x.ico">',
         '<meta property="og:image" content="https://./x.png">',
         '<meta property="og:image" content="https://ex\u00adample.com/x.png">',
+        # A port or an A-label the request parser cannot use (R2-1, S-1d): these
+        # used to raise past ``_store_artifact`` as a bare ``ValueError``.
+        '<link rel="icon" href="https://public.test:99999/x.ico">',
+        '<link rel="icon" href="https://public.test:65536/x.ico">',
+        '<meta property="og:image" content="https://xn--zz.public.test/x.png">',
     ],
 )
 async def test_a_malformed_icon_or_image_host_drops_the_decoration_not_the_card(
@@ -637,6 +660,44 @@ async def test_a_redirect_to_a_malformed_host_is_a_cached_blocked_host(
     assert first.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
     assert second.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
     assert seen == ["/moved"]
+
+
+#: ``Location`` values that used to escape as a 500 or as a retryable error the
+#: card's Retry could never fix (review R2-1, security S-1b/c, QA Q3). The origin
+#: writes the header, so each must be a coded ``blocked-host`` after ONE request
+#: and no lookup of the unusable hop. Raw bytes: what a real origin sends.
+_UNUSABLE_LOCATIONS = [
+    b"https://u:[p]@preview.test/x",
+    b"https://public.test:99999/x",
+    b"https://public.test:65536/x",
+    b"https://xn--zz.public.test/x",
+    b"http://[::1/x",
+    b"http://0177.0.0.1/x",
+    b"https:\\\\evil.test/x",
+    b"https://ex\xc2\xadample.test/x",
+    b"https://pre\tview.test/x",
+    b"https://preview.test/a\x00b",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", _UNUSABLE_LOCATIONS)
+async def test_an_unusable_redirect_location_is_blocked_host_after_one_request(
+    location: bytes, monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(
+        monkeypatch, lambda request: httpx.Response(302, headers=[(b"location", location)])
+    )
+    async with _client() as client:
+        response = await _post(
+            client,
+            {"url": "https://preview.test/moved", "index": 0, "expected_account_id": ACCOUNT},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert seen == ["/moved"]
+    assert looked_up == ["preview.test"]
 
 
 @pytest.mark.asyncio
@@ -1593,6 +1654,43 @@ async def test_a_credentialed_refusal_does_not_poison_the_plain_spelling(
         plain = await _post(client, _resolve_body())
         assert plain.json()["result"]["kind"] == "ready", plain.text
     # One entry, written by the plain resolve: the refusal stored nothing.
+    assert preview_cache_for_test.stats().entries == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attack", "victim"),
+    [
+        ("http://preview.test/page#\x01", "http://preview.test/page"),
+        ("http://preview.test/page#x\x00", "http://preview.test/page"),
+        ("http://preview.test/page#\x7f", "http://preview.test/page"),
+        ("http://preview.test/page?a=\x01", "http://preview.test/page?a=%01"),
+        ("http://preview.test/page?b=\x01&a=1", "http://preview.test/page?a=1&b=%01"),
+    ],
+)
+async def test_an_unrequestable_spelling_does_not_poison_its_canonical_twin(
+    attack: str,
+    victim: str,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_in: None,
+    preview_cache_for_test: PreviewCache,
+) -> None:
+    """A refusal decided from the string alone is never cached (security S-5).
+
+    The key drops the fragment and re-encodes the query, so ``page#\x01`` and
+    ``page`` are ONE key. A cached ``blocked-host`` for the unrequestable spelling
+    would deny the legitimate URL its card for ``NEGATIVE_TTL_S`` — the same class
+    as the credential refusal (Q2-1), closed the same way: refused on the raw
+    target, before the key exists.
+    """
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        attacked = await _post(client, _resolve_body(attack))
+        assert attacked.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+        assert seen == [], "the refusal must not reach the origin"
+
+        legitimate = await _post(client, _resolve_body(victim))
+        assert legitimate.json()["result"]["kind"] == "ready", legitimate.text
     assert preview_cache_for_test.stats().entries == 1
 
 

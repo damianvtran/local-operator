@@ -233,6 +233,124 @@ async def test_an_idn_host_is_pinned_with_an_ascii_host_header_and_sni(
     }
 
 
+#: Spellings the request parser would mis-read or fail on, each judged from the
+#: string alone (review R2-1, security S-1): a port httpx accepts but cannot use
+#: (out of range, negative) or silently DROPS (a leading space, fullwidth digits,
+#: so the pin would connect to the default port instead), an A-label httpx
+#: cannot decode (``xn--zz`` failed at request time, after a real lookup), and a
+#: name longer than DNS can hold. Every one is a refusal BEFORE the lookup.
+_UNREQUESTABLE_SPELLINGS = [
+    "https://public.test:65536/x",
+    "https://public.test:99999/x",
+    "https://public.test:-1/x",
+    "https://public.test: 443/x",
+    "https://public.test:\uff14\uff14\uff13/x",
+    "https://public.test:+80/x",
+    "https://xn--zz.public.test/x",
+    "https://xn--a.public.test/x",
+    "https://" + ".".join(["a" * 63] * 4) + ".test/x",
+]
+
+
+@pytest.mark.parametrize("url", _UNREQUESTABLE_SPELLINGS)
+def test_an_unrequestable_spelling_is_refused_before_any_lookup(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    looked_up: list[str] = []
+    monkeypatch.setattr(
+        service, "_resolve_host_ips", lambda host: looked_up.append(host) or ["93.184.216.34"]
+    )
+    with pytest.raises(service.PolicyRefusal) as refused:
+        validate_public_url(url, allow_private=False)
+    assert refused.value.reason == "host"
+    assert looked_up == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://public.test:65535/x",
+        "https://public.test:0/x",
+        "https://public.test:443/x",
+        "https://XN--CAF-DMA.test/x",
+        "https://" + ".".join(["a" * 63] * 3) + "." + "b" * 61 + "/x",
+    ],
+)
+def test_the_spelling_checks_leave_real_urls_alone(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
+    assert validate_public_url(url, allow_private=False) == "93.184.216.34"
+
+
+def test_the_pin_carries_the_port_the_guard_judged() -> None:
+    """``_pin_request`` reads the port from the parser the guard used (R2-1).
+
+    It used to re-read it with ``urlparse``, which disagrees with httpx about
+    spellings such as an out-of-range port — the guard passed, then the pin raised.
+    """
+    _url, headers, _ext = service._pin_request("https://public.test:8443/p", "93.184.216.34")
+    assert headers == {"Host": "public.test:8443"}
+
+
+#: ``Location`` values an origin can send that no request may be built from. The
+#: first group fails our own parse (``urljoin`` raising on bracketed userinfo, a
+#: port or A-label the guard refuses); the second fails INSIDE ``client.stream``,
+#: where httpx builds its own ``next_request`` even with redirects off, and used to
+#: surface as a 500 (``InvalidURL``) or a retryable transport error that hit the
+#: origin three times. Raw bytes, because that is what a real origin sends.
+_UNUSABLE_LOCATIONS = [
+    b"https://u:[p]@preview.test/x",
+    b"https://public.test:99999/x",
+    b"https://public.test:65536/x",
+    b"https://xn--zz.public.test/x",
+    b"http://[::1/x",
+    b"http://0177.0.0.1/x",
+    b"https:\\\\evil.test/x",
+    b"https://ex\xc2\xadample.test/x",
+    b"https://ex\xadample.test/x",
+    b"https://pre\tview.test/x",
+    b"https://preview.test/a\x00b",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", _UNUSABLE_LOCATIONS)
+async def test_an_unusable_redirect_location_is_one_non_retryable_refusal(
+    location: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    looked_up: list[str] = []
+    monkeypatch.setattr(
+        service, "_resolve_host_ips", lambda host: looked_up.append(host) or ["93.184.216.34"]
+    )
+    hits: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(request.url.path)
+        return httpx.Response(302, headers=[(b"location", location)])
+
+    with pytest.raises(service.PolicyRefusal) as refused:
+        await _service(httpx.MockTransport(handler)).fetch("https://preview.test/moved")
+    assert refused.value.reason == "host"
+    assert hits == ["/moved"], "a refusal is never retried against the origin"
+    assert looked_up == ["preview.test"], "the unusable hop costs no lookup"
+
+
+def test_a_resolver_error_names_the_spelling_the_url_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lookup runs on punycode, but the reader wrote Unicode (R2-2)."""
+
+    def _no_such_host(host: str, *args: object, **kwargs: object) -> list[object]:
+        raise service.socket.gaierror(service.socket.EAI_NONAME, "nodename nor servname")
+
+    monkeypatch.setattr(service.socket, "getaddrinfo", _no_such_host)
+    with pytest.raises(service.PolicyRefusal) as refused:
+        validate_public_url("https://nx\u00e9.test/p", allow_private=False)
+    assert "xn--nx-cja.test" in str(refused.value)
+    assert "nx\u00e9.test" in str(refused.value)
+
+
 def test_validate_allow_private_bypasses(monkeypatch: pytest.MonkeyPatch) -> None:
     # With allow_private, DNS is not even consulted — the switch is the escape.
     validate_public_url("http://localhost:3000/", allow_private=True)
