@@ -142,6 +142,13 @@ _HARMLESS: dict[str, str] = {
     "LOCAL_OPERATOR_SCHEDULED_TASK_TIMEOUT_SECONDS": "a timeout",
     "LOCAL_OPERATOR_CONTEXT_FILES": "extra context file names, read relative to cwd",
     "LOCAL_OPERATOR_SKILL_EXTRA_ROOTS": "extra skill roots; read-only directories",
+    # The backend's resolved-language chain reads these beside the config file:
+    # `LOP_LANG` is a documented step in that chain and `LOP_I18N` is the per-run
+    # escape hatch. Neither names a resource a spawned runtime could damage; they
+    # only pick which catalogue a server-generated label renders in, so a test may
+    # inherit them deliberately.
+    "LOP_LANG": "language override in the resolved-language chain; picks a catalogue",
+    "LOP_I18N": "per-run i18n escape hatch; picks a catalogue",
     "LOP_SESSION_GRACE_S": "runtime residency grace; a duration",
     "LOP_BUILD_SETTLE_S": "runtime self-refresh settle; a duration",
     "LOP_BUILD_STAGGER_S": "runtime self-refresh stagger; a duration",

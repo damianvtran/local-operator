@@ -1,0 +1,3 @@
+{
+  "wire.session.status.scheduled": "شیڈول شدہ ({count, plural, one {# بیداری} other {# بیداریاں}})"
+}
