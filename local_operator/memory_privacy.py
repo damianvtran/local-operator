@@ -22,33 +22,49 @@ def is_memory(name: str, arguments: Any) -> bool:
 
 
 def guard_encoded(value: Any, depth: int = 0, field: str | None = None) -> None:
-    from local_operator.memory import guard
+    """Guard a tool call's arguments as their DECODED values, plus their spellings.
 
-    # ``field`` follows the value down (a JSON string decoded below keeps the key that
-    # held it): it is the context ``guard``'s opaque-run rule reads, and the name a
-    # refusal reports, so a nested pass judges a value exactly as the top-level one did.
-    guard(value, field=field)
-    # Numeric document/card values can occur in an invalid structured payload;
-    # inspect its JSON spelling too, before another validator can echo it.
-    if isinstance(value, (dict, list)):
-        guard(json.dumps(value, ensure_ascii=False, separators=(",", ":")), field=field)
-    # No per-field opaque pass here any more: ``guard`` applies one rule to every
-    # field (the store's own), so this pre-check and the store cannot disagree.
-    if depth >= 4:
-        return
+    Every string value is judged by ``guard`` at its own field, exactly as the store
+    judges it, which is what keeps one rule. A string that is itself JSON (a write's
+    ``content``, an edit's ``new_text``) is decoded and its values are judged the same
+    way; the JSON text of it, and of each dict/list, gets ``guard_spelling`` only (every
+    rule but the context-sensitive opaque run, see its docstring). ``field`` follows the
+    value down as the context and the name a refusal reports.
+    """
+    from local_operator.memory import guard, guard_spelling
+
     if isinstance(value, dict):
         for key, child in value.items():
-            child_field = f"{field}.{key}" if field else key
-            guard_encoded(child, depth + 1, child_field if isinstance(child_field, str) else field)
+            guard(key, field=field)
+            child_field = f"{field}.{key}" if field and isinstance(key, str) else key
+            child_field = child_field if isinstance(child_field, str) else field
+            if depth >= 4:
+                guard(child, field=child_field)
+            else:
+                guard_encoded(child, depth + 1, child_field)
     elif isinstance(value, list):
         for child in value:
-            guard_encoded(child, depth + 1, field)
-    elif isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+            if depth >= 4:
+                guard(child, field=field)
+            else:
+                guard_encoded(child, depth + 1, field)
+    if isinstance(value, (dict, list)):
+        # Numeric document/card values can occur in an invalid structured payload;
+        # inspect its JSON spelling too, before another validator can echo it. AFTER the
+        # values, so a hit is reported at its own field with offsets into that value.
+        guard_spelling(json.dumps(value, ensure_ascii=False, separators=(",", ":")), field)
+    elif isinstance(value, str) and depth < 4 and value.lstrip().startswith(("{", "[")):
         try:
             decoded = json.loads(value)
         except (ValueError, TypeError):
-            return
-        guard_encoded(decoded, depth + 1, field)
+            decoded = None
+        if isinstance(decoded, (dict, list)):
+            guard_encoded(decoded, depth + 1, field)
+            guard_spelling(value, field)
+        else:
+            guard(value, field=field)
+    else:
+        guard(value, field=field)
 
 
 def _check(name: str, arguments: Any, raw: str | None) -> None:
@@ -71,7 +87,13 @@ def _check(name: str, arguments: Any, raw: str | None) -> None:
                     raise MemoryError("Invalid raw memory argument shape is not retained.")
             except (ValueError, TypeError):
                 raise MemoryError("Unparseable memory arguments are not retained.") from None
-        guard_encoded(raw)
+            # The raw TEXT is a spelling: every rule but the opaque run. Its decoded
+            # values (which may differ from the typed arguments: duplicate keys keep the
+            # last) are then judged at their own fields, like the typed ones.
+            from local_operator.memory import guard_spelling
+
+            guard_spelling(raw)
+            guard_encoded(decoded)
 
 
 #: Upper bound on spans masked in one call before retention gives up and redacts the

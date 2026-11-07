@@ -297,18 +297,7 @@ _SECRET_NAME_CONTEXT = re.compile(
 # The clause a secret name is looked for in: back to the last line break or sentence end,
 # at most this many characters before the run (a name further away is another clause).
 _CLAUSE_LOOKBACK = 64
-_CLAUSE_BREAK = re.compile(r"\n|[.!?;]\s")
-# The loop pre-check also judges the JSON SPELLING of the arguments, where a newline is
-# the two characters ``\`` ``n``: the clause never broke there and ``\nCommit`` hid the
-# ``commit`` word, so the pre-check refused (and redacted whole) a fact the field guard
-# stored (agent review round 2, M-1 / QA Q-N2). The opaque rule therefore reads its
-# CONTEXT from a view with each escape replaced by same-length whitespace (offsets
-# unchanged): ``\n``/``\r`` -> real newline + space, ``\t`` -> two spaces.
-_JSON_ESCAPE = re.compile(r"\\([nrt])")
-
-
-def _unescaped_view(text: str) -> str:
-    return _JSON_ESCAPE.sub(lambda m: "\n " if m.group(1) in "nr" else "  ", text)
+_CLAUSE_BREAK = re.compile(r"[\n\r]|[.!?;]\s")
 
 
 # What may follow a run for it to be a DNS label: optional rest of the label
@@ -765,7 +754,10 @@ def _opaque_verdict(
     # Only a run that CAN be a DNS label gets the hostname reading: hex, or lowercase
     # letters/digits/hyphens of label length. A mixed-case or ``+/_=`` run followed by
     # ``.evil.example`` is a key shape, not a label (agent review round 2, m-1).
-    label = hex_run or re.fullmatch(r"[0-9a-z-]{1,63}", text[start:end]) is not None
+    # 63 is the DNS label limit (RFC 1035); a longer run cannot be a label (round 3, m-2).
+    label = (hex_run and end - start <= 63) or re.fullmatch(
+        r"[0-9a-z-]{1,63}", text[start:end]
+    ) is not None
     if label and tail and tail.group("tld").lower() not in _FILE_SUFFIXES:
         # A DNS label (``<hex>-lop.radienthq.com``, ``a.<hex>.example.com``). A run after
         # a dot with NO hostname tail (``dp.st.dev.<run>``, ``v1.<run>``) is a prefixed
@@ -774,7 +766,9 @@ def _opaque_verdict(
     return "opaque"
 
 
-def _rule_spans(text: str, field: str | None = None) -> list[tuple[str, int, int]]:
+def _rule_spans(
+    text: str, field: str | None = None, *, opaque: bool = True
+) -> list[tuple[str, int, int]]:
     """``(kind, start, end)`` for every memory-specific sensitive shape in FOLDED text.
 
     Heuristic pattern guard. Not proof of absence. The kinds are value-free labels so a
@@ -809,9 +803,9 @@ def _rule_spans(text: str, field: str | None = None) -> list[tuple[str, int, int
             spans.append(("named-secret", *match.span(1)))
     for match in _PASSPHRASE_WORDS.finditer(text):
         spans.append(("passphrase", *match.span()))
-    # Matches and context come from the unescaped view (see ``_JSON_ESCAPE``); its
-    # offsets equal the caller's, so the reported span is still a span of ``text``.
-    view = _unescaped_view(text) if "\\" in text else text
+    if not opaque:
+        return spans
+    view = text
     for match in _HEX_RUN.finditer(view):
         # A key or digest drawn at random uses most of the 16 hex digits (two or fewer
         # distinct in 32 draws has probability < 1e-30); a run like ``aaaa…`` or
@@ -858,7 +852,9 @@ class SensitiveSpan:
     complete: bool = True
 
 
-def sensitive_spans(text: str, *, field: str | None = None) -> list[SensitiveSpan]:
+def sensitive_spans(
+    text: str, *, field: str | None = None, opaque: bool = True
+) -> list[SensitiveSpan]:
     """Every sensitive span in ``text``: the shared credential table, then memory rules.
 
     The shared ``redaction_shapes`` table (vendor key prefixes, JWT, PEM, bearer
@@ -895,7 +891,7 @@ def sensitive_spans(text: str, *, field: str | None = None) -> list[SensitiveSpa
     for span in found:
         if span.start is not None and span.end is not None:
             shared.append((span.start, span.end))
-    for kind, start, end in _rule_spans(folded, field):
+    for kind, start, end in _rule_spans(folded, field, opaque=opaque):
         if exact and any(a <= start and end <= b for a, b in shared):
             continue  # one span, one report: the first (most specific) label wins
         if exact:
@@ -1056,36 +1052,57 @@ def guard(value: Any, *, field: str | None = None) -> None:
         for child in value:
             guard(child, field=field)
     elif isinstance(value, str):
-        if len(value.encode("utf-8")) > ITEM_BYTES:
-            raise MemoryError("Memory field exceeds the 8192-byte cap; split into atomic facts.")
-        folded = _fold(value)
-        spans = sensitive_spans(value, field=field)
-        if spans:
-            raise SensitiveValueError(spans)
-        # Check path-like tokens, not the complete prose (which can contain a
-        # harmless reference beside a sensitive path). Never persist the latter.
-        # A drive letter starts a token, not the suffix of a URL scheme: matching
-        # `s://example...` in https:// made benign URLs resolve relative to the
-        # session cwd and fail whenever that cwd was under a protected root.
-        # The boundary belongs ONLY to the drive-letter arm. Unix separators
-        # inside relative locators must still expose sensitive components such
-        # as docs/.env or deploy/kubeconfig-prod (R7).
-        exact = folded == value
-        for match in re.finditer(r"(?:~?/|(?<![\w])[A-Za-z]:[/\\])[^\s<>\"']{1,512}", folded):
-            word = match.group()
-            rule = is_sensitive(word)
-            if rule and not _is_attachment_reference(word, rule):
-                raise SensitiveValueError(
-                    [
-                        SensitiveSpan(
-                            field,
-                            f"sensitive-path:{rule}",
-                            match.start() if exact else None,
-                            match.end() if exact else None,
-                            exact,
-                        )
-                    ]
-                )
+        _guard_string(value, field, opaque=True)
+
+
+def guard_spelling(text: str, field: str | None = None) -> None:
+    """Guard a SERIALIZED spelling (a JSON dump or raw tool-call JSON) of values that are
+    themselves guarded decoded, at their own field.
+
+    The opaque long-hex/base64 rule decides by CONTEXT: the field that holds a run and
+    the clause before it. A spelling has neither: its escapes (``\\n``) glue and hide
+    words, and its keys sit where prose would. Judging the opaque rule there made the
+    loop pre-check refuse facts the field guard stored (agent review round 2, M-1), and
+    patching that with an escape-decoding view let a value's own literal backslash-n
+    cut a clause (round 3, R3-M1). So a spelling gets every OTHER rule (cards, SSN,
+    IBAN, vendor key shapes, sensitive paths...), whose matches survive serialization,
+    and never the opaque rule; every caller also guards the decoded values, where the
+    opaque rule runs exactly as ``guard(value)`` runs it. That is what keeps one rule.
+    """
+    _guard_string(text, field, opaque=False)
+
+
+def _guard_string(value: str, field: str | None, *, opaque: bool) -> None:
+    if len(value.encode("utf-8")) > ITEM_BYTES:
+        raise MemoryError("Memory field exceeds the 8192-byte cap; split into atomic facts.")
+    folded = _fold(value)
+    spans = sensitive_spans(value, field=field, opaque=opaque)
+    if spans:
+        raise SensitiveValueError(spans)
+    # Check path-like tokens, not the complete prose (which can contain a
+    # harmless reference beside a sensitive path). Never persist the latter.
+    # A drive letter starts a token, not the suffix of a URL scheme: matching
+    # `s://example...` in https:// made benign URLs resolve relative to the
+    # session cwd and fail whenever that cwd was under a protected root.
+    # The boundary belongs ONLY to the drive-letter arm. Unix separators
+    # inside relative locators must still expose sensitive components such
+    # as docs/.env or deploy/kubeconfig-prod (R7).
+    exact = folded == value
+    for match in re.finditer(r"(?:~?/|(?<![\w])[A-Za-z]:[/\\])[^\s<>\"']{1,512}", folded):
+        word = match.group()
+        rule = is_sensitive(word)
+        if rule and not _is_attachment_reference(word, rule):
+            raise SensitiveValueError(
+                [
+                    SensitiveSpan(
+                        field,
+                        f"sensitive-path:{rule}",
+                        match.start() if exact else None,
+                        match.end() if exact else None,
+                        exact,
+                    )
+                ]
+            )
 
 
 #: A content-addressed attachment blob name: the store writes ``<hex digest>.bin``
@@ -1324,7 +1341,7 @@ def validate_fact(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise MemoryError("Memory content must be a JSON object; read guide://memory.")
     guard(raw)
-    guard(_dump(raw))
+    guard_spelling(_dump(raw))
     allowed = {
         "title",
         "body",

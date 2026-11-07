@@ -31,6 +31,7 @@ from local_operator.memory import (
     MemoryStore,
     _dump,
     guard,
+    guard_spelling,
     is_expiry_tombstone,
     safe_segment,
     validate_fact,
@@ -783,7 +784,7 @@ def _admitted(body: str, tag: str, *, standalone: bool = True, floor: bool = Fal
             "source": {"session": "probe", "entry": "probe", "kind": "compaction"},
         }
     )
-    guard(_dump(probe))
+    guard_spelling(_dump(probe))
 
 
 def _emit(

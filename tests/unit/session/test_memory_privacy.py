@@ -295,5 +295,36 @@ def test_derived_title_keeps_whole_tokens():
     assert _derived_title("short title\nbody") == "short title"
     long = "word " * 30
     assert len(_derived_title(long)) <= 100 and not _derived_title(long).endswith(" ")
-    assert _derived_title("a" * 150) == ""
+    assert _derived_title("a" * 150) == "Note"
     assert _derived_title("x " + "b" * 120) == "x"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        "https://example.invalid/" + "/".join(["segment-name"] * 9) + "/index.html?q=1",
+        "/Users/x/.local-operator/attachments/{digest}.bin",
+        "/srv/" + "/".join(["component"] * 11) + "/end.txt",
+    ],
+    ids=["long-url", "absolute-attachment", "116-char-path"],
+)
+async def test_a_single_long_token_first_line_stores_with_a_whole_component_title(
+    tmp_path, first_line
+):
+    """Q-M3: one first-line token over the title budget used to derive an empty title,
+    which the store refuses. The title is now cut at a component boundary the guard
+    admits, else a neutral title, never empty and never a raw slice."""
+    from local_operator.tools.memory_tools import _derived_title
+    from tests.unit.test_memory_guard_shapes import DIGEST64
+
+    line = first_line.format(digest=DIGEST64)
+    assert len(line) > 100 and " " not in line
+    title = _derived_title(line)
+    assert title and len(title) <= 100 and (line.startswith(title) or title == "Note")
+    session, transcript = await _run_memory_store(
+        tmp_path, {"op": "store", "text": line + "\nsecond line"}
+    )
+    result = _tool_result_text(transcript)
+    assert "refused" not in result and "status" in result, result
+    await session.dispose()

@@ -513,10 +513,18 @@ MULTILINE_PUBLIC = [
     f"Fixed it\nCommit {HEX40} landed",
     f"Fixed it\r\nsha256 {DIGEST64}",
     f"notes\tcommit {HEX40}",
+    f"path C:\\new\\commit {HEX40}",
+    f"auth token\rcommit {HEX40}",  # a real carriage return ends the clause (r3 m-1)
     f"line one\nTunnel host {TUNNEL_HEX}-lop.radienthq.com\nline three",
     f"a\n- screenshot ~/.local-operator/attachments/{DIGEST64}.bin\n- b",
 ]
 MULTILINE_SECRET = [
+    # LITERAL backslash escapes inside a value (round 3, R3-M1): the opaque rule judges
+    # the decoded value, where ``\\n`` is two characters, not a clause break.
+    f"api_key\\ncommit {HEX40}",
+    f"auth token\\rcommit {HEX40}",
+    f"secret\\tcommit {HEX40}",
+    f"notes\\tcommit {HEX40}",  # literal backslash-t: ``tcommit`` names nothing
     f"Rotated it.\nthe token {HEX40}",
     f"note\n{HEX40}\nmore",
     f"cfg\tapi key\t{HEX40}",
@@ -581,3 +589,19 @@ def test_retention_never_judges_its_own_mask_labels():
         "op": "store",
         "text": "[redacted:aws-access-key-id] / [redacted:opaque-base64]",
     }
+
+
+def test_a_hex_run_longer_than_a_dns_label_is_not_a_hostname():
+    """m-2: a DNS label is at most 63 characters (RFC 1035)."""
+    assert refused(f"value {DIGEST64}.evil.example")
+    assert not refused(f"value {DIGEST64[:63]}.evil.example")
+
+
+def test_spelling_guard_skips_only_the_opaque_rule():
+    from local_operator.memory import guard_spelling
+
+    guard_spelling(json.dumps({"body": f"api_key\\ncommit {HEX40}"}))  # judged decoded
+    with pytest.raises(SensitiveValueError):
+        guard_spelling(json.dumps({"body": "card 4111 1111 1111 1111"}))
+    with pytest.raises(SensitiveValueError):
+        guard_spelling(json.dumps({"body": SYNTH_GITHUB}))
