@@ -452,3 +452,97 @@ def test_merged_skill_md_keeps_terminal_newline(tmp_path: Path) -> None:
     assert proposal.document is not None
     skill = {f.path: f.content for f in proposal.document.files}["SKILL.md"]
     assert skill.endswith("\n") and not skill.endswith("\n\n\n")
+
+
+# --- Take-hub installs the Hub's SKILL.md bytes verbatim (#3423) ---
+#
+# Seen on a real folder: a take-hub adoption re-dumped the frontmatter through
+# PyYAML, which folds a long ``description`` at width 80. Parsed metadata stayed
+# equal, but the installed bytes -- and therefore the fingerprint -- no longer
+# matched the Hub row, so the fresh link classified ``local-only``. Both Hub
+# shapes matter: a long single line PyYAML would fold, and a description the Hub
+# ALREADY folds in its own style, which a re-dump would re-wrap differently.
+
+_LONG_DESCRIPTION = (
+    "Municipal procurement guidance for verifying deadlines, clerk contacts and audit "
+    "evidence against official notices before any pilot is proposed to a municipality"
+)
+_HUB_FRONTMATTERS = {
+    "single-line": f"---\nname: {ALIAS}\ndescription: {_LONG_DESCRIPTION}\nlicense: MIT\n---\n",
+    "hub-folded": (
+        f"---\nname: {ALIAS}\ndescription: >-\n"
+        "  Municipal procurement guidance for verifying deadlines, clerk contacts\n"
+        # Deliberately wider than PyYAML's width-80 fold: a re-dump re-wraps it.
+        "  and audit evidence against official notices before any pilot is "
+        "proposed to a municipality\n"
+        "license: MIT\n---\n"
+    ),
+}
+
+
+def _long_description(tmp_path: Path, shape: str, *, same_body: bool):
+    hub_body = "# Municipal procurement\n\nPreserve the procurement audit evidence.\n"
+    local_body = hub_body if same_body else "# Municipal procurement\n\nKeep the POC clerk.\n"
+    remote = SkillDocument.from_json(
+        {
+            "document_version": 1,
+            "name": ALIAS,
+            "description": _LONG_DESCRIPTION,
+            "files": [{"path": "SKILL.md", "content": _HUB_FRONTMATTERS[shape] + hub_body}],
+        }
+    )
+    local_head = f"---\nname: {ALIAS}\ndescription: {_LONG_DESCRIPTION}\nlicense: MIT\n---\n"
+    folder = _authored(
+        tmp_path, {"files": [{"path": "SKILL.md", "content": local_head + local_body}]}
+    )
+    return folder, remote
+
+
+@pytest.mark.parametrize("same_body", [False, True], ids=["taken-hub", "same-body"])
+@pytest.mark.parametrize("shape", sorted(_HUB_FRONTMATTERS))
+def test_take_hub_proposal_is_the_hub_document_verbatim(
+    tmp_path: Path, shape: str, same_body: bool
+) -> None:
+    folder, remote = _long_description(tmp_path, shape, same_body=same_body)
+
+    proposal = adoption.build_proposal(
+        ALIAS,
+        adoption.read_tree(folder),
+        remote,
+        resolver=None,
+        allow_llm=False,
+        strategy="take-hub",
+    )
+
+    assert proposal.document is not None
+    assert proposal.document == remote
+    assert proposal.document.fingerprint == remote.fingerprint
+
+
+@pytest.mark.parametrize("shape", sorted(_HUB_FRONTMATTERS))
+def test_service_take_hub_installs_hub_bytes_and_fingerprint(tmp_path: Path, shape: str) -> None:
+    ctx, manager, remote, base, _document = _rig(tmp_path)
+    folder, document = _long_description(manager.config_dir, shape, same_body=False)
+    remote.document = document.to_json()
+
+    preview = _install(ctx, base, dry_run=True, adoption_strategy="take-hub", allow_llm=False)
+    result = _install(
+        ctx,
+        base,
+        confirm=True,
+        adoption_receipt=preview["adoption_receipt"],
+        adoption_strategy="take-hub",
+        allow_llm=False,
+    )
+
+    assert result["reports"][0]["applied"] is True
+    # The operator-visible symptom first: the fresh link must not read as local
+    # edits. An in-sync check persists no publish-side mark (``_state_of``).
+    from local_operator.hub_sync.store import StatusStore
+
+    rows = StatusStore(manager.config_dir).load()["items"]
+    assert [row.get("classification") for row in rows.values()] == [None]
+    remote_skill = next(f.content for f in document.files if f.path == "SKILL.md")
+    assert (folder / "SKILL.md").read_bytes() == remote_skill.encode("utf-8")
+    installed = SkillDocument.from_directory(folder)
+    assert installed.fingerprint == document.fingerprint
