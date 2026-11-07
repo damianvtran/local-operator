@@ -4438,6 +4438,31 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.compaction_mid_turn_enabled_choice_false_description()),
         ),
     ),
+    # Opt-in cost trade for RESUMED contexts (#3448); see the field comment in
+    # ``compaction/thresholds.py``. The help text must keep saying that earlier
+    # operator turns stop surviving verbatim in card mode — that is the price,
+    # and an operator choosing it from /settings has to see it there.
+    Setting(
+        key="compaction.resume_replay",
+        path=("compaction", "resume_replay"),
+        section="compaction",
+        label=_t(_ws.compaction_resume_replay_label()),
+        kind=Kind.ENUM,
+        default="full",
+        help=_t(_ws.compaction_resume_replay_help()),
+        choices=(
+            Choice(
+                "full",
+                _t(_ws.compaction_resume_replay_choice_full_label()),
+                _t(_ws.compaction_resume_replay_choice_full_description()),
+            ),
+            Choice(
+                "card",
+                _t(_ws.compaction_resume_replay_choice_card_label()),
+                _t(_ws.compaction_resume_replay_choice_card_description()),
+            ),
+        ),
+    ),
     # The two BYTE knobs. They live in this section because they are compaction
     # triggers, but they measure a different thing from every other key here:
     # request SIZE, not context occupancy. A screenshot-heavy conversation can
