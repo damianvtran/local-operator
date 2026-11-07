@@ -516,6 +516,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     ),
     "compaction.auto_continue": (False, lambda s, w: compaction_of(s).auto_continue),
     "compaction.mid_turn_enabled": (False, lambda s, w: compaction_of(s).mid_turn_enabled),
+    "compaction.resume_replay": ("card", lambda s, w: compaction_of(s).resume_replay),
     # The two BYTE knobs. LIVE for the same reason as their neighbours — the
     # session re-coerces CompactionSettings on every config change — and it
     # matters more here: an operator raising the budget is usually reacting to

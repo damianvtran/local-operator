@@ -19,7 +19,7 @@ What these pin, and why each matters:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -63,7 +63,7 @@ class ScriptedStream:
         return gen()
 
 
-def _session(directory: Path, mode: str | None) -> Session:
+def _session(directory: Path, mode: Literal["full", "card"] | None) -> Session:
     settings = (
         CompactionSettings(keep_recent_tokens=KEEP_RECENT)
         if mode is None
@@ -115,7 +115,11 @@ async def test_the_default_writes_no_card_and_resume_equals_live(tmp_path):
 async def test_explicit_full_is_byte_identical_to_the_default(tmp_path):
     """``"full"`` spelled out and the absent key replay the same bytes."""
     dumps = []
-    for name, mode in (("default", None), ("full", "full")):
+    runs: tuple[tuple[str, Literal["full", "card"] | None], ...] = (
+        ("default", None),
+        ("full", "full"),
+    )
+    for name, mode in runs:
         directory = tmp_path / name
         session = _session(directory, mode)
         await _round(session, "a")
@@ -158,8 +162,11 @@ async def test_card_mode_changes_replay_only(tmp_path):
     assert (
         isinstance(replayed[0], CustomMessage) and replayed[0].custom_type == "compaction_summary"
     )
-    assert is_resume_card(replayed[1]) and replayed[1].id == RESUME_CARD_ID
-    assert replayed[1].text.startswith(CARD_HEADER)
+    card = replayed[1]
+    # ``is_resume_card`` is only true for a ``Message``; the isinstance is
+    # the narrowing pyright needs for ``.text`` (CustomMessage has none).
+    assert isinstance(card, Message) and is_resume_card(card) and card.id == RESUME_CARD_ID
+    assert card.text.startswith(CARD_HEADER)
     assert is_rendered_injection(replayed[1]), "card must carry the harness_injected stamp"
     # No verbatim preserved turn survives a card resume — the documented price.
     assert not any(
@@ -198,7 +205,9 @@ async def test_the_card_is_never_harvested_across_a_resume_and_a_second_pass(tmp
     # Second card covers round b, and still exactly one on replay.
     replayed = Transcript(directory).build_llm_history()
     assert sum(1 for m in replayed if is_resume_card(m)) == 1
-    assert "constraint-b-" in replayed[1].text
+    card = replayed[1]
+    assert isinstance(card, Message) and is_resume_card(card)
+    assert "constraint-b-" in card.text
     await resumed.dispose()
 
 
