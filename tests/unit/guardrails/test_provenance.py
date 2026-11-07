@@ -1514,3 +1514,48 @@ def test_bare_dash_o_does_not_turn_on_the_deep_walk(home: Path, prefix: str) -> 
     assert resolve_command(
         "bash -O globstar -c 'ls **'", cwd=str(home), env=_env(home), home=str(home)
     ).globstar
+
+
+def test_stamp_falls_back_to_ctime_when_birthtime_is_zero() -> None:
+    from types import SimpleNamespace
+
+    st = SimpleNamespace(st_birthtime=0.0, st_ctime_ns=1234)
+    assert prov.creation_stamp(st) == 1234  # type: ignore[arg-type]
+
+
+def test_concurrent_stamp_migration_is_tolerated(home: Path) -> None:
+    """A second process migrating the same legacy ledger sees 'duplicate
+    column'; the connect re-checks instead of failing."""
+    import sqlite3
+
+    db = prov.ledger_path(home / ".local-operator")
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE created (owner TEXT NOT NULL, path TEXT NOT NULL, dev INTEGER NOT NULL,"
+            " ino INTEGER NOT NULL, created_at REAL NOT NULL, creator TEXT NOT NULL,"
+            " kind TEXT NOT NULL, command TEXT NOT NULL, PRIMARY KEY (owner, path))"
+        )
+    real_connect = sqlite3.connect
+
+    class Racing:
+        def __init__(self, conn: sqlite3.Connection) -> None:
+            self._conn = conn
+
+        def execute(self, sql: str, *args: object):
+            if sql.startswith("ALTER TABLE"):
+                self._conn.execute(sql)  # the "other" process wins first
+            return self._conn.execute(sql, *args)
+
+        def __getattr__(self, name: str):
+            return getattr(self._conn, name)
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(prov.sqlite3, "connect", lambda *a, **k: Racing(real_connect(*a, **k)))
+        conn = prov._connect(db, create=False)
+    assert conn is not None
+    conn.close()
+    with sqlite3.connect(db) as check:
+        assert "stamp" in {row[1] for row in check.execute("PRAGMA table_info(created)")}

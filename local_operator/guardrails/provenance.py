@@ -206,7 +206,9 @@ def creation_stamp(st: os.stat_result) -> int:
       never accepted as "newer is fine": a recreation is exactly "newer".
     """
     birth = getattr(st, "st_birthtime", None)
-    if birth is not None:
+    # 0 means "unknown" on some filesystems (FAT/network mounts on macOS):
+    # every directory there would share one stamp, so use ctime instead.
+    if birth:
         return int(round(float(birth) * 1_000_000_000))
     return int(st.st_ctime_ns)
 
@@ -243,12 +245,23 @@ def _connect(path: Path, *, create: bool) -> sqlite3.Connection | None:
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=_DB_TIMEOUT_S)
-    conn.execute(_SCHEMA)
-    # A ledger written before the stamp column existed: add it (old rows keep
-    # NULL and so never match — fail closed).
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(created)")}
-    if "stamp" not in columns:
-        conn.execute("ALTER TABLE created ADD COLUMN stamp INTEGER")
+    try:
+        conn.execute(_SCHEMA)
+        # A ledger written before the stamp column existed: add it (old rows
+        # keep NULL and so never match — fail closed).
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(created)")}
+        if "stamp" not in columns:
+            try:
+                conn.execute("ALTER TABLE created ADD COLUMN stamp INTEGER")
+            except sqlite3.OperationalError:
+                # Two processes migrating at once: the loser sees "duplicate
+                # column". Re-check rather than fail the whole record/lookup.
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(created)")}
+                if "stamp" not in columns:
+                    raise
+    except BaseException:
+        conn.close()  # never leak a half-set-up connection
+        raise
     return conn
 
 
