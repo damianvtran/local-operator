@@ -626,7 +626,7 @@ def test_bare_directory_word_is_not_a_path(tmp_path: Path) -> None:
 # --- shared helpers for the #3540 cases -----------------------------------------
 
 
-def _reach(tmp_path: Path, ship: dict[str, str], harness_path: str = "scripts/ci/check.ts"):
+def _reach(tmp_path: Path, ship: dict[str, str | None], harness_path: str = "scripts/ci/check.ts"):
     """Commit ``ship`` files on top of the reviewed head, then change one harness
     file; return the proof run for that harness-only delta."""
     repo, _ = _setup(tmp_path)
@@ -693,11 +693,107 @@ def _native_delta(tmp_path: Path, head_text: str) -> subprocess.CompletedProcess
 
 def test_harness_workflow_edit_without_new_powers_is_harness_only(tmp_path: Path) -> None:
     """Negative: same triggers, GITHUB_TOKEN only, read permission, and an upload
-    step the reviewed head already had — a harness edit, no round. Comments
-    naming powers (`# on: push`, `secrets.NPM_TOKEN`) are not powers."""
+    step the reviewed head already had — a harness edit, no round."""
     edited = _SAFE_NATIVE.replace("bun scripts/ci/check.ts", "bun scripts/ci/check.ts --fast")
-    edited = "# was on: push with secrets.NPM_TOKEN and contents: write\n" + edited
     _exempt(_native_delta(tmp_path, edited))
+
+
+def test_harness_workflow_comment_naming_powers_opens_a_round(tmp_path: Path) -> None:
+    """INTENDED over-report (#3540 round 1): powers are read from the RAW text,
+    comments included. Stripping comments hid real shell (`N="a #"; gh release
+    create`, review R1) and `${{ }}` inside block scalars, which GitHub still
+    interpolates (QA Q1); a comment that only names a power costs one round."""
+    edited = "# was on: push with secrets.NPM_TOKEN and contents: write\n" + _SAFE_NATIVE
+    result = _native_delta(tmp_path, edited)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "secret `NPM_TOKEN`" in result.stdout
+
+
+_ATTACK_TAIL = (
+    "permissions:\n  contents: read\njobs:\n  n:\n    runs-on: ubuntu-latest\n    steps:\n"
+    "      - run: bun scripts/ci/check.ts\n      - uses: actions/upload-artifact@v4\n"
+)
+#: Spelled in two halves only so the literal reads as YAML here, not as prose.
+_INHERIT = "inh" + "erit"
+
+
+@pytest.mark.parametrize(
+    ("head_text", "reason"),
+    [
+        # Review R1 / QA Q1: comment stripping cut real shell and block scalars.
+        (_SAFE_NATIVE + '      - run: |\n          N="a #"; gh release create v9\n', "gh release"),
+        (
+            _SAFE_NATIVE + '      - run: |\n          N="a #"; echo ${{ secrets.NPM_TOKEN }}\n',
+            "NPM_TOKEN",
+        ),
+        (_SAFE_NATIVE + "      - run: |\n          # ${{ secrets.NPM_TOKEN }}\n", "NPM_TOKEN"),
+        (
+            _SAFE_NATIVE
+            + "      - run: >-\n          echo hi\n          #${{ secrets.NPM_TOKEN }}\n",
+            "NPM_TOKEN",
+        ),
+        # Review R2: whole-context, quoted and indexed forms.
+        (_SAFE_NATIVE + "      - run: echo '${{ toJSON(secrets) }}'\n", "secret"),
+        (
+            _SAFE_NATIVE.replace("    runs-on:", f'    secrets: "{_INHERIT}"\n    runs-on:', 1),
+            "secret",
+        ),
+        (_SAFE_NATIVE + "      - run: echo ${{ secrets['NPM'] }}\n", "secret"),
+        # QA Q2: quoted permission key/value.
+        (_SAFE_NATIVE.replace("contents: read", '"contents": "write"'), "write permission"),
+        (_SAFE_NATIVE.replace("contents: read", "'contents': 'write'"), "write permission"),
+        (_SAFE_NATIVE.replace("  contents: read", "  write-all"), "write permission"),
+        # QA Q3 / review R4: event shapes a line parser missed.
+        ('on:\n  pull_request:\n  "push":\n' + _ATTACK_TAIL, "trigger `push`"),
+        ("on:\n- pull_request\n- push\n" + _ATTACK_TAIL, "trigger `push`"),
+        ("on:\n  - pull_request\n  - 'push'\n" + _ATTACK_TAIL, "trigger `push`"),
+        ("on: [pull_request,\n  push]\n" + _ATTACK_TAIL, "trigger `push`"),
+        ('"on": {pull_request: {}, workflow_call: {}}\n' + _ATTACK_TAIL, "trigger `workflow_call`"),
+        ("on: release\n" + _ATTACK_TAIL, "trigger `release`"),
+    ],
+    ids=[
+        "hash-in-shell-release",
+        "hash-in-shell-secret",
+        "block-scalar-comment-secret",
+        "folded-scalar-secret",
+        "tojson-secrets",
+        "quoted-inherit",
+        "indexed-secret",
+        "quoted-permission-dq",
+        "quoted-permission-sq",
+        "write-all",
+        "quoted-event-key",
+        "seq-at-key-indent",
+        "quoted-seq-item",
+        "multiline-flow-seq",
+        "flow-map-workflow-call",
+        "scalar-event",
+    ],
+)
+def test_harness_workflow_power_attacks_open_a_round(
+    tmp_path: Path, head_text: str, reason: str
+) -> None:
+    """Every round-1 reviewer/QA attack on #3540 that exited 0, as a regression."""
+    result = _native_delta(tmp_path, head_text)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "harness workflow `.github/workflows/native.yml` can ship:" in result.stdout
+    assert reason in result.stdout
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    [
+        "jobs:\n  r:\n    steps:\n      - {uses: ./scripts/ci}\n",
+        "jobs:\n  r:\n    steps:\n      - { uses: ./scripts/ci }\n",
+        'jobs:\n  r:\n    steps:\n      - "uses": ./scripts/ci\n',
+        "jobs:\n  r:\n    steps: [{name: a, uses: ./scripts/ci}]\n",
+        "jobs:\n  r:\n    steps:\n      - uses: './scripts/ci'\n",
+    ],
+    ids=["flow-map", "flow-map-spaced", "quoted-key", "flow-seq", "quoted-value"],
+)
+def test_local_uses_in_any_yaml_shape_reaches(tmp_path: Path, workflow: str) -> None:
+    """Review R3 / QA Q4: `uses: ./<dir>` in flow or quoted form is still a step."""
+    _reached(_reach(tmp_path, {".github/workflows/release.yml": workflow}))
 
 
 @pytest.mark.parametrize(
