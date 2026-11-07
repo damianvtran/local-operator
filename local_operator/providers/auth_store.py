@@ -4039,6 +4039,38 @@ class AuthStore:
                     return self._served_while_contended(row, now_data)
                 if not self._try_refresh_lease(row.id):
                     return self._served_while_contended(row, now_data)
+                # THE RETAKEN LEASE IS HELD OVER A ROW THAT MAY HAVE ROTATED (#3560
+                # review R1). ``fresh`` was read BEFORE the wait; the holder we
+                # waited out frees its lease only after writing its result, so if
+                # it succeeded the row now carries a new refresh token and ``fresh``
+                # still carries the one it just SPENT. Presenting that again is a
+                # reuse a rotating IdP answers by revoking the whole family — the
+                # owner's login, provoked by nothing more than a forced caller (a
+                # peer's 401 report, the bridge's 401) landing at expiry, which is
+                # exactly when the owner's own sessions refresh. So re-read under
+                # the lease: a rotation that happened during the wait IS the new
+                # token the force asked for, and is served without a POST; only an
+                # unchanged row goes on to the exchange, re-checked for a tombstone
+                # the sibling may have written instead.
+                retaken = self.get_credential(row.id)
+                if retaken is None or retaken.disabled_cause is not None:
+                    self._release_refresh_lease(row.id)
+                    raise AuthStoreError(f"Credential {row.id} disappeared during refresh")
+                retaken_data = dict(retaken.data)
+                if retaken_data.get("access") != fresh.get(
+                    "access"
+                ) or self._presented_refresh_token(retaken_data) != (
+                    self._presented_refresh_token(fresh)
+                ):
+                    self._release_refresh_lease(row.id)
+                    return retaken_data
+                if self._grant_dead_at(retaken_data) is not None:
+                    self._release_refresh_lease(row.id)
+                    raise CredentialInvalidError(
+                        f"OAuth grant for '{row.provider}' was refused by the identity "
+                        f"provider; run /login {row.provider} to sign in again"
+                    )
+                fresh = retaken_data
             # Imported here, not at module scope: `callback_server` drags in
             # http.server/ssl/email (~138 ms, 150-odd modules), and three
             # separate comments in this codebase exist to stop anyone

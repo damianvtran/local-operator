@@ -1976,20 +1976,22 @@ class MeshCredentialBroker:
             },
         )
         # WHAT THE PROBE FOUND, after the row that proves it was spent (owner-relogin
-        # design §3.5, gap 1). Read from the STORE'S PERSISTED VERDICT rather than
-        # from the probe's exception alone, because the MCP probe does not raise on
-        # the case that matters: ``ensure_mcp_oauth_fresh`` leaves a failed refresh
-        # in place without raising. The provider probe now raises
-        # (``ensure_oauth_fresh_or_raise``), and its ``CredentialInvalidError`` is
-        # accepted as the same verdict. The tombstone is written only on the IdP's
-        # own ``invalid_grant``,
-        # so a transient outage — a 5xx, a refused connection, this probe timing out
-        # — never reads as "sign in again". Same authority as before: one probe per
-        # credential per window, and the probe's RESULT is what is newly recorded.
+        # design §3.5, gap 1). A dead grant is believed only on the IdP's OWN
+        # verdict: the tombstone the store persists on ``invalid_grant`` (the MCP
+        # probe's only signal — ``ensure_mcp_oauth_fresh`` never raises), or an
+        # ``InvalidGrantError`` in the provider probe's cause chain. NOT on
+        # ``CredentialInvalidError`` as such (#3560 review M2): the store also raises
+        # it for refusals it makes ON ITS OWN, with no IdP consulted — a forced
+        # refresh of a ``meta-muse`` key, whose account bearer was discarded at mint,
+        # raises before any POST — and recording ``reauth_required`` from that would
+        # let a peer's observation open a repair on the owner. A transient outage —
+        # a 5xx, a refused connection, this probe timing out — never reads as "sign
+        # in again" either. Same authority as before: one probe per credential per
+        # window, and the probe's RESULT is what is newly recorded.
         from local_operator.providers.auth_store import CredentialInvalidError
 
-        grant_dead = self._grant_is_tombstoned(key, credential_id) or isinstance(
-            failure, CredentialInvalidError
+        grant_dead = self._grant_is_tombstoned(key, credential_id) or _caused_by_invalid_grant(
+            failure
         )
         if grant_dead:
             self._record_reauth_required(key, by)
@@ -2010,10 +2012,21 @@ class MeshCredentialBroker:
                 "code": "grant_invalid",
                 "remedy": repair_command(key),
             }
+        if isinstance(failure, CredentialInvalidError):
+            # The owner's store refused to refresh this row by its own rule (a key
+            # with no refresh, a delegation that ended, a family that moved). Not an
+            # IdP verdict, so nothing is recorded and no remedy is claimed; and not
+            # transient, so no retry time is offered either.
+            return {
+                **common,
+                "action": "refresh_failed",
+                "code": "not_refreshable",
+                "message": failure.__class__.__name__,
+            }
         if failure is not None:
             # A transport fault or this wait timing out: a retry can fix it, but not
-            # a report retry inside the window, which is coalesced — so the borrower
-            # is told the earliest moment another report can provoke a refresh.
+            # a report retry inside the window, which is coalesced, so the reply
+            # carries the earliest moment another report can provoke a refresh.
             return {
                 **common,
                 "action": "refresh_failed",
@@ -2026,8 +2039,9 @@ class MeshCredentialBroker:
             return {**common, "action": "refreshed"}
         # Nothing new was obtained and nothing failed: the store declined (an
         # unsettled send holding the refresh off, a row that is gone or disabled, or
-        # an MCP row whose refresh has no force). Saying so is what lets the
-        # borrower stop expecting the next borrow to be different.
+        # an MCP row whose refresh has no force). The reply says so. No borrower
+        # reads it yet — ``report_sync`` discards the ack — so today the honest
+        # outcome serves the wire and a later borrower-side surface, not the user.
         return {**common, "action": "unchanged"}
 
     def _stored_bearer(self, credential_id: int) -> str:
@@ -3292,6 +3306,29 @@ def _lifecycle_unsupported(kind: Any) -> dict[str, Any]:
         code="unsupported",
         message=f"this build does not serve {kind!r}; nothing was read or changed",
     ).to_detail()
+
+
+def _caused_by_invalid_grant(exc: BaseException | None) -> bool:
+    """Whether the IdP's own ``invalid_grant`` sits anywhere in ``exc``'s chain.
+
+    The store re-raises the provider's :class:`InvalidGrantError` as
+    ``CredentialInvalidError`` (chained ``from``), and also raises that class for
+    refusals it makes on its own rules; only the first is an IdP verdict (#3560
+    review M2). The import is local because ``callback_server`` is a heavy module
+    this one otherwise never needs. Bounded by a seen-set: a chain can cycle.
+    """
+    if exc is None:
+        return False
+    from local_operator.providers.oauth.callback_server import InvalidGrantError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, InvalidGrantError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def broker_for_relay(server: Any) -> MeshCredentialBroker | None:

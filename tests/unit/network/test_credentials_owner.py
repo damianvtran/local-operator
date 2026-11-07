@@ -771,9 +771,48 @@ def test_a_dead_grant_on_the_forced_refresh_answers_the_relogin_remedy_once(
     assert reply["remedy"] == f"/login {STUB_PROVIDER}", reply
     assert reply["owner_device"] == OWNER_DEVICE, reply
     assert len(idp.posts) == 2, idp.posts
+    # The positive control for the M2 test below: this audit read DOES see the
+    # repair when the IdP itself refused the grant.
+    owner.audit.flush()
+    assert any(
+        record.get("event") == "credential.report"
+        and record.get("detail", {}).get("failure") == "reauth_required"
+        for record in owner.audit.tail(200)
+    )
     again = _report(owner, BORROWER_DEVICE, "unauthorized")
     assert again["action"] == "coalesced", again
     assert len(idp.posts) == 2, "a dead grant was retried inside the window"
+
+
+def test_a_store_side_refusal_is_not_read_as_the_idps_verdict(
+    owner: Any, idp: RotatingIdP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3560 review M2: ``CredentialInvalidError`` alone opens no repair on the owner.
+
+    The store raises it for refusals of its OWN (a forced ``meta-muse`` refresh
+    raises before any POST); only the IdP's ``invalid_grant`` — a tombstone, or an
+    ``InvalidGrantError`` in the chain — is a verdict a peer's report may surface.
+    """
+    from local_operator.providers.auth_store import CredentialInvalidError
+
+    _borrow_live(owner, idp)
+
+    async def _refuses(credential_id: int, *, force: bool = False) -> None:
+        raise CredentialInvalidError("Muse Code key needs a new sign-in; run /login meta-muse.")
+
+    monkeypatch.setattr(owner.auth, "ensure_oauth_fresh_or_raise", _refuses)
+    reply = _report(owner, BORROWER_DEVICE, "unauthorized")
+    assert reply["action"] == "refresh_failed", reply
+    assert reply["code"] == "not_refreshable", reply
+    assert "remedy" not in reply, reply
+    owner.audit.flush()
+    failures = [
+        record.get("detail", {}).get("failure")
+        for record in owner.audit.tail(200)
+        if record.get("event") == "credential.report"
+    ]
+    assert "reauth_required" not in failures, failures
+    assert len(idp.posts) == 1, idp.posts
 
 
 def test_a_401_report_from_a_device_that_is_not_a_holder_refreshes_nothing(

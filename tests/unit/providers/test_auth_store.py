@@ -3318,6 +3318,71 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
         holder.close()
         loser.close()
 
+    async def test_a_forced_retake_never_re_presents_the_token_the_holder_just_spent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3560 review R1: a forced caller that RETAKES a freed lease re-reads the row.
+
+        The forced caller (a peer's 401 report, the bridge's 401) loses the lease to
+        the owner's own session, waits a slice, and retakes it once that session's
+        refresh lands. It used to POST with the row it read BEFORE the wait — the
+        refresh token the holder had just spent — which a rotating IdP answers by
+        revoking the family. The rotation that landed during the wait is the new
+        token the force asked for, so it is served with no second POST.
+        """
+        import time as _time
+        import types
+
+        from local_operator.providers import auth_store as auth_store_mod
+
+        db = tmp_path / "auth.db"
+        owner_session = AuthStore(db)
+        broker = AuthStore(db)
+        row = owner_session.upsert_credential(
+            "openai", _oauth(access="access-1", expires=int(_time.time() * 1000) + 1000)
+        )
+        spent = str(row.data["refresh"])
+        posts: list[str] = []
+        held = asyncio.Event()
+        release = asyncio.Event()
+
+        async def rotating(creds: dict[str, Any]) -> dict[str, Any]:
+            posts.append(creds["refresh"])
+            if len(posts) == 1:
+                held.set()
+                await release.wait()
+            return {
+                "access": f"access-{len(posts) + 1}",
+                "refresh": f"rotated-{len(posts)}",
+                "expires": int(_time.time() * 1000) + 3600_000,
+            }
+
+        monkeypatch.setattr(owner_session, "_refresh_fn", lambda provider: rotating)
+        monkeypatch.setattr(broker, "_refresh_fn", lambda provider: rotating)
+        task = asyncio.create_task(owner_session.get_api_key("openai"))
+        await asyncio.wait_for(held.wait(), 2)
+
+        async def holder_finishes_during_the_wait(_seconds: float) -> None:
+            # The contended slice is exactly where the holder's write lands and its
+            # lease is freed; the broker then retakes it.
+            release.set()
+            await task
+
+        # Only the store module's view of ``asyncio.sleep`` is replaced, so the
+        # event loop and the holder's task keep the real one.
+        shim = types.ModuleType("asyncio_shim")
+        shim.__dict__.update(asyncio.__dict__)
+        shim.sleep = holder_finishes_during_the_wait  # type: ignore[attr-defined]
+        monkeypatch.setattr(auth_store_mod, "asyncio", shim)
+
+        served = await broker.ensure_oauth_fresh_or_raise(row.id, force=True)
+        assert posts == [spent], f"a spent refresh token was presented again: {posts}"
+        assert served is not None and served["access"] == "access-2", served
+        assert served["refresh"] == "rotated-1", served
+        assert broker.grant_is_dead(row.id) is False
+        owner_session.close()
+        broker.close()
+
     async def test_a_lease_loser_is_still_refused_a_dead_grant(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
