@@ -1391,3 +1391,72 @@ async def test_a_raising_org_enrol_never_costs_the_tick(rig, monkeypatch) -> Non
     monkeypatch.setattr(enrol, "on_boundary", boom)
     report = await runner.tick(reason="timer")
     assert report.skipped == "no-linked-items"
+
+
+# -- wake(): a sign-in runs the next check now ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wake_cuts_a_sleeping_interval_short_and_runs_a_check(rig, monkeypatch) -> None:
+    """A woken runner ticks immediately instead of at the end of its interval.
+
+    The interval is left at its real 15 minutes: without ``wake()`` the second
+    tick could not happen inside this test's one-second budget.
+    """
+
+    runner, *_ = rig
+    reasons: list[str] = []
+    ticked = asyncio.Event()
+
+    async def tick(*, reason: str) -> TickReport:
+        reasons.append(reason)
+        ticked.set()
+        return TickReport(reason=reason)
+
+    monkeypatch.setattr(runner, "tick", tick)
+    task = asyncio.create_task(runner.run_forever())
+    try:
+        await asyncio.wait_for(ticked.wait(), timeout=1.0)  # the startup tick
+        ticked.clear()
+        await asyncio.sleep(0.02)  # now parked in the ~15 min interval sleep
+        assert reasons == ["startup"]
+        runner.wake()
+        await asyncio.wait_for(ticked.wait(), timeout=1.0)
+        assert reasons == ["startup", "timer"]
+        # Consumed: the sleep after the woken tick is a full interval again.
+        await asyncio.sleep(0.05)
+        assert reasons == ["startup", "timer"]
+    finally:
+        runner.stop()
+        await asyncio.wait_for(task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_wake_from_another_thread_reaches_the_loop(rig, monkeypatch) -> None:
+    runner, *_ = rig
+    ticks: list[str] = []
+    ticked = asyncio.Event()
+
+    async def tick(*, reason: str) -> TickReport:
+        ticks.append(reason)
+        ticked.set()
+        return TickReport(reason=reason)
+
+    monkeypatch.setattr(runner, "tick", tick)
+    task = asyncio.create_task(runner.run_forever())
+    try:
+        await asyncio.wait_for(ticked.wait(), timeout=1.0)
+        ticked.clear()
+        await asyncio.to_thread(runner.wake)
+        await asyncio.wait_for(ticked.wait(), timeout=1.0)
+        assert ticks == ["startup", "timer"]
+    finally:
+        runner.stop()
+        await asyncio.wait_for(task, timeout=1.0)
+
+
+def test_wake_without_a_running_runner_is_a_quiet_no_op(rig) -> None:
+    runner, *_ = rig
+    runner.wake()  # never started: nothing to wake, nothing raised
+    runner.stop()
+    runner.wake()  # stopped: likewise
