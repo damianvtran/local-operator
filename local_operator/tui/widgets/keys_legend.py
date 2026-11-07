@@ -85,6 +85,15 @@ def _hint_segments() -> tuple[str, ...]:
     )
 
 
+#: Positions of the hint segments in ``_HINT_SEGMENTS``. ``_hint_row`` decides
+#: what to filter and what to drop by ROLE, never by comparing painted text:
+#: the segments are catalogue copy, so a text comparison against the English
+#: string matches only in English and silently turns the scroll-cue filter and
+#: the narrow-width drop ladder off in every other locale (a fr card that does
+#: not scroll painted the cue, and a 30-column fr row was cropped mid-word).
+#: Keep these in step with the tuple ``_hint_segments`` builds.
+_HINT_SCROLL, _HINT_CLOSE, _HINT_REOPEN, _HINT_TYPING = range(4)
+
 #: The hint row's segments, in paint order. The reopen route leads with the
 #: typed `/keys` — the unconditional one — and marks `?` as its conditional
 #: sibling rather than naming it bare (UX round 1, U2: the card's own footer
@@ -436,23 +445,26 @@ class KeysLegend(Static):
         it is the one segment that is only conditionally true.
         """
         width = self._content_width()
-        candidates = list(_HINT_SEGMENTS)
+        # Role indexes into the segment tuple, not text (see ``_HINT_SCROLL``):
+        # every locale then filters and drops in exactly the English order.
+        kept = list(range(len(_HINT_SEGMENTS)))
         if not scrolled:
-            candidates = [segment for segment in candidates if segment != "↑↓ scroll"]
+            kept.remove(_HINT_SCROLL)
 
-        def painted(items: list[str]) -> str:
-            return " · ".join(items)
+        def painted(indexes: list[int]) -> str:
+            return " · ".join(_HINT_SEGMENTS[index] for index in indexes)
 
-        kept = list(candidates)
-        for disposable in ("? when not typing", "/keys reopens", "↑↓ scroll"):
+        for disposable in (_HINT_TYPING, _HINT_REOPEN, _HINT_SCROLL):
             if cell_len(painted(kept)) <= width:
                 break
-            kept = [segment for segment in kept if segment != disposable]
+            if disposable in kept:
+                kept.remove(disposable)
         faint = Style(color=theme_mod.semantic_color("faint"))
         words = Style(color=theme_mod.semantic_color("muted"))
         row = Text()
-        for index, segment in enumerate(kept):
-            if index:
+        for position, index in enumerate(kept):
+            segment = _HINT_SEGMENTS[index]
+            if position:
                 row.append(" · ", style=faint)
             # The hint is copy, not decoration: it names the way out and the
             # routes back in, so it rides the same `muted` rung as the card's

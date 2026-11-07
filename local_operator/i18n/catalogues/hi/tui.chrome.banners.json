@@ -12,7 +12,7 @@
   "tui.chrome.banners.context_input_required": "इनपुट आवश्यक",
   "tui.chrome.banners.context_interrupted": "बाधित",
   "tui.chrome.banners.context_mixed": "मिले-जुले नतीजे",
-  "tui.chrome.banners.context_retired": "सेवानिवृत्त",
+  "tui.chrome.banners.context_retired": "अपडेट से रुका",
   "tui.chrome.banners.digest_title": "{total, plural, one {{count} सत्र पूरा हुआ} other {{count} सत्र पूरे हुए}}",
   "tui.chrome.banners.fallback_title": "एक सत्र पूरा हुआ"
 }

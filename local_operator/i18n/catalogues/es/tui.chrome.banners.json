@@ -6,7 +6,7 @@
   "tui.chrome.banners.body_complete": "Tarea completada",
   "tui.chrome.banners.body_error": "Se detuvo con un error",
   "tui.chrome.banners.body_interrupted": "Se detuvo sin terminar",
-  "tui.chrome.banners.body_update": "Actualización de un agente",
+  "tui.chrome.banners.body_update": "Un agente señaló una novedad",
   "tui.chrome.banners.context_attention": "Requiere atención",
   "tui.chrome.banners.context_complete": "Completada",
   "tui.chrome.banners.context_input_required": "Acción requerida",

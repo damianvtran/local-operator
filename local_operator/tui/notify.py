@@ -304,9 +304,10 @@ BODIES: dict[str, str] = {
 def _reload_copy() -> None:
     """Re-resolve the banner vocabulary after a live language switch.
 
-    These are module-level constants because non-TUI callers import them by
-    value (``notifications.compose``, the desktop feed, the mobile push
-    payload), so they must stay plain ``str``. A constant built once at import
+    These are module-level plain ``str`` constants. Non-TUI callers
+    (``notifications.compose``, the mobile push payload) read them through this
+    module at call time instead of importing them by value, and the derived maps
+    are updated in place, so both follow a switch. A constant built once at import
     does not follow ``set_active_locale`` on its own — the trade ``i18n.text``
     documents — so this rebinds them in place and the derived maps below with
     them. Callers that captured a value before the switch keep the words they

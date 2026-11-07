@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "tui.chrome.banners",
-  "history_sha256": "af1cd08bccce742e98df22771619a2dbf4618baa969cfe26cf7d43729add023b",
+  "history_sha256": "c2f2a9349197572c4962e1f5d43837a1b57d984e31629992bba054d2b3a2d52d",
   "entries": [
     {
       "locale": "hi",
@@ -38,6 +38,78 @@
       },
       "status": "passed",
       "note": "Single independent audit of the first-pass bytes (target_sha256 re-derived at write time): verdict clean-with-findings (0 blocker, 0 major, 3 minor, 3 nit), no remediation needed. docs/I18N.md step 3 says high-visibility/safety copy needs a SECOND independent audit; the doc does not define whether a keys legend or notification banners are high-visibility. No such classification is claimed and no second-audit approval is manufactured: this locale has ONE independent audit only. Evidence is the translators' and auditors' own reports (their commands and outputs), not coder-invented output. Verdict counts cover the locale's two namespaces together (tui.chrome.bindings and tui.chrome.banners), not this namespace alone. Unresolved minors/nits are deferred, not fixed (counts only; the coder was not given per-finding text). "
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.chrome.banners",
+      "source_sha256": "5db92af262dac02373b00db67066d78ea5993a0854e99c498bcde33068708766",
+      "context_sha256": "b7c18bc8554380c849b77286190eeb4789ef26e395563f9a55e6e55d578f89ed",
+      "target_sha256": "00234b1aff9585855bee064b076295fa98d3a43dd214ba56a16944736b51a46c",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "session": "ef88ddf3cf8e",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-06",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (the coder inspected no harness route log)"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev task subagent, profile 'translation-auditor'), second independent full audit; independent instance, distinct from every translator and from the earlier auditors of this locale",
+        "session": "2db258bf4214",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-06",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (the coder inspected no harness route log)",
+        "result": "fail",
+        "findings": 4,
+        "unresolved_blocker_major": 1,
+        "finding_detail": "0 blocker, 1 major, 0 minor, 3 nit",
+        "independent_from_translator": true,
+        "translator_session": "ef88ddf3cf8e",
+        "scope": "full audit of every row of the namespace"
+      },
+      "status": "failed",
+      "note": "Second independent full audit (full audit of every row of the namespace) of the bytes the previous row passed (target_sha256 re-derived at write time): verdict fail (0 blocker, 1 major, 0 minor, 3 nit). The major finding is remediated in the following row of this history. This is the second full independent audit that docs/I18N.md step 3 asks of high-visibility copy; the doc does not define whether banners are high-visibility, and that classification is not claimed here. Verdict counts are as reported by the auditor to the coder; per-finding text lives in the PR thread (damianvtran/local-operator#3502), and unresolved minors/nits are deferred, not fixed. Evidence is the auditors' own reports, not coder-invented output; the audit result is the auditor's self-reported verdict."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.chrome.banners",
+      "source_sha256": "5db92af262dac02373b00db67066d78ea5993a0854e99c498bcde33068708766",
+      "context_sha256": "b7c18bc8554380c849b77286190eeb4789ef26e395563f9a55e6e55d578f89ed",
+      "target_sha256": "5d36fbcb1df15989be0a148628fcfbbfbb64017bd5a277812657bc5061bf9bd8",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), remediation of the second-audit findings",
+        "session": "5a7c969ed16f",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-06",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (the coder inspected no harness route log)"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev task subagent, profile 'translation-auditor'), delta re-audit; independent instance, distinct from every translator and from the earlier auditors of this locale",
+        "session": "6dfd66977c57",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-06",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (the coder inspected no harness route log)",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 1 minor, 1 nit",
+        "independent_from_translator": true,
+        "translator_session": "5a7c969ed16f",
+        "scope": "remediation delta only: the changed rows (context_retired)"
+      },
+      "status": "passed",
+      "note": "Delta re-audit of the remediated bytes (target_sha256 re-derived at write time): verdict clean-with-findings (0 blocker, 0 major, 1 minor, 1 nit), covering ONLY the rows changed by the remediation (context_retired). Unchanged rows rest on the two earlier independent full audits (the first-pass audit and the second full audit recorded in the row above). Verdict counts are as reported by the auditor to the coder; per-finding text lives in the PR thread (damianvtran/local-operator#3502), and unresolved minors/nits are deferred, not fixed. Evidence is the auditors' own reports, not coder-invented output; the audit result is the auditor's self-reported verdict."
     }
   ]
 }
