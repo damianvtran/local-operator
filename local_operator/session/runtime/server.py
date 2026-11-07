@@ -1239,6 +1239,49 @@ _UNCHAINED_OPS = frozenset({"ping", "abort"})
 #: dispatches its choice as ``slash_result`` ``/model`` (see
 #: ``AttachedSession.route_shared_slash``), and every other slash keeps its
 #: place in the main chain. See :func:`_is_switch_frame`.
+#: The error frame's message bound. A refusal's prose is unbounded in principle
+#: (provider text, nested causes), and every reader prints it on one receipt.
+ERROR_MESSAGE_MAX = 400
+
+#: The longest trailing remedy line :func:`bounded_error_message` keeps whole.
+ERROR_REMEDY_MAX = 300
+
+
+def bounded_error_message(text: str, limit: int = ERROR_MESSAGE_MAX) -> str:
+    """Bound an error frame's message WITHOUT cutting its trailing remedy command.
+
+    WHY (QA round 1 Q3 on #3554): the frame used to be ``str(exc)[:400]``, and
+    #3542's catalogue refusal — a reason, then the exact command on its own
+    line in backticks (``shared_catalogue._device_scope_refusal``) — runs past
+    400 characters, so a peer create printed the command with ``--scope device``
+    and the network id cut off: a remedy that, pasted, does the wrong thing.
+
+    WHY THIS ROUTE rather than a larger cap or a separate field: a larger cap
+    only moves the cliff for the next long reason, and a field needs every hop
+    (relay, CLI, desktop) to learn it while an older requester still reads the
+    cut ``message``. The command is the part a reader acts on and the reason the
+    part they can do without, so the REASON is clipped and the command kept. The
+    rule is structural, not keyed on one sentence: a last line that is one
+    backticked token (the house form for a pasteable command) and fits
+    ``ERROR_REMEDY_MAX`` is kept whole; anything else is cut as before.
+    """
+    if len(text) <= limit:
+        return text
+    head, newline, tail = text.rpartition("\n")
+    if (
+        newline
+        and len(tail) <= ERROR_REMEDY_MAX
+        and len(tail) > 2
+        and tail.startswith("`")
+        and tail.endswith("`")
+        and tail.count("`") == 2
+    ):
+        room = limit - len(tail) - len("…\n")
+        if room > 0:
+            return f"{head[:room].rstrip()}…\n{tail}"
+    return text[:limit]
+
+
 _SWITCH_OPS = frozenset({"set_model", "set_effort"})
 
 #: The routed slash commands that ride the switch lane, by registry PRIMARY name.
@@ -7233,7 +7276,7 @@ class RuntimeServer:
                 RuntimeRetiring,
             )
 
-            frame = {"op": "error", "req": req, "message": str(exc)[:400]}
+            frame = {"op": "error", "req": req, "message": bounded_error_message(str(exc))}
             if isinstance(exc, _StopRefused):
                 # A machine token from a closed set, never prose: the stop
                 # ladder picks its own already-catalogued sentence from it, so

@@ -5095,6 +5095,31 @@ def _model_choice_refusal(model: Any) -> str:
     )
 
 
+def _model_not_applied(model: dict[str, Any], reason: str, *, certain: bool = True) -> str:
+    """The receipt for a NAMED model the runtime did not (or may not) take.
+
+    WHY (operator report, 2026-11-07): the runtime's refusal alone printed as a
+    bare "catalogue metadata unavailable" under "created on <peer>", and the
+    first turn then ran on the session's own model — the origin's receipt never
+    said the model it asked for was not the one running.
+
+    THE SHAPE (design round 1 on #3554, D2/D3): key-first like the receipt's
+    ``agent:``/``team:`` lines, the consequence on the first line and the reason
+    on its own ``why:`` line, so neither soft-wraps mid-word at 80 columns and a
+    reason that ends in a pasteable command (#3542's ``--scope device`` remedy)
+    keeps that command last, alone on its line. It names no device: "this
+    device" read as the ORIGIN on the receipt. Every reader of ``model.detail``
+    (CLI receipt, ``--json``, desktop, an older requester) prints it verbatim,
+    and those readers already carry #3542's multi-line refusal.
+    """
+    wanted = f"{model.get('provider')}/{model.get('model_id')}"
+    if certain:
+        head = f"model: {wanted} not applied — the session keeps its own model"
+    else:
+        head = f"model: {wanted} may not have been applied"
+    return f"{head}\nwhy: {reason}"
+
+
 def _model_credential_refusal(root: Path, model: Any, birth: Any) -> str:
     """Why this device cannot serve a create's resolved model, or ``""`` when it can.
 
@@ -10708,7 +10733,9 @@ class RelayServer:
                         session_id,
                         peer=peer,
                         network_id=network_id,
-                        detail=f"the runtime did not take the model choice: {result.get('detail')}",
+                        # The detail is already the whole "model: … not applied"
+                        # receipt (review round 1, N1): a prefix said it twice.
+                        detail=str(result.get("detail") or ""),
                     )
 
         # RESOLVED HERE, IN THE CALLER'S OWN THREAD (see ``_engage_locally``): a warm
@@ -10868,7 +10895,9 @@ class RelayServer:
         try:
             dial = self._dial_owned(session_id, capabilities=())
         except session_dial.OwnerUnreachable as exc:
-            return {"applied": False, "detail": str(exc)}
+            # Same receipt as a refusal (review round 1, M2): no dial means no
+            # switch, and the caller must read that, not a bare transport error.
+            return {"applied": False, "detail": _model_not_applied(model, str(exc))}
         try:
             reply = dial.exchange(
                 {
@@ -10882,27 +10911,21 @@ class RelayServer:
             )
         finally:
             dial.close()
-        # THE SENTENCE SAYS WHAT HAPPENED TO THE SESSION, not only why (operator
-        # report, 2026-11-07). The runtime's refusal alone printed as a bare
-        # "catalogue metadata unavailable" under "created on <peer>", and the
-        # first turn then ran on this device's default model — the origin's
-        # receipt never said the model it asked for was NOT the one running.
-        # Naming the pair and the consequence makes the substitution visible on
-        # every reader of ``model.detail`` (CLI receipt, ``--json``, desktop). It
-        # names no device ("this device" read as the ORIGIN on the receipt);
-        # an older requester prints this sentence verbatim, as it did the bare one.
-        wanted = f"{model.get('provider')}/{model.get('model_id')}"
         if reply is None:
-            reason = "the runtime did not answer"
-        elif reply.get("op") == "error":
-            reason = str(reply.get("message") or "refused")
-        else:
-            return {"applied": True, "detail": ""}
-        return {
-            "applied": False,
-            "detail": f"model {wanted} was not applied ({reason}); "
-            "the session keeps the model it started with",
-        }
+            # NOT "was not applied" (review round 1, M3): ``exchange`` answers
+            # ``None`` both past the budget and on a dropped socket, and the
+            # runtime may have switched before either. ``applied`` stays False
+            # (nothing confirmed it), and the sentence says only what is known.
+            return {
+                "applied": False,
+                "detail": _model_not_applied(model, "no reply from the session", certain=False),
+            }
+        if reply.get("op") == "error":
+            return {
+                "applied": False,
+                "detail": _model_not_applied(model, str(reply.get("message") or "refused")),
+            }
+        return {"applied": True, "detail": ""}
 
     def _prompt_on(
         self, session_id: str, text: str, images: Any, *, due: float | None = None

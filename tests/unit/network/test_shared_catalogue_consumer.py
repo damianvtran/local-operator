@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import time
+from typing import Any
 
 import pytest
 
@@ -1007,10 +1008,184 @@ def test_the_selection_budget_sits_between_the_listing_cap_and_the_outer_wait():
     """The ordering the slow-owner fix rests on, pinned without a clock.
 
     Above the listing cap (else a selection fails where it should wait) and
-    strictly below ``prepare_selection``'s 6.1 s ``wait_for`` (else the outer
-    timeout races the fetch and abandons its worker mid-write).
+    strictly below ``prepare_selection``'s ``SELECTION_WAIT_S`` (else the outer
+    timeout races the fetch and abandons its worker mid-write). Pinned through
+    the named constants, never a copy of the literal (review round 1, N2).
     """
     from local_operator.providers import shared_catalogue
 
     assert shared_catalogue.LISTING_FETCH_S == 3.0
-    assert shared_catalogue.LISTING_FETCH_S < shared_catalogue.SELECTION_FETCH_S < 6.1
+    assert (
+        shared_catalogue.LISTING_FETCH_S
+        < shared_catalogue.SELECTION_FETCH_S
+        < shared_catalogue.SELECTION_WAIT_S
+    )
+
+
+def test_a_selection_pays_its_lock_wait_from_its_own_budget(borrower):
+    """Review round 1, M1: a lock wait plus a full fetch overran the outer wait.
+
+    A picker refresh of the same receipt holds the per-receipt lock while a slow
+    owner answers; a selection that starts meanwhile used to wait up to 3 s for
+    that lock and THEN up to 5.5 s for its own fetch, 8.5 s against the 6.1 s
+    ``wait_for`` around it, so the outer timeout raced the worker. The lock wait
+    is now spent from the selection's own budget: the worker settles itself
+    (applied or a typed refusal) inside ``SELECTION_FETCH_S``.
+    """
+    import threading
+    import time as clock
+
+    from local_operator.network.types import MeshRefusal
+    from local_operator.providers import shared_catalogue
+
+    mesh, plain, controller, state = borrower
+    state["during_get"] = lambda: clock.sleep(3.6)
+    listing_started = threading.Event()
+
+    def listing() -> None:
+        listing_started.set()
+        try:
+            shared_catalogue.refresh(mesh.b.root, fresh=True)
+        except MeshRefusal:
+            pass  # the listing's own 3 s cap; it is only here to hold the lock
+
+    holder = threading.Thread(target=listing, daemon=True)
+    holder.start()
+    assert listing_started.wait(5)
+    clock.sleep(0.3)  # the listing is inside its fetch, holding the lock
+    started = clock.monotonic()
+    try:
+        # Either outcome is acceptable; what is pinned is WHEN it settles.
+        shared_catalogue.prepare_selection_sync("openai", mesh.b.root)
+    except MeshRefusal:
+        pass
+    elapsed = clock.monotonic() - started
+    holder.join(10)
+    assert elapsed < shared_catalogue.SELECTION_FETCH_S + 0.5, elapsed
+    assert elapsed < shared_catalogue.SELECTION_WAIT_S, elapsed
+
+
+@pytest.mark.asyncio
+async def test_the_device_scope_remedy_survives_the_runtime_error_frame(
+    borrower, tmp_path, monkeypatch
+):
+    """QA round 1, Q3 on #3554: #3542's remedy was cut on the create path.
+
+    A peer create whose ``--model`` meets a SESSION-scoped share is refused by
+    the borrower runtime's ``set_model`` with #3542's sentence, which ends in
+    the owner's exact command. The runtime's error frame cut every message at
+    400 characters, dropping ``--scope device`` and half the network id, so the
+    receipt printed a command that, pasted, does something else. The real
+    refusal crosses the real runtime frame here, then the relay's receipt and
+    the CLI's printed lines, and the command must arrive whole and last.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.model.configure import invalidate_model_info_cache
+    from local_operator.network import cli as network_cli
+    from local_operator.network import relay
+    from local_operator.session.runtime import serving
+    from tests.unit.session.runtime.test_daemon_serving_plane import (
+        _boot,
+        _recording_stream,
+    )
+
+    mesh, plain, controller, state = borrower
+    with placement.mutate(mesh.network_id, self_device=mesh.owner, root=mesh.a.root) as doc:
+        doc.revoke("openai", mesh.borrower, by=mesh.owner)
+        doc.grant("openai", mesh.borrower, by=mesh.owner, scope="session")
+    transport.helpers._pull(mesh)
+    command = (
+        f"lop network credential share openai --with {mesh.borrower} "
+        f"--network {mesh.network_id} --scope device"
+    )
+    invalidate_model_info_cache()
+    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fixture-remedy-switch")
+    monkeypatch.setattr(serving, "_switch_executor_pool", pool)
+    calls: list[int] = []
+    session, handle, runtime = await _boot(tmp_path, _recording_stream(calls))
+    client = AttachClient(lambda _projection: None, lambda _reason: None)
+    try:
+        await client.connect(runtime.record, runtime.record.session_id)
+        with pytest.raises(RuntimeError) as refused:
+            await client.set_model("openai", "gpt-fixture-sol")
+    finally:
+        await client.detach()
+        runtime.close()
+        await session.dispose()
+        pool.shutdown(wait=True, cancel_futures=True)
+    message = str(refused.value)
+    assert len(message) <= 400, len(message)
+    assert message.endswith(f"\n`{command}`"), message
+    assert message.startswith("catalogue needs a device-scoped share")
+
+    # The relay's receipt, from that exact frame (only the dial is scripted).
+    class _Dial:
+        def exchange(self, frame: dict[str, object], *, timeout_s: float) -> dict[str, object]:
+            return {"op": "error", "message": message}
+
+        def close(self) -> None:
+            pass
+
+    server = relay.RelayServer(
+        root=mesh.b.root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    monkeypatch.setattr(server, "_dial_owned", lambda *args, **kwargs: _Dial())
+    model = server._set_model_on(  # noqa: SLF001
+        "sess00000001", {"provider": "openai", "model_id": "gpt-fixture-sol"}
+    )
+    assert model["applied"] is False
+    assert model["detail"].endswith(f"\n`{command}`"), model
+
+    # And the receipt a person reads: the command alone, whole, on the last model line.
+    monkeypatch.setattr(
+        network_cli,
+        "_relay_answer",
+        lambda *_a, **_k: {
+            "ok": True,
+            "session_id": "sess00000001",
+            "admitted": True,
+            "detail": "",
+            "model": model,
+            "turn": {"state": "settled", "detail": ""},
+        },
+    )
+    args: Any = SimpleNamespace(
+        peer="device-b",
+        create=True,
+        name="",
+        prompt="Reply with exactly: SOL_OK",
+        cwd="",
+        model="",
+        profile="",
+        agent="",
+        agent_id="",
+        team="",
+        effort="",
+        yolo=False,
+        json=False,
+        **{key: "" for key in ("stop", "engage", "send", "steer", "slash", "peek")},
+    )
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    printed = StringIO()
+    with redirect_stdout(printed):
+        assert network_cli._cmd_sessions(args) == 0  # noqa: SLF001
+    assert f"`{command}`" in printed.getvalue().splitlines(), printed.getvalue()
+
+
+def test_an_error_without_a_trailing_command_is_cut_as_before():
+    """The remedy rule is structural: only a lone backticked last line is kept whole."""
+    from local_operator.session.runtime.server import bounded_error_message
+
+    plain = "x" * 500
+    assert bounded_error_message(plain) == plain[:400]
+    prose_tail = "reason " * 60 + "\nnot a command"
+    assert bounded_error_message(prose_tail) == prose_tail[:400]
+    short = "fits\n`lop do it`"
+    assert bounded_error_message(short) == short
+    kept = bounded_error_message("why " * 120 + "\n`lop network credential share openai`")
+    assert len(kept) <= 400 and kept.endswith("…\n`lop network credential share openai`")

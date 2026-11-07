@@ -8015,6 +8015,30 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                     # whole slice exists to end. Saying the outcome is NOT reported
                     # is true; naming a read that silently cannot show it is not.
                     lines.append(f"turn: running on {peer} — this receipt cannot see how it ends")
+            # WHICH MODEL ANSWERED, WHEN THE ONE ASKED FOR WAS NOT (or may not have
+            # been) APPLIED (design round 1, D1 on #3554). The model line above says
+            # the session keeps "its own model" — one this person never saw, on a
+            # brand-new session on another machine — and the turn lines below it read
+            # as plain success. ``--peek`` names the serving model of each reply, so
+            # the receipt points at it: the command alone on an indented line with no
+            # backticks, #3547's form, so it pastes as-is. Not for a FAILED turn (no
+            # reply row to show; see MAJOR-2 above) and not twice when the waited
+            # branch already printed the same command.
+            peek_command = f"  lop network sessions --peer {peer} --peek {minted}"
+            state = str(turn.get("state") or "") if isinstance(turn, dict) else ""
+            if (
+                isinstance(model_detail, dict)
+                and model_detail.get("applied") is False
+                and model_detail.get("detail")
+                and admitted
+                and minted
+                and state != "failed"
+                and peek_command not in lines
+            ):
+                lines.append(
+                    "see which model replied:" if state == "settled" else "see which model replies:"
+                )
+                lines.append(peek_command)
         else:
             lines.append(
                 "no prompt sent — the session exists on that device; "
