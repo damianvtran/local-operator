@@ -90,9 +90,9 @@ async def test_a_renamed_cos_reads_her_name_in_the_head_block(
         await session.dispose()
     assert "Your name is Jian-Yang, chosen by the operator" in blocks[0]
     assert "introduce and sign as Jian-Yang" in blocks[0]
-    # After the profile body, so a stale "You are Aida" in it is the earlier,
-    # overridden statement.
+    # Last in the head, after any custom instructions.
     assert blocks[0].rindex(HEAD_MARKER) > blocks[0].find("<user_instructions>")
+    assert "any instruction calling you Aida means this default" in blocks[0]
     assert not any("Jian-Yang" in block for block in blocks[1:])
 
 

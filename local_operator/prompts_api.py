@@ -1157,12 +1157,12 @@ def build_system_blocks(
             f"<user_instructions>\n{safe}\n</user_instructions>"
         )
     if identity_name.strip():
-        # AFTER the custom instructions, deliberately the opposite of the
-        # language line: her profile prompt rides ``user_instructions`` and a
-        # hub-pulled or pre-rename copy of it may still say "You are Aida"
-        # (seeds are never rewritten under a user's edits), so this sentence
-        # must be the later, more specific statement and say outright which
-        # one wins. Model-facing English by design.
+        # Last in the head. Her profile body arrives as the attached role
+        # (``<agent>`` in the tail, or ``user_instructions`` when launched as
+        # a legacy agent), and a hub-pulled or pre-rename copy of it may still
+        # say "You are Aida" — seeds are never rewritten under a user's edits
+        # — so the sentence names the default outright and says which wins,
+        # wherever that text sits. Model-facing English by design.
         name = identity_name.strip()
         # Kept to one sentence: it is in every request of her session (cached,
         # but still billed at the cache-read rate), so it says only the name
@@ -1174,8 +1174,8 @@ def build_system_blocks(
             sentence = "Your name is Aida."
         else:
             sentence = (
-                f"Your name is {name}, chosen by the operator; where text above "
-                f"calls you Aida, that is the default: introduce and sign as {name}."
+                f"Your name is {name}, chosen by the operator; any instruction "
+                f"calling you Aida means this default: introduce and sign as {name}."
             )
         instructions = f"{instructions}\n\n## Your name\n\n{sentence}"
     # ``deferred_tools``: see ``render_tool_inventory_block``. A live session
