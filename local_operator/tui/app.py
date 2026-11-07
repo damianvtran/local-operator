@@ -32778,10 +32778,10 @@ class OperatorApp(App[None]):
         `Interrupted`/`Stopped with an error` would rewrite a row the user has
         already read for no gain. TWO exceptions restate instead, because the
         live row carries something the outcome supersedes: `retired`
-        (2026-09-29) swaps in `RETIRED_NOTICE_TEXT` in the warning tier (the
+        (2026-09-29) swaps in `retired_notice_text()` in the warning tier (the
         live cut row is the classified sentence from the error branch), and
         `closed` (design D1 on #1829, 2026-09-30) swaps in
-        `CLOSED_NOTICE_TEXT` in the info tier (the live row is the aborted
+        `closed_notice_text()` in the info tier (the live row is the aborted
         branch's `! interrupted` — a carried, not-yet-dispatched run was
         cancelled, so `aborted` is True — and the closure supersedes it).
 
@@ -32863,13 +32863,13 @@ class OperatorApp(App[None]):
         # would re-read the handoff as a failure. `restate` re-freezes each
         # block in place, so one cut stays one row.
         if kind == "retired":
-            from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+            from local_operator.harness.notice_copy import retired_notice_text
 
-            block.restate(RETIRED_NOTICE_TEXT, "warning")
+            block.restate(retired_notice_text(), "warning")
         elif kind == "closed":
-            from local_operator.harness.rows import CLOSED_NOTICE_TEXT
+            from local_operator.harness.notice_copy import closed_notice_text
 
-            block.restate(CLOSED_NOTICE_TEXT, "info")
+            block.restate(closed_notice_text(), "info")
         block.completion_anchor_id = anchor
         return True
 

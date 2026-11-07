@@ -132,7 +132,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; the sound module loads lazi
     from local_operator.notifications.sound import SoundPlan
 
 from local_operator import terminals
-from local_operator.harness.rows import CLOSED_NOTICE_TEXT, RETIRED_NOTICE_TEXT
+from local_operator.harness.notice_copy import closed_notice_text, retired_notice_text
+from local_operator.i18n.text import register_refresh
 from local_operator.proc import spawn_detached
 from local_operator.tui.settings import settings_get
 
@@ -193,14 +194,15 @@ BODY_INTERRUPTED = "Stopped before finishing"
 #: body, so a lock screen learns only that something wants the operator. Same
 #: tier as the completion bodies beside it (unextracted banner literals).
 BODY_UPDATE = "An agent flagged an update"
-#: The retire-for-build row's sentence, shared verbatim with ``rows.py`` (the
-#: module that owns this row on both surfaces) so the banner cannot drift
-#: from the row it stands for. Warning-tier in the row; the banner's own
-#: urgency comes from the kind, not from this string.
-BODY_RETIRED = RETIRED_NOTICE_TEXT
+#: The retire-for-build row's sentence, shared with the row (``rows.py`` owns
+#: the decision, ``harness/notice_copy.py`` the words) so the banner cannot
+#: drift from the row it stands for. Warning-tier in the row; the banner's own
+#: urgency comes from the kind, not from this string. Materialised at import and
+#: re-materialised on a language move by :func:`_reload_notice_copy`.
+BODY_RETIRED = retired_notice_text()
 #: The neutral post-completion closure's sentence (v2 directive, 2026-09-29).
-#: The words live in ``harness/rows.py`` — the module that owns this row on
-#: both surfaces — and are imported rather than retyped so the banner cannot
+#: The words live in ``harness/notice_copy.py`` — shared with the row on both
+#: surfaces — and are resolved there rather than retyped so the banner cannot
 #: drift from the row it stands for. Deliberately NOT an entry in
 #: :data:`CONTEXTS` (nor in :data:`NotifyKind`): a closure is never announced
 #: — the record publishes with ``notify=False``, which every announce path
@@ -208,7 +210,7 @@ BODY_RETIRED = RETIRED_NOTICE_TEXT
 #: would widen two pinned contracts (and collide the "Complete" context with
 #: ``complete``'s) with no reachable caller. It lives in :data:`BODIES` because
 #: that is where a call site names an event and gets the house sentence.
-BODY_CLOSED = CLOSED_NOTICE_TEXT
+BODY_CLOSED = closed_notice_text()
 
 #: Short state categories for notification surfaces with a title/subtitle/body
 #: split. Approval and ask intentionally share the category: both mean the turn
@@ -292,6 +294,24 @@ BODIES: dict[str, str] = {
     "closed": BODY_CLOSED,
     "retired": BODY_RETIRED,
 }
+
+
+def _reload_notice_copy() -> None:
+    """Re-resolve the ``closed``/``retired`` bodies after a language move.
+
+    The two sentences are keyed copy that this module used to import BY VALUE,
+    which left an English body under a localized subtitle in any other language.
+    ``BODIES`` is updated IN PLACE: ``notifications.compose`` and
+    ``mobile.push_payload`` hold the dict itself, so rebinding it would leave
+    them reading the old language.
+    """
+    global BODY_RETIRED, BODY_CLOSED
+    BODY_RETIRED = retired_notice_text()
+    BODY_CLOSED = closed_notice_text()
+    BODIES.update({"closed": BODY_CLOSED, "retired": BODY_RETIRED})
+
+
+register_refresh(_reload_notice_copy)
 
 #: Title for a background completion whose session has no STORED name, and the
 #: sentence the routing design specifies for exactly this case.

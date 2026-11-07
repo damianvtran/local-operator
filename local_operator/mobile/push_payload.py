@@ -84,6 +84,8 @@ from typing import Any
 #: Re-exported deliberately: a caller building an emit body should not have to
 #: reach into the block's producer to name the block's key, and this module's tests
 #: assert the imported value against the filed fixtures' literal.
+from local_operator.i18n.keys import wire_push_alert as _k
+from local_operator.i18n.text import tr
 from local_operator.mobile.push_credentials import REPORT_DEVICES_FIELD
 from local_operator.notifications.catalog_view import PUSH_STEM_RE
 from local_operator.notifications.sound import (
@@ -93,6 +95,10 @@ from local_operator.notifications.sound import (
     configured,
 )
 from local_operator.tui.notify import APP_NAME, BODIES, BODY_COMPLETE, digest_subtitle
+
+#: Resolves per call (the active locale is read on every call), so a push composed
+#: after a language change speaks the new language with no refresh registration.
+_t = tr("wire.push_alert")
 
 #: The alert object: the user-visible text the machine composes and the cloud
 #: delivers verbatim. Its two keys are named here because the deny list is
@@ -234,13 +240,17 @@ def count_phrase(count: int) -> str:
     S1's badge is built from, so the sentence says "conversations" and never
     "updates" — a word that would invite a reader to guess at what changed.
 
-    The singular is spelled rather than left to the template: a count of one is
-    the COMMON case for a completion push, and "1 conversations need you" is
-    prose no surface should ship. The lane's ruling fixes the noun and the count;
-    this is the one shape of it that reads correctly at both ends.
+    The singular is a plural FORM of one keyed message (``wire.push_alert``)
+    rather than left to the template: a count of one is the COMMON case for a
+    completion push, and "1 conversations need you" is prose no surface should
+    ship. The lane's ruling fixes the noun and the count; the catalogue carries
+    the one shape of it that reads correctly at both ends, in the language the
+    computer is set to (the cloud relays the string; it never composes it).
     """
-    noun = "conversation needs" if count == 1 else "conversations need"
-    return f"{count} {noun} you"
+    # ``total`` selects the plural form and ``count`` is PRINTED as a plain digit
+    # string: an ICU number slot would group "9,999" where this phrase has always
+    # printed raw digits (the split ``tui.chrome.banners.digest_title`` records).
+    return _t(_k.attention_count(total=count, count=str(count)))
 
 
 def completion_alert(kind: str, count: int) -> dict[str, str]:

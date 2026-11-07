@@ -183,12 +183,12 @@ def test_a_retire_for_build_cut_keeps_its_own_sentence_and_category(
     REGISTERED: an unregistered kind resolves to "Complete"/"Task complete",
     which would claim success about work that was lost.
     """
-    from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+    from local_operator.harness.notice_copy import retired_notice_text
 
     session = _session(tmp_path, assistant="Mid-verification.", title="Update window")
     composed = compose("retired", session_dir=session)
 
-    assert composed.body == BODIES["retired"] == RETIRED_NOTICE_TEXT
+    assert composed.body == BODIES["retired"] == retired_notice_text()
     assert composed.body_is_snippet is False
     assert composed.status == CONTEXTS["retired"] == "Retired"
 

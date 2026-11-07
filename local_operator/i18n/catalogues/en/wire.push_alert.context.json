@@ -1,0 +1,8 @@
+{
+  "wire.push_alert.attention_count": {
+    "role": "Count clause appended to a phone push notification body after the outcome phrase, joined with ' · ' (e.g. 'Task complete · 5 conversations need you'); it is also the whole body when the outcome phrase is unknown",
+    "tone": "plain, short, addressed to the operator; no full stop",
+    "maxCells": 36,
+    "note": "EN-only context sidecar. {total} is the integer used ONLY to select the plural form; {count} is the same number already formatted as a plain digit string and must be printed exactly once, unchanged (it is deliberately not an ICU number slot, so no thousands grouping appears). 'conversation' is the product's word for a session. Must read correctly for 1, 2, 5 and 21 in the target language's CLDR plural categories. A lock-screen body: keep it short, and keep the sense that these conversations are waiting on the operator. English source is 24 cells at most."
+  }
+}
