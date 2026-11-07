@@ -2176,3 +2176,88 @@ def test_a_team_mid_swap_keeps_its_row(env) -> None:
             assert item["last_pulled_at"] == "2026-01-01T00:00:00Z"
         finally:
             parked.rename(live)
+
+
+# -- a stale ``no-credential`` after the operator signed in ------------------------------
+
+
+def _record_signed_out_check(ctx: svc.HubSyncContext, local_id: str) -> None:
+    """What a check that ran while signed out leaves on the item (check.py)."""
+
+    def mark(doc: dict[str, Any]) -> None:
+        item = doc.setdefault("items", {}).setdefault(f"agent:{local_id}", {})
+        item.update(
+            error_class="no-credential",
+            last_error="sign in to the hub (`lop login radient`)",
+            last_checked_at="2026-11-06T10:00:00Z",
+        )
+
+    assert ctx.store().mutate(mark)
+
+
+def _sign_in(root: Path, *, kind: str = "oauth") -> None:
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(db_path=root / "auth.db", config_dir=root)
+    try:
+        if kind == "oauth":
+            store.upsert_credential(
+                "radient",
+                {
+                    "type": "oauth",
+                    "access": "synthetic-access",
+                    "refresh": "synthetic-refresh",
+                    "expires": 4_102_444_800_000,
+                    "account_id": "acct_synthetic",
+                    "email": "q@example.test",
+                },
+            )
+        else:
+            store.upsert_credential(
+                "radient", {"type": "api_key", "key": "synthetic-key", "source": "login"}
+            )
+    finally:
+        store.close()
+
+
+def _pull_status(ctx: svc.HubSyncContext, local_id: str) -> dict[str, Any]:
+    links = svc.links_snapshot(ctx)["links"]
+    return next(link for link in links if link["local_id"] == local_id)["pull"]
+
+
+def test_a_stored_no_credential_still_says_sign_in_while_signed_out(env) -> None:
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    _record_signed_out_check(ctx, row.id)
+
+    pull = _pull_status(ctx, row.id)
+
+    assert (pull["state"], pull["error_class"]) == ("failed", "no-credential")
+    assert pull["safe_message"]
+
+
+def test_a_stored_no_credential_is_not_a_failure_once_signed_in(env) -> None:
+    """The remedy is done: the stale refusal must not keep asking for a sign-in."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    _record_signed_out_check(ctx, row.id)
+    _sign_in(root)
+
+    pull = _pull_status(ctx, row.id)
+
+    assert pull["state"] != "failed"
+    assert pull["error_class"] is None and pull["safe_message"] is None
+    # The stored row is untouched: the next real check is what replaces it.
+    assert ctx.store().load()["items"][f"agent:{row.id}"]["error_class"] == "no-credential"
+
+
+def test_a_pasted_radient_key_is_not_a_hub_sign_in(env) -> None:
+    """The hub needs the OAuth login; an API key cannot clear the refusal."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    _record_signed_out_check(ctx, row.id)
+    _sign_in(root, kind="api_key")
+
+    assert _pull_status(ctx, row.id)["error_class"] == "no-credential"

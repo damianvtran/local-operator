@@ -2455,6 +2455,16 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
     now = datetime.now(timezone.utc)
     links: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
+    # Probed only when a stored ``no-credential`` could be stale, so a snapshot
+    # with none never opens the auth store (see ``_direction_status``).
+    signed_in = (
+        _radient_login_present(ctx)
+        if any(
+            isinstance(item, Mapping) and item.get("error_class") == "no-credential"
+            for item in items.values()
+        )
+        else False
+    )
     for record in prov.iter_baselines(ctx.config_dir):
         if kinds is not None and record.kind not in kinds:
             continue
@@ -2526,8 +2536,12 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 "auto_will_push": _auto_will_push(item, policy, ctx, now, eligibility),
                 "baseline_state": record.recorded_by,
                 "remote_revision": record.remote_revision,
-                "pull": _direction_status(item, "pull", policy, now, capability),
-                "push": _direction_status(item, "push", policy, now, capability),
+                "pull": _direction_status(
+                    item, "pull", policy, now, capability, signed_in=signed_in
+                ),
+                "push": _direction_status(
+                    item, "push", policy, now, capability, signed_in=signed_in
+                ),
             }
         )
     links.sort(
@@ -3201,23 +3215,72 @@ def record_outbound_receipt(
     prov.write_baseline(ctx.config_dir, replace(record, outbound=receipt))
 
 
+def _radient_login_present(ctx: HubSyncContext) -> bool:
+    """Whether a Radient login the hub could use is stored NOW. Local, no network.
+
+    The links inventory is a local read, so this cannot run the hub's own
+    resolver (``resolve_radient_oauth_access`` may refresh a token over the
+    network). It mirrors that resolver's local gates instead: the configured
+    destination may receive an org bearer, and the store holds an ENABLED
+    Radient OAuth row -- a pasted ``radient-key`` API key does not satisfy the
+    hub, so it does not count. Never raises: any doubt reads as signed out,
+    which only keeps the stored ``no-credential`` as it was.
+    """
+
+    try:
+        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.radient_credentials import (
+            configured_radient_base_url,
+            org_oauth_destination_allowed,
+        )
+
+        if ctx.config_manager is None:
+            return False
+        if not org_oauth_destination_allowed(configured_radient_base_url(ctx.config_manager)):
+            return False
+        store = AuthStore.open_read_only(Path(ctx.config_dir) / "auth.db")
+        try:
+            return any(row.credential_type == "oauth" for row in store.list_credentials("radient"))
+        finally:
+            store.close()
+    except Exception:  # noqa: BLE001 - a status read must never fail on a probe
+        return False
+
+
 def _direction_status(
     item: Mapping[str, Any],
     direction: Literal["pull", "push"],
     policy: Any,
     now: Any,
     capability: bool,
+    *,
+    signed_in: bool = False,
 ) -> dict[str, Any]:
     """One direction's full status: pull and push are independent, never merged.
 
     A failure in one direction cannot overwrite the other's receipt or error;
     whole-row health is a derived view, not the source of truth.
+
+    ``signed_in`` is a FRESH local lookup of the Radient login
+    (``_radient_login_present``). A stored ``no-credential`` was recorded by a
+    check that ran while signed out and persists until the next successful
+    check; reporting it as ``failed`` after the operator signed in told them to
+    sign in again for up to a whole interval. With a login present now, that
+    remedy is already done, so the error is withdrawn and the direction falls
+    through to its ordinary state (normally ``idle``) until the check the sign-in
+    hook woke replaces the row. Not ``checking``: the desktop treats that as busy
+    and disables the row's controls, which would stick if no check ever ran (no
+    runner in this process). Any other error, or ``no-credential`` while still
+    signed out, is reported unchanged.
     """
 
     pulled = direction == "pull"
     enabled = policy.subscribe if pulled else bool(policy.auto_push)
     last = item.get("last_pulled_at") if pulled else item.get("last_pushed_at")
     error = item.get("error_class") if pulled or not pulled else None
+    stale_sign_in = error == "no-credential" and signed_in
+    if stale_sign_in:
+        error = None
     state = st.effective_state(item, now)
     if pulled:
         if error:
@@ -3245,8 +3308,8 @@ def _direction_status(
         "attempts": int(item.get("attempts") or 0),
         "next_retry_at": item.get("next_retry_at"),
         "error_class": error if pulled else None,
-        "error_subclass": item.get("error_subclass") if pulled else None,
-        "safe_message": item.get("last_error") if pulled else None,
+        "error_subclass": (item.get("error_subclass") if pulled and not stale_sign_in else None),
+        "safe_message": item.get("last_error") if pulled and not stale_sign_in else None,
         "operation_id": None,
         "model_used": (
             item.get("summary", {}).get("model")
