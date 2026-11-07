@@ -1061,23 +1061,19 @@ def build_proposal(
     if len(files) > MAX_FILES:
         raise AdoptionError("skill-too-large", "the consolidated skill exceeds 64 files")
     assert description is not None
-    import yaml
-
-    adjusted = []
-    for file in files:
-        if file.path == "SKILL.md":
-            _, body = _split_frontmatter(file.content)
-            meta = parse_frontmatter(file.content)
-            meta.update(name=remote.name, description=description)
-            file = SkillFile(
-                file.path,
-                "---\n"
-                + yaml.safe_dump(meta, sort_keys=False, allow_unicode=True)
-                + "---\n"
-                + body,
-            )
-        adjusted.append(file)
-    document = SkillDocument(remote.name, description, tuple(adjusted))
+    # Align the frontmatter with the chosen name/description by replacing only
+    # the scalar spans, and only when the parsed value actually differs. A full
+    # ``yaml.safe_dump`` re-render folds long descriptions at width 80 and
+    # re-wraps Hub-authored folding, so a take-hub install no longer matched the
+    # Hub bytes and its link classified local-only (#3423). The fingerprint is
+    # over exact bytes, so the fix keeps the bytes rather than normalizing both
+    # sides before comparison.
+    skill_meta = parse_frontmatter(next(f.content for f in files if f.path == "SKILL.md"))
+    document = SkillDocument(skill_meta["name"], skill_meta["description"], files)
+    if document.description != description:
+        document = document.with_description(description)
+    if document.name != remote.name:
+        document = document.with_name(remote.name)
 
     # Equal = every carried path matched the hub after normalization, nothing set
     # aside, nothing relocated into a NEW path, description unchanged. Then the
@@ -1156,7 +1152,11 @@ def _plan_skill_md(
         meta.update(extras)
         if strategy == "keep-local":
             meta["description"] = local_meta["description"]
-    remote_head = "---\n" + yaml.safe_dump(meta, sort_keys=False, allow_unicode=True) + "---\n"
+    if meta != remote_meta:
+        # Only a real metadata change (local extras, kept-local description) is
+        # re-rendered; otherwise the Hub's frontmatter bytes are carried verbatim
+        # so same/taken-hub/equal installs fingerprint-match the Hub (#3423).
+        remote_head = "---\n" + yaml.safe_dump(meta, sort_keys=False, allow_unicode=True) + "---\n"
     if strategy == "merge" and not allow_llm and _norm(local_body) != _norm(remote_body):
         return FilePlan(
             "SKILL.md",

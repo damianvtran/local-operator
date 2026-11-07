@@ -199,11 +199,24 @@ def adopt_skill(
             content_state="present",
             legacy_subscribe_hint=subscribe,
         )
-        # Exact normalized equality (and keep-local) links without touching any
-        # authored bytes; the storage records its canonical read projection.
-        write_document = (
-            None if proposal.get("state") == "equal" or strategy == "keep-local" else document
-        )
+        # Keep-local, and an equal adoption whose folder already holds the Hub's
+        # exact bytes, link without touching any authored bytes; the storage
+        # records its canonical read projection. "Equal" is judged on PARSED
+        # metadata and normalized prose, so it also covers a folder that differs
+        # from the Hub only in YAML style (a folded vs single-line description).
+        # Linking that folder as-is leaves bytes that never match the baseline
+        # fingerprint, and the fresh link reads local-only (#3423, QA Q1 on
+        # #3568), so such an equal adoption installs the Hub document instead.
+        write_document = None if strategy == "keep-local" else document
+        if write_document is not None and proposal.get("state") == "equal":
+            from local_operator.hub_sync.skill_adoption import local_projection
+
+            try:
+                projected = local_projection(tree).with_name(resolved.alias)
+            except AdoptionError:
+                projected = None
+            if projected is not None and projected.fingerprint == write_document.fingerprint:
+                write_document = None
         transaction = ManagedSkillStorage(ctx.config_dir).adopt(
             resolved.identity,
             resolved.alias,
