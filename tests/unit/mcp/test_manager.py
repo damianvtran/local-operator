@@ -1398,6 +1398,161 @@ class TestHalfOpenBreaker:
         assert manager.reconnect_suspended("fast") is False
         await manager.disconnect_all()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("history", ["down_since_startup", "connected", "was_paused"])
+    async def test_a_failed_reconnect_restores_the_retry_state_it_found(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, history: str
+    ) -> None:
+        """#3523 R2-1 / #3541 Q5: a failed Reconnect hands back the retry state it found.
+
+        * ``down_since_startup`` (QA Q1a): nothing retried it before, nothing
+          does after, exactly as before the breaker probed.
+        * ``connected``: never tripped, so it is NOT paused (the monitor would
+          say "keeps dropping"); it re-enters the ordinary ladder, and a server
+          that stays down then trips the breaker on its own.
+        * ``was_paused``: paused again with one fresh probe.
+        """
+        if history == "down_since_startup":
+            manager = McpManager(str(project))
+            server = _FakeServer()
+            server.mode = "down"
+            monkeypatch.setattr(manager, "_connect_server", server.connect)
+            await manager.discover_and_connect()
+            real_sleep = asyncio.sleep
+            clock = _CooldownClock(real_sleep)
+            monkeypatch.setattr(asyncio, "sleep", clock.sleep)
+            assert manager.get_connection("fast") is None
+        else:
+            manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        if history == "was_paused":
+            await self._trip(manager, server, real_sleep)
+        server.mode = "down"
+
+        assert await manager.reconnect_server("fast") is None
+        assert manager.get_connection("fast") is None
+        if history == "was_paused":
+            await _spin(real_sleep)
+            assert manager.reconnect_suspended("fast") is True
+            assert list(manager._pending_probes) == ["fast"]
+            assert clock.parked() == [60.0]
+        elif history == "connected":
+            # Back on the ladder, not paused, before the ladder has run.
+            assert manager.reconnect_suspended("fast") is False
+            assert manager._pending_probes == {}
+            assert "fast" in manager._pending_reconnects
+            # Still down: the ladder runs out and the breaker trips by itself.
+            for _ in range(200):
+                await real_sleep(0)
+                if manager.reconnect_suspended("fast"):
+                    break
+            await _spin(real_sleep)
+            assert manager.reconnect_suspended("fast") is True
+            assert list(manager._pending_probes) == ["fast"]
+            assert clock.parked() == [60.0]
+        else:
+            attempts = server.attempts.count("fast")
+            await _spin(real_sleep)
+            clock.elapse()
+            await _spin(real_sleep)
+            assert server.attempts.count("fast") == attempts  # nothing retries it
+            assert manager.reconnect_suspended("fast") is False
+            assert manager._pending_probes == {}
+            assert "fast" not in manager._pending_reconnects
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_server_heals_after_a_failed_reconnect(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3541 QA Q5: drop, Reconnect fails before any trip, server returns.
+
+        The failed Reconnect cancelled the ladder and tore down; if it then
+        arms nothing the server is never retried again. However the retry is
+        armed, the server must heal unattended once it is back.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        conn = manager.get_connection("fast")
+        assert conn is not None
+        # The drop: the ladder's first attempt parks inside its connect.
+        server.mode = "down"
+        server.hold = asyncio.Event()
+        conn.closed_event.set()
+        await _spin(real_sleep)
+        assert "fast" in manager._pending_reconnects
+        assert manager.reconnect_suspended("fast") is False
+        server.hold = None  # the parked attempt keeps its own event
+
+        assert await manager.reconnect_server("fast") is None
+
+        server.mode = "up"
+        await _spin(real_sleep)
+        if manager.get_connection("fast") is None:
+            clock.elapse()  # a cool-down-based retry gets its time too
+            await _spin(real_sleep)
+        assert manager.get_connection("fast") is not None
+        assert manager.reconnect_suspended("fast") is False
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_reconnect_never_repauses_a_server_connected_meanwhile(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3523 R2-2: another route connected the server while the dial was out.
+
+        ``before_result`` registers a connection the way a ``reload`` landing
+        mid-dial does, then the manual dial fails. The server is live, so the
+        failure must leave it unsuspended with no probe armed against it.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        await self._trip(manager, server, real_sleep)
+        cfg = manager._configs["fast"]
+        other_route = _make_conn("fast", cfg)
+
+        def a_reload_lands() -> None:
+            server.before_result = None
+            manager._register_connection(other_route)
+
+        server.mode = "down"
+        server.before_result = a_reload_lands
+        assert await manager.reconnect_server("fast") is None
+        await _spin(real_sleep)
+
+        assert manager.get_connection("fast") is other_route
+        assert manager.reconnect_suspended("fast") is False
+        assert manager._pending_probes == {}
+        assert clock.parked() == []
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_probe_that_finds_the_server_connected_stands_down(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The probe checks the connection before tearing anything down.
+
+        A connection registered while the probe slept, yet with the breaker
+        still open (the state #3523 R2-2 produced), is live: the probe closes
+        the breaker and exits without a teardown or a redial. Contrast
+        :meth:`test_a_call_site_trip_arms_the_probe_too`, where the connection
+        in the slot is the failing one the probe was armed against.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        await self._trip(manager, server, real_sleep)
+        live = _make_conn("fast", manager._configs["fast"])
+        manager._connections["fast"] = live  # bypasses the breaker-closing choke point
+        attempts = server.attempts.count("fast")
+
+        server.mode = "up"
+        clock.elapse()
+        await _spin(real_sleep)
+
+        assert server.attempts.count("fast") == attempts  # no redial
+        assert manager.get_connection("fast") is live  # not torn down
+        assert manager.reconnect_suspended("fast") is False
+        assert "fast" not in manager._reconnect_history
+        assert manager._pending_probes == {}
+        assert clock.parked() == []
+        await manager.disconnect_all()
+
 
 class TestToolNameCollision:
     """MCP-09: cross-server collisions resolved by stable origin key."""
