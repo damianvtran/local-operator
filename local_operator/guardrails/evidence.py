@@ -198,8 +198,11 @@ def session_tree(state_root: str | os.PathLike[str], session_id: str) -> list[st
     was (the migration window) AND no earlier than the parent's
     ``created_at`` (slack allowed). A session whose own creation time cannot
     be read adopts no legacy children (fail closed: no evidence, the old
-    ranking). Forgery is closed elsewhere: any shell path into ``sessions/``
-    ranks CRITICAL (``classify._touch_reason``).
+    ranking). Forgery is narrowed elsewhere (``classify._touch_reason``): a
+    write-shaped shell touch of ``sessions/`` (a redirection, a known
+    writer's destination, git ``-C`` into it) ranks CRITICAL, a path handed
+    to any other program ranks HIGH, and an interpreter that computes the
+    path itself is the documented ceiling (review R4-MINOR-1).
     """
     if not session_id:
         return []

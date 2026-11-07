@@ -2083,19 +2083,20 @@ class _Walker:
         self._add(root, "clean", "git clean")
 
     def _touch(self, name: str, args: list[Expanded]) -> None:
-        """Record write destinations and unknown-program paths (``touched``)."""
+        """Record write destinations and unknown-program paths (``touched``).
+
+        Fails closed (review R4-MAJOR-1): only a FULLY modelled call — see
+        ``_write_surface`` — skips the path-shaped HIGH fallback.
+        """
         st = self.state
-        dests = _write_destinations(name, args, st.home)
-        if dests is not None:
+        surface = _write_surface(name, args, st.home)
+        if surface is not None:
+            dests, fully = surface
             for w in dests:
                 if w.text and not w.vanished:
                     self.result.touched.append(_target(w, "write", name, st))
-            return
-        if name in _MODELLED_WRITERS:
-            # Its destroyed/created paths are the resolver's own targets and
-            # creations, which ``classify`` checks as write-shaped; its other
-            # operands are sources or data.
-            return
+            if fully:
+                return
         for w in args:
             text = w.text
             if text.startswith("-") and "=" not in text:
@@ -2383,30 +2384,313 @@ def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) 
     return False
 
 
-#: Programs whose write destinations the resolver already models as targets
-#: or creations (``rm`` operands, ``mv`` sources and destination, ``tee``,
-#: ``sed -i``, ``mkdir``, ``git clone``/``worktree add``…). ``classify`` checks
-#: those as write-shaped; their other operands are not touches.
-_MODELLED_WRITERS = frozenset(
-    {
-        *DELETE_PROGRAMS,
-        "mv",
-        "gmv",
-        "tee",
-        "sed",
-        "gsed",
-        "mkdir",
-        "gmkdir",
-        "mktemp",
-        "zip",
-        "chmod",
-        "chown",
-        "chgrp",
-        "xattr",
-    }
-)
+# -- the evidence writer table (review R4-MAJOR-1) ---------------------------
+#
+# WHY A TABLE THAT FAILS CLOSED. ``_touch`` used to stop at any program it had
+# heard of, so an UNMODELLED write by a known program (``git -C <s> checkout``,
+# ``tar -cf <s>/origin.json``, ``perl -e 'open…' <s>``) ranked LOW with no
+# judge call. Now a program skips the HIGH fallback only when its WHOLE write
+# surface for the given mode is enumerated below AND every flag it was given
+# is one this table knows. Anything else — an unknown flag, an unlisted git
+# subcommand, a perl without ``-i`` — keeps its known destinations as CRITICAL
+# writes and ALSO sends every path-shaped word to the HIGH fallback.
+
+
 _LN_VALUE_FLAGS = frozenset({"-t", "--target-directory", "-S", "--suffix"})
 _TAR_VALUE_FLAGS = frozenset({"-f", "--file", "-C", "--directory", "-T", "--files-from", "-X"})
+
+
+@dataclass(frozen=True)
+class _Flags:
+    """The flags a fully-modelled program may carry: short letters (clusters
+    allowed), long names, and the flags whose value is the NEXT word."""
+
+    letters: str = ""
+    longs: frozenset[str] = frozenset()
+    values: frozenset[str] = frozenset()
+
+
+def _flags_known(args: list[Expanded], spec: _Flags) -> bool:
+    """Is every flag in ``args`` one ``spec`` lists? ``--`` ends the flags."""
+    skip = False
+    for w in args:
+        t = w.text
+        if skip:
+            skip = False
+            continue
+        if t == "--":
+            return True
+        if not t.startswith("-") or t == "-":
+            continue
+        if t.startswith("--"):
+            key = t.split("=", 1)[0]
+            if key not in spec.longs and key not in spec.values:
+                return False
+            skip = key in spec.values and "=" not in t
+            continue
+        if t in spec.values:
+            skip = True
+            continue
+        cluster = t[1:]
+        for k, c in enumerate(cluster):
+            if f"-{c}" in spec.values:
+                skip = k == len(cluster) - 1  # ``-f FILE`` vs glued ``-fFILE``
+                break
+            if c not in spec.letters:
+                return False
+    return True
+
+
+_CP_FLAGS = _Flags(
+    "aRrfinpvLPHlsxTXcEN",
+    frozenset(
+        {
+            "--recursive",
+            "--archive",
+            "--force",
+            "--interactive",
+            "--no-clobber",
+            "--verbose",
+            "--preserve",
+            "--no-preserve",
+            "--parents",
+            "--dereference",
+            "--no-dereference",
+            "--link",
+            "--symbolic-link",
+            "--update",
+            "--reflink",
+            "--sparse",
+            "--one-file-system",
+            "--no-target-directory",
+            "--remove-destination",
+            "--attributes-only",
+            "--strip-trailing-slashes",
+            "--backup",
+        }
+    ),
+    frozenset({"-t", "--target-directory", "-S", "--suffix"}),
+)
+_LN_FLAGS = _Flags(
+    "sfnvhiFTLPrb",
+    frozenset(
+        {
+            "--symbolic",
+            "--force",
+            "--no-dereference",
+            "--verbose",
+            "--interactive",
+            "--relative",
+            "--logical",
+            "--physical",
+            "--no-target-directory",
+            "--backup",
+        }
+    ),
+    _LN_VALUE_FLAGS,
+)
+_RSYNC_FLAGS = _Flags(
+    "avzrlptgoDhPnucqHAXWSxRbmiOJ8",
+    frozenset(
+        {
+            "--archive",
+            "--verbose",
+            "--compress",
+            "--recursive",
+            "--links",
+            "--perms",
+            "--times",
+            "--group",
+            "--owner",
+            "--devices",
+            "--specials",
+            "--human-readable",
+            "--progress",
+            "--partial",
+            "--dry-run",
+            "--update",
+            "--checksum",
+            "--quiet",
+            "--hard-links",
+            "--acls",
+            "--xattrs",
+            "--whole-file",
+            "--sparse",
+            "--one-file-system",
+            "--relative",
+            "--stats",
+            "--info",
+            "--itemize-changes",
+            "--delete",
+            "--delete-before",
+            "--delete-during",
+            "--delete-after",
+            "--delete-delay",
+            "--delete-excluded",
+            "--exclude",
+            "--include",
+            "--filter",
+            "--ignore-existing",
+            "--size-only",
+            "--no-perms",
+            "--no-owner",
+            "--no-group",
+            "--omit-dir-times",
+            "--prune-empty-dirs",
+            "--mkpath",
+            "--times",
+            "--safe-links",
+            "--copy-links",
+            "--copy-unsafe-links",
+        }
+    ),
+    _RSYNC_VALUE_FLAGS,
+)
+_DITTO_FLAGS = _Flags(
+    "VXckx",
+    frozenset(
+        {
+            "--keepParent",
+            "--rsrc",
+            "--norsrc",
+            "--extattr",
+            "--noextattr",
+            "--acl",
+            "--noacl",
+            "--qtn",
+            "--noqtn",
+            "--sequesterRsrc",
+            "--nocache",
+            "--hfsCompression",
+            "--nohfsCompression",
+            "--zlibCompressionLevel",
+        }
+    ),
+)
+_INSTALL_FLAGS = _Flags(
+    "dcpsvDCbS",
+    frozenset({"--directory", "--verbose", "--compare", "--preserve-timestamps"}),
+    frozenset({"-m", "--mode", "-o", "--owner", "-g", "--group", "-t", "--target-directory"}),
+)
+_TOUCH_FLAGS = _Flags(
+    "amch",
+    frozenset({"--no-create", "--no-dereference"}),
+    frozenset({"-r", "--reference", "-d", "--date", "-t", "-A"}),
+)
+_TRUNCATE_FLAGS = _Flags(
+    "co",
+    frozenset({"--no-create", "--io-blocks"}),
+    frozenset({"-s", "--size", "-r", "--reference"}),
+)
+_UNZIP_FLAGS = _Flags(
+    "qonjluvfaLCDKXV",
+    frozenset(),
+    frozenset({"-d", "-x", "-P"}),
+)
+_ZIP_FLAGS = _Flags(
+    "rqyj0123456789vumDTXgFS@",
+    frozenset({"--recurse-paths", "--quiet", "--symlinks", "--junk-paths", "--move"}),
+    frozenset({"-x", "-i", "-n", "-P", "-O", "--out"}),
+)
+_TAR_FLAGS = _Flags(
+    "xctruvfzjJZapPkmhOSlw",
+    frozenset(
+        {
+            "--extract",
+            "--get",
+            "--create",
+            "--list",
+            "--append",
+            "--update",
+            "--verbose",
+            "--gzip",
+            "--bzip2",
+            "--xz",
+            "--zstd",
+            "--preserve-permissions",
+            "--keep-old-files",
+            "--strip-components",
+            "--exclude",
+            "--no-same-owner",
+            "--same-owner",
+            "--overwrite",
+            "--to-stdout",
+            "--numeric-owner",
+            "--absolute-names",
+        }
+    ),
+    _TAR_VALUE_FLAGS,
+)
+_MKDIR_FLAGS = _Flags("pv", frozenset({"--parents", "--verbose"}), _MKDIR_VALUE_FLAGS)
+_META_FLAGS = _Flags(
+    "RfvhHLPxsdcrlpw",
+    frozenset(
+        {
+            "--recursive",
+            "--verbose",
+            "--silent",
+            "--quiet",
+            "--no-dereference",
+            "--dereference",
+            "--changes",
+            "--reference",
+        }
+    ),
+)
+_MV_FLAGS = _Flags(
+    "finvuhFTbc",
+    frozenset(
+        {
+            "--force",
+            "--interactive",
+            "--no-clobber",
+            "--verbose",
+            "--update",
+            "--no-target-directory",
+            "--strip-trailing-slashes",
+            "--backup",
+        }
+    ),
+    _MV_VALUE_FLAGS,
+)
+_TEE_FLAGS = _Flags("aip", frozenset({"--append", "--ignore-interrupts"}))
+_SED_FLAGS = _Flags(
+    "nEreisuz",
+    frozenset(
+        {
+            "--quiet",
+            "--silent",
+            "--regexp-extended",
+            "--in-place",
+            "--separate",
+            "--unbuffered",
+            "--null-data",
+            "--posix",
+        }
+    ),
+    frozenset({"-e", "--expression", "-f", "--file", "-l"}),
+)
+#: A sed script that writes a file of its own (``w FILE``, ``s/a/b/w FILE``).
+_SED_WRITES_RE = re.compile(r"(^|[;}\n/\s])[wW]\s*\S|\be\b")
+_DD_KEYS = frozenset(
+    {
+        "if",
+        "of",
+        "bs",
+        "ibs",
+        "obs",
+        "count",
+        "skip",
+        "seek",
+        "conv",
+        "status",
+        "iflag",
+        "oflag",
+        "cbs",
+        "iseek",
+        "oseek",
+    }
+)
 
 
 def _flag_value(args: list[Expanded], short: str, long: str) -> list[Expanded]:
@@ -2414,7 +2698,7 @@ def _flag_value(args: list[Expanded], short: str, long: str) -> list[Expanded]:
     out: list[Expanded] = []
     for k, w in enumerate(args):
         t = w.text
-        if t in (short, long) and k + 1 < len(args):
+        if (t == long or (short and t == short)) and k + 1 < len(args):
             out.append(args[k + 1])
         elif t.startswith(long + "="):
             out.append(Expanded(text=t.split("=", 1)[1], empty=w.empty))
@@ -2423,91 +2707,179 @@ def _flag_value(args: list[Expanded], short: str, long: str) -> list[Expanded]:
     return out
 
 
-def _write_destinations(name: str, args: list[Expanded], home: str) -> list[Expanded] | None:
-    """The paths a known writer WRITES, or ``None`` when ``name`` is not one.
+def _plain_operands(args: list[Expanded], spec: _Flags) -> list[Expanded]:
+    operands, _ = _operands(args, spec.values)
+    return operands
 
-    Destinations only — a copy's sources and an archive's inputs are reads.
-    The list is the set of programs that plant a directory or file without a
-    model elsewhere in this resolver (review R2-MAJOR-1's planters).
+
+def _copy_dest(args: list[Expanded], spec: _Flags) -> list[Expanded]:
+    target_dir = _flag_value(args, "-t", "--target-directory")
+    if target_dir:
+        return target_dir
+    operands = _plain_operands(args, spec)
+    return operands[-1:] if len(operands) >= 2 else []
+
+
+def _write_surface(
+    name: str, args: list[Expanded], home: str
+) -> tuple[list[Expanded], bool] | None:
+    """``(destinations, fully_modelled)`` for a known writer, else ``None``.
+
+    ``destinations`` are the paths the call WRITES (sources and inputs are
+    reads). ``fully_modelled`` is True only when that list is the program's
+    whole write surface for this mode and every flag given is known; a False
+    sends the call's path-shaped words to the HIGH fallback as well.
     """
-    if name in ("ln", "gln", "ditto", "rsync", "cp", "gcp", "install", "ginstall"):
-        flags = {
-            "ln": _LN_VALUE_FLAGS,
-            "gln": _LN_VALUE_FLAGS,
-            "rsync": _RSYNC_VALUE_FLAGS,
-        }.get(name, _MV_VALUE_FLAGS)
-        operands, opts = _operands(args, flags)
-        target_dir = _flag_value(args, "-t", "--target-directory")
-        if target_dir:
-            return target_dir
-        if name in ("install", "ginstall") and _has_short(opts, "d"):
-            return operands
-        if name in ("ln", "gln") and len(operands) == 1:
+    if name in DELETE_PROGRAMS:
+        return [], True  # every operand is the resolver's own delete target
+    if name in ("mv", "gmv"):
+        return [], _flags_known(args, _MV_FLAGS)  # sources + destination: resolver targets
+    if name in ("tee",):
+        return [], _flags_known(args, _TEE_FLAGS)  # resolver targets
+    if name in ("mkdir", "gmkdir"):
+        return [], _flags_known(args, _MKDIR_FLAGS)  # resolver creations
+    if name in ("chmod", "chown", "chgrp", "xattr"):
+        return [], _flags_known(args, _META_FLAGS)  # metadata only, no content
+    if name in ("sed", "gsed"):
+        # ``-i`` operands are resolver targets; a script's own ``w`` is not.
+        scripts = " ".join(w.text for w in args if not w.text.startswith("-"))
+        return [], _flags_known(args, _SED_FLAGS) and not _SED_WRITES_RE.search(scripts)
+    if name in ("cp", "gcp"):
+        return _copy_dest(args, _CP_FLAGS), _flags_known(args, _CP_FLAGS)
+    if name in ("ln", "gln"):
+        operands = _plain_operands(args, _LN_FLAGS)
+        dest = _flag_value(args, "-t", "--target-directory")
+        if not dest and len(operands) == 1:
             # ``ln -s TARGET`` links into the cwd under the target's basename.
-            return [Expanded(text=os.path.basename(operands[0].text.rstrip("/")) or ".")]
-        return operands[-1:] if len(operands) >= 2 else []
-    if name in ("tar", "gtar", "bsdtar"):
-        if _tar_mode(args) != "extract":
-            return []  # create/append/list: ``-C`` names where INPUTS are read
-        return _flag_value(args, "-C", "--directory") or [Expanded(text=".")]
-    if name == "unzip":
-        return _flag_value(args, "-d", "--dir") or [Expanded(text=".")]
-    if name in ("touch", "gtouch", "truncate", "gtruncate"):
-        values = {"-r", "--reference", "-d", "--date", "-t", "-s", "--size", "-A"}
-        out: list[Expanded] = []
-        skip = False
-        for w in args:
-            if skip:
-                skip = False
-                continue
-            if w.text in values:
-                skip = True
-                continue
-            if not w.text.startswith("-"):
-                out.append(w)
-        return out
+            dest = [Expanded(text=os.path.basename(operands[0].text.rstrip("/")) or ".")]
+        elif not dest:
+            dest = operands[-1:] if len(operands) >= 2 else []
+        return dest, _flags_known(args, _LN_FLAGS)
+    if name == "rsync":
+        return _copy_dest(args, _RSYNC_FLAGS), _flags_known(args, _RSYNC_FLAGS)
+    if name == "ditto":
+        return _copy_dest(args, _DITTO_FLAGS), _flags_known(args, _DITTO_FLAGS)
+    if name in ("install", "ginstall"):
+        if any(w.text in ("-d", "--directory") for w in args):
+            return _plain_operands(args, _INSTALL_FLAGS), _flags_known(args, _INSTALL_FLAGS)
+        return _copy_dest(args, _INSTALL_FLAGS), _flags_known(args, _INSTALL_FLAGS)
+    if name in ("touch", "gtouch"):
+        return _plain_operands(args, _TOUCH_FLAGS), _flags_known(args, _TOUCH_FLAGS)
+    if name in ("truncate", "gtruncate"):
+        return _plain_operands(args, _TRUNCATE_FLAGS), _flags_known(args, _TRUNCATE_FLAGS)
     if name == "dd":
-        return [
+        dests = [
             Expanded(text=_tilde_value(w.text[3:], home), empty=w.empty)
             for w in args
             if w.text.startswith("of=")
         ]
+        known = all("=" in w.text and w.text.split("=", 1)[0] in _DD_KEYS for w in args)
+        return dests, known
+    if name == "unzip":
+        dest = _flag_value(args, "-d", "-d") or [Expanded(text=".")]
+        return dest, _flags_known(args, _UNZIP_FLAGS)
+    if name == "zip":
+        out = _flag_value(args, "-O", "--out")
+        operands = _plain_operands(args, _ZIP_FLAGS)
+        return out + operands[:1], _flags_known(args, _ZIP_FLAGS)
+    if name in ("tar", "gtar", "bsdtar"):
+        mode = _tar_mode(args)
+        known = _flags_known(args, _TAR_FLAGS)
+        if mode == "extract":
+            return _cluster_value(args, "C", "--directory") or [Expanded(text=".")], known
+        if mode == "create":
+            # The ARCHIVE is written; ``-C`` names where inputs are read.
+            return _cluster_value(args, "f", "--file"), known
+        return [], known
     if name == "perl":
-        if not any(_PERL_INPLACE_RE.match(w.text) for w in args):
-            return []
-        out = []
-        script_seen = False
-        skip = False
-        for w in args:
-            if skip:
-                skip = False
-                continue
-            if w.text.startswith("-"):
-                if re.match(r"^-[a-zA-Z]*[eE]$", w.text):
-                    skip = script_seen = True  # the next word is the program text
-                continue
-            if not script_seen:
-                script_seen = True  # the first operand is the script file
-                continue
-            out.append(w)
-        return out
+        # Never fully modelled: like every interpreter, what the script does
+        # with a path is unknowable, so its paths also go to the fallback.
+        return _perl_inplace(args), False
     if name == "sqlite3":
+        # ``.output FILE`` and friends write elsewhere: never fully modelled.
         operands, _ = _operands(args, _SQLITE_VALUE_FLAGS)
-        return operands[:1]
+        return operands[:1], False
     if name == "git":
-        # ``git log/show/diff --output=<file>`` writes the file (R3-MAJOR-1:
-        # it forged the lineage registry at LOW). Clone/worktree destinations
-        # are the resolver's creations, checked as write-shaped in classify.
-        return _flag_value(args, "", "--output") + [
-            Expanded(text=w.text[2:], empty=w.empty)
-            for w in args
-            if w.text.startswith("-o") and len(w.text) > 2 and not w.text.startswith("--")
-        ]
+        return _git_writes(args), False
     return None
 
 
-#: ``-i`` / ``-pi`` / ``-i.bak``: in-place editing; only switch letters may
-#: precede it in a cluster, so ``-Mstrict`` is not read as ``-i``.
+def _cluster_value(args: list[Expanded], letter: str, long: str) -> list[Expanded]:
+    """Like ``_flag_value``, but finds ``letter`` inside a short cluster too:
+    ``tar -czf OUT`` and ``tar -czfOUT`` both name ``OUT`` (review R4-MAJOR-1:
+    ``tar -cf <s>/origin.json`` read the cluster as a mode and missed it)."""
+    out = _flag_value(args, "", long)
+    for k, w in enumerate(args):
+        t = w.text
+        if not t.startswith("-") or t.startswith("--") or letter not in t[1:]:
+            continue
+        rest = t[1:].split(letter, 1)[1]
+        if rest:
+            out.append(Expanded(text=rest, empty=w.empty))
+        elif k + 1 < len(args):
+            out.append(args[k + 1])
+    return out
+
+
+def _perl_inplace(args: list[Expanded]) -> list[Expanded]:
+    if not any(_PERL_INPLACE_RE.match(w.text) for w in args):
+        return []
+    out = []
+    script_seen = False
+    skip = False
+    for w in args:
+        if skip:
+            skip = False
+            continue
+        if w.text.startswith("-"):
+            if re.match(r"^-[a-zA-Z]*[eE]$", w.text):
+                skip = script_seen = True  # the next word is the program text
+            continue
+        if not script_seen:
+            script_seen = True  # the first operand is the script file
+            continue
+        out.append(w)
+    return out
+
+
+def _git_writes(args: list[Expanded]) -> list[Expanded]:
+    """The paths a (non-read-only) git call is known to WRITE.
+
+    ``-C``/``--git-dir``/``--work-tree`` count as writes: a non-read-only
+    subcommand there can rewrite any file of that tree (``checkout``,
+    ``reset --hard``, ``apply``, ``stash pop``). Clone and worktree-add
+    destinations are the resolver's creations, checked as writes in classify.
+    """
+    out: list[Expanded] = []
+    rest = list(args)
+    while rest and rest[0].text.startswith("-"):
+        t = rest[0].text
+        if t in ("-C", "--git-dir", "--work-tree", "--namespace") and len(rest) > 1:
+            if t != "--namespace":
+                out.append(rest[1])
+            rest = rest[2:]
+            continue
+        if t.startswith(("--git-dir=", "--work-tree=")):
+            out.append(Expanded(text=t.split("=", 1)[1], empty=rest[0].empty))
+        rest = rest[2:] if t == "-c" else rest[1:]
+    sub = rest[0].text if rest else ""
+    tail = rest[1:]
+    out += _flag_value(tail, "", "--output") + _flag_value(tail, "", "--output-directory")
+    out += _flag_value(tail, "", "--prefix")  # checkout-index --prefix=<dir>/
+    for k, w in enumerate(tail):
+        t = w.text
+        if t == "-o" and k + 1 < len(tail):
+            out.append(tail[k + 1])
+        elif t.startswith("-o") and len(t) > 2 and not t.startswith("--"):
+            out.append(Expanded(text=t[2:], empty=w.empty))
+    operands = [w for w in tail if not w.text.startswith("-")]
+    if sub == "init":
+        out += operands[-1:] or [Expanded(text=".")]
+    elif sub == "bundle" and len(operands) >= 2 and operands[0].text == "create":
+        out.append(operands[1])
+    return out
+
+
 _PERL_INPLACE_RE = re.compile(r"^-[lnpaesw0]*i")
 
 

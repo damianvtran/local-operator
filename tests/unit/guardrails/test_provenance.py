@@ -1016,3 +1016,78 @@ async def test_unknown_program_touch_goes_to_the_context_free_judge(home: Path) 
         "bash", {"command": command}, ctx, judge=_Judge("ALLOW"), settings=GuardSettings()
     )
     assert outcome is not None and not outcome.blocked
+
+
+# -- round 4 ---------------------------------------------------------------------------
+
+_S = f"~/.local-operator/sessions/{CHILD}"
+_H = f"$HOME/.local-operator/sessions/{CHILD}"
+
+#: R4-MAJOR-1's rows: known programs' UNMODELLED writes. Destinations (and
+#: ``-C``/``--git-dir``/``--work-tree`` into session state) are CRITICAL.
+_R4_CRITICAL = [
+    f"git -C {_S} checkout -- origin.json",
+    f"git -C {_S} reset --hard",
+    f"git -C {_S} apply evil.patch",
+    f"git -C {_S} stash pop",
+    f"git -C {_S} restore --source=HEAD~1 origin.json",
+    f"git -C {_S} pull",
+    f"git -C {_S} config user.name x",
+    f"git --git-dir={_H}/.git --work-tree={_H} checkout .",
+    f"git format-patch -o {_S} HEAD~1",
+    f"git format-patch --output-directory {_S} HEAD~1",
+    f"git -C ~/repo archive -o {_S}/origin.json HEAD",
+    f"git archive --output={_H}/origin.json HEAD",
+    f"git bundle create {_S}/x.bundle HEAD",
+    f"git checkout-index --prefix={_H}/ -a",
+    "git init ~/.local-operator/sessions/new000000003",
+    "git init -q ~/.local-operator/guardrails",
+    f"tar -cf {_S}/origin.json src",
+    "tar -czf ~/.local-operator/guardrails/x.tgz src",
+    "tar -cf ~/.local-operator/guardrails/created.sqlite -C ~ repo",
+    f"zip {_S}/origin.json foo",
+]
+
+
+@pytest.mark.parametrize("command", _R4_CRITICAL)
+def test_unmodelled_writes_of_known_programs_are_critical(home: Path, command: str) -> None:
+    assert _verdict(home, command).risk is Risk.CRITICAL, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"perl -e 'open F,\">\",$ARGV[0]' {_S}/origin.json",
+        f"perl script.pl {_S}/origin.json",
+    ],
+)
+def test_perl_is_an_interpreter(home: Path, command: str) -> None:
+    """Like ``python3``: a path handed to it is at least HIGH, never LOW."""
+    assert _verdict(home, command).risk is Risk.HIGH, command
+
+
+#: Every program in the writer table (``resolve._write_surface``).
+_WRITERS = [
+    "rm", "rmdir", "unlink", "shred", "mv", "tee", "mkdir", "chmod", "chown", "chgrp",
+    "xattr", "sed", "cp", "ln", "rsync", "ditto", "install", "touch", "truncate", "dd",
+    "unzip", "zip", "tar", "perl", "sqlite3", "git",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("program", "unknown"),
+    [(p, u) for p in _WRITERS for u in ("--zz-unknown", "-Q")]
+    # Only git has subcommands; elsewhere a bare word is an ordinary operand
+    # (``cp <s> zzsub`` copies FROM session state, a read).
+    + [("git", "zzsub"), ("git", "worktree zzsub"), ("git", "bundle zzsub")],
+)
+def test_writer_with_unknown_flag_or_subcommand_is_never_low(
+    home: Path, program: str, unknown: str
+) -> None:
+    """Fail closed: an unrecognised flag or subcommand means the program's
+    write surface is no longer enumerated, so a session path is never LOW."""
+    for position in ("first", "last"):
+        path = f"{_S}/origin.json"
+        argv = f"{unknown} {path}" if position == "first" else f"{path} {unknown}"
+        command = f"{program} {argv}"
+        assert _verdict(home, command).risk is not Risk.LOW, command
