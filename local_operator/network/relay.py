@@ -10932,8 +10932,18 @@ class RelayServer:
                 # The way OUT, worded here because only this hop knows the device
                 # a person must open: the runtime's sentence names no device, and
                 # "this device" reads as the origin on the receipt (design D2 on
-                # #3554). Its own line, the house form, so neither soft-wraps.
-                reason += f"\nlist them: /model in a lop session on {self._own_label()}"
+                # #3554). Two short lines so neither soft-wraps at 80 columns
+                # (#3556 round 1, design D1 / review m-1): the catalogue to read is
+                # THAT device's, and ``/model`` is typed in lop there, not a shell
+                # command; the second names the escape hatch, since an id newer
+                # than that device's cached list is the likeliest cause and
+                # ``/model <provider>/<id>`` there accepts it.
+                where = self._own_label()
+                provider = model.get("provider")
+                reason += (
+                    f"\nsee what {where} offers: run /model in lop there, then create again"
+                    f"\na newer id than that list: /model {provider}/<id> in lop there takes it"
+                )
             return {"applied": False, "detail": _model_not_applied(model, reason)}
         return {"applied": True, "detail": ""}
 

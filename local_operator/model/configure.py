@@ -1340,6 +1340,18 @@ class ModelSelectionRefused(ValueError):
         self.message = message
 
 
+def model_unknown_refusal(provider: str, model_id: str) -> ModelSelectionRefused:
+    """``model_unknown``: the catalogue here does not offer ``provider``/``model_id``.
+
+    One sentence for the one code, shared by :func:`validate_model_selection`
+    (desktop draft, mobile peer switch) and the runtime's ``offered_only``
+    switch (a remote create, ``serving._require_offered``), so the two surfaces
+    cannot word the same refusal two ways (#3556 round 1, design D3 / review
+    m-2). The desktop's 422 body pins this exact text.
+    """
+    return ModelSelectionRefused("model_unknown", f"'{model_id}' is not a model {provider} serves.")
+
+
 def validate_model_selection(
     provider: str,
     model_id: str,
@@ -1417,9 +1429,7 @@ def validate_model_selection(
         )
     served = offered_model_ids(provider)
     if served is not None and model_id not in served:
-        raise ModelSelectionRefused(
-            "model_unknown", f"'{model_id}' is not a model {provider} serves."
-        )
+        raise model_unknown_refusal(provider, model_id)
     if usable is not None and not usable(provider):
         raise ModelSelectionRefused(
             "provider_unusable",

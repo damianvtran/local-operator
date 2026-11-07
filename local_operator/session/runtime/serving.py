@@ -470,7 +470,7 @@ def _require_offered(provider: str, model_id: str, root: Path | None) -> None:
     The ``<hosting>/`` spelling ``build_model_spec`` canonicalises is accepted
     too, so this never refuses a pair that switch would have built.
     """
-    from local_operator.model.configure import ModelSelectionRefused
+    from local_operator.model.configure import model_unknown_refusal
     from local_operator.model.discovery import offered_model_ids
     from local_operator.model.registry import _hosting_qualified_bare_id
 
@@ -479,7 +479,7 @@ def _require_offered(provider: str, model_id: str, root: Path | None) -> None:
         return
     if _hosting_qualified_bare_id(provider, model_id) in offered:
         return
-    raise ModelSelectionRefused("model_unknown", f"unknown model for {provider}")
+    raise model_unknown_refusal(provider, model_id)
 
 
 #: THE RUNG-4 RETRY LADDER (review round 1, R7).

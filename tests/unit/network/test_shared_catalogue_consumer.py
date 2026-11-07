@@ -1271,7 +1271,8 @@ def test_an_offered_only_switch_refuses_only_what_the_catalogue_rules_out(monkey
     with pytest.raises(ModelSelectionRefused) as refused:
         serving._require_offered("openai", "gpt-qa-nope", None)  # noqa: SLF001
     assert refused.value.code == "model_unknown"
-    assert str(refused.value) == "unknown model for openai"
+    # The ONE sentence the desktop/mobile validator uses for the same code (D3/m-2).
+    assert str(refused.value) == "'gpt-qa-nope' is not a model openai serves."
 
 
 @pytest.mark.asyncio
@@ -1334,11 +1335,49 @@ async def test_a_remote_create_refuses_a_model_the_owner_does_not_offer(
         "applied": False,
         "detail": (
             "model: openai/gpt-qa-nope not applied — the session keeps its own model\n"
-            "why: unknown model for openai\n"
-            f"list them: /model in a lop session on {label}"
+            "why: 'gpt-qa-nope' is not a model openai serves.\n"
+            f"see what {label} offers: run /model in lop there, then create again\n"
+            "a newer id than that list: /model openai/<id> in lop there takes it"
         ),
     }, unknown
     assert after_unknown == started_on != "openai/gpt-qa-nope"
     assert known == {"applied": True, "detail": ""}, known
     assert after_known == "openai/gpt-fixture-sol"
     assert after_bare == "openai/gpt-qa-local-escape"
+
+
+@pytest.mark.parametrize("here", ["build-box", "studio-mini", "gpu-node-07"])
+def test_a_cut_refusal_keeps_whole_sentences_and_whole_words(here):
+    """#3556 round 1, design D2: the cut landed mid-word, ``it l… To allow it``.
+
+    It also dropped the consent clause the owner is asked to accept. Measured on
+    #3542's real refusal shape at three peer-name lengths: the trailing whole
+    sentences (consent and lead-in) survive, the opening is cut back to a word
+    and keeps its leading clause, and the whole stays within the 400 bound.
+    """
+    from local_operator.providers.shared_catalogue import device_scope_share_command
+    from local_operator.session.runtime.server import bounded_error_message
+
+    owner = "damians-macbook-pro"
+    command = device_scope_share_command(
+        "d_cf3f8de7a83b3c057fe4082566b08e63", "n_3fbdcd5287633f98ec2e1789"
+    )
+    head = (
+        "catalogue needs a device-scoped share: "
+        f"{here} borrows openai from {owner} per session, which runs turns but does not "
+        f"share the model list a switch reads. Allowing model switching on {here} is "
+        f"{owner}'s decision: it lends openai to every session on {here}. To allow it, "
+        f"run on {owner}:"
+    )
+    kept = bounded_error_message(f"{head}\n`{command}`")
+    assert len(head) + len(command) + 3 > 400 >= len(kept), len(kept)
+    reason, command_line = kept.split("\n")
+    assert command_line == f"`{command}`"
+    opening, _, rest = reason.partition("… ")
+    assert opening.startswith("catalogue needs a device-scoped share: ")
+    # A whole word: what follows the kept opening is a space or punctuation.
+    assert head.startswith(opening) and not head[len(opening)].isalnum(), opening
+    assert rest == (
+        f"Allowing model switching on {here} is {owner}'s decision: it lends openai to "
+        f"every session on {here}. To allow it, run on {owner}:"
+    ), rest

@@ -524,12 +524,15 @@ _NOT_APPLIED = (
     ("turn", "lead"),
     [
         ({"state": "settled", "detail": ""}, "see which model replied:"),
+        # #3556 round 1, review n-1: the present-tense lead's one remaining
+        # reader, a peer from before #3547 that sends no ``turn`` block at all.
+        (None, "see which model replies:"),
     ],
 )
 def test_an_unapplied_model_points_at_the_read_that_names_the_server(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    turn: dict[str, Any],
+    turn: dict[str, Any] | None,
     lead: str,
 ) -> None:
     """Design round 1 on #3554, D1: the receipt names the read that answers "which model".

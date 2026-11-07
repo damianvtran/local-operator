@@ -8044,6 +8044,8 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 )
                 and peek_command not in lines
             ):
+                # "replies" is now reached only from a peer older than #3547, which
+                # sends no ``turn`` block (review n-1 on #3556; a test pins it).
                 lines.append(
                     "see which model replied:" if state == "settled" else "see which model replies:"
                 )

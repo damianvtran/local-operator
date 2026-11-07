@@ -46,6 +46,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -1209,8 +1210,10 @@ ERROR_MESSAGE_MAX = 400
 #: The longest trailing remedy line :func:`bounded_error_message` keeps whole.
 ERROR_REMEDY_MAX = 300
 
-#: The longest lead-in sentence :func:`bounded_error_message` keeps with that remedy.
-ERROR_LEAD_MAX = 120
+#: The shortest opening of a reason :func:`bounded_error_message` keeps when it
+#: trims the MIDDLE: long enough for a refusal's leading clause (#3542's
+#: "catalogue needs a device-scoped share" is 37), which older readers key on.
+ERROR_REASON_OPENING_MIN = 60
 
 
 def bounded_error_message(text: str, limit: int = ERROR_MESSAGE_MAX) -> str:
@@ -1234,9 +1237,16 @@ def bounded_error_message(text: str, limit: int = ERROR_MESSAGE_MAX) -> str:
     THE LEAD-IN TRAVELS WITH THE COMMAND (design D4 = QA Q4 on #3554). Keeping
     only the command cut #3542's "To allow it, run on <owner>:" — the one
     clause saying WHERE to paste it — so a reader got a command with no
-    instruction. When the reason's last sentence ends in ``:`` (the house form
-    for "the command below does this") and fits ``ERROR_LEAD_MAX``, that
-    sentence is kept too and the cut falls in the middle of the reason. Chosen
+    instruction. When the reason ends in ``:`` (the house form for "the command
+    below does this"), its trailing WHOLE sentences are kept too — as many as
+    fit beside an opening of at least ``ERROR_REASON_OPENING_MIN`` — and the
+    cut falls in the middle of the reason. Whole sentences, and the opening cut
+    back to a word (#3556 round 1, design D2): a character cut there left
+    "it l… To allow it", a broken word right before the line a reader acts on,
+    and dropped the consent clause ("it lends openai to every session on X")
+    the owner is being asked to accept. Boundaries are ``". "`` and a newline;
+    one missed (an abbreviation, a lead with no sentence before it) only keeps
+    less, never more than the limit. Chosen
     over re-flowing #3542's refusal onto three lines because the rule stays
     structural and in one place: the refusal's sentence is shared with
     ``lop network ready`` and keyed on by older readers, while every other
@@ -1253,15 +1263,24 @@ def bounded_error_message(text: str, limit: int = ERROR_MESSAGE_MAX) -> str:
         and tail.endswith("`")
         and tail.count("`") == 2
     ):
-        stop = head.rfind(". ")
-        lead = head[stop + 2 :] if stop != -1 and head.endswith(":") else ""
-        if len(lead) > ERROR_LEAD_MAX:
-            lead = ""
-        # The cut always lands BEFORE ``stop``: were it at or past it, head plus
-        # tail would already fit the limit, which the guard above ruled out.
-        room = limit - len(tail) - len("…\n") - (len(lead) + 1 if lead else 0)
+        budget = limit - len(tail) - len("\n")
+        lead = ""
+        if head.endswith(":"):
+            # Earliest boundary first = the most whole sentences that still fit.
+            for boundary in re.finditer(r"\. |\n", head):
+                suffix = head[boundary.end() :]
+                if len(suffix) + len("… ") + ERROR_REASON_OPENING_MIN <= budget:
+                    lead = suffix
+                    break
+        # The opening never reaches into ``lead``: were the cut at or past its
+        # boundary, head plus tail would already fit, which the guard ruled out.
+        room = budget - len("…") - (len(lead) + 1 if lead else 0)
         if room > 0:
-            cut = f"{head[:room].rstrip()}…"
+            opening = head[:room]
+            space = opening.rfind(" ")
+            if space > room // 2:
+                opening = opening[:space]
+            cut = f"{opening.rstrip(' ,;:—')}…"
             return f"{cut} {lead}\n{tail}" if lead else f"{cut}\n{tail}"
     return text[:limit]
 
