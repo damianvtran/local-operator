@@ -81,6 +81,7 @@ from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.messages import render_repair_notice
 from local_operator.network.credentials.placement import PlacementDocument
+from local_operator.network.credentials.repair import REPAIR_FAILURES
 from local_operator.network.credentials.types import (
     QUOTA_REASON_HOLDER_EXCLUDED,
     QUOTA_REASON_POOL_DEPLETED,
@@ -984,7 +985,7 @@ class MeshCredentialBroker:
                     exclude_credential_ids=excluded_ids or None,
                 )
         except Exception as exc:  # noqa: BLE001 — classified below, never propagated
-            return self._classify_refresh_failure(exc, key)
+            return self._classify_refresh_failure(exc, key, by=by, for_session=for_session)
         if (
             denied_excluded
             and access is not None
@@ -1087,6 +1088,17 @@ class MeshCredentialBroker:
                         )
                     ),
                 )
+            # THE DEAD PROVIDER GRANT ENDS HERE, NOT IN ``grant_invalid`` (owner-relogin
+            # design §3.5 gap 2, as the code actually runs). The cascade catches a
+            # tombstoned row's ``CredentialInvalidError`` per row and moves on, so a
+            # provider whose only lendable login the IdP refused reaches this arm with
+            # ``access is None`` — the refusal the borrower reads stays exactly
+            # ``no_local_credential``. What was missing is the OWNER's record: when a
+            # row this resolve could have lent carries the IdP's verdict, only a fresh
+            # sign-in here helps, and that is the repair row the doctor and the inbox
+            # read. A provider with nothing signed in writes nothing.
+            if self._lendable_grant_is_dead(provider, excluded_ids):
+                self._record_reauth_required(key, by, for_session=for_session)
             return BrokerError(
                 code="no_local_credential",
                 key=key,
@@ -1223,7 +1235,7 @@ class MeshCredentialBroker:
             try:
                 await ensure_mcp_oauth_fresh(url, MCPHttpServerConfig(url=url), store)
             except Exception as exc:  # noqa: BLE001 — a refresh failure is a refusal
-                return self._classify_refresh_failure(exc, key)
+                return self._classify_refresh_failure(exc, key, by=by, for_session=for_session)
 
         refreshed = self._row_stamps(MCP_OAUTH_PROVIDER).get(row_id, 0) > before.get(row_id, 0)
         # Refresh may have tombstoned this family or a new login may have
@@ -1751,6 +1763,18 @@ class MeshCredentialBroker:
         by, refused = self._caller(link, frame, key, key)
         if refused is not None:
             return refused
+        if failure in REPAIR_FAILURES:
+            # THE OPENING WORDS ARE THIS DEVICE'S OWN VERDICTS, NEVER A PEER'S CLAIM
+            # (owner-relogin design §3.5). ``repair.open_reports`` opens a repair —
+            # and now raises a high-priority inbox item here — on exactly these
+            # words, and this row is written before the holder check below, from a
+            # field any authenticated member fills in. Recorded verbatim, a peer
+            # could ask THIS operator to sign in again whenever it liked. No honest
+            # borrower sends either word (``client.serve_report`` sends what its
+            # bearer observed), so the claim keeps its value under a prefix the
+            # predicate cannot match: still in the log for an incident review, and
+            # answered by the ``noted`` arm below like any unclassified failure.
+            failure = f"peer_claimed:{failure}"
         self._audit(
             "credential.report",
             actor=self.self_device,
@@ -1936,7 +1960,84 @@ class MeshCredentialBroker:
                 "cause": reason,
             },
         )
+        # WHAT THE PROBE FOUND, after the row that proves it was spent (owner-relogin
+        # design §3.5, gap 1). Read from the STORE'S PERSISTED VERDICT rather than
+        # from the probe's exception, because neither probe raises on the case that
+        # matters: ``AuthStore.ensure_oauth_fresh`` swallows ``AuthStoreError``
+        # (``CredentialInvalidError`` included) to ``None``, and
+        # ``ensure_mcp_oauth_fresh`` leaves a failed refresh in place without
+        # raising. The tombstone is written only on the IdP's own ``invalid_grant``,
+        # so a transient outage — a 5xx, a refused connection, this probe timing out
+        # — never reads as "sign in again". Same authority as before: one probe per
+        # credential per window, and the probe's RESULT is what is newly recorded.
+        if self._grant_is_tombstoned(key, credential_id):
+            self._record_reauth_required(key, by)
         return {"kind": "ack", "key": key, "action": "refreshed"}
+
+    def _grant_is_tombstoned(self, key: str, credential_id: int) -> bool:
+        """Whether this device's own row for ``key`` carries the IdP's dead-grant verdict.
+
+        Read-only, no POST: the provider store's ``grant_is_dead`` and the MCP
+        grant marker's ``is_dead`` are the two persisted forms of the same verdict
+        (``GRANT_DEAD_AT_KEY``). An unreadable store answers ``False`` — the side
+        that writes nothing, because a notice that a login is dead must never rest
+        on a read that failed.
+        """
+        try:
+            store = self._auth_store_instance()
+            if is_mcp_key(key):
+                from local_operator.mcp.auth import McpTokenStorage
+
+                marker = McpTokenStorage(mcp_url_from_key(key), store).grant_marker()
+                return marker is not None and bool(marker.is_dead)
+            return bool(store.grant_is_dead(credential_id))
+        except Exception:  # noqa: BLE001 — unknown is "not proven dead"
+            return False
+
+    def _lendable_grant_is_dead(self, provider: str, excluded_ids: tuple[int, ...]) -> bool:
+        """Whether a provider row this resolve could lend carries the IdP's dead verdict.
+
+        Rows the holder's exclusions hid are not this borrower's to wait on, so they
+        are skipped; an unreadable store answers ``False`` (nothing proven dead).
+        """
+        try:
+            store = self._auth_store_instance()
+            hidden = set(excluded_ids)
+            return any(
+                store.grant_is_dead(int(row.id))
+                for row in store.list_credentials(provider)
+                if int(row.id) not in hidden
+            )
+        except Exception:  # noqa: BLE001 — unknown is "not proven dead"
+            return False
+
+    def _record_reauth_required(self, key: str, by: str, *, for_session: str = "") -> None:
+        """The owner's own ``credential.report {failure: reauth_required}`` row.
+
+        The record ``repair.open_reports`` folds into the doctor row and the inbox
+        item: "only a fresh sign-in HERE helps, and ``by`` is the device that
+        found out". Same call shape as the ``interactive_required`` row
+        ``_resolve_mcp`` writes. FIRE-AND-FORGET by construction — ``_audit``
+        swallows a failed write — so a lost row costs the notice, never the
+        refusal or the ack it rides beside; the next failing borrow writes another.
+        ``by`` is the requesting peer on every caller (the report arm, the
+        classifier, the provider's empty answer); without one there is no borrower
+        to name, and nothing is written.
+        """
+        if not by:
+            return
+        self._audit(
+            "credential.report",
+            actor=self.self_device,
+            subject=by,
+            session_id=for_session,
+            detail={
+                "credential_key": key,
+                "act": self.self_device,
+                "sub": by,
+                "failure": "reauth_required",
+            },
+        )
 
     async def _owner_refresh(self, key: str, credential_id: int) -> Any:
         """The owner's OWN refresh for ``key``: the provider store's, or MCP's.
@@ -2938,7 +3039,9 @@ class MeshCredentialBroker:
             return {}
         return {int(row.id): int(row.updated_at or 0) for row in rows}
 
-    def _classify_refresh_failure(self, exc: BaseException, key: str) -> BrokerError:
+    def _classify_refresh_failure(
+        self, exc: BaseException, key: str, *, by: str = "", for_session: str = ""
+    ) -> BrokerError:
         """Turn the store's failure classes into the design's refusal codes.
 
         The distinction the codes exist for: ``grant_invalid`` means the IdP has
@@ -2946,6 +3049,13 @@ class MeshCredentialBroker:
         store's own path), while ``refresh_failed`` is a transient outage that a
         retry can fix. Collapsing them is how an operator is told to sign in again
         for a network blip.
+
+        ``grant_invalid`` ALSO RECORDS THE REPAIR (owner-relogin design §3.5, gap 2).
+        It used to reach the borrower only: no ``credential.report`` row, so the
+        derivation behind ``lop network doctor`` and the inbox item could not see
+        a dead provider login even in principle. ``by``/``for_session`` name the
+        borrower the refusal is for; ``refresh_failed`` writes nothing, because a
+        retry can still fix it.
         """
         from local_operator.providers.auth_store import CredentialInvalidError
 
@@ -2959,6 +3069,7 @@ class MeshCredentialBroker:
             "owner_device_name": self.self_device_name,
         }
         if isinstance(exc, CredentialInvalidError):
+            self._record_reauth_required(key, by, for_session=for_session)
             return BrokerError(code="grant_invalid", message=str(exc), **common)
         return BrokerError(
             code="refresh_failed",

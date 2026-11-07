@@ -535,18 +535,20 @@ def repair_command(key: str, *, name: str = "") -> str:
 #: where they are the detail of a code this build cannot classify. On the wire, this
 #: string's reader is a human reading a wire capture or the owner's logs.
 #:
-#: The "owner-side toast" a first draft of this docstring described does not exist:
-#: the design's §4.7 row asked for a ``credential_repair`` op that raises a durable
-#: notice on the owning device, and NO SUCH OP IS BUILT. What ships instead is
-#: DERIVED from the ``credential.report`` audit record written beside this refusal:
-#: ``credentials/repair.py`` turns an open report into a ``credential_repair`` check
-#: row that ``lop network doctor`` (relay path and local fallback) and the
-#: ``/network`` panel show on the OWNER — which is the sense in which this wording
-#: now reaches an operator, recomposed on their own surface rather than sent to
-#: them. What the borrower has is the ``interactive_required`` sentence in
-#: :func:`render_broker_error` — which names the owner and the command to run there,
-#: and is the reason the composed MCP failure line can be truthful without a repair
-#: op.
+#: The design's §4.7 row asked for a ``credential_repair`` op that raises a durable
+#: notice on the owning device; NO SUCH OP IS BUILT, and none is needed. What ships
+#: is DERIVED from the ``credential.report`` audit record written beside this
+#: refusal: ``credentials/repair.py`` turns an open report into a
+#: ``credential_repair`` check row that ``lop network doctor`` (relay path and local
+#: fallback) and the ``/network`` panel show on the OWNER, and
+#: ``credentials/repair_inbox.py`` turns the same derivation into one
+#: ``notifications.db`` item per open key — high on its first raise, so the banner
+#: ladder tells the owner's operator once without a panel open (#3522). That is the
+#: sense in which this wording reaches an operator: recomposed on their own
+#: surfaces, never sent to them. What the borrower has is the
+#: ``interactive_required`` sentence in :func:`render_broker_error` — which names
+#: the owner and the command to run there, and is the reason the composed MCP
+#: failure line can be truthful without a repair op.
 #:
 #: ``key`` is the placement key (``mcp:<url>`` or a provider name); the quoting is
 #: deliberate, because the operator pastes the command.
