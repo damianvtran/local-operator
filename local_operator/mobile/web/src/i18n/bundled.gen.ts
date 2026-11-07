@@ -525,7 +525,7 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.usage_reset.outcome_no_credit": "No reset credits are left.",
       "relay.usage_reset.outcome_nothing_to_reset": "Nothing was over its limit, so no window needed clearing.",
       "relay.usage_reset.outcome_reset": "{count, plural, =0 {Reset applied.} one {Reset applied \u2014 1 window cleared.} other {Reset applied \u2014 # windows cleared.}}",
-      "relay.usage_reset.refused": "That reset was refused. Refresh the list and try again.",
+      "relay.usage_reset.refused": "Nothing was spent \u2014 the reset was refused. Refresh the list.",
     },
   },
 };

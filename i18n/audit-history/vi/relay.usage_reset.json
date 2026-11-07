@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "relay.usage_reset",
-  "history_sha256": "fe74cb07e418d50bfaaa514949b1da743f84dc6716de4103db6fa2b618271ccd",
+  "history_sha256": "632f7a38ef5abff6baa566abc39ea5a2404444ef4e6bb5a2124ea2999b5927e3",
   "entries": [
     {
       "locale": "vi",
@@ -45,6 +45,27 @@
       },
       "status": "passed",
       "note": "12-key phone usage-reset sheet, all keys audited against the English source and its context sidecar: the failed outcome reads as UNKNOWN with the no-second-credit reassurance, refused is distinct, nothing-to-reset is distinct from no-credit, placeholders and plural arms match, widths fit maxCells. Deferred minor (vi's own): the unit is 'lượt' (an instance/turn) where the English says 'reset credit'; the badge shows a bare count, so the sheet never repeats the noun, but the two should be reconciled if a visible credit label is ever added."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.usage_reset",
+      "source_sha256": "bf65e8762769356d071899fe4d017c43eb8633802210af1e68f71394bfcbd97b",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent 0ff12ad4ef23)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagents a826f3746582 then e297f58a2103 for the refused rewrite)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "12-key phone usage-reset sheet. Round-1 audit read the complete namespace against the English source and its context sidecar (failed outcome honest and retry-safe, refused distinct, nothing-to-reset distinct from no-credit, placeholders/plural arms exact, widths inside maxCells). This row also covers the later `refused` rewrite ('Nothing was spent — the reset was refused. Refresh the list.'), re-audited in all seven locales: passed. Deferred NITs: outcome_failed is 94 of 96 cells; outcome_nothing_to_reset repeats 'cửa sổ nào' in one sentence."
     }
   ]
 }

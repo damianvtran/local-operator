@@ -525,7 +525,7 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.usage_reset.outcome_no_credit": "Kh\u00f4ng c\u00f2n l\u01b0\u1ee3t \u0111\u1eb7t l\u1ea1i n\u00e0o.",
       "relay.usage_reset.outcome_nothing_to_reset": "Kh\u00f4ng c\u1eeda s\u1ed5 n\u00e0o v\u01b0\u1ee3t gi\u1edbi h\u1ea1n n\u00ean kh\u00f4ng c\u1ea7n x\u00f3a c\u1eeda s\u1ed5 n\u00e0o.",
       "relay.usage_reset.outcome_reset": "{count, plural, =0 {\u0110\u00e3 \u0111\u1eb7t l\u1ea1i.} other {\u0110\u00e3 \u0111\u1eb7t l\u1ea1i \u2014 \u0111\u00e3 x\u00f3a # c\u1eeda s\u1ed5.}}",
-      "relay.usage_reset.refused": "Y\u00eau c\u1ea7u \u0111\u1eb7t l\u1ea1i b\u1ecb t\u1eeb ch\u1ed1i. H\u00e3y l\u00e0m m\u1edbi danh s\u00e1ch r\u1ed3i th\u1eed l\u1ea1i.",
+      "relay.usage_reset.refused": "Ch\u01b0a d\u00f9ng l\u01b0\u1ee3t n\u00e0o \u2014 \u0111\u1eb7t l\u1ea1i b\u1ecb t\u1eeb ch\u1ed1i. H\u00e3y l\u00e0m m\u1edbi danh s\u00e1ch.",
     },
   },
 };

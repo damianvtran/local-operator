@@ -10,5 +10,5 @@
   "relay.usage_reset.outcome_no_credit": "Không còn lượt đặt lại nào.",
   "relay.usage_reset.outcome_nothing_to_reset": "Không cửa sổ nào vượt giới hạn nên không cần xóa cửa sổ nào.",
   "relay.usage_reset.outcome_failed": "Chưa xác định được kết quả đặt lại. Hãy thử lại để kiểm tra — thử lại không tốn thêm lượt nào.",
-  "relay.usage_reset.refused": "Yêu cầu đặt lại bị từ chối. Hãy làm mới danh sách rồi thử lại."
+  "relay.usage_reset.refused": "Chưa dùng lượt nào — đặt lại bị từ chối. Hãy làm mới danh sách."
 }

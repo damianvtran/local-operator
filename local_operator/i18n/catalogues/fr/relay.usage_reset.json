@@ -10,5 +10,5 @@
   "relay.usage_reset.outcome_no_credit": "Plus aucun crédit de réinitialisation.",
   "relay.usage_reset.outcome_nothing_to_reset": "Rien n’avait dépassé sa limite : aucune fenêtre à vider.",
   "relay.usage_reset.outcome_failed": "Réinitialisation non confirmée. Réessayez pour vérifier — aucun second crédit ne sera utilisé.",
-  "relay.usage_reset.refused": "Réinitialisation refusée. Actualisez la liste et réessayez."
+  "relay.usage_reset.refused": "Rien n’a été débité — réinit. refusée. Actualisez la liste."
 }

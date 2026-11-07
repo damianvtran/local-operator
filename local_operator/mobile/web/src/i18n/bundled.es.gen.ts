@@ -525,7 +525,7 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.usage_reset.outcome_no_credit": "No quedan cr\u00e9ditos de reinicio.",
       "relay.usage_reset.outcome_nothing_to_reset": "Ninguna ventana superaba su l\u00edmite; no hac\u00eda falta liberar ninguna.",
       "relay.usage_reset.outcome_reset": "{count, plural, =0 {Reinicio aplicado.} one {Reinicio aplicado \u2014 1 ventana liberada.} many {Reinicio aplicado \u2014 # de ventanas liberadas.} other {Reinicio aplicado \u2014 # ventanas liberadas.}}",
-      "relay.usage_reset.refused": "Se rechaz\u00f3 ese reinicio. Actualiza la lista y reint\u00e9ntalo.",
+      "relay.usage_reset.refused": "No se gast\u00f3 nada \u2014 se rechaz\u00f3 el reinicio. Actualiza la lista.",
     },
   },
 };

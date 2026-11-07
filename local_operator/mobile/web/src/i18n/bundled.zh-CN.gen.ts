@@ -525,7 +525,7 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.usage_reset.outcome_no_credit": "\u5df2\u65e0\u5269\u4f59\u91cd\u7f6e\u6b21\u6570\u3002",
       "relay.usage_reset.outcome_nothing_to_reset": "\u6ca1\u6709\u7a97\u53e3\u8fbe\u5230\u4e0a\u9650\uff0c\u56e0\u6b64\u65e0\u9700\u6e05\u9664\u3002",
       "relay.usage_reset.outcome_reset": "{count, plural, =0 {\u91cd\u7f6e\u5df2\u751f\u6548\u3002} other {\u91cd\u7f6e\u5df2\u751f\u6548 \u2014 \u5df2\u6e05\u9664#\u4e2a\u7a97\u53e3\u3002}}",
-      "relay.usage_reset.refused": "\u6b64\u6b21\u91cd\u7f6e\u8bf7\u6c42\u88ab\u62d2\u7edd\u3002\u8bf7\u5237\u65b0\u5217\u8868\u540e\u91cd\u8bd5\u3002",
+      "relay.usage_reset.refused": "\u672a\u6d88\u8017\u4efb\u4f55\u6b21\u6570 \u2014 \u91cd\u7f6e\u8bf7\u6c42\u88ab\u62d2\u7edd\u3002\u8bf7\u5237\u65b0\u5217\u8868\u3002",
     },
   },
 };

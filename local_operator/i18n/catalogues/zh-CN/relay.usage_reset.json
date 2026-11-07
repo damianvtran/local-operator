@@ -10,5 +10,5 @@
   "relay.usage_reset.outcome_no_credit": "已无剩余重置次数。",
   "relay.usage_reset.outcome_nothing_to_reset": "没有窗口达到上限，因此无需清除。",
   "relay.usage_reset.outcome_failed": "未能确认重置结果。请重试以核实 — 重试不会再消耗一次重置。",
-  "relay.usage_reset.refused": "此次重置请求被拒绝。请刷新列表后重试。"
+  "relay.usage_reset.refused": "未消耗任何次数 — 重置请求被拒绝。请刷新列表。"
 }

@@ -10,5 +10,5 @@
   "relay.usage_reset.outcome_no_credit": "No quedan créditos de reinicio.",
   "relay.usage_reset.outcome_nothing_to_reset": "Ninguna ventana superaba su límite; no hacía falta liberar ninguna.",
   "relay.usage_reset.outcome_failed": "No se pudo confirmar el reinicio. Reinténtalo para comprobarlo — no gastará otro crédito.",
-  "relay.usage_reset.refused": "Se rechazó ese reinicio. Actualiza la lista y reinténtalo."
+  "relay.usage_reset.refused": "No se gastó nada — se rechazó el reinicio. Actualiza la lista."
 }

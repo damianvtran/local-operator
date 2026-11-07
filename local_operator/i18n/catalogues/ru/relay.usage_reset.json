@@ -10,5 +10,5 @@
   "relay.usage_reset.outcome_no_credit": "Кредитов сброса не осталось.",
   "relay.usage_reset.outcome_nothing_to_reset": "Ни один лимит не был превышен, поэтому очищать окна не потребовалось.",
   "relay.usage_reset.outcome_failed": "Не удалось узнать, применён ли сброс. Повторите для проверки — второй кредит не спишется.",
-  "relay.usage_reset.refused": "Сброс отклонён. Обновите список и повторите попытку."
+  "relay.usage_reset.refused": "Ничего не списано — сброс отклонён. Обновите список."
 }

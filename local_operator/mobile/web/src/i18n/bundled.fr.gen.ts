@@ -525,7 +525,7 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.usage_reset.outcome_no_credit": "Plus aucun cr\u00e9dit de r\u00e9initialisation.",
       "relay.usage_reset.outcome_nothing_to_reset": "Rien n\u2019avait d\u00e9pass\u00e9 sa limite\u202f: aucune fen\u00eatre \u00e0 vider.",
       "relay.usage_reset.outcome_reset": "{count, plural, =0 {R\u00e9initialisation appliqu\u00e9e.} one {R\u00e9initialisation appliqu\u00e9e \u2014 1 fen\u00eatre vid\u00e9e.} many {R\u00e9initialisation appliqu\u00e9e \u2014 # de fen\u00eatres vid\u00e9es.} other {R\u00e9initialisation appliqu\u00e9e \u2014 # fen\u00eatres vid\u00e9es.}}",
-      "relay.usage_reset.refused": "R\u00e9initialisation refus\u00e9e. Actualisez la liste et r\u00e9essayez.",
+      "relay.usage_reset.refused": "Rien n\u2019a \u00e9t\u00e9 d\u00e9bit\u00e9 \u2014 r\u00e9init. refus\u00e9e. Actualisez la liste.",
     },
   },
 };

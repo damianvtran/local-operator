@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "relay.usage_reset",
-  "history_sha256": "b3421c49383a5a37be540a4dd45f37b838790b319911bf07489cdfb82549cf13",
+  "history_sha256": "8301e3d50f17b81e4c50dd66e74d93bae28336fe12ff8ed580e47eeed6e13f2e",
   "entries": [
     {
       "locale": "ru",
@@ -45,6 +45,27 @@
       },
       "status": "passed",
       "note": "12-key phone usage-reset sheet, all keys audited against the English source and its context sidecar: the failed outcome reads as UNKNOWN with the no-second-credit reassurance, refused is distinct, nothing-to-reset is distinct from no-credit, placeholders and plural arms match, widths fit maxCells. Deferred minor (ru's own): the badge 'Сброс · {count}' is the bare noun the shell's own countdown also uses ('сброс через {countdown}'), so on the card only the accessible name separates 'a reset you can spend' from 'a reset that is due'."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.usage_reset",
+      "source_sha256": "bf65e8762769356d071899fe4d017c43eb8633802210af1e68f71394bfcbd97b",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent dc89f611738e)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagents c24f69db93bb then e297f58a2103 for the refused rewrite)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "12-key phone usage-reset sheet. Round-1 audit read the complete namespace against the English source and its context sidecar (failed outcome honest and retry-safe, refused distinct, nothing-to-reset distinct from no-credit, placeholders/plural arms exact, widths inside maxCells). This row also covers the later `refused` rewrite ('Nothing was spent — the reset was refused. Refresh the list.'), re-audited in all seven locales: passed. Deferred MINOR: glossary drift — 'кредит сброса' here vs bare 'сброс' in the shipped tui.usage.resets.*; the guide should pick one. Deferred NIT: confirm_title lower-case 'аккаунт' vs the sheet's capitalised card header."
     }
   ]
 }

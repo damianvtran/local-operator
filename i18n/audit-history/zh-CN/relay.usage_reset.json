@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "relay.usage_reset",
-  "history_sha256": "3b68fd35352e9996b3384e5ea7ec0e6aacb5c0e4d4d95e5ee0ffe766ed0cdaa4",
+  "history_sha256": "792995760037d902c3705e0a0315bfe09ab204fa842629888d67002d554cab5f",
   "entries": [
     {
       "locale": "zh-CN",
@@ -45,6 +45,27 @@
       },
       "status": "passed",
       "note": "12-key phone usage-reset sheet, all keys audited against the English source and its context sidecar: the failed outcome reads as UNKNOWN with the no-second-credit reassurance, refused is distinct, nothing-to-reset is distinct from no-credit, placeholders and plural arms match, widths fit maxCells. Deferred minor (zh-CN's own): Chinese carries no plural arm, so '将消耗1次重置（现有#次）' and '重置已生效 — 已清除#个窗口' read identically at every count and the placeholder is the only signal; the badge is 41.9 px at meta size, addressed by the design round's 44 px floor."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.usage_reset",
+      "source_sha256": "bf65e8762769356d071899fe4d017c43eb8633802210af1e68f71394bfcbd97b",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent ada3bb290193)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagents a826f3746582 then e297f58a2103 for the refused rewrite)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "12-key phone usage-reset sheet. Round-1 audit read the complete namespace against the English source and its context sidecar (failed outcome honest and retry-safe, refused distinct, nothing-to-reset distinct from no-credit, placeholders/plural arms exact, widths inside maxCells). This row also covers the later `refused` rewrite ('Nothing was spent — the reset was refused. Refresh the list.'), re-audited in all seven locales: passed. Deferred NITs: 请 in the retry/refresh sentences where the style guide reserves it for explicit 'please'; the =1 arm of confirm_prompt could read 最后一次重置机会."
     }
   ]
 }

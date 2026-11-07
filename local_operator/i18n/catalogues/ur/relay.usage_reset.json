@@ -10,5 +10,5 @@
   "relay.usage_reset.outcome_no_credit": "کوئی ری سیٹ کریڈٹ باقی نہیں۔",
   "relay.usage_reset.outcome_nothing_to_reset": "کوئی ونڈو حد سے اوپر نہیں تھی، اس لیے کچھ صاف کرنے کی ضرورت نہیں پڑی۔",
   "relay.usage_reset.outcome_failed": "ری سیٹ کی تصدیق نہیں ہو سکی۔ جانچنے کے لیے دوبارہ کوشش کریں — اس سے دوسرا کریڈٹ خرچ نہیں ہو گا۔",
-  "relay.usage_reset.refused": "وہ ری سیٹ مسترد کر دیا گیا۔ فہرست ریفریش کر کے دوبارہ کوشش کریں۔"
+  "relay.usage_reset.refused": "کچھ خرچ نہیں ہوا — ری سیٹ مسترد کر دیا گیا۔ فہرست ریفریش کریں۔"
 }
