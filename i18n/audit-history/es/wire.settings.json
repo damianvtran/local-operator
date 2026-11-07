@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "92dc84d6703d75e72bf6730092a0a9213e4f9445781a08b69823600e5a2d5d71",
+  "history_sha256": "c5276fadd76ad7eaf25284478b72bbe910b159f6c58cf33b5e28eec98b06031d",
   "entries": [
     {
       "locale": "es",
@@ -109,6 +109,26 @@
       },
       "status": "passed",
       "note": "Delta re-audit of the ambient help. 'Sale del tope de no dirigidos, nunca se suma al tope de la cuenta' names the unaddressed ceiling as parent and the account ceiling as the total never added to, which matches ambient <= unaddressed in ScreeningBudget.clamped(); spelling the second ceiling out instead of the sibling's anaphor is required, not drift. The unaddressed label is 'Tope de no dirigidos / hora' at 27 cells after the design trim. Accepted minors: the help is 156 cells and takes the marked cut at the 74-cell band (as three sibling rows already do) and the label's ' / hora' breaks the 'por hora' pattern of its siblings by design."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "a6301181965176db933ba0600331d424edb6db83f5f0327937f6e2c7308cfd07",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3570 implementer)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, session 8035a3c0e3b6, task i18n-audit-3570-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'y volver a completa no los recupera' checked for accuracy, glossary (choice label 'completa' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). No blocker/major. F1 minor accuracy: label 'Reanudación' dropped 'replay' -> 'Reproducción al reanudar' (precedent cli.global_help.resume 'reproduciendo'). F2 minor idiom: help 'Tarjeta es mucho más pequeña' lacked the article -> 'La tarjeta es…'. F3 minor idiom: card.description 'la cola reciente' (cola reads as queue) and 'turnos anteriores no literales' (reads as non-literal/figurative) -> 'las entradas recientes; sin turnos anteriores literales'. compactación/sesión/operador/turno/tarjeta match glossary and shipped es. No placeholders/ICU/plurals. Receipt valid only if applied bytes equal expected-final-values.json."
     }
   ]
 }

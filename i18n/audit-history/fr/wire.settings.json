@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings",
-  "history_sha256": "1a06d5a90ddc73cd2fec319a1f6460a9a2174e10f71279cf5aa7d8c32f3cab2c",
+  "history_sha256": "a6e011a478250a1d4dbeda230c32de8f376c48dcfa3758deea4b2687d63a951b",
   "entries": [
     {
       "locale": "fr",
@@ -109,6 +109,26 @@
       },
       "status": "passed",
       "note": "Delta re-audit of the ambient help after the design round moved the carve-out parent from the account ceiling to the unaddressed ceiling. Semantics verified: 'Prélevé sur le plafond des messages non adressés, jamais ajouté à celui du compte' keeps the order claim and the chatter bound. F1 (layout MAJOR, 183 cells cut at 74 and 94) resolved in this wave by adopting the auditor's own 149-cell replacement, which wraps in two lines at both bands; F2 (colon preceded by U+0020 instead of the guide's U+202F) applied by the manager and re-checked on the bytes. No numerals, no ICU, no bidi."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "a6301181965176db933ba0600331d424edb6db83f5f0327937f6e2c7308cfd07",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3570 implementer)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, session 8035a3c0e3b6, task i18n-audit-3570-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 5,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'et repasser en complet ne les rétablit pas' checked for accuracy, glossary (choice label 'complet' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b) against en, glossary and fr guide. F1 MAJOR glossary: help said 'compaction'; glossary and the section title use 'compactage' (11 shipped uses) -> fixed. F2 minor accuracy: label 'Reprise' dropped 'replay' -> 'Rejeu à la reprise' (precedent cli.global_help.resume 'en rejouant'); full.label 'complète' -> 'complet' to agree with 'rejeu' (matches display_dock 'complet'). F3 minor idiom+typography: card.description 'non littéraux' reads as 'figurative' and ';' was preceded by U+0020 -> 'sans les tours antérieurs mot pour mot' with U+202F. F4 nit: 'la fin récente' for 'tail' accepted. No placeholders/ICU/plurals/markup in source or target; U+2019 apostrophes correct. Receipt valid only if the applied bytes equal expected-final-values.json (verify.py)."
     }
   ]
 }

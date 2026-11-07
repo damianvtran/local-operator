@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "09c3404e61bda32b8c93d7954c86fdc4e52c6df349f9df664928d41a49af5b96",
+  "history_sha256": "74e4452cd03649d6e6b4580d4a0ce546f63bc89dd677136f4447a47cd8db100c",
   "entries": [
     {
       "locale": "zh-CN",
@@ -109,6 +109,26 @@
       },
       "status": "passed",
       "note": "Delta re-audit of the ambient help. '从非定向上限中划出' matches the ambient <= unaddressed clamp and '绝不额外增加账户上限' reads as the order claim that the slice never raises the account total; dropping '只能' loses nothing because '最多' carries the bound. This space-free locale always takes the marked cut at the 74-cell band (a documented product-wide limit, shared by all four zh screening helps), and the value renders whole at 94 cells. No digits, placeholders or bidi controls."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "a6301181965176db933ba0600331d424edb6db83f5f0327937f6e2c7308cfd07",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3570 implementer)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, session 8035a3c0e3b6, task i18n-audit-3570-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause '切换回完整也无法恢复' checked for accuracy, glossary (choice label '完整' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). No blocker/major. F1 minor glossary drift: help '操作者' vs the namespace's '操作员' (6 wire.settings uses incl. subagents_model_choice.choice.operator.label) -> '操作员'. F2 nit: '最近的尾部' slightly literal for 'tail', accepted. 压缩/会话/轮次/卡片/重放 match glossary and shipped zh-CN (cli.global_help.resume 重放). No placeholders/ICU/plurals. Receipt valid only if applied bytes equal expected-final-values.json."
     }
   ]
 }
