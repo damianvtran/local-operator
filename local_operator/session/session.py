@@ -30791,49 +30791,14 @@ class Session:
             # there would be an untrue diagnosis for 24 hours, which is the
             # class this method exists to remove, so the strike stays.
             return ("gone", "")
-        detail = f'"{server}"'
         try:
-            if manager.startup_settling() and manager.get_connection_status(server) != "connected":
-                return ("unavailable", f"MCP server {detail} is still connecting")
-            status = manager.get_connection_status(server)
-            if status == "auth-required":
+            wait = self._mcp_server_wait_detail(manager, server)
+            if wait is None:
                 return (
                     "unavailable",
-                    f"MCP server {detail} needs re-authentication — run /mcp reauth {server}",
+                    f'MCP server "{server}" is connected but no longer lists "{name}"',
                 )
-            if status == "connecting":
-                # Ahead of the breaker on purpose: a half-open probe inside its
-                # connect is still ``reconnect_suspended`` (the breaker closes
-                # only when the connect lands), and "still connecting" is the
-                # truthful answer for that instant. Nothing else is both
-                # suspended and connecting: the fast ladder is paused while the
-                # breaker is open, and auth-required is answered above.
-                return ("unavailable", f"MCP server {detail} is still connecting")
-            if manager.reconnect_suspended(server):
-                # The flap breaker: paused and retried on its own cool-down
-                # (``RECONNECT_PROBE_COOLDOWN_S``), so it names no command —
-                # ``/mcp reauth`` would re-spend a perfectly valid grant. This
-                # text becomes the stall notice's ``Reason:``, whose body says
-                # the watch is retrying; the two must agree. Pinned verbatim in
-                # tests/unit/monitors (re-verify the probe if it changes), with
-                # a 100-char server name still inside the 200-char notice clip.
-                return (
-                    "unavailable",
-                    f"MCP server {detail} keeps dropping; reconnects are paused "
-                    "for a cool-down, then retried automatically",
-                )
-            if status == "connected":
-                return (
-                    "unavailable",
-                    f'MCP server {detail} is connected but no longer lists "{name}"',
-                )
-            if status == "disconnected":
-                return ("unavailable", f"MCP server {detail} is disconnected")
-            # ``get_connection_status`` has exactly four answers, so anything
-            # else means a manager that does not implement the contract (a
-            # fake, a snapshot). Waiting is the safe reading, but the detail
-            # names what it actually said rather than claiming "disconnected".
-            return ("unavailable", f'MCP server {detail} reported status "{status}"')
+            return ("unavailable", wait)
         except Exception:  # noqa: BLE001 — fail CLOSED, and the states are the reason
             # A manager that cannot answer is not proof of absence, so this does
             # NOT invent "unavailable" (which would suspend the strike ladder
@@ -30929,6 +30894,134 @@ class Session:
             logger.debug("monitor server lookup failed for %s", name, exc_info=True)
         return None
 
+    def _monitor_mcp_liveness(self, name: str) -> tuple[str, str] | None:
+        """Whether an ``mcp__`` tick may reach the read-only gate and ``execute``.
+
+        ``None`` = the tool was built from THIS connection's ``tools/list`` on
+        a connected server: run the gate, then the call, as before.
+        ``("unavailable", detail)`` = wait without a strike; ``("strike",
+        reason)`` = the probe could not answer, so the tick fails closed.
+
+        WHY a tick must not run a cache-built tool. A just-booted runtime
+        registers MCP tools from the tool cache ahead of the live connect
+        (``deferred``). Their annotations are the CACHED ones, i.e. what the
+        server declared last time, and a deferred ``execute`` parks until the
+        connect lands and then calls the server WITHOUT consulting the new live
+        ``tools/list``. So a cached ``readOnlyHint: true`` would let an
+        unattended monitor invoke a tool whose live definition has since
+        dropped the hint (QA round 1 on #3546, Q-1: invocations 1→2). The
+        read-only rule is only honest against the live answer, so until the
+        live tool is in the registry nothing runs, whatever the cache says.
+
+        WHY it waits rather than strikes. The opposite failure is the one this
+        PR was opened for (v0.101.7, 2026-11-05 23:43: a restart registered
+        hint-less cached tools and monitor m4's first tick was refused and
+        struck, 1→2; five strikes disable the watch). A server that has not
+        connected yet is the same no-strike class ``_monitor_availability``
+        already waits on, and it uses that ladder's sentences
+        (``_mcp_server_wait_detail``), so an ``auth-required`` server names
+        ``/mcp reauth`` rather than reading as "still connecting". It does NOT
+        sit on the ordinary strike ladder: re-authentication is an operator
+        action, and striking would disable the watch before the operator acts;
+        the scheduler's unavailable ladder already disables after 24 h.
+
+        Once the live tool is registered the gate runs unchanged: a live tool
+        without the hint is refused and struck exactly as before, and arm
+        time never consults this.
+
+        Side effect beyond the cache case: a LIVE-built tool whose server is
+        not connected (dropped, re-auth, breaker open) also waits instead of
+        running. With the hint it previously ran, hit the dead transport and
+        was classified ``unavailable`` after the fact (``_mcp_call_lost_its_
+        server``); now nothing is attempted. Without the hint (lost via
+        ``tools/list_changed`` before the drop) it previously struck at once;
+        now it waits, bounded by the 24 h unavailable ladder, and strikes on
+        the first tick after the reconnect. Nothing executes either way.
+
+        Fail closed: a manager that cannot report status or tool origin
+        produces a STRIKE, never a wait (which would suspend the ladder
+        forever) and never a pass (which would run an unproven tool). Names
+        this method cannot attribute to a manager server (no manager, a tool
+        from the session's own inventory) keep the old path; they have no
+        cache-built form.
+        """
+        if not name.startswith("mcp__"):
+            return None
+        manager = self.mcp_manager
+        if manager is None:
+            return None
+        server = self._monitor_server_for(name)
+        if server is None:
+            return None
+        try:
+            meta = manager.get_tool_meta(name)
+            wait = self._mcp_server_wait_detail(manager, server)
+        except Exception:  # noqa: BLE001 — fail CLOSED: an unanswerable probe strikes
+            logger.debug("monitor liveness probe failed for %s", name, exc_info=True)
+            return (
+                "strike",
+                f'monitor can\'t watch "{name}": the connection state of MCP server '
+                f'"{server}" could not be read, so the tool cannot be shown to be live.',
+            )
+        if wait is not None:
+            return ("unavailable", wait)
+        if isinstance(meta, Mapping) and meta.get("deferred") is True:
+            # DEFENSIVE: the manager swaps the live tools in as part of the same
+            # connect that makes the server ``connected``, and round-1 review
+            # found no observable window between the two. Kept so a future
+            # reordering cannot reopen Q-1 through a connected-but-cached tool.
+            return (
+                "unavailable",
+                f'MCP server "{server}" is connected but "{name}" still comes from '
+                "the tool cache, not its live tool list",
+            )
+        return None
+
+    def _mcp_server_wait_detail(self, manager: Any, server: str) -> str | None:
+        """The wait sentence for a server that is not connected; ``None`` if connected.
+
+        One source for the per-status sentences (still connecting, re-auth
+        with its remedy, breaker paused, disconnected, an unknown status) so
+        ``_monitor_availability`` and ``_monitor_mcp_liveness`` cannot describe
+        one server two ways. Probe errors propagate: each caller decides its
+        own fail-closed answer.
+        """
+        detail = f'"{server}"'
+        if manager.startup_settling() and manager.get_connection_status(server) != "connected":
+            return f"MCP server {detail} is still connecting"
+        status = manager.get_connection_status(server)
+        if status == "auth-required":
+            return f"MCP server {detail} needs re-authentication — run /mcp reauth {server}"
+        if status == "connecting":
+            # Ahead of the breaker on purpose: a half-open probe inside its
+            # connect is still ``reconnect_suspended`` (the breaker closes
+            # only when the connect lands), and "still connecting" is the
+            # truthful answer for that instant. Nothing else is both
+            # suspended and connecting: the fast ladder is paused while the
+            # breaker is open, and auth-required is answered above.
+            return f"MCP server {detail} is still connecting"
+        if manager.reconnect_suspended(server):
+            # The flap breaker: paused and retried on its own cool-down
+            # (``RECONNECT_PROBE_COOLDOWN_S``), so it names no command —
+            # ``/mcp reauth`` would re-spend a perfectly valid grant. This
+            # text becomes the stall notice's ``Reason:``, whose body says
+            # the watch is retrying; the two must agree. Pinned verbatim in
+            # tests/unit/monitors (re-verify the probe if it changes), with
+            # a 100-char server name still inside the 200-char notice clip.
+            return (
+                f"MCP server {detail} keeps dropping; reconnects are paused "
+                "for a cool-down, then retried automatically"
+            )
+        if status == "connected":
+            return None
+        if status == "disconnected":
+            return f"MCP server {detail} is disconnected"
+        # ``get_connection_status`` has exactly four answers, so anything
+        # else means a manager that does not implement the contract (a
+        # fake, a snapshot). Waiting is the safe reading, but the detail
+        # names what it actually said rather than claiming "disconnected".
+        return f'MCP server {detail} reported status "{status}"'
+
     def _validate_monitor_call(self, tool_name: str, arguments: Mapping[str, Any]) -> str | None:
         """The gate, shared by arm-time validation and the run-time re-check
         (§6.1/§6.8): tool present, the harness's effective tier still ``read``,
@@ -30965,6 +31058,16 @@ class Session:
         state, detail = self._monitor_availability(spec.tool)
         if state == "unavailable":
             return {"error": detail, "kind": "unavailable"}
+        # Liveness BEFORE the read-only gate and before ``execute``: a tool built
+        # from the cache carries the cached hint and would pass the gate, then
+        # call the server once it connects without re-reading the live list
+        # (see ``_monitor_mcp_liveness``). Nothing runs until the live tool is in.
+        liveness = self._monitor_mcp_liveness(spec.tool)
+        if liveness is not None:
+            verdict, why = liveness
+            if verdict == "unavailable":
+                return {"error": why, "kind": "unavailable"}
+            return {"error": why}
         reason = self._validate_monitor_call(spec.tool, spec.arguments)
         if reason is not None:
             return {"error": reason}

@@ -146,3 +146,71 @@ def test_removed_server_delete_drops_every_digest(tmp_path: Path) -> None:
     cache.put("echo", _TOOLS, a)
     cache.delete("echo")
     assert cache.get("echo", a) is None
+
+
+# --- annotations survive the cache (monitor readOnlyHint) ------------------
+#
+# MEASURED (v0.101.7, 2026-11-05 23:43): a runtime rolled over, registered its
+# Slack tools from this cache before the live connect, and a monitor's first
+# tick was refused "does not declare readOnlyHint" and struck — the writer had
+# dropped ``annotations``, so every cache-built tool read as hint-less.
+
+
+async def _noop_call(*_args, **_kwargs):  # pragma: no cover - never executed
+    raise AssertionError("not called")
+
+
+def test_cache_round_trip_keeps_read_only_hint(tmp_path: Path) -> None:
+    from mcp.types import Tool, ToolAnnotations
+
+    from local_operator.mcp.manager import _tool_to_cache_entry
+    from local_operator.mcp.tool_bridge import build_agent_tool
+
+    tool = Tool(
+        name="read_channel",
+        description="read",
+        input_schema={"type": "object"},
+        annotations=ToolAnnotations(read_only_hint=True, title="Read"),
+    )
+    entry = _tool_to_cache_entry(tool)
+    # Wire spelling, never the SDK's snake-case field name.
+    assert entry["annotations"] == {"readOnlyHint": True, "title": "Read"}
+
+    cache = McpToolCache(tmp_path / "mcp_cache.db")
+    digest = config_digest(MCPStdioServerConfig(command="slack"))
+    cache.put("slack", [entry], digest)
+    loaded = cache.get("slack", digest)
+    assert loaded is not None and loaded == [entry]
+
+    agent_tool = build_agent_tool("slack", loaded[0], _noop_call)
+    assert agent_tool.mcp_annotations == {"readOnlyHint": True, "title": "Read"}
+
+
+def test_a_tool_without_annotations_writes_no_annotations_key() -> None:
+    from mcp.types import Tool
+
+    from local_operator.mcp.manager import _tool_to_cache_entry
+
+    entry = _tool_to_cache_entry(Tool(name="echo", input_schema={"type": "object"}))
+    assert "annotations" not in entry
+
+
+def test_an_old_cache_row_without_annotations_still_builds_a_tool(tmp_path: Path) -> None:
+    """Rows written before annotations were cached must keep loading: the
+    digest hashes the server CONFIG only, so the new key neither invalidates
+    them nor forces a re-auth — they simply carry no hint until the live
+    ``tools/list`` replaces them.
+    """
+    from local_operator.mcp.tool_bridge import build_agent_tool
+
+    cache = McpToolCache(tmp_path / "mcp_cache.db")
+    config = MCPStdioServerConfig(command="echo")
+    digest = config_digest(config)
+    cache.put("echo", _TOOLS, digest)  # the pre-fix row shape
+    # The digest is a function of the config alone (no tool payload input).
+    assert config_digest(config) == digest
+    loaded = cache.get("echo", digest)
+    assert loaded is not None and loaded == _TOOLS
+    agent_tool = build_agent_tool("echo", loaded[0], _noop_call)
+    assert agent_tool.mcp_annotations is None
+    assert agent_tool.name.endswith("echo")
