@@ -11,10 +11,14 @@ import time
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
-from local_operator.providers.usage import META_MUSE_USAGE_NOTES, usage_report_state
+from local_operator.providers.usage import (
+    META_MUSE_USAGE_NOTES,
+    RESET_CONSUME_OUTCOMES,
+    usage_report_state,
+)
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
@@ -287,6 +291,37 @@ async def models(
         controller.close()
 
 
+def _usage_result(reports: list[Any], *, live: bool) -> dict[str, Any]:
+    """The desktop's usage payload, built ONCE for every route that answers it.
+
+    ``GET /v1/desktop/usage`` and ``POST /v1/desktop/usage/reset`` must answer
+    IDENTICAL rows: the reset response is what the desktop paints immediately
+    after a spend, so a second projection is how a field added to one of them
+    goes missing from the other and the card contradicts itself. Everything
+    here is the established row (``dataclasses.asdict`` of a ``UsageReport``)
+    plus the three derived keys.
+    """
+    now = int(time.time() * 1000)
+    rows = []
+    for report in reports:
+        row = dataclasses.asdict(report)
+        # Arbitrary provider notes are not a safe public error vocabulary.
+        # Muse's fixed local provenance is essential to interpreting its
+        # passive meters, so retain only its known constants, never a
+        # provider-supplied string (even one labelled as Muse).
+        row["notes"] = (
+            report.notes
+            if report.provider == "meta-muse"
+            and isinstance(report.notes, str)
+            and report.notes in META_MUSE_USAGE_NOTES
+            else None
+        )
+        row["age_ms"] = max(0, now - report.fetched_at) if report.fetched_at > 0 else None
+        row["state"] = usage_report_state(report)
+        rows.append(row)
+    return {"reports": rows, "source": "live" if live else "cached", "fetched_at": now}
+
+
 @router.get("/v1/desktop/usage", response_model=CRUDResponse[UsageReports])
 async def usage(
     provider: str | None = Query(default=None, max_length=64),
@@ -305,25 +340,144 @@ async def usage(
             if live
             else controller.cached_usage_reports(provider)
         )
-        rows = []
-        now = int(time.time() * 1000)
-        for report in reports:
-            row = dataclasses.asdict(report)
-            # Arbitrary provider notes are not a safe public error vocabulary.
-            # Muse's fixed local provenance is essential to interpreting its
-            # passive meters, so retain only its known constants, never a
-            # provider-supplied string (even one labelled as Muse).
-            row["notes"] = (
-                report.notes
-                if report.provider == "meta-muse"
-                and isinstance(report.notes, str)
-                and report.notes in META_MUSE_USAGE_NOTES
-                else None
-            )
-            row["age_ms"] = max(0, now - report.fetched_at) if report.fetched_at > 0 else None
-            row["state"] = usage_report_state(report)
-            rows.append(row)
-        return reply({"reports": rows, "source": "live" if live else "cached", "fetched_at": now})
+        return reply(_usage_result(reports, live=live))
+    finally:
+        controller.close()
+
+
+class UsageResetRequest(BaseModel):
+    """Body of ``POST /v1/desktop/usage/reset`` -- exactly one credit.
+
+    ``extra="forbid"`` because these four fields ARE the contract: a caller that
+    misspells ``credential_ref`` must be told, not handed a reset spent on
+    something it did not name.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Registry provider id. ``openai`` is the only provider with a reset-credit
+    #: product today; an id the registry does not know is the sibling routes'
+    #: ``unknown_provider`` 422, not this model.
+    provider: str = Field(min_length=1, max_length=64)
+    #: The ``credential_ref`` a usage report carried. Names exactly ONE stored
+    #: login, which is what makes it unambiguous where a label is not.
+    credential_ref: str | None = Field(default=None, min_length=1, max_length=128)
+    #: The label the reports carry (``credential_identity``: email, account id,
+    #: then org name). Accepted alone (see ``ProviderController``) or beside a
+    #: ref, where it narrows the candidates first.
+    identity: str | None = Field(default=None, min_length=1, max_length=256)
+    #: Client-minted UUID, the vendor's idempotency key: the SAME value on a
+    #: retry of an attempt whose fate is unknown, a fresh one for a new attempt.
+    #: ``RequestID`` is the desktop plane's UUID shape, which subsumes the
+    #: 128-character bound the contract states.
+    redeem_request_id: RequestID
+
+    @model_validator(mode="after")
+    def _names_an_account(self) -> "UsageResetRequest":
+        """Refuse a body that names no account AT THE BODY LAYER.
+
+        A reset spends something that cannot be refunded, so a request carrying
+        neither identifier must never reach the controller -- there it would be
+        a ``refused`` verdict for a body-shaped mistake, and the desktop would
+        paint the failed band for a request that should not have been sent.
+        FastAPI answers this 422 with the validation detail, which is the shape
+        every other body-shaped refusal on this plane already has; no catalogue
+        copy is added by this PR.
+        """
+        if not self.credential_ref and not self.identity:
+            raise ValueError("credential_ref or identity is required")
+        return self
+
+
+class UsageReset(BaseModel):
+    """The result of ``POST /v1/desktop/usage/reset``.
+
+    ``usage`` is ``None`` after ``failed``/``refused``: no refresh is performed
+    there, so the desktop keeps the rows it already holds rather than being
+    handed a second, differently-aged copy of them.
+    """
+
+    reset: dict[str, Any]
+    usage: UsageReports | None = None
+
+
+@router.post("/v1/desktop/usage/reset", response_model=CRUDResponse[UsageReset])
+async def reset_usage(body: UsageResetRequest, auth: DesktopAuth = Depends(get_desktop_auth)):
+    """``usage.reset`` -- spend ONE vendor usage-reset credit on ONE account.
+
+    CONTRACT (the other half is ``src/shared/desktop-contract.ts`` in
+    ``local-operator-ui``; these shapes are stated here so the two cannot
+    drift):
+
+    * op ``usage.reset``, method POST, path ``/v1/desktop/usage/reset``,
+      desktop auth required (the sibling routes' bearer/Origin rules).
+    * request body, ``extra="forbid"``:
+
+      ``provider``           registry provider id (``openai`` is the only one
+                             with a reset-credit product; anything else is a
+                             ``failed``/``refused`` verdict from the
+                             controller, and an id the registry does not know
+                             is the sibling ``unknown_provider`` 422).
+      ``credential_ref``     the ref a usage report carried; names exactly one
+                             stored login. Optional.
+      ``identity``           the label the reports carry (email, account id,
+                             then org name). Optional.
+      ``redeem_request_id``  client-minted UUID, the vendor's idempotency key:
+                             reuse it when retrying an attempt whose outcome is
+                             unknown, mint a new one for a new attempt.
+
+      At least one of ``credential_ref``/``identity`` is REQUIRED: a body with
+      neither is a 422 at the body layer and never reaches the controller.
+    * response, ``CRUDResponse.result``:
+
+      ``{"reset": {"outcome": str, "windows_reset": int, "detail": str,
+      "refused": bool}, "usage": {...} | null}``
+
+      ``usage`` is EXACTLY the ``GET /v1/desktop/usage`` result (same row
+      builder, `live` source) and is present only for a definitive outcome; it
+      is ``null`` after ``failed``/``refused``, where no refresh runs.
+    * outcome vocabulary:
+
+      ``reset``             a credit was spent; ``windows_reset`` counts the
+                            windows it cleared.
+      ``already_redeemed``  this redeem id was already spent (a retry, or a
+                            joiner of an in-flight attempt).
+      ``no_credit``         the account has nothing left to spend.
+      ``nothing_to_reset``  no window was over its limit, so none needed
+                            clearing.
+      ``failed``            the outcome is NOT established (transport, HTTP,
+                            unparseable answer); retry with the SAME redeem id.
+
+      ``refused`` is true only when nothing reached the vendor, so a caller can
+      say "nothing was spent" instead of "the credit's fate is unknown".
+
+    The access token is never logged nor returned, and the response never
+    echoes ``credential_ref`` or ``identity``: the outcome is the answer, and
+    the rows it carries already name their own account.
+
+    A definitive outcome forces ONE ``force_refresh`` fetch of the provider, so
+    the numbers the desktop paints next are the post-spend ones; two concurrent
+    requests for the same attempt share one vendor call (see
+    ``ProviderController.consume_usage_reset``).
+    """
+    controller = auth.controller()
+    try:
+        if controller.provider(body.provider) is None:
+            raise HTTPException(422, _wd.unknown_provider().envelope())
+        result = await controller.consume_usage_reset(
+            body.provider,
+            body.identity,
+            body.redeem_request_id,
+            credential_ref=body.credential_ref,
+        )
+        payload = UsageReset(reset=dataclasses.asdict(result))
+        if result.outcome in RESET_CONSUME_OUTCOMES:
+            reports = await controller.fetch_usage([body.provider], force_refresh=True)
+            # Validated into the SAME model the GET declares, so this route's
+            # row shape is the response model's shape rather than a bare dict
+            # that merely agrees with it today.
+            payload.usage = UsageReports(**_usage_result(reports, live=True))
+        return reply(payload)
     finally:
         controller.close()
 

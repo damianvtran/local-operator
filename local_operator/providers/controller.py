@@ -20,7 +20,16 @@ import logging
 import random
 import sqlite3
 import time
-from typing import TYPE_CHECKING, Any, Callable, Collection, Mapping, Protocol, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    ClassVar,
+    Collection,
+    Mapping,
+    Protocol,
+    cast,
+)
 
 import httpx
 
@@ -1700,14 +1709,66 @@ class ProviderController:
             reports.extend(result)
         return reports
 
+    #: In-flight redeems by ``(provider, target, redeem_request_id)``, and the
+    #: locks that SERIALIZE distinct attempts on one target.
+    #:
+    #: Class-level, deliberately, and the deviation is the whole point: this
+    #: class is built per request (``DesktopAuth.controller()``), so an
+    #: instance attribute would be a lock of one -- every concurrent request
+    #: would hold its OWN lock and all of them would reach the vendor. The
+    #: resource being protected is one stored login's credits, which is
+    #: process-wide, so the guard has to be too. Cross-PROCESS overlap stays
+    #: the vendor's job: ``redeem_request_id`` is its idempotency key, and two
+    #: lop processes share no memory this could reach.
+    _reset_flights: ClassVar[dict[tuple[str, str, str], asyncio.Future[ResetConsumeResult]]] = {}
+    _reset_locks: ClassVar[dict[tuple[str, str], asyncio.Lock]] = {}
+    #: Bound on the lock registry: a caller may name an account that does not
+    #: exist, and each such call would otherwise leave a lock behind forever.
+    #: Only UNHELD locks are dropped, so eviction can never admit a second
+    #: redeem onto a target someone is currently inside.
+    _RESET_LOCKS_MAX = 64
+
+    @classmethod
+    def _reset_lock(cls, provider: str, target: str) -> asyncio.Lock:
+        """The lock serializing redeems on ONE ``(provider, target)`` login."""
+        key = (provider, target)
+        lock = cls._reset_locks.get(key)
+        if lock is None:
+            if len(cls._reset_locks) >= cls._RESET_LOCKS_MAX:
+                for stale, candidate in list(cls._reset_locks.items()):
+                    if not candidate.locked():
+                        del cls._reset_locks[stale]
+            lock = cls._reset_locks[key] = asyncio.Lock()
+        return lock
+
     async def consume_usage_reset(
         self,
         provider: str,
-        identity: str,
+        identity: str | None,
         redeem_request_id: str,
         credential_ref: str | None = None,
     ) -> ResetConsumeResult:
-        """Spend one vendor usage-reset credit on ONE named account.
+        """Spend one vendor usage-reset credit on ONE named account. Never raises.
+
+        SINGLE FLIGHT, in two layers, because a credit is the one thing here
+        that cannot be refunded:
+
+        * the SAME attempt arriving twice at once (same provider, same target,
+          same ``redeem_request_id``) JOINS the running call and is answered
+          with its result -- the vendor sees one request, not two. That is the
+          double-submit the desktop can produce when two surfaces (or one
+          double click) fire the confirm; the alternative, letting the second
+          through, spends the vendor's idempotency on a race the client never
+          meant to run and still costs a round trip.
+        * DIFFERENT attempts on the same login are SERIALIZED, so a client that
+          minted two ids for one account cannot race two credits into flight;
+          the second one runs against the post-reset state and the vendor's own
+          answer settles it.
+
+        A joiner of a call that was cancelled (or that raised past this layer's
+        guards) is answered ``failed`` rather than an exception: the method's
+        contract is a verdict, and an unknown fate is exactly what ``failed``
+        means.
 
         ``identity`` is the label the reports carry (``credential_identity``:
         email, then account id, then org name) and it -- not the registry id,
@@ -1733,11 +1794,62 @@ class ProviderController:
         the SAME one when retrying an ambiguous failure, and a fresh one for a
         genuinely new attempt (see :func:`consume_openai_reset_credit`).
 
+        ``identity`` and ``credential_ref`` are each OPTIONAL and either may be
+        given alone: a ref names one row by itself (the desktop contract sends
+        exactly one of the two), while a label alone resolves as before. With
+        NEITHER there is nothing to spend on, so the call REFUSES rather than
+        falling back to the cascade's current account -- guessing here is how a
+        credit lands on a login the user never named.
+
         On a spent or already-redeemed credit the cached usage row for the
         provider is dropped, because that row now states a count and set of
         windows that are no longer true and the cache is shared by every lop
         session on the machine -- a stale row would make the panel look like
         the button did nothing.
+        """
+        target = credential_ref or identity or ""
+        flight_key = (provider, target, redeem_request_id)
+        flights = ProviderController._reset_flights
+        running = flights.get(flight_key)
+        if running is not None:
+            # ``shield``: THIS caller giving up (a desktop request abandoned on
+            # a closed panel) must not cancel the attempt whose outcome the
+            # other caller is still waiting for.
+            return await asyncio.shield(running)
+        flight: asyncio.Future[ResetConsumeResult] = asyncio.get_running_loop().create_future()
+        flights[flight_key] = flight
+        try:
+            async with self._reset_lock(provider, target):
+                result = await self._redeem_usage_reset(
+                    provider, identity, redeem_request_id, credential_ref
+                )
+        except asyncio.CancelledError:
+            flight.set_result(ResetConsumeResult(outcome="failed", detail="cancelled"))
+            raise
+        except BaseException:  # noqa: BLE001 -- see the never-raises contract above
+            flight.set_result(ResetConsumeResult(outcome="failed", detail="internal error"))
+            raise
+        else:
+            # BEFORE the ``finally`` drops the registry entry, so a joiner
+            # already inside this key can never miss an outcome and mint a
+            # second call.
+            flight.set_result(result)
+            return result
+        finally:
+            flights.pop(flight_key, None)
+
+    async def _redeem_usage_reset(
+        self,
+        provider: str,
+        identity: str | None,
+        redeem_request_id: str,
+        credential_ref: str | None = None,
+    ) -> ResetConsumeResult:
+        """The redeem itself, run single-flight by :meth:`consume_usage_reset`.
+
+        Split out so the wrapper above has exactly one thing to run: everything
+        below is the pre-flight resolution, the vendor call and the cache drop,
+        and it must run ONCE per attempt.
         """
         from local_operator.providers.auth_store import credential_identity
 
@@ -1766,13 +1878,28 @@ class ProviderController:
                 label = credential_identity(candidate)
             except Exception:  # noqa: BLE001 -- an unlabelled row matches nothing
                 label = None
-            if label == identity:
+            if identity and label == identity:
                 matches.append(candidate)
         if credential_ref:
+            # A ref names exactly ONE row on its own, so a caller that sends a
+            # ref and no label is resolved here rather than refused for the
+            # absent label it was never asked to supply: the desktop contract
+            # carries either identifier. With BOTH, the label still narrows the
+            # candidates first, which is what keeps a stale ref from crossing
+            # accounts.
+            pool = (
+                matches
+                if identity
+                else [
+                    candidate
+                    for candidate in rows
+                    if getattr(candidate, "credential_type", None) == "oauth"
+                ]
+            )
             row = next(
                 (
                     candidate
-                    for candidate in matches
+                    for candidate in pool
                     if self._credential_ref(candidate) == credential_ref
                 ),
                 None,
@@ -1780,9 +1907,18 @@ class ProviderController:
             if row is None:
                 return ResetConsumeResult(
                     outcome="failed",
-                    detail=f"no stored login for '{identity}'",
+                    detail=(
+                        f"no stored login for '{identity}'"
+                        if identity
+                        else "no stored login for that credential"
+                    ),
                     refused=True,
                 )
+        elif not identity:
+            # Neither identifier: refuse BEFORE anything is sent. Falling back
+            # to a store row or the cascade would spend an unrecoverable credit
+            # on an account the caller did not name.
+            return ResetConsumeResult(outcome="failed", detail="no account named", refused=True)
         elif len(matches) > 1:
             return ResetConsumeResult(outcome="failed", detail="ambiguous login", refused=True)
         elif matches:
