@@ -41,7 +41,6 @@ import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Final
-from urllib.parse import urlsplit
 
 from local_operator.team_bridge.link_preview.cache import PreviewCache, PreviewScope
 from local_operator.team_bridge.link_preview.cache import artifact_id as artifact_id_for
@@ -523,9 +522,6 @@ async def _store_artifact(
 #: parsing; the stdlib's ``_UNSAFE_URL_BYTES_TO_REMOVE``, private, so restated).
 _STRIPPED_BY_URLSPLIT = ("\t", "\r", "\n")
 
-#: RFC 1035's limit on a whole name in presentation form, trailing dot excluded.
-_MAX_HOST_OCTETS = 253
-
 
 def _target_refusal(target: str) -> AbsentReason | None:
     """Why ``target`` cannot be previewed as an absolute URL, or ``None`` if it can.
@@ -558,47 +554,26 @@ def _target_refusal(target: str) -> AbsentReason | None:
         return "no-metadata"
     if any(character in target for character in _STRIPPED_BY_URLSPLIT):
         # ``urlsplit`` silently deletes these (WHATWG), so ``https:\t//host`` would
-        # pass the checks below as ``https://host`` — while the fetcher's
+        # pass the shared spelling check as ``https://host`` — while the fetcher's
         # collapsed-scheme repair reads the same string as ``https:`` plus
         # ``\t//host`` and builds a URL with no host, a retryable error whose
         # Retry never works (security S-3). Refusing the raw spelling keeps the
         # guard and the fetcher judging one string; no real link contains them.
         return "blocked-host"
-    try:
-        parts = urlsplit(target)
-        scheme = parts.scheme.lower()
-        # ``hostname`` also validates the netloc (an unterminated IPv6 literal
-        # raises), and ``port`` raises on an out-of-range one; a URL that fails
-        # either is one nothing downstream could use.
-        host = parts.hostname
-        # Reading ``port`` is a VALIDATION, not a use: urlsplit defers the port
-        # parse, so an out-of-range one raises only when the attribute is read.
-        parts.port
-    except ValueError:
-        return "blocked-host"
-    if scheme not in ("http", "https"):
-        return "unsupported-scheme"
-    if not host:
-        return "blocked-host"
-    try:
-        encoded = host.encode("idna")
-    except UnicodeError:
-        # ``.`` or an over-long label: the resolver's own encode would raise the
-        # same way after a lookup was already attempted.
-        return "blocked-host"
-    if len(encoded.rstrip(b".")) > _MAX_HOST_OCTETS:
-        # The codec checks each label (<= 63) but not the total, so five legal
-        # labels would still cost a lookup for a name DNS cannot hold (S-4).
-        return "blocked-host"
-    # EVERY OTHER REFUSAL THE FETCHER CAN DECIDE FROM THE STRING, ON THE RAW TARGET
-    # (security S-5). The cache key drops the fragment and re-encodes the query, so
-    # ``page#\x01`` and ``page`` (or ``?a=\x01`` and ``?a=%01``) are ONE key; had
+    # EVERY REFUSAL THE FETCHER CAN DECIDE FROM THE STRING — scheme, host, port,
+    # IDNA, length — ON THE RAW TARGET, and only there (security S-5, review m1:
+    # a second copy here used the IDNA 2003 codec where the request uses 2008, two
+    # answers to one question). The cache key drops the fragment and keys the
+    # query in httpx's on-wire encoding, so ``page#\x01`` and ``page`` (or
+    # ``?a=\x01`` and ``?a=%01``) are ONE key; had
     # the fetcher refused the raw spelling and the answer been cached under that
     # key, one sender's unrequestable link would deny every reader the legitimate
     # card for ``NEGATIVE_TTL_S``. Refused here, before the key exists, it is
     # never cached — the credential refusal's placement, for the same reason.
-    # Only refusals that are a property of the NORMALISED URL (a name that does
-    # not exist, a private address, an unusable redirect hop) reach the cache.
+    # Only refusals that hold for EVERY spelling sharing the key reach the cache:
+    # a name that does not exist and a private address are properties of the
+    # host, and an unusable redirect hop is a property of the request bytes,
+    # which the key now pins (``canonical_url`` keeps the query as sent, S-8).
     try:
         vet_url_spelling(target)
     except PolicyRefusal as refusal:

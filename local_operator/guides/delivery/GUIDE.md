@@ -40,6 +40,24 @@ source-only checks are not native proof. Failed setup stops dispatch: report the
 prerequisite and bounded repair. Use the harness browser, no second stack; follow
 AGENTS.md's HOME/config, CMUX stripping and exact-process-group teardown rules.
 
+**Budget costly evidence.** A native, simulator, device or hosted E2E lane gets
+3 failed-or-cancelled attempts OR 6 h from first dispatch — the same budget
+measured two ways: PR #156 (local-operator-mobile) saw 36 failures at a 118 min
+median cadence. Attempts lost to our own harness count. Spent, stop dispatching
+and escalate with each option's consequence: merge on unit/contract tests plus
+manual device QA; split the harness into its own PR; drop the row; or extend by a
+stated amount for a stated reason. No new mechanism and no retry while the
+escalation is open. A lane never once succeeding in 3 attempts is a harness
+problem until shown otherwise — 20 of those 36 failures, 41.4 h, came after the
+last product commit.
+
+**Measure before you cap; name the invariant.** No new timeout, cap, threshold or
+retry count without the distribution it bounds (n, median, max, source) and a
+setting above the observed max; every mechanism (cache, reuse, skip, fixture,
+gate) and shortcut names its invariant and the check proving it — no check, no
+shortcut. PR #156 capped hierarchy reads at 20 s over a measured 66–173 s, and
+reused a candidate app on a fixture port that was ephemeral: a round-36 blocker.
+
 ## Worktrees
 
 The manager (or lead coder) owns ONE PR worktree in `<repo>/.worktrees/` from
@@ -72,6 +90,37 @@ holds forbid hold-class runs, not evidence. Read CI once at the terminal merge
 gate, never sleep-poll it mid-cycle; investigate even out-of-slice fails.
 
 ## Converge, do not restart
+
+**Converge the base once, at the merge gate.** Do not merge or rebase the base
+into a PR mid-review; the one exception is GitHub reporting DIRTY where a required
+run cannot start — prefer `workflow_dispatch` on the branch ref, because a
+`pull_request` workflow gets no merge ref on a conflicting PR and never starts.
+At the gate: converge, rebase proof, ONE round on files upstream also touched, CI.
+PR #156 merged main 13 times, each a proof, a pin recompute and often a round.
+
+**Harness-only delta: no numbered round.** After a clean round on head R, delta
+R..H takes no `### Agent review — round N` when
+`scripts/harness_delta_proof.py R H` exits 0: same merge-base;
+`.github/harness-paths` present and unchanged; every changed path (added,
+modified, deleted, both sides of a rename, mode) under a `harness:` glob; nothing
+ship-reachable. That proves the one invariant: *no byte the shipping pipeline
+consumes differs between R and H*. Instead, ONE `### Harness delta check — R..H`
+at the merge gate by an independent reviewer reading for gate weakening (deleted
+or loosened assertions, skips, widened tolerances, `continue-on-error`, a probe
+that cannot fail) AND for any harness change that runs with release triggers,
+secrets, signing or publishing, plus the script output the merger re-runs; QA
+retained, shipped bytes unchanged. Anything unreadable, unresolvable or
+unclassifiable is a round or exit 2, never a pass.
+
+Honest yield: it exempts only manifest-declared harness files nothing in the ship
+closure names — a reachability classifier made safe by failing closed, not a proof
+that a harness change cannot alter behaviour.
+
+**Split when the harness outgrows the feature.** At each review request compare
+added lines under harness globs with all others (`--split` prints both); harness
+above product moves the harness to its own PR (review plus its own negative
+control, no product QA), leaving the feature a minimal proof. PR #156 crossed at
+round 1 (2,787 vs 2,764 lines) and stayed crossed from round 11 (9,780 vs 4,730).
 
 Complete every applicable initial stream (code, independent real-path QA,
 design, UX, security) across its full in-scope surface before remediation.
@@ -119,11 +168,16 @@ correctness, security or regression risk. MINOR/NIT do not force another round.
   Never a minors-only commit after all streams are terminal: it re-stales the head.
 - **Freshness.** A delta round is `### Agent review — round <N>`, `Scope:
   <prev-head>..<head>`, by an independent reviewer. MECHANICAL rebase/merge of
-  main (`scripts/rebase_proof.py`) keeps rounds fresh on its proof. A clean
-  stream is NOT re-run when the delta misses its surface: a test-only, CI-fix or
-  comment-only commit after clean rounds gets at most a delta code check, no
-  QA/design/UX round. Executable code needs a delta round plus QA re-testing prior
-  FAIL rows and the surfaces it moved; other rows stay `retained (<sha>)`.
+  main (`scripts/rebase_proof.py`) keeps rounds fresh on its proof, and so does
+  a harness-only delta (`scripts/harness_delta_proof.py`, above) — that is the
+  ONLY extra exemption. A clean stream is NOT re-run when the delta misses its
+  surface: a test-only, docs-only, CI-fix or comment-only commit after clean
+  rounds gets at most a delta code check, no QA/design/UX round. `tests/` is
+  product here, so a test change never takes the harness-only carve-out —
+  weakening a test weakens the gate — and it still needs only that delta code
+  check, not a numbered round. Executable code needs a delta round plus QA
+  re-testing prior FAIL rows and the surfaces it moved; other rows stay
+  `retained (<sha>)`.
 - **Hygiene.** Rounds only on pushed heads; one comment per stream per round; no
   `re-pin`/`addendum` comments. Amend your own round (`gh api -X PATCH`) only
   for provenance/typos, before any remediation reply; never change `Scope:`.

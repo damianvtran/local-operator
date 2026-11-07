@@ -232,8 +232,17 @@ async def test_suspended_reconnect_is_unavailable(tmp_path: Any) -> None:
     try:
         assert session._monitor_availability(mcp_name()) == (
             "unavailable",
-            'MCP server "datadog" keeps dropping; reconnects are paused and retried automatically',
+            'MCP server "datadog" keeps dropping; reconnects are paused for a cool-down, '
+            "then retried automatically",
         )
+        # The stall notice clips its ``Reason:`` at NOTICE_ERROR_CHARS: even the
+        # longest legal server name (``SERVER_NAME_RE``, 100 chars) must leave
+        # the "retried automatically" promise whole (195 of 200).
+        from local_operator.monitors.delivery import NOTICE_ERROR_CHARS
+
+        _, detail = session._monitor_availability(mcp_name())
+        longest = detail.replace('"datadog"', '"' + "x" * 100 + '"')
+        assert len(longest) <= NOTICE_ERROR_CHARS
     finally:
         await session.dispose()
 

@@ -10,8 +10,8 @@ account could replay into another session. So the key is the whole
 from the same triple, and a lookup for another scope is a MISS that fetches for
 itself rather than a hit that leaks.
 
-WHY THE CANONICAL FORM IS ONLY A KEY. Two links that differ in case or in the
-order of their query parameters name one page, so they share one entry. What is
+WHY THE CANONICAL FORM IS ONLY A KEY. Two links that differ in host case, a
+default port or a fragment send one request, so they share one entry. What is
 fetched and what is returned stay the URL the reader was shown: a cache that
 rewrote the request (or the card's link) to its own normalised spelling would be
 answering a question nobody asked. See :func:`canonical_url`.
@@ -53,7 +53,9 @@ from collections import OrderedDict
 from collections.abc import Callable, Coroutine, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Final
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
+
+import httpx
 
 from local_operator.team_bridge.link_preview.models import LinkPreviewResolution
 
@@ -165,8 +167,32 @@ def canonical_url(url: str) -> str:
     Case in the scheme and host is not case-sensitive, a fragment never reaches
     the origin, and an explicit default port names the same socket as an implicit
     one, so all three are normalised away. The query is PRESERVED — it routinely
-    selects the page, and dropping it would answer for the wrong document — and
-    its parameters are ordered so ``?b=2&a=1`` and ``?a=1&b=2`` share one entry.
+    selects the page, and dropping it would answer for the wrong document.
+
+    THE QUERY IS KEYED EXACTLY AS IT IS SENT (security S-8). It used to be
+    decoded, sorted and re-encoded, which made ``?to=\\evil.test/x`` and
+    ``?to=%5C%5Cevil.test%2Fx`` one key — but httpx sends the first's backslashes
+    raw, so they are two different requests, and an origin that echoes its query
+    into ``Location`` redirects them differently: the first is refused at the hop
+    and that ``blocked-host`` was then served to the second from cache for the
+    whole negative TTL (or the clean ``ready`` to the refused spelling). A
+    redirect is a property of the REQUEST BYTES, so two spellings may share an
+    answer only when their bytes do. Of the two fixes on offer this one was
+    chosen over fetching the key's normalised form instead: that would send a
+    request nobody wrote (sorted parameters, ``?flag`` rewritten as ``?flag=``)
+    and break the rule that the fetched URL is the caller's. The price is that
+    reordered parameters are two entries — one extra fetch, never a wrong card.
+    The on-wire form is httpx's own encoding, so ``?a=é`` and ``?a=%C3%A9``,
+    which ARE one request, still share an entry.
+
+    THE PATH AND QUERY ARE ONE VALUE: httpx's ``raw_path``, the request target it
+    writes on the request line (security S-13). Rebuilding them from ``urlsplit``
+    dropped an empty query, so ``/p?`` and ``/p`` shared a key though httpx sends
+    ``GET /p?`` and ``GET /p``. ``raw_path`` also carries httpx's dot-segment
+    removal and path percent-encoding, so ``/./p``, ``/a/../p`` and ``/p`` — and
+    ``/é`` and ``/%C3%A9`` — now share one entry; each pair was measured sending an
+    identical request line to a capturing socket, so merging them saves fetches
+    without ever merging two different requests.
 
     USERINFO IS DROPPED. ``https://user:pass@host/x`` is the same resource as
     ``https://host/x``; keeping credentials in a cache key would put them in a
@@ -207,8 +233,20 @@ def canonical_url(url: str) -> str:
     netloc = f"[{host}]" if ":" in host else host
     if port is not None:
         netloc = f"{netloc}:{port}"
-    query = urlencode(sorted(parse_qsl(parts.query, keep_blank_values=True)))
-    return urlunsplit((scheme, netloc, parts.path or "/", query, ""))
+    return urlunsplit((scheme, netloc, "", "", "")) + _target_as_sent(url.strip(), parts)
+
+
+def _target_as_sent(url: str, parts: SplitResult) -> str:
+    """The path and query httpx puts on the request line (see :func:`canonical_url`).
+
+    A key function must be total, so a URL httpx cannot parse keeps its path and
+    query as written — the fetcher refuses such a URL before any request, and the
+    entry it would key is one no fetch fills.
+    """
+    try:
+        return httpx.URL(url).raw_path.decode("ascii")
+    except (httpx.InvalidURL, UnicodeError, ValueError):
+        return urlunsplit(("", "", parts.path or "/", parts.query, ""))
 
 
 def key_for(scope: PreviewScope, url: str) -> PreviewKey:

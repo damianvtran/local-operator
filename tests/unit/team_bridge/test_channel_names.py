@@ -34,7 +34,7 @@ from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
 from local_operator.team_bridge.tool import BridgeRuntime, execute_bridge
 from tests.unit.team_bridge.test_channel_tool import RecordingClient
 
-QA_ID = "bcv_82e302c190df4b3db0dde405e73d09dc"
+QA_ID = "bcv_c719ca33307b45e189cf11b419fdc8c1"
 
 OWNER = OwnerSnapshot(
     credential_id=7,

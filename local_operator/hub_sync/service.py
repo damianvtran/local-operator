@@ -2151,7 +2151,16 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     counts = {"available": 0, "failed": 0, "updating": 0, "up-to-date": 0, "applied": 0}
     items: list[dict[str, Any]] = []
-    for item in doc.get("items", {}).values():
+    # The SAME stale-sign-in rule ``links_snapshot`` applies (review m1): a
+    # ``no-credential`` recorded before a usable login is withdrawn here too, so
+    # ``/hub/status`` and ``/hub/links`` never disagree about one item while the
+    # woken check is on its way. ``credential`` below stays the last tick's
+    # record -- it reports what that tick ran with, not the login now.
+    login_since = _radient_login_since(ctx, doc.get("items", {}).values())
+    for stored in doc.get("items", {}).values():
+        item = stored
+        if _no_credential_is_stale(stored, login_since):
+            item = {**stored, "error_class": None, "error_subclass": None, "last_error": None}
         kind = item.get("kind", "agent")
         if kind not in ("agent", "team", "skill"):
             # Skill failures are part of the updates surface now (the operator's
@@ -2455,6 +2464,9 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
     now = datetime.now(timezone.utc)
     links: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
+    # One login probe per snapshot; each item is then ordered against it
+    # (``_no_credential_is_stale``, see ``_direction_status``).
+    login_since = _radient_login_since(ctx, items.values())
     for record in prov.iter_baselines(ctx.config_dir):
         if kinds is not None and record.kind not in kinds:
             continue
@@ -2526,8 +2538,22 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                 "auto_will_push": _auto_will_push(item, policy, ctx, now, eligibility),
                 "baseline_state": record.recorded_by,
                 "remote_revision": record.remote_revision,
-                "pull": _direction_status(item, "pull", policy, now, capability),
-                "push": _direction_status(item, "push", policy, now, capability),
+                "pull": _direction_status(
+                    item,
+                    "pull",
+                    policy,
+                    now,
+                    capability,
+                    signed_in=_no_credential_is_stale(item, login_since),
+                ),
+                "push": _direction_status(
+                    item,
+                    "push",
+                    policy,
+                    now,
+                    capability,
+                    signed_in=_no_credential_is_stale(item, login_since),
+                ),
             }
         )
     links.sort(
@@ -3201,23 +3227,103 @@ def record_outbound_receipt(
     prov.write_baseline(ctx.config_dir, replace(record, outbound=receipt))
 
 
+def _radient_login_since(ctx: HubSyncContext, items: Any) -> int | None:
+    """When the newest Radient login the hub could use was stored (epoch ms), or
+    ``None``. Local, no network; probed only when some item carries a stored
+    ``no-credential`` (the one error a sign-in can make stale), so a snapshot with
+    none never opens the auth store.
+
+    The projections are local reads, so this cannot run the hub's own resolver
+    (``resolve_radient_oauth_access`` may refresh a token over the network). It
+    asks ``radient_oauth_login_usable_since``, which applies that resolver's LOCAL
+    refusals -- destination guard, OAuth-only, dead grant, moved family,
+    delegation -- so a login the hub would refuse never counts as a sign-in
+    (PR #3536 review M1 / QA Q1). Never raises: doubt reads as signed out, which
+    only keeps the stored ``no-credential`` as it was.
+    """
+
+    try:
+        if ctx.config_manager is None or not any(
+            isinstance(item, Mapping) and item.get("error_class") == "no-credential"
+            for item in items
+        ):
+            return None
+        from local_operator.providers.radient_credentials import (
+            configured_radient_base_url,
+            radient_oauth_login_usable_since,
+        )
+
+        return radient_oauth_login_usable_since(
+            Path(ctx.config_dir), configured_radient_base_url(ctx.config_manager)
+        )
+    except Exception:  # noqa: BLE001 - a status read must never fail on a probe
+        return None
+
+
+def _no_credential_is_stale(item: Mapping[str, Any], login_since: int | None) -> bool:
+    """Whether this item's stored ``no-credential`` predates a usable login.
+
+    Only a refusal recorded BEFORE the login is stale: the remedy it names was
+    done afterwards. A refusal recorded after the login is a current fact (a
+    refresh that failed, a block, anything only the network decides), so it is
+    reported as is.
+
+    The refusal's own time (``st.NO_CREDENTIAL_AT``) decides; a row written
+    before that stamp existed falls back to ``last_checked_at``, the time of the
+    check that wrote it. Every doubt keeps the refusal VISIBLE, because hiding a
+    real one hides the only remedy while showing a stale one only lasts until the
+    check the sign-in wakes replaces it:
+
+    * no readable time -- it cannot be ordered against the login (review r2 m3);
+    * the SAME SECOND -- the stamps are whole seconds and the woken check fires
+      ~0.1-0.25 s after the sign-in, so a tie may well be a refusal AFTER it.
+      Comparing the login's milliseconds against a truncated stamp read every
+      such tie as older and masked it (QA r2 Q3, review r2 m2).
+    """
+
+    if login_since is None or item.get("error_class") != "no-credential":
+        return False
+    recorded = item.get(st.NO_CREDENTIAL_AT) or item.get("last_checked_at")
+    parsed = _parse_iso(recorded) if isinstance(recorded, str) else None
+    if parsed is None:
+        return False
+    return login_since // 1000 > int(parsed.timestamp())
+
+
 def _direction_status(
     item: Mapping[str, Any],
     direction: Literal["pull", "push"],
     policy: Any,
     now: Any,
     capability: bool,
+    *,
+    signed_in: bool = False,
 ) -> dict[str, Any]:
     """One direction's full status: pull and push are independent, never merged.
 
     A failure in one direction cannot overwrite the other's receipt or error;
     whole-row health is a derived view, not the source of truth.
+
+    ``signed_in`` says this item's stored ``no-credential`` is STALE: a login
+    the hub could use was stored after the check that recorded it
+    (``_no_credential_is_stale``). That refusal persists until the next
+    successful check; reporting it as ``failed`` after the operator signed in told them to
+    sign in again for up to a whole interval. With a login present now, that
+    remedy is already done, so the error is withdrawn and the direction falls
+    through to its ordinary state (normally ``idle``) until the check the sign-in
+    hook woke replaces the row. Not ``checking``: the desktop treats that as busy
+    and disables the row's controls, which would stick if no check ever ran (no
+    runner in this process). Any other error, or ``no-credential`` while still
+    signed out, is reported unchanged.
     """
 
     pulled = direction == "pull"
     enabled = policy.subscribe if pulled else bool(policy.auto_push)
     last = item.get("last_pulled_at") if pulled else item.get("last_pushed_at")
     error = item.get("error_class") if pulled or not pulled else None
+    stale_sign_in = error == "no-credential" and signed_in
+    if stale_sign_in:
+        error = None
     state = st.effective_state(item, now)
     if pulled:
         if error:
@@ -3245,8 +3351,8 @@ def _direction_status(
         "attempts": int(item.get("attempts") or 0),
         "next_retry_at": item.get("next_retry_at"),
         "error_class": error if pulled else None,
-        "error_subclass": item.get("error_subclass") if pulled else None,
-        "safe_message": item.get("last_error") if pulled else None,
+        "error_subclass": (item.get("error_subclass") if pulled and not stale_sign_in else None),
+        "safe_message": item.get("last_error") if pulled and not stale_sign_in else None,
         "operation_id": None,
         "model_used": (
             item.get("summary", {}).get("model")

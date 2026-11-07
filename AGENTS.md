@@ -2749,11 +2749,16 @@ affected content. **The proof is file-level: it does NOT detect a cross-file
 semantic break** — upstream renames a function in a file the PR never touches
 while the PR calls it from another, and the verdict is still MECHANICAL (QA
 reproduced exactly that). Green CI on the rebased head is the guard for that
-class, which is why merge-time CI stays required. Likewise, a test-only or
-docs-only commit after a clean round needs only a delta review scoped to
-`<prev-head>..<head>` by any independent reviewer, and no QA re-run unless the
-change touches a QA'd surface. A real BLOCKER/MAJOR found anywhere is still
-fixed.
+class, which is why merge-time CI stays required. Likewise, a test-only,
+docs-only, CI-fix or comment-only commit after a clean round needs only a delta
+check or review scoped to `<prev-head>..<head>` by any independent reviewer, and
+no QA re-run unless the change touches a QA'd surface — and a commit touching
+only paths the repo's `.github/harness-paths` manifest declares harness needs only
+the merge-gate harness delta check described below: shipped bytes did not move
+either way. `tests/` is product in that manifest unless the repo declares
+otherwise, so a test change is executable and never takes the harness-only
+carve-out — weakening a test weakens the gate. A real BLOCKER/MAJOR found
+anywhere is still fixed.
 
 **Finally, a terminal approval is a property of a SHA, not of a PR.** Commits
 landing after a clean round — including ones driven by a *different* stream,
@@ -2764,6 +2769,21 @@ review that are exclusively non-conflicting fixes from parallel approved
 streams — a docs or nit commit from another round — leave it fresh, as does a
 rebase or merge of main whose posted `### Rebase proof` is MECHANICAL.
 
+The second exception is a **harness-only delta**: a delta R..H that
+`python scripts/harness_delta_proof.py R H` (exit 0) proves changed no byte the
+shipping pipeline consumes — same merge-base, manifest present and unchanged,
+every changed path under a `harness:` glob, none ship-reachable. It opens no
+numbered round; it is settled at the merge gate by ONE
+`### Harness delta check — R..H` from an independent reviewer, reading for gate
+weakening AND for any harness change that runs with release triggers, secrets,
+signing or publishing, with the script output re-run by the merger. The proof
+exists so the exception cannot swallow a product change: PR #156
+(local-operator-mobile) spent 40 rounds on a product finished at round 3, and 20
+of its 36 failed native attempts came after the last product-code commit. It is a
+reachability classifier made safe by failing closed — not a proof that a harness
+change cannot alter behaviour. Rules, manifest format and the split trigger:
+`guide://delivery`.
+
 **Review economy.** Across the last ~75 merged non-release PRs in each repo
 (manager measurement, 2026-11-02, from `gh pr view --json comments`), lop ran a
 median of 6 rounds per PR (p90 15) and ui 7 (p90 20); ~55% of rounds were
@@ -2773,9 +2793,11 @@ that stop that live in `guide://delivery` ("Review economy"): briefs carry the
 operator's request, acceptance criteria and non-goals; pre-existing defects
 never gate; all streams review one pushed head in waves (target <= 2); accepted
 MINOR/NIT fold into the remediation commit or are deferred. Freshness is
-unchanged from the rule above: only a MECHANICAL rebase/merge of main keeps
-rounds fresh on its proof; a docs/comments/test-only commit gets a delta round,
-and any executable change, minor fixes included, gets a numbered
+unchanged from the rule above: only a MECHANICAL rebase/merge of main, or a
+harness-only delta proved by `scripts/harness_delta_proof.py`, keeps rounds
+fresh on its proof; a commit that changes anything the shipping pipeline
+consumes — `tests/` included — gets at least a delta check, and any executable
+change, minor fixes included, gets a numbered
 `### Agent review — round <N>` delta round scoped `<prev-head>..<head>` by an
 independent reviewer, plus QA if a QA'd surface moved.
 

@@ -2506,9 +2506,26 @@ class McpManager:
         At once, including mid cool-down: the pending half-open probe is
         cancelled BEFORE this attempt, so it can neither race the manual
         connect nor fire later against the connection the user just made. If
-        this attempt fails for a non-auth reason the server goes back to
-        paused, with a fresh probe on the first cool-down step.
+        this attempt fails for a non-auth reason the server gets back the
+        retry state it had when Reconnect started: a paused server is paused
+        again with a fresh probe on the first cool-down step, a server on the
+        fast ladder re-enters the ladder, and one that was never connected is
+        left as it was before the breaker probed (nothing retries it).
         """
+        # Read before the reset below wipes them. A failed Reconnect must hand
+        # the server back to the retry state it was in, never invent a worse or
+        # a better one (#3523 R2-1; #3541 QA Q5):
+        # * paused: the breaker had suspended it;
+        # * retrying: it had a live connection (which the teardown below
+        #   drops), a pending ladder attempt, or the waiter
+        #   ``_handle_disconnect`` installs on a drop, which outlives the gaps
+        #   between ladder attempts. A server down since startup has none.
+        was_paused = name in self._reconnect_suspended
+        was_retrying = (
+            name in self._connections
+            or name in self._pending_reconnects
+            or name in self._connect_futures
+        )
         self._reconnect_history.pop(name, None)
         self._reconnect_suspended.discard(name)
         self._backoff_index.pop(name, None)
@@ -2532,14 +2549,30 @@ class McpManager:
             return None
         except Exception as exc:
             logger.warning("Manual MCP reconnect failed for %r: %s", name, exc)
-            # Back to paused-and-probing rather than orphaned: the reset above
-            # dropped the probe, and with the connection torn down no transport
-            # close will ever reach ``_schedule_reconnect`` again, so without
-            # this a failed Reconnect left the server dead for the life of the
-            # process. The cool-down restarts at its first step (the reset
+            # Restore the retry state, never orphan: the reset above dropped
+            # the probe and the ladder, and with the connection torn down no
+            # transport close will ever reach ``_schedule_reconnect`` again, so
+            # without this a failed Reconnect left the server dead for the life
+            # of the process. Both arms restart at their first step (the reset
             # cleared the ladder): the user just asked for a fresh start.
-            self._reconnect_suspended.add(name)
-            self._schedule_probe(name)
+            #
+            # * paused: re-pause with one probe.
+            # * retrying: the ordinary ladder, NOT a pause (R2-1: the monitor
+            #   would say it "keeps dropping" when it has not). A server that
+            #   stays down trips the breaker on its own, and only then is it
+            #   paused and described that way.
+            # * neither (down since startup): nothing, as before the breaker
+            #   probed. Retrying such a server is a product change.
+            # Never for a connected server (R2-2): the teardown above emptied
+            # the slot, so a connection here was registered by another route (a
+            # ``reload``) while this dial was in flight, and that route already
+            # closed the breaker. Same check as ``_rearm_paused_probe``.
+            if name not in self._connections:
+                if was_paused:
+                    self._reconnect_suspended.add(name)
+                    self._schedule_probe(name)
+                elif was_retrying:
+                    self._schedule_reconnect(name)
             return None
         self._register_connection(conn)
         self._fire_tools_changed()
@@ -5151,8 +5184,15 @@ class McpManager:
         pending = self._pending_probes.get(name)
         if pending is not None and not pending.done() and pending is not asyncio.current_task():
             return
+        # The connection registered NOW is the only one the probe may replace:
+        # a call-site trip leaves its failing connection in the slot, and the
+        # probe must still redial that one. Any other connection it finds when
+        # it wakes was made by another route and means the server is back.
+        armed_on = self._connections.get(name)
         task = asyncio.get_running_loop().create_task(
-            self._reconnect(name, self._next_probe_delay(name), self._epoch, probe=True)
+            self._reconnect(
+                name, self._next_probe_delay(name), self._epoch, probe=True, armed_on=armed_on
+            )
         )
         self._pending_probes[name] = task
 
@@ -5217,12 +5257,22 @@ class McpManager:
             task.cancel()
         self._pending_probes.clear()
 
-    async def _reconnect(self, name: str, delay: float, epoch: int, *, probe: bool = False) -> None:
+    async def _reconnect(
+        self,
+        name: str,
+        delay: float,
+        epoch: int,
+        *,
+        probe: bool = False,
+        armed_on: ServerConnection | None = None,
+    ) -> None:
         """One reconnect attempt after ``delay``; the epoch guards resurrection.
 
         ``probe=True`` is the half-open breaker's single attempt (see
         :meth:`_schedule_probe`): a failure steps the cool-down rather than
         re-entering the fast ladder; the auth and success arms are shared.
+        ``armed_on`` is the connection registered when the probe was armed:
+        the only one a probe may tear down.
         """
         try:
             await asyncio.sleep(delay)
@@ -5235,6 +5285,19 @@ class McpManager:
             # auth arm took the server while the probe slept: either way this
             # attempt is no longer the breaker's to make, and an auth-blocked
             # server must never be dialled on a timer.
+            return
+        current = self._connections.get(name) if probe else None
+        if current is not None and current is not armed_on:
+            # Connected by another route while the probe slept, yet still
+            # suspended (#3523 R2-2): never tear a live connection down to
+            # redial it. The server is back, so close the breaker the way
+            # ``_register_connection`` does and stand down without dialling.
+            # Only the breaker: the route that registered this connection went
+            # through ``_register_connection`` itself, so the recovery notice,
+            # the waiter settle and the startup-failure clear already happened.
+            self._reconnect_suspended.discard(name)
+            self._reconnect_history.pop(name, None)
+            self._cancel_probe(name)
             return
         cfg = self._configs.get(name)
         if cfg is None:

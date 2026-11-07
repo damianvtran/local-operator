@@ -76,8 +76,10 @@ These apply to the Minerva organization's tenant only; they are that team's
 convention, not runtime behaviour.
 
 - **Canonical QA room:** `qa-coordination`,
-  `bcv_82e302c190df4b3db0dde405e73d09dc` — tenant-visible, with all humans
-  and every chief of staff.
+  `bcv_c719ca33307b45e189cf11b419fdc8c1` — tenant-visible.
+  `bcv_82e302c190df4b3db0dde405e73d09dc` is an archived duplicate with the same
+  name; it is not the room, so never post there or treat a read of it as
+  anything.
 - **Interim rule (set 2026-11-06): Slack while agent messages are broken.**
   It applies to a session that normally has the `bridge` tool when Team
   Bridge is signed out or a read of that room fails. A subagent has no
@@ -86,10 +88,11 @@ convention, not runtime behaviour.
   reach Team Bridge. Then Slack #qa-coordination is an acceptable TEMPORARY
   surface; say that you are using it and why. Before each Slack START, DONE
   or hold post, retry `channel_history` on
-  `bcv_82e302c190df4b3db0dde405e73d09dc`. The rule ends the moment that read
-  succeeds: post only in Team Bridge from then on, carry any open window or
-  hold over with a one-line pointer to the Slack thread, and stop reading
-  Slack as the source of truth.
+  `bcv_c719ca33307b45e189cf11b419fdc8c1`. The rule ends the moment that read (or
+  `channel_history` on the name `qa-coordination`, which only resolves open
+  rooms) succeeds: post only in Team Bridge from then on, carry any open
+  window or hold over with a one-line pointer to the Slack thread, and stop
+  reading Slack as the source of truth.
 
 ## What it does when nothing is open
 

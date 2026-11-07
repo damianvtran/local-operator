@@ -811,8 +811,8 @@ def test_the_breaker_row_says_it_is_retried_and_names_the_app_action() -> None:
     assert format_mcp_unavailable_message("slack", reason).split("\n") == [
         "[session warning] MCP server 'slack' is unavailable: its tools are gone for now.",
         "Reason: auto-reconnect paused after >5 attempts in 30s; next attempt in 60s",
-        "It is retried automatically; Reconnect on its row in the app's Integrations "
-        "settings restores it at once.",
+        "It is retried automatically, so the agent need not call its tools until it "
+        "is back; Reconnect on its row in the app's Integrations settings retries it now.",
     ]
     text = format_mcp_unavailable_message("slack", reason)
     for promise in ("until it reconnects", "will reconnect", "available again", "comes back"):

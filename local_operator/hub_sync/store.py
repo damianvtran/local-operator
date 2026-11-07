@@ -63,6 +63,14 @@ NO_AUTO_RETRY = {"merge-refused"}
 #: so an unchanged request is never re-sent to the paid model.
 PROMPT_TOO_LONG_RETRY_S = 3600
 #: Classes that are not counted attempts.
+# When the item's CURRENT ``no-credential`` was recorded (ISO, whole seconds).
+# Every writer of that class stamps it -- the check arm of ``record_check`` and
+# ``record_failure`` for a merge/apply refusal -- because the status projections
+# withdraw a refusal that PREDATES a later sign-in (``service._no_credential_is_stale``)
+# and must order the refusal itself against the login. ``last_checked_at`` cannot
+# stand in: a failed apply does not move it, so a refusal written after the
+# sign-in looked older than it and was hidden (PR #3536 review r2 m2).
+NO_CREDENTIAL_AT = "no_credential_at"
 UNCOUNTED = {"no-credential", "concurrent-edit"}
 #: Systemic: one item hitting these stops an apply-all run (B4.4).
 SYSTEMIC = {"no-credential", "model-unavailable", "provider-error/quota"}
@@ -314,6 +322,7 @@ def apply_check(
             # never re-derives "needs the login" from the credential or the tenant.
             item["error_class"], item["last_error"] = "no-credential", None
             item["error_subclass"] = None
+            item[NO_CREDENTIAL_AT] = _iso(now)
             # It also RETIRES the schedule the class it replaced had armed (agent review
             # round 4, M2): an apply this item could not do is not worth retrying, and a
             # stale ``next_retry_at`` would keep answering "due" for a merge that cannot
@@ -501,6 +510,11 @@ def record_failure(
     item.pop("updating_since", None)
     item["error_class"], item["error_subclass"] = cls, sub or None
     item["last_error"] = scrub(message)
+    if cls == "no-credential":
+        # A merge/apply refusal lands here without touching ``last_checked_at``
+        # (that field drives the check schedule), so the refusal carries its own
+        # time: see ``NO_CREDENTIAL_AT``.
+        item[NO_CREDENTIAL_AT] = _iso(now)
     if summary is not None:
         item["summary"] = dict(summary)
     if cls not in UNCOUNTED:

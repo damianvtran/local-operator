@@ -1,0 +1,56 @@
+# Harness-path manifest — read by scripts/harness_delta_proof.py.
+#
+# Why: after a clean agent-review round, a delta that touches ONLY harness
+# (probes, benches, evals, evidence workflows) skips the numbered round and is
+# settled by one merge-gate `### Harness delta check` (guide://delivery,
+# "Harness-only delta"). The invariant: no byte the shipping pipeline — the
+# wheel/sdist and the published release — consumes differs between the reviewed
+# head and the current head.
+#
+# Constraints:
+# - This file is PRODUCT. Any change to it opens a round, so the exemption set
+#   cannot grow without review.
+# - A path matching neither list is product. tests/** is deliberately product:
+#   tests guard product behaviour, and weakening one must open a round.
+# - Where a harness and a ship glob both match, the more specific glob wins
+#   (ci.yml/publish.yml/release-gate.yml beat .github/workflows/**).
+# - Listing a path under harness never exempts it on its own: the script also
+#   refuses any harness file NAMED by the ship closure (repo path, basename,
+#   import/source specifier). Example, verified when this manifest landed:
+#   scripts/rebase_proof.py is harness here, but local_operator/guides/delivery/
+#   GUIDE.md names it, so a change to it reports SHIP-REACHABLE and opens a
+#   round. That is correct and conservative — the guide ships in the wheel and
+#   tells agents to run it — not a false alarm to tune away.
+
+# Ship: everything the wheel, sdist and release pipeline consume.
+ship: pyproject.toml
+ship: MANIFEST.in
+ship: local_operator/**
+ship: packaging/**
+ship: Makefile
+ship: .github/workflows/ci.yml
+ship: .github/workflows/mobile-web.yml
+# Workflows that can publish, sign or deploy something — the release pipeline
+# itself and every lane that reaches a store or an environment. Listed one by
+# one on purpose: a workflow joins the shipping pipeline through its trigger,
+# secrets and permissions, not by being named, so there is no
+# `.github/workflows/**` harness glob for a NEW workflow to hide behind.
+ship: .github/workflows/publish.yml
+ship: .github/workflows/release-gate.yml
+ship: .github/workflows/chrome-web-store.yml
+ship: .github/workflows/chrome-web-store-promote.yml
+ship: .github/workflows/extension.yml
+ship: .github/workflows/helpdesk.yml
+# Scheduled `actions: write` on every queued run: it can cancel a release run.
+ship: .github/workflows/reap-superseded.yml
+
+# Harness: paths that never reach the wheel or the published release.
+harness: scripts/**
+harness: benchmarks/**
+harness: evals/**
+harness: fixtures/**
+
+# The only harness workflow, by EXACT filename: a verifier with no secrets, no
+# publish step and no environment. The proof rejects any wildcard harness glob
+# under `.github/` (exit 2), so an unlisted — hence new — workflow is product.
+harness: .github/workflows/windows-anchor.yml
