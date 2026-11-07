@@ -715,8 +715,15 @@ export interface SessionSummary {
 	    a reader must treat absence as `false`. */
 	pinned?: boolean;
 	conversation_name: string;
+	/** Live value, else the journal's record for a session with no attached
+	    runtime; `""` only when neither knows. */
 	cwd: string;
 	model_label: string;
+	/** Reasoning effort rung (the `/api/models` `efforts` vocabulary), from the
+	    live projection or, with no runtime attached, the journal's newest model
+	    selection. `null` when unknown or the model has no ladder; an older
+	    daemon omits the key. */
+	effort?: string | null;
 	streaming: boolean;
 	needs_attention: boolean;
 	/** A turn finished while no relay client was viewing the session, and it

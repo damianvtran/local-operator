@@ -28,6 +28,7 @@ phone starting a session never stalls the SSE streams of the others.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import copy
 import gzip
@@ -918,6 +919,10 @@ class SessionTable:
         #: the agent index, which is disk work the row merge must not pay on the
         #: event loop). A row absent from it carries the two ``None``s.
         self._avatar_fields: dict[str, dict[str, str | None]] = {}
+        #: ``{session_id: _DurableIdentity}`` for the durable listing, resolved
+        #: OFF the loop beside ``_avatar_fields``: the model, effort and cwd a row
+        #: shows when no runtime is attached (see ``_DurableIdentity``).
+        self._durable_identities: dict[str, _DurableIdentity] = {}
         #: The sidebar's durable pinned session ids, newest pin first, read by
         #: ``_merge_summaries``. Kept as table state rather than read per row so
         #: a pin change made in the terminal reaches the phone through exactly
@@ -1056,6 +1061,13 @@ class SessionTable:
                 session_id: session_row_fields(directory, session_id)
                 for session_id in set(rows) | live_ids
                 if session_id not in ("", ".", "..") and Path(session_id).name == session_id
+            }
+            # Model/cwd/effort for rows with no attached runtime, off the loop for
+            # the same reason (journal reads). Durable rows only: their ids came
+            # from the store scan, so they are already safe path components.
+            self._durable_identities = {
+                session_id: _durable_identity(directory / "sessions" / session_id)
+                for session_id in rows
             }
             # THE PINS ARE DELIBERATELY *NOT* READ HERE. This load runs off the
             # loop and unannounced whenever something wants a listing — a second
@@ -1524,6 +1536,7 @@ class SessionTable:
             counts = _advertisable_counts(entry)
             p = entry.projection if entry else None
             row = durable.get(session_id)
+            identity = self._durable_identities.get(session_id) or _DurableIdentity()
             attention = self._attention_states.get(f"session/{session_id}", {})
             # BIRTH, AND THE FALLBACK IS THE RUNTIME'S OWN START, never 0.0.
             # ``_creation_dates`` is resolved off-loop by ``_refresh_durable_rows``
@@ -1578,10 +1591,21 @@ class SessionTable:
                     "conversation_name": (p.conversation_name if p else "")
                     or (entry.record.conversation_name if entry else "")
                     or (row.name if row else ""),
-                    "cwd": p.cwd if p else (entry.record.cwd if entry else ""),
+                    # Live values first (projection, then the discovery record);
+                    # with no attached runtime, the journal's own record
+                    # (``_DurableIdentity``) instead of an empty field the phone
+                    # renders as ``n/a``.
+                    "cwd": (p.cwd if p else (entry.record.cwd if entry else "")) or identity.cwd,
                     "model_label": (
                         p.model_label if p else (entry.record.model_label if entry else "")
-                    ),
+                    )
+                    or identity.model_label,
+                    # ADDITIVE: a rung from the model's ladder (the ``/api/models``
+                    # ``efforts`` vocabulary) or ``None`` when unknown or the model
+                    # has none. An older client ignores the key.
+                    # A live projection's "" is a real answer (no ladder), so the
+                    # journal is consulted only when no projection exists.
+                    "effort": (p.effort or None) if p else identity.effort,
                     "streaming": bool(p and p.streaming),
                     # A SIGNALLED RUNTIME STREAMS TOO, so this list's own spinner
                     # said "working" about a session somebody had already asked
@@ -2091,6 +2115,133 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
     return directory
 
 
+@dataclass(frozen=True)
+class _DurableIdentity:
+    """Model, effort and working directory of a conversation, read from disk.
+
+    WHY THIS EXISTS: the phone's list row and session detail named a session's
+    model, effort and directory only while a runtime was ATTACHED — the values
+    came from the live projection (``entry.projection``) or the discovery record,
+    both of which die with the process. Every ended conversation, and every one
+    the daemon has not seen live since it booted, therefore rendered ``n/a`` for
+    all three, although the facts were already durable:
+
+    * model + effort — the journal's ``selected_model`` row
+      (``session.model_selection``). The owner writes it at birth with the level
+      in force (the chosen one, else the spec's resolved level, which is where a
+      configured ``model_effort`` default and a phone Start's ``effort`` land) and
+      again on every ``/model``/``/effort``, so the newest row IS the effective
+      selection. ``read_model_selection`` is the shared resolver the cold desktop
+      open and ``/resume`` already use, memoised per journal stat.
+    * cwd — the ladder the desktop's own cold open (``DesktopSessions._locate``)
+      climbs: the ``desktop.json`` marker a created session carries, then the
+      newest frontend checkpoint's ``state.cwd`` (absence proven by a byte scan
+      first, so a legacy journal is not JSON-walked end to end), then the wake
+      index's ``cwd``. Unknown stays ``""``: the row renders a cwd as the
+      conversation's identity, so a guess (the store root, ``~``) would read as a
+      recorded fact.
+
+    Values match the live fields' vocabulary: ``model_label`` is
+    ``provider/model_id`` like ``_effective_label``, ``effort`` is a rung from the
+    model's ladder (``/api/models`` ``efforts``) or ``None`` when the row carries
+    none — never ``""`` invented for "unknown".
+    """
+
+    model_label: str = ""
+    cwd: str = ""
+    effort: str | None = None
+
+
+#: ``_durable_identity`` answers keyed on the journal's stat, so the 1 s listing
+#: refresh pays one stat per durable row once a session's journal stops moving.
+#: Bounded like the selection memo it sits on; an evicted row is recomputed.
+_IDENTITY_MEMO: (
+    "collections.OrderedDict[str, tuple[tuple[int, int, int, int], _DurableIdentity]]"
+) = collections.OrderedDict()
+_IDENTITY_MEMO_MAX = 512
+_IDENTITY_MEMO_GUARD = threading.Lock()
+
+
+def _durable_identity(directory: Path) -> _DurableIdentity:
+    """:class:`_DurableIdentity` for the session stored at ``directory``.
+
+    Blocking (stats and, on a miss, reads the journal): call it off the event
+    loop. Best effort by contract — a store this cannot read costs the row its
+    model/cwd/effort, never the listing or the projection it decorates.
+
+    The memo key is the JOURNAL's stat only. The marker and wake index can in
+    principle change without a journal append, but both are written alongside
+    owner activity that appends to the journal, and a stale cwd on a cold row
+    is cosmetic; keying on three files would triple the per-row stats.
+    """
+    from local_operator.session import compression
+
+    stat_key: tuple[int, int, int, int] | None = None
+    try:
+        # ``read_only``: a listing must never re-inflate a compressed session
+        # in place (see ``transcript_for_read``).
+        journal = compression.transcript_for_read(directory, read_only=True)
+        info = journal.stat() if journal is not None else None
+    except (OSError, compression.ArchiveError):
+        info = None
+    if info is not None:
+        stat_key = (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    key = str(directory)
+    if stat_key is not None:
+        with _IDENTITY_MEMO_GUARD:
+            cached = _IDENTITY_MEMO.get(key)
+            if cached is not None and cached[0] == stat_key:
+                _IDENTITY_MEMO.move_to_end(key)
+                return cached[1]
+    try:
+        identity = _read_durable_identity(directory)
+    except Exception as exc:  # noqa: BLE001 — a decoration, never a listing failure
+        logger.debug("mobile: no durable identity for %s: %s", directory.name, exc)
+        return _DurableIdentity()
+    if stat_key is not None:
+        with _IDENTITY_MEMO_GUARD:
+            _IDENTITY_MEMO[key] = (stat_key, identity)
+            _IDENTITY_MEMO.move_to_end(key)
+            while len(_IDENTITY_MEMO) > _IDENTITY_MEMO_MAX:
+                _IDENTITY_MEMO.popitem(last=False)
+    return identity
+
+
+def _read_durable_identity(directory: Path) -> _DurableIdentity:
+    """The uncached read behind :func:`_durable_identity` (see its docstring)."""
+    from local_operator.paths import config_dir
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.model_selection import read_model_selection
+    from local_operator.session.retention import DESKTOP_MARKER_NAME
+    from local_operator.session.transcript import (
+        custom_type_proven_absent,
+        read_latest_custom,
+    )
+    from local_operator.wakes import store as wake_store
+
+    selection = read_model_selection(directory)
+    model_label = selection.selector if selection is not None and selection.model_id else ""
+    effort = (selection.effort or None) if selection is not None else None
+
+    cwd = ""
+    try:
+        marker = json.loads((directory / DESKTOP_MARKER_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        marker = None
+    if isinstance(marker, dict) and isinstance(marker.get("cwd"), str):
+        cwd = marker["cwd"]
+    if not cwd and not custom_type_proven_absent(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE):
+        checkpoint = read_latest_custom(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE) or {}
+        state = checkpoint.get("state")
+        if isinstance(state, dict) and isinstance(state.get("cwd"), str):
+            cwd = state["cwd"]
+    if not cwd:
+        entry = wake_store.read_entry(config_dir(), directory.name) or {}
+        if isinstance(entry.get("cwd"), str):
+            cwd = entry["cwd"]
+    return _DurableIdentity(model_label=model_label, cwd=cwd, effort=effort)
+
+
 def _live_generation_is_user_facing(session_id: str) -> bool:
     """Whether a LIVE session id names a conversation the user can be shown.
 
@@ -2196,9 +2347,15 @@ def _durable_projection(
         kind="daemon",
         conversation_name=stored_session_title(directory),
         attention=AttentionStore().state(f"session/{session_id}"),
-        cwd="",
-        model_label="",
     )
+    # Model/effort/cwd from the journal, so a session with no attached runtime
+    # opens with the same identity its list row shows instead of ``n/a``. A live
+    # payload, when one lands, replaces these with the runtime's own values.
+    identity = _durable_identity(directory)
+    projection.cwd = identity.cwd
+    projection.model_label = identity.model_label
+    projection.model_selector = identity.model_label
+    projection.effort = identity.effort or ""
     fold = ProjectionFold(projection)
     # fold_history reads messages without mutating them, so the cached list
     # can be shared; the fold builds its own TranscriptEntry rows.
