@@ -69,6 +69,19 @@ def provenance_args() -> list[str]:
     return ["--public-provenance", *values]
 
 
+# Host-side, trial-bound record that the strict pre-inference scan passed
+# (R11 F28): written by adapters._preinference_checks into the trial dir,
+# required by BenchVerifier before any late hidden match is graded.
+PREFLIGHT_RECEIPT = "bench-preflight-receipt.json"
+
+
+def preflight_binding(session_id: str) -> dict[str, str]:
+    """Identity a preflight receipt must carry; from the Harbor process env."""
+    return {"trial": session_id,
+            "image_digest": os.environ.get("BENCH_IMAGE_DIGEST", ""),
+            "manifest_sha256": os.environ.get("BENCH_PUBLIC_PROVENANCE_SHA256", "")}
+
+
 def _public_pairs(manifest, task_payload_sha256, image_digest, digests):
     """Malformed/stale provenance cannot turn a strict match into public input."""
     def is_sha(value):
@@ -136,8 +149,11 @@ def _solution_tree(base: Path) -> dict[str, str]:
 
 
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
-DISCLOSABLE = frozenset({"solution", "tests-fixture"})
-CLASSES = DISCLOSABLE | {"verifier-code"}
+# S9c (R11 F27/F30): the ONLY disclosable class is a reviewed expected-output
+# fixture. Every other hidden tests/ digest ("verifier-hidden") and every
+# solution-tree digest ("solution") refuses grading.
+DISCLOSABLE = frozenset({"expected-output-fixture"})
+CLASSES = DISCLOSABLE | {"verifier-hidden", "solution"}
 
 
 def _digest_classes(manifest, digests) -> dict[str, str] | None:
@@ -231,7 +247,9 @@ def isolation(digests: set[str], root: str = "/", *, manifest=None,
     # that reached grading was absent pre-inference (that scan refuses any), so
     # with /tests withheld and the fence intact it can only be the agent's own
     # work -- e.g. a correct answer equal to an expected-output fixture. Such
-    # solution/tests-fixture matches are DISCLOSED and graded; verifier-code or
+    # reviewed expected-output fixture matches are DISCLOSED and graded (only
+    # when BenchVerifier also holds a clean same-trial preflight receipt and an
+    # intact fence); solution, other hidden tests or
     # unclassified matches, and every structural failure, still refuse. The
     # fence half of the rule is checked host-side by BenchVerifier.
     classes = _digest_classes(manifest, digests) if error is None else None

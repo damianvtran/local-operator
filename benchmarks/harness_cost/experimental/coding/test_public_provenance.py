@@ -734,35 +734,46 @@ class _ProbeEnv:
 
 
 class PostAgentDisclosureTests(unittest.TestCase):
-    """S9b: late hidden matches are disclosed and graded, behind a strict pre-inference
-    scan, an intact fence and a verifier-code exception; identical for all arms."""
+    """S9b/S9c: a late hidden match is graded only if it is a REVIEWED expected-output
+    fixture, the trial holds a clean host-side preflight receipt and the fence is
+    intact; everything else refuses. Identical for all arms (R11 F27-F31)."""
 
     MANIFEST_SHA = "d" * 64
+    IMAGE = "sha256:" + "b" * 64
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD"))
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.fixture, self.code, self.solve = b"sanitized expected", b"def test_x(): ...", b"sh"
+        self.fixture, self.hidden, self.solve = b"sanitized expected", b"(hidden test)", b"sh"
         self.manifest = {
             "version": 1, "task_payload_sha256": "a" * 64,
-            "image_digest": "sha256:" + "b" * 64, "policy_sha256": "c" * 64,
+            "image_digest": self.IMAGE, "policy_sha256": "c" * 64,
             "public_files": [], "solution_digests": [_sha(self.solve)],
-            "gold_digests": sorted({_sha(self.fixture), _sha(self.code), _sha(self.solve)}),
-            "digest_classes": {_sha(self.fixture): "tests-fixture",
-                               _sha(self.code): "verifier-code", _sha(self.solve): "solution"},
+            "gold_digests": sorted({_sha(self.fixture), _sha(self.hidden), _sha(self.solve)}),
+            "digest_classes": {_sha(self.fixture): "expected-output-fixture",
+                               _sha(self.hidden): "verifier-hidden", _sha(self.solve): "solution"},
         }
         self.log = self.root / "connections.jsonl"
+        self.log.touch()  # the driver pre-creates every listed log (F31)
+        self.trial = self.root / "trial"
         self.env = {"BENCH_PUBLIC_PROVENANCE_SHA256": self.MANIFEST_SHA,
+                    "BENCH_IMAGE_DIGEST": self.IMAGE,
                     "BENCH_GOLD_DIGESTS": "e" * 64, "BENCH_GATE_PORTS": "8787",
                     "BENCH_EGRESS_CANARY_PORT": "41999",
                     "BENCH_PACKAGE_EGRESS_LOGS": str(self.log)}
+        self.receipt()
 
-    def scan(self, manifest=None):
+    def receipt(self, **overrides):
+        body = {"trial": "sess", "image_digest": self.IMAGE,
+                "manifest_sha256": self.MANIFEST_SHA, "ok": True, **overrides}
+        _write(self.trial / gold_probe.PREFLIGHT_RECEIPT, json.dumps(body))
+
+    def scan(self, manifest=None, authorized=None):
         return gold_probe.isolation(
             set(self.manifest["gold_digests"]), root=str(self.root / "image"),
             manifest=manifest or self.manifest, task_payload_sha256="a" * 64,
-            image_digest="sha256:" + "b" * 64)
+            image_digest=self.IMAGE, authorized_solution=authorized)
 
     def verify(self, iso, egress_ok=True):
         verifier, _env, calls = _load_verifier([])
@@ -770,7 +781,7 @@ class PostAgentDisclosureTests(unittest.TestCase):
                     0 if iso["ok"] else 1), ('{"survivors": []}', 0),
                    (json.dumps({"check": "egress", "ok": egress_ok}), 0 if egress_ok else 1)]
         environment = _ProbeEnv(replies, calls)
-        paths = SimpleNamespace(verifier_dir=self.root / "verifier")
+        paths = SimpleNamespace(verifier_dir=self.trial / "verifier", trial_dir=self.trial)
         with patch.dict(os.environ, self.env), \
                 patch.object(verifier, "provenance_args", return_value=[]), \
                 patch.object(verifier, "compose_project", return_value="proj"), \
@@ -782,40 +793,116 @@ class PostAgentDisclosureTests(unittest.TestCase):
         record = json.loads((paths.verifier_dir / "bench-isolation.json").read_text())
         return result, record, calls, uplink
 
-    def test_expected_output_fixture_match_is_graded_and_flagged(self):
+    def assert_refused(self, iso, **kwargs):
+        result, record, calls, uplink = self.verify(iso, **kwargs)
+        self.assertIsNone(result)
+        self.assertFalse(record["graded"])
+        self.assertNotIn("stock-verify", calls)
+        uplink.assert_not_called()
+        return record
+
+    def test_reviewed_expected_output_match_is_graded_and_flagged(self):
         # sanitize-git-repo: the correct answer equals tests/process.py.
         _write(self.root / "image/app/dclm/ray_processing/process.py", self.fixture)
         iso = self.scan()
         self.assertFalse(iso["ok"])  # strict decision (and pre-inference) unchanged
         self.assertTrue(iso["post_agent_ok"])
-        self.assertEqual([(m["class"]) for m in iso["disclosed_matches"]], ["tests-fixture"])
+        self.assertEqual([m["class"] for m in iso["disclosed_matches"]],
+                         ["expected-output-fixture"])
         self.assertEqual(iso["raw_matches"][0]["sha256"], _sha(self.fixture))
         result, record, calls, uplink = self.verify(iso)
         self.assertEqual(result, "graded")
         self.assertEqual(calls[-1], "stock-verify")
         uplink.assert_called_once()
         self.assertIn("hidden-digest-appeared-after-agent-phase", record["flags"])
-        self.assertEqual(record["post_agent_disclosed"][0]["class"], "tests-fixture")
+        self.assertTrue(record["preflight_receipt"]["ok"])
         self.assertTrue(record["fence"]["ok"])
-        self.assertFalse(record["isolation_after_agent"]["strict_ok"])
 
-    def test_solution_digest_match_is_disclosed_too(self):
-        _write(self.root / "image/app/out.sh", self.solve)
-        iso = self.scan()
-        self.assertTrue(iso["post_agent_ok"])
-        self.assertEqual(iso["disclosed_matches"][0]["class"], "solution")
-
-    def test_verifier_code_match_refuses_grading(self):
-        _write(self.root / "image/app/dclm/process.py", self.fixture)
-        _write(self.root / "image/app/test_outputs.py", self.code)
+    def test_unlisted_hidden_tests_file_refuses(self):
+        # F27: refuse is the default for every tests/ file not reviewed as output.
+        _write(self.root / "image/app/my_tests.scm", self.hidden)
         iso = self.scan()
         self.assertFalse(iso["post_agent_ok"])
-        self.assertEqual([m["class"] for m in iso["refusing_matches"]], ["verifier-code"])
-        result, record, calls, uplink = self.verify(iso)
-        self.assertIsNone(result)
-        self.assertFalse(record["graded"])
-        self.assertNotIn("stock-verify", calls)
-        uplink.assert_not_called()
+        self.assertEqual([m["class"] for m in iso["refusing_matches"]], ["verifier-hidden"])
+        self.assert_refused(iso)
+
+    @unittest.skipUnless((TASK_ROOT / "schemelike-metacircular-eval").is_dir(), "task root absent")
+    def test_r11_shadow_test_repro_refuses(self):
+        # R11 F27 repro: the "agent" wrote tests/shadow_test/binary_tree.scm to /app.
+        task = TASK_ROOT / "schemelike-metacircular-eval"
+        policy = json.loads((HERE / "public-provenance.json").read_text())
+        image = policy["tasks"]["schemelike-metacircular-eval"]["image_digest"]
+        manifest = driver.public_provenance(task, image)
+        _write(self.root / "image/app/my_tests.scm",
+               (task / "tests/shadow_test/binary_tree.scm").read_bytes())
+        iso = gold_probe.isolation(set(manifest["gold_digests"]), root=str(self.root / "image"),
+                                   manifest=manifest,
+                                   task_payload_sha256=manifest["task_payload_sha256"],
+                                   image_digest=image)
+        self.assertIsNone(iso["provenance_error"])
+        self.assertFalse(iso["post_agent_ok"])
+        self.assertEqual(iso["disclosed_matches"], [])
+        self.assertEqual([m["class"] for m in iso["refusing_matches"]], ["verifier-hidden"])
+
+    def test_solution_copy_refuses_for_model_arms(self):
+        # F30: a byte copy of solve.sh (or any solution-tree file) is a leak signal.
+        _write(self.root / "image/app/solve_copy.sh", self.solve)
+        iso = self.scan()
+        self.assertFalse(iso["post_agent_ok"])
+        self.assertEqual([m["class"] for m in iso["refusing_matches"]], ["solution"])
+        self.assert_refused(iso)
+
+    def test_oracle_qualification_still_authorizes_its_own_upload(self):
+        _write(self.root / "image/app/solve_copy.sh", self.solve)
+        _write(self.root / "solution/solve.sh", self.solve)
+        with patch.object(gold_probe, "SOLUTION", self.root / "solution"):
+            iso = self.scan(authorized={"solve.sh": _sha(self.solve)})
+        self.assertTrue(iso["ok"])
+        self.assertEqual(len(iso["authorized_solution_matches"]), 1)
+        self.assertEqual(iso["refusing_matches"], [])
+
+    def test_late_match_needs_a_clean_same_trial_preflight_receipt(self):
+        # F28: "absent before inference" is checked, never assumed.
+        _write(self.root / "image/app/process.py", self.fixture)
+        iso = self.scan()
+        for overrides in ({"trial": "other"}, {"image_digest": "sha256:" + "c" * 64},
+                          {"manifest_sha256": "f" * 64}, {"ok": False}, None):
+            with self.subTest(overrides=overrides):
+                if overrides is None:
+                    (self.trial / gold_probe.PREFLIGHT_RECEIPT).unlink()
+                else:
+                    self.receipt(**overrides)
+                record = self.assert_refused(iso)
+                self.assertFalse(record["preflight_receipt"]["ok"])
+
+    def test_preinference_writes_a_host_side_trial_bound_receipt(self):
+        adapter = _load()
+        agent_dir = self.trial / "agent"
+        agent_dir.mkdir(parents=True)
+        (self.trial / gold_probe.PREFLIGHT_RECEIPT).unlink()
+        for ok in (True, False):
+            good = json.dumps({"ok": ok, "manifest_sha256": self.MANIFEST_SHA})
+
+            async def execute(command, good=good, **kwargs):
+                return SimpleNamespace(stdout=good if " isolation " in command else '{"ok":true}',
+                                       return_code=0)
+
+            with self.subTest(ok=ok), patch.dict(os.environ, self.env), \
+                    patch.object(adapter, "provenance_args", return_value=[]):
+                environment = SimpleNamespace(exec=execute, session_id="sess")
+                call = adapter._preinference_checks(SimpleNamespace(logs_dir=agent_dir),
+                                                    environment)
+                if ok:
+                    asyncio.run(call)
+                else:
+                    with self.assertRaises(RuntimeError):
+                        asyncio.run(call)
+                receipt = json.loads((self.trial / gold_probe.PREFLIGHT_RECEIPT).read_text())
+                self.assertEqual((receipt["trial"], receipt["image_digest"],
+                                  receipt["manifest_sha256"], receipt["ok"]),
+                                 ("sess", self.IMAGE, self.MANIFEST_SHA, ok))
+        # Not in the agent-writable /logs/agent mount.
+        self.assertFalse((agent_dir / gold_probe.PREFLIGHT_RECEIPT).exists())
 
     def test_unclassified_task_keeps_the_strict_refusal(self):
         _write(self.root / "image/app/process.py", self.fixture)
@@ -823,6 +910,10 @@ class PostAgentDisclosureTests(unittest.TestCase):
         iso = self.scan(manifest)
         self.assertFalse(iso["post_agent_ok"])
         self.assertEqual(iso["refusing_matches"][0]["class"], "unclassified")
+        # An S9b-era map (heuristic classes) is not accepted either.
+        old = {**self.manifest, "digest_classes": {
+            k: "tests-fixture" for k in self.manifest["digest_classes"]}}
+        self.assertEqual(self.scan(old)["refusing_matches"][0]["class"], "unclassified")
 
     def test_structural_failures_still_refuse(self):
         _write(self.root / "image/app/process.py", self.fixture)
@@ -845,18 +936,29 @@ class PostAgentDisclosureTests(unittest.TestCase):
                    "reason": "not-allowlisted"}], False)):  # canary breach on re-probe
             with self.subTest(rows=rows, egress_ok=egress_ok):
                 self.log.write_text("".join(json.dumps(r) + "\n" for r in rows))
-                result, record, calls, uplink = self.verify(iso, egress_ok=egress_ok)
-                self.assertIsNone(result)
+                record = self.assert_refused(iso, egress_ok=egress_ok)
                 self.assertFalse(record["fence"]["ok"])
-                self.assertNotIn("stock-verify", calls)
-                uplink.assert_not_called()
         # Ordinary denials alone are the fence working, not an anomaly.
-        result, record, _calls, _uplink = self.verify(iso)
+        result, _record, _calls, _uplink = self.verify(iso)
         self.assertEqual(result, "graded")
         with patch.dict(self.env, {"BENCH_PACKAGE_EGRESS_LOGS": ""}):
-            result, record, _calls, _uplink = self.verify(iso)
-        self.assertIsNone(result)
+            record = self.assert_refused(iso)
         self.assertEqual(record["fence"]["reason"], "missing fence inputs")
+
+    def test_missing_egress_log_fails_closed_unless_no_proxy_was_launched(self):
+        # F31: the driver pre-creates every listed log, so absence is an anomaly.
+        _write(self.root / "image/app/process.py", self.fixture)
+        iso = self.scan()
+        self.log.unlink()
+        record = self.assert_refused(iso)
+        self.assertEqual(record["fence"]["package_anomalies"][0]["reason"], "missing-log")
+        with patch.dict(self.env, {"BENCH_PACKAGE_EGRESS_LOGS": "",
+                                   "BENCH_PACKAGE_PROXY_LAUNCHED": "none"}):
+            result, record, _calls, _uplink = self.verify(iso)
+        self.assertEqual(result, "graded")
+        source = (HERE / "driver.py").read_text()
+        self.assertIn("for log in package_logs:", source)
+        self.assertIn("log.touch()", source)
 
     def test_pre_inference_stays_strict(self):
         _write(self.root / "image/app/process.py", self.fixture)
@@ -874,62 +976,94 @@ class PostAgentDisclosureTests(unittest.TestCase):
                 asyncio.run(adapter._preinference_checks(
                     SimpleNamespace(logs_dir=None), SimpleNamespace(exec=execute)))
 
-    def test_trial_record_and_flag_table_publish_counts_per_task_and_arm(self):
-        job = self.root / "job"
-        _write(job / "trial/verifier/bench-isolation.json", json.dumps({
-            "graded": True, "fence": {"ok": True}, "post_agent_disclosed": [
-                {"path": "/app/p.py", "sha256": "f" * 64, "class": "tests-fixture"}]}))
-        flags = driver.post_agent_flags(job)
-        self.assertEqual(flags["counts"], {"solution": 0, "tests-fixture": 1})
+    def test_flag_table_counts_graded_and_refused_trials_separately(self):
+        # F29.
         out = self.root / "out"
-        rows = [{"task": "sanitize-git-repo", "harness": h, "post_agent_flags": flags}
-                for h in ("omp", "omp", "local-operator")]
+        rows = []
+        for harness, graded in (("omp", True), ("omp", False), ("local-operator", True)):
+            job = self.root / f"job-{len(rows)}"
+            _write(job / "trial/verifier/bench-isolation.json", json.dumps({
+                "graded": graded, "fence": {"ok": graded}, "preflight_receipt": {"ok": True},
+                "post_agent_disclosed": [{"path": "/app/p.py", "sha256": "f" * 64,
+                                          "class": "expected-output-fixture"}]}))
+            rows.append({"task": "sanitize-git-repo", "harness": harness,
+                         "post_agent_flags": driver.post_agent_flags(job)})
         _write(out / "runs.jsonl", "".join(json.dumps(r) + "\n" for r in rows))
         table = driver.flag_table(out)
-        self.assertEqual(table["sanitize-git-repo"]["omp"],
-                         {"trials": 2, "solution": 0, "tests-fixture": 2})
+        self.assertEqual(table["sanitize-git-repo"]["omp"], {
+            "trials": 2, "graded": {"trials": 1, "expected-output-fixture": 1},
+            "refused": {"trials": 1, "expected-output-fixture": 1}})
         self.assertEqual(json.loads((out / "post-agent-flags.json").read_text()), table)
 
-    @unittest.skipUnless((TASK_ROOT / "sanitize-git-repo").is_dir(), "task root absent")
-    def test_frozen_classes_cover_the_cohort_and_classify_sanitize_as_fixtures(self):
+    def test_no_heuristic_classifier_remains(self):
+        self.assertFalse(hasattr(provenance_derive, "classify_tests"))
         frozen = json.loads((HERE / "post-agent-classes.json").read_text())
         self.assertEqual(len(frozen["tasks"]), 30)
+        listed = {name: entry["expected_output_fixtures"]
+                  for name, entry in frozen["tasks"].items() if entry["expected_output_fixtures"]}
+        self.assertEqual(sorted(listed), ["sanitize-git-repo"])
+        for fixture in listed["sanitize-git-repo"]:
+            self.assertTrue(fixture["justification"])
+            self.assertIn(fixture["path"], fixture["cites"][0]["text"])
+            self.assertIn("assert contaminated_text == decontaminated_text",
+                          fixture["cites"][-1]["text"])
+
+    @unittest.skipUnless((TASK_ROOT / "sanitize-git-repo").is_dir(), "task root absent")
+    def test_frozen_sanitize_entries_validate_against_the_task(self):
         task = TASK_ROOT / "sanitize-git-repo"
+        policy = json.loads((HERE / "public-provenance.json").read_text())
         manifest = driver.public_provenance(
-            task, json.loads((HERE / "public-provenance.json").read_text())
-            ["tasks"]["sanitize-git-repo"]["image_digest"])
-        # The three a18da995 post-oracle matches (process.py, ray_cluster.yaml, json).
+            task, policy["tasks"]["sanitize-git-repo"]["image_digest"])
         for name in ("process.py", "ray_cluster.yaml",
                      "rw_v2_fasttext_openhermes_vs_rw_v2_bigram_0.1_arcade100k.json"):
             self.assertEqual(manifest["digest_classes"][driver.digest(task / "tests" / name)],
-                             "tests-fixture")
+                             "expected-output-fixture")
         for name in ("test.sh", "test_outputs.py"):
             self.assertEqual(manifest["digest_classes"][driver.digest(task / "tests" / name)],
-                             "verifier-code")
+                             "verifier-hidden")
+        self.assertEqual(manifest["digest_classes"][driver.digest(task / "solution/solve.sh")],
+                         "solution")
 
-    def test_drifted_class_map_is_refused(self):
+    def test_reviewed_entry_drift_or_shared_digest_refuses(self):
         task = self.root / "fixture"
         _write(task / "solution/solve.sh", b"s")
         _write(task / "tests/test.sh", b"pytest /tests/test_outputs.py")
+        _write(task / "tests/test_outputs.py",
+               "EXPECTED = 'expected.txt'\nassert open(OUT).read() == open(EXPECTED).read()\n")
         _write(task / "tests/expected.txt", b"answer")
         _write(task / "environment/Dockerfile", "FROM scratch\n")
-        payload = driver.task_payload(task)[0]
         policy = self.root / "policy"
         policy.mkdir()
         (policy / "public-provenance.json").write_text('{"version": 1, "tasks": {}}')
-        tests = {rel: {"sha256": driver.digest(task / "tests" / rel), **row}
-                 for rel, row in provenance_derive.classify_tests(task).items()}
-        frozen = {"version": 1, "tasks": {"fixture": {"task_payload_sha256": payload,
-                                                      "tests": tests}}}
-        (policy / "post-agent-classes.json").write_text(json.dumps(frozen))
-        with patch.object(driver, "HERE", policy):
-            classes = driver.public_provenance(task, "sha256:" + "b" * 64)["digest_classes"]
-            self.assertEqual(classes[_sha(b"answer")], "tests-fixture")
-            self.assertEqual(classes[_sha(b"pytest /tests/test_outputs.py")], "verifier-code")
-            tests["expected.txt"]["class"] = "verifier-code"
+        fixture = {"path": "expected.txt", "sha256": _sha(b"answer"), "justification": "compared",
+                   "cites": [{"file": "tests/test_outputs.py", "line": 1,
+                              "text": "EXPECTED = 'expected.txt'"},
+                             {"file": "tests/test_outputs.py", "line": 2,
+                              "text": "assert open(OUT).read() == open(EXPECTED).read()"}]}
+
+        def freeze(fixtures):
+            frozen = {"version": 2, "tasks": {"fixture": {
+                "task_payload_sha256": driver.task_payload(task)[0],
+                "expected_output_fixtures": fixtures}}}
             (policy / "post-agent-classes.json").write_text(json.dumps(frozen))
+
+        with patch.object(driver, "HERE", policy):
+            freeze([fixture])
+            classes = driver.public_provenance(task, self.IMAGE)["digest_classes"]
+            self.assertEqual(classes[_sha(b"answer")], "expected-output-fixture")
+            self.assertEqual(classes[_sha(b"pytest /tests/test_outputs.py")], "verifier-hidden")
+            moved = {**fixture["cites"][0], "line": 2}
+            freeze([{**fixture, "cites": [moved, fixture["cites"][1]]}])
             with self.assertRaisesRegex(ValueError, "stale post-agent classes"):
-                driver.public_provenance(task, "sha256:" + "b" * 64)
+                driver.public_provenance(task, self.IMAGE)
+            freeze([{**fixture, "cites": fixture["cites"][:1]}])
+            with self.assertRaisesRegex(ValueError, "stale post-agent classes"):
+                driver.public_provenance(task, self.IMAGE)
+            # The same bytes also stored as an unlisted tests file: refuse.
+            _write(task / "tests/hidden_copy.txt", b"answer")
+            freeze([fixture])
+            classes = driver.public_provenance(task, self.IMAGE)["digest_classes"]
+            self.assertEqual(classes[_sha(b"answer")], "verifier-hidden")
 
 
 if __name__ == "__main__":

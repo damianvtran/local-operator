@@ -50,7 +50,7 @@
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
       "bytes": 11427,
-      "sha256": "b0d86128f2b5652f94e75e798ea79db1de3537e7a040dd89031658bfa71f3f15"
+      "sha256": "d66795e212e44eae5ff17b5c545f78f1ce62b03f1a9ac632b132d087d411be71"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
@@ -144,8 +144,8 @@
     },
     {
       "path": "experimental/coding/README.md",
-      "bytes": 13251,
-      "sha256": "9390a99cc2ace71ab4bd1bd7706324b64f3d05345436b23346aae6f0bcc3a35c"
+      "bytes": 13863,
+      "sha256": "bd13f3e93165673ab7a38d99c03561aef8fef282a742bf2e0068d34c725de931"
     },
     {
       "path": "experimental/coding/SOURCE_MAP.md",
@@ -154,8 +154,8 @@
     },
     {
       "path": "experimental/coding/STATUS.md",
-      "bytes": 7587,
-      "sha256": "6f805cee1793b322b271b52d5b833692e61dfb91bb7b969d7258c24a652d3578"
+      "bytes": 7639,
+      "sha256": "950c71d7fcd4a26541baef33212c900333b66864ceef41db53aea75280a0f3d5"
     },
     {
       "path": "experimental/coding/THIRD_PARTY_NOTICES.md",
@@ -164,13 +164,13 @@
     },
     {
       "path": "experimental/coding/adapters.py",
-      "bytes": 19618,
-      "sha256": "31852b248ea5c5411b011b2d96d91d449f7ced0e0e84a7bbdd3649ddbc0f88cd"
+      "bytes": 20719,
+      "sha256": "c0b5e55d5c46d52f3ed0c9f2654f497a8faa87cf2b66caccb6443576c17fe321"
     },
     {
       "path": "experimental/coding/bench_verifier.py",
-      "bytes": 9456,
-      "sha256": "12079ec44362268368a650d67622eac0c13bd795c15c0e846d59962c30ea2bea"
+      "bytes": 11181,
+      "sha256": "4279cd8a1e33223ae81df0d4754012edef426607a2bb0b6c2e4e39fcfe4d9ba3"
     },
     {
       "path": "experimental/coding/codex-model-catalog.json",
@@ -184,8 +184,8 @@
     },
     {
       "path": "experimental/coding/driver.py",
-      "bytes": 49248,
-      "sha256": "c39665154e8365172718d50fc18ec650918ba297fb947daacc8aed150031564b"
+      "bytes": 50717,
+      "sha256": "2a641e6ad6685132f0541f8eb123586e3adca59e120aa535c4d973322e822b77"
     },
     {
       "path": "experimental/coding/egress.py",
@@ -199,8 +199,8 @@
     },
     {
       "path": "experimental/coding/gold_probe.py",
-      "bytes": 19760,
-      "sha256": "e15fba838bcd4a487a89e1efd9e6f948e8846b5bc1b628837eb1e25b4b263cb2"
+      "bytes": 20705,
+      "sha256": "a03256d9c59d507a65dbadf29d4589165edf948c7dc2c1ff53ad5af52f20e4f7"
     },
     {
       "path": "experimental/coding/lop_launch.py",
@@ -224,13 +224,13 @@
     },
     {
       "path": "experimental/coding/post-agent-classes.json",
-      "bytes": 34826,
-      "sha256": "2932422530e0fcadb37334a51c86f73ecbea365d43dbe3a20f18ab40a08dfb8d"
+      "bytes": 8596,
+      "sha256": "978e3f39ed13df8ca85591006421e587b2b43041abf8f9adfb4a961e56a81632"
     },
     {
       "path": "experimental/coding/provenance_derive.py",
-      "bytes": 13897,
-      "sha256": "ce0f7632570d5415aaa83bfb3adaa7ee82c700986e018b466fe76078fd89532a"
+      "bytes": 13630,
+      "sha256": "f4f860d5469714aa5fb34370ee290cd837d6fa644c00855323ecedd49ee59c14"
     },
     {
       "path": "experimental/coding/public-provenance.json",
@@ -274,8 +274,8 @@
     },
     {
       "path": "experimental/coding/test_public_provenance.py",
-      "bytes": 46200,
-      "sha256": "3db1b753da9d682171d0673ab9c81074f8263692966ad4b08719b81c15d05786"
+      "bytes": 53794,
+      "sha256": "dc00800b07b51cad3ffa5993e616825bb7149e2d34734cd9986e549020e2904f"
     },
     {
       "path": "experimental/evaluate.py",

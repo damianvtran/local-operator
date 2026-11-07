@@ -1,856 +1,193 @@
 {
-  "version": 1,
-  "derivation": "provenance_derive.classify_tests over each cohort task's tests/ tree (the 30 rows of container-s4/ORACLE-SWEEP.json), reviewed then frozen. verifier-code = what the verifier executes (entry/pytest/shell names, imported .py modules, files named on an execute/compile line of a code file); everything else is a data fixture. driver.digest_classes re-derives and refuses drift; a task absent here keeps the strict pre-grading refusal.",
+  "version": 2,
+  "derivation": "S9c (R11 F27): refuse by default. A hidden tests/ file is disclosable at pre-grading ONLY when listed here as a reviewed expected-output fixture, with citations of the verifier lines that read it and compare the agent's output against it (driver.digest_classes re-validates hash and every cited line). No heuristic proposes entries. Only sanitize-git-repo's three fixtures (the R11-confirmed case) are listed; every other task of the 30 a18da995 sweep rows lists none, so all its hidden tests/ digests refuse -- adding one needs a new review. Entries are bound to the task payload hash; a task absent here stays strict.",
   "tasks": {
     "git-leak-recovery": {
       "task_payload_sha256": "00a78cf28fc11e87a084c91650b4e7e148d5f780434a0f3bdefa3c7aba29b062",
-      "tests": {
-        "test.sh": {
-          "sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "dc7b01c1b9dbb0c123def54b146dc1dd399a600edee5970d043a5db5eac4c775",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "vulnerable-secret": {
       "task_payload_sha256": "a06d910bed2accfceab88731daab7325ceb5d5594389f8ae5ca90e6e59336598",
-      "tests": {
-        "test.sh": {
-          "sha256": "d9e46bae71e0b119bdc8aaf689de9a780db29741cb5d46bfcc9090ad8943e08e",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "f2b65f63ac81acd1e80e1ad4c59c1022131a0f9eb20f8ab3212c4ef8d8f0c753",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "password-recovery": {
       "task_payload_sha256": "6b3f94cfa3c58c92be480aa1322020c5629c0f714a9bb315a5fe27908361a7a9",
-      "tests": {
-        "test.sh": {
-          "sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "2dc14fc180734b6fbb0ee00f27c4f866071247b57a2217f579465ff8ed3bfc9e",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "dna-insert": {
       "task_payload_sha256": "dc0b1edc5084ac2c0cb78b9c9074a89f66b1a33ccf63ad8c91e7c51b321e7e5b",
-      "tests": {
-        "test.sh": {
-          "sha256": "355c3f627ad14243da1ec683ebdb120aca7921bb52656c5cb65b281b347ba68b",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "5bf0651b48969968dea30956d4b0cf9e499af59d73cc6886af3ad7aa92934647",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "feal-linear-cryptanalysis": {
       "task_payload_sha256": "b73019ac0d33e275277a3745b973e042bde8a0efae207c4b37d9aff4c16fb6fa",
-      "tests": {
-        "test.sh": {
-          "sha256": "9431cbc2bad2b690001e096218ecd3f7f2f241b415062a2ea1ec7083d2e7c9e1",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "f59ebc7218a648582483cee02556c3bc1235e186301376bc3be066ed106ed9f9",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "dna-assembly": {
       "task_payload_sha256": "b3b43b1e39648614f5758985179b53e6fdb0520bf10b61a3ad2d57b2e0a36c19",
-      "tests": {
-        "test.sh": {
-          "sha256": "271c8317c98539e3b49233d017fe51fb0e5fba8114e76830fe698565499b2b1d",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "5c2d0fd2e5f6303263e9750f67acda7db491ef04841832b4fc62bcfb61b08924",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "schemelike-metacircular-eval": {
       "task_payload_sha256": "f7337d07c44192c03e40da41dfbdf6fb8f777105af8d464f918157d8861b79cb",
-      "tests": {
-        "interp.py": {
-          "sha256": "efb8b5cdcf78b73afcf39d59600a1f355ca89b7bac9854bb01f110cc77bea2c1",
-          "class": "verifier-code",
-          "reason": "executed/compiled at tests/test_outputs.py:14"
-        },
-        "shadow_test/01-factorial.scm": {
-          "sha256": "540e81fac476f04dc510ba107721d606ac980760088b2136889e7d4bf884e5c5",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/02-fibonacci.scm": {
-          "sha256": "628957171e0c4a3ee373635923fcd29e75bdf4bf13a402ac26fe94a5fc1443ac",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/03-list-operations.scm": {
-          "sha256": "fe8f17f59fe4045582fce363d52df95ba7c4de7345542c8bd4993a9f2f396235",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/04-higher-order.scm": {
-          "sha256": "9c2eba8c91bb7b224de56d789207d2eaad98bbe1f8c360d6eca4f014f42f9230",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/05-simple-io.scm": {
-          "sha256": "1eba30db30824fcf6048ea8e49b84e85c866cefce30862fce49b300e4416843c",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/06-interactive-io.scm": {
-          "sha256": "4fbc0e2d6e42c5a9495e549ccb13c02fcaeddf8fdaf8d2cf5de833116f12610a",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/08-progn-sequencing.scm": {
-          "sha256": "3bf8236dc5356d29ab8dbfe1b0f4c519354fbb23c8f3eaf946779c28b80feea3",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/09-mutual-recursion.scm": {
-          "sha256": "3bfa1f77e602c7039f8c8c70315e6d4fff6eed737dab0f0398e5bdf690137c2c",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/10-advanced-features.scm": {
-          "sha256": "b69ef497088fcf0aec388789a17561b783b8cdd5915719915a51c5ba189c31ff",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/accumulator_patterns.scm": {
-          "sha256": "8b9192796a6f9c3155cc5e44d0a0ba6a46d20a0d94e265b69b23ec8af43e4a07",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/binary_tree.scm": {
-          "sha256": "5a3dafc8844969cebb5809f253f4e54de7df480f378da8197f870badef03ee47",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/church_numerals.scm": {
-          "sha256": "31d075785f2f605bac3bd9ac2d99fcf7eaaed6686eb9afeab1d40bf5f35bbf2c",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/closures.scm": {
-          "sha256": "c7d025a376987f5ee22f529847b66eaf53f0af7033acbb4055cedb734168d612",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/continuation_passing.scm": {
-          "sha256": "79e7445c42227846f1adfaf08c17e278aac7a34df77482900b068be4fd248080",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/currying.scm": {
-          "sha256": "690a8cccbb1d249c8f6fcabc0193cecc5d0e4c1af39a0bb67c7e95fcff8e393e",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/filter_operations.scm": {
-          "sha256": "485a0563b81d002e368c5e4b2b7cc98a5306163701053630f416e3b783a2a238",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/fold_operations.scm": {
-          "sha256": "461b33db6b3f5580122d4c6dff0fd6d11c7f044865ffd684ade67d9b296a5a24",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/function_composition.scm": {
-          "sha256": "65ceee00188b12c3549134449e2f938d010c2c97dba090f5b53244abb3579b1f",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/lazy_evaluation.scm": {
-          "sha256": "edd95748de14aadf916c65209b5bcb8759d3e33b7ec935289a5128a656d33bec",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/list_operations.scm": {
-          "sha256": "660963851ecb49639f66557bd88db1e73db323186742145f33cb2e14d3af1103",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/map_operations.scm": {
-          "sha256": "974ac42d892f4b62b9b21ef7844581624dad811b38d35944f1005cc47f249856",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/memoization.scm": {
-          "sha256": "25482c1912fab1235651b1b7acd727f2ea6a55dc5c1919f841b44cfc32107b05",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/mutual_recursion.scm": {
-          "sha256": "2fbc9562e863cb2b325f86419fb2a7588265aaf5576295550722ee4274663712",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/nested_defines.scm": {
-          "sha256": "23ad3b2f936949501466da784511ea2e6215e2b198ca371bef86f6af877ca923",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/oeis_sequences.scm": {
-          "sha256": "1b586df6af2429a54808f7587f60021ba2b2c9bcc2ef2f9cbe44339699853c62",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/oeis_sequences2.scm": {
-          "sha256": "300da0b0dc20b883e01142adea9eb6da1a583a1b969ac0be47aa32c1ab66340e",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/oeis_sequences3.scm": {
-          "sha256": "dea198e874bf518b93c8406a843b64c1586cf4ce780fec8c444f8343e9322c75",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/recursive_structures.scm": {
-          "sha256": "64f1a430bf04a627f5e27bf004805544b60406f8a123d186516774dfcf3846cd",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/test_read.scm": {
-          "sha256": "fda448c22685e2f9af37ff7b986ee5e906d485a2db16f62eec113149f866870f",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/variadic_functions.scm": {
-          "sha256": "ac940ac0273e87ee06280fee192194ab5cdc14c88b61da9cfba92105e66b8f2f",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "shadow_test/y_combinator.scm": {
-          "sha256": "38d25b02d54342ab5610ad03fcef68c5f1d4eef8902295645f6acceb853c9860",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test.sh": {
-          "sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test/01-factorial.scm": {
-          "sha256": "2623000a742c63d50ae1851854826247caee129c7d1613be6c7131d21f26a6ad",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/02-fibonacci.scm": {
-          "sha256": "db769cef446d5da9e9b1abccdf9ca644e239938095a98c21551aee25255a57d4",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/03-list-operations.scm": {
-          "sha256": "1a14b4100dedef30010fed62ea9fd295add1b0facb2e8e6e27c8d8eb3d90111b",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/04-higher-order.scm": {
-          "sha256": "59cd17bbffad641a37729b17c5bf9178b8bae7289fe89cc7135eb0bfec2b4fd6",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/05-simple-io.scm": {
-          "sha256": "3deeb3275df1b771449ebaebfcb9a934f375415e138c5e9f3685516c69a1f7a0",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/06-interactive-io.scm": {
-          "sha256": "aa3cae79b79dca90ac9d61a1babf64d6a5bb6559798c7727c11be02d8ddfd216",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/08-progn-sequencing.scm": {
-          "sha256": "4c0a4d980cf4223d1d17715d58adbe27dc120eced257a0d9f42de952c094bc5b",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/09-mutual-recursion.scm": {
-          "sha256": "939e18f4bd25b5ab0e2a4a767bf7eb6b0d8fb3530d28bf236f06cf27f2d90ee8",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/10-advanced-features.scm": {
-          "sha256": "c4cc5fb412df363875768c6a1e645255f6bc8f9ddf988d1ec2f4a266cedb8ec7",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/README.md": {
-          "sha256": "1f2174c7f12721f9f1898cda190c2886fb3ef9d35fd085f315da5814657104ae",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/accumulator_patterns.scm": {
-          "sha256": "50d246e00577d1f3ab3f0462c2b9618ea63680c33fcca12369cd1707b010cb5f",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/binary_tree.scm": {
-          "sha256": "c95f59ccac1ea4a9c846afddc993aa40ac081c0f9e6731544530109b269b67ae",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/calculator.scm": {
-          "sha256": "a09213ec8a2ec52486b9346c420ddb7c537576ef71b1cc5c6ec61d13d9139f61",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/church_numerals.scm": {
-          "sha256": "f37d858f32a9c5ba8868d094018c92516acadf0ea4e55b7c36f14320cb0c69a6",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/closures.scm": {
-          "sha256": "3ecfc35289479288876e20bf7f55e5b8eda84acd35937e89e3d062308a99aeff",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/continuation_passing.scm": {
-          "sha256": "01049581e582f7d35ef40ef68e1827d012da619beea57c1c74675a5f245318d7",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/currying.scm": {
-          "sha256": "2844d54eee9a94af05a11b4aae06d6e7823d193f17235c8f90bf98926cbca75d",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/filter_operations.scm": {
-          "sha256": "f6bc75f6da9ece96c0616e3570e4df59d0f2eb4655375d3a46b0349c86cc5dd8",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/fold_operations.scm": {
-          "sha256": "05aab492ad914baecd19cf454ed587e7a031e94b8990500eb1c869c15da6fc0b",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/function_composition.scm": {
-          "sha256": "9b56dc78823e7d35adb213744c0f8e95684074d6a12bb98c8c05755788be5b06",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/lazy_evaluation.scm": {
-          "sha256": "ea5912a53a35b65bf2bee9483dca90814b8baf52ae3ae50c2d4589f794dca54d",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/list_operations.scm": {
-          "sha256": "d7e70621afbbb787cf646e2089bccfbd3681fbb2e70325f3e50f56ccd30dbd9d",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/map_operations.scm": {
-          "sha256": "0cebddb3d4a50e4b6f6bfc0e8c12762d3f42609030aef077d8ab4bedda4718d9",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/memoization.scm": {
-          "sha256": "cf8202df22407dbba72ca7f660d8ab7cd4ca962b215c36cc491d5c1a474c160b",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/mutual_recursion.scm": {
-          "sha256": "a3dc23a96ec1cf05b0be4a4f0b6d3da9e2bad1aa3f7a83c7566f71f980a67fe2",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/nested_defines.scm": {
-          "sha256": "21faa0ccaf744cb8c9d283bbfd0c36e195c803c85f511e70a99267c0a85b6216",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/oeis_sequences.scm": {
-          "sha256": "d1f77161b367176b3dfab55a34466e511c602c7ae359e05f5a715627b93dca6a",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/oeis_sequences2.scm": {
-          "sha256": "5679ef0f99743114d8c06edcdcde1fea9474b71aeb57c2069f1ee33df1970bce",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/oeis_sequences3.scm": {
-          "sha256": "5dc8b44158b2648a6e9766f6bcdf21553a07bf487d79e64ebb418511ef3b8186",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/recursive_structures.scm": {
-          "sha256": "67838ff5bac26ea359139720adec1d5700176147b0062065c7def9715e8a2aeb",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/test_read.scm": {
-          "sha256": "5b9ee381c3cf45b2fc8c2e7b490857fb67f1ac78653b586d7f2848daf6853809",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/variadic_functions.scm": {
-          "sha256": "c9b847c50840c6977904e5033a07f6108cc3a54012b02d916e79025fb43e0f6e",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test/y_combinator.scm": {
-          "sha256": "971144dcb2b04aaa3b34d9279459bd7d2e8256c585d17809465848c2589d36d8",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test_outputs.py": {
-          "sha256": "fbb84e3c0c2f72ed7de90f54380f860052c16155e7d0c9076cd57c966e9be7ed",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "large-scale-text-editing": {
       "task_payload_sha256": "afad418191bcb36202bc6205f26533bdd8fa6268fca6e51c96f71c9416eb9151",
-      "tests": {
-        "gen_large_csv.py": {
-          "sha256": "167daab578dc75ba1385c40492037f11708b06ea4cda836cd05f12017ae54654",
-          "class": "verifier-code",
-          "reason": "executed/compiled at tests/test.sh:22"
-        },
-        "test.sh": {
-          "sha256": "e5edb6fcd43d7e638ffcf64522c11185a8355afb5daf6ad805cdfedd47e9ceb3",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "f5e69f4fedeefa23197745888a5847161529f454e6b5c32a4057363d9ae4cd43",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "torch-pipeline-parallelism": {
       "task_payload_sha256": "ce92e81dbb8b45b929718b72fb6cb7864d7372fed1e2a4db3383d9b77fa53b1a",
-      "tests": {
-        "test.sh": {
-          "sha256": "cc9fd28b6590993fc37e4a99da771cbf04726c8c62fe308e802612241da69dea",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "23574246a407163a8e6581c84287cc2f1eb745efbaad2a317a5a28c39958c64f",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "circuit-fibsqrt": {
       "task_payload_sha256": "2b76b15c93880e9a1e35779bb66ec5f539a2ca045c9a966911b9af1cd939ecd8",
-      "tests": {
-        "sim.c": {
-          "sha256": "700645ac6156cdc88ec1e210f7c7d8d9969bb42aec969c410597e8efca796173",
-          "class": "verifier-code",
-          "reason": "executed/compiled at tests/test_outputs.py:66"
-        },
-        "test.sh": {
-          "sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "6117b8edb7d567b30e32b16a9244bec4c131ec01e9065d52f6f53f87e36f0438",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "headless-terminal": {
       "task_payload_sha256": "4a330a835e7a7e69837571082c0b9f40a338498d674a71422c52201e48cd1d20",
-      "tests": {
-        "test.sh": {
-          "sha256": "bfaa32131cbbef985f9b0bbc3cb231ac51eb90579e6e3db55a2f09b5fa0f46b7",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "c6998195e29efb64f41f903b6a727059c4f0ee267f730cd7ffca5c1f7d99ab78",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "financial-document-processor": {
       "task_payload_sha256": "445be33f5432f6e39249a8cb029025eb53dfeddf385155c694ef7c1692ce1229",
-      "tests": {
-        "test.sh": {
-          "sha256": "48abbda713ace5cee00dd28c7398959f28280062350eb88206a6697a28c72790",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "978f506ad5c1bfaf28f9bc774dfe4347d33d046ca009b8496eb513956b7f5a9a",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "kv-store-grpc": {
       "task_payload_sha256": "1ce65580c7b9c57c7561251b294a5f1b89486dbe5d3e84841284dd1c6e8a6c9c",
-      "tests": {
-        "test.sh": {
-          "sha256": "c348467a076bf614d0a850e25b2263f85bbf7b4c7a8d344fbd5454a0611a0df8",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "115de2e964bbe689d07930527113422ef8a9e4be4eb958ad84594e3fcd2b1b0e",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "fix-code-vulnerability": {
       "task_payload_sha256": "cace70d134d47044c9b8493aba69f9b4339d46adad1234f0ffa03f4d030e8e8d",
-      "tests": {
-        "test.sh": {
-          "sha256": "f1611da693cb4cfc5e8482698c6a1858a5c67220ae9db89b50aed66584e9b17f",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "c006a5de95b69bd78055aa26cc055734dbd50718ede25d331f767bfee4ef7f26",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "nginx-request-logging": {
       "task_payload_sha256": "f726d4e1f8184913238c8d1ffb91324f26d0cf1999ec074789c27d9fa712195a",
-      "tests": {
-        "test.sh": {
-          "sha256": "27761195f53cbfe5941fe39b573631f6c926869e64b7c43220377e1e116528e7",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "045cc716c14efde3b0dcff5fc7c85ec5d18bfc6ce66f8b40a418fa2a3a4acda0",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "build-pmars": {
       "task_payload_sha256": "1c3311ef694ee38e0255a9a07fe43bcd5873769a4d91c8e01fc6e30908851c47",
-      "tests": {
-        "test.sh": {
-          "sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "d9d2796ddc19cf8159670567e174ea377e2bce675bf3451d5951c045b01f4e85",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "overfull-hbox": {
       "task_payload_sha256": "af1b25e8c8a3a248398eb6458225ab2464dea3f7c03db0e4eb260e528d7a79d0",
-      "tests": {
-        "input.tex": {
-          "sha256": "7bf7dbe58dbbfb08b6a652c547daa09a57cdbccc0fd18141b4968756061326a3",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "main.tex": {
-          "sha256": "6c07d3203fdc3fc54317fafeee9d19b576418c9de2e142a599814b2f6cb32b2f",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "synonyms.txt": {
-          "sha256": "bc8f7cf4b41914be036e6d4666e1550971d39b2f23b7e69e3e975f4bdb387be6",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test.sh": {
-          "sha256": "ab4ef5988c8694f6049eac703b7683a7f846c4714a61b764bd8e66e116abe16f",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "09756f87d1a29df533e86c5c7d5fd14f64acb17b03cabb55921bb2890d368e5d",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "sparql-university": {
       "task_payload_sha256": "a17439b1cd544b508ce60b8f3b1dfaa527d7cc54cc71c12927d6532ccec6aeca",
-      "tests": {
-        "test.sh": {
-          "sha256": "45902b57bd0f1dd6959216bc9943ab27bb349edc7ff557035a1ecc8732e4cc6b",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "ecf15840fc14f1eeff2f3b6317d7f0febc8fa81f688d24e3054205ba13207b39",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "university_graph_test.ttl": {
-          "sha256": "368ce01d32513ee04dfe592784b0c976086e514c1eab9b3165a016ca7b0192cb",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "largest-eigenval": {
       "task_payload_sha256": "da9537f9587aa54ce9a76e6e0baf14403d1c35e31c45d6fd769931ad6830aa98",
-      "tests": {
-        "test.sh": {
-          "sha256": "fc40868bee6cbcfd6e906b0522dda9a778064ea9876e64a40a377d66087a174b",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "cdc58e3aa0960dac2e12a12b1cfa4131237d697762a6a78ebf33f80d2eb168ce",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "make-doom-for-mips": {
       "task_payload_sha256": "63ef6e29afe4d961f4c8252959f2039adaf62e051266a867a708b26511053bed",
-      "tests": {
-        "reference.jpg": {
-          "sha256": "d1909be8f3266a72686c3945029a553b82e5b46acd624eda65f3fdd5eb339574",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test.sh": {
-          "sha256": "25809a2ebcb714b1c4e55563b0db16add23e2fd9b68d03e51b1734f8dbb392e1",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "f1748ff20bfd670af1e1cb935647503eb176a4a14dd15f20935264ad7e4a98f6",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "extract-moves-from-video": {
       "task_payload_sha256": "ece3a9970ba973e816b5cd9e1bdc97981e19d9afd1f5b7a15523d6b2ab5fd493",
-      "tests": {
-        "test.sh": {
-          "sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "565a7617602f33c0f103d6c9b39c95e0cfe72ba8eadf4d3f859cabfd9235467e",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "llm-inference-batching-scheduler": {
       "task_payload_sha256": "3853dd9fbc9e7966584312287b0ba8f5eff559d33d0a67723bbb9bd895ebbceb",
-      "tests": {
-        "__init__.py": {
-          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "cost_model_for_tests.py": {
-          "sha256": "d3e810a99d40327fb8317f6512d879c52c6aeebdf5dcdc0c5e117c7df61c9ab9",
-          "class": "verifier-code",
-          "reason": "imported by test_outputs.py"
-        },
-        "test.sh": {
-          "sha256": "005f980332355e2fe143d4ff4aac11828adf070594bbe7055399c238f06953ca",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "80b06b7c4ba0db28832b767d48be74bb462d7f5df5798d9cb58c4f1160d96ffa",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "merge-diff-arc-agi-task": {
       "task_payload_sha256": "c2916da0543330ac4154bab1dd4392d457a9ac53cdb0ec9cc12f3a79649164cd",
-      "tests": {
-        "test.json": {
-          "sha256": "20f116a6b718bbf4874bbe203d15a5c0f85a1d88cb622e2d7529c7e4fb2d4c28",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test.sh": {
-          "sha256": "c9052954cd6ce25c4a375a2fb48e765b1efa5b39f7991b93993cc793af8ab9d2",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "2754ba6c5c5f75c9db5ed2c5729d9f5d7e21cb7fdb18aa0c65abdc3e7e85c149",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "tune-mjcf": {
       "task_payload_sha256": "d68ba32682f4999f789d18923398b58181d22b8a215c2271261b49bd06af8325",
-      "tests": {
-        "model_ref.xml": {
-          "sha256": "f3561cbea5bb024886e9627e795c8f60a3984bd749853073bbd433d0e49bf0b7",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test.sh": {
-          "sha256": "343a0604775b960f47cb7ed04bc0c4f9e23f8439c4ba44d6027f0cb245327e97",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "3f20e17eb16bb51e236a9321ddc1331345838467473c5a6faf7e1c762af10bbc",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "build-pov-ray": {
       "task_payload_sha256": "74996c4fae5a923190c6f7da7acc76bc1d18ffcddffc42a684f1681b366a6138",
-      "tests": {
-        "reference_illum1.png": {
-          "sha256": "bb084f430bbc9d5b623a656920670dc06cee6d9132a9d550be4a1b99e41ab9e0",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test.sh": {
-          "sha256": "928d1497ad21aef0c456294e3784f1fddf8493410f23584da89f9e02ec6bd134",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "64d6ce107503714ada346e5606832ee886be9950971cf81523e73d8ba28e8d37",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "adaptive-rejection-sampler": {
       "task_payload_sha256": "7ce5ee6608fe6a679fcda9821bcc1d6369a805f1e2e4220ae04684d12f89b897",
-      "tests": {
-        "test.sh": {
-          "sha256": "38b43560d173cc2b952c3a3e17b8a480216d84e33450515e047bcb0d806b1e0a",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "547dc6e107f034f41703722aeceb6d0236e3fb69116fc3f2fbaba11884de352f",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "sanitize-git-repo": {
       "task_payload_sha256": "c51b2b72efa67277f3fc9fc1a0c9d0ff29d5fe25edf64bd17e133b1087cbbfb8",
-      "tests": {
-        "process.py": {
+      "expected_output_fixtures": [
+        {
+          "path": "process.py",
           "sha256": "3525f32100c994ee517ba06a355f6d2130c332857da017d921aa8d9252b7022d",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
+          "justification": "Expected output: DECONTAMINATED_PATHS names this file; the verifier opens it and asserts the agent's sanitized /app/dclm copy equals it byte for byte. Read, never executed.",
+          "cites": [
+            {
+              "file": "tests/test_outputs.py",
+              "line": 43,
+              "text": "        Path(__file__).parent / \"process.py\","
+            },
+            {
+              "file": "tests/test_outputs.py",
+              "line": 54,
+              "text": "        with open(decontaminated_path, \"r\") as file:"
+            },
+            {
+              "file": "tests/test_outputs.py",
+              "line": 57,
+              "text": "        assert contaminated_text == decontaminated_text"
+            }
+          ]
         },
-        "ray_cluster.yaml": {
+        {
+          "path": "ray_cluster.yaml",
           "sha256": "4827a78e929c005853df1af502f1a5aae2e2e9ce721ee0d33ab0731eefa128a5",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
+          "justification": "Expected output: DECONTAMINATED_PATHS names this file; the verifier opens it and asserts the agent's sanitized /app/dclm copy equals it byte for byte. Read, never executed.",
+          "cites": [
+            {
+              "file": "tests/test_outputs.py",
+              "line": 42,
+              "text": "        Path(__file__).parent / \"ray_cluster.yaml\","
+            },
+            {
+              "file": "tests/test_outputs.py",
+              "line": 54,
+              "text": "        with open(decontaminated_path, \"r\") as file:"
+            },
+            {
+              "file": "tests/test_outputs.py",
+              "line": 57,
+              "text": "        assert contaminated_text == decontaminated_text"
+            }
+          ]
         },
-        "rw_v2_fasttext_openhermes_vs_rw_v2_bigram_0.1_arcade100k.json": {
+        {
+          "path": "rw_v2_fasttext_openhermes_vs_rw_v2_bigram_0.1_arcade100k.json",
           "sha256": "2d281c309cb03e9802f532931ac6c1eca129f75c4583ae48996dbb4130f57c0f",
-          "class": "tests-fixture",
-          "reason": "data: not executed"
-        },
-        "test.sh": {
-          "sha256": "16014722171ae4479112051d2e8af7d0c5bb231bae6aff1b80cfa19e718c814f",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "57e4904177acac5807b51f7c32444bde1968ba0445855fa4333d9eb73865b59e",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
+          "justification": "Expected output: DECONTAMINATED_PATHS names this file; the verifier opens it and asserts the agent's sanitized /app/dclm copy equals it byte for byte. Read, never executed.",
+          "cites": [
+            {
+              "file": "tests/test_outputs.py",
+              "line": 45,
+              "text": "        / (\"rw_v2_fasttext_openhermes_vs_rw_v2_bigram_0.1_arcade100k.json\"),"
+            },
+            {
+              "file": "tests/test_outputs.py",
+              "line": 54,
+              "text": "        with open(decontaminated_path, \"r\") as file:"
+            },
+            {
+              "file": "tests/test_outputs.py",
+              "line": 57,
+              "text": "        assert contaminated_text == decontaminated_text"
+            }
+          ]
         }
-      }
+      ]
     },
     "regex-log": {
       "task_payload_sha256": "bf03c964f4fc7046739596dec43cd7b558f8e810a33d79982280d2b98a656234",
-      "tests": {
-        "test.sh": {
-          "sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "345c3bd09ab6f6fe8c8361a58c0a47bf0a13b3fcb38a5ac7824e44ff855e8f72",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "pytorch-model-cli": {
       "task_payload_sha256": "e8efe1efefd65c47954a3a6d1d4211502819137b1f2a9a5311f6b856dfb77c92",
-      "tests": {
-        "test.sh": {
-          "sha256": "43fb67e537c7adc2df11c2367f47c876cb5d16a7c1ae16d0339c3a3364bb2b06",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "370702c57a4e0c85f70ee37a5c357ae3a5df8480a275bb6263b0376f2f6c093b",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     },
     "code-from-image": {
       "task_payload_sha256": "f725907dec3b9bd6d2d101bbbecdadd1198effe32fa8bb59090261b331039fb9",
-      "tests": {
-        "test.sh": {
-          "sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        },
-        "test_outputs.py": {
-          "sha256": "b9b7cb0033116df88a4807404bf309190f92d62a89df2ce64cdcbf732efe084a",
-          "class": "verifier-code",
-          "reason": "entry/pytest/shell name"
-        }
-      }
+      "expected_output_fixtures": []
     }
   }
 }

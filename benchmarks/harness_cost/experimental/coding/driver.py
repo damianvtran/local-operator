@@ -316,13 +316,16 @@ def public_provenance(task_dir, image_digest):
 
 
 def digest_classes(task_dir, payload, solutions):
-    """Frozen ``gold digest -> solution | tests-fixture | verifier-code`` (S9b).
+    """Frozen ``gold digest -> expected-output-fixture | verifier-hidden | solution``.
 
-    Feeds the pre-grading rule: a hidden digest first seen after the agent
-    phase is disclosed and graded unless it is verifier code. The class map is
-    reviewed and frozen in post-agent-classes.json, bound to the task payload,
-    and re-derived here; a task without an entry gets ``None``, which keeps the
-    old strict refusal (fail closed), never a permissive default.
+    S9c (R11 F27/F30): refuse is the default. Only a fixture a reviewer listed
+    in post-agent-classes.json as an expected output -- with citations of the
+    verifier lines that compare against it, re-validated here byte for byte
+    -- may be disclosed and graded when it appears after the agent phase.
+    Every other hidden tests/ digest is ``verifier-hidden`` and every
+    solution-tree digest is ``solution`` (both refuse). A digest shared with
+    any unlisted tests/ file, or with the solution tree, refuses. A task
+    without a payload-bound entry gets ``None``: the old strict refusal.
     """
     import provenance_derive
 
@@ -331,43 +334,61 @@ def digest_classes(task_dir, payload, solutions):
     entry = frozen["tasks"].get(Path(task_dir).name)
     if entry is None:
         return None
-    derived = {rel: {"sha256": digest(Path(task_dir) / "tests" / rel), **row}
-               for rel, row in provenance_derive.classify_tests(task_dir).items()}
-    if entry["task_payload_sha256"] != payload or entry["tests"] != derived:
+    if entry.get("task_payload_sha256") != payload:
         raise ValueError("stale post-agent classes; task requires review")
-    code = {row["sha256"] for row in derived.values() if row["class"] == "verifier-code"}
-    return {sha: "verifier-code" if sha in code else "solution" if sha in solutions
-            else "tests-fixture" for sha in gold_digests(task_dir)}
+    try:
+        listed = provenance_derive.expected_output_fixtures(task_dir, entry)
+    except provenance_derive.Unsupported as exc:
+        raise ValueError(f"stale post-agent classes: {exc}") from exc
+    tests = {str(p.relative_to(Path(task_dir) / "tests")): digest(p)
+             for p in (Path(task_dir) / "tests").rglob("*") if p.is_file()}
+    unlisted = {sha for rel, sha in tests.items() if rel not in listed}
+    return {sha: "solution" if sha in solutions
+            else "expected-output-fixture" if sha in listed.values() and sha not in unlisted
+            else "verifier-hidden" for sha in gold_digests(task_dir)}
+
+
+DISCLOSED_CLASS = "expected-output-fixture"
 
 
 def post_agent_flags(job):
-    """S9b disclosure for one trial, from BenchVerifier's host-side record.
+    """S9b/S9c disclosure for one trial, from BenchVerifier's host-side record.
 
-    Counts per origin class plus the (path, digest, class) rows; hashes and
-    paths only, never bytes. ``None`` when the verifier record is missing.
+    Rows are (path, digest, class); hashes and paths only, never bytes.
+    ``graded`` says whether this trial's disclosures were actually graded
+    (R11 F29). ``None`` when the verifier record is missing.
     """
     records = list(Path(job).glob("*/verifier/bench-isolation.json"))
     if len(records) != 1:
         return None
     record = json.loads(records[0].read_text())
     rows = record.get("post_agent_disclosed") or []
-    counts = {k: sum(1 for r in rows if r.get("class") == k)
-              for k in ("solution", "tests-fixture")}
-    return {"counts": counts, "matches": rows, "graded": record.get("graded"),
-            "fence_ok": (record.get("fence") or {}).get("ok")}
+    return {"counts": {DISCLOSED_CLASS: sum(1 for r in rows if r.get("class") == DISCLOSED_CLASS)},
+            "matches": rows, "graded": record.get("graded") is True,
+            "fence_ok": (record.get("fence") or {}).get("ok"),
+            "preflight_ok": (record.get("preflight_receipt") or {}).get("ok")}
 
 
 def flag_table(output):
-    """Publish ``task -> harness -> class -> count`` beside runs.jsonl (S9b)."""
+    """Publish ``task -> harness -> {graded, refused}`` disclosure counts (S9c).
+
+    R11 F29: only graded trials count as disclosed-and-graded; trials whose
+    late matches were refused (fence, receipt or other refusing matches) are
+    counted separately, never folded into the graded cell.
+    """
     table = {}
     for line in (Path(output) / "runs.jsonl").read_text().splitlines():
         row = json.loads(line)
-        counts = (row.get("post_agent_flags") or {}).get("counts") or {}
-        cell = table.setdefault(row.get("task", "?"), {}).setdefault(
-            row["harness"], {"trials": 0, "solution": 0, "tests-fixture": 0})
+        flags = row.get("post_agent_flags") or {}
+        cell = table.setdefault(row.get("task", "?"), {}).setdefault(row["harness"], {
+            "trials": 0, "graded": {"trials": 0, DISCLOSED_CLASS: 0},
+            "refused": {"trials": 0, DISCLOSED_CLASS: 0}})
         cell["trials"] += 1
-        for key, value in counts.items():
-            cell[key] += value
+        count = (flags.get("counts") or {}).get(DISCLOSED_CLASS, 0)
+        if count:
+            side = cell["graded" if flags.get("graded") is True else "refused"]
+            side["trials"] += 1
+            side[DISCLOSED_CLASS] += count
     (Path(output) / "post-agent-flags.json").write_text(
         json.dumps(table, indent=1, sort_keys=True) + "\n")
     return table
@@ -980,6 +1001,14 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
     # hashes and port numbers, never task bytes or credentials.
     package_logs = [egress_log / "connections.jsonl"] + (
         [args.output / "edge" / run_id / "package-egress.jsonl"] if edge else [])
+    # R11 F31: every arm launches the gate's package proxy (LoP also its edge
+    # policy), so every listed log must exist at grading; the host creates
+    # them empty now and BenchVerifier treats a missing one as a fence
+    # anomaly. BENCH_PACKAGE_PROXY_LAUNCHED=none (no arm today) is the only
+    # case in which no log is expected.
+    for log in package_logs:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.touch()
     provenance_json = json.dumps(provenance, sort_keys=True, separators=(",", ":"))
     provenance_sha = hashlib.sha256(provenance_json.encode()).hexdigest()
     (args.output / (run_id + ".public-provenance.json")).write_text(provenance_json + "\n")

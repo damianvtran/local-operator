@@ -33,6 +33,7 @@ Harbor process's PYTHONPATH. Never put that PYTHONPATH on the agent environment.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
@@ -41,7 +42,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Protocol, TypeVar, runtime_checkable
 
-from gold_probe import provenance_args
+from gold_probe import PREFLIGHT_RECEIPT, preflight_binding, provenance_args
 
 
 @runtime_checkable
@@ -166,8 +167,27 @@ async def _preinference_checks(agent, environment) -> None:
                 or (check == "isolation" and parsed.get("manifest_sha256")
                     != os.environ.get("BENCH_PUBLIC_PROVENANCE_SHA256"))):
             _write_preinference(agent, results)
+            _write_preflight_receipt(agent, environment, results, ok=False)
             raise RuntimeError(f"pre-inference {check} check failed")
     _write_preinference(agent, results)
+    _write_preflight_receipt(agent, environment, results, ok=True)
+
+
+def _write_preflight_receipt(agent, environment, results, *, ok: bool) -> None:
+    """Host-side record that THIS trial passed the strict pre-inference scan.
+
+    R11 F28: BenchVerifier grades a late hidden match only with this receipt.
+    It goes in the trial dir, the parent of the agent log dir: that dir is not
+    a container mount, unlike ``/logs/agent`` (bench-preinference.json), so
+    nothing in ``main`` can forge it. Bound to trial id, image and manifest.
+    """
+    logs = getattr(agent, "logs_dir", None)
+    if logs is None or Path(logs).name != "agent":
+        return
+    receipt = {**preflight_binding(getattr(environment, "session_id", "")), "ok": ok,
+               "isolation_sha256": hashlib.sha256(
+                   "".join(results.get("isolation", [])).encode()).hexdigest()}
+    (Path(logs).parent / PREFLIGHT_RECEIPT).write_text(json.dumps(receipt, sort_keys=True) + "\n")
 
 
 def _write_preinference(agent, results) -> None:

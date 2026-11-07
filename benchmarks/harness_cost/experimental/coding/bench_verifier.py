@@ -22,11 +22,12 @@ runs, this wrapper, in order:
 
 Only step 1 can refuse grading: a gold-isolation failure means the agent saw
 hidden inputs, so the score would not measure the agent.
-S9b narrows that for the pre-grading scan only: a hidden digest first seen
-after the agent phase (the strict pre-inference scan already refused any
-earlier one) is disclosed and graded when the probe classes it as solution
-or tests-fixture output AND ``_fence_check`` finds the fence intact; verifier
-code, unclassified digests and structural failures still refuse. Results of 1-2 go to
+S9b/S9c narrow that for the pre-grading scan only: a hidden digest first seen
+after the agent phase is disclosed and graded only when the probe classes it
+as a reviewed expected-output fixture, ``_preflight_receipt`` finds this
+trial's clean host-side pre-inference receipt, and ``_fence_check`` finds the
+fence intact. Solution, other hidden tests, unclassified digests and
+structural failures still refuse. Results of 1-2 go to
 ``<trial>/verifier/bench-isolation.json`` on the host, written before tests
 are uploaded, so the record cannot be shaped by them.
 
@@ -49,7 +50,7 @@ import shlex
 from pathlib import Path
 
 from egress import GATE_PYTHON, SUPPORT, UPLINK_NETWORK, run_docker
-from gold_probe import provenance_args
+from gold_probe import PREFLIGHT_RECEIPT, preflight_binding, provenance_args
 
 PROBE = f"{GATE_PYTHON} {SUPPORT}/gold_probe.py"
 SURVIVOR_FLAG = "agent-processes-survived-into-grading"
@@ -64,12 +65,18 @@ def fence_anomalies(log_paths: list[str], allow: set[str]) -> list[dict[str, obj
     the frozen allowlist (a policy that let something unexpected through),
     means the fence cannot vouch that a late hidden match was the agent's own
     work. Ordinary denials (github.com, unlisted mirrors) are the fence
-    working and are not anomalies. A missing log file means no connection.
+    working and are not anomalies.
+
+    R11 F31: a MISSING log is an anomaly (fail closed). Every arm launches the
+    gate's package proxy and the driver creates each listed log empty before
+    the trial, so a missing file means it was removed, not "no connection".
     """
     anomalies = []
     for raw in log_paths:
         path = Path(raw)
         if not path.is_file():
+            anomalies.append({"host": None, "port": None, "allowed": None,
+                              "reason": "missing-log", "unparsed": None})
             continue
         for line in path.read_text().splitlines():
             try:
@@ -137,6 +144,22 @@ class BenchVerifier(_verifier_base()):  # type: ignore[misc]
         """
         return []
 
+    def _preflight_receipt(self) -> dict[str, object]:
+        """The host-side receipt adapters._preinference_checks wrote, validated."""
+        trial_dir = getattr(self.trial_paths, "trial_dir", None)
+        if trial_dir is None:
+            return {"ok": False, "reason": "no trial dir"}
+        path = Path(trial_dir) / PREFLIGHT_RECEIPT
+        try:
+            receipt = json.loads(path.read_text())
+        except (OSError, ValueError, TypeError):
+            return {"ok": False, "reason": "missing or unreadable receipt"}
+        expected = preflight_binding(self.environment.session_id)
+        bad = [k for k, v in expected.items() if not v or receipt.get(k) != v]
+        if receipt.get("ok") is not True:
+            bad.append("ok")
+        return {"ok": not bad, "mismatched": bad}
+
     async def _fence_check(self) -> dict[str, object]:
         """Fence evidence for a late hidden match: logs plus a fresh egress probe.
 
@@ -145,7 +168,10 @@ class BenchVerifier(_verifier_base()):  # type: ignore[misc]
         logs = [p for p in os.environ.get("BENCH_PACKAGE_EGRESS_LOGS", "").split(",") if p]
         ports = os.environ.get("BENCH_GATE_PORTS", "")
         canary = os.environ.get("BENCH_EGRESS_CANARY_PORT", "")
-        if not logs or not canary.isdigit() or not ports or not all(
+        # Only a driver that launched no package proxy for this arm may list no
+        # log (none does today; documented in README "Gold isolation").
+        no_proxy = os.environ.get("BENCH_PACKAGE_PROXY_LAUNCHED") == "none"
+        if (not logs and not no_proxy) or not canary.isdigit() or not ports or not all(
                 p.isdigit() for p in ports.split(",")):
             return {"ok": False, "reason": "missing fence inputs"}
         allow = set(json.loads(ALLOWLIST.read_text())["allow"])
@@ -177,9 +203,12 @@ class BenchVerifier(_verifier_base()):  # type: ignore[misc]
         late_ok = False
         if bound and not strict and record["post_agent_disclosed"] and (
                 isolation.return_code in (0, 1) and iso.get("post_agent_ok") is True):
-            # S9b: grade and disclose, but only behind an intact fence.
+            # S9b: grade and disclose, but only behind an intact fence AND a
+            # clean, same-trial pre-inference receipt (R11 F28): the premise
+            # "absent before inference" is checked, never assumed.
+            record["preflight_receipt"] = self._preflight_receipt()
             record["fence"] = await self._fence_check()
-            late_ok = record["fence"]["ok"]
+            late_ok = record["preflight_receipt"]["ok"] and record["fence"]["ok"]
             if late_ok:
                 record["flags"].append(DISCLOSED_FLAG)
         record["graded"] = bound and (strict or late_ok)
