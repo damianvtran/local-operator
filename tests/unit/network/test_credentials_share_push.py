@@ -96,6 +96,7 @@ def drive_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
             "owner": server_a.identity.device_id,
             "borrower": server_b.identity.device_id,
             "idp": stub_idp,
+            "b_endpoint": f"{host_b}:{port_b}",
         },
     )
     server_b.stop()
@@ -211,7 +212,10 @@ def test_the_human_receipt_says_the_share_was_delivered(
         _lop_network("credential", "share", STUB_PROVIDER, "--with", drive_mesh.b.identity.name)
         == 0
     )
-    assert f"delivered to {drive_mesh.b.identity.name}: now" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "usable there: now" in out, out
+    # The name is said once, on the receipt's first line (design review D3).
+    assert out.count(drive_mesh.b.identity.name) == 1, out
 
 
 def test_an_unshared_default_invite_is_still_refused_and_parks_its_cadence(
@@ -370,3 +374,164 @@ def test_the_receiver_refuses_what_a_share_push_may_not_carry(
     )
     assert detail.get("kind") == "error" and detail.get("code") == expected, detail
     assert not _b_holds(drive_mesh)
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation: honest receipts, missed pushes, and a key another device owns
+# ---------------------------------------------------------------------------
+
+
+LONG_NAME = "studio-macbook-pro-m4-max-upstairs-office-2026"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "first", "follow_up"),
+    [
+        ("pushed", "usable there: now", None),
+        ("offline", "not yet — offline; it arrives when that device reconnects", None),
+        ("failed", "not yet — that device did not answer", "lop network credentials"),
+        ("refused:malformed_frame", "turned the update down", "lop network credentials"),
+        ("refused:placement_conflict", "no — that device borrows this", "revoke it on"),
+        ("no_relay_answer", "this device's network service", "lop network status"),
+        ("skipped:peer_lacks_share_push", "runs an older lop", "lop network update"),
+        ("skipped:not_a_holder", "no — the share was removed", "run the share again"),
+        ("skipped:no_dialer", "arrives on that device's next sync", None),
+    ],
+)
+def test_every_delivery_outcome_reads_as_what_is_true(
+    outcome: str, first: str, follow_up: str | None
+) -> None:
+    """Design review D1/D2/D3: the answer leads, no wire code in prose, fits 80 columns."""
+    from local_operator.network import cli as network_cli
+
+    lines = network_cli._delivery_lines(  # noqa: SLF001 — the receipt's one map
+        {"delivered": outcome == "pushed", "outcome": outcome}, LONG_NAME
+    )
+    assert lines[0].startswith("usable there: ") and first in lines[0], lines
+    assert not any(":" in line.split(" — ", 1)[-1] and "_" in line for line in lines), lines
+    if follow_up is None:
+        assert len(lines) == 1, lines
+    else:
+        assert any(follow_up in line for line in lines[1:]), lines
+        assert all(line.startswith("  ") for line in lines[1:]), lines
+    # Prose never repeats the name; only a command that needs it may.
+    assert all(len(line) < 80 for line in lines if LONG_NAME not in line), lines
+
+
+def _partition(mesh: Any) -> None:
+    """A cannot reach B: B's address on A is dead and every live link is dropped."""
+    with store.mutate(mesh.network_id, mesh.a.root) as copy:
+        row = copy.member(mesh.borrower)
+        assert row is not None
+        row.endpoints = ["127.0.0.1:9"]
+        store.save(copy, mesh.a.root)
+    for server in (mesh.a, mesh.b):
+        for link in list(server.links.values()):
+            link.close()
+    assert net_fixtures.wait_for(
+        lambda: not any(x.alive for x in [*mesh.a.links.values(), *mesh.b.links.values()])
+    )
+
+
+def _heal(mesh: Any) -> None:
+    with store.mutate(mesh.network_id, mesh.a.root) as copy:
+        row = copy.member(mesh.borrower)
+        assert row is not None
+        row.endpoints = [mesh.b_endpoint]
+        store.save(copy, mesh.a.root)
+
+
+def test_a_missed_push_is_resent_on_the_owners_first_sync_after_reconnect(
+    drive_mesh: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA Q1: B's relay stayed up but was unreachable at share time, AND B was already
+    parked by an earlier refusal (every fresh drive device is). Before the fix the
+    share arrived only when the 30-min park expired (measured 1814-1843 s)."""
+    from local_operator.network.credentials import share_push
+
+    _start_b(drive_mesh)
+    cred_sync.credentials_sync_step(drive_mesh.b, drive_mesh.owner)
+    assert drive_mesh.owner in cred_sync._owner_refusals(drive_mesh.b)  # noqa: SLF001
+    _partition(drive_mesh)
+
+    payload = _share_json(drive_mesh, capsys)
+    assert payload["delivery"] == {"delivered": False, "outcome": "offline"}, payload
+    assert not _b_holds(drive_mesh)
+
+    _heal(drive_mesh)
+    # ONE owner sync after reconnect: the retry step the tick runs for this member.
+    assert share_push.retry_step(drive_mesh.a, drive_mesh.borrower) == "pushed"
+    assert _b_holds(drive_mesh)
+    assert share_push.retry_step(drive_mesh.a, drive_mesh.borrower) is None, "not forgotten"
+
+
+def test_a_new_link_ends_the_borrowers_parked_refusal(
+    drive_mesh: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA Q1, borrower half: with no push at all (an old owner, or an owner relay that
+    restarted and forgot its retry), B's own next sync after the link is replaced
+    pulls the share instead of waiting out the 30-min park."""
+    from local_operator.network.credentials import share_push
+
+    monkeypatch.setattr(
+        share_push,
+        "push_share",
+        lambda *a, **k: {"delivered": False, "outcome": "skipped:test_disabled"},
+    )
+    _start_b(drive_mesh)
+    cred_sync.credentials_sync_step(drive_mesh.b, drive_mesh.owner)
+    assert drive_mesh.owner in cred_sync._owner_refusals(drive_mesh.b)  # noqa: SLF001
+    _share_json(drive_mesh, capsys)
+    # Same link: the park holds (the owner's answer has not been disturbed).
+    cred_sync.credentials_sync_step(drive_mesh.b, drive_mesh.owner)
+    assert not _b_holds(drive_mesh)
+
+    for link in list(drive_mesh.b.links.values()):
+        link.close()
+    assert net_fixtures.wait_for(lambda: not any(x.alive for x in drive_mesh.b.links.values()))
+    link, why = drive_mesh.b._ensure_link_with_reason(drive_mesh.owner)  # noqa: SLF001
+    assert link is not None, why
+
+    cred_sync.credentials_sync_step(drive_mesh.b, drive_mesh.owner)
+    assert _b_holds(drive_mesh), "a replaced link did not end the park"
+
+
+def test_a_push_that_loses_to_another_owners_row_is_not_reported_usable(
+    drive_mesh: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review m2: B already borrows this key from device C. The merge keeps C's row, so
+    the push must not ack as delivered, and the receipt must say why."""
+    third = "d_third_owner_000000000000000000"
+    _start_b(drive_mesh)
+    placement_mod.merge_from_peer(
+        drive_mesh.network_id,
+        {
+            "schema": placement_mod.PLACEMENT_SCHEMA,
+            "network_id": drive_mesh.network_id,
+            "epoch": 0,
+            "written_by": third,
+            "credentials": [
+                {
+                    "key": STUB_PROVIDER,
+                    "owner_device": third,
+                    "provider": STUB_PROVIDER,
+                    "kind": "oauth-rotating",
+                    "doc_rev": 1,
+                    "holders": [{"device": drive_mesh.borrower, "scope": "device"}],
+                }
+            ],
+        },
+        from_device=third,
+        self_device=drive_mesh.borrower,
+        root=drive_mesh.b.root,
+    )
+
+    payload = _share_json(drive_mesh, capsys)
+    assert payload["delivery"] == {
+        "delivered": False,
+        "outcome": "refused:placement_conflict",
+    }, payload
+    stored = placement_mod.PlacementDocument.load(
+        drive_mesh.network_id, drive_mesh.b.root, self_device=drive_mesh.borrower
+    )
+    assert stored.owner_of(STUB_PROVIDER) == third

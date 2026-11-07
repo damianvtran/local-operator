@@ -2424,7 +2424,15 @@ def credentials_sync_step(step_server: "RelayServer", device_id: str) -> str | N
 _OWNER_REFUSED_ATTR = "_credential_owner_refused_until"
 
 
-def _owner_refusals(server: Any) -> dict[str, float]:
+def _live_link_id(server: Any, device_id: str) -> str:
+    """The id of a live link to ``device_id`` right now, or ``""`` (never dials)."""
+    for link in list((getattr(server, "links", None) or {}).values()):
+        if getattr(link, "device_id", "") == device_id and getattr(link, "alive", False):
+            return str(getattr(link, "link_id", "") or "")
+    return ""
+
+
+def _owner_refusals(server: Any) -> dict[str, tuple[float, str]]:
     parked = getattr(server, _OWNER_REFUSED_ATTR, None)
     if not isinstance(parked, dict):
         parked = {}
@@ -2433,8 +2441,8 @@ def _owner_refusals(server: Any) -> dict[str, float]:
 
 
 def forget_owner_refusal(server: Any, owner: str) -> None:
-    """Drop a parked refusal for ``owner`` (its share push just proved it changed)."""
-    if owner:
+    """Drop a parked refusal for ``owner``: it pushed a share or served its document."""
+    if owner and server is not None:
         _owner_refusals(server).pop(owner, None)
 
 
@@ -2471,8 +2479,19 @@ def _pull_past_stale_self_view(server: Any, engine: Any, device_id: str, blocked
     skip = f"skipped:no_{blocked}"
     parked = _owner_refusals(server)
     now = time.monotonic()
-    if parked.get(device_id, 0.0) > now:
-        return skip
+    held = parked.get(device_id)
+    # THE PARK BELONGS TO ONE LINK INCARNATION (QA round 1, Q1). A refusal is the
+    # owner's answer over the link it was asked on; once that link has been replaced
+    # (the owner's relay restarted, a sleep or a Wi-Fi drop ended, the owner dialled us
+    # to retry a share it could not deliver), the answer may have changed, and holding
+    # the park would leave a missed share waiting out the full 30 min (measured
+    # 1814-1843 s). A missing link is NOT a new incarnation: re-asking then would dial
+    # an owner whose answer nothing has disturbed.
+    if held is not None and held[0] > now:
+        current = _live_link_id(server, device_id)
+        if not current or current == held[1]:
+            return skip
+        parked.pop(device_id, None)
     try:
         from local_operator.network.credentials.client import MeshCredentialClient
 
@@ -2484,7 +2503,10 @@ def _pull_past_stale_self_view(server: Any, engine: Any, device_id: str, blocked
     if not isinstance(result, dict):
         return skip
     if device_id in (result.get("refused_by") or ()):
-        parked[device_id] = now + definitions.REFUSED_MIN_INTERVAL_S
+        parked[device_id] = (
+            now + definitions.REFUSED_MIN_INTERVAL_S,
+            _live_link_id(server, device_id),
+        )
         return skip
     parked.pop(device_id, None)
     return engine.enqueue_placement_pull(device_id)

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -50,6 +51,22 @@ SHARE_PUSH_ORIGIN = "credential_share"
 #: receiver tolerant of a sender that later batches a multi-key share.
 MAX_SHARE_ROWS = 8
 MAX_SHARE_BYTES = 65536
+
+
+#: ``server`` attribute holding ``{(network_id, device_id, key): first_attempt_wall}``:
+#: shares whose push did not land for a reason a later attempt can fix.
+_PENDING_ATTR = "_credential_share_pushes_pending"
+
+#: The push outcomes a retry can still turn into delivery: the holder was unreachable
+#: or did not answer. Everything else is either done (``pushed``), a policy answer a
+#: retry cannot change (``refused:*``, ``skipped:*``), or this device's own relay —
+#: which is the one running the retry, so it cannot be the problem then.
+RETRYABLE_OUTCOMES = frozenset({"offline", "failed"})
+
+#: How long an undelivered share is retried before the holder's own pull is left to
+#: carry it. A day covers a laptop asleep overnight; past that the holder's cadence
+#: (whose refusal park is per link incarnation) still converges on reconnect.
+PENDING_MAX_AGE_S = 24 * 3600.0
 
 
 def negotiated(link: Any) -> bool:
@@ -141,6 +158,62 @@ def push_share(server: Any, network_id: str, device_id: str, key: str) -> dict[s
     return {"delivered": False, "outcome": "failed"}
 
 
+def push_and_remember(server: Any, network_id: str, device_id: str, key: str) -> dict[str, Any]:
+    """:func:`push_share`, and keep an undelivered-but-retryable share for the cadence.
+
+    WHY THE OWNER RETRIES (QA round 1, Q1). A holder whose relay stayed up but missed
+    the push (asleep, partitioned) used to wait out its 30-min refusal park before its
+    own pull asked again, so the receipt's "when it reconnects" meant half an hour.
+    The owner already dials every member on its 15 s tick (``lifecycle`` step), so
+    re-sending the one row when the holder answers again costs no extra link and makes
+    "when it reconnects" mean the first tick after it does.
+    """
+    result = push_share(server, network_id, device_id, key)
+    pending = _pending(server)
+    ident = (network_id, device_id, key)
+    if str(result.get("outcome") or "") in RETRYABLE_OUTCOMES:
+        pending.setdefault(ident, time.time())
+    else:
+        pending.pop(ident, None)
+    return result
+
+
+def _pending(server: Any) -> dict[tuple[str, str, str], float]:
+    pending = getattr(server, _PENDING_ATTR, None)
+    if not isinstance(pending, dict):
+        pending = {}
+        setattr(server, _PENDING_ATTR, pending)
+    return pending
+
+
+def retry_step(server: Any, device_id: str) -> str | None:
+    """The cadence half: re-push this member's undelivered shares. ``None`` when idle.
+
+    Registered as an INDEPENDENT tick step (``credentials.install``), so it rides the
+    definitions syncer's thread and 15 s floor and inherits no capability gate: the
+    owner's own row is the authority here, and :func:`push_share` re-reads it each
+    time, so a share revoked meanwhile is dropped (``skipped:not_a_holder``), not sent.
+    In memory only: a relay restart forgets it, and the holder's pull then converges.
+    """
+    pending = getattr(server, _PENDING_ATTR, None)
+    if not isinstance(pending, dict) or not pending:
+        return None
+    now = time.time()
+    outcomes: list[str] = []
+    for ident, first in list(pending.items()):
+        network_id, device, key = ident
+        if device != device_id:
+            continue
+        if now - first > PENDING_MAX_AGE_S:
+            pending.pop(ident, None)
+            continue
+        try:
+            outcomes.append(str(push_and_remember(server, network_id, device, key)["outcome"]))
+        except Exception:  # noqa: BLE001 — a cadence reports; it never raises into the tick
+            logger.debug("share push: retry to %s failed", device, exc_info=True)
+    return ",".join(outcomes) or None
+
+
 # ---------------------------------------------------------------------------
 # Holder side: routed from ``owner.relay_handler`` / ``MeshCredentialBroker.on_broker``
 # ---------------------------------------------------------------------------
@@ -150,9 +223,14 @@ def member_share_push(server: Any, link: Any, frame: Mapping[str, Any]) -> dict[
     """Apply a share push. Reached with or without a broker on this device, because the
     device that most needs it (a borrower-only one) owns nothing and builds no broker.
 
-    The relay's authoriser has already required the sender's ``broker_credential`` in
-    THIS device's row for it (``types.OP_CAPABILITY['net_broker']``). Every field is
-    type-checked before it is compared, and nothing is written unless all checks pass.
+    THE OPERATIVE DEFENCE IS THIS HANDLER'S OWN CHECKS (QA round 1, Q2), not the
+    relay's authoriser. The authoriser does require ``broker_credential`` on THIS
+    device's row for the sender (``types.OP_CAPABILITY['net_broker']``), but that row
+    is learned through membership sync and any device somebody shared with may carry
+    it — so a third member can reach this function. What stops it is below: the
+    transport-authenticated sender (``identity_mismatch``), owner == sender
+    (``not_owner``), this device named as a holder (``not_a_holder``), an active sender,
+    and the owner-only merge. Every field is type-checked before it is compared.
     """
     root = getattr(server, "root", None)
     self_device = str(getattr(getattr(server, "identity", None), "device_id", "") or "")
@@ -223,6 +301,37 @@ def _accept(
             return _refuse("not_a_holder", "a pushed row does not name this device as a holder")
     if not _member_is_active(root, network_id, sender):
         return _refuse("not_owner", "the sender is not an active member of this network")
-    return placement_mod.merge_from_peer(
+    changed = placement_mod.merge_from_peer(
         network_id, document, from_device=sender, self_device=self_device, root=root
     )
+    # THE ACK MUST MEAN "USABLE FROM THE SENDER" (review round 1, m2). Placement keys
+    # are global, and the merge silently keeps a row this device already holds from a
+    # DIFFERENT owner for the same key — an ``ack`` then made the owner's receipt say
+    # "usable now" while every borrow of that key still went elsewhere. So the stored
+    # row is read back, and a push whose row did not land as the sender's is refused by
+    # name; the owner's receipt then says why instead of claiming delivery.
+    stored = placement_mod.PlacementDocument.load(network_id, root, self_device=self_device)
+    for row in rows:
+        entry = stored.entry(str(row.get("key") or ""))
+        if entry is None or entry.owner_device != sender:
+            return _refuse(
+                "placement_conflict",
+                "this device already borrows that key from another device; nothing changed",
+            )
+        if not entry.is_holder(self_device):
+            # This device holds a NEWER revision of the sender's row that no longer
+            # names it (a revoke overtook the push): the push is stale, not usable.
+            return _refuse("not_a_holder", "a newer revision here no longer names this device")
+    return changed
+
+
+def install() -> None:
+    """Register :func:`retry_step` on the definitions syncer's ONE seam (idempotent).
+
+    Independent of the step capability gates for the lifecycle step's reason: the
+    retry is the OWNER's act about its OWN row, so no member capability decides it.
+    """
+    from local_operator.network import definitions
+
+    setattr(retry_step, "independent_cadence", True)
+    definitions.add_tick_step(retry_step)

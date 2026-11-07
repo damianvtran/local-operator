@@ -3290,6 +3290,59 @@ def _push_share_to_holder(network_id: str, device: str, key: str) -> dict[str, A
     }
 
 
+def _delivery_lines(delivery: dict[str, Any], name: str) -> list[str]:
+    """The receipt's answer to "can that device use it yet, and if not, what now?".
+
+    WHY A MAP AND NOT THE CODE (design review round 1, D1/D2): the first version read
+    ``delivered to <name>: on its next sync (<code>)`` for every outcome but one, so the
+    line led with the opposite of what happened, its reason was a wire code, and for
+    three outcomes "next sync" was untrue — a removed share never arrives, an older
+    drive-role device never pulls until it is updated, and a silent local relay is
+    this device's problem, not the holder's. Each outcome now says what is true and,
+    where the operator can act, the one command that acts. ``--json`` keeps the code.
+
+    Prose lines say ``there`` / ``that device`` (the receipt's first line names it);
+    only a command that needs the name repeats it, on its own indented line, so an 80-
+    column terminal never wraps inside a code or a command (D3).
+    """
+    outcome = str(delivery.get("outcome") or "")
+    if delivery.get("delivered"):
+        return ["usable there: now"]
+    fetch_now = "  to fetch it now, run there: lop network credentials"
+    if outcome == "offline":
+        # The owner re-sends on its next tick after the device answers again
+        # (``share_push.retry_step``), so nothing is asked of the operator.
+        return ["usable there: not yet — offline; it arrives when that device reconnects"]
+    if outcome == "failed":
+        return ["usable there: not yet — that device did not answer; retried shortly", fetch_now]
+    if outcome == "refused:placement_conflict":
+        return [
+            "usable there: no — that device borrows this from another owner",
+            "  to switch: revoke it on that owner, then share again",
+        ]
+    if outcome.startswith("refused:"):
+        return ["usable there: not yet — that device turned the update down", fetch_now]
+    if outcome == "no_relay_answer":
+        return [
+            "usable there: not yet — this device's network service did not answer",
+            "  check: lop network status, then share again",
+        ]
+    if outcome == "skipped:peer_lacks_share_push":
+        # An older drive-role build never pulls on its own (the defect this push
+        # fixes), so "next sync" would be a promise its cadence cannot keep.
+        return [
+            "usable there: not yet — that device runs an older lop",
+            f"  update it: lop network update {name}",
+            "  or run there: lop network credentials",
+        ]
+    if outcome == "skipped:not_a_holder":
+        return [
+            "usable there: no — the share was removed before it was sent",
+            "  run the share again to send it",
+        ]
+    return ["usable there: not yet — it arrives on that device's next sync"]
+
+
 def _cmd_credential(args: argparse.Namespace) -> int:
     """``credential share|revoke <key> --with/--from <dev>``: the owner's own verb.
 
@@ -3500,14 +3553,12 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     lines = [
         f"{action} {shown!r} with {name}" if verb == "share" else f"{action} {shown!r} from {name}",
         f"borrowers now: {', '.join(holders) or 'none'}",
-        f"broker_credential on {name}: {capability or 'unchanged'}",
+        # ``there``, not the name again (design review round 1, D3): the first line
+        # already names the device, and a long name repeated per line wrapped mid-token.
+        f"broker_credential there: {capability or 'unchanged'}",
     ]
     if delivery:
-        lines.append(
-            f"delivered to {name}: now"
-            if delivery.get("delivered")
-            else f"delivered to {name}: on its next sync ({delivery.get('outcome') or 'not sent'})"
-        )
+        lines.extend(_delivery_lines(delivery, name))
     from local_operator.network.credentials.types import is_mcp_key
 
     if verb == "share" and is_mcp_key(key):

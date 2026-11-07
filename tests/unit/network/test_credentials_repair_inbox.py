@@ -54,6 +54,7 @@ from tests.unit.network.test_credentials_real_link import (  # noqa: F401 — fi
     _borrower_client,
     _lop_network,
     _pull,
+    _pulled_or_held,
     _share,
     mesh,
 )
@@ -165,7 +166,7 @@ def _tombstone_provider(rig: Any) -> None:
 
 def _share_mcp(rig: Any) -> None:
     assert _lop_network("credential", "share", MCP_KEY, "--with", rig.b.identity.name) == 0
-    assert MCP_KEY in _pull(rig).get("changed", [])
+    assert _pulled_or_held(rig, MCP_KEY)
 
 
 def _borrow(rig: Any, key: str = MCP_KEY, provider: str = "mcp-oauth") -> Any:

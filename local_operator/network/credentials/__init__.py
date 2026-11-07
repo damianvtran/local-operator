@@ -283,7 +283,7 @@ class _LocalOps:
         """
         from local_operator.network.credentials import share_push as share_push_mod
 
-        return share_push_mod.push_share(
+        return share_push_mod.push_and_remember(
             self._server,
             str(frame.get("network") or ""),
             str(frame.get("device") or ""),
@@ -381,6 +381,11 @@ def install(server: RelayServer) -> None:
     # THE LIFECYCLE SENDER rides the same tick; it sends only to peers whose link
     # negotiated ``credential-lifecycle-v1`` (see ``lifecycle.lifecycle_tick_step``).
     lifecycle_mod.install()
+    # THE SHARE PUSH'S RETRY rides the same tick (``share_push.retry_step``): a share
+    # whose holder was unreachable at share time is re-sent when it answers again.
+    from local_operator.network.credentials import share_push as share_push_mod
+
+    share_push_mod.install()
     handler = owner_mod.MeshCredentialBroker.relay_handler(server)
     ops = _LocalOps(server)
     server.register_ops(

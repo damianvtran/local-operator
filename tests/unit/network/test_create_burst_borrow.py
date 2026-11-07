@@ -43,6 +43,7 @@ from tests.unit.network.test_credentials_owner import (  # noqa: F401 — fixtur
 from tests.unit.network.test_credentials_real_link import (  # noqa: F401 — fixtures by import
     _borrower_client,
     _pull,
+    _pulled_or_held,
     _share,
     mesh,
 )
@@ -71,7 +72,7 @@ def test_a_borrow_during_a_burst_of_slow_creates_is_served(
     # The borrow goes out ~4 s into the burst; a queued one must outwait 8 s.
     assert _WAIT_S - 5.0 > CLIENT_DEADLINE_S, "the rig must hold creates past the deadline"
     _share(rig)
-    assert STUB_PROVIDER in _pull(rig).get("changed", [])
+    assert _pulled_or_held(rig, STUB_PROVIDER)
     monkeypatch.setattr(relay, "FIRST_TURN_WAIT_S", _WAIT_S)
     monkeypatch.setattr(plane, "_Handle", _LongTurn)
     served = plane._serve(monkeypatch, rig.a.root)  # noqa: SLF001

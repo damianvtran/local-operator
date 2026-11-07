@@ -1524,6 +1524,13 @@ class MeshCredentialClient:
                 refused_by.append(device)
                 continue
             if isinstance(document, dict):
+                # AN ANSWERED PULL ENDS A PARKED REFUSAL (review round 1, n1), whoever
+                # asked: the explicit listing and onboarding's in-run refresh run this
+                # too, and a park left standing after the owner served its document
+                # would only delay the cadence's copies for no reason.
+                from local_operator.network.credentials import sync as sync_mod
+
+                sync_mod.forget_owner_refusal(self._relay, device)
                 # ``device`` is the member this device DIALLED, whose key the
                 # handshake verified — the transport's identity, not a frame field.
                 # Merged into the FILE under its lock: saving an in-memory copy is

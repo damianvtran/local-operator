@@ -129,6 +129,7 @@ _UNWORDED_CODES = frozenset(
         # negotiated, was malformed, or reached a device without an identity. Wire
         # details answered to the pushing owner, never stored on an approval card.
         "malformed_frame",
+        "placement_conflict",
         "unavailable",
         "unsupported",
         "consent_action_refused",
