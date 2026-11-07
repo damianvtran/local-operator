@@ -642,6 +642,11 @@ def plan_arm(
         # fire text is built at delivery time); it mirrors the note so a raw
         # transcript/index reader sees what the wait was about.
         message=merged_note,
+        # AGENT-ARMED: the note is the agent's own words (this file composes the
+        # fire note from it), and ``origin`` defaults to unset — the hedge — so
+        # the row has to say it. The delivery comment in ``session.py`` already
+        # claims patience fires are stamped; this is the stamp it means.
+        origin="tool",
         next_due_at=due,
         every_ms=None,
         fired_count=0,

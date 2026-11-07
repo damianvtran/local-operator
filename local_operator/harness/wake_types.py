@@ -190,25 +190,47 @@ class WakeSchedule(BaseModel):
     #
     # SKEW: additive with the usual rule for this model (``extra="forbid"`` +
     # ``load()``'s drop-with-warning). A build that predates the field drops a
-    # row carrying it; a row written by such a build reads back as ``tool``
-    # here — model-authored — which is the direction that keeps an
-    # unattributed row from silencing anything (see
-    # :func:`local_operator.divergence._wake_author`, which hedges instead of
-    # claiming the check happened). Every writer in this tree stamps it
-    # explicitly except the model-created ones, for which ``tool`` IS the
-    # answer.
-    origin: WakeOrigin = "tool"
+    # row carrying it; a row written by such a build reads back with NO origin
+    # here — unattributed, not model-authored. The default is ``None`` for
+    # exactly that reason: rows are persisted with a plain ``model_dump()``, so
+    # "the field was never written" and "the field says tool" are different
+    # bytes, and only the second is a claim about who wrote the words. Every
+    # row that predates this field is in the first case (167 of 167 sampled on
+    # a live machine), and answering ``tool`` for them stamped the operator's
+    # own pre-upgrade instruction ``wake_author="model"`` — so the judge saw a
+    # known author, never recorded ``unseen=unattributed_wake``, and the notice
+    # asserted their instruction was in no user message (review round 5, R5-
+    # MAJOR-1). ``None`` reaches the hedge instead, which is the honest answer
+    # for a row nobody stamped.
+    #
+    # Every model-side writer stamps ``"tool"`` explicitly — the direct row
+    # constructors in ``aida/proactive.py``, ``librarian/proactive.py``,
+    # ``wakes/patience.py`` and ``asks/queue.py``, plus ``arm_wake``'s default
+    # (which covers the agent's ``wake`` tool) — and an edit carries the row's
+    # own value forward (``harness/wake.py``'s ``build_wake_edit``). Leaving it
+    # unset is therefore only ever a fact about a row, not a forgotten stamp.
+    origin: WakeOrigin | None = None
 
     @property
     def message_author(self) -> str:
-        """``"operator"`` or ``"model"`` — who wrote ``message``.
+        """``"operator"``, ``"model"`` or ``""`` — who wrote ``message``.
 
-        Two-valued on purpose: consumers ask ONE question (could anybody but
-        this session's model have said these words?), while ``origin`` keeps
-        the exact writer for the surfaces that want it. Keep the predicate here
-        so a new ``origin`` literal cannot be added in one place and forgotten
-        in another.
+        Two-valued for every row that names a writer, and ``""`` reserved for a
+        row that names NONE (``origin`` unset: written before the field existed,
+        or by a writer outside this tree). Consumers ask ONE question — could
+        anybody but this session's model have said these words? — and ``""`` is
+        the honest answer when the row does not say: it is not ``"model"`` (a
+        claim about a row nobody stamped, and the one that produced the round-5
+        false notice) and it is not ``"operator"`` (which would let an
+        unattributed row explain a root the model invented).
+
+        :func:`local_operator.divergence._wake_author` reads this through the
+        delivery's ``wake_author`` detail and hedges the notice on ``""``.
+        Keep the predicate here so a new ``origin`` literal cannot be added in
+        one place and forgotten in another.
         """
+        if self.origin is None:
+            return ""
         return "operator" if self.origin in OPERATOR_WAKE_ORIGINS else "model"
 
 

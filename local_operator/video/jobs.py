@@ -163,7 +163,12 @@ class VideoWakeHandle:
             if "error" in outcome:
                 logger.warning("could not arm video check-wake: %s", outcome.get("error"))
                 return
-            schedule = outcome["schedule"].model_copy(update={"id": self.wake_id})
+            # ENGINE TEXT, stamped with its author: ``WakeSchedule.origin``
+            # defaults to UNSET (unattributed, which makes the divergence notice
+            # hedge instead of judging the text), and these check-in words are
+            # the job's, not a person's — so the row says "tool" and a delivery
+            # that names a root can be judged on its text.
+            schedule = outcome["schedule"].model_copy(update={"id": self.wake_id, "origin": "tool"})
             await scheduler.update([*existing, schedule])
         except Exception:  # noqa: BLE001 — the wake is a net, never a hard dependency
             logger.warning("video check-wake arm failed", exc_info=True)

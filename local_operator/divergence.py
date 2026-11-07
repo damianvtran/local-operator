@@ -82,12 +82,18 @@ of asserting absence over them:
 * ``compacted_history`` — compaction replaces ``context.messages`` with a
   summary, so a root named before the cut may be absent from the list this
   judge is handed.
-* ``unattributed_wake`` — a delivered wake whose author was never recorded
-  (history written before ``WakeSchedule.origin`` existed, or a writer outside
-  this tree). A wake's text has two possible authors; when the author cannot be
-  read, the delivery is not used as a source AND the row says so, because "the
-  model did not write it" and "the operator did write it" are different claims
-  and only one of them is knowable.
+* ``unattributed_wake`` — a delivered wake whose author was never recorded:
+  a ``wake_prompt`` already in history from before ``WakeSchedule.origin``
+  existed, OR a live fire from a row that carries no ``origin`` (every row
+  written before the field shipped — ``WakeSchedule`` deliberately defaults it to
+  unset rather than to a guess, so such a row reads back as unattributed rather
+  than as model-authored). A wake's text has two possible authors; when the
+  author cannot be read, the delivery is not used as a source AND the row says
+  so, because "the model did not write it" and "the operator did write it" are
+  different claims and only one of them is knowable. Review round 5 found the
+  live half unreachable: an unset field defaulted to ``"tool"``, the delivery
+  stamped a known author, and the operator's own pre-upgrade instruction was
+  asserted absent — the exact case this flag exists to hedge.
 
 A fifth carrier is out of reach for a structural reason worth stating: the
 **request-assembly service** composes the provider request outside this
@@ -1164,6 +1170,30 @@ MODEL_AUTHORED_CARRIERS = frozenset(
 #: contents, a listing), which is the 48% of the baseline this arm exists for. The
 #: list is names, so a new self-echoing tool is a one-line addition here — the
 #: guard's failure mode without it is a missed notice, never a false one.
+#:
+#: THE EXCLUSION IS BY NAME, NOT BY OP — deliberate, and the trade is stated
+#: (review round 5, R5-MINOR-1). ``project op=show``/``list`` returns stored
+#: records written by the OPERATOR (``lop project``, the desktop) or by other
+#: sessions, not just the model's own arguments, so excluding every ``project``
+#: result costs a real source and can leave a root the operator wrote in a
+#: project record unexplained: one observation-only row too many. Narrowing the
+#: exclusion by op was considered and REJECTED, because the result a ``show`` /
+#: ``list`` op returns is an unfiltered aggregate of records from several
+#: authors and this judge has no per-line attribution inside a tool result — so
+#: it cannot fold the operator's line without also folding the model's own
+#: earlier description of the same project, which is the two-call laundering
+#: path this whole set exists to close (model writes "build ~/x" into a project
+#: via an excluded receipt, then reads it back with ``project show`` and cites
+#: itself). It is the same all-of rule the resume catch-up applies to its fold
+#: (``Session._resume_catchup_author``): an aggregate whose members disagree is
+#: unattributable, and unattributable here means excluded, not guessed.
+#: ``wake op=list`` has the identical shape (operator-armed rows and the model's
+#: own rows come back in one blob). The cost is bounded and honest: the notice's
+#: checked-sources clause names only the three instruction sources, so a row
+#: raised despite the operator naming the root in a project record is redundant,
+#: never a false claim about those sources. The alternative error — folding the
+#: blob — silences the guard in the incident's own shape, which is the one this
+#: module must not commit.
 SELF_ECHO_RECEIPT_TOOLS = frozenset({"wake", "todo", "project", "monitor"})
 
 
@@ -1176,9 +1206,12 @@ def _wake_author(message: Any) -> str:
     aggregate as one blob and one model-written line inside it would launder a
     root the model invented).
 
-    ``""`` means the delivery carries no author at all — history written before
-    the field existed, or a writer outside this tree that did not stamp it. That
-    is genuinely unknowable from here, so it is NOT read as an operator source,
+    ``""`` means the delivery carries no author at all: history written before
+    the field existed, a writer outside this tree that did not stamp it, or a LIVE
+    fire from a row whose ``origin`` is unset (``WakeSchedule`` defaults it to
+    ``None``, not to ``"tool"``, so an unstamped row is distinguishable from a
+    model-armed one on disk). That is genuinely unknowable from here, so it is
+    NOT read as an operator source,
     and :meth:`DivergenceJudge._sync_corpus` records ``unattributed_wake`` in
     ``unseen`` so the notice hedges ("is not named in what this session could
     check") instead of asserting the carrier was checked. A hedged notice is

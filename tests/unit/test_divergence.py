@@ -13,6 +13,7 @@ same way).
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1070,7 +1071,7 @@ def test_an_unattributed_wake_is_not_folded_and_not_claimed_as_checked(
     assert "unattributed_wake" in events[0].unseen
     text, _kind = divergence_notice(events[0].as_notice_payload())
     assert "is not named in what this session could check" in text
-    assert "a wake delivery with no recorded author" in text
+    assert "wake deliveries with no recorded author" in text
 
 
 @pytest.mark.parametrize("tool_name", sorted(SELF_ECHO_RECEIPT_TOOLS))
@@ -1129,6 +1130,60 @@ def test_a_tool_result_that_carries_the_environments_answer_still_explains(
         system_blocks=["You are a personal assistant."],
     )
     assert events == []
+
+
+def test_a_listed_tools_stored_record_is_excluded_and_an_unlisted_tools_is_not(
+    home: Path, tmp_path: Path
+) -> None:
+    """R5-MINOR-1, the DECISION PIN: the exclusion is by NAME, on purpose.
+
+    ``project op=show`` / ``op=list`` returns records the operator or another
+    session wrote, so excluding every ``project`` result costs a real source —
+    the note on :data:`SELF_ECHO_RECEIPT_TOOLS` states the trade and why
+    narrowing by op was rejected (a read op's result is an unattributable
+    aggregate that also carries the model's own earlier description, so folding
+    it would reopen the two-call laundering path). This test pins BOTH halves in
+    the same test so the trade cannot drift into an implicit one: a listed
+    tool's stored-record result does not explain the root, and an unlisted
+    tool's result of the same shape does.
+    """
+    stored_record = "project show: description 'minerva build' names ~/squeeze/app.py"
+    listed = _judge(home, tmp_path)
+    assert (
+        len(
+            listed.observe_turn(
+                turn_index=2,
+                tool="write",
+                arguments={"path": "~/squeeze/app.py"},
+                messages=[
+                    Message.user("review the tunnels MR"),
+                    Message(
+                        role="tool",
+                        tool_name="project",
+                        content=[TextContent(text=stored_record)],
+                    ),
+                ],
+                system_blocks=["You are a personal assistant."],
+            )
+        )
+        == 1
+    ), "a project read is excluded by name — documented, not accidental"
+    unlisted = _judge(home, tmp_path)
+    assert (
+        unlisted.observe_turn(
+            turn_index=2,
+            tool="write",
+            arguments={"path": "~/squeeze/app.py"},
+            messages=[
+                Message.user("review the tunnels MR"),
+                Message(
+                    role="tool", tool_name="bash", content=[TextContent(text=stored_record)]
+                ),
+            ],
+            system_blocks=["You are a personal assistant."],
+        )
+        == []
+    ), "the SAME text from an unlisted tool still counts"
 
 
 def test_a_todo_reminder_is_the_models_own_plan_and_does_not_explain_the_root(
@@ -2073,10 +2128,21 @@ class _WakePathStream:
     """
 
     def __init__(
-        self, *, root: str, create_wake: dict[str, Any] | None, unnamed: str | None = None
+        self,
+        *,
+        root: str,
+        create_wake: dict[str, Any] | None,
+        unnamed: str | None = None,
+        trigger: str = "(alarm) Scheduled wake",
     ) -> None:
         self.root = root
         self.create_wake = create_wake
+        #: Which delivered text makes this the WOKEN turn. A single fire says
+        #: "(alarm) Scheduled wake"; the resume catch-up says "(alarm) The
+        #: session resumed" and folds several rows into one prompt, so the test
+        #: that drives the fold picks its own marker rather than matching one
+        #: hard-coded string and silently never waking.
+        self.trigger = trigger
         #: A SECOND root in the same command that NOTHING named — the operator
         #: case's non-vacuity control: one turn, one tool, one judge, and the
         #: row that fires must be this one while the operator's root stays quiet.
@@ -2108,7 +2174,7 @@ class _WakePathStream:
         blob = self._text(request)
         tools = self._tool_names(request)
         events: list[StreamEvent] = []
-        if "(alarm) Scheduled wake" in blob:
+        if self.trigger in blob:
             # THE WOKEN TURN: the carrier is in this request. Write to the root
             # the test is watching, then finish.
             if "bash" in tools:
@@ -2357,3 +2423,253 @@ async def test_a_model_scheduled_wake_does_not_explain_its_root_end_to_end(
     # "start the job", and the model's own wake text is not an instruction.
     assert "could not be checked" not in text
     assert "wake-model-root" in text
+
+
+async def _rewrite_schedules(session_dir: Path, mutate: Any) -> list[dict[str, Any]]:
+    """Rewrite the transcript's NEWEST ``wake_schedules`` snapshot in place.
+
+    The transcript entry is the truth ``load()`` reads; the index under
+    ``<config>/wakes/`` is derived (``wakes/arm.py``'s own note). A test that
+    wants a row this build would never write — one produced by a build that
+    predates a field, or one whose due instant is already past — therefore has
+    to rewrite THIS, exactly as a pre-upgrade runtime left it. Returns the rows
+    it wrote, so the test can assert what reached disk.
+    """
+    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript, read_latest_custom_entry
+
+    entry = read_latest_custom_entry(session_dir, WAKE_SCHEDULES_CUSTOM_TYPE)
+    assert entry is not None, "no wake_schedules snapshot to rewrite"
+    rows = list(entry.payload["details"]["schedules"])
+    mutate(rows)
+    await Transcript(session_dir).append_custom(WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": rows})
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_wake_row_hedges_its_live_delivery_end_to_end(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5-MAJOR-1: a row written before ``origin`` existed must HEDGE, not assert.
+
+    The hedge was built for the stored-history case and was unreachable for a
+    LIVE fire: the field defaulted to ``"tool"``, so a row with no ``origin``
+    read back as model-authored, the delivery stamped ``wake_author="model"``,
+    the judge saw a known author and never recorded ``unattributed_wake`` — and
+    the operator read "… Not in the system prompt, custom instructions or user
+    messages" about their OWN instruction. Not a corner: every persisted row on
+    a live machine carries no ``origin`` (167 of 167 sampled), and an edit
+    carries ``tool`` forward so editing did not repair one.
+
+    Driven through the real writer (``arm_wake`` stamping ``cli``), a store
+    rewrite that removes the key exactly as a pre-field build would, then the
+    real scheduler, the real delivery and the real judge.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.registry import create_tools
+    from local_operator.wakes.arm import arm_wake
+
+    scratch = home.parent
+    config_dir = scratch / "config"
+    session_dir = config_dir / "sessions" / "sess"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    recorder = reset_recorder_for_test(AnalyticsStore(scratch / "analytics.db"))
+    # The fixture home lives under $TMPDIR, which the shipped skip list
+    # suppresses wholesale — neutralised through the one seam the real
+    # derivation reads, so an empty result here is the fold and not blindness.
+    monkeypatch.setattr("local_operator.session.spec.volatile_roots", lambda: ())
+    root = "~/wake-legacy-root"
+    message = f"when you wake, check {root}/src and report"
+
+    def build(stream_fn: Any) -> Any:
+        return Session(
+            model=MODEL,
+            stream_fn=stream_fn,
+            tools=create_tools(ToolContext(), enabled=["bash"]),
+            transcript=Transcript(config_dir / "sessions" / "sess"),
+            session_id="sess",
+            system_blocks_provider=lambda: ["You are a personal assistant."],
+            yolo=True,
+            compaction_settings=CompactionSettings(enabled=False),
+        )
+
+    first = build(_WakePathStream(root=root, create_wake=None))
+    try:
+        await first.prompt("hello there")
+    finally:
+        await first.dispose()
+
+    outcome = await arm_wake(config_dir, "sess", {"message": message, "in": "2s"}, origin="cli")
+    assert outcome.schedules[0].origin == "cli"
+    # What a build that predates the field wrote: the KEY IS ABSENT (not
+    # ``"tool"``), which is the distinction the default has to preserve.
+    written = await _rewrite_schedules(
+        session_dir, lambda rows: [row.pop("origin", None) for row in rows]
+    )
+    assert all("origin" not in row for row in written), written
+
+    session = build(_WakePathStream(root=root, create_wake=None))
+    try:
+        assert await _wait_until(
+            lambda: _wake_carriers(session)
+        ), "the legacy row never fired through the real scheduler"
+        carriers = _wake_carriers(session)
+        target = home / "wake-legacy-root" / "src" / "app.py"
+        assert await _wait_until(
+            lambda: target.exists()
+        ), "the woken turn never wrote to the root the legacy row named"
+        events = list(session._divergence_judge._events)
+    finally:
+        await session.dispose()
+        recorder.close()
+        reset_recorder_for_test(AnalyticsStore(scratch / "analytics-2.db")).close()
+
+    assert carriers, "the woken turn must have received the wake_prompt carrier"
+    assert carriers[0].details["wake_author"] == "", (
+        "a row with no recorded author must deliver with NO author, not 'model' — "
+        f"got {carriers[0].details.get('wake_author')!r}"
+    )
+    rows = _divergence_rows(config_dir)
+    assert [row["root"] for row in rows] == [root], rows
+    assert "unattributed_wake" in rows[0]["unseen"], rows[0]["unseen"]
+    assert events, "the row must surface as a notice on the real path"
+    text, _kind = divergence_notice(events[0].as_notice_payload())
+    # THE REGRESSION, in the wording the operator reads: the author was never
+    # recorded, so the notice may not claim the absence was checked.
+    assert "is not named in what this session could check" in text
+    assert "wake deliveries with no recorded author" in text
+    assert "is new to this session" not in text
+
+
+@pytest.mark.parametrize(
+    ("authors", "expected_author", "expect_row", "expect_hedge"),
+    [
+        (("cli",), "operator", False, False),
+        (("cli", "tool"), "", True, True),
+        (("tool",), "model", True, False),
+    ],
+    ids=["operator-only", "mixed", "tool-only"],
+)
+@pytest.mark.asyncio
+async def test_a_resume_catchup_attributes_its_fold_only_when_every_row_agrees(
+    authors: tuple[str, ...],
+    expected_author: str,
+    expect_row: bool,
+    expect_hedge: bool,
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QA round 5: the fold is three-valued, so a MIXED catch-up hedges.
+
+    An aggregate of several rows is attributable only when every member agrees.
+    Collapsing a mixed fold to ``"model"`` was the defect: one model row folded
+    in with the operator's stamped a known author, so the judge folded the
+    whole blob, never recorded ``unattributed_wake``, and the operator's own
+    root got the unhedged false sentence. All-operator must stay silent (the
+    round-4 pass), all-model must still fire a true notice, and mixed must fire
+    the HEDGED one.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.registry import create_tools
+    from local_operator.wakes.arm import arm_wake
+
+    scratch = home.parent
+    config_dir = scratch / "config"
+    session_dir = config_dir / "sessions" / "sess"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    recorder = reset_recorder_for_test(AnalyticsStore(scratch / "analytics.db"))
+    monkeypatch.setattr("local_operator.session.spec.volatile_roots", lambda: ())
+    root = "~/wake-catchup-root"
+
+    def build(stream_fn: Any) -> Any:
+        return Session(
+            model=MODEL,
+            stream_fn=stream_fn,
+            tools=create_tools(ToolContext(), enabled=["bash"]),
+            transcript=Transcript(config_dir / "sessions" / "sess"),
+            session_id="sess",
+            system_blocks_provider=lambda: ["You are a personal assistant."],
+            yolo=True,
+            compaction_settings=CompactionSettings(enabled=False),
+        )
+
+    first = build(_WakePathStream(root=root, create_wake=None))
+    try:
+        await first.prompt("hello there")
+    finally:
+        await first.dispose()
+
+    for origin in authors:
+        await arm_wake(
+            config_dir,
+            "sess",
+            {"message": f"check {root}/src and report", "in": "2s"},
+            origin=origin,
+        )
+    overdue = int(time.time() * 1000) - 60_000
+
+    def make_overdue(rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            # Overdue at load is what routes a row into the catch-up fold.
+            row["next_due_at"] = overdue
+
+    rewritten = await _rewrite_schedules(session_dir, make_overdue)
+    assert len(rewritten) == len(authors)
+
+    session = build(
+        _WakePathStream(
+            root=root, create_wake=None, trigger="(alarm) The session resumed"
+        )
+    )
+    try:
+        # ``_prepare_missed_wake_catchup`` ran in __init__; the take is held
+        # until load's grace deadline (LOAD_GRACE_MS) so a resumed session does
+        # not paint a catch-up over a prompt it is about to run. The wait itself
+        # is not what this test measures and has its own tests, so the deadline
+        # is dropped rather than slept through — the same neutralisation the
+        # skip list gets above.
+        session._resume_grace_ends_ms = 0.0
+        session._handle_missed_wakes()
+        assert await _wait_until(lambda: _wake_carriers(session)), "the catch-up never delivered"
+        carriers = _wake_carriers(session)
+        target = home / "wake-catchup-root" / "src" / "app.py"
+        assert await _wait_until(
+            lambda: target.exists()
+        ), "the woken turn never wrote to the root the folded row named"
+        events = list(session._divergence_judge._events)
+    finally:
+        await session.dispose()
+        recorder.close()
+        reset_recorder_for_test(AnalyticsStore(scratch / "analytics-2.db")).close()
+
+    assert carriers, "the catch-up must reach the model as a carrier"
+    assert carriers[0].details["wake_author"] == expected_author
+    rows = _divergence_rows(config_dir)
+    if not expect_row:
+        # NON-VACUITY: the turn ran and wrote (asserted above), so an empty
+        # result is the operator's root being folded, not the judge being blind.
+        assert rows == [], "an all-operator fold explains the operator's own root"
+        assert events == []
+        return
+    assert [row["root"] for row in rows] == [root], rows
+    assert events, "the notice must surface on the real path"
+    text, _kind = divergence_notice(events[0].as_notice_payload())
+    if expect_hedge:
+        assert "unattributed_wake" in rows[0]["unseen"], rows[0]["unseen"]
+        assert "is not named in what this session could check" in text
+        assert "wake deliveries with no recorded author" in text
+        assert "is new to this session" not in text, "a mixed fold is unattributable"
+    else:
+        assert rows[0]["unseen"] == [], "every folded row was model-written"
+        assert "could not be checked" not in text
+        assert "wake-catchup-root" in text

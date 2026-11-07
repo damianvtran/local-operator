@@ -2573,8 +2573,11 @@ _UNSEEN_PHRASES: dict[str, str] = {
     "compacted_history": "turns compacted away",
     # A wake's text has two possible authors (``WakeSchedule.origin``). When the
     # delivery does not say which, the judge neither folds it nor claims it was
-    # checked — this phrase is how the operator reads that distinction.
-    "unattributed_wake": "a wake delivery with no recorded author",
+    # checked — this phrase is how the operator reads that distinction. Plural,
+    # like its neighbours: the flag is a category (any delivery whose author is
+    # unrecorded), not one wake, and the list reads "text masked before storage,
+    # image attachments and wake deliveries with no recorded author".
+    "unattributed_wake": "wake deliveries with no recorded author",
 }
 
 

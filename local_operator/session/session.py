@@ -5250,14 +5250,18 @@ class Session:
         #: (a whole day's check-in lost, silently). Empty when there is no
         #: catch-up pending.
         self._resume_catchup_ids: set[str] = set()
-        #: Whether EVERY schedule the catch-up text folds carries operator words
-        #: (``WakeSchedule.message_author``). The aggregate is attributable only
-        #: if all of its members are: one model-authored message inside the fold
-        #: makes the whole delivery unattributable, because the divergence guard
-        #: cannot see WHICH line of the aggregated text the root came from — so
-        #: the honest answer for the fold is the strict one. False until a
-        #: catch-up is prepared; cleared with the fold ids at take.
-        self._resume_catchup_all_operator = False
+        #: WHO wrote the words the catch-up text folds — ``"operator"``,
+        #: ``"model"`` or ``""`` (``WakeSchedule.message_author``). THREE-VALUED
+        #: on purpose: the guard searches the aggregate as ONE blob, so the answer
+        #: is knowable only when every member agrees. All-operator is attributable;
+        #: all-model is attributable; ANY mixture — a model row among the
+        #: operator's, or a legacy row that names no author — is not, and ``""``
+        #: says so. The mixed case used to collapse to ``"model"``, which asserted a
+        #: known author for text the operator wrote and put the round-4 false
+        #: notice back on their own root (QA round 5). ``""`` makes the delivery
+        #: unattributable at the judge, which hedges instead of asserting.
+        #: ``""`` until a catch-up is prepared; cleared with the fold ids at take.
+        self._resume_catchup_author = ""
         #: The load-time fires the catch-up still owes a swallow. Seeded with
         #: the fold ids at prepare; each fire that matches consumes its id
         #: ONCE (see :meth:`_deliver_wake_catchup`). Kept SEPARATE from the
@@ -29068,8 +29072,18 @@ class Session:
         # into the message (review round 2, R7); the leftover load-time fires
         # are tracked separately as phantoms.
         self._resume_catchup_ids = {m["schedule"].id for m in missed}
-        self._resume_catchup_all_operator = all(
-            m["schedule"].message_author == "operator" for m in missed
+        # The folded authors, as a SET: the guard searches the aggregate as one
+        # blob, so the only knowable answers are "every row is the operator's",
+        # "every row is the model's", and "the rows disagree" — the last one
+        # includes a row that names no author at all (a legacy row), because an
+        # attributable aggregate must not contain a line nobody can attribute.
+        catchup_authors = {m["schedule"].message_author for m in missed}
+        self._resume_catchup_author = (
+            "operator"
+            if catchup_authors == {"operator"}
+            else "model"
+            if catchup_authors == {"model"}
+            else ""
         )
         if getattr(self, "_aida_duty", False):
             # Keep the original row, not the scheduler's grace-shifted copy.
@@ -29176,13 +29190,17 @@ class Session:
                 # set is spent below — this is the only reader of the fold set
                 # once the take has run.
                 "wake_ids": sorted(self._resume_catchup_ids),
-                # WHO WROTE the folded messages, for the divergence guard. An
-                # aggregate is attributable only when EVERY row in it is the
-                # operator's: the guard searches the delivered text as one
-                # blob, so a single model-authored message inside it would
-                # launder a root the model invented. "operator" here is
-                # therefore the strict all-of answer, not any-of.
-                "wake_author": ("operator" if self._resume_catchup_all_operator else "model"),
+                # WHO WROTE the folded messages, for the divergence guard. Three
+                # values, not two: an aggregate is attributable only when every
+                # row in it agrees — all-operator or all-model — because the
+                # guard searches the delivered text as one blob and cannot see
+                # WHICH line a root came from. A mixed fold (one model row among
+                # the operator's, or a legacy row naming no author) is stamped
+                # "", so the judge folds nothing and records
+                # ``unseen=unattributed_wake``: the notice hedges instead of
+                # telling the operator their own instruction was in no user
+                # message a model row happened to travel with (QA round 5).
+                "wake_author": self._resume_catchup_author,
             },
         )
         # THE FOLD IS SPENT HERE, and only here (review round 2, R7) — AFTER
@@ -29199,7 +29217,7 @@ class Session:
             self._aida_cadence_delivered = getattr(self, "_aida_cadence_catchup", None)
             self._aida_cadence_catchup = None
         self._resume_catchup_ids = set()
-        self._resume_catchup_all_operator = False
+        self._resume_catchup_author = ""
         return message
 
     def _deliver_resume_catchup(self, catchup: CustomMessage) -> None:
