@@ -1,0 +1,14 @@
+{
+  "wire.outcome_notices.closed": {
+    "role": "One-line receipt row in the transcript (terminal, phone, desktop) and the notification-banner body for a session whose runtime was disposed after its output had already been delivered",
+    "tone": "neutral receipt; a statement, not a failure and not an alarm; no full stop",
+    "maxCells": 48,
+    "note": "EN-only context sidecar. Info tier: nothing went wrong and no work was lost, so the wording must NOT read as an error, a cut-off or a stop. 'runtime' is the product's term for the process that ran the session; 'retired/disposed' describes it being shut down and may be one natural verb in the target language. English source is 37 cells; the banner wraps rather than clips, but the transcript row is a single line. No ICU arguments."
+  },
+  "wire.outcome_notices.retired": {
+    "role": "One-line warning row in the transcript (terminal, phone, desktop) and the notification-banner body for a turn that was cut short because the app was being updated",
+    "tone": "calm, factual, reassuring about the kept work; warning tier but never danger/failure wording; no full stop",
+    "maxCells": 100,
+    "note": "EN-only context sidecar. MUST say all three facts: (1) the session was retired because of an update, (2) a turn was in progress and was cut short, (3) the output it had already produced is kept. The kept-output clause is the one fact a user who lost work needs; never drop it to save width. Do not word it as an error or a crash. English source is 83 cells; the budget leaves room for languages that run about 20% longer. The banner wraps rather than clips; the transcript row is a single line. No ICU arguments."
+  }
+}

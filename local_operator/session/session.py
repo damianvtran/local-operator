@@ -17729,8 +17729,8 @@ class Session:
             return
         kind = "closed"
         # The closure carries no sentence of its own: the copy lives with the
-        # row decision (``harness/rows.py`` CLOSED_NOTICE_TEXT, reused by the
-        # notification vocabulary), so no reader has to render a reason here.
+        # row decision (``harness/notice_copy.py``'s ``closed_notice_text``, reused
+        # by the notification vocabulary), so no reader renders a reason here.
         reason = ""
         async with self._attention_publish_lock:
             self._attention_run_settled = True

@@ -263,7 +263,7 @@ async def test_a_retire_for_build_cut_notifies_as_retired_not_as_an_error() -> N
     fires once — carried the failure sentence this whole class exists to
     remove. The kind must be ``retired`` and the body its own copy.
     """
-    from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+    from local_operator.harness.notice_copy import retired_notice_text
 
     session = JobsSession()
     app, notifier = await _app_with_notifier(session)
@@ -281,7 +281,7 @@ async def test_a_retire_for_build_cut_notifies_as_retired_not_as_an_error() -> N
         )
         await pilot.pause()
     assert notifier.kinds == ["retired"]
-    assert notifier.bodies == [RETIRED_NOTICE_TEXT]
+    assert notifier.bodies == [retired_notice_text()]
 
 
 @pytest.mark.asyncio

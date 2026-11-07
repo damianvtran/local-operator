@@ -181,7 +181,7 @@ async def test_a_retired_outcome_restates_the_live_cut_row_instead_of_doubling_i
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
-    from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+    from local_operator.harness.notice_copy import retired_notice_text
 
     async with app.run_test(size=(100, 30)) as pilot:
         sentence = "the runtime retired so the next engage would run a newer build"
@@ -200,7 +200,7 @@ async def test_a_retired_outcome_restates_the_live_cut_row_instead_of_doubling_i
         await pilot.pause()
 
         texts = _notice_texts(app)
-        assert texts == [RETIRED_NOTICE_TEXT], texts
+        assert texts == [retired_notice_text()], texts
         assert not any("Stopped with an error" in text for text in texts), texts
         assert all(block._token != "danger" for block in _notice_blocks(app))
 
@@ -220,14 +220,14 @@ async def test_a_closed_outcome_restates_an_aborted_live_row_into_the_info_tier(
     had been superseded.
 
     The adoption restates in place — the closure's own words
-    (``CLOSED_NOTICE_TEXT``) in the info tier — so the frame carries ONE row
+    (``closed_notice_text()``) in the info tier — so the frame carries ONE row
     for the cut, and it is the receipt the outcome (and both other surfaces)
     call neutral. The retired cell above stays the warning-tier control.
     """
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
-    from local_operator.harness.rows import CLOSED_NOTICE_TEXT
+    from local_operator.harness.notice_copy import closed_notice_text
 
     async with app.run_test(size=(100, 30)) as pilot:
         await _start_and_end_turn(app, pilot, aborted=True, error=None)
@@ -241,7 +241,7 @@ async def test_a_closed_outcome_restates_an_aborted_live_row_into_the_info_tier(
         await pilot.pause()
 
         texts = _notice_texts(app)
-        assert texts == [CLOSED_NOTICE_TEXT], texts
+        assert texts == [closed_notice_text()], texts
         # The info tier, POSITIVELY: `info` is the `dim` token — the same ink
         # the poller's own closure row uses — where the adopted row was warning
         # `interrupted` before the restate.
@@ -566,7 +566,7 @@ async def test_the_poller_paints_a_closed_run_neutrally_and_never_in_danger(
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
-    from local_operator.harness.rows import CLOSED_NOTICE_TEXT
+    from local_operator.harness.notice_copy import closed_notice_text
 
     async with app.run_test(size=(100, 30)) as pilot:
         await _start_and_end_turn(app, pilot, aborted=False, error=None)
@@ -574,7 +574,7 @@ async def test_the_poller_paints_a_closed_run_neutrally_and_never_in_danger(
         await app._poll_completion_attention()
         await pilot.pause()
         texts = _notice_texts(app)
-        assert any(CLOSED_NOTICE_TEXT in text for text in texts), texts
+        assert any(closed_notice_text() in text for text in texts), texts
         assert not any("Stopped with an error" in text for text in texts), texts
         assert all(
             block._token != "danger" for block in _notice_blocks(app)
@@ -583,12 +583,13 @@ async def test_the_poller_paints_a_closed_run_neutrally_and_never_in_danger(
 
 def test_the_closed_closure_reads_completed_and_keeps_the_info_tier() -> None:
     """The copy and the tier, pinned at the one decision both surfaces read."""
-    from local_operator.harness.rows import CLOSED_NOTICE_TEXT, completion_notice
+    from local_operator.harness.notice_copy import closed_notice_text
+    from local_operator.harness.rows import completion_notice
 
     text, severity = completion_notice(
         "closed", "the session was disposed while this turn was running"
     )
-    assert text == CLOSED_NOTICE_TEXT == "Completed — runtime retired/disposed"
+    assert text == closed_notice_text() == "Completed — runtime retired/disposed"
     assert severity == "info", "the closure must never wear the danger tier"
 
 
@@ -599,14 +600,15 @@ def test_the_retired_row_reads_retired_for_an_update_and_keeps_the_warning_tier(
     turn was cut) but DISTINGUISHED FROM A FAILURE — warning ink, its own
     sentence, never danger, and never the info whisper a closure gets.
     """
-    from local_operator.harness.rows import RETIRED_NOTICE_TEXT, completion_notice
+    from local_operator.harness.notice_copy import retired_notice_text
+    from local_operator.harness.rows import completion_notice
 
     text, severity = completion_notice(
         "retired", "the runtime retired so the next engage would run a newer build"
     )
     assert (
         text
-        == RETIRED_NOTICE_TEXT
+        == retired_notice_text()
         == ("Retired for an update — a turn was in flight and was cut; its earlier output is kept")
     )
     assert severity == "warning", "a cut for an update is warning, never danger"
@@ -629,7 +631,7 @@ async def test_the_poller_paints_a_retired_run_in_warning_and_never_in_danger(
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
     app = OperatorApp(lambda: _factory(session))
-    from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+    from local_operator.harness.notice_copy import retired_notice_text
 
     async with app.run_test(size=(100, 30)) as pilot:
         await _start_and_end_turn(app, pilot, aborted=False, error=None)
@@ -637,7 +639,7 @@ async def test_the_poller_paints_a_retired_run_in_warning_and_never_in_danger(
         await app._poll_completion_attention()
         await pilot.pause()
         texts = _notice_texts(app)
-        assert any(RETIRED_NOTICE_TEXT in text for text in texts), texts
+        assert any(retired_notice_text() in text for text in texts), texts
         assert not any("Stopped with an error" in text for text in texts), texts
         assert all(
             block._token != "danger" for block in _notice_blocks(app)
