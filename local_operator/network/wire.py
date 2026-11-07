@@ -125,6 +125,14 @@ CREDENTIAL_CATALOGUE_METADATA_V1 = "credential-catalogue-metadata-v1"
 #: (``reconcile.member_placement_push``). Never reuse a shipped capability string for
 #: a new frame kind.
 CREDENTIAL_PLACEMENT_PUSH_V1 = "credential-placement-push-v1"
+#: The owner's push of an EXPLICIT share's placement row to its new holder
+#: (``credentials/share_push.py``), sent by ``lop network credential share`` so the
+#: share lands in one round trip instead of on the holder's next pull. DISTINCT from
+#: ``credential-placement-push-v1``: that string's receiver (``reconcile.accept_push``)
+#: admits only consent-derived native-OAuth rows and refuses an MCP or store-secret
+#: row as ``not_owner``, so reusing it would send a frame every shipped peer rejects.
+#: A peer without this string is simply not pushed to; its own pull still converges.
+CREDENTIAL_SHARE_PUSH_V1 = "credential-share-push-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
@@ -142,6 +150,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     CREDENTIAL_LIFECYCLE_V1,
     CREDENTIAL_CATALOGUE_METADATA_V1,
     CREDENTIAL_PLACEMENT_PUSH_V1,
+    CREDENTIAL_SHARE_PUSH_V1,
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
