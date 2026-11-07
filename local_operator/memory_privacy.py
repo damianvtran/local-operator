@@ -75,8 +75,9 @@ def _check(name: str, arguments: Any, raw: str | None) -> None:
 
 
 #: Upper bound on spans masked in one call before retention gives up and redacts the
-#: whole call. Each pass masks one span (offsets shift after a replacement), so this is
-#: the number of distinct sensitive spans an explainable refusal may carry.
+#: whole call: the cumulative number of distinct sensitive spans an explainable refusal
+#: may carry. Each re-check pass blanks EVERY span it reports with a same-length neutral
+#: stand-in, so offsets never shift; the pass count is bounded by the same number.
 _MAX_MASKED_SPANS = 16
 
 

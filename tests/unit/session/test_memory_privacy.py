@@ -270,3 +270,30 @@ async def test_a_credential_in_a_store_is_refused_with_field_kind_span_and_maske
     assert f"[redacted:{kind}]" in serialized
     assert not (session._config_dir / "memory").exists()
     await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix_len", range(33, 69))
+async def test_a_derived_title_never_splits_an_attachment_digest(tmp_path, prefix_len):
+    """Q-M2: the store guards the DERIVED title too. A hard 100-char cut used to drop
+    ``.bin`` and leave a bare digest; the single-line fact must store at every prefix
+    length that put the cut inside the digest (33-68 before a 64-hex name)."""
+    from tests.unit.test_memory_guard_shapes import DIGEST64
+
+    lead = "x" * (prefix_len - 1 - len("~/.local-operator/attachments/")) + " "
+    text = f"{lead}~/.local-operator/attachments/{DIGEST64}.bin"
+    assert text.index(DIGEST64) == prefix_len
+    session, transcript = await _run_memory_store(tmp_path, {"op": "store", "text": text})
+    result = _tool_result_text(transcript)
+    assert "refused" not in result, result
+    await session.dispose()
+
+
+def test_derived_title_keeps_whole_tokens():
+    from local_operator.tools.memory_tools import _derived_title
+
+    assert _derived_title("short title\nbody") == "short title"
+    long = "word " * 30
+    assert len(_derived_title(long)) <= 100 and not _derived_title(long).endswith(" ")
+    assert _derived_title("a" * 150) == ""
+    assert _derived_title("x " + "b" * 120) == "x"

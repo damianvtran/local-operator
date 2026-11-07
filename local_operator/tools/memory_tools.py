@@ -119,6 +119,33 @@ def _guarded_fact_args(args: Any) -> Any:
     return {**args, "text": ""} if structural_reference(args.get("text")) else args
 
 
+#: The store's title budget for a title derived from the first line of a stored text.
+_TITLE_CHARS = 100
+
+
+def _derived_title(text: str) -> str:
+    """The first line of ``text``, cut to the title budget at a whitespace boundary.
+
+    The store guards ``title`` as its own field. A hard cut can split a token into a NEW
+    shape: ``…/attachments/<digest>.bin`` cut before ``.bin`` leaves a bare hex run the
+    body never had, so a fact the guard and loop pre-check admitted was refused by its
+    own derived title (QA round 2, Q-M2). Dropping the partial last token keeps the
+    title a set of whole tokens from an already-guarded text; a first line that is one
+    unbroken token longer than the budget gives an empty title rather than a fragment.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    line = stripped.splitlines()[0]
+    if len(line) <= _TITLE_CHARS:
+        return line
+    if line[_TITLE_CHARS].isspace():
+        return line[:_TITLE_CHARS].rstrip()
+    head = line[:_TITLE_CHARS]
+    cut = max(head.rfind(" "), head.rfind("\t"))
+    return head[:cut].rstrip() if cut > 0 else ""
+
+
 def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
     from local_operator.memory_privacy import guard_encoded
 
@@ -353,10 +380,7 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
         path = "memory://" + scope
         if args["op"] == "store":
             guard(text, field="text")
-            payload = {
-                "title": text.strip().splitlines()[0][:100] if text.strip() else "",
-                "body": text,
-            }
+            payload = {"title": _derived_title(text), "body": text}
             store_for(context).prepare_fact(payload)
             result = await execute_memory(
                 call_id, "write", {"path": path, "content": json.dumps(payload)}, context

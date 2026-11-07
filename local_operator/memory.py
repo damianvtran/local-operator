@@ -298,6 +298,19 @@ _SECRET_NAME_CONTEXT = re.compile(
 # at most this many characters before the run (a name further away is another clause).
 _CLAUSE_LOOKBACK = 64
 _CLAUSE_BREAK = re.compile(r"\n|[.!?;]\s")
+# The loop pre-check also judges the JSON SPELLING of the arguments, where a newline is
+# the two characters ``\`` ``n``: the clause never broke there and ``\nCommit`` hid the
+# ``commit`` word, so the pre-check refused (and redacted whole) a fact the field guard
+# stored (agent review round 2, M-1 / QA Q-N2). The opaque rule therefore reads its
+# CONTEXT from a view with each escape replaced by same-length whitespace (offsets
+# unchanged): ``\n``/``\r`` -> real newline + space, ``\t`` -> two spaces.
+_JSON_ESCAPE = re.compile(r"\\([nrt])")
+
+
+def _unescaped_view(text: str) -> str:
+    return _JSON_ESCAPE.sub(lambda m: "\n " if m.group(1) in "nr" else "  ", text)
+
+
 # What may follow a run for it to be a DNS label: optional rest of the label
 # (``-lop``), then at least one more dot-separated label ending in an alphabetic TLD.
 # Two labels minimum after the run, so ``<run>.py`` / ``<run>.bin`` (a file name, judged
@@ -749,7 +762,11 @@ def _opaque_verdict(
             # there (agent review round 1, m1).
             return None
     tail = _HOST_TAIL.match(text, end)
-    if tail and tail.group("tld").lower() not in _FILE_SUFFIXES:
+    # Only a run that CAN be a DNS label gets the hostname reading: hex, or lowercase
+    # letters/digits/hyphens of label length. A mixed-case or ``+/_=`` run followed by
+    # ``.evil.example`` is a key shape, not a label (agent review round 2, m-1).
+    label = hex_run or re.fullmatch(r"[0-9a-z-]{1,63}", text[start:end]) is not None
+    if label and tail and tail.group("tld").lower() not in _FILE_SUFFIXES:
         # A DNS label (``<hex>-lop.radienthq.com``, ``a.<hex>.example.com``). A run after
         # a dot with NO hostname tail (``dp.st.dev.<run>``, ``v1.<run>``) is a prefixed
         # token, not a label, and is refused (agent review round 1, M1).
@@ -792,16 +809,19 @@ def _rule_spans(text: str, field: str | None = None) -> list[tuple[str, int, int
             spans.append(("named-secret", *match.span(1)))
     for match in _PASSPHRASE_WORDS.finditer(text):
         spans.append(("passphrase", *match.span()))
-    for match in _HEX_RUN.finditer(text):
+    # Matches and context come from the unescaped view (see ``_JSON_ESCAPE``); its
+    # offsets equal the caller's, so the reported span is still a span of ``text``.
+    view = _unescaped_view(text) if "\\" in text else text
+    for match in _HEX_RUN.finditer(view):
         # A key or digest drawn at random uses most of the 16 hex digits (two or fewer
         # distinct in 32 draws has probability < 1e-30); a run like ``aaaa…`` or
         # ``0101…`` is padding or a placeholder, not a credential.
         if len(set(match.group().lower())) < 3:
             continue
-        verdict = _opaque_verdict(text, match.start(), match.end(), field)
+        verdict = _opaque_verdict(view, match.start(), match.end(), field)
         if verdict:
             spans.append(("opaque-hex" if verdict == "opaque" else verdict, *match.span()))
-    for match in _B64_RUN.finditer(text):
+    for match in _B64_RUN.finditer(view):
         token = match.group()
         if (
             any(c.isdigit() for c in token)
@@ -810,7 +830,7 @@ def _rule_spans(text: str, field: str | None = None) -> list[tuple[str, int, int
             and token.count("/") <= 3
             and sum(token.count(c) for c in "-_") <= 3
         ):
-            verdict = _opaque_verdict(text, match.start(), match.end(), field, hex_run=False)
+            verdict = _opaque_verdict(view, match.start(), match.end(), field, hex_run=False)
             if verdict:
                 spans.append(("opaque-base64" if verdict == "opaque" else verdict, *match.span()))
     return spans

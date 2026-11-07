@@ -504,8 +504,69 @@ def test_a_secret_name_anywhere_in_the_clause_names_the_value(text):
     )
 
 
+# Multi-line and tab rows: the loop pre-check also judges the JSON spelling, where a
+# newline is ``\n`` (agent review round 2, M-1 / QA Q-N2). Each row must get the SAME
+# verdict from guard(), the typed and raw pre-check, retention and the store.
+MULTILINE_PUBLIC = [
+    f"Rotated the token yesterday.\nCommit {HEX40} fixed the build",
+    f"token rotated\nCommit {HEX40}",
+    f"Fixed it\nCommit {HEX40} landed",
+    f"Fixed it\r\nsha256 {DIGEST64}",
+    f"notes\tcommit {HEX40}",
+    f"line one\nTunnel host {TUNNEL_HEX}-lop.radienthq.com\nline three",
+    f"a\n- screenshot ~/.local-operator/attachments/{DIGEST64}.bin\n- b",
+]
+MULTILINE_SECRET = [
+    f"Rotated it.\nthe token {HEX40}",
+    f"note\n{HEX40}\nmore",
+    f"cfg\tapi key\t{HEX40}",
+    f"x\nvalue {ALNUM40}.evil.example",
+]
+
+
+def _verdicts(text: str) -> tuple[bool, ...]:
+    args = {"op": "store", "text": text}
+    typed = refusal_message("memory", args) is not None
+    raw = refusal_message("memory", args, json.dumps(args)) is not None
+    retained = retained_arguments("memory", args, json.dumps(args))[2]
+    try:
+        validate_fact({"title": "T", "body": text})
+        store = False
+    except SensitiveValueError:
+        store = True
+    except MemoryError:
+        store = False  # the bare fact lacks source metadata; only privacy matters
+    return refused(text), refused(text, field="text"), typed, raw, retained, store
+
+
+@pytest.mark.parametrize("text", MULTILINE_PUBLIC)
+def test_multiline_public_rows_store_on_every_path(text):
+    assert _verdicts(text) == (False,) * 6, text
+
+
+@pytest.mark.parametrize("text", MULTILINE_SECRET)
+def test_multiline_secret_rows_are_refused_on_every_path(text):
+    assert _verdicts(text) == (True,) * 6, text
+    kept = retained_arguments("memory", {"op": "store", "text": text})[0]
+    assert "memory_arguments_redacted" not in kept, "a located span keeps the call"
+
+
 def test_a_secret_name_in_an_earlier_clause_does_not_poison_a_later_id():
     assert not refused(f"Rotated the token yesterday.\nCommit {HEX40} fixed the build")
+
+
+@pytest.mark.parametrize(
+    "run",
+    [ALNUM40, "aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gI3kM5o+Q7/", "Zx9" * 14],
+)
+def test_only_a_run_that_can_be_a_dns_label_reads_as_a_hostname(run):
+    """m-1: mixed-case or ``+/_=`` runs before ``.evil.example`` are key shapes."""
+    assert refused(f"value {run}.evil.example")
+
+
+def test_a_lowercase_label_and_hex_still_read_as_hostnames():
+    assert not refused(f"value {HEX40}.evil.example")
+    assert not refused("see abcdefghij0123456789abcdefghij0123456789.example.com")
 
 
 def test_retention_never_judges_its_own_mask_labels():
