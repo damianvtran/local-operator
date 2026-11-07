@@ -152,8 +152,8 @@
       "description": "Coordinates delegated work and reports honest status: what is done, what is in flight, what is blocked and on whom.",
       "when_to_use": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
       "version": "1.6.12",
-      "instructions_sha256": "e6f8817f328a8eba5ea8292ff94947bb6f49a0a88ae44eea7e4bed4877c7cc13",
-      "instructions_chars": 4028,
+      "instructions_sha256": "38fad34846b0675c1879b1d1176a3221046b61f62bd6d9d258cdd63c655dd945",
+      "instructions_chars": 3432,
       "tools": [
         "read",
         "glob",
@@ -217,8 +217,8 @@
       "description": "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews.",
       "when_to_use": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
       "version": "1.3.15",
-      "instructions_sha256": "07940fd427650af6feec9e36ba9cc3d56690627fd582df450216a81845b775d1",
-      "instructions_chars": 3945,
+      "instructions_sha256": "25c3ecd7aaeed966bd3c6af6e17fcf1dd2274f29d2f3668a74dc02b532402b85",
+      "instructions_chars": 3497,
       "tools": [
         "read",
         "glob",
