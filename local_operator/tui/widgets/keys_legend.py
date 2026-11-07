@@ -300,7 +300,15 @@ def build_legend_rows(width: int, keymap: Mapping[str, str] | None = None) -> li
             # One air row between sections: a heading flush against the
             # previous section's last row reads as one more entry of it.
             rows.append(Text(""))
-        rows.append(Text(section.heading, style=heading_ink))
+        # Wrapped by the SAME width logic as the descriptions below it. A
+        # translated heading can be wider than the content box at the card's
+        # narrow contract (fr "la liste des sessions (f9)" is 26 cells against
+        # 22 at 30 columns): left as one `Text`, the widget soft-wraps it into
+        # an extra painted row that `len(rows)` never counted, so the pinned
+        # height under-counts and the hint row -- the only exit cue -- is the
+        # first thing clipped (design round 1, D1).
+        for part in wrap_cells(section.heading, width) or [""]:
+            rows.append(Text(part, style=heading_ink))
         for key, description in section.rows:
             painted_key = resolve_key(key, keymap)
             parts = wrap_cells(description, desc_width) or [""]
