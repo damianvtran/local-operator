@@ -3264,20 +3264,30 @@ def _no_credential_is_stale(item: Mapping[str, Any], login_since: int | None) ->
     """Whether this item's stored ``no-credential`` predates a usable login.
 
     Only a refusal recorded BEFORE the login is stale: the remedy it names was
-    done afterwards. A check that ran after the login and still found no usable
-    credential is a current fact (a refresh that failed, a block, anything only
-    the network decides), so it is reported as is. An item with no readable
-    check time cannot be ordered against the login and is treated as older --
-    it was written by a check, and every check stamps its time.
+    done afterwards. A refusal recorded after the login is a current fact (a
+    refresh that failed, a block, anything only the network decides), so it is
+    reported as is.
+
+    The refusal's own time (``st.NO_CREDENTIAL_AT``) decides; a row written
+    before that stamp existed falls back to ``last_checked_at``, the time of the
+    check that wrote it. Every doubt keeps the refusal VISIBLE, because hiding a
+    real one hides the only remedy while showing a stale one only lasts until the
+    check the sign-in wakes replaces it:
+
+    * no readable time -- it cannot be ordered against the login (review r2 m3);
+    * the SAME SECOND -- the stamps are whole seconds and the woken check fires
+      ~0.1-0.25 s after the sign-in, so a tie may well be a refusal AFTER it.
+      Comparing the login's milliseconds against a truncated stamp read every
+      such tie as older and masked it (QA r2 Q3, review r2 m2).
     """
 
     if login_since is None or item.get("error_class") != "no-credential":
         return False
-    checked = item.get("last_checked_at")
-    parsed = _parse_iso(checked) if isinstance(checked, str) else None
+    recorded = item.get(st.NO_CREDENTIAL_AT) or item.get("last_checked_at")
+    parsed = _parse_iso(recorded) if isinstance(recorded, str) else None
     if parsed is None:
-        return True
-    return login_since > int(parsed.timestamp() * 1000)
+        return False
+    return login_since // 1000 > int(parsed.timestamp())
 
 
 def _direction_status(

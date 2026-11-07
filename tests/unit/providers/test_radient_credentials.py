@@ -285,7 +285,8 @@ def test_oauth_access_sync_bridge_is_empty_with_nothing_stored(tmp_path) -> None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "scenario", ["usable", "dead", "moved", "delegated", "api_key", "none", "refused"]
+    "scenario",
+    ["usable", "dead", "moved", "delegated", "blocked", "api_key", "none", "refused"],
 )
 async def test_the_local_login_probe_agrees_with_the_hub_resolver(
     tmp_path, monkeypatch, scenario: str
@@ -329,6 +330,10 @@ async def test_the_local_login_probe_agrees_with_the_hub_resolver(
                     row.id,
                     {"device": "peer-synthetic", "state": "active", "not_after": time.time() + 600},
                 )
+            elif scenario == "blocked":
+                # An account-wide backoff (a failed call wrote it): the resolver's
+                # selection skips a blocked row, so it is no sign-in either (r2 m1).
+                store.block_credential(row.id, "radient")
         resolved = await resolve_radient_oauth_access(tmp_path, base, store=store)
     finally:
         store.close()

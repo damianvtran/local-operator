@@ -2182,7 +2182,7 @@ def test_a_team_mid_swap_keeps_its_row(env) -> None:
 
 
 def _record_signed_out_check(
-    ctx: svc.HubSyncContext, local_id: str, *, checked_at: str = "2026-11-06T10:00:00Z"
+    ctx: svc.HubSyncContext, local_id: str, *, checked_at: str | None = "2026-11-06T10:00:00Z"
 ) -> None:
     """What a check that ran while signed out leaves on the item (check.py)."""
 
@@ -2192,6 +2192,7 @@ def _record_signed_out_check(
         # projection keys its rows by it.
         item.setdefault("kind", "agent")
         item.setdefault("local_id", local_id)
+        item.setdefault("attempts", 0)
         item.update(
             error_class="no-credential",
             last_error="sign in to the hub (`lop login radient`)",
@@ -2300,6 +2301,62 @@ def test_a_no_credential_recorded_after_the_login_is_not_stale(env) -> None:
     row = _pull_agent(agents, hub, root)
     _sign_in(root)
     _record_signed_out_check(ctx, row.id, checked_at="2999-01-01T00:00:00Z")
+
+    assert _pull_status(ctx, row.id)["error_class"] == "no-credential"
+
+
+def _login_updated_at_ms(root: Path) -> int:
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(db_path=root / "auth.db", config_dir=root)
+    try:
+        return max(int(r.updated_at) for r in store.list_credentials("radient"))
+    finally:
+        store.close()
+
+
+def test_a_no_credential_recorded_in_the_same_second_as_the_login_is_not_stale(env) -> None:
+    """PR #3536 QA r2 Q3 / review r2 m2: the wake check fires ~0.1-0.25 s after the
+    sign-in, and the store stamps checks at whole seconds. A refusal stamped in the
+    login's own second may have come AFTER it, so it cannot be ordered as older and
+    must stay visible -- masking it hid a real refusal (refresh answered 500)."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    _sign_in(root)
+    login_ms = _login_updated_at_ms(root)
+    same_second = datetime.fromtimestamp(login_ms // 1000, tz=timezone.utc)
+    _record_signed_out_check(ctx, row.id, checked_at=same_second.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    assert _pull_status(ctx, row.id)["error_class"] == "no-credential"
+
+
+@pytest.mark.parametrize("checked_at", [None, "not-a-timestamp"])
+def test_a_no_credential_with_no_readable_check_time_stays_visible(env, checked_at) -> None:
+    """Review r2 m3: a refusal that cannot be ordered against the login is kept."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    _record_signed_out_check(ctx, row.id, checked_at=checked_at)
+    _sign_in(root)
+
+    assert _pull_status(ctx, row.id)["error_class"] == "no-credential"
+
+
+def test_a_no_credential_an_apply_records_after_the_login_is_not_stale(env) -> None:
+    """Review r2 m2: a merge/apply refusal goes through ``record_failure``, which
+    leaves ``last_checked_at`` at the OLDER check. Ordering by that check masked a
+    refusal written after the sign-in; the refusal's own time must decide."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    _record_signed_out_check(ctx, row.id)  # an old check, long before the login
+    _sign_in(root)
+
+    def apply_refused(doc: dict[str, Any]) -> None:
+        st.record_failure(doc["items"][f"agent:{row.id}"], "no-credential", "sign in")
+
+    assert ctx.store().mutate(apply_refused)
 
     assert _pull_status(ctx, row.id)["error_class"] == "no-credential"
 

@@ -337,13 +337,15 @@ def radient_oauth_login_usable_since(config_dir: Path, base_url: str) -> int | N
       method refuses with ``RefreshDelegatedError``. These rows stay listed
       (they are deliberately not ``disabled_cause``), which is why a bare
       "any enabled OAuth row" probe reported a dead login as signed in (PR #3536
-      review M1 / QA Q1).
+      review M1 / QA Q1);
+    * an account-wide credential block (``AuthStore.is_blocked``) still in
+      force -- the resolver's selection skips that row (review r2 m1).
 
     What it CANNOT see is an outcome only the network decides (a refresh that
-    fails transiently, a block written after a failed call). The timestamp is
-    the guard for those: a caller compares it with the check that recorded the
-    refusal and treats the refusal as stale only when this login is NEWER --
-    a check that ran after the login and still found nothing is a current fact.
+    fails transiently, a block a LATER failed call writes). The timestamp is
+    the guard for those: a caller compares it with the time the refusal was
+    recorded and treats the refusal as stale only when this login is NEWER -- a
+    refusal recorded after the login is a current fact.
 
     Runtime/config API-key overrides (``set_runtime_api_key`` /
     ``set_config_api_key``) also make the resolver answer ``None``, but they are
@@ -360,6 +362,7 @@ def radient_oauth_login_usable_since(config_dir: Path, base_url: str) -> int | N
         store = AuthStore.open_read_only(Path(config_dir) / "auth.db")
         try:
             rows = store.list_credentials("radient")
+            blocked = {row.id for row in rows if store.is_blocked(row.id, "radient")}
         finally:
             store.close()
         now_ms = AuthStore._now_ms()
@@ -368,6 +371,12 @@ def radient_oauth_login_usable_since(config_dir: Path, base_url: str) -> int | N
             if row.credential_type != "oauth" or not isinstance(row.data, dict):
                 continue
             creds = row.data
+            # An account-wide backoff a failed call wrote: the resolver's
+            # selection skips a blocked row, so it is no sign-in here either
+            # (PR #3536 review r2 m1). It expires on its TTL, after which the
+            # row counts again -- the same moment the resolver would use it.
+            if row.id in blocked:
+                continue
             if AuthStore._grant_dead_at(creds) is not None:
                 continue
             if AuthStore._family_moved_at(creds) is not None:
