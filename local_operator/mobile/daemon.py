@@ -3258,8 +3258,14 @@ def _is_turn_in_flight(exc: BaseException) -> bool:
 
     The same two-sided test ``AttachClient.send_command`` makes: the TYPE when
     this build raised it, the sentence when the refusal crossed the wire (the
-    error frame carries no code for it, so ``daemon.request`` rebuilds a plain
-    ``RuntimeError`` around :data:`TURN_IN_FLIGHT`).
+    error frame carries no code for it today, so ``daemon.request`` rebuilds a
+    plain ``RuntimeError`` around :data:`TURN_IN_FLIGHT`).
+
+    The text match covers ONLY that streaming sentence, deliberately: the same
+    typed ``TurnInFlight`` also carries other wordings (e.g. "context compaction
+    is running"), and those are not a turn a steer could join. The owner waits a
+    compaction out before handing the prompt to the session, so the compaction
+    wording does not reach this relay on the no-wait path.
     """
     from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
 
@@ -8552,11 +8558,15 @@ def build_app(daemon: MobileDaemon):
             # ``detail`` exactly as it always did.
             return JSONResponse({"ok": True, "detail": detail, "tone": tone, "refused": refused})
         answer = receipt(reply.get("detail", ""))
-        if op in ("prompt", "steer"):
+        if op in ("prompt", "steer") and answer.get("detail") != "already admitted":
             # ADDITIVE: which channel carried a continuation, so the phone can say
             # "steered into the running turn" rather than imply a new turn. Absent
             # on every other op and on the cold-wake arm above (that delivery
             # happens inside a freshly engaged client this route does not see).
+            # Absent on an "already admitted" retry too (review round 1, NIT-1):
+            # that reply names THIS request's op, not the channel the original
+            # attempt landed on (a steered first try replayed as a prompt would
+            # read "prompt"), and the owner does not record which it was.
             answer["delivered_as"] = delivered_as
         return JSONResponse(answer)
 

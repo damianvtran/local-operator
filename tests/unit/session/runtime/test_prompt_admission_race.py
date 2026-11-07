@@ -730,3 +730,36 @@ async def test_an_idle_no_wait_prompt_is_admitted_as_a_prompt(tmp_path: Path) ->
         assert _user_rows(tmp_path / "sess", "idle hi") == 1
     finally:
         await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_no_wait_prompt_during_compaction_waits_it_out(tmp_path: Path) -> None:
+    """A compaction is waited out, not refused (review round 1, MINOR-1).
+
+    A manual compaction holds the turn lock with ``is_streaming`` False and an
+    empty queue, so the no-wait prompt is admitted; the drain must still wait
+    for the lock rather than hand it to ``Session.prompt``, whose compaction
+    refusal is not the sentence the phone relay steers on. There is no turn to
+    steer into, so the prompt lands as its own turn once compaction ends.
+    """
+    stream = _GatedStream([text_turn(f"reply {i}") for i in range(4)], gate_call=99)
+    session = build_session(tmp_path / "sess", stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    await session._turn_lock.acquire()
+    session._compacting = True
+    try:
+        receipt = asyncio.ensure_future(
+            handle.prompt("compact hi", command_id="compact-1", wait_for_turn=False)
+        )
+        await asyncio.sleep(0.3)
+        assert not receipt.done(), "admitted during compaction: must wait, not refuse"
+        session._compacting = False
+        session._turn_lock.release()
+        assert await asyncio.wait_for(receipt, 10) == "prompt admitted"
+        await asyncio.wait_for(_idle(session, handle), 10)
+        assert _user_rows(tmp_path / "sess", "compact hi") == 1
+    finally:
+        session._compacting = False
+        if session._turn_lock.locked():
+            session._turn_lock.release()
+        await handle.dispose()

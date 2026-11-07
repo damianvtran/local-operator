@@ -4251,6 +4251,11 @@ class ServingSessionHandle(SessionHandle):
             # A queued-but-not-yet-streaming command counts as busy: that is the
             # drain's prelude window, and a steer queued there is taken by the
             # turn it is opening (``Session._ensure_steering_wake``).
+            # ORDERING, intended: when the queue head is itself waiting out a
+            # foreign turn (e.g. a job-result delivery), the refused message is
+            # steered INTO that turn and so may be answered before a desktop
+            # prompt that was sent earlier and is still queued — steer semantics
+            # join the turn running now, they do not queue behind other input.
             from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
 
             self._command_reservations.reject(command_id)
@@ -5164,6 +5169,21 @@ class ServingSessionHandle(SessionHandle):
                             await self._await_turn_lock_free()
                     else:
                         await self._await_turn_lock_free()
+                elif getattr(self._session, "_compacting", False):
+                    # A COMPACTION IS WAITED OUT EVEN BY A NO-WAIT CALLER. The
+                    # admission-time refusal above keys on ``is_streaming`` and
+                    # the queue, and a manual compaction holds the turn lock with
+                    # neither, so the command was admitted; skipping this wait
+                    # would hand it to ``Session.prompt``, whose compaction
+                    # refusal ("context compaction is running") is not the
+                    # TURN_IN_FLIGHT sentence the phone relay steers on — the
+                    # message would be failed after admission (review round 1,
+                    # MINOR-1). Steering is not an option there either: there is
+                    # no turn to join. Compaction is short and ends by itself, so
+                    # the prompt lands as a turn once it does, as it did before
+                    # ``wait_for_turn=False`` existed. A streaming turn still takes
+                    # the immediate refusal and the steer path.
+                    await self._await_turn_lock_free()
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {

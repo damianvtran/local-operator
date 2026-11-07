@@ -3958,6 +3958,8 @@ def test_a_prompt_to_a_busy_session_is_steered_under_the_same_id(tmp_path, monke
     retry = client.post("/api/sessions/steer-me/command", json={"op": "prompt", **_CONTINUATION})
     assert retry.status_code == 200
     assert retry.json()["detail"] == "already admitted"
+    # NIT-1: the retry's own op is not how the message landed, so it is not reported.
+    assert "delivered_as" not in retry.json()
     assert [f["op"] for f in frames[2:]] == ["prompt"]
 
 
