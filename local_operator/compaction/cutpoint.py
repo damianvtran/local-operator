@@ -261,8 +261,16 @@ def is_resume_card(message: AgentMessage) -> bool:
     return isinstance(payload, dict) and bool(payload.get(RESUME_CARD_KEY))
 
 
-def resume_tail_start(messages: Sequence[AgentMessage], budget_tokens: int) -> int:
-    """Index where a card replay's recent tail of ``messages`` begins.
+def resume_tail_start(
+    messages: Sequence[AgentMessage], budget_tokens: int, end: int | None = None
+) -> int:
+    """Index where a card replay's recent tail of ``messages[:end]`` begins.
+
+    ``end`` bounds the TRIMMABLE region: only the kept window the card's pass
+    saw may be trimmed, never a row journalled after the marker (the card could
+    not have described it, so trimming it is loss, not compaction). Pairing is
+    still judged over the WHOLE list, so a call in the trimmable region whose
+    result was written after ``end`` is never separated from it.
 
     Walks back until roughly ``budget_tokens`` are covered, then moves FORWARD
     to the first boundary that keeps every tool call beside its result and does
@@ -270,9 +278,9 @@ def resume_tail_start(messages: Sequence[AgentMessage], budget_tokens: int) -> i
     enforces, because an orphaned call or result breaks every provider. Forward
     rather than backward so the tail never exceeds its budget by a long tool
     chain; a window with no legal boundary inside the budget yields an empty
-    tail (``len(messages)``), since the card already summarizes it.
+    trimmed tail (``end``), since the card already summarizes it.
     """
-    total = len(messages)
+    total = len(messages) if end is None else max(0, min(end, len(messages)))
     if total == 0 or budget_tokens <= 0:
         return total
     accumulated = 0
@@ -283,14 +291,26 @@ def resume_tail_start(messages: Sequence[AgentMessage], budget_tokens: int) -> i
             break
         start = index
     safe = _pairing_safe_cuts(messages)
-    for index in range(start, total):
+
+    def legal(index: int) -> bool:
         message = messages[index]
         if index not in safe or is_carried_tier(message):
-            continue
-        if isinstance(message, Message) and message.role == "tool":
-            continue
-        return index
-    return total
+            return False
+        return not (isinstance(message, Message) and message.role == "tool")
+
+    for index in range(start, total):
+        if legal(index):
+            return index
+    # No boundary inside the budget. Dropping the whole trimmable region is
+    # legal only when the first row after it is itself a legal boundary; a
+    # mid-turn pass can leave a call before ``end`` answered after it, and then
+    # the tail must grow backwards rather than orphan that result.
+    if total >= len(messages) or legal(total):
+        return total
+    for index in range(start - 1, -1, -1):
+        if legal(index):
+            return index
+    return 0
 
 
 def is_rendered_injection(message: AgentMessage) -> bool:

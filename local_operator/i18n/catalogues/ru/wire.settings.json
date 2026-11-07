@@ -126,7 +126,7 @@
   "wire.settings.compaction_resume_replay.choice.card.label": "карточка",
   "wire.settings.compaction_resume_replay.choice.full.description": "сводка, все сохранённые реплики пользователя и оставленное окно",
   "wire.settings.compaction_resume_replay.choice.full.label": "полностью",
-  "wire.settings.compaction_resume_replay.help": "Что воспроизводит возобновлённая сессия после сжатия. Карточка намного короче, но прежние реплики оператора больше не сохраняются дословно.",
+  "wire.settings.compaction_resume_replay.help": "Что воспроизводит возобновлённая сессия после сжатия. Карточка намного короче, но прежние реплики оператора больше не сохраняются дословно, и возврат к «полностью» их не восстанавливает.",
   "wire.settings.compaction_resume_replay.label": "Воспроизведение при возобновлении",
   "wire.settings.compaction_strategy.choice.auto.description": "snapcompact для визуальных моделей, иначе context-full",
   "wire.settings.compaction_strategy.choice.auto.label": "auto",

@@ -4440,8 +4440,9 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     # Opt-in cost trade for RESUMED contexts (#3448); see the field comment in
     # ``compaction/thresholds.py``. The help text must keep saying that earlier
-    # operator turns stop surviving verbatim in card mode — that is the price,
-    # and an operator choosing it from /settings has to see it there.
+    # operator turns stop surviving verbatim in card mode, and that switching
+    # back to full does not restore them — that is the price, one-way for the
+    # session, and an operator choosing it from /settings has to see it there.
     Setting(
         key="compaction.resume_replay",
         path=("compaction", "resume_replay"),

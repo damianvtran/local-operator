@@ -301,3 +301,54 @@ def test_the_card_renders_actions_open_items_and_next_step():
     assert "Open items: 1 unresolved ask(s)" in text
     assert "Next step — last assistant message: Updated module_2.py" in text
     assert render_resume_card(None) is None
+
+
+@pytest.mark.asyncio
+async def test_turns_after_a_card_pass_survive_cold_replay_and_the_preview(tmp_path):
+    """Review R1 / QA Q1: the tail trim may only touch the PASS-TIME kept window.
+
+    The card was built at the commit, so it can stand in only for rows that
+    existed then. Rows journalled after the marker were never summarized and
+    never carded; trimming them would lose operator turns from every resume,
+    from the sidebar preview, and — once the next pass summarizes the
+    truncated context — for good.
+    """
+    from local_operator.session.saved_preview import read_saved_preview
+
+    directory = tmp_path / "sess"
+    session = _session(directory, "card")
+    await _round(session, "a")
+    assert (await session.compact_now()).ran is True
+    # Well past the ~2k-token tail budget, with no further pass.
+    posts = [f"POST-{index} " + "word " * 120 for index in range(24)]
+    for text in posts:
+        await session.prompt(text)
+    assert len([e for e in Transcript(directory).entries() if e.type == "compaction"]) == 1
+    await session.dispose()
+
+    def post_turns(messages) -> list[str]:
+        return [
+            m.text.split()[0]
+            for m in messages
+            if isinstance(m, Message) and m.role == "user" and m.text.startswith("POST-")
+        ]
+
+    expected = [f"POST-{index}" for index in range(24)]
+    replayed = Transcript(directory).build_llm_history()
+    assert is_resume_card(replayed[1]), "still a card replay"
+    assert post_turns(replayed) == expected
+    assert post_turns(_session(directory, "card")._context.messages) == expected
+    assert post_turns(read_saved_preview(directory).messages) == expected
+
+
+def test_the_tail_never_orphans_a_result_written_after_the_window():
+    """A mid-turn pass can leave a call before the marker answered after it."""
+    rows = _realistic_rows(3)
+    # rows[9] is the last exchange's assistant tool call, rows[10] its result.
+    window_end = 10
+    for budget in (1, 50, 10**9):
+        start = resume_tail_start(rows, budget, end=window_end)
+        assert start <= 9, f"budget {budget}: dropped call-9 but kept its result"
+        assert rows[start].role != "tool"
+    # A clean boundary right after the window may drop the whole window.
+    assert resume_tail_start(rows, 1, end=8) == 8

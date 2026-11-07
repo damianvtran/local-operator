@@ -156,7 +156,10 @@ class CompactionSettings(BaseModel):
     # window. The price is a guarantee, not only tokens: the operator's
     # verbatim turns (``extract_preserved_user_turns``) stop surviving a
     # resume, so a constraint stated long ago reaches the model only as the
-    # summary's paraphrase. Text strategy only — a snapcompact archive's image
+    # summary's paraphrase. The loss is ONE-WAY for the session: the next
+    # pass after a card resume harvests preserved turns from the live context,
+    # which no longer holds the older ones, so switching back to "full" cannot
+    # restore them. Text strategy only — a snapcompact archive's image
     # frames have no card equivalent, so a snapcompact pass never writes one.
     # The LIVE context after a pass is untouched in both modes; only what
     # ``replay_entries(mode="context")`` rebuilds from disk differs.
@@ -167,7 +170,8 @@ class CompactionSettings(BaseModel):
             " re-injects the summary, every preserved user turn verbatim and the"
             " whole kept window. 'card' replays the summary, a short resume card"
             " and a small recent tail instead: far fewer tokens, but the"
-            " operator's earlier turns no longer survive verbatim. Text"
+            " operator's earlier turns no longer survive verbatim, and switching"
+            " back to 'full' does not restore them for this session. Text"
             " strategy only; snapcompact passes always replay in full."
         ),
     )

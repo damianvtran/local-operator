@@ -4978,7 +4978,11 @@ def replay_entries(
         # same pass is ``[marker, *preserved, carried, *kept]`` — the operator
         # opted into replaying a short card instead of the verbatim preserved
         # turns and the full kept window, so preserved user turns STOP surviving
-        # a resume in that mode. Do not "restore" the reprint here as a parity
+        # a resume in that mode — one-way for the session: the next pass
+        # harvests from this shortened context, so switching the setting back
+        # to "full" afterwards cannot bring the dropped turns back. Rows
+        # journalled AFTER the marker are not part of that price and always
+        # replay verbatim (see the tail trim below). Do not "restore" the reprint here as a parity
         # fix; the default ("full") record carries no card and stays
         # byte-identical to the live context.
         if resume_card is not None:
@@ -5061,14 +5065,26 @@ def replay_entries(
                 next(projected_iter) if isinstance(message, Message) else message
                 for message in kept
             ]
-    if resume_card is not None:
-        # Card mode keeps only the in-flight tail of the kept window; the card
-        # stands in for the rest. Applied LAST so prunes and capture elisions
-        # above see the same window the live session did.
+    if resume_card is not None and compaction_index is not None:
+        # Card mode keeps only the in-flight tail of the PASS-TIME kept window;
+        # the card stands in for the rest. Only that window — rows journalled
+        # BEFORE the marker — may be trimmed: the card was built at the commit
+        # and cannot describe a row written after it, and such a row is in no
+        # summary either, so trimming it would silently lose operator turns
+        # from every resume and, once the next pass summarizes the truncated
+        # context, for good (agent review R1 / QA Q1, round 1). Every
+        # post-marker row therefore replays verbatim. Applied LAST so prunes
+        # and capture elisions above see the same window the live session did.
         from local_operator.compaction.cutpoint import resume_tail_start
         from local_operator.compaction.resume_card import RESUME_CARD_TAIL_TOKENS
 
-        kept = kept[resume_tail_start(kept, RESUME_CARD_TAIL_TOKENS) :]
+        pre_marker_ids = {
+            entry.id for entry in entries[start:compaction_index] if entry.type == ENTRY_MESSAGE
+        }
+        window_end = 0
+        while window_end < len(kept) and kept[window_end].id in pre_marker_ids:
+            window_end += 1
+        kept = kept[resume_tail_start(kept, RESUME_CARD_TAIL_TOKENS, end=window_end) :]
     return list(prefix) + kept
 
 

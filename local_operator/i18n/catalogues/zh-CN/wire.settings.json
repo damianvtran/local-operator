@@ -126,7 +126,7 @@
   "wire.settings.compaction_resume_replay.choice.card.label": "卡片",
   "wire.settings.compaction_resume_replay.choice.full.description": "摘要、每个保留的用户轮次和保留窗口",
   "wire.settings.compaction_resume_replay.choice.full.label": "完整",
-  "wire.settings.compaction_resume_replay.help": "压缩后恢复的会话重放哪些内容。卡片小得多，但操作者较早的轮次不再逐字保留。",
+  "wire.settings.compaction_resume_replay.help": "压缩后恢复的会话重放哪些内容。卡片小得多，但操作员较早的轮次不再逐字保留，切换回完整也无法恢复。",
   "wire.settings.compaction_resume_replay.label": "恢复时重放",
   "wire.settings.compaction_strategy.choice.auto.description": "视觉模型用snapcompact，否则用context-full",
   "wire.settings.compaction_strategy.choice.auto.label": "auto",

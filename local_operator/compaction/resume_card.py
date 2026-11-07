@@ -14,7 +14,10 @@ the operator's verbatim turns stop surviving a resume. ``extract_preserved_user
 _turns`` exists because a paraphrased constraint is how an agent later does the
 forbidden thing; in card mode only the newest few operator turns ride the card
 (clamped), and everything older reaches the model as the summary's paraphrase.
-That is why the mode is opt-in and the default replay is untouched.
+The loss is one-way for the session: once a card resume is followed by a
+pass, the dropped turns are in no record, so switching back to ``"full"`` does
+not bring them back. That is why the mode is opt-in and the default replay is
+untouched.
 
 LIFECYCLE. The card is BUILT at the compaction commit from the messages the
 pass saw and STORED on the marker payload (:data:`RESUME_CARD_PAYLOAD_KEY`) the

@@ -147,7 +147,7 @@
  "wire.settings.compaction_resume_replay.choice.card.label": "card",
  "wire.settings.compaction_resume_replay.choice.full.description": "summary, every preserved user turn and the kept window",
  "wire.settings.compaction_resume_replay.choice.full.label": "full",
- "wire.settings.compaction_resume_replay.help": "What a resumed session replays after a compaction. Card is far smaller, but earlier operator turns no longer survive verbatim.",
+ "wire.settings.compaction_resume_replay.help": "What a resumed session replays after a compaction. Card is far smaller, but earlier operator turns no longer survive verbatim, and switching back to full does not restore them.",
  "wire.settings.compaction_resume_replay.label": "Resume replay",
  "wire.settings.compaction_strategy.choice.auto.description": "snapcompact for vision models, else context-full",
  "wire.settings.compaction_strategy.choice.auto.label": "auto",
