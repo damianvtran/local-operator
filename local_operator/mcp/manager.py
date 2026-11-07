@@ -9,10 +9,11 @@ Ports the established MCP manager semantics onto the official
   pending servers without a cache hit contribute nothing until a background
   continuation swaps them in via the ``on_tools_changed`` callback.
 - Reconnect on transport close with backoff ``[0.5, 1, 2, 4]`` s and a
-  circuit breaker: more than 5 attempts in a sliding 30 s window suspends
-  auto-reconnect (manual reconnect resets the history). An epoch counter
-  incremented on ``disconnect_all`` prevents a late reconnect from
-  resurrecting a dead connection.
+  half-open circuit breaker: more than 5 attempts in a sliding 30 s window
+  pauses auto-reconnect, then ONE probe reconnect runs after a cool-down of
+  60 s doubling to a 15 min cap until one succeeds (manual reconnect resets
+  it at once). An epoch counter incremented on ``disconnect_all`` and
+  ``reload`` prevents a late reconnect from resurrecting a dead connection.
 - Server-initiated ``notifications/tools/list_changed`` refreshes that
   server's tools and fires the tools-changed callback.
 
@@ -52,6 +53,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.incidents import MCP_BREAKER_REASON_PREFIX
 from local_operator.mcp.auth import (
     REFRESH_CONTENTION,
     REFRESH_REFUSAL_ENDPOINT,
@@ -520,6 +522,32 @@ RECONNECT_BACKOFF_S = (0.5, 1.0, 2.0, 4.0)
 RECONNECT_BURST_WINDOW_S = 30.0
 RECONNECT_BURST_LIMIT = 5
 
+# Half-open breaker: once the burst limit trips, the fast ladder above stays
+# paused and ONE probe reconnect runs after a cool-down of
+# RECONNECT_PROBE_COOLDOWN_S, doubling per failed probe up to
+# RECONNECT_PROBE_COOLDOWN_MAX_S (60 -> 120 -> 240 -> 480 -> 900 s), until one
+# succeeds and closes the breaker.
+#
+# Why a probe at all: the breaker used to be OPEN for good. Nothing lifted it
+# but the app's Reconnect, ``/mcp login`` or removing the server, so in an
+# unattended runtime an outage that outlasted the ladder's five attempts
+# (0.5+1+2+4+4 = 11.5 s of backoff) killed the server for the life of the
+# process. Measured 2026-11-06: a runtime lost Slack at ~10:35 and answered
+# "MCP server 'slack' is not connected" to every call and monitor tick for 3+
+# hours, while sibling sessions on the same token read and posted to Slack.
+#
+# Why these numbers: the breaker exists so a flapping server is not hammered
+# (5 attempts in 30 s), and the probe must not rebuild that load. A minute is
+# twice the burst window, so even the first probe stands well clear of the
+# burst that tripped, and it matches AUTH_REVALIDATE_INTERVAL_S, the other
+# unattended heal.
+# Doubling makes a server that is truly gone cost four probes in its first 15
+# minutes and four an hour at the cap, each one connect and one log line. The
+# 15 minute cap bounds how long a server that came back stays dark, which keeps
+# a monitor watching it far inside its 24 h unavailable bound.
+RECONNECT_PROBE_COOLDOWN_S = 60.0
+RECONNECT_PROBE_COOLDOWN_MAX_S = 900.0
+
 # How often a session re-reads the SHARED credential store for servers it gave
 # up on over an auth failure (see :meth:`McpManager.revalidate_auth_blocked`).
 #
@@ -652,6 +680,8 @@ class _AttemptRecord:
 # (``_reconnect_history``); the backoff ladder position is separate state
 # (``_backoff_index``) so a successful reconnect resets the LADDER but never
 # clears the window — a flapping server still trips the breaker (MCP-07).
+# The window IS cleared when the breaker closes (a connect while suspended,
+# see ``_register_connection``): that connect ended the outage it counted.
 
 # Default per-request timeout; ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` overrides,
 # config ``timeout`` (ms) refines, ``0`` disables.
@@ -1857,6 +1887,16 @@ class McpManager:
         self._notify_tasks: set[asyncio.Task[None]] = set()
         self._reconnect_history: dict[str, deque[float]] = {}
         self._reconnect_suspended: set[str] = set()
+        # The half-open breaker's state (see RECONNECT_PROBE_COOLDOWN_S): the
+        # ONE pending probe per tripped server, and the cool-down the next
+        # probe waits (absent = the first, RECONNECT_PROBE_COOLDOWN_S). Held
+        # apart from ``_pending_reconnects`` deliberately: that dict makes
+        # ``get_connection_status`` answer "connecting", which a server paused
+        # for up to 15 minutes is not, and ``_schedule_reconnect`` replaces its
+        # entry, which must never cancel the probe. Every site that cancels a
+        # pending reconnect cancels the probe too (``_cancel_probe``).
+        self._pending_probes: dict[str, asyncio.Task[None]] = {}
+        self._probe_cooldown_s: dict[str, float] = {}
         # Servers auto-reconnect gave up on because their OAUTH GRANT is not
         # usable, held separately from ``_reconnect_suspended`` because the two
         # have different RECOVERY CONDITIONS and only ever shared a set by
@@ -2162,6 +2202,9 @@ class McpManager:
         for task in list(self._pending_reconnects.values()):
             task.cancel()
         self._pending_reconnects.clear()
+        # The round below makes its own connect attempt for every server, and
+        # one that connects closes its breaker in ``_register_connection``.
+        self._cancel_all_probes()
         for continuation, gate_task in list(self._pending_continuations.values()):
             continuation.cancel()
             gate_task.cancel()
@@ -2186,6 +2229,7 @@ class McpManager:
             self._reconnect_history.pop(name, None)
             self._reconnect_suspended.discard(name)
             self._backoff_index.pop(name, None)
+            self._cancel_probe(name)
             # A removed server must not carry an auth block (or a marker read
             # against the OLD entry's URL) across a re-add: the re-added server
             # may point somewhere else entirely.
@@ -2325,6 +2369,7 @@ class McpManager:
                 # A parked waiter (reload) must fail, not hang (MCP-08).
                 waiter = self._connect_futures.pop(name, None)
                 _settle_future_error(waiter, exc)
+                self._rearm_paused_probe(name)
                 continue
             self._register_connection(conn)
             result.connected_servers.append(name)
@@ -2425,10 +2470,18 @@ class McpManager:
         self._fire_tools_changed()
 
     async def reconnect_server(self, name: str) -> ServerConnection | None:
-        """Manual reconnect: resets the breaker history for ``name``."""
+        """Manual reconnect (the app's Reconnect): resets the breaker for ``name``.
+
+        At once, including mid cool-down: the pending half-open probe is
+        cancelled BEFORE this attempt, so it can neither race the manual
+        connect nor fire later against the connection the user just made. If
+        this attempt fails for a non-auth reason the server goes back to
+        paused, with a fresh probe on the first cool-down step.
+        """
         self._reconnect_history.pop(name, None)
         self._reconnect_suspended.discard(name)
         self._backoff_index.pop(name, None)
+        self._cancel_probe(name)
         # A user-initiated reconnect clears the auth block for the same reason
         # it clears the breaker: the user asked for one more attempt, and the
         # attempt below either succeeds or re-blocks on a fresh marker.
@@ -2448,6 +2501,14 @@ class McpManager:
             return None
         except Exception as exc:
             logger.warning("Manual MCP reconnect failed for %r: %s", name, exc)
+            # Back to paused-and-probing rather than orphaned: the reset above
+            # dropped the probe, and with the connection torn down no transport
+            # close will ever reach ``_schedule_reconnect`` again, so without
+            # this a failed Reconnect left the server dead for the life of the
+            # process. The cool-down restarts at its first step (the reset
+            # cleared the ladder): the user just asked for a fresh start.
+            self._reconnect_suspended.add(name)
+            self._schedule_probe(name)
             return None
         self._register_connection(conn)
         self._fire_tools_changed()
@@ -2458,6 +2519,8 @@ class McpManager:
         pending = self._pending_reconnects.pop(name, None)
         if pending is not None:
             pending.cancel()
+        # A server the user disconnected must not be reconnected by a probe.
+        self._cancel_probe(name)
         continuation = self._pending_continuations.pop(name, None)
         if continuation is not None:
             continuation[0].cancel()
@@ -2511,6 +2574,7 @@ class McpManager:
         for task in list(self._pending_reconnects.values()):
             task.cancel()
         self._pending_reconnects.clear()
+        self._cancel_all_probes()
         for continuation, gate_task in list(self._pending_continuations.values()):
             continuation.cancel()
             gate_task.cancel()
@@ -4121,6 +4185,7 @@ class McpManager:
             self._rebuild_agent_names()
             if current_round:
                 self._settle_deferred(name)
+                self._rearm_paused_probe(name)
             self._fire_tools_changed()
             return
         if self._disposed or epoch != self._epoch:
@@ -4161,6 +4226,18 @@ class McpManager:
         # that: the grant is valid, so its marker never moves again. That is
         # the same "state outliving its condition" this whole feature fixes.
         self._clear_auth_block(conn.name)
+        # …and the FLAP BREAKER closes, for the same reason and at the same
+        # choke point: the half-open probe, a reload, a login or a grant
+        # revalidation all connect through here, and a suspension outliving its
+        # connection would leave the next ordinary drop on the slow probe
+        # cadence instead of the fast ladder. Gated on membership so MCP-07
+        # holds: an ordinary ladder success is never suspended, so its burst
+        # window stays intact and a flapping server still trips. Any pending
+        # probe is dropped unconditionally: it would tear this connection down.
+        if conn.name in self._reconnect_suspended:
+            self._reconnect_suspended.discard(conn.name)
+            self._reconnect_history.pop(conn.name, None)
+        self._cancel_probe(conn.name)
         # A connected server must stop being accused of the failure it
         # recovered from: the startup accumulator feeds ``McpServerState.error``
         # in the frontend projection, which no status check filters. The
@@ -4575,7 +4652,16 @@ class McpManager:
         self._schedule_reconnect(name)
 
     def reconnect_suspended(self, name: str) -> bool:
-        """Whether the circuit breaker currently suspends auto-reconnect.
+        """Whether the circuit breaker is OPEN: the fast reconnect ladder is paused.
+
+        True from the trip until the breaker closes, which is the whole
+        half-open cool-down INCLUDING the probe's own connect attempt: the
+        fast ladder stays paused throughout, and a probe due in 15 minutes is
+        not "reconnecting" to any caller that acts on this. It turns False when
+        any route connects the server (``_register_connection`` closes the
+        breaker) or the app's Reconnect resets it. A server whose probe hit an
+        auth failure stays True beside :meth:`auth_blocked`; the auth arm then
+        owns its recovery and no probe is pending.
 
         Reports the FLAP BREAKER only, deliberately: an auth block is a
         different condition with a different recovery (see ``_auth_blocked``),
@@ -4939,15 +5025,25 @@ class McpManager:
             self._abandon_reconnect(name, "auto-reconnect suspended (authorization required)")
             return
         if name in self._reconnect_suspended:
-            self._abandon_reconnect(name, "auto-reconnect suspended (breaker tripped)")
+            # The breaker is open: the fast ladder stays paused and the
+            # half-open probe is the only retry. Waiters fail now rather than
+            # park for a cool-down of up to 15 minutes (MCP-08). Re-arming is a
+            # no-op while a probe is pending, which is the normal case; it
+            # matters for a call-site trip, whose connection stays registered
+            # and only reaches here when its transport later closes.
+            self._abandon_reconnect(name, "auto-reconnect paused (breaker tripped)")
+            self._schedule_probe(name)
             return
         if not self._record_reconnect_attempt(name):
+            cooldown = int(self._next_probe_delay(name))
             logger.warning(
                 "MCP reconnect breaker tripped for %r: >%d attempts in %ds; "
-                "auto-reconnect suspended (manual reconnect resets)",
+                "auto-reconnect paused, next attempt in %ds "
+                "(the app's Reconnect resets it at once)",
                 name,
                 RECONNECT_BURST_LIMIT,
                 int(RECONNECT_BURST_WINDOW_S),
+                cooldown,
             )
             # Model-visible WARNING (session installs the sink): the agent
             # must know the server's tools are GONE, or it hammers them in a
@@ -4956,26 +5052,33 @@ class McpManager:
             sink = getattr(self, "on_incident", None)
             if sink is not None:
                 try:
+                    # The pause and when it ends. The manual override is the
+                    # row's last line (``MCP_BREAKER_TAIL``), which the
+                    # formatter picks by this reason's prefix, so the prefix
+                    # comes from the same constant and the override is not
+                    # repeated here.
                     sink(
                         name,
-                        f"auto-reconnect suspended after >{RECONNECT_BURST_LIMIT} "
-                        f"attempts in {int(RECONNECT_BURST_WINDOW_S)}s; its tools are "
-                        "unavailable until a reconnect succeeds",
+                        f"{MCP_BREAKER_REASON_PREFIX} >{RECONNECT_BURST_LIMIT} "
+                        f"attempts in {int(RECONNECT_BURST_WINDOW_S)}s; next attempt "
+                        f"in {cooldown}s",
                     )
                     # Arm the recovery notice — INSIDE the ``if sink is not
                     # None`` branch, deliberately. The gate records that the
                     # MODEL heard about this failure; a host with no incident
                     # sink heard nothing and must get no recovery. This is the
                     # route the warning text itself promises a recovery for
-                    # ("unavailable until a reconnect succeeds").
+                    # ("next attempt in Ns"): the probe heals through
+                    # ``_register_connection``, which fires it.
                     self._incident_announced.add(name)
                 except Exception:  # noqa: BLE001 — incidents must never break the manager
                     logger.debug("mcp incident sink raised", exc_info=True)
             self._abandon_reconnect(
                 name,
                 f"reconnect breaker tripped (>{RECONNECT_BURST_LIMIT} in "
-                f"{int(RECONNECT_BURST_WINDOW_S)}s)",
+                f"{int(RECONNECT_BURST_WINDOW_S)}s); next attempt in {cooldown}s",
             )
+            self._schedule_probe(name)
             return
         # Backoff ladder position is independent of the breaker window (MCP-07).
         index = self._backoff_index.get(name, 0)
@@ -4994,14 +5097,114 @@ class McpManager:
 
         task.add_done_callback(_discard)
 
-    async def _reconnect(self, name: str, delay: float, epoch: int) -> None:
-        """One reconnect attempt after ``delay``; the epoch guards resurrection."""
+    def _next_probe_delay(self, name: str) -> float:
+        """The cool-down the next half-open probe for ``name`` waits, in seconds."""
+        return self._probe_cooldown_s.get(name, RECONNECT_PROBE_COOLDOWN_S)
+
+    def _schedule_probe(self, name: str) -> None:
+        """Arm the half-open probe: ONE reconnect attempt after the cool-down.
+
+        The probe is ``_reconnect(probe=True)``, the same attempt the fast
+        ladder makes, so its auth arm is the one every reconnect has: an auth
+        failure blocks on the grant (``_block_on_auth``) and arms nothing
+        further, so no refresh token is ever re-spent on a timer. Success heals
+        through ``_register_connection``, which closes the breaker; failure
+        steps the cool-down and re-arms through :meth:`_probe_failed`.
+
+        Never more than one probe per server: a pending probe other than the
+        caller's own task wins. The exception is the probe re-arming itself
+        from its failure arm, which replaces its own entry while it finishes.
+        """
+        if self._disposed or name in self._auth_blocked or name not in self._configs:
+            return
+        pending = self._pending_probes.get(name)
+        if pending is not None and not pending.done() and pending is not asyncio.current_task():
+            return
+        task = asyncio.get_running_loop().create_task(
+            self._reconnect(name, self._next_probe_delay(name), self._epoch, probe=True)
+        )
+        self._pending_probes[name] = task
+
+        def _discard(done: asyncio.Task[None]) -> None:
+            if self._pending_probes.get(name) is done:
+                self._pending_probes.pop(name, None)
+
+        task.add_done_callback(_discard)
+
+    def _probe_failed(self, name: str, epoch: int) -> None:
+        """A probe's connect failed: stay paused, double the cool-down, re-arm."""
+        if epoch != self._epoch or self._disposed:
+            return  # a probe from a reloaded/disposed round writes nothing
+        if name not in self._reconnect_suspended or name in self._auth_blocked:
+            return  # reset meanwhile, or the auth arm owns recovery now
+        delay = min(self._next_probe_delay(name) * 2, RECONNECT_PROBE_COOLDOWN_MAX_S)
+        self._probe_cooldown_s[name] = delay
+        logger.info(
+            "MCP reconnect probe for %r failed; auto-reconnect stays paused, "
+            "next attempt in %ds",
+            name,
+            int(delay),
+        )
+        self._schedule_probe(name)
+
+    def _cancel_probe(self, name: str) -> None:
+        """Drop ``name``'s pending probe and cool-down (breaker closed or reset).
+
+        Never cancels the calling task: a probe that heals reaches here through
+        ``_register_connection``, and cancelling itself there would end the
+        task CANCELLED after a successful connect.
+        """
+        self._probe_cooldown_s.pop(name, None)
+        task = self._pending_probes.pop(name, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    def _rearm_paused_probe(self, name: str) -> None:
+        """Re-arm the probe for a paused server a connect round failed to reach.
+
+        ``reload()`` cancels every pending probe because its round dials every
+        server itself. When that dial fails, neither round failure arm (the
+        gate's, ``_finish_pending``'s) goes through ``_schedule_reconnect``,
+        and with no live connection no transport close ever will, so a server
+        still suspended here would stay paused with nothing left to retry it.
+        Gated on suspension so a server that was never tripped keeps today's
+        startup behaviour; ``_schedule_probe`` stands down for an auth block,
+        which the auth arm of the same failure has already taken. The cool-down
+        ladder is kept from before the reload.
+        """
+        if name in self._reconnect_suspended and name not in self._connections:
+            self._schedule_probe(name)
+
+    def _cancel_all_probes(self) -> None:
+        """Cancel every pending probe (``reload``/``disconnect_all``).
+
+        Tasks only: the epoch bump beside each call is what stops a probe that
+        slips past this cancel from writing state, and the cool-down ladder is
+        cleared where a breaker actually closes or resets (``_cancel_probe``).
+        """
+        for task in list(self._pending_probes.values()):
+            task.cancel()
+        self._pending_probes.clear()
+
+    async def _reconnect(self, name: str, delay: float, epoch: int, *, probe: bool = False) -> None:
+        """One reconnect attempt after ``delay``; the epoch guards resurrection.
+
+        ``probe=True`` is the half-open breaker's single attempt (see
+        :meth:`_schedule_probe`): a failure steps the cool-down rather than
+        re-entering the fast ladder; the auth and success arms are shared.
+        """
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
         if epoch != self._epoch or self._disposed:
             return  # disconnect_all ran meanwhile; never resurrect
+        if probe and (name in self._auth_blocked or name not in self._reconnect_suspended):
+            # The breaker closed (a connect by another route, a reset) or the
+            # auth arm took the server while the probe slept: either way this
+            # attempt is no longer the breaker's to make, and an auth-blocked
+            # server must never be dialled on a timer.
+            return
         cfg = self._configs.get(name)
         if cfg is None:
             return
@@ -5073,8 +5276,22 @@ class McpManager:
                 future.set_exception(exc)
                 future.exception()  # mark retrieved; waiters still see the raise
             self._connect_futures.pop(name, None)
-            self._schedule_reconnect(name)
+            if probe:
+                self._probe_failed(name, epoch)
+            else:
+                self._schedule_reconnect(name)
             return
+        if epoch != self._epoch or self._disposed:
+            # A reload()/dispose() landed during the connect and its cancel
+            # did not reach us: the round this attempt belonged to is gone, so
+            # registering would resurrect a server its teardown already
+            # handled (and, for a probe, close a breaker the new round owns).
+            if conn.stack is not None:
+                with suppress(Exception):
+                    await conn.stack.aclose()
+            return
+        # Through the choke point: it closes the breaker when this was the
+        # half-open probe, fires ``on_recovery`` and settles parked waiters.
         self._register_connection(conn)
         # Success resets the backoff LADDER only; the breaker window stays
         # intact so a flapping server still trips (MCP-07).
@@ -5098,7 +5315,16 @@ class McpManager:
         if name in self._reconnect_suspended or name in self._auth_blocked:
             return None
         if not self._record_reconnect_attempt(name):
-            logger.warning("MCP reconnect breaker tripped for %r (call-site attempt)", name)
+            logger.warning(
+                "MCP reconnect breaker tripped for %r (call-site attempt); "
+                "auto-reconnect paused, next attempt in %ds",
+                name,
+                int(self._next_probe_delay(name)),
+            )
+            # A trip like any other, so it gets the probe: this one leaves the
+            # failing connection registered, and if its transport never closes
+            # nothing else would ever arm one.
+            self._schedule_probe(name)
             return None
         epoch = self._epoch
         await self._teardown_connection(name)
@@ -5171,6 +5397,8 @@ __all__ = [
     "RECONNECT_BACKOFF_S",
     "RECONNECT_BURST_LIMIT",
     "RECONNECT_BURST_WINDOW_S",
+    "RECONNECT_PROBE_COOLDOWN_MAX_S",
+    "RECONNECT_PROBE_COOLDOWN_S",
     "STARTUP_GATE_MS",
     "STDERR_TAIL_LINES",
     "McpConnectionError",

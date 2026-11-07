@@ -208,12 +208,36 @@ async def test_auth_required_names_its_own_remedy(tmp_path: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_suspended_reconnect_is_unavailable(tmp_path: Any) -> None:
+    """The flap breaker's detail, pinned verbatim.
+
+    It becomes the stall notice's ``Reason:``, so it must agree with that
+    notice's "retrying" body. Any change to this sentence must re-verify the
+    route it promises: the manager's half-open probe retries a tripped server
+    unattended (``McpManager._schedule_probe``). It names no ``/mcp reauth``: a
+    flap has a valid grant, and reauth would re-spend it.
+    """
     manager = FakeManager([], status="disconnected", suspended=True)
     session = _session(tmp_path, manager)
     try:
-        state, detail = session._monitor_availability(mcp_name())
-        assert state == "unavailable"
-        assert "/mcp reauth datadog" in detail
+        assert session._monitor_availability(mcp_name()) == (
+            "unavailable",
+            'MCP server "datadog" keeps dropping; reconnects are paused and retried automatically',
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_probe_mid_connect_reads_connecting_not_paused(tmp_path: Any) -> None:
+    """The breaker stays open until the probe's connect lands, so for that
+    instant the server is both suspended and connecting; connecting is true."""
+    manager = FakeManager([], status="connecting", suspended=True)
+    session = _session(tmp_path, manager)
+    try:
+        assert session._monitor_availability(mcp_name()) == (
+            "unavailable",
+            'MCP server "datadog" is still connecting',
+        )
     finally:
         await session.dispose()
 

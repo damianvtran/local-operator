@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -30,6 +31,8 @@ from local_operator.mcp.auth import (
 from local_operator.mcp.config import MCPStdioServerConfig
 from local_operator.mcp.manager import (
     DEFAULT_MCP_TIMEOUT_MS,
+    RECONNECT_BACKOFF_S,
+    McpConnectionError,
     McpManager,
     ServerConnection,
     build_cmd_exe_argv,
@@ -550,11 +553,13 @@ class TestCircuitBreaker:
                 break
 
         assert manager.reconnect_suspended("fast") is True
+        # The breaker is half-open now, so the incident names the pause and
+        # when it ends; the manual override is the row's own last line
+        # (``incidents.MCP_BREAKER_TAIL``), keyed on this reason's prefix.
         assert incidents == [
             (
                 "fast",
-                "auto-reconnect suspended after >5 attempts in 30s; its tools are "
-                "unavailable until a reconnect succeeds",
+                "auto-reconnect paused after >5 attempts in 30s; next attempt in 60s",
             )
         ]
         # Backoff escalates 0.5, 1, 2, 4 and caps at 4 (five failed attempts).
@@ -959,6 +964,438 @@ class TestBreakerTrippedCallsFailPromptly:
         assert result.is_error is True
         assert "disconnected" in result.text
         release.set()
+        await manager.disconnect_all()
+
+
+class _FakeServer:
+    """The ``_connect_server`` seam, switchable between up, down and auth-failing.
+
+    ``hold`` parks connects inside the attempt so a test can read the state a
+    probe is in WHILE it dials; ``before_result`` runs just before the outcome,
+    which is where a reload landing mid-connect is simulated.
+    """
+
+    def __init__(self) -> None:
+        self.mode = "up"
+        self.attempts: list[str] = []
+        self.hold: asyncio.Event | None = None
+        self.before_result: Callable[[], None] | None = None
+
+    async def connect(self, name: str, cfg: Any, **_: Any) -> ServerConnection:
+        from local_operator.mcp.auth import McpAuthRequiredError
+
+        self.attempts.append(name)
+        if self.hold is not None:
+            await self.hold.wait()
+        if self.before_result is not None:
+            self.before_result()
+        if self.mode == "down":
+            raise RuntimeError("still down")
+        if self.mode == "auth":
+            raise McpAuthRequiredError("https://srv.example/mcp")
+        return _make_conn(name, cfg)
+
+
+class _CooldownClock:
+    """Patched ``asyncio.sleep``: the backoff ladder is instant, cool-downs park.
+
+    The ladder never waits longer than ``max(RECONNECT_BACKOFF_S)`` and a
+    half-open cool-down never less than a minute, so any longer wait is a
+    cool-down: it is recorded and parks until the test calls :meth:`elapse`.
+    No real time passes, and cancelling a probe cancels its parked future
+    exactly as it would cancel a real sleep.
+    """
+
+    def __init__(self, real_sleep: Callable[[float], Any]) -> None:
+        self._real_sleep = real_sleep
+        self.waits: list[float] = []
+        self._parked: list[tuple[float, asyncio.Future[None]]] = []
+
+    async def sleep(self, delay: float, result: Any = None) -> Any:
+        if delay <= max(RECONNECT_BACKOFF_S):
+            await self._real_sleep(0)
+            return result
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self.waits.append(delay)
+        self._parked.append((delay, future))
+        await future
+        return result
+
+    def parked(self) -> list[float]:
+        """The cool-downs still waiting, in the order they were armed."""
+        return [delay for delay, future in self._parked if not future.done()]
+
+    def elapse(self) -> None:
+        """Let every parked cool-down run out."""
+        for _, future in self._parked:
+            if not future.done():
+                future.set_result(None)
+
+
+async def _spin(real_sleep: Callable[[float], Any], turns: int = 40) -> None:
+    """Give the loop ``turns`` passes so scheduled reconnect work can run."""
+    for _ in range(turns):
+        await real_sleep(0)
+
+
+class TestHalfOpenBreaker:
+    """A tripped breaker heals itself: one probe per cool-down, 60 s doubling to 15 min.
+
+    The breaker used to stay OPEN for the life of the process, so a runtime that
+    lost a server for longer than the backoff ladder lasts answered "MCP server
+    'slack' is not connected" for hours while sibling sessions used the same
+    server without error (measured 2026-11-06). Every test starts from the real
+    trigger, a transport death driving the real reconnect chain; only the
+    connect seam and the clock are fakes.
+    """
+
+    @staticmethod
+    async def _boot(
+        project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[McpManager, _FakeServer, _CooldownClock, Callable[[float], Any]]:
+        manager = McpManager(str(project))
+        server = _FakeServer()
+        monkeypatch.setattr(manager, "_connect_server", server.connect)
+        await manager.discover_and_connect()
+        real_sleep = asyncio.sleep
+        clock = _CooldownClock(real_sleep)
+        monkeypatch.setattr(asyncio, "sleep", clock.sleep)
+        return manager, server, clock, real_sleep
+
+    @staticmethod
+    async def _trip(
+        manager: McpManager,
+        server: _FakeServer,
+        real_sleep: Callable[[float], Any],
+        name: str = "fast",
+    ) -> asyncio.Task[None]:
+        """Kill ``name``'s transport with the server down until the breaker trips."""
+        conn = manager.get_connection(name)
+        assert conn is not None
+        server.mode = "down"
+        conn.closed_event.set()
+        for _ in range(200):
+            await real_sleep(0)
+            if manager.reconnect_suspended(name):
+                break
+        assert manager.reconnect_suspended(name) is True
+        await _spin(real_sleep)
+        # getattr: on a build without the probe this reads as the missing
+        # behaviour it is, not as an AttributeError.
+        probe = getattr(manager, "_pending_probes", {}).get(name)
+        assert probe is not None, "a trip must arm the half-open probe"
+        return probe
+
+    @pytest.mark.asyncio
+    async def test_one_probe_after_the_cooldown_heals_through_the_choke_point(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        incidents: list[tuple[str, str]] = []
+        recoveries: list[tuple[str, int]] = []
+        manager.on_incident = lambda server_name, reason: incidents.append((server_name, reason))
+        manager.on_recovery = lambda server_name, count: recoveries.append((server_name, count))
+        changed: list[int] = []
+        manager.set_on_tools_changed(lambda tools: changed.append(len(tools)))
+
+        probe = await self._trip(manager, server, real_sleep)
+        attempts_at_trip = server.attempts.count("fast")
+        # ONE probe, parked on the first cool-down, and nothing dials meanwhile;
+        # another drop report for the paused server does not arm a second one.
+        assert clock.parked() == [60.0]
+        manager._schedule_reconnect("fast")
+        await _spin(real_sleep)
+        assert clock.parked() == [60.0]
+        assert manager._pending_probes == {"fast": probe}
+        assert server.attempts.count("fast") == attempts_at_trip
+        # Paused rather than "connecting", and a call fails now instead of
+        # parking for the length of the cool-down (MCP-08).
+        assert manager.get_connection_status("fast") == "disconnected"
+        with pytest.raises(McpConnectionError):
+            await manager.wait_for_connection("fast")
+        assert [server_name for server_name, _ in incidents] == ["fast"]
+
+        # The server is back. Hold the probe inside its connect to read that state.
+        server.mode = "up"
+        server.hold = asyncio.Event()
+        clock.elapse()
+        await _spin(real_sleep)
+        assert server.attempts.count("fast") == attempts_at_trip + 1
+        assert manager.get_connection_status("fast") == "connecting"
+        assert manager.reconnect_suspended("fast") is True  # open until the connect lands
+        waiter = asyncio.ensure_future(manager.wait_for_connection("fast"))
+        await _spin(real_sleep)
+        assert not waiter.done()
+        changed_before = len(changed)
+        server.hold.set()
+        await _spin(real_sleep)
+
+        conn = manager.get_connection("fast")
+        assert conn is not None
+        assert waiter.done() and waiter.result() is conn  # the parked call rides the heal
+        assert manager.reconnect_suspended("fast") is False
+        assert "fast" not in manager._reconnect_history
+        assert manager._probe_cooldown_s == {}
+        assert manager._pending_probes == {}
+        assert recoveries == [("fast", 1)]
+        assert len(changed) > changed_before
+        assert server.attempts.count("fast") == attempts_at_trip + 1  # exactly one probe
+        assert clock.parked() == []
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_probe_doubles_the_cooldown_up_to_the_cap(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        await self._trip(manager, server, real_sleep)
+
+        for _ in range(6):
+            before = server.attempts.count("fast")
+            clock.elapse()
+            await _spin(real_sleep)
+            # Each cool-down buys exactly one attempt; a failure stays paused
+            # with exactly one probe re-armed behind it.
+            assert server.attempts.count("fast") == before + 1
+            assert manager.reconnect_suspended("fast") is True
+            assert manager.get_connection("fast") is None
+            assert len(clock.parked()) == 1
+            assert list(manager._pending_probes) == ["fast"]
+
+        # 60 -> 120 -> 240 -> 480 -> 900, then held at the 15-minute cap.
+        assert clock.waits == [60.0, 120.0, 240.0, 480.0, 900.0, 900.0, 900.0]
+        await manager.disconnect_all()
+        assert manager._pending_probes == {}
+
+    @pytest.mark.asyncio
+    async def test_an_auth_failure_during_a_probe_goes_to_the_grant_arm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"dd": {"type": "http", "url": "https://srv.example/mcp",'
+            ' "auth": {"type": "oauth"}}}}',
+            encoding="utf-8",
+        )
+        manager, server, clock, real_sleep = await self._boot(tmp_path, monkeypatch)
+        await self._trip(manager, server, real_sleep, "dd")
+
+        server.mode = "auth"
+        before = server.attempts.count("dd")
+        clock.elapse()
+        await _spin(real_sleep)
+        assert server.attempts.count("dd") == before + 1
+        # The grant arm, exactly where an ordinary reconnect's auth failure lands.
+        assert manager.auth_blocked("dd") is True
+        assert manager.get_connection_status("dd") == "auth-required"
+        # The flap ladder is out of it: nothing armed, the cool-down never stepped.
+        assert manager._pending_probes == {}
+        assert clock.parked() == []
+        assert "dd" not in manager._probe_cooldown_s
+        # A later drop report cannot re-arm it either: no timer re-spends a grant.
+        manager._schedule_reconnect("dd")
+        await _spin(real_sleep)
+        assert manager._pending_probes == {}
+        assert "dd" not in manager._pending_reconnects
+        assert server.attempts.count("dd") == before + 1
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_probe_never_dials_a_server_the_grant_arm_holds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A probe that wakes to find an auth block stands down without a connect.
+
+        Dialling would spend a refresh token on a timer, the storm the grant
+        arm exists to prevent; only a changed grant may retry such a server.
+        """
+        (tmp_path / ".local-operator").mkdir()
+        (tmp_path / ".local-operator" / "mcp.json").write_text(
+            '{"mcpServers": {"dd": {"type": "http", "url": "https://srv.example/mcp",'
+            ' "auth": {"type": "oauth"}}}}',
+            encoding="utf-8",
+        )
+        manager, server, clock, real_sleep = await self._boot(tmp_path, monkeypatch)
+        await self._trip(manager, server, real_sleep, "dd")
+        manager._block_on_auth("dd")  # the grant arm takes it during the cool-down
+        before = server.attempts.count("dd")
+
+        clock.elapse()
+        await _spin(real_sleep)
+        assert server.attempts.count("dd") == before
+        assert manager._pending_probes == {}
+        assert clock.parked() == []
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "disconnect_all",
+            "reload",
+            "reconnect_server",
+            "disconnect_server",
+            "login",
+            "removed_from_config",
+        ],
+    )
+    async def test_a_reset_during_the_cooldown_cancels_the_probe(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, action: str
+    ) -> None:
+        """Each reset cancels the probe itself, and nothing fires later.
+
+        A reset whose own connect FAILS re-arms a fresh probe instead; that is
+        :meth:`test_a_reset_that_fails_rearms_one_probe_and_heals`.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        probe = await self._trip(manager, server, real_sleep)
+        server.mode = "up"
+
+        if action == "disconnect_all":
+            await manager.disconnect_all()
+        elif action == "reload":
+            await manager.reload()
+        elif action == "reconnect_server":
+            assert await manager.reconnect_server("fast") is not None
+        elif action == "disconnect_server":
+            await manager.disconnect_server("fast")
+        elif action == "removed_from_config":
+            # A re-discovery, unlike reload(), cancels no probes wholesale: the
+            # removed server's own drop is what has to.
+            (project / ".local-operator" / "mcp.json").write_text(
+                '{"mcpServers": {"slow": {"type": "stdio", "command": "slow-cmd"}}}',
+                encoding="utf-8",
+            )
+            await manager.discover_and_connect()
+        else:
+            await manager.connect_configured_server("fast")
+        await _spin(real_sleep)
+
+        # The probe is gone: its task ended, its parked cool-down was cancelled,
+        # and no reconnect task of any kind is left behind for the server.
+        assert probe.done()
+        assert manager._pending_probes == {}
+        assert clock.parked() == []
+        assert not [t for t in asyncio.all_tasks() if "_reconnect" in repr(t.get_coro())]
+        attempts = server.attempts.count("fast")
+        clock.elapse()
+        await _spin(real_sleep)
+        assert server.attempts.count("fast") == attempts  # nothing fires later
+        if action in ("reload", "reconnect_server", "login"):
+            # Each of these connects the server, which closes the breaker.
+            assert manager.get_connection("fast") is not None
+            assert manager.reconnect_suspended("fast") is False
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["reload", "reload_past_the_gate", "reconnect_server"])
+    async def test_a_reset_that_fails_rearms_one_probe_and_heals(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, action: str
+    ) -> None:
+        """A reset whose own connect fails must not orphan the server (R1-1).
+
+        ``reload()`` and the app's Reconnect both drop the pending probe and dial
+        the server themselves. When that dial fails there is no live connection,
+        so no transport close will ever reach ``_schedule_reconnect`` again: the
+        only retry left is a probe the failure itself arms. ``reload`` fails
+        inside the startup gate, ``reload_past_the_gate`` in the deferred
+        continuation (``_finish_pending``); the two are separate failure arms.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        old_probe = await self._trip(manager, server, real_sleep)
+
+        if action == "reload":
+            await manager.reload()
+        elif action == "reload_past_the_gate":
+            server.hold = asyncio.Event()
+            await manager.reload()  # returns at the gate with the dial still held
+            assert manager.get_connection_status("fast") == "connecting"
+            server.hold.set()
+        else:
+            assert await manager.reconnect_server("fast") is None
+        await _spin(real_sleep)
+
+        # Paused again with exactly ONE fresh probe on the first cool-down step,
+        # and nothing else dialling meanwhile.
+        assert old_probe.done()
+        assert manager.get_connection("fast") is None
+        assert manager.reconnect_suspended("fast") is True
+        assert list(manager._pending_probes) == ["fast"]
+        assert manager._pending_probes["fast"] is not old_probe
+        assert clock.parked() == [60.0]
+
+        # The server returns; the probe alone heals it, with no further action.
+        server.hold = None
+        server.mode = "up"
+        attempts = server.attempts.count("fast")
+        clock.elapse()
+        await _spin(real_sleep)
+        assert server.attempts.count("fast") == attempts + 1
+        assert manager.get_connection("fast") is not None
+        assert manager.reconnect_suspended("fast") is False
+        assert manager._pending_probes == {}
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["up", "down"])
+    async def test_a_stale_epoch_probe_writes_no_state(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+    ) -> None:
+        """A probe inside its connect when the round changes must write nothing.
+
+        ``reload()``/``disconnect_all()`` cancel the probe; the epoch is the
+        second line of defence for a cancel that never reaches it. Bumping
+        ``_epoch`` from inside the connect is that race with the cancel removed.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        recoveries: list[tuple[str, int]] = []
+        manager.on_incident = lambda server_name, reason: None
+        manager.on_recovery = lambda server_name, count: recoveries.append((server_name, count))
+        await self._trip(manager, server, real_sleep)
+        history = list(manager._reconnect_history["fast"])
+
+        def the_round_changes() -> None:
+            manager._epoch += 1
+
+        server.mode = outcome
+        server.before_result = the_round_changes
+        clock.elapse()
+        await _spin(real_sleep)
+
+        assert manager.get_connection("fast") is None  # never registered
+        assert manager.reconnect_suspended("fast") is True  # breaker untouched
+        assert list(manager._reconnect_history["fast"]) == history
+        assert "fast" not in manager._probe_cooldown_s  # ladder not stepped
+        assert manager._pending_probes == {}  # and nothing re-armed
+        assert clock.parked() == []
+        assert recoveries == []
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_call_site_trip_arms_the_probe_too(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The call-site retry trips the same breaker, so it gets the same probe.
+
+        That trip leaves the failing connection registered; if its transport
+        never closes, nothing else would ever arm a probe for it.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        failing = manager.get_connection("fast")
+        assert failing is not None
+        now = asyncio.get_running_loop().time()
+        manager._reconnect_history["fast"] = deque([now] * 5)  # a full burst window
+
+        assert await manager._reconnect_for_call("fast") is None
+        assert manager.reconnect_suspended("fast") is True
+        await _spin(real_sleep)
+        assert clock.parked() == [60.0]
+
+        clock.elapse()
+        await _spin(real_sleep)
+        healed = manager.get_connection("fast")
+        assert healed is not None and healed is not failing
+        assert manager.reconnect_suspended("fast") is False
         await manager.disconnect_all()
 
 

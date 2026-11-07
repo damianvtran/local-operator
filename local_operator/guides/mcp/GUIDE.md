@@ -112,3 +112,4 @@ The desktop app may run a private virtual environment, so a random system `pip` 
 3. Run the stdio command directly or check that the remote URL is reachable.
 4. Restart the Local Operator session and read its MCP startup warning.
 5. If only one server fails, fix that server. If every server reports the SDK missing, repair the Local Operator installation instead.
+6. A server that keeps dropping is paused, not abandoned: after more than five reconnect attempts in 30 seconds, auto-reconnect stops hammering it and retries once per cool-down (1 minute, doubling to 15) until it answers. The app's Reconnect on that server's row resets it at once. A server that needs authorization is never retried on a timer; run `/mcp reauth <name>` instead.

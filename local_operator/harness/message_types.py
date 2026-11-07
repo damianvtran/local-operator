@@ -199,6 +199,9 @@ SESSION_MODEL_SWITCH_MESSAGE_TYPE = "session_model_switch"
 #: — and its advice, "Its tools are not callable until the user restores it, and
 #: the agent should not retry them in a loop." — for a server that had been
 #: usable for the rest of the session. Observed live against ``minerva-qa``.
+#: (That tail is the auth/config rows'. A reconnect-breaker row ends with
+#: ``incidents.MCP_BREAKER_TAIL`` instead, since the breaker retries on its own;
+#: the recovery row supersedes either.)
 #:
 #: It is a DEDICATED type rather than a ``session_incident``, and since
 #: :data:`SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE` its pair is too. The reason

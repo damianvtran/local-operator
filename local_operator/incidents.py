@@ -1519,6 +1519,26 @@ def format_shape_incident_message(
     )
 
 
+#: How the reconnect breaker's reason begins (``McpManager._schedule_reconnect``
+#: writes it from this constant). The ONE marker the formatter below keys the
+#: breaker's tail on: the ``on_incident`` hook carries only ``(server, reason)``,
+#: and the session's dedupe re-renders a stored row from its stored reason, so a
+#: separate flag would have to be persisted beside it to survive that replay.
+MCP_BREAKER_REASON_PREFIX = "auto-reconnect paused after"
+
+#: The breaker row's last line. Any change to it must re-verify the two routes
+#: it names: the manager's half-open probe (``RECONNECT_PROBE_COOLDOWN_S``), and
+#: the desktop app's "Reconnect" row action in Settings > Integrations
+#: (local-operator-ui ``ui.settings.integrations.integration_model.reconnect``,
+#: offered on a loaded server's row in the error state, and in its overflow menu
+#: whenever it is not connected; a breaker only ever trips on a loaded server).
+MCP_BREAKER_TAIL = (
+    # i18n: ignore model-facing incident block
+    "It is retried automatically; Reconnect on its row in the app's "
+    "Integrations settings restores it at once."
+)
+
+
 def format_mcp_unavailable_message(server: str, reason: str) -> str:
     """Render the MCP-unavailability text injected into the model's context.
 
@@ -1538,19 +1558,22 @@ def format_mcp_unavailable_message(server: str, reason: str) -> str:
     * the head states the CAPABILITY change — the server is unavailable and its
       tools are gone — because that is what stops the model calling them;
     * ``Reason:`` carries the operator's own remedy (``/mcp reauth <server>``,
-      a breaker that suspended auto-reconnect), which is what lets the model
+      a breaker that paused auto-reconnect), which is what lets the model
       tell the user what to do rather than only that something is wrong;
-    * the last line states the manual-recovery fact and keeps the model's
-      instruction not to hammer the tools.
+    * the last line states how the server comes back: for auth/config, the
+      manual-recovery fact plus the instruction not to hammer the tools; for
+      the breaker, that it is retried automatically and what restores it now.
 
     **"for now", never "until it reconnects".** The first draft promised a
     self-heal, and there is none for either family this row is written for: an
     expired grant never heals by retrying (auto-reconnect is non-interactive by
-    design, so only ``/mcp reauth`` restores it) and a tripped breaker has
-    auto-reconnect SUSPENDED at the moment this row is written. "Until it
+    design, so only ``/mcp reauth`` restores it) and, when this was written, a
+    tripped breaker had auto-reconnect SUSPENDED for good. "Until it
     reconnects" also implied an action nobody had taken. Design review round 1
     (D2): the promise has to be true for both families, which is why the head is
-    reason-agnostic and the last line says the user has to restore it.
+    reason-agnostic. The breaker now retries on a cool-down, so its last line
+    says so (see below) — still without promising when, since a server that
+    stays down is only retried, never guaranteed back.
 
     The last line is read by TWO audiences — it rides the model's context and
     the transcript row the operator sees — so it is phrased as a fact about the
@@ -1569,17 +1592,29 @@ def format_mcp_unavailable_message(server: str, reason: str) -> str:
     lands at the front of the line rather than mid-line after a restatement
     (design review round 1, D3). The breaker site is the third caller and names
     no verb: its remedy is a reconnect rather than a typed command, so its reason
-    states the condition (``auto-reconnect suspended after >N attempts``) and the
-    row's last line defers the recovery to the user without naming one.
+    states the condition (``auto-reconnect paused after >N attempts``, see
+    :data:`MCP_BREAKER_REASON_PREFIX`).
+
+    **The breaker row ends differently**, with :data:`MCP_BREAKER_TAIL`. Since
+    the breaker became half-open (2026-11-06) it heals unattended, so "not
+    callable until the user restores it" stopped being true for it and
+    contradicted its own ``Reason:`` line ("next attempt in 60s"); the auth and
+    configuration families keep that line, because for them it still is. The
+    breaker tail still promises no TIME, only that retrying happens and which
+    action restores it now, and the recovery row supersedes the warning when
+    the probe lands.
     """
     lines = [f"[session warning] MCP server '{server}' is unavailable: its tools are gone for now."]
     if reason.strip():
         lines.append(f"Reason: {reason.strip()[:200]}")  # i18n: ignore model-facing incident block
-    lines.append(
-        # i18n: ignore model-facing incident block
-        "Its tools are not callable until the user restores it, and the agent "
-        "should not retry them in a loop."
-    )
+    if reason.strip().startswith(MCP_BREAKER_REASON_PREFIX):
+        lines.append(MCP_BREAKER_TAIL)
+    else:
+        lines.append(
+            # i18n: ignore model-facing incident block
+            "Its tools are not callable until the user restores it, and the agent "
+            "should not retry them in a loop."
+        )
     return "\n".join(lines)
 
 

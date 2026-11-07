@@ -18,7 +18,9 @@ PATHS = {
     # 14 -> 15: the failover sentence in `Incident.render` is the same
     # model-facing incident block as its siblings, so it carries the same
     # pragma rather than an extracted string.
-    "local_operator/incidents.py": 15,
+    # 15 -> 16: the half-open breaker's tail (MCP_BREAKER_TAIL) is the same
+    # model-facing incident block as its siblings, so it carries the same pragma.
+    "local_operator/incidents.py": 16,
 }
 
 
