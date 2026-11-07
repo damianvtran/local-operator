@@ -1222,7 +1222,9 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
             self._entries = entries
             self._holds_urls = holds_urls
 
-        def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
+        def placement(
+            self, *, provider: str = "", mcp_url: str = "", network_id: str = ""
+        ) -> dict[str, Any]:
             return dict(self._entries.get(mcp_url, {}))
 
         def holds_mcp_login(self, url: str) -> bool | None:
@@ -1334,7 +1336,9 @@ def test_mcp_row_never_promises_a_borrow_this_device_cannot_fund(tmp_path: Path)
         def __init__(self, holds: bool | None, root: Path | None = None) -> None:
             super().__init__(holds_mcp=holds, root=root)
 
-        def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
+        def placement(
+            self, *, provider: str = "", mcp_url: str = "", network_id: str = ""
+        ) -> dict[str, Any]:
             return dict(placement.get(mcp_url, {}))
 
     def one(holds: bool | None) -> dict[str, Any]:
@@ -4120,7 +4124,9 @@ class _GithubViewer(_FakeViewer):
         super().__init__(device_id=device_id, placement=placement)
         self.root = root
 
-    def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
+    def placement(
+        self, *, provider: str = "", mcp_url: str = "", network_id: str = ""
+    ) -> dict[str, Any]:
         return dict(self._placement)
 
 
