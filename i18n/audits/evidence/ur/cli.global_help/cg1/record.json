@@ -40,7 +40,7 @@
     "target": "fc853997205439f62fd084faa0a590aedf4bd9f952db17f371bf6a96b52b94c3",
     "style_guide": "c0eecf7f7b5e89956b7de9ab7a9eb647ff1a7ef701ccf2a7f0264d5eea15ca60",
     "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
-    "audited_input_manifest": "28f1f9ba69c51bc023ebbfcc980a556209c72b3b260b7629427a5059d9337c71"
+    "audited_input_manifest": "9b1511095140baf5e197e2a9d194bf43366eb951edd67a4fcd69e7fb409359fc"
   },
   "input_paths": {
     "en": "local_operator/i18n/catalogues/en/cli.global_help.json",

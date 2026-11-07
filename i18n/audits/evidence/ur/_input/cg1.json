@@ -1464,7 +1464,26 @@
    "tui.usage.stale": "5e2998823cbad4d42aa3212cfc9ac73dba86f14df18447c3cc7075dee9170e23",
    "tui.usage.title": "6aab4d9a01145cce3a2033932ba4db57fffda9c5d5694455f1013c6db3c82467",
    "tui.usage.unavailable": "493c50e6c3b01de3f7f707edbea04ec3398a74f09ca4bb00444c11fb7cced061",
-   "tui.usage.windows_count": "ac4233298654badcdd303c7eee7e15d94258573fa32883a89fc0b48753e3367b"
+   "tui.usage.windows_count": "ac4233298654badcdd303c7eee7e15d94258573fa32883a89fc0b48753e3367b",
+   "tui.usage.resets.badge": "ea8f3cc9e66c154ee1b1f4a2f28dc5124ec12a3dc2fd136d5c24249c91c9c0d1",
+   "tui.usage.resets.hint": "b301fe99a9889332281ed4c2e8120b2c2bfce5caf932db516628ca270ada9162",
+   "tui.usage.resets.choose": "d94f904faf9dc91f74ccecaf22000bba888396ff4f70847d98914b56d1057795",
+   "tui.usage.resets.accept": "b301fe99a9889332281ed4c2e8120b2c2bfce5caf932db516628ca270ada9162",
+   "tui.usage.resets.cancel": "100fbc861ea2caf5faebc1ad813d2a73881f176146234d7a25360e61601977a7",
+   "tui.usage.resets.choose_title": "52e25eb24e314974c7e4bc6ff89e498673e7d306831d8eba804835763708d7d5",
+   "tui.usage.resets.more": "0f63f2351e75e78fecac09cf39e423bd7cc2db2e0d02a0e16c2308616b348e0c",
+   "tui.usage.resets.confirm_title": "67ae50b8241020eec49f212e32d81686b9c85fbacb248098ab2bea04f6141464",
+   "tui.usage.resets.confirm_detail": "46401d62323feeec80c214eae7637ad842a9434417607c60fec71555531dd84e",
+   "tui.usage.resets.busy": "770ec48c38a11ed1c1c57795f57bb952c957101264de62f4542876028944e131",
+   "tui.usage.resets.done": "084cd4cde585bd1d330d5fe23ddeb08245b5505f1f52f8683cc94f366f147aa8",
+   "tui.usage.resets.nothing": "298ab1694e8b07eb8dafd48d623c328ea19394e401c344994100594589072ab2",
+   "tui.usage.resets.no_credit": "ccd73dc1885f71bce4037e32c6da2928872d47c69f43fa2469b00f1d252482a0",
+   "tui.usage.resets.already": "65cc63129e34392fed987211530e1bee06af33a971b6e2769fb22feb8e68f114",
+   "tui.usage.resets.failed": "6701f3beb8bfcf3cef684a8b03b56feec9c5fa18b07f426dd492b881b9fb8448",
+   "tui.usage.resets.confirm_title_account": "283df73c709add4c5940c53601da3d5b8f2a8412b044121ccbc03b8b1402a656",
+   "tui.usage.resets.dismiss": "3d32fc63ee964458ab363c82e626eef7d8f5bb4534af557fc33f6d07acb70c3e",
+   "tui.usage.resets.recheck": "b86722c0cd4bf63291db12f368ef10d353990cda7df8122f871242a3292202db",
+   "tui.usage.resets.changed": "0018ca6336f70deed29a56d303f8b40e75505a20820fd55af85a8d2851bff163"
   },
   "wire.aida_cadence": {
    "wire.aida_cadence.interval_hours.help": "22dc1821ec1d344e257b6ef8f3e7930fefebc9404278ab71d22f2bbb3d8d5d97",
@@ -1666,5 +1685,5 @@
    "wire.tunnel_setup.unavailable": "07167c5e574cdf1f61c648618f3ad8350dcd44e667e28153f291dfd4b13d3df9"
   }
  },
- "manifest_sha256": "fca7222a40b421bc69eacb032fb8128849c6c7c5fe50c5199bd232924502d4fa"
+ "manifest_sha256": "5d89259f0320c437e0a44e6e5a5779bba865fc9d162b3f951da327bad9d35cd0"
 }
