@@ -564,7 +564,7 @@ def _secret_candidate_names(config: Path) -> list[str]:
         return []
     try:
         from local_operator.secrets import access
-        from local_operator.secrets.store import is_provider_secret_name
+        from local_operator.secrets.store import is_reserved_secret_name
 
         store = access.open_store(config)
     except Exception as exc:  # noqa: BLE001 — exists but unreadable: say so
@@ -573,7 +573,7 @@ def _secret_candidate_names(config: Path) -> list[str]:
     try:
         for record in store.list():
             name = str(getattr(record, "name", "") or "")
-            if not name or is_provider_secret_name(name):
+            if not name or is_reserved_secret_name(name):
                 continue
             names.append(name)
     except Exception as exc:  # noqa: BLE001 — an enumeration that failed is unreadable
