@@ -1342,7 +1342,10 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
     from local_operator.secrets.access import open_store
     from local_operator.secrets.errors import SecretStoreError
     from local_operator.secrets.keys import store_path
-    from local_operator.secrets.store import PROVIDER_SECRET_PREFIX, is_delegation_secret_name
+    from local_operator.secrets.store import (
+        PROVIDER_SECRET_PREFIX,
+        is_delegation_secret_name,
+    )
 
     # An errno comparison rather than ``is_file()``/``exists()``, for a reason
     # worth keeping in view: a path probe answers

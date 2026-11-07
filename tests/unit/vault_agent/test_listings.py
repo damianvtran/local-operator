@@ -31,22 +31,22 @@ def test_every_source_has_its_own_label() -> None:
     store = VariableStore()
     store.store_credential("GH", "a", "command")
     store.store_credential("ASKED", "b", "ask")
-    store.store_credential("VAULT_DEPLOY", "c", "vault", trim=False)
+    store.store_credential("RADIENT_VAULT_DEPLOY", "c", "vault", trim=False)
     rows = format_credential_list(store.list_credentials()).splitlines()
     assert any("GH" in r and r.endswith("from /credential") for r in rows)
     assert any("ASKED" in r and r.endswith("from ask") for r in rows)
-    assert any("VAULT_DEPLOY" in r and r.endswith("from Radient Vault") for r in rows)
+    assert any("RADIENT_VAULT_DEPLOY" in r and r.endswith("from Radient Vault") for r in rows)
 
 
 def test_a_vault_value_is_never_promoted_to_the_long_term_store(config_dir) -> None:
     store = VariableStore()
-    store.store_credential("VAULT_DEPLOY", "shared-by-a-teammate", "vault", trim=False)
-    result = promote_session_credential(store, "VAULT_DEPLOY", base=config_dir)
+    store.store_credential("RADIENT_VAULT_DEPLOY", "shared-by-a-teammate", "vault", trim=False)
+    result = promote_session_credential(store, "RADIENT_VAULT_DEPLOY", base=config_dir)
     assert not result.ok and "session-only" in result.message
     assert "shared-by-a-teammate" not in result.message
     # Nothing was written, and the session copy still works.
     assert not (config_dir / "secrets").exists() or open_store(config_dir).list() == []
-    assert store.credential_env() == {"VAULT_DEPLOY": "shared-by-a-teammate"}
+    assert store.credential_env() == {"RADIENT_VAULT_DEPLOY": "shared-by-a-teammate"}
 
 
 def test_the_cell_secrets_mapping_does_not_list_the_seed(config_dir) -> None:
@@ -71,3 +71,15 @@ def test_the_credentials_route_does_not_list_the_seed(config_dir, monkeypatch) -
     response = asyncio.run(credentials.list_credentials(manager))
     assert response.result is not None
     assert response.result["keys"] == ["GITHUB_TOKEN"]
+
+
+def test_the_remote_viewer_wire_keeps_the_vault_source() -> None:
+    """Review round 2, M2: the remote-viewer path relabelled a Vault row."""
+    from local_operator.variables import SessionCredential, credential_source_from_wire
+
+    assert credential_source_from_wire("vault") == "vault"
+    assert credential_source_from_wire("ask") == "ask"
+    assert credential_source_from_wire("command") == "command"
+    assert credential_source_from_wire("something-new") == "command"
+    rows = [SessionCredential(key="RADIENT_VAULT_X", source=credential_source_from_wire("vault"))]
+    assert format_credential_list(rows).splitlines()[1].endswith("from Radient Vault")

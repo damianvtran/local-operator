@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -53,6 +54,10 @@ NOT_CONNECTED = (
     "`lop vault connect` in a terminal and approve it in the console, then try again."
 )
 
+INVALID_ID = (
+    "Radient Vault couldn't use an id in this request. Ask the user to run "
+    "`lop vault connect` again."
+)
 KEY_UNREADABLE = (
     "This machine's Radient Vault agent key could not be read. Ask the user to run "
     "`lop vault disconnect` and then `lop vault connect` to create a new one."
@@ -272,6 +277,13 @@ def resolve_item(
             "`lop login radient`.",
         )
 
+    # Every id that reaches the signed bytes is checked BEFORE the mint: a
+    # non-NFC id could never verify (wire.s refuses it), and finding that out
+    # after route 27 would spend a single-use challenge and a rate-limit slot.
+    ids = (gate.tenant_id, gate.endpoint_id, grant.delegation_id, vault_id, item_id)
+    if any(unicodedata.normalize("NFC", value) != value for value in ids):
+        raise VaultAgentRefusal("invalid_id", INVALID_ID)
+
     try:
         answer = client.mint_resolve(vault_id=vault_id, item_id=item_id)
     except VaultAgentRefusal:
@@ -298,11 +310,7 @@ def resolve_item(
     except ValueError:
         # A non-NFC id (wire.s): the authority would sign other bytes, so the
         # proof could never verify. Refused locally, before route 15.
-        raise VaultAgentRefusal(
-            "invalid_id",
-            "An id for this request is not in the canonical form Radient Vault "
-            "signs. Ask the user to run `lop vault connect` again.",
-        ) from None
+        raise VaultAgentRefusal("invalid_id", INVALID_ID) from None
     proof = keys.sign_proof(seed, message)
     try:
         body = client.resolve_as_agent(

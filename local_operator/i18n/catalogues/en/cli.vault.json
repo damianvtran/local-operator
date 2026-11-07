@@ -22,6 +22,7 @@
   "cli.vault.nothing_to_remove": "This machine has no agent key to remove.",
   "cli.vault.revoke_hint": "To revoke the access you gave, open Agent access in the console:",
   "cli.vault.title": "Radient Vault agent access · {org}",
+  "cli.vault.title_bare": "Radient Vault agent access",
   "cli.vault.endpoint_row": "Agent endpoint: {endpoint}",
   "cli.vault.fingerprint_label": "Key fingerprint:",
   "cli.vault.fingerprint_held": "Key fingerprint (this machine still holds this key):",

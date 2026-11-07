@@ -22,6 +22,7 @@
   "cli.vault.nothing_to_remove": "Máy này không có khóa tác nhân nào để xóa.",
   "cli.vault.revoke_hint": "Để thu hồi quyền bạn đã cấp, hãy mở trang “Agent access” trong bảng điều khiển:",
   "cli.vault.title": "Quyền truy cập Radient Vault của tác nhân · {org}",
+  "cli.vault.title_bare": "Quyền truy cập Radient Vault của tác nhân",
   "cli.vault.endpoint_row": "Điểm cuối tác nhân: {endpoint}",
   "cli.vault.fingerprint_label": "Dấu vân tay khóa:",
   "cli.vault.fingerprint_held": "Dấu vân tay khóa (máy này vẫn giữ khóa này):",

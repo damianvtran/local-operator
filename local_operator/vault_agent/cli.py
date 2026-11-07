@@ -181,6 +181,12 @@ def _link(url: str, out: Any) -> str:
     return f"\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\" if linked else url
 
 
+def _print_title(org: str | None, *, out: Any) -> None:
+    # The organization NAME only: a bare ``tnt_`` id is accurate but tells a
+    # person nothing, so when no name is known the title stands alone.
+    print(_t(_v.title(org=org) if org else _v.title_bare()), file=out)
+
+
 def _print_key_block(
     *,
     org: str | None,
@@ -194,22 +200,21 @@ def _print_key_block(
 
     The two labels are the console's own ("Agent endpoint", "Key fingerprint")
     so the person matches the two screens at a glance. The instruction comes
-    BEFORE the grid (people read what to do, then compare), and blank lines set
-    the grid apart. Every row stays short of 60 cells, so nothing wraps
-    mid-identifier.
+    BEFORE the label (people read what to do, then compare), so "Key
+    fingerprint:" sits directly over its value, and blank lines set the grid
+    apart. Every row stays short of 60 cells, so nothing wraps mid-identifier.
     """
 
     from local_operator.vault_agent.wire import fingerprint_grid
 
-    if org:
-        print(_t(_v.title(org=org)), file=out)
+    _print_title(org, out=out)
     print(_t(_v.endpoint_row(endpoint=endpoint_id)), file=out)
     # ``held``: the gate is closed, so the key exists but is not usable now.
     # ``compare``: only ``connect`` asks for the comparison; ``status`` reports.
-    print(_t(_v.fingerprint_held() if held else _v.fingerprint_label()), file=out)
     if compare and not held:
         print(_t(_v.compare()), file=out)
         print(_t(_v.compare_stop()), file=out)
+    print(_t(_v.fingerprint_held() if held else _v.fingerprint_label()), file=out)
     print(file=out)
     for line in fingerprint_grid(fingerprint):
         print(f"  {line}", file=out)
@@ -267,7 +272,7 @@ def connect(
     public_key = keys.public_key_from_seed(seed)
     fingerprint = wire.key_fingerprint(public_key)
     _print_key_block(
-        org=gate.tenant_name or gate.tenant_id,
+        org=gate.tenant_name,
         endpoint_id=gate.endpoint_id,
         fingerprint=fingerprint,
         out=out,
@@ -380,11 +385,7 @@ def status(root: Path, *, as_json: bool = False, out: Any = None, err: Any = Non
         if gate is not None and owner is not None and fingerprint is not None
         else None
     )
-    org = (
-        getattr(gate, "tenant_name", None)
-        or observation.tenant_name
-        or getattr(owner, "tenant_id", None)
-    )
+    org = getattr(gate, "tenant_name", None) or observation.tenant_name
     if as_json:
         print(
             json.dumps(
@@ -414,7 +415,7 @@ def status(root: Path, *, as_json: bool = False, out: Any = None, err: Any = Non
         print(_closed_reason(observation), file=out)
         return EXIT_OK
     if fingerprint is None:
-        print(_t(_v.title(org=org or gate.tenant_id)), file=out)
+        _print_title(org, out=out)
         print(_t(_v.status_no_key()), file=out)
         return EXIT_OK
     _print_key_block(

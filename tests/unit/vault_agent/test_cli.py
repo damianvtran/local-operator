@@ -93,9 +93,10 @@ def test_connect_prints_the_4x4_grid_opens_the_link_and_caches_the_pickup(
     assert lines[first : first + 4] == grid
     # Set apart by blank lines, the instruction BEFORE the grid, console labels.
     assert lines[first - 1] == "" and lines[first + 4] == ""
-    assert lines[first - 2] == "If they differ, stop."
-    assert "exactly these 16 groups" in lines[first - 3]
-    assert lines[first - 4] == "Key fingerprint:"
+    # The instructions sit ABOVE the label, so the label is directly over its value.
+    assert lines[first - 2] == "Key fingerprint:"
+    assert lines[first - 3] == "If they differ, stop."
+    assert "exactly these 16 groups" in lines[first - 4]
     assert lines[first - 5] == f"Agent endpoint: {ENDPOINT}"
     assert lines[first - 6] == "Radient Vault agent access · Acme"
     # The URL alone on its line, unindented, plain (stdout is not a TTY here).
@@ -321,3 +322,19 @@ def test_disconnect_reports_a_store_failure_without_a_traceback(config_dir, monk
 
 def test_english_is_pinned_for_these_assertions() -> None:
     assert active_locale() == "en"
+
+
+def test_a_title_without_an_organization_name_never_shows_the_tenant_id(
+    config_dir, wired, monkeypatch
+) -> None:
+    """Design round 2, D9: signed out, a key on disk, no name known."""
+    wired["observation"] = Observation(state="signed_out")
+    wired["gate"] = None
+    monkeypatch.setattr(keys, "load_seed", lambda endpoint, base=None: SEED)
+    monkeypatch.setattr(
+        "local_operator.team_bridge.store.Store.active_owner_readonly",
+        lambda self: SimpleNamespace(tenant_id=TENANT, endpoint_id=ENDPOINT),
+    )
+    _rc, text, _err = _status(config_dir)
+    assert text.splitlines()[0] == "Radient Vault agent access"
+    assert TENANT not in text

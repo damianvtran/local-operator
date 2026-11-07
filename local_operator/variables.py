@@ -239,6 +239,21 @@ _CREDENTIAL_SOURCE_LABEL: dict[str, str] = {
 }
 
 
+def credential_source_from_wire(raw: object) -> CredentialSource:
+    """A source string read off the remote-viewer wire, as the typed Literal.
+
+    Every source with a label is carried as itself; only an unrecognised value
+    falls back to ``"command"`` (the row exists either way).
+    """
+
+    text = str(raw or "")
+    if text == "ask":
+        return "ask"
+    if text == "vault":
+        return "vault"
+    return "command"
+
+
 def format_credential_list(credentials: list[SessionCredential]) -> str:
     """Operator-facing listing. Names and sources only — never values."""
     if not credentials:

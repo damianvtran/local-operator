@@ -94,8 +94,8 @@ _VAULT_PROPERTIES = ("vault_id", "item_id")
 _VAULT_CLAUSE = (
     " vault_resolve: only for a credential a teammate shared in Radient Vault, or one "
     "the user keeps there for other machines; the value becomes session credential "
-    "$VAULT_<NAME> for bash (map a well-known name in the command, e.g. "
-    'GH_TOKEN="$VAULT_GH_TOKEN"), never shown. Everything else: store/retrieve.'
+    "$RADIENT_VAULT_<NAME> for bash (map a well-known name in the command, e.g. "
+    'GH_TOKEN="$RADIENT_VAULT_GH_TOKEN"), never shown. Everything else: store/retrieve.'
 )
 
 
@@ -430,20 +430,25 @@ async def execute_secret(
 #: as ``GIT_SSH_COMMAND``, ``PATH`` or ``BASH_ENV`` and run on this machine. A
 #: forced namespace is an allowlist by shape; a denylist of exec-affecting names
 #: would always be one variable short. A command needing a well-known name maps
-#: it visibly in its own command line (``GH_TOKEN="$VAULT_GH" gh ...``).
-VAULT_CREDENTIAL_PREFIX = "VAULT_"
+#: it visibly in its own command line (``GH_TOKEN="$RADIENT_VAULT_GH" gh ...``).
+#:
+#: ``RADIENT_VAULT_`` and not ``VAULT_``: the bare prefix is HashiCorp Vault's own
+#: namespace, so ``addr`` would have become ``VAULT_ADDR`` (pointing the ``vault``
+#: CLI or Terraform's provider at a teammate-chosen server, which then receives
+#: the operator's own ``VAULT_TOKEN``) and ``token`` would replace that token.
+RADIENT_VAULT_CREDENTIAL_PREFIX = "RADIENT_VAULT_"
 
 
 def vault_credential_key(name: str | None, item_id: str) -> str | None:
-    """The session-credential name for a resolved item: always ``VAULT_``-prefixed."""
+    """The session-credential name for a resolved item: always ``RADIENT_VAULT_``-prefixed."""
 
     from local_operator.variables import normalize_credential_key
 
     requested = normalize_credential_key(name or "")
     if requested is None:
         requested = item_id.removeprefix("vit_")[-8:]
-    if not requested.startswith(VAULT_CREDENTIAL_PREFIX):
-        requested = VAULT_CREDENTIAL_PREFIX + requested
+    if not requested.startswith(RADIENT_VAULT_CREDENTIAL_PREFIX):
+        requested = RADIENT_VAULT_CREDENTIAL_PREFIX + requested
     return normalize_credential_key(requested)
 
 
@@ -498,6 +503,19 @@ async def _op_vault_resolve(
     key = vault_credential_key(params.name, item_id)
     if key is None:  # pragma: no cover - the default always normalizes
         return _error(tool_call_id, "secret", "Could not derive a credential name.")
+    import os
+
+    if key in os.environ:
+        # The prefix makes this rare, not impossible (the operator may export a
+        # RADIENT_VAULT_* name themselves). Injections override what bash
+        # children inherit, so a resolved value under an inherited name would
+        # silently replace the operator's own. Refused before the mint.
+        return _error(
+            tool_call_id,
+            "secret",
+            f"{key} is already set in this machine's environment; it was not replaced. "
+            "Pass a different name.",
+        )
     previous = next((c for c in _list_credentials(store) if c.key == key), None)
     if previous is not None and previous.source != "vault":
         # Never displace what the operator typed or stored: a teammate-chosen

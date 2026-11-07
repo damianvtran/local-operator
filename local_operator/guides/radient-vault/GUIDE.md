@@ -18,9 +18,9 @@ machine.
 You can also pass the console item link (`…/dashboard/vaults/<vlt_>/items/<vit_>`)
 as `item_id`. Take both ids from the user or their link; never guess one.
 
-The value lands as a **session credential** named with a `VAULT_` prefix
-(`$VAULT_DEPLOY_KEY` in `bash`). A command that needs a well-known name maps it
-in its own command line: `GH_TOKEN="$VAULT_GH_TOKEN" gh …`. The value is never
+The value lands as a **session credential** named with a `RADIENT_VAULT_` prefix
+(`$RADIENT_VAULT_DEPLOY_KEY` in `bash`). A command that needs a well-known name maps it
+in its own command line: `GH_TOKEN="$RADIENT_VAULT_GH_TOKEN" gh …`. The value is never
 shown to you, lasts for this session only and is not saved locally. Never echo
 it, write it to a file, or paste it into a message, a commit or a memory.
 

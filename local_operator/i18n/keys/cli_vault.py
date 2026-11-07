@@ -122,6 +122,10 @@ def title(*, org: str) -> Msg:
     return Msg("cli.vault.title", {"org": org})
 
 
+def title_bare() -> Msg:
+    return Msg("cli.vault.title_bare", {})
+
+
 def unavailable() -> Msg:
     return Msg("cli.vault.unavailable", {})
 

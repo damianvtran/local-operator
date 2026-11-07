@@ -22,6 +22,7 @@
   "cli.vault.nothing_to_remove": "اس مشین پر ہٹانے کے لیے کوئی ایجنٹ کلید نہیں۔",
   "cli.vault.revoke_hint": "آپ کی دی ہوئی رسائی منسوخ کرنے کے لیے کنسول میں “Agent access” کا صفحہ کھولیں:",
   "cli.vault.title": "Radient Vault ایجنٹ رسائی · {org}",
+  "cli.vault.title_bare": "Radient Vault ایجنٹ رسائی",
   "cli.vault.endpoint_row": "ایجنٹ اینڈ پوائنٹ: {endpoint}",
   "cli.vault.fingerprint_label": "کلید کا فنگر پرنٹ:",
   "cli.vault.fingerprint_held": "کلید کا فنگر پرنٹ (یہ مشین اب بھی یہ کلید رکھتی ہے):",

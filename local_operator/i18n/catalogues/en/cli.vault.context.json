@@ -114,6 +114,11 @@
     "tone": "plain, direct, operator-facing; no alarm, no up-sell",
     "note": "First line of the key block. {org} is an organization name (or a tnt_ id). The middle dot is a separator; keep it."
   },
+  "cli.vault.title_bare": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "cli.vault.title without the organization: used when only the tenant id is known. Must read exactly as cli.vault.title minus its ' · {org}' suffix."
+  },
   "cli.vault.endpoint_row": {
     "role": "lop vault CLI output",
     "tone": "plain, direct, operator-facing; no alarm, no up-sell",

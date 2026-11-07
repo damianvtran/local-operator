@@ -22,6 +22,7 @@
   "cli.vault.nothing_to_remove": "इस मशीन पर हटाने के लिए कोई एजेंट कुंजी नहीं है।",
   "cli.vault.revoke_hint": "आपने जो एक्सेस दिया है उसे रद्द करने के लिए कंसोल में “Agent access” पेज खोलें:",
   "cli.vault.title": "Radient Vault एजेंट एक्सेस · {org}",
+  "cli.vault.title_bare": "Radient Vault एजेंट एक्सेस",
   "cli.vault.endpoint_row": "एजेंट एंडपॉइंट: {endpoint}",
   "cli.vault.fingerprint_label": "कुंजी फ़िंगरप्रिंट:",
   "cli.vault.fingerprint_held": "कुंजी फ़िंगरप्रिंट (यह मशीन अब भी यह कुंजी रखती है):",

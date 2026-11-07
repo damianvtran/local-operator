@@ -335,7 +335,8 @@ def test_a_non_nfc_id_is_refused_before_route_15(config_dir, open_gate, monkeypa
     with pytest.raises(VaultAgentRefusal) as info:
         _resolve(config_dir, transport)
     assert info.value.code == "invalid_id"
-    assert [c["url"].rsplit("/", 1)[-1] for c in transport.calls] == ["challenges"]
+    # S-7: refused before the mint, so nothing is spent.
+    assert transport.calls == []
 
 
 def test_parse_reference_accepts_a_console_item_link() -> None:

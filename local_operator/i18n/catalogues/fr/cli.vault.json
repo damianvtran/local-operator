@@ -22,6 +22,7 @@
   "cli.vault.nothing_to_remove": "Cette machine n’a aucune clé d’agent à supprimer.",
   "cli.vault.revoke_hint": "Pour révoquer l’accès que vous avez accordé, ouvrez la page « Agent access » de la console :",
   "cli.vault.title": "Accès des agents à Radient Vault · {org}",
+  "cli.vault.title_bare": "Accès des agents à Radient Vault",
   "cli.vault.endpoint_row": "Point de terminaison de l’agent : {endpoint}",
   "cli.vault.fingerprint_label": "Empreinte de la clé :",
   "cli.vault.fingerprint_held": "Empreinte de la clé (cette machine détient toujours cette clé) :",

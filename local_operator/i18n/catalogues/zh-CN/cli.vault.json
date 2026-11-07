@@ -22,6 +22,7 @@
   "cli.vault.nothing_to_remove": "此机器没有可删除的智能体密钥。",
   "cli.vault.revoke_hint": "如需撤销你授予的访问权限，请在控制台中打开“Agent access”页面：",
   "cli.vault.title": "Radient Vault智能体访问 · {org}",
+  "cli.vault.title_bare": "Radient Vault智能体访问",
   "cli.vault.endpoint_row": "智能体端点：{endpoint}",
   "cli.vault.fingerprint_label": "密钥指纹：",
   "cli.vault.fingerprint_held": "密钥指纹（此机器仍保存着这个密钥）：",

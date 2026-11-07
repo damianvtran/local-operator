@@ -22,6 +22,7 @@
   "cli.vault.nothing_to_remove": "На этом компьютере нет ключа агента, который можно удалить.",
   "cli.vault.revoke_hint": "Чтобы отозвать выданный доступ, откройте в консоли раздел «Agent access»:",
   "cli.vault.title": "Доступ агентов к Radient Vault · {org}",
+  "cli.vault.title_bare": "Доступ агентов к Radient Vault",
   "cli.vault.endpoint_row": "Точка подключения агента: {endpoint}",
   "cli.vault.fingerprint_label": "Отпечаток ключа:",
   "cli.vault.fingerprint_held": "Отпечаток ключа (этот ключ всё ещё хранится на этом компьютере):",
