@@ -370,5 +370,102 @@ class GateWiringTests(unittest.TestCase):
         self.assertEqual(summary["policy"], driver.package_egress_hashes())
 
 
+class S9AllowlistGapTests(unittest.TestCase):
+    """a18da995 sweep gaps: pytorch CDN redirect and uv managed Python (S9)."""
+
+    MIRROR = "https://python-standalone.org/mirror/astral-sh/python-build-standalone"
+    HARNESSES = ("claude-code", "omp", "opencode", "hermes", "codex-best", "dsh")
+
+    def test_pytorch_redirect_target_is_allowed(self):
+        policy = package_egress.Policy.load(ALLOWLIST)
+        self.assertIsNone(policy.decide("download-r2.pytorch.org", 443))
+
+    def test_github_contamination_route_stays_denied(self):
+        # Opening github.com would let any arm fetch Terminal-Bench's published
+        # solutions; the uv fix must not reopen it or its object/redirect hosts.
+        policy = package_egress.Policy.load(ALLOWLIST)
+        data = json.loads(ALLOWLIST.read_text())
+        for host in ("github.com", "www.github.com", "api.github.com", "codeload.github.com",
+                     "raw.githubusercontent.com", "objects.githubusercontent.com",
+                     "release-assets.githubusercontent.com", "gist.github.com"):
+            with self.subTest(host=host):
+                self.assertEqual(policy.decide(host, 443), "not-allowlisted")
+                self.assertEqual(policy.decide(host, 80), "not-allowlisted")
+        for host in data["denied_by_design"]:
+            self.assertNotIn(host, policy.allow)
+
+    async def _connect(self, host):
+        proxy = package_egress.PackageProxy(
+            package_egress.Policy.load(ALLOWLIST),
+            package_egress.ConnectionLog(Path(self.tmp.name) / "log.jsonl", via="gate"),
+            opener=self._never_open,
+        )
+        reader = asyncio.StreamReader()
+        reader.feed_data(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode())
+        reader.feed_eof()
+        out = []
+
+        class _Writer:
+            def write(self, data):
+                out.append(data)
+
+            async def drain(self):
+                return None
+
+            def close(self):
+                return None
+
+            async def wait_closed(self):
+                return None
+
+        await proxy.handle(reader, _Writer())
+        return b"".join(out)
+
+    async def _never_open(self, host, port):
+        raise AssertionError(f"upstream opened for denied {host}")
+
+    def test_proxy_refuses_a_github_connect_without_opening_upstream(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD"))
+        self.addCleanup(self.tmp.cleanup)
+        reply = asyncio.run(self._connect("github.com"))
+        self.assertTrue(reply.startswith(b"HTTP/1.1 403"))
+        row = json.loads((Path(self.tmp.name) / "log.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((row["allowed"], row["reason"]), (False, "not-allowlisted"))
+
+    def test_uv_mirror_is_pinned_identically_for_all_seven_arms(self):
+        self.assertEqual(driver.package_agent_env(), {"UV_PYTHON_INSTALL_MIRROR": self.MIRROR})
+        policy = package_egress.Policy.load(ALLOWLIST)
+        # The mirror and its measured redirect bucket are the only new uv hosts.
+        self.assertIsNone(policy.decide("python-standalone.org", 443))
+        self.assertIsNone(policy.decide("pycdn-2025-03-02.oss-cn-shanghai.aliyuncs.com", 443))
+        for harness in self.HARNESSES:
+            with self.subTest(harness=harness):
+                plan = driver.container_plan("r", harness, "i", meter_port=8787,
+                                             bridge_port=8789)
+                self.assertEqual(plan["env"]["UV_PYTHON_INSTALL_MIRROR"], self.MIRROR)
+        child = {k: "http://run1:pw@127.0.0.1:41000" for k in
+                 ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")}
+        plan = driver.container_plan(
+            "run1", "local-operator", "i", meter_port=8787, bridge_port=8789,
+            edge={"port": 41000, "env": child, "ca_file": Path("/h/edge-ca.pem")},
+        )
+        self.assertEqual(plan["env"]["UV_PYTHON_INSTALL_MIRROR"], self.MIRROR)
+        # LoP's native adapter forwards only EDGE_ENV_KEYS to the product.
+        self.assertIn("UV_PYTHON_INSTALL_MIRROR",
+                      _const_tuple(HERE / "adapters.py", "EDGE_ENV_KEYS"))
+
+    def test_agent_env_refuses_unreviewed_variables_and_unlisted_mirrors(self):
+        data = json.loads(ALLOWLIST.read_text())
+        with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
+            path = Path(tmp) / "allow.json"
+            for env in ({"UV_PYTHON_INSTALL_MIRROR": "https://github.com/astral-sh/x"},
+                        {"UV_PYTHON_INSTALL_MIRROR": "http://python-standalone.org/m"},
+                        {"PIP_INDEX_URL": "https://pypi.org/simple"}):
+                path.write_text(json.dumps({**data, "agent_env": env}))
+                with self.subTest(env=env), patch.object(driver, "PACKAGE_ALLOWLIST", path):
+                    with self.assertRaises(ValueError):
+                        driver.package_agent_env()
+
+
 if __name__ == "__main__":
     unittest.main()

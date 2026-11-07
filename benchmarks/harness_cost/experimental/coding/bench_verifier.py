@@ -92,11 +92,20 @@ def _verifier_base() -> type:
 
 
 class BenchVerifier(_verifier_base()):  # type: ignore[misc]
+    def _isolation_extra_args(self) -> list[str]:
+        """Paid trials pass NOTHING extra: no authorized-source exception exists.
+
+        Only ``oracle_qualification.QualificationVerifier`` (zero-model
+        qualification, never selected by driver.py) overrides this, so the
+        grading tail below stays one shared implementation (design step 6).
+        """
+        return []
+
     async def verify(self):  # noqa: D102 -- see module docstring
         record: dict[str, object] = {}
         run = self.environment.exec
         isolation = await run(f"{PROBE} isolation " + shlex.join(
-            [*gold_digests(), *provenance_args()]), user="root")
+            [*gold_digests(), *provenance_args(), *self._isolation_extra_args()]), user="root")
         record["isolation_after_agent"] = _parse(isolation.stdout)
         quiet = _parse((await run(f"{PROBE} quiescence", user="root")).stdout)
         record["quiescence"] = quiet

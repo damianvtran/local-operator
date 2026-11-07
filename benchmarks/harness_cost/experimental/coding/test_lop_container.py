@@ -639,8 +639,10 @@ class DriverContainerTests(unittest.TestCase):
             driver.container_plan("r", "omp", "i", meter_port=1, bridge_port=2,
                                   edge={"port": 3, "env": {}, "ca_file": Path("/edge-ca.pem")})
         plan = driver.container_plan("r", "omp", "i", meter_port=8787, bridge_port=8789)
-        # Only the package-proxy route (test_package_egress); no edge env.
+        # Only the package-proxy route plus its frozen uv mirror pin
+        # (test_package_egress); no edge env.
         self.assertEqual(sorted(plan["env"]), ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+                                               "UV_PYTHON_INSTALL_MIRROR",
                                                "http_proxy", "https_proxy", "no_proxy"])
         self.assertEqual(plan["ports"], [8787])
 

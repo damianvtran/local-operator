@@ -30,6 +30,12 @@ or a timeout; a refusal means a packet got there and back, so it fails (R6
 F16) -- public DNS must not resolve, unlisted gate ports must not connect, and
 every listed gate port must connect: the gate is the one route.
 
+``isolation ... --authorized-solution <tree-json> <sha256>`` exists ONLY for
+zero-model oracle qualification (``oracle_qualification.py``, design step 5):
+digests supplied by that exact uploaded ``/solution`` tree are classified
+``authorized_solution_matches``; tests-only digests stay rejected. No paid
+path passes it (``bench_verifier.BenchVerifier._isolation_extra_args``).
+
 Usage: ``python3 gold_probe.py isolation <digest>...`` |
 ``quiescence`` | ``egress --canary <port> <gate_port>...``. Prints one JSON line; exit 0 = clean.
 """
@@ -98,8 +104,45 @@ def _public_pairs(manifest, task_payload_sha256, image_digest, digests):
     return pairs
 
 
+def _authorized_tree(authorized, manifest) -> dict[str, str]:
+    """The exact uploaded ``/solution`` tree an oracle qualification may carry.
+
+    ORACLE-ONLY (ORACLE-ISOLATION-DESIGN.md step 5): only
+    ``oracle_qualification.QualificationVerifier`` passes this, from a host-side
+    receipt. Every non-empty digest must be a manifest solution digest, so a
+    verifier-only (tests) digest can never be authorized through it.
+    """
+    if not isinstance(authorized, dict) or not authorized:
+        raise ValueError("malformed authorized solution tree")
+    solutions = set(manifest.get("solution_digests", []))
+    for rel, sha in authorized.items():
+        if (not isinstance(rel, str) or not rel or rel.startswith("/")
+                or ".." in Path(rel).parts or str(Path(rel)) != rel
+                or not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{64}", sha) is None
+                or (sha != EMPTY_SHA256 and sha not in solutions)):
+            raise ValueError("authorized solution entry is not a manifest solution file")
+    return authorized
+
+
+def _solution_tree(base: Path) -> dict[str, str]:
+    tree = {}
+    for path in sorted(base.rglob("*")) if base.is_dir() else []:
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            tree[str(path.relative_to(base))] = "non-regular"
+        elif path.is_file():
+            with open(path, "rb") as fh:
+                tree[str(path.relative_to(base))] = hashlib.file_digest(fh, "sha256").hexdigest()
+    return tree
+
+
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+# The oracle upload target; a module constant so offline tests can relocate it.
+SOLUTION = Path("/solution")
+
+
 def isolation(digests: set[str], root: str = "/", *, manifest=None,
-              task_payload_sha256=None, image_digest=None) -> dict[str, object]:
+              task_payload_sha256=None, image_digest=None,
+              authorized_solution=None) -> dict[str, object]:
     found: list[str] = []
     raw_matches = []
     error = None
@@ -107,10 +150,19 @@ def isolation(digests: set[str], root: str = "/", *, manifest=None,
         public_pairs = _public_pairs(manifest, task_payload_sha256, image_digest, digests)
     except (ValueError, TypeError) as exc:
         public_pairs, error = set(), str(exc)
+    authorized: dict[str, str] = {}
+    if authorized_solution is not None and error is None:
+        try:
+            authorized = _authorized_tree(authorized_solution, manifest)
+        except (ValueError, TypeError) as exc:
+            error = str(exc)
+    elif authorized_solution is not None:
+        error = error or "authorized solution without valid provenance"
     # A public/solution collision is disclosed, never silently authorized.
     solutions = set(manifest.get("solution_digests", [])) if not error else set()
     overlap = sorted({sha for _, sha in public_pairs} & solutions)
-    public_matches, rejected = [], []
+    public_matches, rejected, authorized_matches = [], [], []
+    authorized_digests = set(authorized.values()) - {EMPTY_SHA256}
     scanned = 0
     truncated = False
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -135,6 +187,9 @@ def isolation(digests: set[str], root: str = "/", *, manifest=None,
                         raw_matches.append(match)
                         if (path, sha) in public_pairs and sha not in solutions:
                             public_matches.append(match)
+                        elif sha in authorized_digests:
+                            # Supplied by the authorized oracle source itself.
+                            authorized_matches.append(match)
                         else:
                             rejected.append(match)
             except OSError:
@@ -144,12 +199,17 @@ def isolation(digests: set[str], root: str = "/", *, manifest=None,
     verifier_logs = sorted(p.name for p in Path("/logs/verifier").glob("*")) if Path(
         "/logs/verifier"
     ).is_dir() else []
+    # Without an authorization /solution must be absent; with one, it must be
+    # EXACTLY the recorded upload (no extra, missing or changed entry).
+    present = SOLUTION.exists()
+    tree = _solution_tree(SOLUTION) if present and authorized else {}
+    solution_ok = (not present) if not authorized else (not present or tree == authorized)
     ok = (
         not rejected
         and error is None
         and not overlap
         and not truncated
-        and not Path("/solution").exists()
+        and solution_ok
         and not Path("/tests").exists()
         and not verifier_logs
     )
@@ -165,6 +225,8 @@ def isolation(digests: set[str], root: str = "/", *, manifest=None,
         "public_matches": public_matches,
         "rejected_matches": rejected,
         "solution_public_overlap": overlap,
+        "authorized_solution_matches": authorized_matches,
+        "authorized_solution_tree_match": (tree == authorized) if authorized else None,
         "provenance_error": error,
         "manifest_sha256": hashlib.sha256(json.dumps(
             manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
@@ -297,6 +359,18 @@ def main(argv: list[str]) -> int:
     if argv[:1] == ["isolation"]:
         args = argv[1:]
         manifest, payload, image = None, None, None
+        authorized = None
+        if "--authorized-solution" in args:
+            # Oracle qualification only; see _authorized_tree. A tree whose
+            # digest does not verify becomes a malformed value, so it fails.
+            index = args.index("--authorized-solution")
+            try:
+                raw_tree, tree_sha = args[index + 1:index + 3]
+                authorized = (json.loads(raw_tree) if hashlib.sha256(
+                    raw_tree.encode()).hexdigest() == tree_sha else "digest mismatch")
+            except ValueError:
+                authorized = "malformed"
+            args = args[:index] + args[index + 3:]
         if "--public-provenance" in args:
             index = args.index("--public-provenance")
             try:
@@ -308,7 +382,8 @@ def main(argv: list[str]) -> int:
                 manifest = None
             args = args[:index]
         result = isolation(set(args), manifest=manifest,
-                           task_payload_sha256=payload, image_digest=image)
+                           task_payload_sha256=payload, image_digest=image,
+                           authorized_solution=authorized)
     elif argv[:1] == ["quiescence"]:
         result = quiescence()
     elif (argv[:2] == ["egress", "--canary"] and len(argv) > 3

@@ -97,12 +97,12 @@
       "sha256": "e11b39d2c3665a8b248b23a7aa52343e1fb38694dae9058d190a58544481725a"
     },
     "coding/adapters.py": {
-      "bytes": 19507,
-      "sha256": "f1ce59ff5b3dc0dc6e5207248d793604257b8cece8097255bec2e2fa259e3de9"
+      "bytes": 19618,
+      "sha256": "31852b248ea5c5411b011b2d96d91d449f7ced0e0e84a7bbdd3649ddbc0f88cd"
     },
     "coding/bench_verifier.py": {
-      "bytes": 5572,
-      "sha256": "81c7143af132b21f9827400f9fd19ec49b26e0d95d67478c0d713820bcf581d9"
+      "bytes": 5990,
+      "sha256": "c04786b3914b5cc967449b322b94ad3c7d12da6c1146691980715f41c88d4871"
     },
     "coding/codex-model-catalog.json": {
       "bytes": 23154,
@@ -113,8 +113,8 @@
       "sha256": "1adf87f9009d1d7a366f7b2ff5bda6894d0e859c0dc7314bec518342a39210df"
     },
     "coding/driver.py": {
-      "bytes": 42070,
-      "sha256": "094dd16beb08873461586ecaefd66341f8f112aed976a8c4f5c369788fcd1c7e"
+      "bytes": 45871,
+      "sha256": "3bc93ca496503e06a6ea28a7e8c291a1807413986d106e585c9eb0fbde4336a7"
     },
     "coding/egress.py": {
       "bytes": 13650,
@@ -125,24 +125,32 @@
       "sha256": "318ccf6c9618eff6f69914f6572b026a30856311b8aeb3d82022af3149288262"
     },
     "coding/gold_probe.py": {
-      "bytes": 14092,
-      "sha256": "ab603bcbce4001e540b902d8e13ef73da7bdf0fd58ef20d3a50d734da22230ba"
+      "bytes": 18010,
+      "sha256": "d1e89d872364e22691bf077a2f4d198bfc0d7860a43ca87ced11fa160b81608c"
     },
     "coding/lop_launch.py": {
       "bytes": 9379,
       "sha256": "9a40c33f035214927068790fe073694b877aec8d47d2eb750d0c4b886d0751ee"
+    },
+    "coding/oracle_qualification.py": {
+      "bytes": 7811,
+      "sha256": "357dbad625253d40efd2ca9777003d920ee8f109834796433c60052de2eeaa1c"
     },
     "coding/oracle_sweep.py": {
       "bytes": 10828,
       "sha256": "38d43c41d75d3111572fd3995dd3bad5ee6118a1323d692eae419558a46bae9f"
     },
     "coding/package-egress-allowlist.json": {
-      "bytes": 1416,
-      "sha256": "34a2088db869a2b0ad91e8a9ebad2226138653f35659a59f7942e1b57ab180b0"
+      "bytes": 3752,
+      "sha256": "79bb7a298398409e6ef5039f0249410a0bde04be5e89b72a93e95c7649a77376"
+    },
+    "coding/provenance_derive.py": {
+      "bytes": 11355,
+      "sha256": "f277083b7aa558fa4b9d841c244940b74023b7095f9d36014e02d57d09b043fb"
     },
     "coding/public-provenance.json": {
-      "bytes": 8107,
-      "sha256": "28c385be0bac87e19d02acf4d22634c679990b03ff2873ebc7b174efa613e1cf"
+      "bytes": 16154,
+      "sha256": "3a507af8277ffb024315fb8e906850adf5c1317eb1aa8a5ff94ac38480e43749"
     },
     "coding/public-roots.pem": {
       "bytes": 240216,
@@ -165,16 +173,16 @@
       "sha256": "5bf759f765c33ddaad7c707f3223243b7a6d6591d4a9bb59e924f14eb6b62009"
     },
     "coding/test_lop_container.py": {
-      "bytes": 44731,
-      "sha256": "ab6d9336b51dbf0ba85e44ed800c35289ffe97a4086890ace293a73321aabf59"
+      "bytes": 44846,
+      "sha256": "f378063385847a5641b73a96fa1e05015992ece1bd90d904ca5472d3ba8c89a3"
     },
     "coding/test_package_egress.py": {
-      "bytes": 18839,
-      "sha256": "b3bb7691e299912210c04ecd3a7b83d750b06cef07d54fac32db20aa0ff9f8cc"
+      "bytes": 23829,
+      "sha256": "f70989245f016f611ee04b5cde8bbf84835a4b5e5e7b96cb4ac612164f2b0bf6"
     },
     "coding/test_public_provenance.py": {
-      "bytes": 10319,
-      "sha256": "1f2fa40bfbdd5f15d1d0846fe621873c321be89a58e955cbb3c4b5fcf2432543"
+      "bytes": 34474,
+      "sha256": "d08e01fe83cd2c604415cff49a400f3306bcd37e1f1a8df6a4b2a73ad9ed5c9a"
     },
     "evaluate.py": {
       "bytes": 7630,

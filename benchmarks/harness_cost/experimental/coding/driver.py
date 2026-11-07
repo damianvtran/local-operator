@@ -26,6 +26,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -95,6 +96,8 @@ CONTAINER_CLOSURE = (
     "gate_relay.py",
     "gold_probe.py",
     "public-provenance.json",
+    # Re-derives the frozen COPY pairs at trial start (driver.public_provenance).
+    "provenance_derive.py",
     "lop_launch.py",
     "package-egress-allowlist.json",
     "public-roots.pem",
@@ -121,6 +124,27 @@ def package_egress_hashes():
     return {"policy": digest(HERE.parent / "package_egress.py"),
             "allowlist": digest(PACKAGE_ALLOWLIST),
             "public_roots": digest(PUBLIC_ROOTS)}
+
+
+def package_agent_env():
+    """Frozen tool-child env from the allowlist file, identical for all seven arms.
+
+    Only ``UV_PYTHON_INSTALL_MIRROR`` exists (S9): it moves uv's managed-Python
+    downloads off github.com, which stays denied host-wide as a contamination
+    route. The mirror host must itself be allowlisted, so this file cannot name
+    a route the policy would not already permit.
+    """
+    from urllib.parse import urlsplit
+
+    data = json.loads(PACKAGE_ALLOWLIST.read_text())
+    env = data.get("agent_env", {})
+    if set(env) - {"UV_PYTHON_INSTALL_MIRROR"}:
+        raise ValueError("package agent_env names an unreviewed variable")
+    for value in env.values():
+        url = urlsplit(value)
+        if url.scheme != "https" or url.hostname not in data["allow"]:
+            raise ValueError("package agent_env must name an allowlisted https mirror")
+    return dict(env)
 
 
 def package_egress_summary(logs):
@@ -190,16 +214,47 @@ def block_paid_coding(args):
         )
 
 
-def gold_digests(task_dir):
-    """SHA-256 of every host-side solution/ and tests/ file (hashes only, never bytes)."""
+# SHA-256 of zero bytes. An empty gold file (llm-inference-batching-scheduler's
+# ``tests/__init__.py``) carries no information an agent could use, yet its
+# digest matches every empty file in any image (/.dockerenv, /etc/subgid, pip's
+# py.typed: 49 in the a18da995 sweep), refusing the task for every arm. ONLY
+# this digest is excluded, and the exclusion is recorded in the manifest; no
+# small-file threshold, because a short non-empty file can still be the answer.
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def _gold_files(task_dir):
     task_dir = Path(task_dir)
-    digests = sorted(
-        {digest(p) for sub in ("solution", "tests")
-         for p in (task_dir / sub).rglob("*") if p.is_file()}
-    )
+    return {str(p.relative_to(task_dir)): digest(p) for sub in ("solution", "tests")
+            for p in sorted((task_dir / sub).rglob("*")) if p.is_file()}
+
+
+def gold_digests(task_dir):
+    """SHA-256 of every non-empty host-side solution/ and tests/ file (hashes only)."""
+    digests = sorted(set(_gold_files(task_dir).values()) - {EMPTY_SHA256})
     if not digests:
         raise ValueError("task has no solution/tests files to guard")
     return digests
+
+
+def gold_exclusions(task_dir):
+    """The disclosed exclusion record: which guarded files were zero-length."""
+    empty = sorted(p for p, sha in _gold_files(task_dir).items() if sha == EMPTY_SHA256)
+    return [{"sha256": EMPTY_SHA256, "files": empty,
+             "reason": "zero-length file carries no information; its digest matches "
+                       "every empty file in the image"}] if empty else []
+
+
+def task_payload(task_dir):
+    """SHA-256 over the whole task tree's ``relpath -> sha256`` map."""
+    task_dir = Path(task_dir)
+    files = {str(p.relative_to(task_dir)): digest(p)
+             for p in sorted(task_dir.rglob("*")) if p.is_file()}
+    if any(not p.resolve().is_relative_to(task_dir.resolve())
+           for p in task_dir.rglob("*") if p.is_file()):
+        raise ValueError("escaping task payload symlink")
+    return hashlib.sha256(json.dumps(
+        files, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), files
 
 
 def public_provenance(task_dir, image_digest):
@@ -208,14 +263,10 @@ def public_provenance(task_dir, image_digest):
     Only the checked-in exact inventory can relax a strict gold match. Task
     payload and image changes require renewed review, not a learned baseline.
     """
+    import provenance_derive
+
     task_dir = Path(task_dir)
-    files = {str(p.relative_to(task_dir)): digest(p)
-             for p in sorted(task_dir.rglob("*")) if p.is_file()}
-    if any(not p.resolve().is_relative_to(task_dir.resolve())
-           for p in task_dir.rglob("*") if p.is_file()):
-        raise ValueError("escaping task payload symlink")
-    payload = hashlib.sha256(json.dumps(
-        files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    payload, files = task_payload(task_dir)
     policy_path = HERE / "public-provenance.json"
     policy = json.loads(policy_path.read_text())
     approved = policy["tasks"].get(task_dir.name)
@@ -225,16 +276,37 @@ def public_provenance(task_dir, image_digest):
                 or approved["image_digest"] != image_digest
                 or approved["dockerfile_sha256"] != files.get("environment/Dockerfile")):
             raise ValueError("stale public provenance; task/image requires review")
+        # COPY pairs are re-derived from the task's own Dockerfile and must equal
+        # the frozen review exactly, so a hand-edited or drifted pair is refused.
+        try:
+            derived, _runs = provenance_derive._copy_pairs(task_dir, set(gold_digests(task_dir)))
+        except provenance_derive.Unsupported as exc:
+            raise ValueError(f"stale public COPY input: {exc}") from exc
+        frozen_copies = [e for e in approved["public_files"]
+                         if e.get("origin") == "dockerfile-copy"]
+        if sorted(derived, key=lambda e: e["path"]) != sorted(
+                frozen_copies, key=lambda e: e["path"]):
+            raise ValueError("stale public COPY input")
         for entry in approved["public_files"]:
-            if files.get(entry["source"]) != entry["sha256"]:
-                raise ValueError("stale public COPY input")
+            if entry.get("origin") == "dockerfile-copy":
+                if files.get(entry["source"]) != entry["sha256"]:
+                    raise ValueError("stale public COPY input")
+            elif str(entry.get("origin", "")).startswith("build-time clone of "):
+                # The clone's bytes are bound by the pinned commit, its script
+                # by the task payload hash; the script must still be present.
+                if entry.get("build_input") not in files or not re.fullmatch(
+                        r"build-time clone of https://\S+@[0-9a-f]{40}", entry["origin"]):
+                    raise ValueError("stale public clone input")
+            else:
+                raise ValueError("public pair without a reviewed origin")
             public.append({"path": entry["path"], "sha256": entry["sha256"]})
     solutions = sorted({digest(p) for p in (task_dir / "solution").rglob("*")
-                        if p.is_file()})
+                        if p.is_file()} - {EMPTY_SHA256})
     return {"version": 1, "task_payload_sha256": payload,
             "image_digest": image_digest, "policy_sha256": digest(policy_path),
             "public_files": public, "solution_digests": solutions,
-            "gold_digests": gold_digests(task_dir)}
+            "gold_digests": gold_digests(task_dir),
+            "gold_exclusions": gold_exclusions(task_dir)}
 
 
 @contextmanager
@@ -365,6 +437,8 @@ def container_plan(run_id, harness, image, *, meter_port, bridge_port, edge=None
         env.update(child)
     elif edge:
         raise ValueError("only LoP is metered through the edge")
+    # Same mirror pin for every arm, LoP included (adapters.EDGE_ENV_KEYS).
+    env.update(package_agent_env())
     return {"ports": ports, "env": env, "urls": urls, "image": image}
 
 

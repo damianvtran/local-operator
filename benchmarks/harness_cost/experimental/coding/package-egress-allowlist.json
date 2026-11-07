@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "derivation": "Static scan of solution/ in the 13 subset tasks (container-s4/package-egress-hosts.json, 2026-11-04): agent-phase mechanisms apt (11), pip (3), uv (1) and solution-literal download hosts. Verifier-phase hosts (astral.sh) and build-time hosts (github.com) are deliberately absent: the verifier keeps Harbor's own uplink. To be confirmed by a logged oracle sweep through the proxy before any paid run.",
+  "derivation": "Static scan of solution/ in the 13 subset tasks (container-s4/package-egress-hosts.json, 2026-11-04): agent-phase mechanisms apt (11), pip (3), uv (1) and solution-literal download hosts. Verifier-phase hosts (astral.sh) and build-time hosts (github.com) are deliberately absent: the verifier keeps Harbor's own uplink. To be confirmed by a logged oracle sweep through the proxy before any paid run. S9 (2026-11-07): download-r2.pytorch.org added as the measured redirect target of the allowlisted download.pytorch.org (a18da995 sweep, pytorch-model-cli). python-standalone.org + its measured redirect bucket added as the uv managed-Python mirror selected by agent_env (financial-document-processor); github.com stays denied host-wide (see denied_by_design).",
   "allow": [
     "archive.ubuntu.com",
     "security.ubuntu.com",
@@ -10,7 +10,10 @@
     "download.pytorch.org",
     "benryves.com",
     "www.povray.org",
-    "19100.neocities.org"
+    "19100.neocities.org",
+    "download-r2.pytorch.org",
+    "python-standalone.org",
+    "pycdn-2025-03-02.oss-cn-shanghai.aliyuncs.com"
   ],
   "rationale": {
     "archive.ubuntu.com": "apt mirror of ubuntu:24.04 amd64 images (7 tasks)",
@@ -21,6 +24,20 @@
     "download.pytorch.org": "literal in pytorch-model-cli solve.sh (CPU wheel index)",
     "benryves.com": "literal in make-doom-for-mips solve.sh",
     "www.povray.org": "literal in build-pov-ray solve.sh",
-    "19100.neocities.org": "literal in build-pov-ray solve.sh"
+    "19100.neocities.org": "literal in build-pov-ray solve.sh",
+    "download-r2.pytorch.org": "documented CDN redirect target of download.pytorch.org wheel/metadata URLs (a18da995 sweep: pytorch-model-cli denied here, torch not installed)",
+    "python-standalone.org": "python-build-standalone mirror named by agent_env UV_PYTHON_INSTALL_MIRROR; serves only /mirror/astral-sh/python-build-standalone/<tag>/<file> via a 302 to the bucket below; uv 0.8.14 verifies every artifact against its embedded sha256",
+    "pycdn-2025-03-02.oss-cn-shanghai.aliyuncs.com": "measured 302 target of python-standalone.org (uv 0.8.14 CONNECT log, 2026-11-07); bucket listing is AccessDenied and non-PBS paths 404"
+  },
+  "agent_env": {
+    "UV_PYTHON_INSTALL_MIRROR": "https://python-standalone.org/mirror/astral-sh/python-build-standalone"
+  },
+  "agent_env_rationale": "Set identically for all seven arms (driver.package_agent_env). uv's default managed-Python source is github.com/astral-sh/python-build-standalone/releases/download, which would need github.com host-wide. Measured with uv 0.8.14 (the financial-document-processor image's uv): requests become <mirror>/<tag>/<file>; a valid-gzip wrong-bytes mirror is refused with a sha256 mismatch, so the mirror cannot change what uv installs. No task file is modified.",
+  "denied_by_design": {
+    "github.com": "would let any agent fetch Terminal-Bench's published tasks/solutions (contamination route); TLS is tunnelled, so a path-scoped github route would need interception",
+    "codeload.github.com": "repository archives (same contamination route)",
+    "raw.githubusercontent.com": "repository file contents (same contamination route)",
+    "objects.githubusercontent.com": "GitHub release/LFS object host (reachable only via github.com redirects)",
+    "release-assets.githubusercontent.com": "measured redirect target of github.com release downloads (uv 0.8.14 CONNECT log)"
   }
 }
