@@ -349,20 +349,6 @@ def _read_only_hint(annotations: Mapping[str, Any] | None) -> bool:
     return annotations.get("readOnlyHint") is True
 
 
-def mcp_readonly_hint_missing(tool: AgentTool) -> bool:
-    """True when ``tool`` is an ``mcp__`` tool that does not declare ``readOnlyHint``.
-
-    Exactly the condition behind :func:`readonly_verdict`'s MCP refusal, as a
-    predicate, so the run-time re-check can tell THAT refusal apart from the
-    shape check's without matching sentence text. It changes no verdict: the
-    caller still refuses; it only decides whether the refusal is a wait (the
-    hint cannot be known yet because the server has not connected) or a strike.
-    """
-    if not tool.name.startswith("mcp__"):
-        return False
-    return not _read_only_hint(getattr(tool, "mcp_annotations", None))
-
-
 def _unmapped_verb_reason(tool: AgentTool, args: Mapping[str, Any]) -> str | None:
     """Fail-closed: an op-bearing read-tier tool absent from the map (§6.2)."""
     verb_key = _declared_verb_property(tool)
