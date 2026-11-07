@@ -1,0 +1,4 @@
+{
+  "wire.outcome_notices.closed": "Completada — runtime retirado",
+  "wire.outcome_notices.retired": "Retirada por una actualización — se interrumpió un turno en curso; su salida previa se conserva"
+}

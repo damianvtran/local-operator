@@ -135,12 +135,25 @@ def test_a_live_language_switch_moves_every_surface_off_english(fr_fixture: None
     assert completion_notice("retired")[0] == english["retired"]
 
 
-def test_missing_locale_keys_fall_back_to_english_not_codes() -> None:
-    """A shipped locale that does not carry the namespace yet reads English source.
+def test_missing_locale_keys_fall_back_to_english_not_codes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A shipped locale that does not carry the namespace reads English source.
 
-    This is the state between this change and the translation/audit wave: the
-    real ``fr`` (shipped) has no ``wire.outcome_notices`` file at all.
+    This is the per-namespace fallback (docs/design/i18n.md section 2.5) that
+    protects a locale added before its translation wave. Every real shipped
+    locale now carries both namespaces, so the state is built in a throwaway
+    root: ``fr`` is shipped there but has no ``wire.outcome_notices`` /
+    ``wire.push_alert`` file at all.
     """
+    real = catalogues.catalogue_root()
+    for locale in ("en", "fr"):
+        (tmp_path / locale).mkdir()
+    for namespace in NAMESPACES:
+        source = (real / "en" / f"{namespace}.json").read_text(encoding="utf-8")
+        (tmp_path / "en" / f"{namespace}.json").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(catalogues, "_CATALOGUES", tmp_path)
+    monkeypatch.setattr(resolve_mod, "shipped_locales", lambda: ("en", "fr"))
     english = notice_copy.retired_notice_text()
     text.set_active_locale("fr")
     assert notice_copy.retired_notice_text() == english

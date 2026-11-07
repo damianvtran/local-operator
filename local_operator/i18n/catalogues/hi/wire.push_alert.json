@@ -1,0 +1,3 @@
+{
+  "wire.push_alert.attention_count": "{total, plural, one {{count} बातचीत को आपका इंतज़ार है} other {{count} बातचीतों को आपका इंतज़ार है}}"
+}
