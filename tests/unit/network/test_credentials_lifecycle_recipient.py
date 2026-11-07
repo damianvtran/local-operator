@@ -434,6 +434,8 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         "credential-broker-v1": "net_broker",
         wire.CREDENTIAL_LIFECYCLE_V1: "net_broker",
         wire.CREDENTIAL_PLACEMENT_PUSH_V1: "net_broker",
+        # The share push is a ``placement`` KIND on the same op (``share_push``).
+        wire.CREDENTIAL_SHARE_PUSH_V1: "net_broker",
         # Catalogue is a metadata kind on the installed broker, not a pure
         # handshake feature or a second unregistered peer operation.
         wire.CREDENTIAL_CATALOGUE_METADATA_V1: "net_broker",
