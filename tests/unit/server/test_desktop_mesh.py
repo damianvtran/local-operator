@@ -2390,3 +2390,49 @@ def test_a_peer_create_names_its_level_in_both_spellings_for_an_older_owner(
         "reasoning_effort": "max",
     }, "the caller's dict is not mutated"
     assert "effort" not in sent[1]["model"]
+
+
+def test_a_remote_row_carries_the_background_work_fact(tmp_path: Path, monkeypatch) -> None:
+    """Remote rows ship the same orthogonal Running fact the local half does (2026-11-07).
+
+    Through the real projection: a peer's wire row is parsed by
+    ``PeerRow.from_json`` (which nulls a stale peer's counts) and its counts land
+    on the ``SessionRow`` the desktop list projects, where
+    ``SessionRow.background_work`` derives the flag. The mesh lane reported the
+    same symptom as the local one — an ``attached`` remote parent with a child
+    running read as not-Running.
+    """
+    from local_operator.network.projection import PeerRow
+    from local_operator.server.utils.desktop_mesh import remote_session_rows
+    from local_operator.session import peer_rows as peer_rows_mod
+
+    (tmp_path / "network" / "networks").mkdir(parents=True, exist_ok=True)
+
+    def projected(state: str, **counts: Any) -> SessionRow:
+        peer = PeerRow.from_json(
+            {"session_id": OTHER, "state": state, "detached": False, **counts}, device_id=PEER
+        )
+        return _peer_row(
+            live_state="attached",
+            waiting_on=peer.waiting_on,
+            jobs_running=peer.jobs_running,
+            subagents_running=peer.subagents_running,
+            subagents_queued=peer.subagents_queued,
+        )
+
+    def listed(row: SessionRow) -> dict[str, Any]:
+        monkeypatch.setattr(peer_rows_mod, "peer_session_rows", lambda root=None, **kw: (row,))
+        return remote_session_rows(tmp_path, pins=set())[0]
+
+    working = listed(projected("live", subagents_running=1, jobs_running=1))
+    assert working["status"]["code"] == "attached"
+    assert (working["subagents_running"], working["jobs_running"]) == (1, 1)
+    assert working["background_work"] is True
+
+    finished = listed(projected("live", subagents_running=0, jobs_running=0))
+    assert finished["background_work"] is False
+
+    # A stale peer's counts are nulled by the projection: never a claim.
+    stale = listed(projected("stale", subagents_running=3))
+    assert stale["subagents_running"] is None
+    assert stale["background_work"] is False

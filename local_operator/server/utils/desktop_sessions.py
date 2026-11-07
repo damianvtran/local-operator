@@ -97,7 +97,6 @@ from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentSt
 from local_operator.session.attention import AttentionStore, acknowledge_session_receipt
 from local_operator.session.catalog import (
     DECORATION_ATTENTION,
-    RUNNING_STATUS_CODES,
     CatalogueScope,
     ScopeCensus,
     catalogue_page,
@@ -9219,6 +9218,11 @@ class DesktopSessions:
                     {
                         "active": entry.active,
                         "status": {"code": entry.status_code, "label": entry.status},
+                        # The orthogonal Running fact (``SessionRow.background_work``):
+                        # true while a subagent, job or parked wait runs, whatever
+                        # the code above says. The counts it is derived from ride
+                        # the row already, from ``_asdict``.
+                        "background_work": entry.row.background_work,
                         "binding": {
                             "agent": stored.agent or None if stored else None,
                             "team": stored.team or None if stored else None,
@@ -9255,7 +9259,7 @@ class DesktopSessions:
                         # than that uncached preview read.
                         "last_user_at": (
                             last_user_at(self.root / "sessions" / entry.id)
-                            if entry.status_code in RUNNING_STATUS_CODES
+                            if entry.running
                             else None
                         ),
                         # ALWAYS PRESENT, BOTH VALUES. See `SessionRow.pinned`:

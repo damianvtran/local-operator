@@ -1147,7 +1147,15 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
         return SPINNER_FRAMES[frame % len(SPINNER_FRAMES)], "accent"
     if row.live_state == "attached":
         return ATTACHED_MARKER, "muted"
-    if row.delegating is not None:
+    if row.background_work:
+        # READS ``background_work``, NOT ``delegating`` (operator report,
+        # 2026-11-07): the two differ only on a draining runtime, whose
+        # ``delegating`` is suppressed so the desktop's code cannot say
+        # "delegating" beside "Leaving…". A drain waits for exactly this work,
+        # so the glyph says it is running — the same orthogonal fact the desktop
+        # and the relay now file Running by. ``waiting_on`` is part of that fact
+        # but is caught by the louder ``⧗`` rung above.
+        #
         # BELOW ``attached`` and ABOVE the armed wake, the same rung
         # ``CatalogEntry.status_code``/``status`` place it at, read from the same
         # row-level fact (``SessionRow.delegating``) so the glyph and the tooltip

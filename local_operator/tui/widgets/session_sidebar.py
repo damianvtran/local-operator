@@ -2861,7 +2861,16 @@ class SessionSidebar(Widget, can_focus=True):
                 # notice gets a spinner ON THE ROW, where the eye is. The
                 # footer "Opening…" stays as the textual counterpart.
                 mark, ink = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)], "accent"
-            elif entry.shows_completion_mark:
+            elif entry.shows_completion_mark and not entry.row.background_work:
+                # PRESENT WORK OUTRANKS THE LAST OUTCOME (operator report,
+                # 2026-11-07): an unread completion on a parent whose subagent or
+                # job is still running said "finished" over work that was not,
+                # the TUI twin of the desktop row that dropped out of Running.
+                # The same argument that already lets a busy spinner beat the
+                # mark; `row_state_mark` then draws its `⇉` background rung.
+                # The receipt stays unread and the mark returns when the last
+                # child ends.
+                #
                 # `shows_completion_mark`, not `unseen`, is the test: an unread
                 # completion says what the session did LAST, and a busy or
                 # wedged row is saying what it is doing NOW. The old condition

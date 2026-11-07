@@ -961,7 +961,7 @@ async def test_delegating_is_covered_and_idle_is_not_computed(tmp_path):
     scan per resident session for a value no reader consumes. ``waiting`` is the
     sixth: a live record's foreground wait, not an idle/attached resident.
     """
-    from local_operator.server.utils.desktop_sessions import RUNNING_STATUS_CODES
+    from local_operator.session.catalog import RUNNING_STATUS_CODES
     from tests.unit.server.test_desktop_feed import (
         _FOREIGN_LIVE_PID,
         _extra_live_pid,

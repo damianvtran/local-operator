@@ -5764,3 +5764,79 @@ async def test_the_hub_door_answers_press_and_hover_at_100_columns() -> None:
         )
         await pilot.pause()
         assert opened == ["hub"], "the door press must open the hub links surface"
+
+
+def test_background_work_keeps_its_mark_on_a_draining_parent():
+    """The live report's row (2026-11-07): draining for the build, one child running.
+
+    ``delegating`` is suppressed by ``leaving`` so the code can never say
+    "delegating" beside "Leaving…", but the WORK is real — the drain waits for
+    it — so the glyph is the background rung ``⇉``, distinct from the busy
+    spinner and from every completion mark. The section is Active.
+    """
+    from local_operator.session.runtime.types import LEAVING_FOR_BUILD
+    from local_operator.tui.widgets.session_picker import (
+        COMPLETION_MARKERS,
+        DELEGATING_MARKER,
+        IDLE_MARKER,
+        SPINNER_FRAMES,
+        row_state_mark,
+    )
+
+    now = time.time()
+    draining = CatalogEntry(
+        SessionRow(
+            "drain0000001",
+            now,
+            "parent",
+            live_state="idle",
+            leaving=LEAVING_FOR_BUILD,
+            subagents_running=1,
+        )
+    )
+    assert draining.status_code == "idle"
+    assert row_state_mark(draining.row, 0) == (DELEGATING_MARKER, "accent")
+    assert DELEGATING_MARKER not in SPINNER_FRAMES
+    assert DELEGATING_MARKER not in {glyph for glyph, _ink in COMPLETION_MARKERS.values()}
+    # The last child ends: the ordinary idle mark, no residue.
+    done = draining.row._replace(subagents_running=0)
+    assert row_state_mark(done, 0)[0] == IDLE_MARKER
+
+
+@pytest.mark.asyncio
+async def test_background_work_outranks_an_unread_completion_mark_in_the_sidebar(monkeypatch):
+    """Present work beats the last outcome: an unread ``complete`` parent with a
+    running child paints ``⇉`` and files under Active; when the child ends the
+    completion mark returns (the receipt was never acknowledged)."""
+    from local_operator.tui.widgets.session_picker import (
+        COMPLETION_MARKERS,
+        DELEGATING_MARKER,
+    )
+
+    now = time.time()
+    working = CatalogEntry(
+        SessionRow("done00000001", now, "parent", live_state="idle", subagents_running=1),
+        unseen=True,
+        completion_kind="complete",
+    )
+    assert working.shows_completion_mark and working.status_code == "complete"
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    monkeypatch.setattr(app, "_refresh_sidebar", lambda: None)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        sidebar.set_open(True)
+        sidebar.entries = (working,)
+        await pilot.pause()
+        assert sidebar._section_of(working) == 1
+        assert DELEGATING_MARKER in sidebar.render().plain
+        finished = CatalogEntry(
+            working.row._replace(subagents_running=0),
+            unseen=True,
+            completion_kind="complete",
+        )
+        sidebar.entries = (finished,)
+        await pilot.pause()
+        plain = sidebar.render().plain
+        assert DELEGATING_MARKER not in plain
+        assert COMPLETION_MARKERS["complete"][0] in plain

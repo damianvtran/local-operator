@@ -83,7 +83,11 @@ from local_operator.session.runtime.presence import (
     desktop_viewing_session,
     reset_cache,
 )
-from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRecord
+from local_operator.session.runtime.types import (
+    HEARTBEAT_TIMEOUT_S,
+    LEAVING_FOR_BUILD,
+    SessionRecord,
+)
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 from local_operator.tui.notify import BODY_BACKGROUND_DIGEST, background_digest_title
 from local_operator.wakes.store import write_entry
@@ -1414,7 +1418,12 @@ def test_the_gate_edge_publishes_once_with_the_backends_own_spelling(tmp_path):
     _tick(feed)
     frames = _statuses(_queued(subscription))
     assert [frame["session_id"] for frame in frames] == [sid], frames
-    assert frames[0]["payload"] == {"code": "approval", "label": "Approval needed", "revision": 1}
+    assert frames[0]["payload"] == {
+        "code": "approval",
+        "label": "Approval needed",
+        "revision": 1,
+        **_NO_BACKGROUND,
+    }
 
     # The answer clears the gate. Exactly one more frame, and its code is the
     # post-gate one: the pair changed, which is the whole emission rule.
@@ -1422,7 +1431,12 @@ def test_the_gate_edge_publishes_once_with_the_backends_own_spelling(tmp_path):
     _tick(feed)
     cleared = _statuses(_queued(subscription))
     assert len(cleared) == 1, cleared
-    assert cleared[0]["payload"] == {"code": "attached", "label": "Open", "revision": 2}
+    assert cleared[0]["payload"] == {
+        "code": "attached",
+        "label": "Open",
+        "revision": 2,
+        **_NO_BACKGROUND,
+    }
     # ...and the doorbell ended with its cache current, which is what makes the
     # NEXT quiet tick cheap rather than a re-read.
     assert feed._registry_fingerprint == _fingerprint(feed._registry_dir)
@@ -1504,6 +1518,91 @@ def test_a_heartbeat_rewrite_publishes_nothing(tmp_path):
     asyncio.run(feed.close())
 
 
+#: The background-work fields every ``session_status`` frame carries beside the
+#: pair — the same names the list row ships (``DesktopSessionRow``).
+_NO_BACKGROUND: dict[str, Any] = {
+    "subagents_running": None,
+    "subagents_queued": None,
+    "jobs_running": None,
+    "waiting_on": 0,
+    "background_work": False,
+}
+_BACKGROUND_KEYS = frozenset(
+    {"subagents_running", "subagents_queued", "jobs_running", "waiting_on", "background_work"}
+)
+
+
+@pytest.mark.parametrize(
+    ("fields", "code"),
+    [
+        # A terminal is watching: ``attached`` outranks ``delegating``, so the
+        # pair never moved with the counts and no frame was published.
+        ({"detached": False}, "attached"),
+        # The live report (session 956da85b4c7e, 2026-11-07): a runtime draining
+        # for the build suppresses ``delegating`` and reads ``idle`` while its
+        # child still runs.
+        ({"detached": True, "leaving": LEAVING_FOR_BUILD}, "idle"),
+    ],
+)
+def test_a_count_edge_publishes_on_every_rung(tmp_path, fields, code):
+    """Background work publishes even where the pair cannot move — and 1 -> 0 is ONE frame.
+
+    Before the counts joined the dedupe key, only the ``delegating`` rung's
+    LABEL carried them, so on every louder rung a child starting or finishing
+    published nothing and a client could not learn the row had (or no longer
+    had) work running. The 1 -> 0 edge must arrive as exactly one frame whose
+    counts and flag change together: two frames (code, then counts) is the
+    intermediate state a sidebar paints as a flicker out of Running.
+    """
+    root = tmp_path
+    sid = "b9" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+
+    def publish(**counts: Any) -> Path:
+        return _record_publish(root, sid, **fields, **counts)
+
+    publish(subagents_running=0, subagents_queued=0, jobs_running=0)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _tick(feed)
+    assert _statuses(_queued(subscription)) == []
+
+    publish(subagents_running=1, subagents_queued=0, jobs_running=1)
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert len(frames) == 1, frames
+    payload = frames[0]["payload"]
+    assert payload["code"] == code
+    assert set(payload) == {"code", "label", "revision", *_BACKGROUND_KEYS}
+    assert (payload["subagents_running"], payload["jobs_running"]) == (1, 1)
+    assert payload["background_work"] is True
+
+    # A heartbeat at unchanged counts stays silent: the anti-poll property.
+    publish(subagents_running=1, subagents_queued=0, jobs_running=1)
+    _tick(feed)
+    assert _statuses(_queued(subscription)) == []
+
+    # One child ends: still running, still one frame.
+    publish(subagents_running=0, subagents_queued=0, jobs_running=1)
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert [(f["payload"]["jobs_running"], f["payload"]["background_work"]) for f in frames] == [
+        (1, True)
+    ]
+
+    # THE LAST ONE ENDS: exactly one frame, counts and flag together.
+    publish(subagents_running=0, subagents_queued=0, jobs_running=0)
+    _tick(feed)
+    frames = _statuses(_queued(subscription))
+    assert len(frames) == 1, frames
+    payload = frames[0]["payload"]
+    assert payload["code"] == code
+    assert payload["background_work"] is False
+    assert (payload["subagents_running"], payload["jobs_running"]) == (0, 0)
+    asyncio.run(feed.close())
+
+
 def test_a_count_change_publishes_exactly_one_status_edge(tmp_path):
     """U3: the count rides the LABEL, so a count change is an EDGE.
 
@@ -1519,10 +1618,9 @@ def test_a_count_change_publishes_exactly_one_status_edge(tmp_path):
     count publishes nothing; and a record that reports NO count is neither a
     zero nor a state — it republishes the rung it leaves behind.
 
-    The frame is asserted to be a ``{code, label, revision}`` TRIPLE. That is
-    not decoration either: a count carried as a fourth payload field would be a
-    shape change every client has to know about, and the design deliberately
-    keeps the count inside the label instead.
+    The frame's key set is asserted exactly: the pair and revision, plus the
+    background-work fields (``test_a_count_edge_publishes_on_every_rung``), so a
+    field added or dropped is a contract change this test names.
     """
     root = tmp_path
     sid = "c1" * 6
@@ -1548,7 +1646,10 @@ def test_a_count_change_publishes_exactly_one_status_edge(tmp_path):
     assert len(frames) == 1, frames
     assert frames[0]["payload"]["code"] == "delegating"
     assert frames[0]["payload"]["label"] == "2 subagents running"
-    assert set(frames[0]["payload"]) == {"code", "label", "revision"}, frames[0]["payload"]
+    assert set(frames[0]["payload"]) == {"code", "label", "revision", *_BACKGROUND_KEYS}, frames[0][
+        "payload"
+    ]
+    assert frames[0]["payload"]["background_work"] is True
 
     # 2 -> 1: one edge, and it carries the SINGULAR.
     publish(subagents_running=1)
@@ -2635,7 +2736,10 @@ def _pair(root: Path, session_id: str) -> tuple[str, str]:
     entry = {row.id: row for row in load_catalog(root)}[session_id]
     store = AttentionStore(root / "attention.db")
     attention = store.state_many([f"session/{session_id}"]).get(f"session/{session_id}")
-    return status_dedupe_key(entry.row, attention)
+    # The PAIR the client sees; the key's third term (the background counts) is
+    # pinned by ``test_a_count_edge_publishes_on_every_rung``.
+    code, label, _counts = status_dedupe_key(entry.row, attention)
+    return code, label
 
 
 def test_a_row_that_completes_inside_active_invalidates_the_catalogue(tmp_path):
