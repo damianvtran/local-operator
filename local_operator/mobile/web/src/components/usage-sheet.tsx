@@ -338,7 +338,7 @@ function ResetPanel({ flow, name, busy, onCancel, onConfirm }: {
 	</div>;
 }
 
-function AccountCard({ account, name, now, locale, flow, attempts, busy, exhausted, escapeDismiss, onResetOpen, onResetCancel, onResetConfirm }: {
+function AccountCard({ account, name, now, locale, flow, attempts, busy, exhausted, escapeDismiss, escapeOwner, onResetOpen, onResetCancel, onResetConfirm }: {
 	account: UsageAccount;
 	name: string;
 	now: number;
@@ -352,8 +352,17 @@ function AccountCard({ account, name, now, locale, flow, attempts, busy, exhaust
 	exhausted: boolean;
 	/** Where this card publishes "how to dismiss the panel I am showing". The
 	 *  sheet's Escape handler calls it, because only the card knows which badge
-	 *  to put focus back on (U12). */
+	 *  to put focus back on (U12).
+	 *
+	 *  CARDS ARE NOT THE ONLY WRITER. Every mounted card runs this render body,
+	 *  so a card with no panel must leave the ref alone: the shared ref is
+	 *  guarded by `escapeOwner`, which names the ONE card whose panel is open.
+	 *  Without that guard the last card rendered cleared the handler and Escape
+	 *  closed the whole sheet instead of the panel on any card but the last
+	 *  (review round 3, R11). */
 	escapeDismiss: MutableRefObject<(() => void) | null>;
+	/** The account key that currently owns `escapeDismiss`. */
+	escapeOwner: MutableRefObject<string | null>;
 	onResetOpen: (key: string, target: ResetTarget) => void;
 	onResetCancel: () => void;
 	onResetConfirm: (key: string, target: ResetTarget) => void;
@@ -393,7 +402,17 @@ function AccountCard({ account, name, now, locale, flow, attempts, busy, exhaust
 	// holds the badge focus must return to. A BUSY panel is not dismissible --
 	// a request is running and there is nothing to cancel -- so Escape keeps its
 	// old meaning there and closes the sheet (U8/U11/U12).
-	escapeDismiss.current = mine !== null && mine.kind !== "busy" ? dismiss : null;
+	//
+	// Ownership, not "last writer wins": only the card showing a panel may claim
+	// the handler, and only the card that claimed it may release it. A sibling
+	// card that draws afterwards has no panel and must not clear it (R11).
+	if (mine !== null && mine.kind !== "busy") {
+		escapeDismiss.current = dismiss;
+		escapeOwner.current = key;
+	} else if (escapeOwner.current === key) {
+		escapeDismiss.current = null;
+		escapeOwner.current = null;
+	}
 	return <div ref={cardRef} tabIndex={-1} className="flex flex-col gap-3 rounded-sm bg-surface px-3 py-2.5 outline-none">
 		{/* THE HEADER LINE WRAPS, IN TWO ATOMIC UNITS (D2/U5/D8). The right unit
 		    -- the tone word plus the percent -- never splits, so a wrap can only
@@ -506,6 +525,8 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 	// has to run the CARD's dismissal, not a sheet-level one, or focus lands on
 	// <body> instead of the badge the panel came from (U12).
 	const escapeDismiss = useRef<(() => void) | null>(null);
+	/** Which account card owns `escapeDismiss` (R11). */
+	const escapeOwner = useRef<string | null>(null);
 	// ONE reset interaction for the whole sheet: opening a second card's
 	// confirmation replaces the first, so two irreversible prompts can never be
 	// open at once.
@@ -748,7 +769,7 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 					{provider.accounts.map((account) => <AccountCard key={account.number} account={account}
 						name={provider.name} now={now} locale={locale.uiLocale} flow={flow}
 						attempts={attempts} busy={attemptsBusy} exhausted={exhausted.has(accountKey(account))}
-						escapeDismiss={escapeDismiss}
+						escapeDismiss={escapeDismiss} escapeOwner={escapeOwner}
 						onResetOpen={(key, target) => setFlow(resetFlowConfirm(key, target))}
 						onResetCancel={() => setFlow(resetFlowCancel())}
 						onResetConfirm={confirmReset} />)}

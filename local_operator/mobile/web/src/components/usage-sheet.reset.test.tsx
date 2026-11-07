@@ -471,6 +471,28 @@ it("leaves focus on the badge when Escape dismisses the panel", async () => {
 	await waitFor(() => expect(document.activeElement).toBe(badges(2)[0]));
 });
 
+it("dismisses the FIRST card's panel with Escape, not the whole sheet", async () => {
+	// R11: every mounted card used to write the shared Escape handler, so a card
+	// with no panel cleared the one card that had one and Escape closed the sheet
+	// instead of the panel -- only the last card worked. The handler is now owned
+	// by the card showing the panel.
+	const onClose = vi.fn();
+	vi.mocked(getUsage).mockResolvedValue(
+		envelope([
+			report({ account_index: 0, account_count: 2, resets_available: 2 }),
+			report({ account_index: 1, account_count: 2, resets_available: 3 }),
+		]),
+	);
+	render(<UsageSheet open onClose={onClose} />);
+	await screen.findByText("ChatGPT");
+	fireEvent.click(badges(2)[0]);
+	expect(screen.getAllByRole("group")).toHaveLength(1);
+	fireEvent.keyDown(window, { key: "Escape" });
+	await waitFor(() => expect(screen.queryAllByRole("group")).toHaveLength(0));
+	expect(onClose).not.toHaveBeenCalled();
+	await waitFor(() => expect(document.activeElement).toBe(badges(2)[0]));
+});
+
 it("puts Dismiss before the retry, so the action keeps the right edge", async () => {
 	// D9: the confirmation is [Cancel][Reset] -- action on the right. The result
 	// row must not flip that around under the same thumb.
