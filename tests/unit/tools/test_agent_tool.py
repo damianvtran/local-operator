@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from local_operator.agent_profiles import (
+    list_seeds,
     load_seed,
     load_seed_version,
     profile_from_agent,
@@ -1517,6 +1518,40 @@ async def test_show_prints_what_it_tells_an_unrecorded_reader_to_apply(context) 
         if line.strip() and line not in body
     ]
     assert not missing, f"the reader cannot apply what is not printed: {missing[:2]}"
+
+
+@pytest.mark.parametrize("seed_name", list_seeds())
+@pytest.mark.asyncio
+async def test_show_delivers_the_packaged_text_in_full_for_every_starter(
+    context, seed_name: str
+) -> None:
+    """U13's guarantee belongs to EVERY starter, not to whichever is longest.
+
+    The full print is a payload the reader is told to copy, so the body must
+    carry it whole. U13 pinned the one seed big enough to prove the branch was
+    reached, and that made a provenance test hostage to a seed's size: when
+    `manager`'s own guidance grew 602 bytes the rendered body crossed the 8 KiB
+    tool-output budget, the elision cut the packaged block, and this file
+    reported a provenance failure for a reason that had nothing to do with
+    provenance. Every packaged starter is checked here so the next seed growth
+    fails naming the seed that caused it.
+    """
+    packaged = load_seed(seed_name)
+    assert packaged is not None
+    lines = packaged.instructions.strip().splitlines()
+    edited = "\n".join([lines[0], "I ALSO IMPLEMENT WHEN I FEEL LIKE IT.", *lines[1:]])
+    _legacy_role_row(context.agent_registry, seed_name, instructions=edited)
+
+    body = await call(context, op="show", name=seed_name)
+
+    assert "packaged instructions in full" in body
+    assert "as a diff against yours" not in body
+    missing = [
+        line
+        for line in packaged.instructions.strip().splitlines()
+        if line.strip() and line not in body
+    ]
+    assert not missing, f"{seed_name}: the reader cannot apply what is not printed: {missing[:2]}"
 
 
 @pytest.mark.asyncio
