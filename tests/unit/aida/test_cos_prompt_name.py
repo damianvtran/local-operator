@@ -22,7 +22,11 @@ from typing import Any
 
 import pytest
 
-from local_operator.prompts_api import build_system_blocks, split_tail_sections
+from local_operator.prompts_api import (
+    build_system_blocks,
+    identity_delta,
+    split_tail_sections,
+)
 
 HEAD_MARKER = "## Your name"
 
@@ -154,11 +158,7 @@ async def test_a_mid_session_rename_is_one_delta_and_the_prefix_stays(
         rows = _state_rows(session)
         assert len(rows) == 1
         details = rows[0].payload["details"]
-        assert details["blocks"] == {
-            "3": {
-                "identity": "<identity>\nYour name is now Jian-Yang.\n</identity>"
-            }
-        }
+        assert details["blocks"] == {"3": {"identity": identity_delta("Jian-Yang", "Aida")}}
         assert "## Your name" in details["text"]
         assert len(_prefix_rows(session)) == 1
         assert "Your name is Aida." in first[0]
@@ -191,7 +191,9 @@ async def test_a_resume_after_a_rename_carries_the_name_in_its_prefix(
     re-anchors tail state, it does not rebuild block 0), so the prefix-rebuild
     path a rename reaches is the next provider: a fresh session or a resume.
     A resume whose stored prefix named the old name starts ONE new prefix
-    epoch — the same rule as an edited AGENTS.md — and carries no tail delta.
+    epoch — the same rule as an edited AGENTS.md — and, with the rename made
+    BETWEEN sessions, carries no tail delta. The mid-session case is
+    :func:`test_a_resume_after_a_mid_session_rename_ships_no_removal`.
     """
     from local_operator.aida import naming
 
@@ -230,6 +232,75 @@ async def test_renaming_back_ships_a_removal(isolated_root: Path, as_cos: None) 
         assert rows[1].payload["details"]["blocks"] == {"3": {"identity": ""}}
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_resume_after_a_mid_session_rename_ships_no_removal(
+    isolated_root: Path, as_cos: None
+) -> None:
+    """R1-2: the replayed rename record agrees with the rebuilt head.
+
+    Renamed while open, the old process journals ``<identity>`` naming
+    Jian-Yang; the resumed process freezes Jian-Yang into a new head epoch.
+    Removing the replayed record would ship ``{'3': {'identity': ''}}`` for
+    nothing, so no new identity row is journalled.
+    """
+    from local_operator.aida import naming
+
+    session = await _session(isolated_root)
+    try:
+        session_id = session._session_id
+        await session._prepare_system_blocks()
+        naming.set_name(isolated_root, "Jian-Yang")
+        await session._prepare_system_blocks()
+        assert len(_state_rows(session)) == 1
+    finally:
+        await session.dispose()
+    resumed = await _session(isolated_root, resume=session_id)
+    try:
+        blocks = await resumed._prepare_system_blocks()
+        await resumed._prepare_system_blocks()
+        assert "Your name is Jian-Yang," in blocks[0]
+        assert len(_prefix_rows(resumed)) == 2
+        identity_rows = [
+            row
+            for row in _state_rows(resumed)
+            if "identity" in (row.payload["details"]["blocks"].get("3") or {})
+        ]
+        assert len(identity_rows) == 1  # the replayed rename, nothing new
+
+        # A real rename after the resume still journals, against the new head.
+        naming.set_name(isolated_root, "Erlich")
+        await resumed._prepare_system_blocks()
+        latest = _state_rows(resumed)[-1].payload["details"]["blocks"]
+        assert latest == {"3": {"identity": identity_delta("Erlich", "Jian-Yang")}}
+    finally:
+        await resumed.dispose()
+
+
+@pytest.mark.parametrize(
+    ("head", "new"),
+    [("Aida", "Jian-Yang"), ("Jian-Yang", "Aida"), ("Jian-Yang", "Erlich")],
+    ids=["default-to-renamed", "renamed-to-default", "renamed-to-other"],
+)
+def test_the_rename_delta_supersedes_the_head(head: str, new: str) -> None:
+    """R1-1/Q1: one line naming what it replaces, coherent in every direction.
+
+    Renamed back to the default, the line must not read as one more
+    "instruction calling you Aida" for the renamed head to reinterpret: it
+    says it supersedes that whole section.
+    """
+    blocks = build_system_blocks(
+        [], "<skills/>", "", "2026-11-07", identity_name=head, renamed_to=new
+    )
+    section = split_tail_sections(blocks[3])["identity"]
+    assert section == (
+        f'<identity>\nYour name is now {new}, replacing {head} under "Your name" '
+        "above; this supersedes that section and any earlier name or instruction "
+        f"calling you otherwise: introduce and sign as {new}.\n</identity>"
+    )
+    assert section.count("\n") == 2  # one line inside the element
+    assert f"Your name is {head}" in blocks[0]  # the head is untouched
 
 
 def test_the_default_sentence_tracks_the_packaged_default_name() -> None:

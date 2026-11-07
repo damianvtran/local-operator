@@ -259,6 +259,7 @@ from local_operator.prompts_api import (
     STATE_SECTION_HEADINGS,
     TOOL_INVENTORY_HEADING,
     assemble_system_block_sections,
+    identity_delta_prefix,
     render_tool_inventory_block,
     split_system_block_sections,
 )
@@ -6952,9 +6953,30 @@ class Session:
                     if name not in sections and text and name not in unknown
                 }
             )
+            if section_changes.get("identity") == "" and self._head_carries_rename(
+                str(prior.get("identity") or "")
+            ):
+                # A RESUME AFTER A MID-SESSION RENAME (review R1-2): the new
+                # process froze the new name into a new head epoch, so the
+                # replayed ``<identity>`` record and the head now agree. A
+                # removal would only say "forget the name you were just told
+                # again above". A genuine rename-back still ships its removal:
+                # there the head names a different name than the record.
+                del section_changes["identity"]
             if section_changes:
                 changes[str(index)] = section_changes
         return changes, compaction_id
+
+    def _head_carries_rename(self, record: str) -> bool:
+        """True when ``record`` (an ``<identity>`` rename section) names the
+        name this session's frozen head was built with.
+
+        The factory provider publishes that name as ``cos_identity_name`` at
+        its first render (``session_factory._make_system_blocks_provider``);
+        any other provider has none, and nothing is suppressed.
+        """
+        head_name = getattr(self._system_blocks_provider, "cos_identity_name", "")
+        return bool(head_name) and record.startswith(identity_delta_prefix(str(head_name)))
 
     def _visible_state_blocks(self) -> list[str]:
         """The system blocks as the model can see them in the LIVE context.
@@ -28365,9 +28387,11 @@ class Session:
         render (``session_factory._make_system_blocks_provider``).
 
         Gated on ``_aida_duty`` (``aida/state.json`` names this session) rather
-        than the attached role, because that is the gate
+        than the attached role: the same ``is_aida_session`` identity check
         ``team_bridge.cos_name`` applies before it publishes ``aida.name`` as
-        her bridge label: she is told the name exactly when teammates see it.
+        her bridge label (the bridge additionally requires her to be the
+        designated ``team_bridge.session``; the prompt does not, since she
+        owns the name whether or not a bridge is enrolled).
         A scratch session running the ``aida`` profile is not their chief of
         staff and gets nothing. Read through ``naming.live_display_name`` (the
         config watcher's snapshot, one ``stat`` when unchanged), never a

@@ -4191,6 +4191,10 @@ def _make_system_blocks_provider(
             live_name = ""
         if identity_name is None:
             identity_name = live_name
+            # Read by ``Session._system_state_delta`` (R1-2): a resume after a
+            # mid-session rename freezes the new name into a new head epoch,
+            # and the replayed ``<identity>`` record then needs no removal.
+            setattr(provider, "cos_identity_name", identity_name)
         renamed_to = live_name if identity_name and live_name != identity_name else ""
         key = (
             renamed_to,

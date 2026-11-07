@@ -904,6 +904,39 @@ def _ask_queue_queued() -> bool:
     return policy.enabled()
 
 
+def identity_delta_prefix(name: str) -> str:
+    """The opening bytes of the ``<identity>`` rename section naming ``name``.
+
+    Shared with ``Session._system_state_delta``, which must recognise a
+    replayed record naming the name a rebuilt head already carries (see
+    :func:`identity_delta`) without parsing a name that may itself contain
+    commas.
+    """
+    return f"<identity>\nYour name is now {name},"
+
+
+def identity_delta(name: str, previous: str = "") -> str:
+    """The tail section announcing a mid-session rename to ``name``.
+
+    WHY SO EXPLICIT: the first wording ("Your name is now X.") lost to the
+    frozen head sentence on Haiku 4.5 in 2 of 8 sessions (PR #3575 QA Q1),
+    and renamed back to the default it read as an instruction "calling you
+    Aida", which the renamed head tells the model to treat as its OTHER name
+    (review R1-1). So the line names the name it replaces and states that it
+    supersedes the head's "Your name" section and any earlier naming,
+    whichever direction the rename runs. Still ONE line, and emitted only
+    while the live name differs from the head's: it is re-sent with every
+    later request of the session. ``previous`` is the head's name; a caller
+    with no head name (none in production) gets the line without it.
+    """
+    replacing = previous if previous and previous != name else "the name"
+    return (
+        f'{identity_delta_prefix(name)} replacing {replacing} under "Your name" above; this '
+        "supersedes that section and any earlier name or instruction calling you "
+        f"otherwise: introduce and sign as {name}.\n</identity>"
+    )
+
+
 def build_system_blocks(
     tools: Sequence[AgentTool],
     skills_block: str,
@@ -1240,11 +1273,7 @@ def build_system_blocks(
         # persisted prefix and its cache survive. Placed after the run brief
         # and before ``<interactivity>`` to match ``_TAIL_SECTION_MARKERS``,
         # whose order the splitter walks. Model-facing English by design.
-        name = renamed_to.strip()
-        # ONE line on purpose: it is re-sent with every later request of the
-        # session, so it states only the new fact; the head sentence already
-        # says how to use a name.
-        tail = f"{tail}\n\n<identity>\nYour name is now {name}.\n</identity>"
+        tail = f"{tail}\n\n{identity_delta(renamed_to.strip(), identity_name.strip())}"
     if interactive is not None:
         # WHO CAN ANSWER, stated in BOTH directions rather than only the negative
         # one. A question asked now is answered when the operator LOOKS, not when
