@@ -48,6 +48,7 @@ from local_operator.tui.widgets.usage_panel import (
     format_age,
     format_amount,
     format_countdown,
+    reset_candidates,
     usage_bar,
 )
 
@@ -3175,25 +3176,23 @@ async def test_the_confirm_band_names_the_account_and_its_cost() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_choose_band_lists_five_and_states_the_remainder() -> None:
-    """Five digit keys is the keyboard half of the choice; a sixth account is
+async def test_the_choose_band_lists_nine_and_states_the_remainder() -> None:
+    """Every digit key the keyboard has is one account (U15); a tenth account is
     stated rather than silently unselectable, and the band's keys live in the
     footer so they cost the list no row."""
     async with _panel_app(size=(120, 30)) as panel:
-        panel.show_reports(_reset_reports(accounts=7, extra=0))
+        panel.show_reports(_reset_reports(accounts=12, extra=0))
         panel.action_reset()
         assert panel._reset_state == "choose"
         assert len(panel._reset_choices) == RESET_CHOOSE_MAX
-        assert panel._reset_overflow == 2
+        assert panel._reset_overflow == 3
         rows = panel.render_lines_for_test()
-    band = "\n".join(rows[-9:])
-    assert "7 accounts can reset" in band, band
-    assert "5. account4@example.com" in band, band
-    assert "account5@example.com" not in band, band
-    assert "…and 2 more" in band, band
+    band = "\n".join(rows[-12:])
+    assert "12 accounts can reset" in band, band
+    assert "…and" in band, band
     # The keys are the FOOTER's job while a band is up (D4/U5): one line claims
     # each key, so `esc cancel` cannot sit one row above an `esc close`.
-    assert rows[-1] == "esc cancel · 1-5 choose", rows[-1]
+    assert rows[-1] == "esc cancel · 1-9 choose", rows[-1]
     assert "esc close" not in "\n".join(rows), rows
 
 
@@ -3704,16 +3703,37 @@ async def test_a_refresh_mid_choose_band_withdraws_it_too() -> None:
 
 
 @pytest.mark.asyncio
-async def test_r_dismisses_the_result_and_refetches() -> None:
-    """D3/U3: the failure copy names `r`, so the first press must do what the
-    sentence says. Swallowing it as a dismissal left a vanished sentence and the
-    stale numbers that raised the question."""
+async def test_r_refetches_without_erasing_an_unknown_outcome_receipt() -> None:
+    """D3/U3 + U10: the failure copy names `r`, so the first press must refetch --
+    but the receipt, which is the only record that a credit may have gone, stays
+    until the refresh actually LANDS. Cancelling here replaced it with the
+    generic "refresh failed" note when the re-check itself failed."""
     app = _PanelHost()
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause()
         panel = app.query_one(UsagePanel)
         panel.show_reports(_reset_reports(accounts=1, extra=2))
         panel.show_reset_result(ResetConsumeResult(outcome="failed"), identity="a")
+        await pilot.press("r")
+        await pilot.pause()
+        assert panel._reset_state == "result"
+        assert panel._reset_failed is True
+        # A refresh that arrives is the truth the receipt was waiting for.
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        assert panel._reset_state is None
+    assert len(app.refresh_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_r_still_drops_a_definitive_receipt_immediately() -> None:
+    """Only the UNKNOWN outcome needs the refresh's permission: a spent or
+    refused receipt has nothing left to remember."""
+    app = _PanelHost()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        panel.show_reset_result(ResetConsumeResult(outcome="reset", windows_reset=1), identity="a")
         await pilot.press("r")
         await pilot.pause()
     assert panel._reset_state is None
@@ -3826,3 +3846,243 @@ def test_the_chip_sheds_its_noun_rather_than_being_cut_in_half() -> None:
     # Wide enough, the noun survives.
     wide = _lines([_reset_report("d@example.com", 2)], width=60)[0]
     assert wide.endswith("[2 resets]"), wide
+
+
+# -- wave 3: QA round 1 (Q1, Q3, R7, R8) and the carried minors ---------------
+
+
+def test_two_logins_sharing_an_email_each_keep_their_own_spend_target() -> None:
+    """Q1: the panel's half of the fix. Two reports behind one label, each with
+    its OWN ref, stay two spendable accounts -- and the refs differ, so neither
+    chip can spend on the row the other one names."""
+    first = _reset_report("twin@example.com", 1)
+    first.credential_ref = "row-a"
+    second = _reset_report("twin@example.com", 4)
+    second.credential_ref = "row-b"
+    panel = UsagePanel()
+    panel._reports = [first, second]
+
+    keys = [candidate.key for candidate in reset_candidates(panel._reports)]
+    assert keys == ["row-a", "row-b"], keys
+    lines = _lines([first, second])
+    assert "[1 reset]" in lines[0], lines[0]
+    assert "[4 resets]" in lines[4], lines
+
+
+def test_a_ref_shared_by_two_rows_offers_neither_a_chip_nor_x() -> None:
+    """Q1's backstop: a ref that names more than one row cannot aim a spend at
+    the row whose numbers are shown, so the report is a plain count. Two chips
+    spending on one login is the defect; no chip at all is the safe answer."""
+    first = _reset_report("twin@example.com", 1)
+    first.credential_ref = "row-a"
+    second = _reset_report("twin@example.com", 4)
+    second.credential_ref = "row-a"
+    panel = UsagePanel()
+    panel._reports = [first, second]
+
+    assert reset_candidates(panel._reports) == []
+    rows = panel.render_lines_for_test()
+    assert "resets]" not in "\n".join(rows), rows
+    assert "x reset" not in rows[-1], rows[-1]
+    panel.action_reset()
+    assert panel._reset_state is None
+
+
+def test_a_refusal_that_never_reached_the_wire_says_nothing_was_spent() -> None:
+    """Q3: a refusal decided before the request was built is not an unknown
+    outcome. Its receipt says the certain thing, and it is NOT the persistent
+    one -- there is no credit whose fate needs watching."""
+    panel = UsagePanel()
+    panel._reset_state = "busy"
+    panel.show_reset_result(
+        ResetConsumeResult(outcome="failed", detail="ambiguous login", refused=True),
+        identity="twin@example.com",
+    )
+
+    band = " ".join(row.plain for row in panel._reset_band_rows())
+    assert "nothing was spent" in band, band
+    assert "press r" not in band, band
+    # Not the persistent receipt: this one may self-expire like any definitive
+    # outcome (the timer is armed on mount, see show_reset_result).
+    assert panel._reset_failed is False
+    # And the key line offers only the dismissal: nothing to re-check.
+    assert "re-check" not in panel._band_key_row().plain
+
+
+def test_an_unknown_outcome_keeps_the_copy_that_implies_a_possible_spend() -> None:
+    """Q3's other half: a transport refusal DID reach the wire, so it keeps the
+    unknown-outcome sentence and the persistence that goes with it."""
+    panel = UsagePanel()
+    panel.show_reset_result(
+        ResetConsumeResult(outcome="failed", detail="HTTP 500"), identity="me@example.com"
+    )
+    band = " ".join(row.plain for row in panel._reset_band_rows())
+    assert "press r" in band, band
+    assert "nothing was spent" not in band, band
+    assert panel._reset_failed is True
+
+
+def test_only_esc_dismisses_the_unknown_outcome_receipt() -> None:
+    """U11: `↓` is the natural next key when the receipt says to check your
+    limits, and it used to erase the only record of a possible spend. Scrolling
+    now happens UNDER the receipt; `x` and the digits leave it alone too."""
+    panel = UsagePanel()
+    panel._reports = _reset_reports(accounts=1, extra=3)
+    panel.show_reset_result(ResetConsumeResult(outcome="failed"), identity="account0@x")
+    assert panel._reset_state == "result"
+
+    panel.action_scroll_rows(1)
+    assert panel._reset_state == "result"
+    panel.action_reset()
+    assert panel._reset_state == "result"
+    panel.action_select_reset(1)
+    assert panel._reset_state == "result"
+    panel.action_confirm_reset()
+    assert panel._reset_state == "result"
+
+    panel.action_dismiss()
+    assert panel._reset_state is None
+
+
+@pytest.mark.asyncio
+async def test_a_resize_keeps_the_unknown_outcome_receipt(monkeypatch) -> None:
+    """R8: `_repaint` cancels a band a shrink has taken the rows from -- but a
+    receipt is not a question. Erasing the record of a possible spend because
+    the terminal got shorter is the one loss the user cannot undo."""
+    async with _panel_app(size=(120, 30)) as panel:
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        panel.show_reset_result(ResetConsumeResult(outcome="failed"), identity="a@x")
+        monkeypatch.setattr(panel, "_band_room", lambda: 0)
+        panel._repaint()
+    assert panel._reset_state == "result"
+    assert panel._reset_failed is True
+
+
+@pytest.mark.asyncio
+async def test_escaping_busy_keeps_an_in_flight_marker_and_refuses_a_second_spend() -> None:
+    """U12: after `esc` from busy the request is still on the wire. The card
+    says so in one quiet row, withholds `x` -- and re-arming cannot send the
+    same spend twice (a second `exclusive` worker would cancel the first)."""
+    app = _PanelHost()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        panel.action_reset()
+        panel.action_confirm_reset()
+        await pilot.pause()
+        assert panel._reset_state == "busy"
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert panel._reset_state is None
+        rows = panel.render_lines_for_test()
+        assert "Resetting usage for account0@example.com" in "\n".join(rows), rows
+        assert "x reset" not in rows[-1], rows[-1]
+
+        panel.action_reset()
+        panel.action_confirm_reset()
+        await pilot.pause()
+        assert panel._reset_state is None
+        assert len(app.reset_requests) == 1
+
+        # The outcome lands: the marker goes, and the card is ordinary again.
+        panel.show_reset_result(
+            ResetConsumeResult(outcome="reset", windows_reset=1), identity="a@x"
+        )
+        rows = panel.render_lines_for_test()
+        assert "Resetting usage for" not in "\n".join(rows), rows
+        assert panel._reset_inflight is None
+
+
+@pytest.mark.asyncio
+async def test_below_the_band_floor_the_chip_is_not_drawn(monkeypatch) -> None:
+    """U13: the footer already withheld `x` here, leaving the chip as the one
+    control styled as clickable that did nothing. Both now go together."""
+    async with _panel_app(size=(120, 30)) as panel:
+        panel.show_reports(_reset_reports(accounts=2, extra=2))
+        assert "[2 resets]" in "\n".join(panel.render_lines_for_test())
+        monkeypatch.setattr(panel, "_band_room", lambda: 1)
+        rows = panel.render_lines_for_test()
+    assert "resets]" not in "\n".join(rows), rows
+    assert "x reset" not in rows[-1], rows[-1]
+
+
+@pytest.mark.asyncio
+async def test_the_band_key_line_is_not_painted_as_decoration() -> None:
+    """D13: while a band is up its key line IS the recovery path (the receipt's
+    `press r to re-check` is ellipsised away at 60 cols). `faint` verbs measured
+    1.49:1 -- decoration weight for the one instruction a spend depends on."""
+    async with _panel_app(size=(60, 20)) as panel:
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        panel.show_reset_result(ResetConsumeResult(outcome="failed"), identity="a@x")
+        row = panel._band_key_row()
+    faint = _ink(Style(color=theme_mod.semantic_color("faint")))
+    for span in row.spans:
+        text = row.plain[span.start : span.end]
+        if not text.strip(" ·"):  # the separators are punctuation, not verbs
+            continue
+        assert _ink(span.style) != faint, text
+    assert row.plain
+
+
+@pytest.mark.parametrize("width", [60, 70, 80])
+def test_the_reset_chip_never_spends_the_binding_window(width: int) -> None:
+    """D12: the heading exists to answer "which window binds". A chip that only
+    fits by truncating the row takes that number instead of the noun -- so the
+    short `[N]` spelling is preferred whenever the long one would truncate."""
+    header = _lines([_reset_report("account0@example.com", 2)], width=width)[0]
+    assert "5 hour 4%" in header, header
+    assert "[" in header, header  # a chip is still offered at every width here
+
+
+def test_a_retry_reuses_the_id_filed_under_the_label_once_the_ref_appears() -> None:
+    """R7: the first attempt came from a cache row that carried no ref, so its
+    id was filed under the email link. The refetch added the ref; the retry must
+    find that id and MOVE it, or the vendor sees a second id -- a second credit."""
+    report = _reset_report("me@corp.com", 2)
+    panel = UsagePanel()
+    panel._reports = [report]
+
+    panel.action_reset()
+    panel.action_confirm_reset()
+    first_id = panel._pending_redeem["me@corp.com"]
+    panel.show_reset_result(ResetConsumeResult(outcome="failed"), identity="me@corp.com")
+    panel.cancel_reset()
+
+    # The refetch under the same panel adds the ref. The numbers are unchanged,
+    # so the unknown outcome clears on the landed refresh.
+    report.credential_ref = "acct-1"
+    panel.show_reports([report])
+    assert panel._reset_state is None
+
+    panel.action_reset()
+    assert panel._reset_account is not None
+    assert panel._reset_account.key == "acct-1"
+    panel.action_confirm_reset()
+
+    assert panel._pending_redeem == {"acct-1": first_id}, panel._pending_redeem
+
+
+def test_a_new_attempt_on_a_different_ref_still_mints_a_fresh_id() -> None:
+    """R7's other direction: the fallback is keyed on the identity, so it must
+    not hand one login's id to a different login that happens to share the email."""
+    first = _reset_report("me@corp.com", 2)
+    first.credential_ref = "acct-1"
+    second = _reset_report("me@corp.com", 2)
+    second.credential_ref = "acct-2"
+    panel = UsagePanel()
+    panel._reports = [first, second]
+
+    panel.action_reset()
+    panel.action_select_reset(1)
+    panel.action_confirm_reset()
+    first_id = panel._pending_redeem["acct-1"]
+    panel.show_reset_result(ResetConsumeResult(outcome="failed"), identity="me@corp.com")
+    panel.cancel_reset()
+
+    panel.action_reset()
+    panel.action_select_reset(2)
+    panel.action_confirm_reset()
+    assert panel._pending_redeem["acct-2"] != first_id
+    assert panel._pending_redeem["acct-1"] == first_id

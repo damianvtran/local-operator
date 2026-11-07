@@ -1725,8 +1725,11 @@ class ProviderController:
         from local_operator.providers.auth_store import credential_identity
 
         if provider not in _RESET_CREDIT_PROVIDERS:
+            # `refused=True` on every pre-flight refusal below: the panel must
+            # not tell the user a credit's fate is unknown when nothing was
+            # ever sent (Q3).
             return ResetConsumeResult(
-                outcome="failed", detail=f"{provider} has no usage-reset credits"
+                outcome="failed", detail=f"{provider} has no usage-reset credits", refused=True
             )
         try:
             rows = self.auth_store.list_credentials(provider)
@@ -1759,15 +1762,17 @@ class ProviderController:
             )
             if row is None:
                 return ResetConsumeResult(
-                    outcome="failed", detail=f"no stored login for '{identity}'"
+                    outcome="failed",
+                    detail=f"no stored login for '{identity}'",
+                    refused=True,
                 )
         elif len(matches) > 1:
-            return ResetConsumeResult(outcome="failed", detail="ambiguous login")
+            return ResetConsumeResult(outcome="failed", detail="ambiguous login", refused=True)
         elif matches:
             row = matches[0]
         else:
             return ResetConsumeResult(
-                outcome="failed", detail=f"no stored login for '{identity}'"
+                outcome="failed", detail=f"no stored login for '{identity}'", refused=True
             )  # The row's OWN token, refreshed on the row rather than resolved through
         # the cascade: the same accessor the usage fetcher's per-account path
         # uses, so the request authenticates as the account whose numbers the
@@ -1780,7 +1785,9 @@ class ProviderController:
         access_token = (creds or {}).get("access")
         if not access_token:
             return ResetConsumeResult(
-                outcome="failed", detail=f"could not refresh login for '{identity}'"
+                outcome="failed",
+                detail=f"could not refresh login for '{identity}'",
+                refused=True,
             )
         account_id = (creds or {}).get("account_id") or self._row_account_id(row)
         async with httpx.AsyncClient() as client:
@@ -2380,7 +2387,7 @@ class ProviderController:
         previous: dict[str, UsageReport],
         now_ms: int,
         force: bool,
-        refs: dict[str, str] | None = None,
+        refs: dict[str, list[str]] | None = None,
     ) -> list[UsageReport]:
         """Union of this fetch's successes and last-good for everyone else.
 
@@ -2418,16 +2425,44 @@ class ProviderController:
             merged.append(self._settle_live_report(report, now_ms))
         # The stable per-row ref, stamped HERE rather than at each of the four
         # points a per-account report is built: this is the one place that sees
-        # the finished list, so no construction path can forget it. A ref this
-        # cycle knows about always wins (a re-upserted row's dedupe key may have
-        # moved); an account that did not fetch keeps the ref it came in with,
-        # and a cache row written before the field existed keeps ``None`` -- the
-        # panel then resolves by label and refuses if that is ambiguous.
+        # the finished list, so no construction path can forget it.
+        #
+        # ONE REF PER ROW, never one per label. Two stored logins can share an
+        # email (personal + workspace), and a label-keyed stamp gave both panel
+        # rows the same ref -- so either chip spent on the same login and the
+        # other login's credit was unreachable (Q1). ``refs`` therefore carries
+        # the label's rows as a LIST in login order, and each report takes the
+        # next unused entry. A report the list does not reach keeps no ref at
+        # all: it can then be neither offered nor spent by label, because the
+        # label names more than one row (the controller refuses it as
+        # ambiguous).
+        #
+        # The report is COPIED when it is stamped: two expected labels that
+        # share one email both resolve to the same label-keyed live report, so
+        # `merged` holds the SAME object twice, and a shared object can only
+        # carry the last ref written to it.
+        cursor: dict[str, int] = {}
+        stamped: list[UsageReport] = []
         for report in merged:
-            fresh = refs.get(report.identity or "") if refs else None
-            if fresh:
-                report.credential_ref = fresh
-        return merged
+            identity = report.identity or ""
+            pool = (refs or {}).get(identity) or ()
+            index = cursor.get(identity, 0)
+            cursor[identity] = index + 1
+            if index < len(pool):
+                stamped.append(dataclasses.replace(report, credential_ref=pool[index]))
+                continue
+            if pool:
+                # More reports than stored rows for this label: this one cannot
+                # be aimed at a row, so it must not be spendable.
+                stamped.append(dataclasses.replace(report, credential_ref=None))
+                continue
+            # No ref knowledge this cycle (the account did not fetch, or a
+            # provider whose rows are not listed): keep the ref it came in
+            # with, and a cache row written before the field existed keeps
+            # ``None`` -- the panel then resolves by label and refuses if that
+            # is ambiguous.
+            stamped.append(report)
+        return stamped
 
     def _settle_live_report(self, report: UsageReport, now_ms: int) -> UsageReport:
         """Finish a report this cycle produced, honouring a dead-grant verdict.
@@ -2670,10 +2705,12 @@ class ProviderController:
             accesses_by_id: dict[str, Any] = {}
             # Per-row refs for the accounts this cycle can fetch. Built from the
             # STORED ROWS, because an access carries the row id but not the
-            # dedupe key the ref prefers. Flattened onto the label: a report is
-            # keyed by that label, so two rows sharing one email collapse to one
-            # report here and the ref names the access whose token actually
-            # paid for the numbers on screen.
+            # dedupe key the ref prefers. Collected per LABEL as a LIST in
+            # login order: a report is keyed by that label, so two stored logins
+            # sharing one email collapse onto one key here, and a single
+            # ref-per-label would stamp BOTH panel rows with the last access --
+            # two chips spending on one login (Q1). The merge pairs each report
+            # with its own entry of this list instead.
             refs_by_row: dict[int, str] = {}
             try:
                 for row in self.auth_store.list_credentials(self._storage_id(provider)):
@@ -2682,7 +2719,7 @@ class ProviderController:
                         refs_by_row[row_id] = self._credential_ref(row)
             except Exception:  # noqa: BLE001 — refs are labels; the fetch still runs
                 refs_by_row = {}
-            refs_by_id: dict[str, str] = {}
+            refs_by_id: dict[str, list[str]] = {}
             try:
                 accesses = await self.auth_store.list_oauth_accesses(provider)
             except Exception:  # noqa: BLE001 — no bearer is a per-account miss
@@ -2700,7 +2737,9 @@ class ProviderController:
                 if label:
                     accesses_by_id[str(label)] = access
                     credential_id = int(getattr(access, "credential_id", 0) or 0)
-                    refs_by_id[str(label)] = refs_by_row.get(credential_id, f"cred:{credential_id}")
+                    refs_by_id.setdefault(str(label), []).append(
+                        refs_by_row.get(credential_id, f"cred:{credential_id}")
+                    )
             # The console ticket is ONE session for the whole account, not one
             # per login, so it is spent at most once per cycle however many
             # dead grants are expected. Attempting it per identity would send

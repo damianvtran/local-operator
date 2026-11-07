@@ -44,12 +44,16 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.i18n.keys import tui_usage as _x
+from local_operator.i18n.keys import tui_usage_refusal as _xr
 from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.tool_card import truncate_cells
 
+# The refusal receipt lives in its own (en-only) namespace: see the key module's
+# context note. `tr` resolves one namespace per resolver, so it needs its own.
 _t = tr("tui.usage")
+_tx = tr("tui.usage_refusal")
 
 #: Bar geometry. The bar is the only element here that can be made narrower
 #: without losing information — a percentage is exact and a countdown is words —
@@ -196,12 +200,15 @@ KEY_HINTS: tuple[tuple[str, str], ...] = (
     ("esc", "close"),
 )
 
-#: How many accounts the reset band lists AND makes selectable. Five digit keys
-#: is the keyboard half of the choice, and the band states the remainder
-#: (``…and N more``) rather than growing a scrollable list inside a transient
-#: strip -- the remainder row survives the degrade ladder ahead of a candidate
-#: row, so the band never counts an account it does not account for.
-RESET_CHOOSE_MAX = 5
+#: How many accounts the reset band makes selectable. Every digit key a
+#: keyboard has is one account (U15), and the band still lists only what fits
+#: and states the remainder (``…and N more``) rather than growing a scrollable
+#: list inside a transient strip -- the remainder row survives the degrade
+#: ladder ahead of a candidate row, so the band never counts an account it does
+#: not account for. At the default height the band lists two; the rest are
+#: reachable by digit after a taller terminal, which is why the cap is the
+#: keyboard's, not the band's.
+RESET_CHOOSE_MAX = 9
 
 #: How long the result band stays up before returning to idle. Long enough to
 #: read a sentence, short enough that a card the user reopened is not still
@@ -820,25 +827,58 @@ def _resets_available(report) -> int:  # noqa: ANN001
     return count
 
 
+def _report_ref(report) -> str | None:  # noqa: ANN001
+    """The report's credential ref, or ``None`` when it carries none."""
+    ref = getattr(report, "credential_ref", None)
+    return ref.strip() if isinstance(ref, str) and ref.strip() else None
+
+
+def _report_key(report) -> str | None:  # noqa: ANN001
+    """What a spend on this report resolves by: its ref, else its label.
+
+    The same spelling as :attr:`_ResetCandidate.key`, so the painter's gate and
+    the band's candidate list can never disagree about which row a chip belongs
+    to.
+    """
+    return _report_ref(report) or (report.identity or None)
+
+
 def reset_candidates(reports) -> list[_ResetCandidate]:  # noqa: ANN001
     """Every report that can offer a reset, in BODY order.
 
-    Body order rather than a sorted one: the band's ``1``-``5`` must select the
+    Body order rather than a sorted one: the band's ``1``-``9`` must select the
     account the reader is looking at, and the body is what they are reading.
+
+    Only reports the spend can be AIMED at are candidates (Q1). A ref shared by
+    two reports names no single row, and a label shared by two reports is
+    refused by the controller as ambiguous -- in both cases the row is rendered
+    as a plain count (no chip, no ``x``) rather than as an affordance that
+    cannot honour the account whose numbers it sits beside. A report with no
+    ref at all stays spendable while its LABEL is unique, which is what keeps an
+    old cache row (fetched before the field existed) working.
     """
+    reports = list(reports)
+    ref_counts: dict[str, int] = {}
+    label_counts: dict[str, int] = {}
+    for report in reports:
+        ref = _report_ref(report)
+        if ref:
+            ref_counts[ref] = ref_counts.get(ref, 0) + 1
+        label = getattr(report, "identity", None)
+        if isinstance(label, str):
+            label_counts[label] = label_counts.get(label, 0) + 1
     candidates = []
     for report in reports:
         count = _resets_available(report)
-        if count:
-            ref = getattr(report, "credential_ref", None)
-            candidates.append(
-                _ResetCandidate(
-                    report.provider,
-                    report.identity,
-                    count,
-                    ref if isinstance(ref, str) and ref.strip() else None,
-                )
-            )
+        if not count:
+            continue
+        ref = _report_ref(report)
+        if ref:
+            if ref_counts.get(ref, 0) > 1:
+                continue
+        elif label_counts.get(report.identity, 0) > 1:
+            continue
+        candidates.append(_ResetCandidate(report.provider, report.identity, count, ref))
     return candidates
 
 
@@ -857,10 +897,12 @@ def _with_reset_chip(row: Text, count: int, width: int | None) -> Text:
 
     The chip is a click target as well as a datum (see
     :meth:`UsagePanel._chip_hits`), so a partial chip is worse than none: ``[2…``
-    reads as a rendering fault and cannot be hit. The heading's own text yields
-    the cells instead -- its identity is ellipsised so the chip keeps its room --
-    and past that the noun is shed (``[2]``) rather than the number, because the
-    number is the datum and the noun only labels it.
+    reads as a rendering fault and cannot be hit. It is also the LAST thing the
+    heading needs: the binding window is what the row is opened to answer, so a
+    chip may only take cells the row can spare untruncated (``[2 resets]``
+    first, then ``[2]``). Only when neither fits does the heading give up cells,
+    and it then gives them up to the short chip -- the noun is what a truncation
+    may cost, never the number.
 
     ``width`` is the body's composed width. ``None`` means "let the caller
     truncate" (the pre-existing behaviour) and is only used by callers that pass
@@ -872,22 +914,40 @@ def _with_reset_chip(row: Text, count: int, width: int | None) -> Text:
         row.append("  ")
         row.append(long_chip, style=accent)
         return row
+    # WHOLE CHIP, PERCENT INTACT, IN THAT ORDER (D12). The row truncator cuts
+    # the TAIL, which is where the binding window lives, so a chip that only
+    # fits by truncating spends the one number a usage view is opened to answer
+    # on the chip's noun. Try each spelling against the UNTRUNCATED row first;
+    # only when neither fits does the heading yield its cells, and it then
+    # yields them to the SHORT chip -- the noun is what a truncation may cost,
+    # never the datum it labels.
     for chip in (long_chip, short_chip):
         cells = cell_len(chip)
         room = width - 2 - cells
         if room < RESET_CHIP_MIN_HEADING_CELLS:
             continue
-        trial = row.copy()
-        trial.truncate(room, overflow="ellipsis")
-        if trial.cell_len + 2 + cells > width:
+        if row.cell_len > room:
             continue
+        trial = row.copy()
         trial.append("  ")
         trial.append(chip, style=accent)
         return trial
-    return row
+    cells = cell_len(short_chip)
+    room = width - 2 - cells
+    if room < RESET_CHIP_MIN_HEADING_CELLS:
+        return row
+    trial = row.copy()
+    trial.truncate(room, overflow="ellipsis")
+    if trial.cell_len + 2 + cells > width:
+        return row
+    trial.append("  ")
+    trial.append(short_chip, style=accent)
+    return trial
 
 
-def _provider_header(report, now_ms: float, width: int | None = None) -> Text:  # noqa: ANN001
+def _provider_header(  # noqa: ANN001
+    report, now_ms: float, width: int | None = None, *, reset_chip: bool = True
+) -> Text:
     """``anthropic  (me@example.com)`` plus the window that binds.
 
     The binding window is stated HERE, on the block's first row, because that is
@@ -945,7 +1005,12 @@ def _provider_header(report, now_ms: float, width: int | None = None) -> Text:  
     # already are and a row of its own would displace every row below it. It is
     # fitted HERE (see `_with_reset_chip`) so the chip is drawn whole or not at
     # all: a click target half-eaten by the row truncator is not a target.
-    resets = _resets_available(report)
+    #
+    # ``reset_chip`` is the caller's verdict on whether this row may advertise a
+    # spend at all -- a card too short to paint the question, or a report whose
+    # ref names no single login. Styled-as-clickable-but-inert is the one thing
+    # a chip must never be (U13).
+    resets = _resets_available(report) if reset_chip else 0
     if resets:
         row = _with_reset_chip(row, resets, width)
     return row
@@ -1031,7 +1096,12 @@ class UsageBody:
 
 
 def build_usage_body(  # noqa: ANN001
-    reports, width: int, now_ms: float, header_ms: float | None = None
+    reports,
+    width: int,
+    now_ms: float,
+    header_ms: float | None = None,
+    *,
+    reset_chips: bool = True,
 ) -> UsageBody:
     """The scrolling half of the panel: one block per report.
 
@@ -1090,11 +1160,17 @@ def build_usage_body(  # noqa: ANN001
     # rather than `dim` (3.43:1 — the same colour as `resets in 4d` and the
     # footer, i.e. the panel's "this is decoration" ramp).
     warning = Style(color=theme_mod.semantic_color("warning"))
+    # Which headings may advertise a spend: exactly the reports `x` would offer,
+    # so the chip and the key can never disagree about who can be reset. ONE
+    # derivation with the band (``reset_candidates``), which is also what drops a
+    # report whose ref names no single login (Q1) and a card told not to offer
+    # the affordance at all (U13).
+    offered = {candidate.key for candidate in reset_candidates(reports)} if reset_chips else set()
     for index, report in enumerate(reports):
         if index:
             lines.append(Text())
         block_start = len(lines)
-        header = _provider_header(report, now_ms, width)
+        header = _provider_header(report, now_ms, width, reset_chip=_report_key(report) in offered)
         # Provider/account identifiers are user data, not geometry. A long
         # identity must lose its tail rather than widen or clip the whole card.
         header.truncate(max(1, width), overflow="ellipsis")
@@ -1269,6 +1345,10 @@ class UsagePanel(Static):
         ("3", "select_reset(3)", "Choose 3"),
         ("4", "select_reset(4)", "Choose 4"),
         ("5", "select_reset(5)", "Choose 5"),
+        ("6", "select_reset(6)", "Choose 6"),
+        ("7", "select_reset(7)", "Choose 7"),
+        ("8", "select_reset(8)", "Choose 8"),
+        ("9", "select_reset(9)", "Choose 9"),
         ("enter", "confirm_reset", "Confirm reset"),
         ("up", "scroll_rows(-1)", "Up"),
         ("down", "scroll_rows(1)", "Down"),
@@ -1354,6 +1434,12 @@ class UsagePanel(Static):
         #: label), NOT by the label: two stored logins can share one email, and
         #: one shared key made two distinct accounts look like one repeat attempt.
         self._pending_redeem: dict[str, str] = {}
+        #: The account whose reset request is on the wire with NO band up (the
+        #: reader escaped `busy`). The spend is still happening, so the card must
+        #: not look idle: it keeps a quiet marker and withholds `x` until the
+        #: outcome lands (U12). Holds the candidate so the marker can name the
+        #: account; cleared when a result arrives (or the card closes).
+        self._reset_inflight: _ResetCandidate | None = None
         #: Click regions for the headings' reset chips, recorded by the LAST
         #: paint: ``(composed_row, start_cell, end_cell, candidate key)``. Read
         #: back by :meth:`_chip_hit` so the pointer hits the glyphs the user can
@@ -1484,6 +1570,11 @@ class UsagePanel(Static):
         self._reset_account = None
         self._reset_result = ""
         self._reset_failed = False
+        # The marker belongs to the surface that started the request. The worker
+        # abandons a closed surface without painting, so nothing else would ever
+        # clear it (`_pending_redeem` deliberately survives: a retry is still
+        # the same request).
+        self._reset_inflight = None
         self._chip_hits = []
         self._cancel_reset_timer()
         self.display = False
@@ -1592,14 +1683,22 @@ class UsagePanel(Static):
     def action_refresh(self) -> None:
         """``r``: re-run the fetch behind the numbers on screen.
 
-        In the ``result`` state this DISMISSES and refetches in one press. The
-        failure copy names ``r`` as the way to find out what happened to a
-        credit, and treating it as a bare dismissal left the user with a
-        vanished sentence and the stale numbers that raised the question
-        (D3/U3) -- the panel telling them it did something it had not.
+        In the ``result`` state this refetches in one press. The failure copy
+        names ``r`` as the way to find out what happened to a credit, and
+        treating it as a bare dismissal left the user with a vanished sentence
+        and the stale numbers that raised the question (D3/U3) -- the panel
+        telling them it did something it had not.
+
+        An UNKNOWN outcome keeps its receipt while the re-check runs (U10).
+        Cancelling here erased the only record of a possible spend when the
+        refresh itself failed, replacing it with the generic "refresh failed"
+        note; ``show_reports`` clears it instead, on the refresh that actually
+        succeeds. A definitive receipt has nothing left to remember and goes
+        immediately.
         """
         if self._reset_state == "result":
-            self.cancel_reset()
+            if not self._reset_failed:
+                self.cancel_reset()
             self.post_message(UsageRefreshRequested())
             return
         if self._reset_swallowed():
@@ -1623,13 +1722,50 @@ class UsagePanel(Static):
         receipt must not also scroll or refresh behind it. ``r`` is the one key
         that acts INSTEAD of being swallowed, because the failure copy names it
         (:meth:`action_refresh`).
+
+        An UNKNOWN outcome (``failed``) is the exception: it is the only record
+        that a credit may have gone, so no stray key may erase it (U11). It stays
+        until ``esc`` dismisses it explicitly or a refresh succeeds
+        (:meth:`show_reports`), and the scrolling actions bypass this guard
+        entirely so ``↓`` can still look at the numbers the receipt is about
+        (see :meth:`_scroll_swallowed`).
         """
         if self._reset_state == "busy":
             return True
         if self._reset_state == "result":
+            if not self._reset_failed:
+                self.cancel_reset()
+            return True
+        return False
+
+    def _scroll_swallowed(self) -> bool:
+        """Whether the band owns a SCROLL key (a weaker rule than the actions').
+
+        A definitive receipt is still dismissed by any key, scrolling included.
+        An unknown outcome is not: scrolling is how the reader inspects the
+        numbers the receipt is warning about, and it changes nothing about the
+        spend, so it must be allowed through (U11) without dismissing anything.
+        """
+        if self._reset_state == "busy":
+            return True
+        if self._reset_state == "result" and not self._reset_failed:
             self.cancel_reset()
             return True
         return False
+
+    def _reset_offered(self) -> bool:
+        """Whether ``x`` (or a chip) could carry out a reset right now.
+
+        ONE gate for the two affordances: the footer's ``x`` receipt, the
+        heading chips, the click regions and :meth:`action_reset`. A card too
+        short to paint the confirmation must not offer an inert key (R4/U1), and
+        an account whose request is already on the wire must not offer a second
+        one (U12).
+        """
+        if self._reset_inflight is not None:
+            return False
+        count = len(reset_candidates(self._reports))
+        return count > 0 and self._band_room() >= self._reset_band_floor(count)
 
     def action_reset(self) -> None:
         """``x``: open the band for the accounts that hold a credit.
@@ -1644,6 +1780,12 @@ class UsagePanel(Static):
         self._cancel_reset_timer()
         if self._reset_state is not None:
             self.cancel_reset()
+            return
+        if self._reset_inflight is not None:
+            # One request at a time: the worker that is already running would be
+            # cancelled by a second `exclusive` one and its outcome would never
+            # paint (U12). The footer says the request is still out, so this is
+            # a quiet no-op rather than a dead key.
             return
         candidates = reset_candidates(self._reports)
         if not candidates:
@@ -1683,17 +1825,30 @@ class UsagePanel(Static):
             self.cancel_reset()
             return
         account = self._reset_account
+        if self._reset_inflight is not None:
+            # A request is already on the wire: re-arming must not send a second
+            # one, or `run_worker(..., exclusive=True)` cancels the first and
+            # its outcome never paints (U12).
+            return
         # One id per ATTEMPT, minted here rather than in the app: a retry after
         # an ambiguous failure must repeat the SAME request, or the vendor could
         # charge a second credit. The id is kept until an outcome is definitive,
         # and it is filed under the CREDENTIAL REF when one is known, so two
         # logins sharing an email cannot share (or steal) one idempotency id.
+        #
+        # R7: an id filed under the LABEL predates the ref -- the first attempt
+        # came from a cache row fetched before the field existed, and the
+        # refetch under it added one. Reuse that id and re-file it under the ref,
+        # or the "retry" would mint a fresh id and could spend a second credit.
         redeem_id = self._pending_redeem.get(account.key)
+        if redeem_id is None and account.ref:
+            redeem_id = self._pending_redeem.pop(account.identity, None)
         if redeem_id is None:
             redeem_id = str(uuid.uuid4())
-            self._pending_redeem[account.key] = redeem_id
+        self._pending_redeem[account.key] = redeem_id
         self._reset_failed = False
         self._reset_state = "busy"
+        self._reset_inflight = account
         self.post_message(
             UsageResetRequested(account.provider, account.identity, redeem_id, account.ref)
         )
@@ -1707,6 +1862,9 @@ class UsagePanel(Static):
         left a card where every key was inert, with no way out but quitting the
         app (R3). The pending redeem id is never cleared here: an unknown outcome
         outlives the band that reported it, so a retry is still the same request.
+        Neither is ``_reset_inflight``: the request is still on the wire, so the
+        card keeps its quiet marker and withholds ``x`` until the outcome lands
+        (U12).
         """
         self._reset_state = None
         self._reset_choices = []
@@ -1767,10 +1925,20 @@ class UsagePanel(Static):
         ``identity`` / ``credential_ref`` select the pending redeem id to clear.
         Only a definitive outcome clears it: retrying a ``failed`` attempt with
         the same id is the only safe way to find out whether the credit went.
+
+        A ``failed`` that never reached the wire (``result.refused``: no stored
+        login, an ambiguous label, an unmintable token, a provider with no reset
+        product) is NOT an unknown outcome (Q3). Nothing was sent, so the credit
+        certainly survived, and saying "not confirmed" would imply a spend that
+        could not have happened. It gets its own definitive sentence.
         """
         outcome = getattr(result, "outcome", "failed")
         windows = getattr(result, "windows_reset", 0)
         windows = windows if type(windows) is int and windows >= 0 else 0
+        refused = bool(getattr(result, "refused", False))
+        # The request is answered, whatever the answer: the card is no longer
+        # waiting on anything, so the in-flight marker goes (U12).
+        self._reset_inflight = None
         if outcome == "reset":
             text = _t(_x.resets_done(count=windows, identity=identity))
         elif outcome == "nothing_to_reset":
@@ -1779,6 +1947,10 @@ class UsagePanel(Static):
             text = _t(_x.resets_no_credit(identity=identity))
         elif outcome == "already_redeemed":
             text = _t(_x.resets_already(identity=identity))
+        elif refused:
+            # Its own namespace: see the key module's context note. The point is
+            # the CERTAINTY -- nothing was sent, so nothing was spent (Q3).
+            text = _tx(_xr.not_sent(identity=identity))
         else:
             text = _t(_x.resets_failed(identity=identity))
         if outcome in RESET_DEFINITIVE_OUTCOMES:
@@ -1791,8 +1963,9 @@ class UsagePanel(Static):
         # An UNKNOWN outcome is the one receipt that must outlive the moment: it
         # is the only record that a credit may have gone. It stays until it is
         # dismissed or until a refresh succeeds (see `show_reports`), so it is
-        # the only result without a timer (D8/U9).
-        self._reset_failed = outcome not in RESET_DEFINITIVE_OUTCOMES
+        # the only result without a timer (D8/U9). A refusal is definitive --
+        # nothing was spent -- so it keeps the ordinary courtesy timer.
+        self._reset_failed = outcome not in RESET_DEFINITIVE_OUTCOMES and not refused
         self._repaint()
         self._cancel_reset_timer()
         if not self._reset_failed:
@@ -1867,12 +2040,12 @@ class UsagePanel(Static):
             self.cancel_reset()
 
     def action_scroll_rows(self, delta: int) -> None:
-        if self._reset_swallowed():
+        if self._scroll_swallowed():
             return
         self._scroll_by(delta)
 
     def action_scroll_page(self, delta: int) -> None:
-        if self._reset_swallowed():
+        if self._scroll_swallowed():
             return
         # A page is what the card is SHOWING, not what it budgeted for: the
         # window stops at a block boundary, so paging by the budget would step
@@ -1885,13 +2058,13 @@ class UsagePanel(Static):
         self._scroll_by(delta * max(1, shown))
 
     def action_scroll_home(self) -> None:
-        if self._reset_swallowed():
+        if self._scroll_swallowed():
             return
         self._offset = 0
         self._repaint()
 
     def action_scroll_end(self) -> None:
-        if self._reset_swallowed():
+        if self._scroll_swallowed():
             return
         self._offset = self._max_offset()
         self._repaint()
@@ -2004,22 +2177,24 @@ class UsagePanel(Static):
         regions: list[tuple[int, int, int, str]] = []
         if not self._chip_hits_enabled():
             return regions
+        # The SAME candidate list the keys use, so a painted chip always maps to
+        # an account `x` would also offer (Q1/U13).
+        candidates = {candidate.key: candidate for candidate in reset_candidates(self._reports)}
         starts = {start: index for index, (start, _end) in enumerate(body.blocks)}
         for offset, content_row in enumerate(painted_rows):
             block = starts.get(content_row)
             if block is None or block >= len(self._reports):
                 continue
-            report = self._reports[block]
-            count = _resets_available(report)
-            if not count or not isinstance(report.identity, str):
+            key = _report_key(self._reports[block])
+            candidate = candidates.get(key) if key else None
+            if candidate is None:
                 continue
             text = window[offset].plain
-            for chip in _reset_chip_texts(count):
+            for chip in _reset_chip_texts(candidate.count):
                 if not text.endswith(chip):
                     continue
                 start = cell_len(text[: -len(chip)])
-                key = getattr(report, "credential_ref", None) or report.identity
-                regions.append((first_row + offset, start, start + cell_len(chip), str(key)))
+                regions.append((first_row + offset, start, start + cell_len(chip), candidate.key))
                 break
         return regions
 
@@ -2032,8 +2207,7 @@ class UsagePanel(Static):
         """
         if self._reset_state is not None:
             return False
-        count = len(reset_candidates(self._reports))
-        return count > 0 and self._band_room() >= self._reset_band_floor(count)
+        return self._reset_offered()
 
     def _chip_hit(self, event) -> str | None:  # noqa: ANN001 - Textual event type
         """The candidate key whose heading chip covers the press, or ``None``."""
@@ -2200,6 +2374,12 @@ class UsagePanel(Static):
         # The reset band is conditional chrome for the same reason, and it is
         # measured by the SAME method `_compose_rows` paints from, so the two
         # cannot disagree about how many rows the band costs.
+        #
+        # This subtraction is what makes a SCROLLED card keep its height: a body
+        # that already overflows loses the band's rows from its budget, so the
+        # band never lands on the dock. A content-sized card is the documented
+        # exception -- it may GROW by the band's rows (Q2, accepted: the body is
+        # the whole card there, and there is nothing to shrink it against).
         band = len(self._reset_band_rows())
         return rows, gutter, max(1, rows - PANEL_HEIGHT_MARGIN - CHROME_ROWS - gutter - note - band)
 
@@ -2372,7 +2552,16 @@ class UsagePanel(Static):
                 [Text(truncate_cells(message, width), style=dim)],
                 frozenset({1}),
             )
-        return build_usage_body(self._reports, width, self._now(), self._fetched_ms)
+        return build_usage_body(
+            self._reports,
+            width,
+            self._now(),
+            self._fetched_ms,
+            # A chip is a promise that pressing it could spend; below the band's
+            # floor, or while a request is already in flight, there is nothing it
+            # could do (U13).
+            reset_chips=self._reset_offered(),
+        )
 
     def _flagged_account_counts(self) -> tuple[int, int]:
         """``(stale, expired)`` — blocks the title's age does not speak for.
@@ -2497,11 +2686,9 @@ class UsagePanel(Static):
         # a key that opens nothing is the dead receipt this row's shed order
         # exists to avoid. "Something" includes the card having the rows to show
         # the band at all -- `x` on a card too short for the question is a no-op
-        # (`action_reset`), so it must not be advertised (R4).
-        candidates = reset_candidates(self._reports)
-        resettable = bool(candidates) and (
-            self._band_room() >= self._reset_band_floor(len(candidates))
-        )
+        # (`action_reset`), so it must not be advertised (R4) -- and there being
+        # no request already on the wire (U12).
+        resettable = self._reset_offered()
         segments: list[tuple[str, str, str]] = []
         if stats:
             segments.append(("stats", stats, ""))
@@ -2585,16 +2772,26 @@ class UsagePanel(Static):
         return bool(self._reset_band_rows())
 
     def _band_keys(self, pairs: list[tuple[str, str]]) -> Text:
-        """A key receipt line, composed the way :meth:`_hint_row` composes its own."""
+        """A key receipt line, composed the way :meth:`_hint_row` composes its own.
+
+        One step brighter than the idle footer (D13): while a band is up this row
+        is the RECOVERY PATH -- at 60 cols the unknown-outcome receipt's ``press r
+        to re-check`` is ellipsised away, and these words are the only place the
+        instruction survives. ``faint`` verbs measured 1.49:1 against the card,
+        which is decoration weight for the one instruction a possibly-spent
+        credit depends on. Keys ``muted``, verbs ``dim``; the separators stay
+        ``faint`` because they are punctuation.
+        """
+        muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         faint = Style(color=theme_mod.semantic_color("faint"))
         row = Text()
         for key, what in pairs:
             if row.plain:
                 row.append(" · ", style=faint)
-            row.append(key, style=dim)
+            row.append(key, style=muted)
             if what:
-                row.append(f" {what}", style=faint)
+                row.append(f" {what}", style=dim)
         return row
 
     def _band_key_row(self) -> Text:
@@ -2703,6 +2900,7 @@ class UsagePanel(Static):
         - ``confirm``: title + consequence (the account, then its cost).
         - ``busy``: one row.
         - ``result``: one row.
+        - idle with a request on the wire: one quiet row (U12).
 
         The key receipt that used to be the band's last row lives in the footer
         now (``_band_key_row``): the card reserves that row anyway, and two key
@@ -2722,8 +2920,6 @@ class UsagePanel(Static):
         result of a spend, not chrome.
         """
         state = self._reset_state
-        if state is None:
-            return []
         room = self._band_room()
         if room <= 0:
             return []
@@ -2732,7 +2928,20 @@ class UsagePanel(Static):
         factual = Style(color=theme_mod.semantic_color("fg"))
         warning = Style(color=theme_mod.semantic_color("warning"))
         rows: list[Text] = []
-        if state == "busy":
+        if state is None:
+            # The band was dismissed (esc) while its request is still on the
+            # wire. The spend is happening either way, so the card says so in
+            # one QUIET row until the outcome lands -- otherwise it looks idle
+            # and offers another `x` for a request it cannot take (U12).
+            inflight = self._reset_inflight
+            if inflight is None:
+                return []
+            # The BAND's own in-flight sentence, reused deliberately: the
+            # request is still exactly what that sentence says, and a second
+            # wording for the same wait would be a second thing to translate
+            # and could only drift.
+            rows = [Text(_t(_x.resets_busy(identity=inflight.identity)), style=muted)]
+        elif state == "busy":
             identity = self._reset_account.identity if self._reset_account else ""
             rows = [Text(_t(_x.resets_busy(identity=identity)), style=muted)]
         elif state == "result":
@@ -2963,12 +3172,16 @@ class UsagePanel(Static):
     def _repaint(self) -> None:
         if not self.display or not self.is_mounted:
             return
-        if self._reset_state is not None and not self._band_paints():
+        if self._reset_state in ("choose", "confirm") and not self._band_paints():
             # A resize (or a taller dock) took the band's required rows away while
             # the question was armed. Cancel rather than paint a partial band: a
             # confirmation that shows the account but not its cost is exactly the
             # spend R4/U1 caught. `cancel_reset` clears the state before it
             # repaints, so this cannot recurse.
+            #
+            # ONLY the questions. `busy` and `result` carry no question and no
+            # way to spend: a shrink must not erase the record that a credit may
+            # already have gone (R8). Their rows come back when the card grows.
             self.cancel_reset()
             return
         rows = self._compose_rows()

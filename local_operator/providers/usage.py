@@ -1846,6 +1846,13 @@ class ResetConsumeResult:
     outcome: str
     windows_reset: int = 0
     detail: str = ""
+    #: True when this ``failed`` was decided BEFORE anything was put on the
+    #: wire -- no stored login, an ambiguous label, an unmintable token, a
+    #: provider with no reset product. The credit certainly survived, so the
+    #: panel must say "nothing was spent" rather than the unknown-outcome copy
+    #: that a transport error earns. Only the caller that knows nothing was
+    #: sent sets it; every transport/HTTP/parse failure leaves it False.
+    refused: bool = False
 
 
 #: The answer codes the consume endpoint is documented to return. Anything else

@@ -1,0 +1,8 @@
+{
+  "tui.usage_refusal.not_sent": {
+    "role": "refusal receipt naming the account: the reset request was never sent",
+    "tone": "States the certain fact (nothing was spent) and never implies an unknown outcome; short enough for a 50-cell band row.",
+    "note": "Only used for a refusal decided BEFORE anything reached the wire: no stored login, an ambiguous label, an unmintable token, a provider with no reset product. A transport error keeps tui.usage.resets.failed, whose outcome really is unknown. En-only namespace: it rides the documented per-namespace en fallback (docs/design/i18n.md §6 amendment) rather than invalidating the audited tui.usage ledger row for all seven locales.",
+    "maxCells": 60
+  }
+}

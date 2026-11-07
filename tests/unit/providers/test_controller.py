@@ -661,6 +661,116 @@ class TestUsageIsPerAccount:
             ("two@x", "two@x"),
         ]
 
+    @staticmethod
+    def _shared_email_rows(store) -> None:
+        """Two stored logins behind ONE email: personal and workspace accounts."""
+        for row_id, ref, token, account_id in (
+            (1, "twin@x|acct-A", "tok-A", "acct-A"),
+            (2, "twin@x|acct-B", "tok-B", "acct-B"),
+        ):
+            store.rows.append(
+                {
+                    "id": row_id,
+                    "provider": "anthropic",
+                    "credential_type": "oauth",
+                    "data": {
+                        "type": "oauth",
+                        "access": f"a-{row_id}",
+                        "refresh": f"r-{row_id}",
+                        "email": "twin@x",
+                        "account_id": account_id,
+                    },
+                    # The row's own dedupe key: what the panel spends by.
+                    "identity_key": ref,
+                }
+            )
+        store.oauth_accounts["anthropic"] = [
+            types.SimpleNamespace(
+                access_token="tok-A",
+                credential_id=1,
+                account_id="acct-A",
+                email="twin@x",
+                org_id=None,
+                api_endpoint=None,
+                kind="oauth",
+                raw=None,
+                credential_invalid=False,
+            ),
+            types.SimpleNamespace(
+                access_token="tok-B",
+                credential_id=2,
+                account_id="acct-B",
+                email="twin@x",
+                org_id=None,
+                api_endpoint=None,
+                kind="oauth",
+                raw=None,
+                credential_invalid=False,
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_two_logins_sharing_one_email_get_distinct_refs(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """Q1: the ref is what a spend resolves by. Two rows behind one email
+        share a LABEL, so a label-keyed stamp handed both panel rows the same
+        ref: either chip spent on one login and the other credit -- whose count
+        is not even shown -- could not be reached."""
+        self._shared_email_rows(store)
+
+        async def fake_fetch(
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
+        ):
+            return UsageReport(provider=provider, limits=[], resets_available=2)
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["anthropic"])
+
+        assert [r.identity for r in reports] == ["twin@x", "twin@x"]
+        refs = [r.credential_ref for r in reports]
+        assert refs == ["twin@x|acct-A", "twin@x|acct-B"], refs
+        # The one property that matters: no two rows share a spendable handle.
+        assert len(set(refs)) == len(refs)
+
+    @pytest.mark.asyncio
+    async def test_a_second_login_the_refs_cannot_reach_gets_no_ref(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The list of refs can be shorter than the reports when a login minted
+        no bearer this cycle. The unpaired report keeps NO ref: the panel then
+        renders it as a plain count, because a spend aimed by its label would be
+        refused as ambiguous anyway."""
+        self._shared_email_rows(store)
+        # Only the first row can mint a bearer.
+        store.oauth_accounts["anthropic"] = store.oauth_accounts["anthropic"][:1]
+
+        async def fake_fetch(
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
+        ):
+            return UsageReport(provider=provider, limits=[], resets_available=2)
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["anthropic"])
+
+        assert [r.identity for r in reports] == ["twin@x", "twin@x"]
+        refs = [r.credential_ref for r in reports]
+        assert refs == ["twin@x|acct-A", None], refs
+
     @pytest.mark.asyncio
     async def test_one_failing_account_does_not_hide_the_others(
         self, controller, store, monkeypatch
