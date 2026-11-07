@@ -1316,7 +1316,7 @@ def _read_around_page(
         return TranscriptPage(page, has_older, False, has_newer, source_signature=verified)
 
 
-def _resolved_transcript_path(directory: str | Path) -> Path | None:
+def _resolved_transcript_path(directory: str | Path, *, read_only: bool = False) -> Path | None:
     """The path a READER may open for ``directory``, or ``None`` when there is none.
 
     THE read-side resolver for this module: a plain transcript is returned
@@ -1326,8 +1326,11 @@ def _resolved_transcript_path(directory: str | Path) -> Path | None:
     materialised copy is byte-identical to the journal the archive was made from.
     ``None`` means the session has neither form, which every caller already maps
     to its own "empty history" answer.
+
+    ``read_only`` is ``transcript_for_read``'s: no in-place restore, the cache
+    copy or the typed error (see there).
     """
-    return compression.transcript_for_read(Path(directory))
+    return compression.transcript_for_read(Path(directory), read_only=read_only)
 
 
 def read_transcript_page(
@@ -1518,7 +1521,7 @@ _CUSTOM_NEEDLE_CHUNK_BYTES = _BACKWARD_CHUNK_BYTES
 
 
 def find_row_for_custom_type(
-    directory: str | Path, custom_type: str
+    directory: str | Path, custom_type: str, *, read_only: bool = False
 ) -> tuple[int, TranscriptEntry] | None:
     """The newest CUSTOM row of ``custom_type``, found by BYTES, with its offset.
 
@@ -1547,7 +1550,7 @@ def find_row_for_custom_type(
     if encoded != f'"{custom_type}"':
         return None
     needle = b'"custom_type":' + encoded.encode("utf-8")
-    path = _resolved_transcript_path(directory)
+    path = _resolved_transcript_path(directory, read_only=read_only)
     if path is None:
         return None
     try:
@@ -1684,7 +1687,9 @@ def _row_at_offset(handle: Any, offset: int) -> tuple[int, TranscriptEntry] | No
     return row_start, entry
 
 
-def read_latest_custom_entry(directory: str | Path, custom_type: str) -> TranscriptEntry | None:
+def read_latest_custom_entry(
+    directory: str | Path, custom_type: str, *, read_only: bool = False
+) -> TranscriptEntry | None:
     """Newest custom row of ``custom_type``, without parsing the journal above it.
 
     WHY THIS EXISTS. Answering "what did the last ``todo_snapshot`` /
@@ -1744,10 +1749,10 @@ def read_latest_custom_entry(directory: str | Path, custom_type: str) -> Transcr
     ``tests/unit/session/test_transcript.py::test_a_byte_corrupt_journal_is_read_where_the_resident_object_raises``
     so the sentence cannot drift away from the behaviour.
     """
-    located = find_row_for_custom_type(directory, custom_type)
+    located = find_row_for_custom_type(directory, custom_type, read_only=read_only)
     if located is not None:
         return located[1]
-    path = _resolved_transcript_path(directory)
+    path = _resolved_transcript_path(directory, read_only=read_only)
     if path is None:
         return None
     with path.open("rb") as handle:
@@ -1839,7 +1844,9 @@ def _walk_entry_by_id(directory: str | Path, entry_id: str) -> TranscriptEntry |
     return None
 
 
-def read_latest_custom(directory: str | Path, custom_type: str) -> dict[str, Any] | None:
+def read_latest_custom(
+    directory: str | Path, custom_type: str, *, read_only: bool = False
+) -> dict[str, Any] | None:
     """Details mapping of the newest ``custom_type`` row — the single-scan twin.
 
     ``Transcript.latest_custom``'s projection, reproduced verbatim (``dict`` of
@@ -1847,8 +1854,11 @@ def read_latest_custom(directory: str | Path, custom_type: str) -> dict[str, Any
     not a mapping) so a caller cannot tell which implementation answered it.
     Kept as a second wrapper rather than a parameter because the majority of
     callers want only the mapping and must not be handed the entry.
+
+    ``read_only`` refuses the in-place restore of a compressed session (see
+    ``compression.transcript_for_read``) — for display-only callers.
     """
-    entry = read_latest_custom_entry(directory, custom_type)
+    entry = read_latest_custom_entry(directory, custom_type, read_only=read_only)
     return dict(entry.payload.get("details", {})) if entry is not None else None
 
 

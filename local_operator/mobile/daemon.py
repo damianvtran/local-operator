@@ -1537,6 +1537,7 @@ class SessionTable:
             p = entry.projection if entry else None
             row = durable.get(session_id)
             identity = self._durable_identities.get(session_id) or _DurableIdentity()
+            live_model = p.model_label if p else (entry.record.model_label if entry else "")
             attention = self._attention_states.get(f"session/{session_id}", {})
             # BIRTH, AND THE FALLBACK IS THE RUNTIME'S OWN START, never 0.0.
             # ``_creation_dates`` is resolved off-loop by ``_refresh_durable_rows``
@@ -1596,16 +1597,16 @@ class SessionTable:
                     # (``_DurableIdentity``) instead of an empty field the phone
                     # renders as ``n/a``.
                     "cwd": (p.cwd if p else (entry.record.cwd if entry else "")) or identity.cwd,
-                    "model_label": (
-                        p.model_label if p else (entry.record.model_label if entry else "")
-                    )
-                    or identity.model_label,
+                    "model_label": live_model or identity.selector,
                     # ADDITIVE: a rung from the model's ladder (the ``/api/models``
                     # ``efforts`` vocabulary) or ``None`` when unknown or the model
                     # has none. An older client ignores the key.
                     # A live projection's "" is a real answer (no ladder), so the
-                    # journal is consulted only when no projection exists.
-                    "effort": (p.effort or None) if p else identity.effort,
+                    # journal is consulted only when no projection exists — OR
+                    # when the row's model itself came from the journal (review
+                    # m1): the pair is shown together, so it comes from ONE
+                    # source rather than a journal model beside a live "no effort".
+                    "effort": ((p.effort or None) if p and live_model else identity.effort),
                     "streaming": bool(p and p.streaming),
                     # A SIGNALLED RUNTIME STREAMS TOO, so this list's own spinner
                     # said "working" about a session somebody had already asked
@@ -2141,13 +2142,14 @@ class _DurableIdentity:
       conversation's identity, so a guess (the store root, ``~``) would read as a
       recorded fact.
 
-    Values match the live fields' vocabulary: ``model_label`` is
-    ``provider/model_id`` like ``_effective_label``, ``effort`` is a rung from the
+    Values match the live fields' vocabulary: ``selector`` is the selection's
+    ``provider/model_id`` (what fills ``model_label`` and ``model_selector``) like
+    ``_effective_label``, ``effort`` is a rung from the
     model's ladder (``/api/models`` ``efforts``) or ``None`` when the row carries
     none — never ``""`` invented for "unknown".
     """
 
-    model_label: str = ""
+    selector: str = ""
     cwd: str = ""
     effort: str | None = None
 
@@ -2173,16 +2175,32 @@ def _durable_identity(directory: Path) -> _DurableIdentity:
     principle change without a journal append, but both are written alongside
     owner activity that appends to the journal, and a stale cwd on a cold row
     is cosmetic; keying on three files would triple the per-row stats.
+
+    THE KEY IS THE PHYSICAL SOURCE'S STAT (``transcript_source``: the plain
+    journal, else the ARCHIVE), checked before anything is decompressed (agent
+    review round 1, M1). Keying on ``transcript_for_read``'s answer instead
+    stat'd the decompressed CACHE copy: every hit still opened the decoder, and
+    with more than ``CACHE_MAX_ENTRIES`` (64) compressed sessions among the
+    listing's 100 rows the 1 s refresh evicted and re-materialised copies with
+    fresh inodes, so every row missed and decompressed again on every refresh.
+    An archive does not change once written, so it is now read at most once per
+    daemon lifetime and costs one stat per refresh after that.
+
+    NEVER RE-INFLATES (M2): every journal read below is ``read_only``. When an
+    archive's cache copy cannot be made (low disk, unwritable cache) the journal
+    facts are skipped — the row keeps the marker/wake-index cwd — and the answer
+    is not memoised, so the model appears once space frees up. The fallback the
+    non-read-only resolver takes there, ``restore_for_write``, would publish the
+    plain journal back into every listed session for good, without the writer
+    lock, on exactly the low-disk device compression exists for.
     """
     from local_operator.session import compression
 
     stat_key: tuple[int, int, int, int] | None = None
+    source, codec = compression.transcript_source(directory)
     try:
-        # ``read_only``: a listing must never re-inflate a compressed session
-        # in place (see ``transcript_for_read``).
-        journal = compression.transcript_for_read(directory, read_only=True)
-        info = journal.stat() if journal is not None else None
-    except (OSError, compression.ArchiveError):
+        info = source.stat()
+    except OSError:
         info = None
     if info is not None:
         stat_key = (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
@@ -2193,12 +2211,22 @@ def _durable_identity(directory: Path) -> _DurableIdentity:
             if cached is not None and cached[0] == stat_key:
                 _IDENTITY_MEMO.move_to_end(key)
                 return cached[1]
+    journal_readable = True
+    if codec is not None:
+        # Materialise the cache copy READ-ONLY once, up front: the typed error
+        # here is the "cannot be made" signal, and the reads below then hit the
+        # valid copy instead of each attempting (and failing) their own.
+        try:
+            cached = compression.transcript_for_read(directory, read_only=True)
+            journal_readable = cached is not None
+        except (OSError, compression.ArchiveError):
+            journal_readable = False
     try:
-        identity = _read_durable_identity(directory)
+        identity = _read_durable_identity(directory, journal_readable=journal_readable)
     except Exception as exc:  # noqa: BLE001 — a decoration, never a listing failure
         logger.debug("mobile: no durable identity for %s: %s", directory.name, exc)
         return _DurableIdentity()
-    if stat_key is not None:
+    if stat_key is not None and journal_readable:
         with _IDENTITY_MEMO_GUARD:
             _IDENTITY_MEMO[key] = (stat_key, identity)
             _IDENTITY_MEMO.move_to_end(key)
@@ -2207,8 +2235,12 @@ def _durable_identity(directory: Path) -> _DurableIdentity:
     return identity
 
 
-def _read_durable_identity(directory: Path) -> _DurableIdentity:
-    """The uncached read behind :func:`_durable_identity` (see its docstring)."""
+def _read_durable_identity(directory: Path, *, journal_readable: bool = True) -> _DurableIdentity:
+    """The uncached read behind :func:`_durable_identity` (see its docstring).
+
+    ``journal_readable=False`` skips both journal reads (selection and the
+    checkpoint cwd) and answers from the marker and wake index alone.
+    """
     from local_operator.paths import config_dir
     from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
     from local_operator.session.model_selection import read_model_selection
@@ -2219,8 +2251,8 @@ def _read_durable_identity(directory: Path) -> _DurableIdentity:
     )
     from local_operator.wakes import store as wake_store
 
-    selection = read_model_selection(directory)
-    model_label = selection.selector if selection is not None and selection.model_id else ""
+    selection = read_model_selection(directory, read_only=True) if journal_readable else None
+    selector = selection.selector if selection is not None and selection.model_id else ""
     effort = (selection.effort or None) if selection is not None else None
 
     cwd = ""
@@ -2230,8 +2262,14 @@ def _read_durable_identity(directory: Path) -> _DurableIdentity:
         marker = None
     if isinstance(marker, dict) and isinstance(marker.get("cwd"), str):
         cwd = marker["cwd"]
-    if not cwd and not custom_type_proven_absent(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE):
-        checkpoint = read_latest_custom(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE) or {}
+    if (
+        not cwd
+        and journal_readable
+        and not custom_type_proven_absent(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+    ):
+        checkpoint = (
+            read_latest_custom(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE, read_only=True) or {}
+        )
         state = checkpoint.get("state")
         if isinstance(state, dict) and isinstance(state.get("cwd"), str):
             cwd = state["cwd"]
@@ -2239,7 +2277,7 @@ def _read_durable_identity(directory: Path) -> _DurableIdentity:
         entry = wake_store.read_entry(config_dir(), directory.name) or {}
         if isinstance(entry.get("cwd"), str):
             cwd = entry["cwd"]
-    return _DurableIdentity(model_label=model_label, cwd=cwd, effort=effort)
+    return _DurableIdentity(selector=selector, cwd=cwd, effort=effort)
 
 
 def _live_generation_is_user_facing(session_id: str) -> bool:
@@ -2353,8 +2391,8 @@ def _durable_projection(
     # payload, when one lands, replaces these with the runtime's own values.
     identity = _durable_identity(directory)
     projection.cwd = identity.cwd
-    projection.model_label = identity.model_label
-    projection.model_selector = identity.model_label
+    projection.model_label = identity.selector
+    projection.model_selector = identity.selector
     projection.effort = identity.effort or ""
     fold = ProjectionFold(projection)
     # fold_history reads messages without mutating them, so the cached list

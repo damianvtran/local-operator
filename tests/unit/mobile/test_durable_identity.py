@@ -34,6 +34,7 @@ from local_operator.mobile.daemon import (
     _DurableIdentity,
 )
 from local_operator.mobile.types import SessionProjection, SessionRecord
+from local_operator.session import compression
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
 from local_operator.session.transcript import Transcript
@@ -86,7 +87,7 @@ def test_identity_reads_model_effort_and_checkpoint_cwd(config) -> None:
         checkpoint_cwd="/work/project",
     )
     assert _durable_identity(directory) == _DurableIdentity(
-        model_label="anthropic/claude-opus-5-5", cwd="/work/project", effort="medium"
+        selector="anthropic/claude-opus-5-5", cwd="/work/project", effort="medium"
     )
 
 
@@ -109,7 +110,7 @@ def test_an_old_row_without_effort_still_names_the_model(config) -> None:
         config, "s-legacy", selection={"version": 2, "selector": "openai/gpt-5", "boot": None}
     )
     identity = _durable_identity(directory)
-    assert identity.model_label == "openai/gpt-5"
+    assert identity.selector == "openai/gpt-5"
     assert identity.effort is None
 
 
@@ -214,9 +215,109 @@ def test_the_listing_refresh_resolves_identities(config) -> None:
 def test_an_unreadable_store_costs_the_identity_not_the_row(config, monkeypatch) -> None:
     directory = _session(config, "s-broken", selection=_v2("a/b", "low"))
 
-    def boom(_directory):
+    def boom(_directory, **_kwargs):
         raise RuntimeError("damaged")
 
     monkeypatch.setattr(daemon_module, "_read_durable_identity", boom)
     # A fresh directory key: the memo has never seen this path.
     assert _durable_identity(directory) == _DurableIdentity()
+
+
+# --- Compressed sessions (agent review round 1, M1/M2/m1) -------------------
+
+
+def _compressed(config: Path, session_id: str, **kwargs: Any) -> Path:
+    directory = _session(config, session_id, **kwargs)
+    assert compression.compress_session(directory, codec="gzip").status == "compressed"
+    assert not compression.plain_path(directory).exists()
+    return directory
+
+
+def _count_uncached_reads(monkeypatch) -> list[str]:
+    reads: list[str] = []
+    real = daemon_module._read_durable_identity
+
+    def counting(directory: Path, **kwargs: Any) -> _DurableIdentity:
+        reads.append(directory.name)
+        return real(directory, **kwargs)
+
+    monkeypatch.setattr(daemon_module, "_read_durable_identity", counting)
+    return reads
+
+
+def test_more_compressed_rows_than_the_cache_holds_are_read_once(config, monkeypatch) -> None:
+    """M1: 100 archives > ``CACHE_MAX_ENTRIES`` (64). Keyed on the cache copy,
+    LRU eviction gave every re-materialised copy a new inode, so every refresh
+    missed the memo and decompressed all 100 again. Keyed on the archive, the
+    second listing is 100 stats and no reads."""
+    assert compression.CACHE_MAX_ENTRIES < 100
+    directories = [
+        _compressed(config, f"s-gz-{index:03d}", selection=_v2("anthropic/claude-opus-5-5", "low"))
+        for index in range(100)
+    ]
+    reads = _count_uncached_reads(monkeypatch)
+    first = [_durable_identity(directory) for directory in directories]
+    assert len(reads) == 100
+    assert {identity.selector for identity in first} == {"anthropic/claude-opus-5-5"}
+
+    reads.clear()
+    materialised: list[str] = []
+    real_materialise = compression._materialise
+
+    def counting_materialise(directory: Path, *args: Any) -> Path:
+        materialised.append(directory.name)
+        return real_materialise(directory, *args)
+
+    monkeypatch.setattr(compression, "_materialise", counting_materialise)
+    second = [_durable_identity(directory) for directory in directories]
+    assert reads == []
+    # Checked before any decompression: a memo hit never touches the cache.
+    assert materialised == []
+    assert second == first
+
+
+def test_a_listing_never_reinflates_when_the_cache_cannot_be_made(config, monkeypatch) -> None:
+    """M2: with no room for a cache copy the non-read-only resolver falls back
+    to ``restore_for_write`` and publishes the plain journal back for good. The
+    listing must leave every archive in place and skip the journal facts."""
+    directories = [
+        _compressed(config, f"s-low-{index}", selection=_v2("openai/gpt-5", "high"))
+        for index in range(5)
+    ]
+    (directories[0] / "desktop.json").write_text(json.dumps({"cwd": "/from/marker"}))
+
+    def no_room(*_args: Any) -> Path:
+        raise compression.ArchiveCacheUnavailable("no room")
+
+    monkeypatch.setattr(compression, "_materialise", no_room)
+    identities = [_durable_identity(directory) for directory in directories]
+    assert [compression.plain_path(d).exists() for d in directories] == [False] * 5
+    assert all(compression.archive_path(d) is not None for d in directories)
+    # The journal is skipped, the marker is not.
+    assert identities[0] == _DurableIdentity(cwd="/from/marker")
+    assert identities[1] == _DurableIdentity()
+
+    # Not memoised: once space frees up the model appears.
+    monkeypatch.undo()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    assert _durable_identity(directories[1]).selector == "openai/gpt-5"
+    assert _durable_identity(directories[1]).effort == "high"
+
+
+def test_a_journal_model_brings_its_own_effort_onto_the_row() -> None:
+    """m1: a live runtime that has not projected a model yet shows the journal's
+    model — and then the journal's effort beside it, not the live "" as None."""
+    daemon = MobileDaemon(port=0, password=PASSWORD)
+    table = daemon.table
+    table._durable_identities = {
+        "warming": _DurableIdentity("anthropic/claude-opus-5-5", "/work", "medium"),
+    }
+    record = _record("warming", 103)
+    record.model_label = ""
+    entry = SessionEntry(record)
+    entry.projection = SessionProjection(
+        session_id="warming", pid=103, cwd="", model_label="", effort=""
+    )
+    table.entries[103] = entry
+    row = table._merge_summaries({"warming": None})[0]
+    assert (row["model_label"], row["effort"]) == ("anthropic/claude-opus-5-5", "medium")

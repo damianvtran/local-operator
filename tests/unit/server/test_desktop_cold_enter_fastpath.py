@@ -205,9 +205,9 @@ def _count_walks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
     real = transcript_module.read_latest_custom_entry
 
-    def counted(directory, custom_type):  # type: ignore[no-untyped-def]
+    def counted(directory, custom_type, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(custom_type)
-        return real(directory, custom_type)
+        return real(directory, custom_type, **kwargs)
 
     monkeypatch.setattr(transcript_module, "read_latest_custom_entry", counted)
     return calls
