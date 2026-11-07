@@ -21,11 +21,41 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from local_operator.model.effort import EFFORT_ORDER
+
 RECEIPTS_NAME = "mobile-start-receipts.sqlite3"
 RECEIPT_CAPACITY = 4096
-CAPABILITY = {"version": 1, "durable_idempotency": True, "receipt_capacity": RECEIPT_CAPACITY}
+#: ``effort`` advertises that ``POST /api/sessions/start`` accepts a birth
+#: reasoning level. A client MUST read it before sending the field: an older
+#: relay refuses an unknown keyed field (``invalid_start_request``) and silently
+#: drops it on the unkeyed path, so sending blind either fails the start or
+#: starts at a level the reader did not choose. A boolean inside the existing
+#: object, rather than a version bump, so an app that checks ``version == 1``
+#: keeps working unchanged.
+CAPABILITY = {
+    "version": 1,
+    "durable_idempotency": True,
+    "receipt_capacity": RECEIPT_CAPACITY,
+    "effort": True,
+}
 
-#: Per-field bound on cwd/provider/model_id, in code points.
+#: The intent fields every receipt carries, and the one it carries only when
+#: the caller chose it. ``effort`` is OPTIONAL in the stored shape, not merely
+#: on the wire: a request that omits it must canonicalise to the exact bytes
+#: it produced before the field existed, or every receipt already on disk would
+#: fingerprint differently from its own retry and answer ``create_conflict``.
+#:
+#: The cost is one-directional: a daemon from BEFORE this field validates its
+#: whole receipt store on every keyed start, so rolling the runtime back over a
+#: store holding an ``effort`` receipt answers keyed starts with
+#: ``create_receipts_unavailable``. The store never expires or evicts a row, so
+#: that lasts until ``mobile-start-receipts.sqlite3`` is moved aside by hand
+#: (recovery: docs/design/mobile-start-receipts.md, section "Bounded
+#: limitations (honest)"). Forward is free.
+_INTENT_FIELDS = frozenset({"cwd", "provider", "model_id"})
+_OPTIONAL_INTENT_FIELDS = frozenset({"effort"})
+
+#: Per-field bound on cwd/provider/model_id/effort, in code points.
 MAX_FIELD_CHARS = 4096
 #: The start route's whole-body byte cap, enforced BEFORE any JSON parsing.
 #:
@@ -36,7 +66,10 @@ MAX_FIELD_CHARS = 4096
 #: formatted UTF-8 body within the field bounds: the worst JSON encoding of one
 #: code point is an escaped surrogate pair (12 bytes), so three maximal fields
 #: cost 3 x 4096 x 12 bytes; the 4 KiB slack covers the key (at most 36 escaped
-#: characters), escaped field names, punctuation and ordinary whitespace. Bodies
+#: characters), escaped field names, punctuation and ordinary whitespace. The
+#: optional ``effort`` needs no share of the cap: the only values it may take are
+#: vocabulary words of at most seven characters, so a body the cap refuses
+#: because of a long ``effort`` is one the field check would refuse anyway. Bodies
 #: padded past that slack, or sent as UTF-16/32 JSON, can exceed it; no real
 #: client sends either. It applies to unkeyed callers too, because the route
 #: cannot know whether a body is keyed until it has parsed it; no real legacy
@@ -67,7 +100,7 @@ def canonical_request(body: dict[str, Any]) -> tuple[str, str]:
         key = str(uuid.UUID(key))
     except ValueError as exc:
         raise StartRefusal("invalid_create_request_id", 400) from exc
-    if set(body) - {"create_request_id", "cwd", "provider", "model_id"}:
+    if set(body) - {"create_request_id"} - _INTENT_FIELDS - _OPTIONAL_INTENT_FIELDS:
         raise StartRefusal("invalid_start_request", 400)
     intent: dict[str, str | None] = {}
     for field in ("cwd", "provider", "model_id"):
@@ -78,7 +111,40 @@ def canonical_request(body: dict[str, Any]) -> tuple[str, str]:
             intent[field] = None
             continue
         intent[field] = value.strip() or None
+    # Validated HERE, before the key is fingerprinted or claimed, so an unknown
+    # level is a 400 that writes nothing rather than a receipt that can never
+    # spawn. Present only when chosen: see ``_OPTIONAL_INTENT_FIELDS``.
+    effort = start_effort(body.get("effort"))
+    if effort is not None:
+        intent["effort"] = effort
     return key, json.dumps(intent, sort_keys=True, separators=(",", ":"))
+
+
+def start_effort(value: object) -> str | None:
+    """A Start request's ``effort``, normalised; ``None`` means "the configured default".
+
+    The vocabulary is :data:`~local_operator.model.effort.EFFORT_ORDER` -- the
+    shared word set every per-model ladder (``/effort``, the desktop chip, the
+    TUI's shift+tab) is a subset of. Deliberately NOT the chosen model's own
+    ladder: the child CLAMPS an off-ladder level to the nearest rung it has
+    (``LOP_MOBILE_CHILD_EFFORT`` in ``session.runtime.process``), because a
+    stored choice can outlive the ladder that offered it, and resolving the
+    model's ladder here would put a catalogue read on the request path. A word
+    outside the vocabulary is a client bug, not a stale choice, so it is
+    refused instead of being clamped to a level nobody asked for.
+
+    Absent, ``null`` and blank all mean "no choice", the pre-field behaviour.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise StartRefusal("invalid_start_effort", 400)
+    word = value.strip().lower()
+    if not word:
+        return None
+    if word not in EFFORT_ORDER:
+        raise StartRefusal("invalid_start_effort", 400)
+    return word
 
 
 class StartReceipts:
@@ -146,7 +212,9 @@ class StartReceipts:
             raise ValueError("invalid_receipt")
         intent = json.loads(request)
         chosen = json.loads(resolved)
-        if not isinstance(intent, dict) or set(intent) != {"cwd", "provider", "model_id"}:
+        if not isinstance(intent, dict) or not (
+            _INTENT_FIELDS <= set(intent) <= _INTENT_FIELDS | _OPTIONAL_INTENT_FIELDS
+        ):
             raise ValueError("invalid_receipt")
         if not isinstance(chosen, dict) or set(chosen) != set(intent):
             raise ValueError("invalid_receipt")

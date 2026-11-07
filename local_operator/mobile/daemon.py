@@ -95,6 +95,7 @@ from local_operator.mobile.start_receipts import (
     StartReceipts,
     StartRefusal,
     canonical_request,
+    start_effort,
 )
 from local_operator.mobile.transfer_receipts import (
     ReceiptsUnreadable,
@@ -5375,11 +5376,14 @@ class MobileDaemon:
         provider: str | None = None,
         model_id: str | None = None,
         resume: str | None = None,
+        effort: str | None = None,
     ) -> int:
         session_id = resume or uuid.uuid4().hex[:12]
         task = self._session_starts.get(session_id)
         if task is None:
-            task = asyncio.create_task(self._spawn_session(cwd, provider, model_id, session_id))
+            task = asyncio.create_task(
+                self._spawn_session(cwd, provider, model_id, session_id, effort)
+            )
             self._session_starts[session_id] = task
 
             def finished(done: asyncio.Task[int]) -> None:
@@ -5395,7 +5399,12 @@ class MobileDaemon:
         return await asyncio.shield(task)
 
     async def _spawn_session(
-        self, cwd: str, provider: str | None, model_id: str | None, session_id: str
+        self,
+        cwd: str,
+        provider: str | None,
+        model_id: str | None,
+        session_id: str,
+        effort: str | None = None,
     ) -> int:
         """Spawn a daemon-owned session in a supervised CHILD process and let
         discovery adopt it.
@@ -5446,6 +5455,16 @@ class MobileDaemon:
             env["LOP_MOBILE_CHILD_MODEL"] = model_id
         else:
             env.pop("LOP_MOBILE_CHILD_MODEL", None)
+        # The birth level rides the channel ``session.runtime.launch`` already
+        # uses for the desktop draft's chip, so the child applies it through the
+        # one reader (``process.amain`` -> ``session_factory``'s birth_effort),
+        # clamping to the model's ladder there. Popped when absent: a daemon
+        # started from inside a session must not hand ITS level to a start that
+        # asked for the configured default.
+        if effort:
+            env["LOP_MOBILE_CHILD_EFFORT"] = effort
+        else:
+            env.pop("LOP_MOBILE_CHILD_EFFORT", None)
         env["LOP_MOBILE_CHILD_RESUME"] = session_id
         # Unlike a viewer's synthesized birth seed these optional fields came
         # from the Start request itself, so they are deliberate overrides.
@@ -9075,30 +9094,30 @@ def build_app(daemon: MobileDaemon):
                 intent = json.loads(encoded_intent)
 
                 def resolve_start() -> dict[str, str]:
-                    from argparse import Namespace
-
-                    from local_operator.config import ConfigManager
-                    from local_operator.paths import config_dir
-                    from local_operator.session_factory import resolve_hosting_model
-
                     raw = intent["cwd"] or _default_start_cwd()
                     path = Path(raw).expanduser().resolve()
                     if not path.is_dir() or not _spawn_dir_allowed(path):
                         raise StartRefusal("invalid_start_directory", 400)
                     # Use the same birth precedence as the constructor, then
                     # persist the resolved pair before it can observe a later
-                    # config edit. No alternate default-selection algorithm.
+                    # config edit. No alternate default-selection algorithm:
+                    # ``GET /api/models`` publishes its ``default`` through this
+                    # same resolver.
                     try:
-                        provider, model = resolve_hosting_model(
-                            None,
-                            Namespace(hosting=intent["provider"], model=intent["model_id"]),
-                            ConfigManager(config_dir()),
+                        provider, model = _resolve_start_model(
+                            intent["provider"], intent["model_id"]
                         )
                     except ValueError as exc:
                         # A missing/unknown provider or model is a selection
                         # refusal (400), never an unreadable receipt store.
                         raise StartRefusal("invalid_start_selection", 400) from exc
-                    return {"cwd": str(path), "provider": provider, "model_id": model}
+                    chosen = {"cwd": str(path), "provider": provider, "model_id": model}
+                    # Only a CHOSEN level is stored: an omitted one stays
+                    # "the configured default", read by the child at birth
+                    # exactly as before the field existed.
+                    if intent.get("effort"):
+                        chosen["effort"] = intent["effort"]
+                    return chosen
 
                 async def spawn_start(chosen: dict[str, str], sid: str) -> int:
                     return await daemon.spawn_session(
@@ -9106,6 +9125,7 @@ def build_app(daemon: MobileDaemon):
                         provider=chosen["provider"],
                         model_id=chosen["model_id"],
                         resume=sid,
+                        effort=chosen.get("effort"),
                     )
 
                 answer = await daemon.start_receipts().start(
@@ -9122,6 +9142,12 @@ def build_app(daemon: MobileDaemon):
                     status_code=400,
                 )
             return JSONResponse(answer)
+        # Checked before the directory read below so a bad level costs nothing;
+        # the same validator the keyed path applies inside ``canonical_request``.
+        try:
+            effort = start_effort(body.get("effort"))
+        except StartRefusal as exc:
+            return JSONResponse({"error": exc.code, "code": exc.code}, status_code=exc.status)
         # NO DIRECTORY NAMED MEANS "WHERE THE USER HAS BEEN WORKING LATELY".
         # The one-tap start posts no cwd at all, so the resolution lives here,
         # server-side, and is the SAME function ``GET /api/directories``
@@ -9157,6 +9183,7 @@ def build_app(daemon: MobileDaemon):
                 provider=str(provider) if provider else None,
                 model_id=str(model_id) if model_id else None,
                 resume=session_id,
+                effort=effort,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("mobile session spawn failed", exc_info=True)
@@ -9582,7 +9609,11 @@ def build_app(daemon: MobileDaemon):
             models = await asyncio.to_thread(_list_models)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
-        return _maybe_gzip(request, JSONResponse({"models": models}))
+        # Resolved after the listing, off the loop, and never able to fail the
+        # sheet: ``_configured_default`` answers ``None`` for any config it
+        # cannot resolve, which is what the phone renders as "unavailable".
+        default = await asyncio.to_thread(_configured_default)
+        return _maybe_gzip(request, JSONResponse({"models": models, "default": default}))
 
     async def api_transcribe(request: Request) -> Response:
         """Record-then-upload speech-to-text for the phone's voice mic.
@@ -11437,6 +11468,173 @@ class _UnreadableAuthStore:
         raise self._unavailable("get_api_key")
 
 
+def _resolve_start_model(provider: str | None, model_id: str | None) -> tuple[str, str]:
+    """The ``(provider, model_id)`` a phone Start births on, given its choice.
+
+    ONE resolver for the keyed Start route and ``GET /api/models``'s
+    ``default``, so what the phone displays as the default and what a Start
+    without a model actually runs cannot disagree. It is the constructor's own
+    precedence (``session_factory.resolve_hosting_model``: request, then the
+    config file) with no agent, which is what a phone-started child resolves
+    with. Raises ``ValueError`` when nothing names a pair.
+    """
+    from argparse import Namespace
+
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+    from local_operator.session_factory import resolve_hosting_model
+
+    return resolve_hosting_model(
+        None, Namespace(hosting=provider, model=model_id), ConfigManager(config_dir())
+    )
+
+
+def _effort_ladder(
+    provider: str, model_id: str, shipped: "dict[str, frozenset[str]] | None" = None
+) -> tuple[list[str] | None, str | None]:
+    """``(ladder, spec_default)`` for ``provider/model_id``; ladder ``None`` if unknown.
+
+    ONE answer for both ``GET /api/models`` surfaces -- each row's ``efforts``
+    and the ``default.effort`` clamp -- and the SAME answer the child session
+    runs on, because it is derived through the child's own constructor:
+    ``model.configure.build_model_spec(...).reasoning_efforts`` (provider
+    listing memo, then the aggregator router ladder, then the direct DeepSeek
+    ladder, then the offline effort table). Reading the table alone published
+    ``[]`` for direct DeepSeek V4 (``deepseek-v4-pro`` & co.), whose ladder
+    ``build_model_spec`` supplies outside the table, while the session ran
+    ``none/low/high/max`` -- a picker that hid a knob the session honoured.
+
+    OFFLINE by construction, because this runs once per catalogue row (~1000)
+    inside a request that already pays the live listing: ``info`` comes from
+    ``resolve_model_info_paint`` (the in-process memo, else the static
+    registry row -- never discovery's HTTP legs), ``build_model_spec``'s own
+    listing ladder is memo-only (``_listing_effort``), and a local provider is
+    built with ``cached_only=True``. For a shipped registry model that is the
+    same ``info`` the child resolves (registry first), which the parity test
+    over every shipped model pins.
+
+    Three answers, because the phone needs to tell them apart:
+
+    * the spec's ladder, in its order, when it has one;
+    * ``[]`` when the spec has none and the SHIPPED registry lists the model
+      for this provider: we describe that model, so the silence is a
+      statement -- no effort knob (Claude Haiku 4.5 is the motivating case);
+    * ``None`` otherwise (an aggregator's or listing-only id whose ladder only a
+      live listing the relay has not read could supply, or a spec that would
+      not build): the child may well run a level there, so "none" would be a
+      guess.
+
+    ``shipped`` memoises the registry per credential provider: ``_model_rows``
+    asks this for ~1000 rows and ``static_models`` copies its map per call.
+    """
+    from local_operator.model.configure import (
+        build_model_spec,
+        resolve_model_info_paint,
+    )
+    from local_operator.model.registry import static_models
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS, local_model_spec
+    from local_operator.providers.registry import credential_provider_id
+
+    try:
+        if provider in LOCAL_PROVIDER_IDS:
+            spec = local_model_spec(provider, model_id, cached_only=True)
+        else:
+            info, _memo_hit = resolve_model_info_paint(provider, model_id)
+            spec = build_model_spec(provider, model_id, info=info)
+    except Exception:  # noqa: BLE001 -- an unbuildable row is "unknown", not a failed sheet
+        logger.debug("mobile models: no spec for %s/%s", provider, model_id, exc_info=True)
+        return None, None
+    ladder = list(spec.reasoning_efforts or ())
+    if ladder:
+        return ladder, spec.reasoning_default_effort
+    key = credential_provider_id(provider)
+    if shipped is None:
+        shipped = {}
+    if key not in shipped:
+        shipped[key] = frozenset(static_models(key))
+    return ([] if _shipped_describes(key, model_id, shipped[key]) else None), None
+
+
+def _shipped_describes(key: str, model_id: str, shipped_ids: "frozenset[str]") -> bool:
+    """Whether the shipped registry describes ``model_id`` on credential ``key``.
+
+    Exact membership, plus the SAME Claude model under another spelling -- an
+    undated alias of a shipped snapshot (``claude-haiku-4-5`` for
+    ``claude-haiku-4-5-20251001``) or a dated snapshot of a shipped undated id.
+    ``build_model_spec`` already resolves those through the registry's family
+    match (same tier, same version), so the child runs exactly the shipped
+    row's (empty) ladder; answering "unknown" there made ``default.effort``
+    publish the raw configured level for a model the session runs with none
+    (QA round 2, Q1). It reuses ``registry._anthropic_family`` -- the parser
+    that family match uses -- so the two cannot disagree on what "same model"
+    means. Aggregators are excluded: their live listing, which the relay has
+    not read, is what can speak for a ladder there.
+    """
+    if model_id in shipped_ids:
+        return True
+    from local_operator.model.registry import _anthropic_family
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if key in AGGREGATOR_PROVIDERS:
+        return False
+    wanted = _anthropic_family(model_id)
+    return wanted is not None and any(_anthropic_family(row) == wanted for row in shipped_ids)
+
+
+def _configured_default() -> dict[str, Any] | None:
+    """The model and effort a Start with no selection births on, or ``None``.
+
+    Published so the phone never has to invent a default (the build-453 app
+    painted the top-ranked catalogue row as "the default" because the relay
+    named none). ``None`` -- not an absent key -- means "this relay resolved no
+    default", which the client renders as unavailable rather than guessing; an
+    ABSENT key means an older relay that does not publish one.
+
+    ``effort`` follows :func:`_effort_ladder`, the ladder each row's
+    ``efforts`` publishes:
+
+    * a known ladder: the configured ``model_effort`` CLAMPED to it
+      (``model.effort.resolve_effort_in`` against the spec's ladder and
+      ``reasoning_default_effort`` -- the call the child's configure path
+      makes), i.e. the level the turn will actually send, or the spec's
+      default when nothing is configured;
+    * a known empty ladder: ``None`` -- the model exposes no levels;
+    * an unknown model: the RAW configured ``model_effort`` (``None`` when
+      unset). The child clamps against the spec's ladder, which a provider
+      listing may supply, so publishing ``None`` there told the phone "no
+      effort" while the child could run the configured level. The raw value is
+      the honest unclamped answer; the child still clamps it at birth.
+
+    Never raises: a broken config must cost the sheet its default marker, not
+    its whole model list.
+    """
+    try:
+        from local_operator.config import ConfigManager
+        from local_operator.model.effort import configured_effort, resolve_effort_in
+        from local_operator.paths import config_dir
+
+        provider, model_id = _resolve_start_model(None, None)
+        configured = configured_effort(ConfigManager(config_dir()))
+        ladder, spec_default = _effort_ladder(provider, model_id)
+        # ``resolve_effort_in``, not the table-backed ``resolve_effort``: the
+        # ladder is the spec's, and clamping it against the table is the split
+        # brain ``resolve_effort``'s docstring warns about.
+        effort = (
+            configured
+            if ladder is None
+            else resolve_effort_in(tuple(ladder), spec_default, configured)
+        )
+    except Exception:  # noqa: BLE001 -- no default is an answer, not a fault
+        logger.debug("mobile models: no configured default", exc_info=True)
+        return None
+    return {
+        "selector": f"{provider}/{model_id}",
+        "provider": provider,
+        "model_id": model_id,
+        "effort": effort,
+    }
+
+
 def _model_rows(rows: "list[Any]") -> list[dict[str, Any]]:
     """Serialize ranked picker rows into the sheet's wire objects.
 
@@ -11447,6 +11645,9 @@ def _model_rows(rows: "list[Any]") -> list[dict[str, Any]]:
     consumer is a phone on a mobile link; re-add a field here when a surface
     actually renders it.
     """
+    # One registry memo for the whole listing: ``_effort_ladder`` is asked
+    # once per row (~1000) and ``static_models`` copies its map per call.
+    shipped: dict[str, frozenset[str]] = {}
     return [
         {
             "selector": row.selector,
@@ -11476,9 +11677,24 @@ def _model_rows(rows: "list[Any]") -> list[dict[str, Any]]:
             "label": row.label,
             "connected": row.connected,
             "aggregated": row.aggregated,
+            # ``efforts``: the levels the effort picker may offer for this row, from
+            # the same ladder ``default.effort`` is clamped to (``_effort_ladder``).
+            # ``[]`` = the model has no effort knob. The key is OMITTED, not
+            # ``null``, when the relay does not know the ladder -- what an older
+            # relay (which never sends it) means too, so a client has ONE "unknown"
+            # spelling: offer the full vocabulary and let the session clamp.
+            **_efforts_field(row.provider, row.model_id, shipped),
         }
         for row in rows
     ]
+
+
+def _efforts_field(
+    provider: str, model_id: str, shipped: "dict[str, frozenset[str]]"
+) -> dict[str, list[str]]:
+    """``{"efforts": ladder}`` for a known ladder, ``{}`` for an unknown one."""
+    ladder, _default = _effort_ladder(provider, model_id, shipped)
+    return {} if ladder is None else {"efforts": ladder}
 
 
 def _list_models() -> list[dict[str, Any]]:

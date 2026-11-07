@@ -19,7 +19,9 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
 
 ```json
 "capabilities": {
-  "session_start": { "version": 1, "durable_idempotency": true, "receipt_capacity": 4096 }
+  "session_start": {
+    "version": 1, "durable_idempotency": true, "receipt_capacity": 4096, "effort": true
+  }
 }
 ```
 
@@ -27,6 +29,10 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
   ignores unknown start-body fields, so a client MUST NOT send
   `create_request_id` unless this object is present.
 - `receipt_capacity` is the hard bound on recorded keys for that installation.
+- `effort: true` means the start body accepts `effort` (below). A client MUST
+  NOT send `effort` unless it reads `true` here: an older relay refuses it on a
+  keyed request (`invalid_start_request`) and silently drops it on an unkeyed
+  one, which would start the session at the configured default instead.
 - A server may refuse a *new* key when full (`create_capacity`) even while
   advertising the capability: the field is a build fact, not a writability
   promise. Storage faults are reported the same way, as a typed refusal.
@@ -37,7 +43,7 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
 ## Request
 
 ```json
-{ "create_request_id": "<uuid>", "cwd": "…", "provider": "…", "model_id": "…" }
+{ "create_request_id": "<uuid>", "cwd": "…", "provider": "…", "model_id": "…", "effort": "medium" }
 ```
 
 - `create_request_id` is optional. **Omitting it preserves the shipped
@@ -48,9 +54,59 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
 - `cwd`, `provider` and `model_id` are optional strings. Keyed requests are
   refused with `400 invalid_start_request` for unknown top-level fields, so a
   later field cannot silently alias an earlier admission.
+- `effort` is an optional birth reasoning level, keyed or not: one of
+  `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (case-insensitive;
+  `null` or blank means "the configured default", exactly as omitting it). Any
+  other value is `400 invalid_start_effort`, before a receipt or a spawn. A
+  level the chosen model's ladder lacks is clamped to its nearest rung by the
+  session, as every other birth level is; the configured default the phone
+  should display is `GET /api/models` → `default.effort`, and the levels to
+  offer per model are that row's `efforts` (below).
 - The **fingerprint** is the canonical JSON of
-  `{cwd, provider, model_id}` exactly as requested. Omitted values are not part
-  of it.
+  `{cwd, provider, model_id}` exactly as requested, plus `effort` only when one
+  was chosen — so a request without `effort` fingerprints byte-for-byte as it
+  did before the field existed. Omitted values are not part of it.
+
+### Picking a model and effort: `GET /api/models`
+
+The sheet that feeds this body reads `GET /api/models` (authenticated):
+
+```json
+{
+  "models": [
+    { "selector": "anthropic/claude-opus-5-5", "provider": "anthropic",
+      "model_id": "claude-opus-5-5", "name": "…", "label": "…",
+      "connected": true, "aggregated": false,
+      "efforts": ["low", "medium", "high", "xhigh", "max"] },
+    { "selector": "anthropic/claude-haiku-4-5-20251001", "…": "…", "efforts": [] },
+    { "selector": "radient/auto", "…": "…" }
+  ],
+  "default": { "selector": "anthropic/claude-opus-5-5", "provider": "anthropic",
+               "model_id": "claude-opus-5-5", "effort": "medium" }
+}
+```
+
+- `efforts` is the ordered ladder (lowest first) the effort picker may offer
+  for that row: `build_model_spec(...).reasoning_efforts` — the spec the child
+  session itself is built from (provider-listing ladder where the relay holds
+  it, then the aggregator router ladder, the direct DeepSeek ladder, then the
+  offline effort table) — built on the offline path (static registry or
+  in-process memo, no network per row), and the same ladder `default.effort` is
+  clamped to. `[]` means the model has **no** effort knob (the spec has no
+  ladder and the shipped registry describes the model, including an undated
+  alias of a shipped snapshot): hide or disable the picker and send no
+  `effort`. An **absent** key means the relay does not know the ladder (an
+  aggregator or listing-only id whose listing it has not read), exactly what an
+  older relay that never sends the field means: offer the whole vocabulary and
+  let the session clamp. It is never `null`.
+- `default` names what a start with no `provider`/`model_id`/`effort` runs.
+  `null` means this relay resolved no default (render "unavailable"); an absent
+  key means an older relay. `default.effort` is the configured `model_effort`
+  clamped to the model's `efforts` (`resolve_effort_in` against the
+  `build_model_spec` ladder and its `reasoning_default_effort`, the clamp the
+  session applies), or that spec default when nothing is configured, `null` for a model whose `efforts` is `[]`, and the configured
+  value **unclamped** for a model whose ladder is unknown (the session clamps
+  it against the provider's listing at birth).
 
 ## Response
 
@@ -73,6 +129,7 @@ answers `create_indeterminate` (below) instead of a stale number.
 | 400 | `invalid_create_request_id` | Not a UUID, or longer than 36 characters |
 | 400 | `invalid_start_request` | Unknown top-level field, or a non-string value longer than 4096 characters |
 | 400 | `invalid_start_directory` | `cwd` is not an existing directory the spawn gate admits |
+| 400 | `invalid_start_effort` | `effort` is not a string in the level vocabulary (keyed and unkeyed) |
 | 400 | `invalid_start_selection` | The resolved provider/model pair is missing or unusable |
 | 409 | `create_conflict` | Same key, different fingerprint or input |
 | 409 | `create_indeterminate` | Uncertain outcome; carries the authoritative `session_id` |
@@ -126,6 +183,25 @@ replaying while the store is full.
   exists. There is no TTL reclamation, and none should be added without a
   contract change that makes a retired epoch's retries visibly refused rather
   than silently re-run.
+- **Downgrading past the `effort` field breaks keyed starts until the store
+  is moved aside.** A relay from before `effort` validates every stored
+  receipt on each keyed start and rejects a row whose stored intent carries
+  `effort`, so after a rollback over a store holding one, every keyed start
+  answers `503 create_receipts_unavailable`. Because rows never expire or
+  evict (guarantee 8), this does not heal on its own. Unkeyed starts are
+  unaffected. Recovery, on the downgraded machine (the store is opened per
+  request, so the relay need not be stopped):
+
+  ```sh
+  cd "${LOCAL_OPERATOR_CONFIG_DIR:-$HOME/.local-operator}"
+  mv mobile-start-receipts.sqlite3 "mobile-start-receipts.sqlite3.pre-downgrade.$(date +%s)"
+  ```
+
+  The next keyed start creates a fresh store. The cost is that every key
+  recorded before the move is forgotten, so a retry of one of those keys
+  starts a new conversation rather than replaying; let in-flight phone starts
+  settle first. Upgrading again needs no action. Do not move the old file back
+  afterwards: it would drop every key recorded in the fresh store since.
 - **A pending row can remain unresolved indefinitely** if the original child
   never becomes adoptable. That is deliberate: it preserves the identity the
   user's intent already owns, at the cost of requiring an operator/client
