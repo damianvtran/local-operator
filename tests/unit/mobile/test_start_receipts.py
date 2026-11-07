@@ -674,7 +674,11 @@ def test_protocol_doc_matches_the_advertised_contract():
 @pytest.mark.parametrize("keyed", [True, False])
 def test_chosen_effort_reaches_the_spawn_normalised(tmp_path, monkeypatch, keyed):
     r = rig(tmp_path, monkeypatch)
-    payload = body(effort=" Medium ") if keyed else {"cwd": "~", "effort": "Medium"}
+    # Annotated: the literal infers as dict[str, str], and dict invariance
+    # would reject the union against start()'s dict[str, object] parameter.
+    payload: dict[str, object] = (
+        body(effort=" Medium ") if keyed else {"cwd": "~", "effort": "Medium"}
+    )
     response = r.start(payload)
     assert response.status_code == 200, response.text
     assert r.efforts == ["medium"]
