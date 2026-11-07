@@ -621,3 +621,380 @@ def test_bare_directory_word_is_not_a_path(tmp_path: Path) -> None:
     result2 = _run(repo2, reviewed2, head2)
     assert result2.returncode == 1, result2.stdout + result2.stderr
     assert "scripts/ci/probe.ts" in result2.stdout
+
+
+# --- shared helpers for the #3540 cases -----------------------------------------
+
+
+def _reach(tmp_path: Path, ship: dict[str, str | None], harness_path: str = "scripts/ci/check.ts"):
+    """Commit ``ship`` files on top of the reviewed head, then change one harness
+    file; return the proof run for that harness-only delta."""
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(repo, ship, "feat: ship files")
+    head = _commit(repo, {harness_path: "console.log('changed');\n"}, "ci: harness edit")
+    return _run(repo, reviewed, head)
+
+
+def _exempt(result: subprocess.CompletedProcess[str]) -> None:
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "HARNESS-ONLY" in result.stdout
+
+
+def _reached(result: subprocess.CompletedProcess[str], path: str = "scripts/ci/check.ts") -> None:
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"ship-reachable: `{path}`" in result.stdout
+
+
+# --- `uses: ./<dir>` -----------------------------------------------------------------
+# A local action is a DIRECTORY holding action.yml, and the step names it without a
+# trailing slash (`uses: ./scripts/ci`), so the spelled-directory rule never fired
+# and every file under it — the action.yml it runs and the scripts that runs — was
+# exempt-able while release.yml executed it (found writing #3540's tests first).
+
+
+def test_ship_workflow_local_uses_directory_reaches_its_contents(tmp_path: Path) -> None:
+    wf = "jobs:\n  r:\n    steps:\n      - uses: ./scripts/ci\n"
+    _reached(_reach(tmp_path, {".github/workflows/release.yml": wf}))
+
+
+def test_remote_uses_and_bare_directory_word_do_not_reach(tmp_path: Path) -> None:
+    """Negative: a marketplace action is not a repo directory, and prose naming
+    the directory without `uses: ./` stays a word, as on the base."""
+    wf = (
+        "jobs:\n  r:\n    steps:\n      - uses: scripts/ci@v1\n"
+        "      - name: see scripts/ci for probes\n        run: echo ok\n"
+    )
+    _exempt(_reach(tmp_path, {".github/workflows/release.yml": wf}))
+
+
+# --- workflow/action files never take the carve-out (#3540 round 3) -----------------
+# Rounds 1-3 tried to exempt a changed harness workflow unless it could ship
+# (trigger, secret, write permission, publishing step), read by three successive
+# YAML readers; reviewers broke each one. A changed workflow/action is now ALWAYS
+# a round. Every attack those rounds found is kept below as a regression: each
+# changes a harness workflow, so each must exit 1 — now by the structural rule.
+
+_SAFE_NATIVE = (
+    "on:\n  pull_request:\n  workflow_dispatch:\n"
+    "permissions:\n  contents: read\n"
+    "jobs:\n  n:\n    runs-on: ubuntu-latest\n    steps:\n"
+    "      - run: bun scripts/ci/check.ts\n"
+    "        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n"
+    "      - uses: actions/upload-artifact@v4\n        with:\n          name: evidence\n"
+)
+
+
+def _native_delta(tmp_path: Path, head_text: str) -> subprocess.CompletedProcess[str]:
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(repo, {".github/workflows/native.yml": _SAFE_NATIVE}, "ci: native")
+    head = _commit(repo, {".github/workflows/native.yml": head_text}, "ci: native edit")
+    return _run(repo, reviewed, head)
+
+
+def _workflow_round(result: subprocess.CompletedProcess[str]) -> None:
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "workflow/action file changed: `.github/workflows/native.yml`" in result.stdout
+    assert "never take the carve-out" in result.stdout
+
+
+def test_harness_workflow_edit_without_new_powers_opens_a_round(tmp_path: Path) -> None:
+    """Same triggers, GITHUB_TOKEN only, read permission, an upload step the
+    reviewed head already had: exempt in rounds 1-2, a round now — whether a
+    workflow edit is harmless is not decidable without parsing YAML as GitHub."""
+    edited = _SAFE_NATIVE.replace("bun scripts/ci/check.ts", "bun scripts/ci/check.ts --fast")
+    _workflow_round(_native_delta(tmp_path, edited))
+
+
+def test_harness_workflow_comment_naming_powers_opens_a_round(tmp_path: Path) -> None:
+    """QA case (g): a comment that only names powers — a round."""
+    edited = "# was on: push with secrets.NPM_TOKEN and contents: write\n" + _SAFE_NATIVE
+    _workflow_round(_native_delta(tmp_path, edited))
+
+
+def test_harness_action_and_uses_named_yaml_open_a_round(tmp_path: Path) -> None:
+    """Outside `.github/`: an `action.yml` anywhere, and any YAML a `uses: ./…`
+    names (here a reusable workflow under scripts/ci), are workflow files too."""
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(
+        repo,
+        {
+            "scripts/ci/action.yml": "runs:\n  using: composite\n  steps: []\n",
+            "scripts/ci/reuse.yaml": "on: workflow_call\njobs: {}\n",
+            ".github/workflows/native.yml": "jobs:\n  r:\n    uses: './scripts/ci/reuse.yaml'\n",
+        },
+        "ci: local action and reusable workflow",
+    )
+    head = _commit(
+        repo,
+        {
+            "scripts/ci/action.yml": "runs:\n  using: composite\n  steps: [{run: x}]\n",
+            "scripts/ci/reuse.yaml": "on: workflow_call\njobs: {a: {}}\n",
+        },
+        "ci: edit both",
+    )
+    result = _run(repo, reviewed, head)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "workflow/action file changed: `scripts/ci/action.yml`" in result.stdout
+    assert "workflow/action file changed: `scripts/ci/reuse.yaml`" in result.stdout
+
+
+def test_plain_harness_yaml_not_named_by_uses_stays_harness_only(tmp_path: Path) -> None:
+    """Negative: a harness YAML data file no `uses:` names is not a workflow file."""
+    repo, reviewed = _setup(tmp_path)
+    head = _commit(repo, {"e2e/fixture.yml": "cells: [a, b]\n"}, "test(e2e): fixture")
+    _exempt(_run(repo, reviewed, head))
+
+
+_ATTACK_TAIL = (
+    "permissions:\n  contents: read\njobs:\n  n:\n    runs-on: ubuntu-latest\n    steps:\n"
+    "      - run: bun scripts/ci/check.ts\n      - uses: actions/upload-artifact@v4\n"
+)
+#: Spelled in two halves only so the literal reads as YAML here, not as prose.
+_INHERIT = "inh" + "erit"
+
+
+@pytest.mark.parametrize(
+    ("head_text", "reason"),
+    [
+        # Review R1 / QA Q1: comment stripping cut real shell and block scalars.
+        (_SAFE_NATIVE + '      - run: |\n          N="a #"; gh release create v9\n', "gh release"),
+        (
+            _SAFE_NATIVE + '      - run: |\n          N="a #"; echo ${{ secrets.NPM_TOKEN }}\n',
+            "NPM_TOKEN",
+        ),
+        (_SAFE_NATIVE + "      - run: |\n          # ${{ secrets.NPM_TOKEN }}\n", "NPM_TOKEN"),
+        (
+            _SAFE_NATIVE
+            + "      - run: >-\n          echo hi\n          #${{ secrets.NPM_TOKEN }}\n",
+            "NPM_TOKEN",
+        ),
+        # Review R2: whole-context, quoted and indexed forms.
+        (_SAFE_NATIVE + "      - run: echo '${{ toJSON(secrets) }}'\n", "secret"),
+        (
+            _SAFE_NATIVE.replace("    runs-on:", f'    secrets: "{_INHERIT}"\n    runs-on:', 1),
+            "secret",
+        ),
+        (_SAFE_NATIVE + "      - run: echo ${{ secrets['NPM'] }}\n", "secret"),
+        # QA Q2: quoted permission key/value.
+        (_SAFE_NATIVE.replace("contents: read", '"contents": "write"'), "write permission"),
+        (_SAFE_NATIVE.replace("contents: read", "'contents': 'write'"), "write permission"),
+        (_SAFE_NATIVE.replace("  contents: read", "  write-all"), "write permission"),
+        # QA Q3 / review R4: event shapes a line parser missed.
+        ('on:\n  pull_request:\n  "push":\n' + _ATTACK_TAIL, "trigger `push`"),
+        ("on:\n- pull_request\n- push\n" + _ATTACK_TAIL, "trigger `push`"),
+        ("on:\n  - pull_request\n  - 'push'\n" + _ATTACK_TAIL, "trigger `push`"),
+        ("on: [pull_request,\n  push]\n" + _ATTACK_TAIL, "trigger `push`"),
+        ('"on": {pull_request: {}, workflow_call: {}}\n' + _ATTACK_TAIL, "trigger `workflow_call`"),
+        ("on: release\n" + _ATTACK_TAIL, "trigger `release`"),
+    ],
+    ids=[
+        "hash-in-shell-release",
+        "hash-in-shell-secret",
+        "block-scalar-comment-secret",
+        "folded-scalar-secret",
+        "tojson-secrets",
+        "quoted-inherit",
+        "indexed-secret",
+        "quoted-permission-dq",
+        "quoted-permission-sq",
+        "write-all",
+        "quoted-event-key",
+        "seq-at-key-indent",
+        "quoted-seq-item",
+        "multiline-flow-seq",
+        "flow-map-workflow-call",
+        "scalar-event",
+    ],
+)
+def test_harness_workflow_power_attacks_open_a_round(
+    tmp_path: Path, head_text: str, reason: str
+) -> None:
+    """Every round-1 reviewer/QA attack on #3540 that exited 0, as a regression."""
+    # `reason` names the power the attack aimed at; the structural rule catches
+    # it without reading the power at all.
+    del reason
+    _workflow_round(_native_delta(tmp_path, head_text))
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    [
+        "jobs:\n  r:\n    steps:\n      - {uses: ./scripts/ci}\n",
+        "jobs:\n  r:\n    steps:\n      - { uses: ./scripts/ci }\n",
+        'jobs:\n  r:\n    steps:\n      - "uses": ./scripts/ci\n',
+        "jobs:\n  r:\n    steps: [{name: a, uses: ./scripts/ci}]\n",
+        "jobs:\n  r:\n    steps:\n      - uses: './scripts/ci'\n",
+    ],
+    ids=["flow-map", "flow-map-spaced", "quoted-key", "flow-seq", "quoted-value"],
+)
+def test_local_uses_in_any_yaml_shape_reaches(tmp_path: Path, workflow: str) -> None:
+    """Review R3 / QA Q4: `uses: ./<dir>` in flow or quoted form is still a step."""
+    _reached(_reach(tmp_path, {".github/workflows/release.yml": workflow}))
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (("  workflow_dispatch:\n", "  workflow_dispatch:\n  push:\n"), "trigger `push`"),
+        (("on:\n  pull_request:\n", "on: [pull_request, schedule]\nx:\n"), "trigger `schedule`"),
+        (("secrets.GITHUB_TOKEN", "secrets.NPM_TOKEN"), "secret `NPM_TOKEN`"),
+        (("contents: read", "contents: write"), "write permission"),
+        (("contents: read", "id-token: write"), "write permission"),
+        (
+            ("      - run: bun", "      - uses: softprops/action-gh-release@v2\n      - run: bun"),
+            "publishing step `softprops/action-gh-release`",
+        ),
+        (("      - run: bun", "      - run: npm publish\n      - run: bun"), "`npm publish`"),
+    ],
+    ids=["push", "schedule-flow", "secret", "contents-write", "id-token-write", "release", "npm"],
+)
+def test_harness_workflow_gaining_release_powers_opens_a_round(
+    tmp_path: Path, change: tuple[str, str], reason: str
+) -> None:
+    old, new = change
+    assert old in _SAFE_NATIVE
+    del reason  # the power aimed at; the structural rule needs no reading of it
+    _workflow_round(_native_delta(tmp_path, _SAFE_NATIVE.replace(old, new, 1)))
+
+
+# --- #3540 rounds 2-3: attacks on the YAML scanners, kept as regressions -----------
+# Comments after events, CRLF, double-quoted escapes and line joins, anchors,
+# tags, complex keys (round 2), and plain scalars that desynced the scanner's
+# quote or block-scalar tracking (round 3: review R3-M1, QA Q9). All change a
+# harness workflow, so all exit 1 by the structural rule. Ship files are still
+# scanned raw AND with double-quoted escapes decoded (last test).
+
+_S = _SAFE_NATIVE
+_BS = "\\"
+
+
+@pytest.mark.parametrize(
+    ("head_text", "reason"),
+    [
+        # Review R2-m1 / QA Q6: a trailing comment or CRLF after an event.
+        (
+            _S.replace("on:\n  pull_request:\n  workflow_dispatch:\n", "on: push # x\n"),
+            "trigger `push`",
+        ),
+        (
+            _S.replace(
+                "on:\n  pull_request:\n  workflow_dispatch:\n",
+                "on:\n  - pull_request\n  - push  # also main\n",
+            ),
+            "trigger `push`",
+        ),
+        (
+            _S.replace(
+                "on:\n  pull_request:\n  workflow_dispatch:\n",
+                "on:\n  - pull_request\n  - workflow_dispatch\n  - 'push' # x\n",
+            ),
+            "trigger `push`",
+        ),
+        (
+            _S.replace(
+                "on:\n  pull_request:\n  workflow_dispatch:\n",
+                "on:\n  - pull_request\n  - push\n",
+            ).replace("\n", "\r\n"),
+            "trigger `push`",
+        ),
+        # Review R2-M1 / QA Q7: double-quoted escapes and line joins.
+        (_S + f'      - run: "echo ${{{{ {_BS}x73ecrets.NPM_TOKEN }}}} | npm publish"\n', "escape"),
+        (_S + f'      - run: "echo ${{{{ se{_BS}\n          crets.NPM_TOKEN }}}}"\n', "escape"),
+        (_S.replace("contents: read", f'contents: "wr{_BS}x69te"'), "escape"),
+        (_S.replace("contents: read", f'contents: "{_BS}x77rite"'), "escape"),
+        (_S.replace("contents: read", f'contents: read\n  id-token: "wr{_BS}u0069te"'), "escape"),
+        (_S.replace("permissions:", f'"perm{_BS}x69ssions":'), "escape"),
+        (
+            _S.replace(
+                "on:\n  pull_request:\n  workflow_dispatch:\n",
+                f'on:\n  - pull_request\n  - workflow_dispatch\n  - "{_BS}x70ush"\n',
+            ),
+            "escape",
+        ),
+        # QA Q8: anchors and aliases; plus tags and complex keys (same class).
+        (
+            _S.replace(
+                "on:\n  pull_request:\n  workflow_dispatch:\n",
+                "env:\n  EV: &ev push\non:\n  - *ev\n  - workflow_dispatch\n",
+            ),
+            "anchor/alias",
+        ),
+        (_S.replace("contents: read", "contents: !!str read"), "tag"),
+        (
+            _S.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  ? pull_request\n"),
+            "complex key",
+        ),
+        (
+            _S.replace("  workflow_dispatch:\n", '  workflow_dispatch:\n  "unterminated\n'),
+            "unterminated",
+        ),
+        # Review R3-M1: ` - '` in a plain scalar desynced quote tracking.
+        (
+            "name: native - 'evidence\n"
+            + _S.replace("contents: read", f'contents: "wr{_BS}x69te"')
+            + "      - run: echo 'done'\n",
+            "escape",
+        ),
+        (
+            'name: native - "evidence\n'
+            + _S.replace("contents: read", f'contents: "wr{_BS}x69te"'),
+            "escape",
+        ),
+        # QA Q9: ` - |` inside a flow collection read as a block-scalar header.
+        (
+            "on: [pull_request, workflow_dispatch]\n"
+            "jobs: {e2e: {name: x - |\n  , runs-on: ubuntu-latest, permissions: "
+            f'{{contents: "{_BS}x77rite"}}, '
+            f'steps: [{{run: "echo ${{{{ {_BS}x73ecrets.NPM_TOKEN }}}}"}}]}}}}\n',
+            "escape",
+        ),
+        (
+            "on: {pull_request: {branches: [x - |\n  ]}, workflow_dispatch: null, "
+            f'"{_BS}x70ush": null}}\n' + _ATTACK_TAIL,
+            "escape",
+        ),
+    ],
+    ids=[
+        "scalar-event-comment",
+        "seq-item-comment",
+        "quoted-seq-item-comment",
+        "crlf",
+        "dq-escape-secret",
+        "dq-linejoin-secret",
+        "dq-escape-write",
+        "qa-n4-write",
+        "dq-unicode-id-token",
+        "dq-escape-permissions-key",
+        "qa-n3-escaped-event",
+        "qa-n6-anchor-alias",
+        "tag",
+        "complex-key",
+        "unterminated-dq",
+        "r3-name-single-quote",
+        "r3-name-double-quote",
+        "q9-fj-flow-block-header",
+        "q9-fo-flow-escaped-event",
+    ],
+)
+def test_harness_workflow_scanner_attacks_open_a_round(
+    tmp_path: Path, head_text: str, reason: str
+) -> None:
+    # `reason` names the power the attack aimed at; the structural rule catches
+    # it without reading the power at all.
+    del reason
+    _workflow_round(_native_delta(tmp_path, head_text))
+
+
+@pytest.mark.parametrize(
+    "workflow",
+    [
+        f'jobs:\n  r:\n    steps:\n      - uses: "{_BS}x2e/scripts/ci"\n',
+        f'jobs:\n  r:\n    steps:\n      - uses: "{_BS}u002e/scripts/ci"\n',
+        "jobs:\n  r:\n    steps:\n      - uses: ./scripts/ci\r\n",
+    ],
+    ids=["dq-escaped-dot", "dq-unicode-dot", "crlf"],
+)
+def test_ship_reference_through_yaml_escapes_reaches(tmp_path: Path, workflow: str) -> None:
+    """Review R2-M1: a ship file is scanned raw AND with double-quoted escapes
+    decoded, so `"\\x2e/scripts/ci"` still names the local action directory."""
+    _reached(_reach(tmp_path, {".github/workflows/release.yml": workflow}))

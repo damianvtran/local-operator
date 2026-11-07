@@ -60,6 +60,12 @@ each has a regression test):
   hence new — workflow is product.
 - a harness test file (``test_*.py``, ``*_test.py``, ``*.test.*``, ``*.spec.*``)
   that names or imports a ship-closure file is product: it guards shipped code.
+- any changed file under ``.github/``, any ``action.yml``/``action.yaml``, and any
+  YAML file a ``uses: ./…`` step names is a round, harness-declared or not:
+  whether a workflow can ship is not decidable without parsing YAML the way
+  GitHub does, so workflow/action files never take the carve-out.
+- ``uses: ./<dir>`` names every file under ``<dir>`` (a local action is a
+  directory, spelled without the trailing slash the directory rule looks for).
 - an unparsable tsconfig/alias file at head is exit 2 rather than a silent
   fallback to weaker matching.
 
@@ -122,6 +128,12 @@ _JS_SPEC = re.compile(r"""['"`](\.\.?/[^'"`\s]*|[@~]/[^'"`\s]*)['"`]""")
 #: every line start, so a greedy multi-line class costs O(n^2) (measured: 36 min
 #: of CPU on one 120 KB module before this shape).
 _SH_SOURCE = re.compile(r"""(?m)(?:^|[;&|(])[ \t]*(?:source|\.)[ \t]+["']?([^\s;|&)'"]+)""")
+#: ``uses: ./<dir>`` — a local action is a DIRECTORY holding action.yml, named
+#: without a trailing slash, so the spelled-directory rule alone never saw it.
+#: Not line-anchored: flow (``- {uses: ./x}``, ``[{…, uses: ./x}]``) and quoted
+#: (``"uses": './x'``) steps are the same step to GitHub (#3540 R3/Q4). Same
+#: linearity rule: the gaps are ``[ \t]*``, nothing crosses a newline.
+_LOCAL_USES = re.compile(r"""["']?\buses["']?[ \t]*:[ \t]*["']?\./([^'"\s@#,}\]]+)""")
 #: Python relative import: ``from ..pkg.mod import a, b``. Same linearity rule:
 #: the imported-name run stops at end of line, never crossing one.
 _PY_RELATIVE = re.compile(r"""(?m)^[ \t]*from[ \t]+(\.+)([\w.]*)[ \t]+import[ \t]+([^\n]*)""")
@@ -502,6 +514,11 @@ class _Index:
             # (measured round 2), and a word is not a path reference.
             if spelled_dir:
                 take("dir", token, self.by_dir.get(token))
+        for spec in _LOCAL_USES.findall(text):
+            local = posixpath.normpath(spec.rstrip("/"))
+            if local in self.paths:
+                hits.add(local)
+            take("dir", local, self.by_dir.get(local))
         here = posixpath.dirname(path)
         for spec in _JS_SPEC.findall(text):
             if spec.startswith((".", "@", "~")):
@@ -566,7 +583,7 @@ def ship_closure(repo: Path, head: str, manifest: Manifest) -> Closure:
             text = blobs.get(tree[path][1])
             if text is None:
                 continue
-            for named in sorted(index.named_by(path, text, spent)):
+            for named in sorted(index.named_by(path, reference_text(text), spent)):
                 if named not in origin:
                     origin[named] = path
         added_link = False
@@ -597,6 +614,84 @@ def ship_closure(repo: Path, head: str, manifest: Manifest) -> Closure:
         if not fresh and not added_link:
             break
     return Closure(origin, problems, index)
+
+
+# --- workflow/action files never take the carve-out -------------------------------
+#
+# #3540 tried to let a changed harness workflow stay exempt unless it could ship
+# — a trigger, a secret, a write permission or a publishing step — read first
+# from YAML structure by a line reader, then from raw text, then with a scanner
+# for YAML indirection (escapes, anchors, tags, complex keys). Reviewers broke
+# every version (rounds 1-3), because each one stood on an invariant that cannot
+# be checked cheaply: "reads YAML the way GitHub does". So the shortcut is not
+# taken: a changed workflow or action is ALWAYS a round. That covers every file
+# under `.github/` and any `*.yml`/`*.yaml` a `uses: ./…` step names (a local
+# action's `action.yml`, a reusable workflow). The probes such workflows RUN can
+# still be exempt-able; the files that decide how they run cannot.
+
+#: YAML double-quoted escapes that spell a different character than their bytes.
+_YAML_ESCAPE = re.compile(
+    r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(/)|\n[ \t]*)"
+)
+
+
+def _decoded_escapes(text: str) -> str | None:
+    """``text`` with YAML double-quoted escapes decoded, or None if one cannot
+    be (the caller then keeps the raw text alone, which is the whole file)."""
+    if "\\" not in text:
+        return ""
+
+    def one(match: re.Match[str]) -> str:
+        hexa = match.group(1) or match.group(2) or match.group(3)
+        if hexa:
+            return chr(int(hexa, 16))
+        return "/" if match.group(4) else ""
+
+    try:
+        return _YAML_ESCAPE.sub(one, text)
+    except (ValueError, OverflowError):
+        return None
+
+
+def reference_text(text: str) -> str:
+    """What a ship file's reachability scan reads: the raw text with CRLF
+    normalised, plus — when it holds backslashes — the same text with YAML
+    double-quoted escapes decoded (#3540 R2-M1: `uses: "\\x2e/scripts/ci"`).
+    An undecodable escape leaves the raw text, which already counts in full."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    decoded = _decoded_escapes(text)
+    return text if not decoded else text + "\n" + decoded
+
+
+_YAML_SUFFIXES = (".yml", ".yaml")
+
+
+def _uses_targets(repo: Path, tree: dict[str, tuple[str, str]]) -> set[str]:
+    """Every YAML file a ``uses: ./…`` step in any head YAML file can load: the
+    named file itself, or ``action.yml``/``action.yaml`` in the named directory.
+    Escapes are decoded first (``"\\x2e/x"``), CRLF normalised."""
+    yamls = {
+        p: oid
+        for p, (mode, oid) in tree.items()
+        if p.endswith(_YAML_SUFFIXES) and mode not in (SYMLINK_MODE, GITLINK_MODE)
+    }
+    texts = _blobs(repo, set(yamls.values()))
+    targets: set[str] = set()
+    for oid in yamls.values():
+        for spec in _LOCAL_USES.findall(reference_text(texts.get(oid, ""))):
+            local = posixpath.normpath(spec.rstrip("/"))
+            targets.update({local, f"{local}/action.yml", f"{local}/action.yaml"})
+    return targets
+
+
+def _workflow_file(path: str, used: set[str]) -> bool:
+    """A file that decides how a workflow runs: anything under ``.github/``, an
+    ``action.yml``/``action.yaml`` anywhere, or a YAML file a ``uses:`` names."""
+    return (
+        path.startswith(_GITHUB_PREFIX)
+        or posixpath.basename(path) in ("action.yml", "action.yaml")
+        or (path.endswith(_YAML_SUFFIXES) and path in used)
+    )
 
 
 # --- proof ----------------------------------------------------------------------
@@ -676,6 +771,7 @@ def prove(
 
     changes = _changed(repo, reviewed_sha, head_sha)
     closure = ship_closure(repo, head_sha, manifest)
+    used = _uses_targets(repo, _tree(repo, head_sha))
     # DOTALL makes the globs match a path that contains a newline; the batch
     # protocol now speaks ids. The remaining risk is a consumer built on those
     # paths (a shell step, a `git show rev:path`), so a newline or CR anywhere the
@@ -719,6 +815,13 @@ def prove(
                 reasons.append(f"product path changed: `{path}` ({kind})")
             rows.append(f"  - `{path}` — {kind}")
             continue
+        if _workflow_file(path, used):
+            reasons.append(
+                f"workflow/action file changed: `{path}` — workflow/action files never take "
+                "the carve-out"
+            )
+            rows.append(f"  - `{path}` — harness workflow/action file, round")
+            continue
         if path in closure.origin:
             reasons.append(f"ship-reachable: `{path}` named by `{closure.origin[path]}`")
             rows.append(f"  - `{path}` — harness, SHIP-REACHABLE via `{closure.origin[path]}`")
@@ -752,7 +855,8 @@ def prove(
         "- Fail-closed rules applied: gitlink/.gitmodules → product; symlink change → product; "
         "ship symlink leaving the repo → round; unreadable object → exit 2; "
         "`.github/` harness globs must be exact filenames; harness test guarding ship code → "
-        "product; added workflow unmatched by the manifest → product",
+        "product; added workflow unmatched by the manifest → product; any changed `.github/` "
+        "file, action.yml or `uses:`-named YAML → round; `uses: ./<dir>` → everything under it",
         f"- Changed paths ({len(changes)}):",
         *(rows or ["  - (none)"]),
     ]
