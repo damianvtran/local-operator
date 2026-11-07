@@ -5219,6 +5219,34 @@ async def test_wake_create_list_cancel(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_wake_writer_stamps_who_wrote_the_message(tmp_path) -> None:
+    """The agent's own create is model-authored; the desktop owner command is not.
+
+    ``WakeSchedule.origin`` is what the divergence guard reads to decide whether a
+    fired wake's message may explain a project root. The agent's ``wake`` tool
+    leaves the default (``tool`` — the model scheduled itself), while the desktop
+    owner command reaches this SAME helper through
+    ``Session.route_shared_slash("wake", …)`` and must say ``desktop``: no user
+    turn is ever synthesised for a wake, so a row stamped model-authored would
+    let the guard tell the operator their own instruction was never given.
+    """
+    scheduler = _FakeScheduler()
+    context = ToolContext(cwd=str(tmp_path), session_id="s", wake_scheduler=scheduler)
+    tools = {t.name: t for t in create_tools(context)}
+
+    await tools["wake"].execute(
+        "c", {"op": "create", "message": "agent text", "in": "30m"}, None, None, context
+    )
+    desktop = builtin.WakeParams.model_validate(
+        {"op": "create", "message": "person text", "in": "30m"}
+    )
+    await builtin._wake_create("d", desktop, scheduler, int(time.time() * 1000), origin="desktop")
+
+    assert [row.origin for row in scheduler.schedules] == ["tool", "desktop"]
+    assert [row.message_author for row in scheduler.schedules] == ["model", "operator"]
+
+
+@pytest.mark.asyncio
 async def test_wake_create_carries_notify_and_the_schema_advertises_it(tmp_path) -> None:
     # §14.4: both halves — the field is on the schema the model reads, and it
     # plumbs through to the schedule the delivery later reads. Either half

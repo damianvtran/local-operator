@@ -59,6 +59,33 @@ MAX_WAKE_MESSAGE_CHARS = 2_000
 MAX_WAKE_SCHEDULES = 16
 
 
+#: ``WakeSchedule.origin`` values whose ``message`` a PERSON wrote.
+#:
+#: The rest (``tool``) means the scheduling MODEL wrote it — the agent's own
+#: ``wake`` tool, Aida's cadence, the librarian's, a patience wait, the video
+#: check-wake. That is the fail-toward-silence-for-suppression default: an
+#: unattributed row must not be able to explain a root to the divergence guard.
+OPERATOR_WAKE_ORIGINS = frozenset({"cli", "desktop", "tui"})
+
+#: ``WakeSchedule.origin`` values whose ``message`` the scheduling MODEL wrote.
+#:
+#: Expressed as its own set rather than as "everything that is not an operator
+#: value" ON PURPOSE. ``message_author`` must fail toward the hedge, and the
+#: complement form fails toward the claim: adding a fifth literal to
+#: :data:`WakeOrigin` and forgetting one of these two sets returned ``"model"``
+#: — the literal-added-in-one-place-and-forgotten-in-another shape the predicate
+#: exists to prevent, in the direction that produces a false notice about the
+#: operator's own words (review round 6, R6-MINOR-2). A value in neither set is
+#: unknown, and unknown answers ``""``.
+MODEL_WAKE_ORIGINS = frozenset({"tool"})
+
+#: The writers a wake row can name as the author of its message. Typed rather
+#: than ``str`` so a caller cannot pass a value that ``model_copy`` (which does
+#: not re-validate) would store unvalidated and the next ``load()`` would then
+#: DROP as an invalid row — a typo would silently lose the wake, not fail loudly.
+WakeOrigin = Literal["tool", "cli", "desktop", "tui"]
+
+
 class WakeSchedule(BaseModel):
     """One scheduled wake. ``id`` is a stable per-session handle (``w1``…)."""
 
@@ -158,6 +185,75 @@ class WakeSchedule(BaseModel):
     #: the mechanism supplies defaults and bounds).
     note: str = ""
 
+    # ---- who WROTE ``message`` --------------------------------------------
+    # ``message`` has two possible authors, and nothing else on this row says
+    # which one it is. A row built by the agent's ``wake`` tool, by Aida's or
+    # the librarian's engines, by a patience wait or by the video check-wake
+    # carries MODEL text; a row the operator created through ``lop wake
+    # create``, the desktop wake route or the TUI schedule page carries THE
+    # OPERATOR's own words. ``format_wake_delivery_text`` renders that message
+    # verbatim and no user turn is ever synthesised for a wake
+    # (``server/routes/desktop_wakes.py`` explains why), so for an
+    # operator-created row the delivery is the ONLY copy of the instruction —
+    # a reader that treats the two authors alike either silences the
+    # divergence guard on model text or claims the operator's own instruction
+    # is absent from the session. Both are wrong; this field is how a reader
+    # tells them apart.
+    #
+    # SKEW: additive with the usual rule for this model (``extra="forbid"`` +
+    # ``load()``'s drop-with-warning). A build that predates the field drops a
+    # row carrying it; a row written by such a build reads back with NO origin
+    # here — unattributed, not model-authored. The default is ``None`` for
+    # exactly that reason: rows are persisted with a plain ``model_dump()``, so
+    # "the field was never written" and "the field says tool" are different
+    # bytes, and only the second is a claim about who wrote the words. Every
+    # row that predates this field is in the first case (167 of 167 sampled on
+    # a live machine), and answering ``tool`` for them stamped the operator's
+    # own pre-upgrade instruction ``wake_author="model"`` — so the judge saw a
+    # known author, never recorded ``unseen=unattributed_wake``, and the notice
+    # asserted their instruction was in no user message (review round 5, R5-
+    # MAJOR-1). ``None`` reaches the hedge instead, which is the honest answer
+    # for a row nobody stamped.
+    #
+    # Every model-side writer stamps ``"tool"`` explicitly — the direct row
+    # constructors in ``aida/proactive.py``, ``librarian/proactive.py``,
+    # ``wakes/patience.py`` and ``asks/queue.py``, plus ``arm_wake``'s default
+    # (which covers the agent's ``wake`` tool) — and an edit carries the row's
+    # own value forward (``harness/wake.py``'s ``build_wake_edit``) EXCEPT when
+    # the edit replaces the message: those words have a new author, so the
+    # editing surface stamps its own origin and a model-armed row reworded by
+    # the operator reads as the operator's (review round 6, R6-MAJOR-1). A
+    # bounds-only edit changes no words and keeps the row's author. Leaving it
+    # unset is therefore only ever a fact about a row, not a forgotten stamp.
+    origin: WakeOrigin | None = None
+
+    @property
+    def message_author(self) -> str:
+        """``"operator"``, ``"model"`` or ``""`` — who wrote ``message``.
+
+        Two-valued for every row that names a KNOWN writer, and ``""`` for a
+        row that names none (``origin`` unset: written before the field existed,
+        or by a writer outside this tree) OR names something this build does not
+        recognise. Consumers ask ONE question — could anybody but this session's
+        model have said these words? — and ``""`` is the honest answer when the
+        row does not say: it is not ``"model"`` (a claim about a row nobody
+        stamped, and the one that produced the round-5 false notice) and it is
+        not ``"operator"`` (which would let an unattributed row explain a root
+        the model invented). An unknown literal lands here too rather than
+        asserting model authorship — the same unsafe direction as the unstamped
+        case (review round 6, R6-MINOR-2).
+
+        :func:`local_operator.divergence._wake_author` reads this through the
+        delivery's ``wake_author`` detail and hedges the notice on ``""``.
+        Keep the predicate here so a new ``origin`` literal cannot be added in
+        one place and forgotten in another.
+        """
+        if self.origin in OPERATOR_WAKE_ORIGINS:
+            return "operator"
+        if self.origin in MODEL_WAKE_ORIGINS:
+            return "model"
+        return ""
+
 
 class DueWake(BaseModel):
     """A wake that is due right now, handed to the ``deliver`` callback."""
@@ -174,6 +270,9 @@ __all__ = [
     "MAX_WAKE_MESSAGE_CHARS",
     "MAX_WAKE_SCHEDULES",
     "MIN_WAKE_INTERVAL_MS",
+    "MODEL_WAKE_ORIGINS",
+    "OPERATOR_WAKE_ORIGINS",
+    "WakeOrigin",
     "DueWake",
     "WakeSchedule",
 ]

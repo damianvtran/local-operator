@@ -9186,10 +9186,28 @@ class ServingSessionHandle(SessionHandle):
                 return self._wake_failure(
                     SlashResult, "The wake request was not a valid create.", "wake_invalid"
                 )
-            result = await _wake_create(tool_call_id, params, scheduler, int(time.time() * 1000))
+            # ``origin="desktop"``: this is the desktop's "new scheduled task"
+            # form reaching the runtime that owns the session, so the message is
+            # the person's — not the model's. Without the stamp the fired
+            # delivery would read as model-authored and the divergence guard
+            # would tell the operator their own instruction never existed.
+            result = await _wake_create(
+                tool_call_id, params, scheduler, int(time.time() * 1000), origin="desktop"
+            )
         elif op == "edit":
+            # ``editor_origin="desktop"``: the operator's replacement text is
+            # theirs, so re-wording a MODEL-armed row must not deliver as model
+            # authorship (that is what made the divergence guard call their own
+            # sentence new to the session — review round 6, R6-MAJOR-1). The
+            # builder stamps only when the text changed, so re-timing keeps the
+            # row's author.
             result = await _wake_edit(
-                tool_call_id, wake_id, dict(request), scheduler, int(time.time() * 1000)
+                tool_call_id,
+                wake_id,
+                dict(request),
+                scheduler,
+                int(time.time() * 1000),
+                editor_origin="desktop",
             )
         elif op == "cancel":
             params = WakeParams.model_validate({"op": "cancel", "id": wake_id})

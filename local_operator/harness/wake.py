@@ -59,6 +59,7 @@ from local_operator.harness.wake_types import (
     MIN_WAKE_INTERVAL_MS as MIN_WAKE_INTERVAL_MS,
 )
 from local_operator.harness.wake_types import DueWake as DueWake
+from local_operator.harness.wake_types import WakeOrigin as WakeOrigin
 from local_operator.harness.wake_types import WakeSchedule as WakeSchedule
 
 logger = logging.getLogger(__name__)
@@ -568,7 +569,12 @@ _EDIT_KEYS = ("message", "in", "at", "every", "until", "limit", "notify")
 
 
 def build_wake_edit(
-    request: dict[str, Any], existing: list[WakeSchedule], wake_id: str, now_ms: int
+    request: dict[str, Any],
+    existing: list[WakeSchedule],
+    wake_id: str,
+    now_ms: int,
+    *,
+    editor_origin: WakeOrigin | None = None,
 ) -> WakeBuildResult:
     """Validate an EDIT of one existing row, addressed by ``wake_id``.
 
@@ -589,6 +595,16 @@ def build_wake_edit(
       the message and nothing else keeps the row's existing instant, past or
       future, through ``pinned_due_ms``; ``fired_count`` and ``created_at``
       ride along for the same reason (an edit is the same row, not a new one).
+    - **A replaced message gets a new author.** ``editor_origin`` is the
+      surface that is DOING the editing, and it is stamped only when the merged
+      text differs from the row's: those are the editor's words. An operator
+      re-wording a model-armed reminder used to keep ``origin="tool"``, so the
+      delivery read as model-authored and the divergence guard told the
+      operator their own sentence was absent from the session — the false
+      notice this module exists to prevent (review round 6, R6-MAJOR-1). A
+      bounds-only edit changes no words and keeps the row's author, and a writer
+      that is not a person (the cadence engines) passes nothing and so keeps
+      the row's own origin.
     """
     target = next((schedule for schedule in existing if schedule.id == wake_id), None)
     if target is None:
@@ -623,6 +639,18 @@ def build_wake_edit(
     if not moves_time:
         merged.pop("in", None)
         merged.pop("at", None)
+    # THE WORDS, not the request: a caller may send ``message`` back unchanged
+    # (the TUI posts its whole form, the desktop its whole body), and a request
+    # that merely CARRIES the old text has not re-authored it.
+    #
+    # STRIPPED ON BOTH SIDES (round 7, QA minor): the request arrives raw, but
+    # every stored row's message was stripped by ``build_wake_schedule`` on the
+    # way in. Comparing them raw made a padding-only edit look like a reword, so
+    # the row was re-stamped operator-authored while its bytes still matched the
+    # model's — erasing the notice that should have fired. A non-str ``message``
+    # is not a reword; the validator below rejects it.
+    reported = merged["message"]
+    reworded = isinstance(reported, str) and reported.strip() != target.message.strip()
     outcome = build_wake_schedule(
         merged,
         [schedule for schedule in existing if schedule.id != wake_id],
@@ -648,6 +676,21 @@ def build_wake_edit(
                 # R10 — the one strip site in the tree; advance/load/update/re-arm
                 # all preserve it).
                 "request_id": target.request_id,
+                # THE AUTHOR SURVIVES AN EDIT unless the edit replaced the
+                # words. ``build_wake_schedule`` builds a FRESH row, so without
+                # carrying something here every edit turned an operator's own
+                # scheduled instruction into model-authored text — and the
+                # divergence guard then told the operator their own words were
+                # absent from the session. Carrying the ORIGIN is what fixes
+                # that for a bounds-only edit; it is wrong for a reword, because
+                # ``origin`` is "who WROTE ``message``" (``wake_types.py``) and
+                # the reworded text is the editor's. So: the editor's origin when
+                # the text moved and the editor named itself, the row's own
+                # origin otherwise. Unchanged, the desk and the TUI are the same
+                # person who armed the row.
+                "origin": (
+                    editor_origin if (reworded and editor_origin is not None) else target.origin
+                ),
             }
         )
     }

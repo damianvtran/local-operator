@@ -3735,6 +3735,26 @@ class LoopConfig(BaseModel):
     #: should hold to; anything that touches disk, a lock or a socket belongs on
     #: the far side of a queue, not here.
     capture_prepared_write: Callable[[ToolCall, ToolResult], None] | None = None
+    #: The session's divergence observer (``local_operator.divergence.
+    #: DivergenceJudge``), or ``None`` for a host that does not wire one.
+    #:
+    #: Duck-typed rather than annotated with its real class on purpose: this
+    #: module is on deliberately light import paths (the evaluation runner
+    #: asserts the renderer's import closure stays clean) and the judge carries
+    #: a filesystem audit writer, so naming it here would drag both in. The
+    #: loop calls exactly one method on it — ``observe_turn(**kwargs)`` — and
+    #: treats the return value as opaque.
+    #:
+    #: The loop invokes it SYNCHRONOUSLY once per finished tool call, inside the
+    #: turn, wrapped so it cannot raise into the turn. An implementation must
+    #: therefore stay cheap on the common path: the shipped judge extracts
+    #: candidate paths with string work only and touches disk once per NOVEL
+    #: root, never per call.
+    #:
+    #: OBSERVATION ONLY. Nothing this observer returns can deny, approve, delay
+    #: or re-route a call — a guard that could is a gate, and this one exists to
+    #: make a derailed turn *visible*, not to stop it.
+    divergence_judge: Any = Field(default=None, exclude=True)
     record_tool_call: Callable[[str, str, str, float], None] | None = Field(
         default=None, exclude=True
     )

@@ -494,6 +494,12 @@ def cadence_schedule(
     return WakeSchedule(
         id=CADENCE_ID,
         message=cadence_message(config_dir, now_ms),
+        # ENGINE TEXT, stamped rather than left unset: ``origin`` defaults to
+        # ``None`` (= unattributed, which hedges), and this cadence line was
+        # written by the engine on the model's behalf, so "tool" is the true
+        # answer — leaving it unset would make every librarian delivery claim a
+        # carrier went unread.
+        origin="tool",
         next_due_at=due,
         every_ms=None,
         created_at=created_at,
@@ -612,6 +618,7 @@ def reconcile(
                 WakeSchedule(
                     id=_next_extra_id({row.id for row in kept}),
                     message=with_quiet_clause(message or DEFAULT_EXTRA_MESSAGE),
+                    origin="tool",
                     next_due_at=due,
                     every_ms=None,
                     created_at=now,

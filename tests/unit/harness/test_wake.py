@@ -224,6 +224,100 @@ class TestBuildSchedule:
         assert "error" not in cleared
         assert cleared["schedule"].notify is False
 
+    def test_an_edit_stamps_its_editor_only_when_it_replaces_the_words(self):
+        """R6-MAJOR-1: ``origin`` is who WROTE ``message``, and a reword moves it.
+
+        An operator re-wording a model-armed reminder used to keep
+        ``origin="tool"``, so the delivery read as model-authored and the
+        divergence guard told the operator their own sentence was absent from
+        the session. The stamp therefore follows the WORDS, not the request:
+        the TUI and the desktop post their whole form/body, so a caller that
+        carries the old text back unchanged has not re-authored it — and an
+        operator who only moves the time must not take authorship of a model's
+        message (nor a model edit of an operator's, which the tree cannot reach
+        but which the same rule covers).
+        """
+        from local_operator.harness.wake import build_wake_edit
+
+        built = build_wake_schedule({"message": "check the build", "in": "5m"}, [], NOW)
+        assert "error" not in built
+        model_row = built["schedule"].model_copy(update={"origin": "tool"})
+
+        reworded = build_wake_edit(
+            {"message": "deploy the fix"}, [model_row], model_row.id, NOW, editor_origin="tui"
+        )
+        assert "error" not in reworded
+        assert reworded["schedule"].origin == "tui"
+        assert reworded["schedule"].message_author == "operator"
+
+        # The operator's whole form comes back with the same text: no new author.
+        carried = build_wake_edit(
+            {"message": "check the build"},
+            [model_row],
+            model_row.id,
+            NOW,
+            editor_origin="tui",
+        )
+        assert "error" not in carried
+        assert carried["schedule"].origin == "tool", "a carried-back message is not a reword"
+
+        # Padding is not authorship (round 7, QA minor): the request arrives
+        # un-stripped while the row's text was stripped on the way in, so a
+        # whitespace-only "edit" must not look like a reword — re-stamping here
+        # would erase a notice for words the operator never changed.
+        padded = build_wake_edit(
+            {"message": "   check the build   "},
+            [model_row],
+            model_row.id,
+            NOW,
+            editor_origin="desktop",
+        )
+        assert "error" not in padded
+        assert padded["schedule"].origin == "tool", "padding alone is not a reword"
+        assert padded["schedule"].message_author == "model"
+        assert padded["schedule"].message == model_row.message
+
+        # Time only: the words did not move, so neither did the author.
+        retimed = build_wake_edit(
+            {"in": "45m"}, [model_row], model_row.id, NOW, editor_origin="desktop"
+        )
+        assert "error" not in retimed
+        assert retimed["schedule"].origin == "tool"
+        assert retimed["schedule"].message_author == "model"
+
+        # An engine that names no editor (the cadence re-timers) keeps the row's
+        # own origin even when it regenerates the text.
+        engine = build_wake_edit(
+            {"message": "check the build (daily)"}, [model_row], model_row.id, NOW
+        )
+        assert "error" not in engine
+        assert engine["schedule"].origin == "tool"
+
+
+def test_the_author_predicate_hedges_on_a_literal_it_does_not_know() -> None:
+    """R6-MINOR-2: ``message_author`` fails CLOSED.
+
+    This predicate is what tells the divergence guard whether a wake's words
+    could be anybody but the model's, so its fallthrough decides between a
+    hedge and a false notice about the operator's own sentence. A future
+    ``origin`` literal added to the type and forgotten here must answer ``""``
+    (hedge) — not ``"model"``, which is the claim that path used to make.
+    """
+
+    def row(origin: Any) -> WakeSchedule:
+        return WakeSchedule(
+            id="w1", message="m", next_due_at=NOW, created_at=NOW - 1000, origin=origin
+        )
+
+    assert row("cli").message_author == "operator"
+    assert row("desktop").message_author == "operator"
+    assert row("tui").message_author == "operator"
+    assert row("tool").message_author == "model"
+    assert row(None).message_author == ""
+    # ``model_copy`` does not re-validate, which is how an unknown literal
+    # reaches a live row at all; ``load`` would drop it rather than guess.
+    assert row("tool").model_copy(update={"origin": "tomorrow"}).message_author == ""
+
 
 class TestAdvance:
     def one_shot(self, **kw) -> WakeSchedule:

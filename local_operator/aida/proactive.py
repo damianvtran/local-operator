@@ -722,6 +722,13 @@ def cadence_schedule(
     return WakeSchedule(
         id=CADENCE_ID,
         message=cadence_message(config_dir, now_ms),
+        # ENGINE TEXT, stamped rather than left unset: ``origin`` defaults to
+        # ``None`` (= unattributed → the notice hedges), and this line is
+        # composed by the engine on the model's behalf. "tool" is the true
+        # answer, so a fire that names a root can be judged on the text instead
+        # of on a hedge. (The local ``origin`` above is the phase name this
+        # row carries as ``request_id`` — a different field.)
+        origin="tool",
         next_due_at=max(due, now_ms + 1_000) if due <= now_ms else due,
         request_id=origin,
         every_ms=None,
@@ -1055,6 +1062,7 @@ def reconcile(
                             # reply test applies to extras exactly as it does
                             # to the cadence (one constant, three writers).
                             message=with_quiet_clause(message or DEFAULT_EXTRA_MESSAGE),
+                            origin="tool",
                             next_due_at=due,
                             every_ms=None,
                             created_at=now,
@@ -1129,6 +1137,7 @@ def reconcile(
                 WakeSchedule(
                     id=GREETING_WAKE_ID,
                     message=_onboarding.greeting_message(config_dir),
+                    origin="tool",
                     next_due_at=now,
                     every_ms=None,
                     created_at=now,
@@ -1357,6 +1366,7 @@ def consume_triggers(
     row = WakeSchedule(
         id=row_id,
         message=compose_trigger_message(kept, overflow=int(record.get("overflow") or 0)),
+        origin="tool",
         next_due_at=moment,
         every_ms=None,
         created_at=moment,
