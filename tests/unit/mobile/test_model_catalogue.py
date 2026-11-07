@@ -621,3 +621,80 @@ def test_an_unresolvable_default_is_null_not_absent_and_never_fails_the_sheet(mo
 def test_models_default_requires_authentication():
     with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
         assert client.get("/api/models").status_code == 401
+
+
+# --------------------------------------------------------------------------
+# Per-row effort ladders, so the phone's picker offers only real rungs
+# (operator: "both model and effort are selectable")
+# --------------------------------------------------------------------------
+
+
+def _row(provider: str, model_id: str):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        selector=f"{provider}/{model_id}",
+        provider=provider,
+        model_id=model_id,
+        listing_name="",
+        label=f"{provider}/{model_id}",
+        connected=True,
+        aggregated=provider in {"openrouter", "radient"},
+    )
+
+
+def test_rows_publish_the_effort_ladder_empty_for_none_and_omit_unknown():
+    from local_operator.mobile.daemon import _model_rows
+    from local_operator.model.effort import supported_efforts
+
+    opus, haiku, unknown = _model_rows(
+        [
+            _row("anthropic", "claude-opus-5-5"),
+            _row("anthropic", "claude-haiku-4-5-20251001"),
+            _row("openrouter", "vendor/not-a-real-model"),
+        ]
+    )
+    # The table's own ladder, in its order -- the one ``default.effort`` is
+    # clamped to, so the picker and the published default cannot disagree.
+    assert opus["efforts"] == list(supported_efforts("claude-opus-5-5"))
+    assert opus["efforts"] == ["low", "medium", "high", "xhigh", "max"]
+    # A shipped model with no knob says so: ``[]``, not "unknown".
+    assert haiku["efforts"] == []
+    # Unknown is the ABSENT key -- what an older relay means too -- never null.
+    assert "efforts" not in unknown
+
+
+def test_default_effort_on_a_model_with_no_levels_is_null():
+    _write_config(
+        {
+            "hosting": "anthropic",
+            "model_name": "claude-haiku-4-5-20251001",
+            "model_effort": "medium",
+        }
+    )
+    import local_operator.mobile.daemon as daemon_module
+
+    published = daemon_module._configured_default()
+    assert published is not None and published["effort"] is None
+
+
+def test_default_effort_on_an_unknown_model_is_the_raw_configured_level():
+    """The table cannot speak for it; the child may run the level a provider
+    listing supports, so publishing ``null`` ("no effort") would be wrong."""
+    _write_config(
+        {"hosting": "openrouter", "model_name": "vendor/not-a-real-model", "model_effort": "high"}
+    )
+    import local_operator.mobile.daemon as daemon_module
+
+    published = daemon_module._configured_default()
+    assert published is not None
+    assert published["model_id"] == "vendor/not-a-real-model"
+    assert published["effort"] == "high"
+
+
+def test_default_effort_on_an_unknown_model_with_nothing_configured_is_null():
+    _write_config({"hosting": "openrouter", "model_name": "vendor/not-a-real-model"})
+    import local_operator.mobile.daemon as daemon_module
+
+    published = daemon_module._configured_default()
+    assert published is not None and published["effort"] is None

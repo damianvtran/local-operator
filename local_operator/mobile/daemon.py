@@ -11489,6 +11489,45 @@ def _resolve_start_model(provider: str | None, model_id: str | None) -> tuple[st
     )
 
 
+def _effort_ladder(
+    provider: str, model_id: str, shipped: "dict[str, frozenset[str]] | None" = None
+) -> list[str] | None:
+    """The effort levels ``provider/model_id`` accepts, or ``None`` if unknown.
+
+    ONE answer for both ``GET /api/models`` surfaces -- each row's ``efforts``
+    and the ``default.effort`` clamp -- so the picker never offers a rung the
+    published default could not have been clamped to, and vice versa. The
+    source is the offline effort table (``model.effort``), the same one
+    ``resolve_effort`` clamps against.
+
+    Three answers, because the phone needs to tell them apart:
+
+    * the table's ladder, in its order, when the table knows the model;
+    * ``[]`` when the table has no arm for it but the SHIPPED registry lists
+      it for this provider: we describe that model, so the table's silence is
+      a statement -- no effort knob (Claude Haiku 4.5 is the motivating case);
+    * ``None`` when neither knows it: an aggregator's or a listing-only id,
+      whose ladder (if any) only a live provider listing can supply. The
+      child may well run a level there, so "none" would be a guess.
+
+    ``shipped`` memoises the registry per credential provider: ``_model_rows``
+    asks this for ~1000 rows and ``static_models`` copies its map per call.
+    """
+    from local_operator.model.effort import effort_support
+    from local_operator.model.registry import static_models
+    from local_operator.providers.registry import credential_provider_id
+
+    support = effort_support(model_id)
+    if support is not None:
+        return list(support.levels)
+    key = credential_provider_id(provider)
+    if shipped is None:
+        shipped = {}
+    if key not in shipped:
+        shipped[key] = frozenset(static_models(key))
+    return [] if model_id in shipped[key] else None
+
+
 def _configured_default() -> dict[str, Any] | None:
     """The model and effort a Start with no selection births on, or ``None``.
 
@@ -11498,15 +11537,21 @@ def _configured_default() -> dict[str, Any] | None:
     default", which the client renders as unavailable rather than guessing; an
     ABSENT key means an older relay that does not publish one.
 
-    ``effort`` is the configured ``model_effort`` CLAMPED to the model's ladder
-    (``model.effort.resolve_effort``), i.e. the level the turn will actually
-    send, or the model's documented default when nothing is configured. It is
-    the offline table's answer; the child clamps against the spec's ladder,
-    which a provider listing may supply, so the two differ only where that
-    listing and the table disagree about the model's rungs. ``None`` when the
-    model exposes
-    no levels. Never raises: a broken config must cost the sheet its default
-    marker, not its whole model list.
+    ``effort`` follows :func:`_effort_ladder`, the ladder each row's
+    ``efforts`` publishes:
+
+    * a known ladder: the configured ``model_effort`` CLAMPED to it
+      (``model.effort.resolve_effort``), i.e. the level the turn will actually
+      send, or the model's documented default when nothing is configured;
+    * a known empty ladder: ``None`` -- the model exposes no levels;
+    * an unknown model: the RAW configured ``model_effort`` (``None`` when
+      unset). The child clamps against the spec's ladder, which a provider
+      listing may supply, so publishing ``None`` there told the phone "no
+      effort" while the child could run the configured level. The raw value is
+      the honest unclamped answer; the child still clamps it at birth.
+
+    Never raises: a broken config must cost the sheet its default marker, not
+    its whole model list.
     """
     try:
         from local_operator.config import ConfigManager
@@ -11514,7 +11559,9 @@ def _configured_default() -> dict[str, Any] | None:
         from local_operator.paths import config_dir
 
         provider, model_id = _resolve_start_model(None, None)
-        effort = resolve_effort(model_id, configured_effort(ConfigManager(config_dir())))
+        configured = configured_effort(ConfigManager(config_dir()))
+        ladder = _effort_ladder(provider, model_id)
+        effort = configured if ladder is None else resolve_effort(model_id, configured)
     except Exception:  # noqa: BLE001 -- no default is an answer, not a fault
         logger.debug("mobile models: no configured default", exc_info=True)
         return None
@@ -11536,6 +11583,9 @@ def _model_rows(rows: "list[Any]") -> list[dict[str, Any]]:
     consumer is a phone on a mobile link; re-add a field here when a surface
     actually renders it.
     """
+    # One registry memo for the whole listing: ``_effort_ladder`` is asked
+    # once per row (~1000) and ``static_models`` copies its map per call.
+    shipped: dict[str, frozenset[str]] = {}
     return [
         {
             "selector": row.selector,
@@ -11565,9 +11615,24 @@ def _model_rows(rows: "list[Any]") -> list[dict[str, Any]]:
             "label": row.label,
             "connected": row.connected,
             "aggregated": row.aggregated,
+            # ``efforts``: the levels the effort picker may offer for this row, from
+            # the same ladder ``default.effort`` is clamped to (``_effort_ladder``).
+            # ``[]`` = the model has no effort knob. The key is OMITTED, not
+            # ``null``, when the relay does not know the ladder -- what an older
+            # relay (which never sends it) means too, so a client has ONE "unknown"
+            # spelling: offer the full vocabulary and let the session clamp.
+            **_efforts_field(row.provider, row.model_id, shipped),
         }
         for row in rows
     ]
+
+
+def _efforts_field(
+    provider: str, model_id: str, shipped: "dict[str, frozenset[str]]"
+) -> dict[str, list[str]]:
+    """``{"efforts": ladder}`` for a known ladder, ``{}`` for an unknown one."""
+    ladder = _effort_ladder(provider, model_id, shipped)
+    return {} if ladder is None else {"efforts": ladder}
 
 
 def _list_models() -> list[dict[str, Any]]:

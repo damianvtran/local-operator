@@ -60,11 +60,46 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
   other value is `400 invalid_start_effort`, before a receipt or a spawn. A
   level the chosen model's ladder lacks is clamped to its nearest rung by the
   session, as every other birth level is; the configured default the phone
-  should display is `GET /api/models` → `default.effort`.
+  should display is `GET /api/models` → `default.effort`, and the levels to
+  offer per model are that row's `efforts` (below).
 - The **fingerprint** is the canonical JSON of
   `{cwd, provider, model_id}` exactly as requested, plus `effort` only when one
   was chosen — so a request without `effort` fingerprints byte-for-byte as it
   did before the field existed. Omitted values are not part of it.
+
+### Picking a model and effort: `GET /api/models`
+
+The sheet that feeds this body reads `GET /api/models` (authenticated):
+
+```json
+{
+  "models": [
+    { "selector": "anthropic/claude-opus-5-5", "provider": "anthropic",
+      "model_id": "claude-opus-5-5", "name": "…", "label": "…",
+      "connected": true, "aggregated": false,
+      "efforts": ["low", "medium", "high", "xhigh", "max"] },
+    { "selector": "anthropic/claude-haiku-4-5-20251001", "…": "…", "efforts": [] },
+    { "selector": "radient/auto", "…": "…" }
+  ],
+  "default": { "selector": "anthropic/claude-opus-5-5", "provider": "anthropic",
+               "model_id": "claude-opus-5-5", "effort": "medium" }
+}
+```
+
+- `efforts` is the ordered ladder (lowest first) the effort picker may offer
+  for that row, from the relay's offline effort table — the same ladder
+  `default.effort` is clamped to. `[]` means the model has **no** effort knob:
+  hide or disable the picker and send no `effort`. An **absent** key means the
+  relay does not know the ladder (an aggregator or listing-only id), exactly
+  what an older relay that never sends the field means: offer the whole
+  vocabulary and let the session clamp. It is never `null`.
+- `default` names what a start with no `provider`/`model_id`/`effort` runs.
+  `null` means this relay resolved no default (render "unavailable"); an absent
+  key means an older relay. `default.effort` is the configured `model_effort`
+  clamped to the model's `efforts`, or the model's own default when nothing is
+  configured, `null` for a model whose `efforts` is `[]`, and the configured
+  value **unclamped** for a model whose ladder is unknown (the session clamps
+  it against the provider's listing at birth).
 
 ## Response
 
@@ -141,6 +176,25 @@ replaying while the store is full.
   exists. There is no TTL reclamation, and none should be added without a
   contract change that makes a retired epoch's retries visibly refused rather
   than silently re-run.
+- **Downgrading past the `effort` field breaks keyed starts until the store
+  is moved aside.** A relay from before `effort` validates every stored
+  receipt on each keyed start and rejects a row whose stored intent carries
+  `effort`, so after a rollback over a store holding one, every keyed start
+  answers `503 create_receipts_unavailable`. Because rows never expire or
+  evict (guarantee 8), this does not heal on its own. Unkeyed starts are
+  unaffected. Recovery, on the downgraded machine (the store is opened per
+  request, so the relay need not be stopped):
+
+  ```sh
+  cd "${LOCAL_OPERATOR_CONFIG_DIR:-$HOME/.local-operator}"
+  mv mobile-start-receipts.sqlite3 "mobile-start-receipts.sqlite3.pre-downgrade.$(date +%s)"
+  ```
+
+  The next keyed start creates a fresh store. The cost is that every key
+  recorded before the move is forgotten, so a retry of one of those keys
+  starts a new conversation rather than replaying; let in-flight phone starts
+  settle first. Upgrading again needs no action. Do not move the old file back
+  afterwards: it would drop every key recorded in the fresh store since.
 - **A pending row can remain unresolved indefinitely** if the original child
   never becomes adoptable. That is deliberate: it preserves the identity the
   user's intent already owns, at the cost of requiring an operator/client

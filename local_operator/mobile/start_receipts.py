@@ -44,12 +44,14 @@ CAPABILITY = {
 #: on the wire: a request that omits it must canonicalise to the exact bytes
 #: it produced before the field existed, or every receipt already on disk would
 #: fingerprint differently from its own retry and answer ``create_conflict``.
-_INTENT_FIELDS = frozenset({"cwd", "provider", "model_id"})
 #:
 #: The cost is one-directional: a daemon from BEFORE this field validates its
 #: whole receipt store on every keyed start, so rolling the runtime back over a
 #: store holding an ``effort`` receipt answers keyed starts with
-#: ``create_receipts_unavailable`` until that row is gone. Forward is free.
+#: ``create_receipts_unavailable``. The store never expires or evicts a row, so
+#: that lasts until ``mobile-start-receipts.sqlite3`` is moved aside by hand
+#: (recovery: docs/design/mobile-start-receipts.md, "Downgrade"). Forward is free.
+_INTENT_FIELDS = frozenset({"cwd", "provider", "model_id"})
 _OPTIONAL_INTENT_FIELDS = frozenset({"effort"})
 
 #: Per-field bound on cwd/provider/model_id/effort, in code points.
