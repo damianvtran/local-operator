@@ -1,0 +1,4 @@
+{
+  "wire.outcome_notices.closed": "已完成——运行时已退役",
+  "wire.outcome_notices.retired": "因更新已退役——进行中的一轮被中断，此前的输出已保留"
+}

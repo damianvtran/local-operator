@@ -1,0 +1,3 @@
+{
+  "wire.push_alert.attention_count": "{total, plural, one {{count} беседа ждёт вас} few {{count} беседы ждут вас} many {{count} бесед ждут вас} other {{count} беседы ждут вас}}"
+}

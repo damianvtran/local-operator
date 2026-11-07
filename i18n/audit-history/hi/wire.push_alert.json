@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.push_alert",
+  "history_sha256": "f0ffc64fa2867df9087b9e2b7aada5fad614924edb6765530483ca13a72c7431",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "wire.push_alert",
+      "source_sha256": "37f2c41296bdca27c1af3fb4556c9eb92a39838cf329efa399079ca16703f40a",
+      "context_sha256": "474a9ae81aa908cc296a771bd888148ee892bf9e430c6231955ebf990d322b70",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "session": "b2426af428a1",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (the coder inspected no harness route log)"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev task subagent, profile 'translation-auditor'), first independent audit; independent instance, distinct from every translator",
+        "session": "510262672a4f",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (the coder inspected no harness route log)",
+        "result": "clean-with-findings",
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 2 minor, 2 nit",
+        "independent_from_translator": true,
+        "translator_session": "b2426af428a1",
+        "scope": "full audit of every row of the namespace"
+      },
+      "status": "passed",
+      "note": "First independent audit of the first-pass translation: clean-with-findings (0 blocker, 0 major, 2 minor, 2 nit). The text was later changed to address its minors, so this row is history, not a pass of the final bytes; the final row's audit is the second full audit. target_sha256 is deliberately omitted: the bytes this audit saw were not preserved by the coder and the locale was changed afterwards, so no hash is claimed. Evidence is the translators' and auditors' own reports, not coder-invented output; verdicts are as reported to the coder and verdict counts span both namespaces of the locale (wire.outcome_notices and wire.push_alert), repeated in both rows. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3543); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.push_alert",
+      "source_sha256": "37f2c41296bdca27c1af3fb4556c9eb92a39838cf329efa399079ca16703f40a",
+      "context_sha256": "474a9ae81aa908cc296a771bd888148ee892bf9e430c6231955ebf990d322b70",
+      "target_sha256": "a726766bdabd80841042a69ca38ef7bff2d6a8ec63064215cc7cf0148d353a98",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), remediation of the first-audit minors",
+        "session": "183b6c8919fc",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (the coder inspected no harness route log)"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev task subagent, profile 'translation-auditor'), second independent full audit; independent instance, distinct from every translator",
+        "session": "60dd52618f7c",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (the coder inspected no harness route log)",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 1 minor, 1 nit",
+        "independent_from_translator": true,
+        "translator_session": "183b6c8919fc",
+        "scope": "full audit of every row of the namespace"
+      },
+      "status": "passed",
+      "note": "Second independent full audit of the remediated bytes (target_sha256 re-derived at write time): clean-with-findings (0 blocker, 0 major, 1 minor, 1 nit). Evidence is the translators' and auditors' own reports, not coder-invented output; verdicts are as reported to the coder and verdict counts span both namespaces of the locale (wire.outcome_notices and wire.push_alert), repeated in both rows. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3543); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    }
+  ]
+}
