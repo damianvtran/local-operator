@@ -34,7 +34,7 @@
     "target": "0e3170cda8d31b8e3b2bbd767ffa3d0640bdb9b91c5c30c3e0b2a7c11760a424",
     "style_guide": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5",
     "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
-    "audited_input_manifest": "86ea05e39a6c5e70f702825aab8c5b91623a015cf8fc848a1eae8cd1da9e752e"
+    "audited_input_manifest": "e5275819688b0218e08a626f66defbfc176107f87029bee21b259205896c0c7b"
   },
   "input_paths": {
     "en": "local_operator/i18n/catalogues/en/cli.sessions_help.json",

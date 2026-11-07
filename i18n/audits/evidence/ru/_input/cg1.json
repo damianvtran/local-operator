@@ -151,6 +151,63 @@
   "tui.small.spend.unpriced_cancelled_shortest": [
    "core-fix/ru/changes.jsonl"
   ],
+  "tui.usage.resets.accept": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.already": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.badge": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.busy": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.cancel": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.changed": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.choose": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.choose_title": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_detail": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title_account": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.dismiss": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.done": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.failed": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.hint": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.more": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.no_credit": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.nothing": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.recheck": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
   "wire.errors.agents.team_pull_local_failure": [
    "core-fix/ru/changes.jsonl"
   ],
@@ -1396,7 +1453,26 @@
    "tui.usage.stale": "58d91f28a88b12b7b731e7ed5e36588892f2cc1bda51c334944115561ab39200",
    "tui.usage.title": "0441e0299d05d0f396fc9448c1f0476cf6332158feea5c4fce98b3165598de88",
    "tui.usage.unavailable": "91c9565039031dd8a4b712bca17964ebad141085d98bc8da52408374f3dbd484",
-   "tui.usage.windows_count": "23dad4507b823afbb5d2de6b217c9754b9655bf92191997235d344f8750c75e3"
+   "tui.usage.windows_count": "23dad4507b823afbb5d2de6b217c9754b9655bf92191997235d344f8750c75e3",
+   "tui.usage.resets.badge": "d8161963761bbec1180f3a707df53aa569e4644d938f0cad11c06707293e2818",
+   "tui.usage.resets.hint": "aae6135ced2f99f6e943cf1ca2575ad82c3fa6d8c9a0b2625fa5504aa200e854",
+   "tui.usage.resets.choose": "dc348037f1b79a33172010e9bda43c8174bbf5a59f4a91eb5d29b8756ca747cb",
+   "tui.usage.resets.accept": "aae6135ced2f99f6e943cf1ca2575ad82c3fa6d8c9a0b2625fa5504aa200e854",
+   "tui.usage.resets.cancel": "f39b736db055e3dda8307ae846aa3ddaee613f1636878cb19530f14d66e6aed8",
+   "tui.usage.resets.choose_title": "479b23b82c3de8701730ed5cc3097978cc8f2f0d43540cfbbcdb47cc32b26694",
+   "tui.usage.resets.more": "e4dc2f9b566e960cd7674160bc255fe04cdad5c2947af4160c89086ef661d946",
+   "tui.usage.resets.confirm_title": "851f39977ad5a07a03df45296f03931642256f6249a2fd8c284c977eef91bd5b",
+   "tui.usage.resets.confirm_detail": "df0f7ea0fd99205b1d78e9fb3d0a0d09f264595ed8cc8dd0e998e951e5f5188a",
+   "tui.usage.resets.busy": "c3b403b8aacac1f49d0b478f78d82565c5150dd5feb9986c57420239ea7172b6",
+   "tui.usage.resets.done": "c6cce84ac33757ab1c4dfec88e89a3ae1dafbbf68262b44f6c57f627920e9d37",
+   "tui.usage.resets.nothing": "4d149eb4e05b03aef5a913d0d881caf3b136083fbc79666786183d640fbbe793",
+   "tui.usage.resets.no_credit": "47e4daa967ce587fa4df18364aecf5c2331ed9ad16196e460538ffb30f2c6506",
+   "tui.usage.resets.already": "7eadd789edfed06d62de8dfbb5a3f8b64ccc0b1856a53c6719931334881b4eb3",
+   "tui.usage.resets.failed": "fac272ae5721521f51580d02655b13d2a4d61c42bd86afbe52d8fc6312778bac",
+   "tui.usage.resets.confirm_title_account": "653c58d87ba18009386a03752bbe3eeee71c9abc44d0c74efa04a855c1f6ac6c",
+   "tui.usage.resets.dismiss": "f7838dbabbd5b03ecc5609101a54336c2c9e48d61544d41ced1fc5d2adb822e6",
+   "tui.usage.resets.recheck": "86d381e1369acae7752cac8753aa4f79cb7ac8f731c3fa8669f1db24c87b7c17",
+   "tui.usage.resets.changed": "b026999b72c0f4e90dab9ea61f46fca619d1c268c992ce659554f4182b8d5860"
   },
   "wire.aida_cadence": {
    "wire.aida_cadence.interval_hours.help": "180bd93a1d2ece351d79fd704d3eb53ceec63f34cbd5d3555403b28920fe75e9",
@@ -1598,5 +1674,5 @@
    "wire.tunnel_setup.unavailable": "68cdab878f6d7a6d8c550e453a70027f7615beb56430a25e42ae7d91bf359267"
   }
  },
- "manifest_sha256": "c43910ceab791ac5b2396146220c2ca2e85607247ae25c31301914be79e46e54"
+ "manifest_sha256": "bf42971b2fd2d3d7f0c778b7db7ec358243f67f24824db833f975ca8834ae343"
 }

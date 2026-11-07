@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "tui.usage",
+  "history_sha256": "a1a407a3a212fde5f765e836dbbb5f65ccad8e5c4ad4d3cc52ecb08c41ef2af6",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "tui.usage",
+      "source_sha256": "8cf8bb67be0510b3d707b89dc0db7adddfe681a6a670c07ca10d1ae604d9b755",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent 8bbd0eda75f5)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent a4689b84bc0f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06",
+        "result": "passed",
+        "findings": 5,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "19 new tui.usage.resets.* keys; the 21 pre-existing entries were verified byte-identical against the base. Independent audit read the complete namespace and passed with 0 blocker / 0 major, 4 minor and 1 nit wording findings. Deferred MINOR: 'ریٹ لِمٹ ونڈوز' is a new rendering of rate-limit inside a catalogue that already says 'حد' (proposed 'حد والی ونڈوز'); done =0 arm 21 cells longer than English; no_credit +9 cells; failed 'r سے' reads translated (proposed 'r دبا کر'). Deferred NIT: mixed bare/imperative key verbs, consistent with the existing notifications hints. Not edited after the audit, so this receipt's provenance stays on the exact audited bytes."
+    }
+  ]
+}

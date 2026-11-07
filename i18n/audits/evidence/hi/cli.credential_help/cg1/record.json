@@ -40,7 +40,7 @@
     "target": "a224960a1f69f293cc0335894f15272e904e37c1d88bb1968df0100f38a7fa8b",
     "style_guide": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5",
     "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
-    "audited_input_manifest": "71dfe5b553eed45d23cee6927e95fb967f3bdea8a3e3e172626778775abece27"
+    "audited_input_manifest": "bf1e0121574bc9fc7fdc5c0535d71f0eac61d571ca745d977bbdb36d407969d2"
   },
   "input_paths": {
     "en": "local_operator/i18n/catalogues/en/cli.credential_help.json",

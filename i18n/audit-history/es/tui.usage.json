@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tui.usage",
+  "history_sha256": "b260749254fafc4ed12282326966dd6d2658fc430762c8064f75725b437a3905",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.usage",
+      "source_sha256": "8cf8bb67be0510b3d707b89dc0db7adddfe681a6a670c07ca10d1ae604d9b755",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent 5bb60bcb2846)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent 5ee050e8338e)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-06",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "19 new tui.usage.resets.* keys; the 21 pre-existing entries were verified byte-identical against the base. Independent audit read the complete namespace and passed with 0 blocker / 0 major, 1 minor and 3 nit wording findings. Deferred MINOR: done =0 arm 7 cells longer than needed (proposed 'no había ventanas que liberar'). Deferred NIT: choose_title 'reiniciarse' ambiguity, cross-surface reset wording already in the locale, unreachable many-branch width. Not edited after the audit, so this receipt's provenance stays on the exact audited bytes."
+    }
+  ]
+}

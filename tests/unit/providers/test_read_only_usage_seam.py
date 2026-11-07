@@ -116,6 +116,10 @@ async def test_populated_report_is_served_without_identity(tmp_path) -> None:
         identity="someone@example.test",
         notes="plan: pro",
         limits=[UsageLimit("openai:credits", "Credits", UsageAmount(remaining=10, limit=20))],
+        # The ref names ONE stored login exactly as the identity does, so it is
+        # stripped with it: the phone must not receive a handle that addresses
+        # an account it is deliberately not told about.
+        credential_ref="acct",
     )
     cache.set(
         provider_cache_key("openai", fingerprint_accounts(["acct"])),
@@ -129,8 +133,10 @@ async def test_populated_report_is_served_without_identity(tmp_path) -> None:
     snap = controller.cached_persisted_usage_reports_read_only("openai")
     assert not snap.unavailable and [r.provider for r in snap.reports] == ["openai"]
     assert snap.reports[0].limits[0].amount.remaining == 10
-    # Identity and vendor notes never reach the phone wire.
-    assert all(r.identity is None and r.notes is None for r in snap.reports)
+    # Identity, the credential ref and vendor notes never reach the phone wire.
+    assert all(
+        r.identity is None and r.notes is None and r.credential_ref is None for r in snap.reports
+    )
     inv = controller.cached_persisted_usage_reports_read_only(None)
     assert [r.provider for r in inv.reports] == ["openai"]
 

@@ -66,6 +66,82 @@ def reported_balance(*, count: int | float, shown: str) -> Msg:
     return Msg("tui.usage.reported_balance", {"count": count, "shown": shown})
 
 
+def resets_accept() -> Msg:
+    return Msg("tui.usage.resets.accept", {})
+
+
+def resets_already(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.already", {"identity": identity})
+
+
+def resets_badge(*, count: int | float) -> Msg:
+    return Msg("tui.usage.resets.badge", {"count": count})
+
+
+def resets_busy(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.busy", {"identity": identity})
+
+
+def resets_cancel() -> Msg:
+    return Msg("tui.usage.resets.cancel", {})
+
+
+def resets_changed(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.changed", {"identity": identity})
+
+
+def resets_choose() -> Msg:
+    return Msg("tui.usage.resets.choose", {})
+
+
+def resets_choose_title(*, count: int | float) -> Msg:
+    return Msg("tui.usage.resets.choose_title", {"count": count})
+
+
+def resets_confirm_detail(*, count: int | float) -> Msg:
+    return Msg("tui.usage.resets.confirm_detail", {"count": count})
+
+
+def resets_confirm_title(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.confirm_title", {"identity": identity})
+
+
+def resets_confirm_title_account(*, identity: str, account: str) -> Msg:
+    return Msg("tui.usage.resets.confirm_title_account", {"identity": identity, "account": account})
+
+
+def resets_dismiss() -> Msg:
+    return Msg("tui.usage.resets.dismiss", {})
+
+
+def resets_done(*, count: int | float, identity: str) -> Msg:
+    return Msg("tui.usage.resets.done", {"count": count, "identity": identity})
+
+
+def resets_failed(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.failed", {"identity": identity})
+
+
+def resets_hint() -> Msg:
+    return Msg("tui.usage.resets.hint", {})
+
+
+def resets_more(*, count: str) -> Msg:
+    return Msg("tui.usage.resets.more", {"count": count})
+
+
+def resets_no_credit(*, identity: str) -> Msg:
+    return Msg("tui.usage.resets.no_credit", {"identity": identity})
+
+
+def resets_nothing() -> Msg:
+    return Msg("tui.usage.resets.nothing", {})
+
+
+def resets_recheck() -> Msg:
+    return Msg("tui.usage.resets.recheck", {})
+
+
 def resets_in(*, value: str) -> Msg:
     return Msg("tui.usage.resets_in", {"value": value})
 

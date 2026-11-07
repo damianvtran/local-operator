@@ -284,6 +284,63 @@
   "tui.small.wake_panel.monitors_need_attention": [
    "core-argorder/hi/changes.jsonl"
   ],
+  "tui.usage.resets.accept": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.already": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.badge": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.busy": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.cancel": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.changed": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.choose": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.choose_title": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_detail": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title_account": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.dismiss": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.done": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.failed": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.hint": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.more": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.no_credit": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.nothing": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.recheck": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
   "wire.errors.agents.team_pull_local_failure": [
    "core-fix/hi/changes.jsonl"
   ],
@@ -1547,7 +1604,26 @@
    "tui.usage.stale": "48a6931ed5308b6eeaf6cce04a6e2410d823eaed9c175d2c76a27206e84cee54",
    "tui.usage.title": "a2ced67bbb9ba71926b6dd5e87ada54c5cca81593ad7ec3fd4089029c548628e",
    "tui.usage.unavailable": "c1a301834e8a7a796b42405e603c72a5157b7bbc2ba595514ed34857e73f653b",
-   "tui.usage.windows_count": "ba0230c001c2d8cdaf1db4d5b28eb527853ea1aeaa63d27752cbce9b8a68e73d"
+   "tui.usage.windows_count": "ba0230c001c2d8cdaf1db4d5b28eb527853ea1aeaa63d27752cbce9b8a68e73d",
+   "tui.usage.resets.badge": "6ba5e505f31799d698b441f169e3e7e5843ff01827ed0e51700c42a737cd92eb",
+   "tui.usage.resets.hint": "4930c87773579740e307c0503eb14ca7860df962ebcacfe9044fe3980a7f8c7f",
+   "tui.usage.resets.choose": "0f01196ce9334e4758906cb52dbcc8a46e3f769231327b1bf5500a32590370eb",
+   "tui.usage.resets.accept": "2f3f5f096123825c80bca1162a5a759a2acbba0ce7ed2244b67603e70a3b04cf",
+   "tui.usage.resets.cancel": "f27d3081d92b3999dcd44963f5a66defe49ce57120968e71800f4f3a2e230052",
+   "tui.usage.resets.choose_title": "a7705104338e4731f9b741ae2aafe082198d2d0a69d6bcac1b715174c4fcaa3c",
+   "tui.usage.resets.more": "de65864f5ab1da0cd90390703e0c085d8f3b3078daf581b14f4ed4a666c4affb",
+   "tui.usage.resets.confirm_title": "aa047460b7db6807391419d5f155a29a892c34ec7734d900804c4d423de2d0e7",
+   "tui.usage.resets.confirm_detail": "f01047be862145ca2a0cf8ff59b254d706f41dd1ac0d2386ce805f4aa7286ad9",
+   "tui.usage.resets.busy": "0f0065a5dd12faf71af2af21316a357f331c526e56af64921b7bb2149107c4ff",
+   "tui.usage.resets.done": "ce053c1a643b31bde70e53f76e5b846d2edcf7418af3703fe4c26918e491918c",
+   "tui.usage.resets.nothing": "c739569154f740ebff128497e55434710eb05dea26188b975be79c770515be2c",
+   "tui.usage.resets.no_credit": "35e4abcf52088f9393676b3fe577698bbd99a40ba1fe708889baad559814664e",
+   "tui.usage.resets.already": "26ab3305fe63dfd9ac74d78388bdf0841567885533735547c09812c26b5db07a",
+   "tui.usage.resets.failed": "f0cc9114d0612c77a3b2f8c2077fb0d735cea3b0344478707a18048d0fe8510d",
+   "tui.usage.resets.confirm_title_account": "73462c4126e10a3f2bee94226056dfe0d6706455b9094f5efb6800af669a227f",
+   "tui.usage.resets.dismiss": "ef9cca4a55ee043090d3e9cdd265290e84d656e43f00e9de974299ebe5f85755",
+   "tui.usage.resets.recheck": "9b91b46046b0ed148c454405ff272b80ba976e9a6d54c13f1a030812aaa2ee09",
+   "tui.usage.resets.changed": "29d8615b50f24249ba59a7c305e7ecbc9185d9dfe2e4b3a22e9ed7a0e361bb26"
   },
   "wire.aida_cadence": {
    "wire.aida_cadence.interval_hours.help": "4d7edcd9b65f9ce0856b4e85c8d7ad530dcbe09350b7555e31727403dd864a90",
@@ -1730,5 +1806,5 @@
    "wire.tunnel_setup.unavailable": "f9f5721ce4a371745ab80dd7648aa4c5cb862b290d231e7890c4b601ea9d0bf9"
   }
  },
- "manifest_sha256": "a5830e2449379a936c66e0602bd69ad79de0faa7319d65039600e35056d86d10"
+ "manifest_sha256": "929fb407175c724ba122fa504559cb7f6979da1137ab126dd7bb9712da337947"
 }

@@ -19,9 +19,11 @@ import httpx
 import pytest
 
 from local_operator.providers.usage import (
+    ResetConsumeResult,
     UsageAmount,
     UsageLimit,
     UsageReport,
+    consume_openai_reset_credit,
     fetch_usage,
     usage_health,
     usage_supported,
@@ -50,6 +52,22 @@ def _recording_client(payload, status: int = 200) -> tuple[httpx.AsyncClient, li
         return httpx.Response(status, json=payload)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler)), urls
+
+
+def _capture_client(payload, status: int = 200) -> tuple[httpx.AsyncClient, list[httpx.Request]]:
+    """``(client, requests)`` — a canned body plus every request it was sent.
+
+    POSTs are inspected for their METHOD, URL, headers and body, because those
+    are the whole contract of the consume endpoint: the body it sends is a
+    spend request, so a field added or dropped there is not cosmetic.
+    """
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status, json=payload)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler)), requests
 
 
 @pytest.mark.asyncio
@@ -1645,6 +1663,176 @@ async def test_openai_accepts_both_reset_encodings() -> None:
     assert relative is not None
     # Roughly an hour out, allowing for the clock read inside the fetcher.
     assert 3_500_000 <= relative - time.time() * 1000 <= 3_600_000
+
+
+#: A ``rate_limit_reset_credits`` block as the live payload carries it. The
+#: ``applicable_available_count`` is present on the wire but deliberately not
+#: read: the account-wide count is what the panel offers to spend.
+OPENAI_RESET_CREDITS_BLOCK = {"available_count": 2, "applicable_available_count": 2}
+
+
+def _openai_body_with_resets(block: object) -> dict[str, Any]:
+    body: dict[str, Any] = {"rate_limit": {"primary_window": {"used_percent": 5}}}
+    if block is not None:
+        body["rate_limit_reset_credits"] = block
+    return body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "block,expected",
+    [
+        (OPENAI_RESET_CREDITS_BLOCK, 2),
+        ({"available_count": 0}, 0),
+        # Missing key, missing block, and every untrustworthy spelling of the
+        # same field. ``None`` is not "zero credits" -- it is "this payload
+        # did not report the product", and the two drive different UI.
+        ({"applicable_available_count": 2}, None),
+        (None, None),
+        ({"available_count": "2"}, None),
+        ({"available_count": 2.0}, None),
+        ({"available_count": True}, None),
+        ({"available_count": -1}, None),
+    ],
+)
+async def test_openai_reads_usage_reset_credits(block, expected) -> None:
+    client = _client_for(_openai_body_with_resets(block))
+    async with client:
+        report = await fetch_usage(client, "openai", access_token="tok")
+    assert report is not None
+    assert report.resets_available == expected
+
+
+def test_anthropic_reports_no_reset_credit_product() -> None:
+    """Anthropic has no reset-credit product; the field must stay ``None``
+    rather than defaulting to a zero that a surface would render as "none left"."""
+    assert UsageReport(provider="anthropic").resets_available is None
+
+
+@pytest.mark.asyncio
+async def test_openai_reset_credits_are_not_quota() -> None:
+    """A reset credit clears a spent window; it is not headroom. Counting it as
+    quota would report an exhausted plan as serviceable."""
+    body = {
+        "rate_limit": {"primary_window": {"used_percent": 100}},
+        "rate_limit_reset_credits": {"available_count": 3},
+    }
+    client = _client_for(body)
+    async with client:
+        report = await fetch_usage(client, "openai", access_token="tok")
+    assert report is not None
+    assert report.resets_available == 3
+    assert usage_health(report, "gpt-5.3-codex").state == "depleted"
+
+
+@pytest.mark.asyncio
+async def test_openai_reset_consume_sends_the_documented_contract() -> None:
+    """Method, URL, headers and body exactly as the reference implementation
+    sends them: the same auth headers as the usage GET, and a body carrying only
+    the opaque redeem id (so the server picks the credit)."""
+    client, requests = _capture_client({"code": "reset", "windows_reset": 2})
+    async with client:
+        result = await consume_openai_reset_credit(
+            client, "synthetic-token", account_id="acct-1", redeem_request_id="r-1"
+        )
+    assert result == ResetConsumeResult(outcome="reset", windows_reset=2)
+    (request,) = requests
+    assert request.method == "POST"
+    assert str(request.url) == (
+        "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+    )
+    assert request.headers["Authorization"] == "Bearer synthetic-token"
+    assert request.headers["ChatGPT-Account-Id"] == "acct-1"
+    assert json.loads(request.content) == {"redeem_request_id": "r-1"}
+
+
+@pytest.mark.asyncio
+async def test_openai_reset_consume_omits_the_account_header_without_an_id() -> None:
+    client, requests = _capture_client({"code": "reset", "windows_reset": 1})
+    async with client:
+        await consume_openai_reset_credit(client, "tok", account_id=None, redeem_request_id="r-1")
+    (request,) = requests
+    assert "ChatGPT-Account-Id" not in request.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["reset", "nothing_to_reset", "no_credit", "already_redeemed"])
+async def test_openai_reset_consume_maps_every_documented_code(code) -> None:
+    client = _client_for({"code": code, "windows_reset": 1})
+    async with client:
+        result = await consume_openai_reset_credit(
+            client, "tok", account_id=None, redeem_request_id="r-1"
+        )
+    assert result.outcome == code
+    assert result.windows_reset == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("windows", [None, "2", 2.0, True, -1])
+async def test_openai_reset_consume_never_reports_an_untrustworthy_window_count(
+    windows,
+) -> None:
+    payload = {"code": "reset"} if windows is None else {"code": "reset", "windows_reset": windows}
+    client = _client_for(payload)
+    async with client:
+        result = await consume_openai_reset_credit(
+            client, "tok", account_id=None, redeem_request_id="r-1"
+        )
+    assert result.outcome == "reset"
+    assert result.windows_reset == 0
+
+
+@pytest.mark.asyncio
+async def test_openai_reset_consume_reports_an_unknown_code_as_failed() -> None:
+    """Guessing at a new code is how ``no_credit`` would read as ``reset`` and
+    tell the user a window was cleared when none was."""
+    client = _client_for({"code": "partial_reset", "windows_reset": 1})
+    async with client:
+        result = await consume_openai_reset_credit(
+            client, "tok", account_id=None, redeem_request_id="r-1"
+        )
+    assert result.outcome == "failed"
+    assert "partial_reset" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_openai_reset_consume_reports_a_non_200_as_failed() -> None:
+    client = _client_for({"detail": "boom"}, status=500)
+    async with client:
+        result = await consume_openai_reset_credit(
+            client, "tok", account_id=None, redeem_request_id="r-1"
+        )
+    assert result.outcome == "failed"
+    assert result.detail == "HTTP 500"
+
+
+@pytest.mark.asyncio
+async def test_openai_reset_consume_never_raises_on_a_transport_error() -> None:
+    """The caller sits behind a confirmation dialog: an exception here would
+    leave it unable to say whether the credit was spent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await consume_openai_reset_credit(
+            client, "tok", account_id=None, redeem_request_id="r-1"
+        )
+    assert result.outcome == "failed"
+    assert result.detail == "ConnectError"
+
+
+@pytest.mark.asyncio
+async def test_openai_reset_consume_reports_an_unparseable_body_as_failed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>proxy</html>")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await consume_openai_reset_credit(
+            client, "tok", account_id=None, redeem_request_id="r-1"
+        )
+    assert result.outcome == "failed"
+    assert result.detail == "unparseable response"
 
 
 #: A real ``/coding/v1/usages`` body. The plan total is at ``usage``; each window

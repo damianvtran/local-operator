@@ -596,9 +596,11 @@ from local_operator.tui.widgets.transcript import (
     conversation_started,
 )
 from local_operator.tui.widgets.usage_panel import (
+    RESET_DEFINITIVE_OUTCOMES,
     UsageDismissed,
     UsagePanel,
     UsageRefreshRequested,
+    UsageResetRequested,
 )
 from local_operator.tui.widgets.wake_panel import WakePanel
 
@@ -51915,6 +51917,77 @@ class OperatorApp(App[None]):
         if self._welcome is not None:
             self._welcome.refresh_info()
 
+    def on_usage_reset_requested(self, message: UsageResetRequested) -> None:
+        """A confirmed reset — spend ONE vendor credit on ONE named account.
+
+        The panel owns the confirmation (it is what names the account) and the
+        redeem id; this handler owns the call, because the provider controller
+        does. ``thread=False`` with an exclusive group matches the fetch path:
+        the result repaints a Textual widget, so it must run on the UI thread,
+        and two resets at once would race the same shared usage cache row.
+
+        The result is painted through the panel's own band and then confirmed by
+        the SAME forced refresh ``r`` performs. That is not decoration: a spent
+        credit changes both the count on the heading and the windows below it,
+        and the shared cache row the panel is showing was written before the
+        spend — without the refresh the card would report a reset that had not
+        happened yet.
+
+        A ``failed`` outcome deliberately skips the refresh. Its copy says the
+        reset could not be CONFIRMED and points at ``r``; auto-refreshing would
+        contradict that by quietly replacing the numbers under the sentence.
+        """
+        message.stop()
+        if self._providers is None:
+            return
+        panel = self._usage_panel()
+        if panel is None:
+            return
+        surface = panel.surface_generation
+        self.run_worker(
+            self._consume_usage_reset_worker(message, panel, surface),
+            thread=False,
+            group="usage-reset",
+            exclusive=True,
+        )
+
+    async def _consume_usage_reset_worker(
+        self, message: UsageResetRequested, panel: UsagePanel, surface: int
+    ) -> None:
+        """Perform one reset and paint its outcome, if the panel still owns it."""
+        if self._providers is None:
+            return
+        from local_operator.providers.usage import ResetConsumeResult
+
+        try:
+            result = await self._providers.consume_usage_reset(
+                message.provider,
+                message.identity,
+                message.redeem_request_id,
+                credential_ref=message.credential_ref,
+            )
+        except Exception:  # noqa: BLE001 -- the band must ALWAYS be answered
+            # Textual does not re-raise a worker exception (it records it and
+            # moves the worker to ERROR), so an unguarded await left the band on
+            # `busy` with no way out: every key inert, `cancel_reset` refusing,
+            # and nothing repainting it. The library's "never raises" contract
+            # has holes this caller cannot see (a corrupt store row, a future
+            # transport change), so the outcome is answered here unconditionally
+            # -- an unknown result is exactly what `failed` means.
+            result = ResetConsumeResult(outcome="failed", detail="worker error")
+        if not panel.is_open or panel.surface_generation != surface:
+            # The card was closed (or reopened) while the request was on the
+            # wire. The credit may well be spent; painting an outcome into a
+            # surface the user has left, or into a fresh card, would state it
+            # as if they had just asked. The pending id survives on the panel
+            # either way, so a retry is still idempotent.
+            return
+        panel.show_reset_result(
+            result, identity=message.identity, credential_ref=message.credential_ref
+        )
+        if getattr(result, "outcome", "failed") in RESET_DEFINITIVE_OUTCOMES:
+            self._force_usage_refresh(panel)
+
     def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
         """``r`` in the panel — re-run the same fetch behind the same view.
 
@@ -51928,6 +52001,16 @@ class OperatorApp(App[None]):
         panel = self._usage_panel()
         if panel is None:
             return
+        self._force_usage_refresh(panel)
+
+    def _force_usage_refresh(self, panel: UsagePanel) -> None:
+        """Re-run the panel's fetch behind the rows already on screen.
+
+        Shared by ``r`` and by the reset path so both re-fetch the same TARGET
+        the card is scoped to and both keep the reader's place; two copies of
+        this sequence is how one of them would come to blank the card it was
+        meant to refresh.
+        """
         target = panel.target
         # Keep the numbers ON SCREEN while the forced fetch runs: `start_fetch`
         # clears them for the cold open, but a refresh has live rows the user

@@ -11460,6 +11460,14 @@ class _UnreadableAuthStore:
     async def list_oauth_accesses(self, provider: str) -> list[Any]:
         raise self._unavailable("list_oauth_accesses")
 
+    async def ensure_oauth_fresh(self, credential_id: int) -> dict[str, Any] | None:
+        # ``ProviderController.consume_usage_reset`` mints a token through this
+        # member (the same one the per-account usage fetch uses). An unreadable
+        # store can never mint one, and a spent reset credit cannot be undone,
+        # so this refuses loudly rather than letting a degraded catalogue path
+        # reach a vendor with an empty token.
+        raise self._unavailable("ensure_oauth_fresh")
+
     def list_oauth_identities(self, provider: str) -> list[Any]:
         raise self._unavailable("list_oauth_identities")
 

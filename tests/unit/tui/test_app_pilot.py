@@ -15650,3 +15650,163 @@ async def test_the_band_marks_a_total_that_excludes_pending_voice_spend() -> Non
         marked = app._spend_text()
         assert marked.startswith(LOWER_BOUND_MARK), marked
         assert "$0.900" in marked, "the FIGURE stays the published total"
+
+
+# -- usage reset, through the real app: worker failure, `r`, and the late guard --
+def _reset_usage_reports(*, accounts: int = 1):
+    """Reports that can offer a credit, in the shape the panel reads."""
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    reports = []
+    for index in range(accounts):
+        reports.append(
+            UsageReport(
+                provider=f"openai-{index}",
+                identity=f"account{index}@example.com",
+                resets_available=2,
+                credential_ref=f"acct-{index}",
+                limits=[
+                    UsageLimit(
+                        id=f"openai-{index}:5h",
+                        label="5 hour",
+                        amount=UsageAmount(used=4.0, limit=100.0, unit="percent"),
+                        window="5 hour",
+                        shared=True,
+                    )
+                ],
+            )
+        )
+    return reports
+
+
+@pytest.mark.asyncio
+async def test_a_raising_reset_worker_answers_the_band_instead_of_wedging_it() -> None:
+    """R3: Textual does not re-raise a worker exception, so an unguarded await
+    never painted a result and left `_reset_state` on `busy` -- every key inert,
+    `cancel_reset` refusing, and only quitting the app recovered it. A raise is
+    an UNKNOWN outcome, which is exactly what the failure receipt states."""
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    class _RaisingController(FakeProviderController):
+        async def consume_usage_reset(
+            self, provider, identity, redeem_request_id, credential_ref=None
+        ):
+            raise RuntimeError("store exploded mid-spend")
+
+    ctrl = _RaisingController()
+    ctrl.usage_reports = _reset_usage_reports()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        await pilot.press("x")
+        await pilot.pause()
+        assert panel._reset_state == "confirm"
+
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        rows = "\n".join(panel.render_lines_for_test())
+        pending = dict(panel._pending_redeem)
+
+        assert pending, panel.render_lines_for_test()
+        assert panel._reset_state == "result", rows
+        assert "Reset not confirmed for account0@example.com" in rows, rows
+        assert "r re-check" in rows, rows
+        # Not wedged: escape leaves the band the worker could not.
+        await pilot.press("escape")
+        for _ in range(3):
+            await pilot.pause()
+        assert panel._reset_state is None
+        # The unknown outcome kept its id, so a retry is the same request.
+        assert panel._pending_redeem == pending
+
+
+@pytest.mark.asyncio
+async def test_r_after_an_unknown_outcome_dismisses_and_refetches() -> None:
+    """D3/U3: the failure copy names `r`, and the first press must do what the
+    sentence says. Swallowing it as a bare dismissal vanished the sentence and
+    left the stale numbers that raised the question."""
+    from local_operator.providers.usage import ResetConsumeResult
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    class _FailController(FakeProviderController):
+        async def consume_usage_reset(
+            self, provider, identity, redeem_request_id, credential_ref=None
+        ):
+            return ResetConsumeResult(outcome="failed")
+
+    ctrl = _FailController()
+    ctrl.usage_reports = _reset_usage_reports()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        assert panel._reset_state == "result"
+        before = len(ctrl.usage_calls)
+
+        await pilot.press("r")
+        for _ in range(6):
+            await pilot.pause()
+
+        assert len(ctrl.usage_calls) == before + 1, ctrl.usage_calls
+        assert panel._reset_state is None
+
+
+@pytest.mark.asyncio
+async def test_a_reset_result_landing_after_the_card_closed_is_not_painted() -> None:
+    """R5's uncovered path: `surface_generation` is what stops an outcome being
+    painted into a card the user left (or a fresh one they opened). The pending
+    id survives on the panel, so the retry the user may make is still the same
+    request."""
+    import asyncio
+
+    from local_operator.providers.usage import ResetConsumeResult
+    from local_operator.tui.widgets.usage_panel import UsagePanel
+
+    class _BlockingController(FakeProviderController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def consume_usage_reset(
+            self, provider, identity, redeem_request_id, credential_ref=None
+        ):
+            self.started.set()
+            await self.release.wait()
+            return ResetConsumeResult(outcome="reset", windows_reset=1)
+
+    ctrl = _BlockingController()
+    ctrl.usage_reports = _reset_usage_reports()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=ctrl)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        await _run_usage_command(pilot, app)
+        panel = app.query_one(UsagePanel)
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(3):
+            await pilot.pause()
+        await asyncio.wait_for(ctrl.started.wait(), timeout=5)
+        pending = dict(panel._pending_redeem)
+        assert pending
+
+        # The card goes away while the request is still on the wire.
+        panel.close()
+        await pilot.pause()
+        ctrl.release.set()
+        for _ in range(6):
+            await pilot.pause()
+
+        assert panel._reset_state is None, "an outcome was painted into a closed card"
+        assert not panel.is_open
+        assert panel._pending_redeem == pending

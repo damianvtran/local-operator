@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.usage_refusal",
+  "history_sha256": "899c59a81c18551927d13f7952a4c1798a3060578180626203a436c8fe8f1f82",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "tui.usage_refusal",
+      "source_sha256": "4e6a78c448043205b8f97d9bdd0579385d0af274615d52773c7a4c213541ec40",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; lop subagent de8baef4f03c)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent 559d0756aa4a)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Single-key namespace for the reset band's NOTHING-WAS-SENT receipt, split from tui.usage so the already-audited 19-key reset wave keeps its fresh ledger rows. Independent audit read the key in all seven locales: placeholder, terminology (mirrors each locale's tui.usage.resets.failed/changed), punctuation and width all passed with zero findings."
+    }
+  ]
+}

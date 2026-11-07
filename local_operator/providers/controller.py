@@ -59,7 +59,9 @@ from local_operator.providers.registry import (
 )
 from local_operator.providers.usage import (
     USAGE_PROVIDERS,
+    ResetConsumeResult,
     UsageReport,
+    consume_openai_reset_credit,
     fetch_usage,
     usage_kinds,
     usage_supported,
@@ -102,6 +104,16 @@ logger = logging.getLogger("local_operator.providers.controller")
 #: plausible rate-limit window, short enough that a lapsed plan stops burning
 #: a request per warm tick the same day.
 EMPTY_OVER_DATA_ACCEPT_MS = 30 * 60_000
+
+#: Provider ids whose usage-reset credits this facade can spend.
+#:
+#: Both spellings of the ChatGPT login: ``openai`` and its device-code flavour
+#: ``openai-device`` share one stored credential set (see
+#: ``auth_store._storage_id``), and reports may carry either id, so refusing one
+#: spelling would make the affordance dead for half the users. Anthropic is
+#: absent on purpose -- its plan has no reset-credit product, so there is
+#: nothing to redeem and no endpoint to call.
+_RESET_CREDIT_PROVIDERS = frozenset({"openai", "openai-device"})
 
 #: The listing TTL the ``/model`` picker asks :meth:`live_catalogue` for. The
 #: user is asking NOW, and the fetch already runs off-loop behind rows painted
@@ -297,6 +309,10 @@ class ControllerAuthStore(Protocol):
     async def list_oauth_accesses(
         self, provider: str
     ) -> list["OAuthAccess"]: ...  # pragma: no cover
+
+    async def ensure_oauth_fresh(
+        self, credential_id: int
+    ) -> dict[str, Any] | None: ...  # pragma: no cover
 
     def list_oauth_identities(self, provider: str) -> list["OAuthAccess"]: ...  # pragma: no cover
 
@@ -1269,7 +1285,60 @@ class ProviderController:
             if report.provider == "meta-muse" and report.notes in META_MUSE_USAGE_NOTES
             else None
         )
-        return dataclasses.replace(report, identity=None, notes=notes)
+        # ``credential_ref`` is an identity by another name -- a stable pointer at
+        # ONE stored login -- so it is stripped with the label it stands in for.
+        # Leaving it would hand the phone a way to name (and, through any future
+        # write path, address) an account it is deliberately not told about.
+        return dataclasses.replace(report, identity=None, notes=notes, credential_ref=None)
+
+    @staticmethod
+    def _stored_row_label(row: Any) -> str | None:
+        """The display label :meth:`_expected_oauth_identities` gives a row.
+
+        The SAME chain, so "two stored logins share a label" is decided from
+        the spelling the fetch and the reports actually use. Only the label is
+        wanted here -- never raises out of a method that reads stored shapes.
+        """
+        data = getattr(row, "data", None)
+        label = None
+        if isinstance(data, dict):
+            label = data.get("email") or data.get("account_id")
+        label = label or getattr(row, "identity_key", None) or f"cred:{getattr(row, 'id', 0)}"
+        if not label or str(label).startswith("oauth:"):
+            return None
+        return str(label)
+
+    @staticmethod
+    def _credential_ref(row: Any) -> str:
+        """The stable ref naming ONE stored credential row.
+
+        ``identity_key`` when the store has one, else ``cred:<row id>`` -- the
+        same spelling :meth:`_account_fingerprint` and
+        :meth:`order_persisted_usage_reports` already use, so the ref a report
+        carries is the ref the cache key was built from. Its whole job is to be
+        UNIQUE per row: ``credential_identity`` is a display label and two
+        stored logins may share one, while a reset credit can only be spent on
+        one row.
+        """
+        identity_key = getattr(row, "identity_key", None)
+        if isinstance(identity_key, str) and identity_key.strip():
+            return identity_key.strip()
+        return f"cred:{int(getattr(row, 'id', 0) or 0)}"
+
+    @staticmethod
+    def _row_account_id(row: Any) -> str | None:
+        """``account_id`` off a stored row, or ``None`` when the row cannot say.
+
+        The consume request uses it as the ``ChatGPT-Account-Id`` discriminator,
+        so a row whose ``data`` is not a mapping (corrupt, hand-migrated) must
+        read as "not reported" rather than raise out of a method that promises
+        never to raise.
+        """
+        data = getattr(row, "data", None)
+        if not isinstance(data, dict):
+            return None
+        value = data.get("account_id")
+        return str(value) if value else None
 
     # -- model -------------------------------------------------------------
     def resolve_model(self, provider: str, model_id: str) -> ModelSpec:
@@ -1630,6 +1699,129 @@ class ProviderController:
                 continue
             reports.extend(result)
         return reports
+
+    async def consume_usage_reset(
+        self,
+        provider: str,
+        identity: str,
+        redeem_request_id: str,
+        credential_ref: str | None = None,
+    ) -> ResetConsumeResult:
+        """Spend one vendor usage-reset credit on ONE named account.
+
+        ``identity`` is the label the reports carry (``credential_identity``:
+        email, then account id, then org name) and it -- not the registry id,
+        not the cascade's currently selected account -- chooses the credential.
+        THAT is the whole point of the argument: the cascade resolves to
+        whichever sibling outranks the others, while a reset spends something
+        that cannot be refunded on the wrong login. A user with two ChatGPT
+        accounts asks about the one they can see, and this credits that one or
+        nothing at all.
+
+        ``credential_ref`` is how the caller says WHICH login it means when the
+        label cannot: an email is not unique in the store (it dedupes on
+        ``org_id -> account_id -> email``), so two stored logins can share one
+        label. A ref -- the ``credential_ref`` the report carried -- resolves to
+        exactly one row. Without one, a label that matches several rows is
+        REFUSED as ambiguous rather than resolved by store order: silently
+        taking the first is how a credit gets spent on an account the user
+        never confirmed.
+
+        Never raises; every unusable state is a ``ResetConsumeResult`` with
+        ``outcome="failed"`` and a short detail the confirmation dialog can
+        show. ``redeem_request_id`` is the caller's opaque idempotency id: pass
+        the SAME one when retrying an ambiguous failure, and a fresh one for a
+        genuinely new attempt (see :func:`consume_openai_reset_credit`).
+
+        On a spent or already-redeemed credit the cached usage row for the
+        provider is dropped, because that row now states a count and set of
+        windows that are no longer true and the cache is shared by every lop
+        session on the machine -- a stale row would make the panel look like
+        the button did nothing.
+        """
+        from local_operator.providers.auth_store import credential_identity
+
+        if provider not in _RESET_CREDIT_PROVIDERS:
+            # `refused=True` on every pre-flight refusal below: the panel must
+            # not tell the user a credit's fate is unknown when nothing was
+            # ever sent (Q3).
+            return ResetConsumeResult(
+                outcome="failed", detail=f"{provider} has no usage-reset credits", refused=True
+            )
+        try:
+            rows = self.auth_store.list_credentials(provider)
+        except Exception:  # noqa: BLE001 -- an unreadable store is a refusal, not a crash
+            rows = []
+        # Every row whose LABEL matches, collected rather than short-circuited:
+        # ``next(...)`` over a single label was the bug this resolution exists to
+        # remove, because it answered with whichever row the store listed first.
+        # ``credential_identity`` is guarded per row -- a corrupt or
+        # hand-migrated payload that is not a mapping must read as unlabelled,
+        # not raise through a method whose contract is "never raises".
+        matches: list[Any] = []
+        for candidate in rows:
+            if getattr(candidate, "credential_type", None) != "oauth":
+                continue
+            try:
+                label = credential_identity(candidate)
+            except Exception:  # noqa: BLE001 -- an unlabelled row matches nothing
+                label = None
+            if label == identity:
+                matches.append(candidate)
+        if credential_ref:
+            row = next(
+                (
+                    candidate
+                    for candidate in matches
+                    if self._credential_ref(candidate) == credential_ref
+                ),
+                None,
+            )
+            if row is None:
+                return ResetConsumeResult(
+                    outcome="failed",
+                    detail=f"no stored login for '{identity}'",
+                    refused=True,
+                )
+        elif len(matches) > 1:
+            return ResetConsumeResult(outcome="failed", detail="ambiguous login", refused=True)
+        elif matches:
+            row = matches[0]
+        else:
+            return ResetConsumeResult(
+                outcome="failed", detail=f"no stored login for '{identity}'", refused=True
+            )  # The row's OWN token, refreshed on the row rather than resolved through
+        # the cascade: the same accessor the usage fetcher's per-account path
+        # uses, so the request authenticates as the account whose numbers the
+        # panel showed.
+        creds = None
+        try:
+            creds = await self.auth_store.ensure_oauth_fresh(row.id)
+        except Exception:  # noqa: BLE001 -- an unmintable token is a refusal, not a crash
+            creds = None
+        access_token = (creds or {}).get("access")
+        if not access_token:
+            return ResetConsumeResult(
+                outcome="failed",
+                detail=f"could not refresh login for '{identity}'",
+                refused=True,
+            )
+        account_id = (creds or {}).get("account_id") or self._row_account_id(row)
+        async with httpx.AsyncClient() as client:
+            result = await consume_openai_reset_credit(
+                client,
+                access_token,
+                account_id=account_id,
+                redeem_request_id=redeem_request_id,
+            )
+        if result.outcome in ("reset", "already_redeemed"):
+            cache = self._usage_cache_store()
+            if cache is not None:
+                try:
+                    cache.invalidate(self._usage_cache_key(provider))
+                except Exception:  # noqa: BLE001 -- teardown of a stale row, never fatal
+                    logger.debug("usage cache drop after reset failed", exc_info=True)
+        return result
 
     # -- usage cache plumbing ------------------------------------------------
 
@@ -2212,6 +2404,8 @@ class ProviderController:
         previous: dict[str, UsageReport],
         now_ms: int,
         force: bool,
+        refs: dict[str, list[str]] | None = None,
+        ambiguous_labels: set[str] | None = None,
     ) -> list[UsageReport]:
         """Union of this fetch's successes and last-good for everyone else.
 
@@ -2247,7 +2441,57 @@ class ProviderController:
             if identity in seen:
                 continue
             merged.append(self._settle_live_report(report, now_ms))
-        return merged
+        # The stable per-row ref, stamped HERE rather than at each of the four
+        # points a per-account report is built: this is the one place that sees
+        # the finished list, so no construction path can forget it.
+        #
+        # ONE REF PER ROW, never one per label. Two stored logins can share an
+        # email (personal + workspace), and a label-keyed stamp gave both panel
+        # rows the same ref -- so either chip spent on the same login and the
+        # other login's credit was unreachable (Q1). ``refs`` therefore carries
+        # the label's rows as a LIST in login order, and each report takes the
+        # next unused entry. A report the list does not reach keeps no ref at
+        # all: it can then be neither offered nor spent by label, because the
+        # label names more than one row (the controller refuses it as
+        # ambiguous).
+        #
+        # The report is COPIED when it is stamped: two expected labels that
+        # share one email both resolve to the same label-keyed live report, so
+        # `merged` holds the SAME object twice, and a shared object can only
+        # carry the last ref written to it.
+        cursor: dict[str, int] = {}
+        stamped: list[UsageReport] = []
+        for report in merged:
+            identity = report.identity or ""
+            pool = (refs or {}).get(identity) or ()
+            index = cursor.get(identity, 0)
+            cursor[identity] = index + 1
+            if identity in (ambiguous_labels or ()) or len(pool) > 1:
+                # More than one stored login answers to this label, so the
+                # fetch asked ONE of their bearers for every report carrying
+                # it (see ``accesses_by_id``). None of those reports is the
+                # row it sits beside, so none may carry a ref: a ref is a
+                # spendable handle, and this one would spend on a login whose
+                # numbers the reader cannot be shown (R9/Q1).
+                stamped.append(dataclasses.replace(report, credential_ref=None))
+                continue
+            if index < len(pool):
+                stamped.append(dataclasses.replace(report, credential_ref=pool[index]))
+                continue
+            if pool:
+                # More reports than stored rows for this label: this one cannot
+                # be aimed at a row, so it must not be spendable. Defensive
+                # only -- a label with two rows is caught by
+                # ``ambiguous_labels`` above, before the pool is consulted.
+                stamped.append(dataclasses.replace(report, credential_ref=None))
+                continue
+            # No ref knowledge this cycle (the account did not fetch, or a
+            # provider whose rows are not listed): keep the ref it came in
+            # with, and a cache row written before the field existed keeps
+            # ``None`` -- the panel then resolves by label and refuses if that
+            # is ambiguous.
+            stamped.append(report)
+        return stamped
 
     def _settle_live_report(self, report: UsageReport, now_ms: int) -> UsageReport:
         """Finish a report this cycle produced, honouring a dead-grant verdict.
@@ -2488,6 +2732,38 @@ class ProviderController:
             # unchanged). Identities with no bearer this cycle stay in
             # ``expected`` and fall through to last-good / unavailable.
             accesses_by_id: dict[str, Any] = {}
+            # Per-row refs for the accounts this cycle can fetch. Built from the
+            # STORED ROWS, because an access carries the row id but not the
+            # dedupe key the ref prefers. Collected per LABEL as a LIST in
+            # login order: a report is keyed by that label, so two stored logins
+            # sharing one email collapse onto one key here, and a single
+            # ref-per-label would stamp BOTH panel rows with the last access --
+            # two chips spending on one login (Q1). The merge pairs each report
+            # with its own entry of this list instead.
+            refs_by_row: dict[int, str] = {}
+            # How many STORED logins carry each label. A label shared by two
+            # rows cannot be fetched for both: ``accesses_by_id`` below keeps
+            # ONE bearer per label (last wins), so the per-identity loop asks
+            # that same token twice and BOTH reports describe that one login.
+            # The numbers on the other panel row would then not be that row's
+            # numbers, and a chip beside them would spend a credit on a login
+            # the reader is not looking at (R9). No ref is stamped for such a
+            # label, so the panel offers no chip at all -- honest, where a
+            # ref would be a promise the fetch cannot keep.
+            labels_by_row: dict[str, int] = {}
+            try:
+                for row in self.auth_store.list_credentials(self._storage_id(provider)):
+                    row_id = int(getattr(row, "id", 0) or 0)
+                    if row_id:
+                        refs_by_row[row_id] = self._credential_ref(row)
+                    label = self._stored_row_label(row)
+                    if label:
+                        labels_by_row[label] = labels_by_row.get(label, 0) + 1
+            except Exception:  # noqa: BLE001 — refs are labels; the fetch still runs
+                refs_by_row = {}
+                labels_by_row = {}
+            ambiguous_labels = {label for label, count in labels_by_row.items() if count > 1}
+            refs_by_id: dict[str, list[str]] = {}
             try:
                 accesses = await self.auth_store.list_oauth_accesses(provider)
             except Exception:  # noqa: BLE001 — no bearer is a per-account miss
@@ -2504,6 +2780,10 @@ class ProviderController:
                 )
                 if label:
                     accesses_by_id[str(label)] = access
+                    credential_id = int(getattr(access, "credential_id", 0) or 0)
+                    refs_by_id.setdefault(str(label), []).append(
+                        refs_by_row.get(credential_id, f"cred:{credential_id}")
+                    )
             # The console ticket is ONE session for the whole account, not one
             # per login, so it is spent at most once per cycle however many
             # dead grants are expected. Attempting it per identity would send
@@ -2611,6 +2891,8 @@ class ProviderController:
                 previous=previous_by_id,
                 now_ms=now_ms,
                 force=force_refresh,
+                refs=refs_by_id,
+                ambiguous_labels=ambiguous_labels,
             )
         # The API-key route, reached when the provider has no stored OAuth
         # identity at all. The console ticket is threaded through HERE TOO, not
