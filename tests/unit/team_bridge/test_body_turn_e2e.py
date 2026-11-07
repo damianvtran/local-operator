@@ -374,6 +374,41 @@ async def test_the_admitted_body_reaches_every_provider_call_of_the_turn(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_the_conversation_body_request_carries_the_config_request_rule(tmp_path) -> None:
+    """B5 on the CONVERSATION path: the rule is in what the provider receives.
+
+    The journal card never reaches the model (``model_card_text`` swaps it for
+    ``PENDING_CARD``), so the admitted body frame is the one carrier. This reads
+    the actual provider request, not the card's stored bytes: the rule must ride
+    beside the body, ahead of the trusted header, and outside the untrusted
+    object so the screened bytes still decode exactly.
+    """
+
+    from local_operator.harness.message_types import BRIDGE_CONFIG_REQUEST_RULE
+    from local_operator.team_bridge.body_frame import decode_untrusted_object
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    store = _store(config_dir)
+    _reserve(store, config_dir=config_dir)
+    stream = CapturingStream([[StreamTextDelta(delta="noted"), StreamEndEvent(stop_reason="stop")]])
+    session = _session(tmp_path, stream, _runtime(config_dir, FakeBridgeClient()))
+    try:
+        await _serve_body_turn(session)
+    finally:
+        await session.dispose()
+
+    assert len(stream.requests) == 1
+    carrier = [text for text in stream.texts(0) if BODY in text]
+    assert len(carrier) == 1, stream.texts(0)
+    frame = carrier[0]
+    assert frame.count(BRIDGE_CONFIG_REQUEST_RULE) == 1
+    assert frame.index(BRIDGE_CONFIG_REQUEST_RULE) < frame.index(HEADER_MARKER)
+    assert decode_untrusted_object(frame)["body"] == BODY
+    assert _row(config_dir)["state"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_a_mid_turn_aside_never_carries_the_frame(tmp_path) -> None:
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()

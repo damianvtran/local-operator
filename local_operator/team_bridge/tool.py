@@ -166,7 +166,10 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+from local_operator.harness.message_types import (
+    BRIDGE_BODY_READ_HEAD,
+    BRIDGE_UNTRUSTED_CLAUSE,
+)
 from local_operator.harness.types import (
     AgentTool,
     Content,
@@ -1544,12 +1547,15 @@ async def _shared_history(
         # ``content`` stays the RAW page: it persists in ``details`` and is what a
         # human's renderer reads. The bounded copy is the private key, popped by
         # ``_execute`` before details is built — exactly the ``_IMAGES_KEY`` rule.
-        "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+        # B5: a page of teammate BODIES is where a conversation-path config
+        # suggestion is read, so it leads with the clause AND the receiver rule
+        # (one constant, shared with channel_history/channel_thread/take_up).
+        "content": f"{BRIDGE_BODY_READ_HEAD}\n\n{json.dumps(result, ensure_ascii=False)}",
         # Bound while the body is still a plain Python string: json.dumps rewrites
         # a folded payload's newlines into ``\n`` escapes, so a scan of the
         # SERIALISED page cannot see the fold and would stop at the first line.
         _INLINE_DATA_KEY: (
-            f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+            f"{BRIDGE_BODY_READ_HEAD}\n\n"
             f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}"
         ),
     }
@@ -2927,9 +2933,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             # human's renderer) and the model-facing copy rides the private key. File
             # blocks go on the MODEL copy only: they are fetched sender content, and
             # "bytes never ride details" is the rule the raw page has to keep.
-            "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            "content": f"{BRIDGE_BODY_READ_HEAD}\n\n{json.dumps(result, ensure_ascii=False)}",
             _INLINE_DATA_KEY: _with_files(
-                f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+                f"{BRIDGE_BODY_READ_HEAD}\n\n"
                 f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}",
                 files,
             ),
@@ -2986,9 +2992,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             # human's renderer) and the model-facing copy rides the private key. File
             # blocks go on the MODEL copy only: they are fetched sender content, and
             # "bytes never ride details" is the rule the raw page has to keep.
-            "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            "content": f"{BRIDGE_BODY_READ_HEAD}\n\n{json.dumps(result, ensure_ascii=False)}",
             _INLINE_DATA_KEY: _with_files(
-                f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+                f"{BRIDGE_BODY_READ_HEAD}\n\n"
                 f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}",
                 files,
             ),
@@ -3644,8 +3650,10 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                 # §11.1: the take_up result marks the body as external and
                 # untrusted, exactly as the wake wrap does — the ONE clause
                 # constant (D6), so a copy edit cannot silently un-mark this hop.
+                # B5: take_up hands over the full body, so the receiver rule
+                # rides with the clause (the shared BRIDGE_BODY_READ_HEAD).
                 content = (
-                    f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+                    f"{BRIDGE_BODY_READ_HEAD}\n\n"
                     f"message {outcome.get('message_id')}\n\n{outcome['text']}"
                 )
             else:
