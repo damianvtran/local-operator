@@ -1413,3 +1413,101 @@ def test_m2_the_body_shows_scheme_host_and_path_only() -> None:
     ]
     tail = body.splitlines()[-1]
     assert not any(bit in tail for bit in secret_bits), tail
+
+
+# ---------------------------------------------------------------------------
+# #3534 round 1: review m1 (``revived`` inside the cooldown), m2 (``;params``),
+# n1 (``expect_via`` in the store), QA Q5 (IPv6 title)
+# ---------------------------------------------------------------------------
+
+
+def test_review_m1_a_re_break_through_revived_is_bannered_inside_the_cooldown(
+    tmp_path: Any,
+) -> None:
+    """The reviewer's sequence: a second asker had dropped the row to ``normal``.
+
+    Then repair → re-break inside 30 minutes of the first banner. The re-raise is a
+    priority escalation, so the store answers ``revived``, not ``absorbed``; the
+    reopen used to run only on ``absorbed``, and the previous banner's cooldown
+    refused the new episode's claim (``claim2=False``) until it ran out.
+    """
+    episodes: dict[Any, Any] = {}
+    repair_inbox.publish_notices(tmp_path, _planned("g0", "laptop"), [], episodes=episodes)
+    store = NotificationStore(tmp_path)
+    item = _row(store)
+    assert store.claim_delivery(item["id"], "feed"), "the first break's banner"
+    joined = repair_inbox.publish_notices(
+        tmp_path, _planned("g0", "laptop, desk"), [], episodes=episodes
+    )
+    assert joined.updated == 1 and _row(store)["priority"] == "normal", joined
+
+    repair_inbox.publish_notices(tmp_path, {}, ["openai"], episodes=episodes)
+    assert _row(store)["dismissed_via"] == repair_inbox.DISMISSED_VIA
+    again = repair_inbox.publish_notices(
+        tmp_path, _planned("g0", "laptop, desk"), [], episodes=episodes
+    )
+
+    row = _row(store)
+    claims = [store.claim_delivery(item["id"], "feed") for _ in range(2)]
+    print(f"m1 rebreak: {again} priority={row['priority']} claims={claims}")
+    assert again.reopened == 1, again
+    assert row["priority"] == "high" and not row["dismissed"] and not row["read"]
+    assert claims == [True, False]
+
+
+def test_review_n1_reopen_refuses_a_row_it_did_not_close(tmp_path: Any) -> None:
+    """``expect_via`` is checked inside the store's transaction, not by the caller."""
+    store = NotificationStore(tmp_path)
+    store.notify("s1", title="t", priority="high", key="k")
+    row = store.get_by_key("s1", "k")
+    assert row is not None
+    assert store.claim_delivery(row["id"], "feed")
+    store.apply("dismiss", ids=[(row["id"], int(row["revision"]))], via="explicit")
+
+    refused = store.reopen(row["id"], int(row["revision"]), expect_via="mesh_repair")
+
+    after = store.get(row["id"])
+    assert after is not None
+    print(f"n1 reopen(explicit row) -> {refused}, dismissed_via={after['dismissed_via']}")
+    assert refused is False
+    assert after["dismissed"] and after["dismissed_via"] == "explicit"
+    assert int(after["delivered_rev"]) == int(after["revision"]), "watermark untouched"
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("https://h.example.invalid/a;tok=SYNTH", "https://h.example.invalid/a"),
+        ("https://h.example.invalid/a;x=1/b;tok=SYNTH/c", "https://h.example.invalid/a/b/c"),
+        ("https://h.example.invalid/mcp;tok=SYNTH?q=1#f", "https://h.example.invalid/mcp"),
+        ("https://[2001:db8::1]:8443/mcp;tok=SYNTH", "https://[2001:db8::1]:8443/mcp"),
+        ("https://h.example.invalid/plain", "https://h.example.invalid/plain"),
+    ],
+)
+def test_review_m2_path_parameters_are_stripped(url: str, shown: str) -> None:
+    """``urlsplit`` leaves ``;params`` in ``path``; a token there must not reach the body."""
+    got = repair_inbox._display_url(url)  # noqa: SLF001 — the redaction under test
+    print(f"m2 {url} -> {got}")
+    assert got == shown
+    assert "SYNTH" not in got
+
+
+def test_Q5_an_ipv6_host_is_bracketed_in_the_title() -> None:
+    """QA Q5: a bare IPv6 host ran its colons into the title's ``host: remedy``."""
+    notice = RepairNotice(
+        network_id="n_x",
+        key="mcp:https://[2001:db8::1]:8443/mcp",
+        borrower="d_" + "2" * 32,
+        borrower_name="build-box",
+        login_name="",
+        askers=(("d_" + "2" * 32, "build-box"),),
+        failure="interactive_required",
+        generation="g0",
+    )
+
+    title = repair_inbox.render_title(notice)
+    body = repair_inbox.render_body(notice.askers, notice)
+
+    print(f"Q5 title: {title!r}")
+    assert title.startswith("[2001:db8::1]: run '/mcp login <name>'"), title
+    assert body.splitlines()[-1] == "- https://[2001:db8::1]:8443/mcp"

@@ -153,9 +153,12 @@ def _server_host(notice: RepairNotice) -> str:
     from local_operator.network.credentials.types import mcp_url_from_key
 
     try:
-        return urlsplit(mcp_url_from_key(notice.key)).hostname or ""
+        host = urlsplit(mcp_url_from_key(notice.key)).hostname or ""
     except ValueError:
         return ""
+    # An IPv6 literal is bracketed as the body's URL is (#3534 QA Q5): bare, its
+    # colons ran into the title's own "host: remedy" separator.
+    return f"[{host}]" if ":" in host else host
 
 
 def _display_url(url: str) -> str:
@@ -185,7 +188,13 @@ def _display_url(url: str) -> str:
         host = f"[{host}]"  # an IPv6 literal; ``hostname`` strips the brackets
     if port is not None:
         host = f"{host}:{port}"
-    return f"{parts.scheme}://{host}{parts.path}"
+    # PATH PARAMETERS GO TOO (#3534 review m2): ``urlsplit`` leaves ``;params``
+    # inside ``path``, so ``/mcp;tok=SECRET`` carried a token past the redaction.
+    # Stripped per segment — RFC 3986 allows them on every one. A token that is a
+    # whole path segment cannot be told from a route and stays: the path is what
+    # says which server.
+    path = "/".join(segment.split(";", 1)[0] for segment in parts.path.split("/"))
+    return f"{parts.scheme}://{host}{path}"
 
 
 def render_title(notice: RepairNotice) -> str:
@@ -488,6 +497,28 @@ def _raise(notifications: Any, item: PlannedItem, generation: str) -> str:
         priority = str(existing.get("priority") or "normal")
     else:
         priority = "normal"
+    if repaired_before and existing is not None:
+        # A key this module closed as repaired is open again under the SAME token
+        # (only possible for ``g0``, once the closing grant has itself left the
+        # window): a new episode, so the row comes back — undismissed, unread AND
+        # bannerable, in one transaction (``store.reopen``). Its revision is the
+        # one the previous episode's banner claimed, so an undismiss alone left a
+        # live row no banner leg would raise (#3522 follow-up, QA Q3).
+        #
+        # BEFORE THE NOTIFY, so it holds WHATEVER THE STORE ANSWERS (#3534 review
+        # m1): a row a second asker had dropped to ``normal`` comes back through
+        # the store's own ``revived`` (a priority escalation), not ``absorbed``,
+        # and kept the previous banner's cooldown — the new break was not bannered
+        # for up to 30 minutes. Reopened first, the notify below lands on a live
+        # row whose watermark is already released: same text answers
+        # ``unchanged``, new text ``updated``, and either revision banners once.
+        # ``expect_via`` makes the store itself refuse a row the operator, not
+        # this module, dismissed.
+        reopened = notifications.reopen(
+            str(existing["id"]), int(existing["revision"]), expect_via=DISMISSED_VIA
+        )
+    else:
+        reopened = False
     outcome = notifications.notify(
         SESSION_ID,
         title=item.title,
@@ -496,14 +527,7 @@ def _raise(notifications: Any, item: PlannedItem, generation: str) -> str:
         key=key,
         session_title=SESSION_TITLE,
     )
-    if repaired_before and outcome.action == "absorbed":
-        # A key this module closed as repaired is open again under the SAME token
-        # (only possible for ``g0``, once the closing grant has itself left the
-        # window): a new episode, so the row comes back — undismissed, unread AND
-        # bannerable, in one transaction (``store.reopen``). The revision is the
-        # one the previous episode's banner already claimed, so an undismiss alone
-        # left a live row no banner leg would raise (#3522 follow-up, QA Q3).
-        notifications.reopen(outcome.item_id, outcome.revision)
+    if reopened:
         return "reopened"
     return str(outcome.action)
 

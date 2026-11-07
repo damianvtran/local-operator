@@ -1407,7 +1407,7 @@ class NotificationStore:
 
         return self._write(body, "release")
 
-    def reopen(self, item_id: str, revision: int) -> bool:
+    def reopen(self, item_id: str, revision: int, *, expect_via: str) -> bool:
         """Bring a dismissed row back as a NEW EPISODE: live, unread AND unbannered.
 
         For a producer that closed a keyed row itself (the credential repair
@@ -1432,15 +1432,21 @@ class NotificationStore:
         Token-bound on ``(id, revision)`` like :meth:`apply`; True when it wrote.
         A live row is left alone (``False``): reopening is for a settled row, and
         resetting a live row's watermark would re-banner it.
+
+        ``expect_via`` IS CHECKED IN THE SAME TRANSACTION (#3534 review n1): only a
+        row dismissed for exactly that reason is reopened — the producer's own
+        close. A row the operator dismissed is refused even if a caller's earlier
+        read said otherwise, so this primitive can never re-banner (and lift the
+        cooldown of) something a person put away.
         """
 
         def body(conn: sqlite3.Connection) -> bool:
             row = conn.execute(
-                "SELECT revision, dismissed_at FROM items WHERE id=?", (item_id,)
+                "SELECT revision, dismissed_at, dismissed_via FROM items WHERE id=?", (item_id,)
             ).fetchone()
             if row is None or int(row["revision"]) != int(revision):
                 return False
-            if row["dismissed_at"] is None:
+            if row["dismissed_at"] is None or str(row["dismissed_via"] or "") != expect_via:
                 return False
             conn.execute(
                 "UPDATE items SET seq=?, read_rev=0, read_at=NULL, read_via=NULL, "
