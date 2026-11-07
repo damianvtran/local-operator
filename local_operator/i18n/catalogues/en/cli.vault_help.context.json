@@ -1,0 +1,37 @@
+{
+  "cli.vault_help.vault": {
+    "role": "lop vault argparse help",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "argparse help for the `lop vault` group; listed only to accounts with access."
+  },
+  "cli.vault_help.connect": {
+    "role": "lop vault argparse help",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "argparse help"
+  },
+  "cli.vault_help.no_open": {
+    "role": "lop vault argparse help",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "argparse help for --no-open"
+  },
+  "cli.vault_help.timeout": {
+    "role": "lop vault argparse help",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "argparse help for --timeout"
+  },
+  "cli.vault_help.status": {
+    "role": "lop vault argparse help",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "argparse help"
+  },
+  "cli.vault_help.json": {
+    "role": "lop vault argparse help",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "argparse help for --json"
+  },
+  "cli.vault_help.disconnect": {
+    "role": "lop vault argparse help",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "argparse help"
+  }
+}
