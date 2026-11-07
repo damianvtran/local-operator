@@ -8,6 +8,7 @@ rather than depending on live DNS.
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import httpx
 import pytest
@@ -239,7 +240,16 @@ async def test_an_idn_host_is_pinned_with_an_ascii_host_header_and_sni(
 #: so the pin would connect to the default port instead), an A-label httpx
 #: cannot decode (``xn--zz`` failed at request time, after a real lookup), and a
 #: name longer than DNS can hold. Every one is a refusal BEFORE the lookup.
+#: Port 0 (and its ``:00`` spelling) is no port at all: nothing listens there, so
+#: the connect fails as a retryable error whose Retry can never work (S-9).
 _UNREQUESTABLE_SPELLINGS = [
+    "https://public.test:0/x",
+    "https://public.test:00/x",
+    # An empty label is no DNS name; the lookup used to raise from IDNA (m1 moved
+    # this rule here from the preview's own copy).
+    "https://./x",
+    "https://a..public.test/x",
+    "https://.public.test/x",
     "https://public.test:65536/x",
     "https://public.test:99999/x",
     "https://public.test:-1/x",
@@ -270,8 +280,9 @@ def test_an_unrequestable_spelling_is_refused_before_any_lookup(
     "url",
     [
         "https://public.test:65535/x",
-        "https://public.test:0/x",
         "https://public.test:443/x",
+        # A single trailing dot is the DNS root, not an empty label.
+        "https://public.test./x",
         "https://XN--CAF-DMA.test/x",
         "https://" + ".".join(["a" * 63] * 3) + "." + "b" * 61 + "/x",
     ],
@@ -281,6 +292,120 @@ def test_the_spelling_checks_leave_real_urls_alone(
 ) -> None:
     monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
     assert validate_public_url(url, allow_private=False) == "93.184.216.34"
+
+
+def test_the_spelling_verdict_is_memoised_by_the_exact_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The string-only verdict is computed once per exact spelling (security S-10).
+
+    A refused spelling is never cached by the preview, so every render re-paid the
+    parse — measured at ~15 ms for a 200-character IDN host, on the event loop.
+    The memo is keyed by the RAW string, so a verdict can never answer for a
+    different spelling: one character more is a fresh decision.
+    """
+    calls: list[str] = []
+    real_parse = service._parse_request_url
+
+    def _counting(url: str) -> httpx.URL:
+        calls.append(url)
+        return real_parse(url)
+
+    monkeypatch.setattr(service, "_parse_request_url", _counting)
+
+    def _verdict(candidate: str) -> tuple[str, str]:
+        try:
+            return ("pass", service.vet_url_spelling(candidate))
+        except service.PolicyRefusal as refusal:
+            return ("refused", refusal.reason)
+
+    # Unique per run, so a verdict memoised by an earlier test cannot answer it.
+    # Both a passing and a refused spelling: the refused one is the expensive
+    # case, because the preview never caches it.
+    run = uuid.uuid4().hex
+    label = "\u00fc" * 20 + "a" * 10
+    for url in (
+        f"https://{label}.{run}.test/p",
+        "https://" + ".".join([label] * 6) + f".{run}.test/p",
+    ):
+        calls.clear()
+        first = _verdict(url)
+        assert _verdict(url) == first
+        assert len(calls) == 1, "the same exact spelling was parsed twice"
+
+        # One character more is a different spelling with its own verdict, and
+        # the refusal it earns does not leak back onto the first spelling.
+        assert _verdict(url + "#\x01") == ("refused", "host")
+        assert _verdict(url) == first
+        assert len(calls) == 2
+
+
+def test_a_credentialed_spelling_never_enters_the_verdict_memo() -> None:
+    """A URL carrying userinfo is judged fresh and never retained (security S-11).
+
+    The memo is process-global and outlives the request, so keeping
+    ``https://user:secret@host/`` as a key would break the package's rule that
+    credentials are never cached. That covers both credential arms: the plain
+    refusal, and a netloc ``urlparse`` cannot split, where the bracketed userinfo
+    would otherwise sit in the key AND in the refusal's ``repr(url)``.
+    """
+    run = uuid.uuid4().hex
+    memo = service._memoised_spelling_verdict
+    for url in (
+        f"https://user:pw-{run}@{run}.test/p",
+        f"https://user:p[w-{run}@{run}.test/p",
+    ):
+        before = memo.cache_info()
+        for _ in range(2):
+            with pytest.raises(service.PolicyRefusal) as refused:
+                service.vet_url_spelling(url)
+            assert refused.value.reason == "host"
+        after = memo.cache_info()
+        assert (after.currsize, after.hits) == (before.currsize, before.hits), url
+
+
+#: The memo's worst-case footprint, as stated beside ``_SPELLING_MEMO_SIZE``.
+_SPELLING_MEMO_BOUND_BYTES = 16 * 1024 * 1024
+
+
+def test_the_verdict_memo_stays_inside_its_stated_bound() -> None:
+    """Filling every slot with the most expensive spellings stays under the bound.
+
+    Security S-12 measured ~53 MB, not "a few megabytes": the refusal message
+    embeds ``repr(url)`` twice (ours and httpx's) and ``repr`` expands one
+    non-printable astral character to ten. The cached message is now capped, so
+    the key — at most 4,096 characters, four bytes each when astral, plus the
+    UTF-8 copy CPython may cache beside it — is what the bound counts.
+    """
+    import tracemalloc
+
+    memo = service._memoised_spelling_verdict
+    run = uuid.uuid4().hex
+    # The two shapes S-12 found most expensive per entry: an astral host (the
+    # longest message) and an astral fragment behind a control byte (the
+    # largest key plus message). Both refuse fast, so 512 slots fill in ~1 s.
+    shapes = (
+        lambda i: f"https://{i}{run}" + "\U000e0001" * 4096,
+        lambda i: f"https://{i}.{run}.test/p#\x01" + "\U000e0001" * 4096,
+    )
+    longest_message = 0
+    memo.cache_clear()
+    tracemalloc.start()
+    try:
+        baseline = tracemalloc.get_traced_memory()[0]
+        for index in range(service._SPELLING_MEMO_SIZE):
+            url = shapes[index % 2](index)[: service._SPELLING_MEMO_MAX_CHARS]
+            with pytest.raises(service.PolicyRefusal) as refused:
+                service.vet_url_spelling(url)
+            longest_message = max(longest_message, len(str(refused.value)))
+            del url, refused
+        retained = tracemalloc.get_traced_memory()[0] - baseline
+    finally:
+        tracemalloc.stop()
+        memo.cache_clear()
+    assert memo.cache_info().maxsize == service._SPELLING_MEMO_SIZE
+    assert retained <= _SPELLING_MEMO_BOUND_BYTES, f"{retained / 2**20:.1f} MiB retained"
+    assert longest_message <= service._SPELLING_MEMO_MESSAGE_CHARS
 
 
 def test_the_pin_carries_the_port_the_guard_judged() -> None:

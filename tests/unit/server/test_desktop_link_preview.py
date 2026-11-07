@@ -89,7 +89,10 @@ def _fresh_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
     cases turned thirteen unrelated tests into ``429 rate_limited``. Tests of the
     throttle itself still install their own, which wins because it is set later.
     """
-    monkeypatch.setattr(desktop_link_preview, "get_resolve_throttle", ResolveThrottle)
+    # ONE bucket for the whole test (m2): installing the class itself built a
+    # fresh bucket on every call, so the default path never charged anything.
+    bucket = ResolveThrottle()
+    monkeypatch.setattr(desktop_link_preview, "get_resolve_throttle", lambda: bucket)
 
 
 @pytest.fixture(autouse=True)
@@ -1692,6 +1695,102 @@ async def test_an_unrequestable_spelling_does_not_poison_its_canonical_twin(
         legitimate = await _post(client, _resolve_body(victim))
         assert legitimate.json()["result"]["kind"] == "ready", legitimate.text
     assert preview_cache_for_test.stats().entries == 1
+
+
+#: One redirector URL in two spellings that share a cache key under a query
+#: re-encoding: httpx sends the backslashes RAW in the first and percent-encoded
+#: in the second, so an origin echoing its raw query into ``Location`` answers
+#: them differently (security S-8).
+_REFLECTED_POISON = "http://preview.test/r?to=\\\\evil.test/x"
+_REFLECTED_CLEAN = "http://preview.test/r?to=%5C%5Cevil.test%2Fx"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [(_REFLECTED_POISON, _REFLECTED_CLEAN), (_REFLECTED_CLEAN, _REFLECTED_POISON)],
+    ids=["poison-first", "clean-first"],
+)
+async def test_a_reflected_location_cannot_answer_for_another_spelling_of_the_query(
+    first: str,
+    second: str,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_in: None,
+    preview_cache_for_test: PreviewCache,
+) -> None:
+    """Two spellings whose bytes on the wire differ never share a cached answer.
+
+    The redirect hop is a property of the REQUEST BYTES: the poison spelling's
+    ``Location`` carries ``\\\\`` (refused at the hop, a cached ``blocked-host``)
+    while the clean one's is a harmless relative path (``ready``). Whichever
+    resolves first, the other must make its own request and get its own answer —
+    neither a 30-minute denial of the clean card nor a ``ready`` for the refused
+    spelling.
+    """
+    card = _card_handler(_html(CARD_HEAD))
+
+    def _reflector(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/r":
+            echoed = request.url.query.split(b"=", 1)[1]
+            return httpx.Response(302, headers=[(b"location", echoed)])
+        return card(request)
+
+    seen = _route_transport(monkeypatch, _reflector)
+    expected = {
+        _REFLECTED_POISON: {"kind": "absent", "reason": "blocked-host"},
+        _REFLECTED_CLEAN: {"kind": "ready"},
+    }
+    async with _client() as client:
+        for url in (first, second):
+            before = seen.count("/r")
+            result = (await _post(client, _resolve_body(url))).json()["result"]
+            assert {k: result.get(k) for k in expected[url]} == expected[url], (url, result)
+            assert seen.count("/r") == before + 1, f"{url!r} was answered from another spelling"
+    assert preview_cache_for_test.stats().entries == 2
+
+
+def test_the_default_throttle_is_one_bucket_for_the_whole_test() -> None:
+    """The autouse fixture installs ONE bucket per test, not one per call (m2).
+
+    Installing the class itself built a fresh bucket on every read, so the default
+    path's throttle never charged anything inside a test.
+    """
+    assert desktop_link_preview.get_resolve_throttle() is (
+        desktop_link_preview.get_resolve_throttle()
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://public.test:99999/x",
+        "https://" + ".".join(["a" * 63] * 4) + ".test/x",
+        "https://xn--zz.public.test/x",
+    ],
+)
+def test_the_preview_keeps_no_second_copy_of_the_spelling_rules(
+    target: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``vet_url_spelling`` is the ONE source of the string rules (review m1).
+
+    With the shared verdict stubbed to accept, the preview must accept too: a
+    port, IDNA or length check of its own (the old copy used the IDNA 2003 codec,
+    where the request uses 2008) would be a second answer to one question.
+    """
+    monkeypatch.setattr(preview_service, "vet_url_spelling", lambda url: "public.test")
+    assert preview_service._target_refusal(target) is None
+
+
+def test_the_preview_maps_the_shared_verdict_into_its_own_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _refuse(url: str) -> str:
+        raise PolicyRefusal("refused", reason="scheme")
+
+    monkeypatch.setattr(preview_service, "vet_url_spelling", _refuse)
+    assert preview_service._target_refusal("ftp://public.test/x") == "unsupported-scheme"
+    # The one check the preview keeps: characters ``urlsplit`` deletes (S-3).
+    assert preview_service._target_refusal("https:\t//public.test/x") == "blocked-host"
 
 
 @pytest.mark.asyncio
