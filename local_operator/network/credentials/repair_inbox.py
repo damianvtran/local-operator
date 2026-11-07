@@ -158,6 +158,36 @@ def _server_host(notice: RepairNotice) -> str:
         return ""
 
 
+def _display_url(url: str) -> str:
+    """``scheme://host[:port]/path`` — the server, without anything that can be a secret.
+
+    THE BODY CAN REACH THE LOCK SCREEN (#3522 follow-up, review m2): it is the one
+    field the banner ladder shows when the privacy flag allows it, and some MCP
+    endpoints carry an access token in the query string or credentials in the
+    userinfo. The operator needs WHICH server, which scheme, host and path say;
+    userinfo, query and fragment are dropped. The item KEY keeps the full URL (it
+    is the collapse identity and is never rendered on a banner), as does the
+    doctor row — both out of this function's scope.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        # An unparseable URL (a bad port, a broken IPv6 literal) shows nothing
+        # rather than its raw text — the raw text is what may hold a secret.
+        return ""
+    if not host:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"  # an IPv6 literal; ``hostname`` strips the brackets
+    if port is not None:
+        host = f"{host}:{port}"
+    return f"{parts.scheme}://{host}{parts.path}"
+
+
 def render_title(notice: RepairNotice) -> str:
     """The doctor row's remedy, as a headline: the action, the same for every asker.
 
@@ -184,7 +214,8 @@ def render_body(askers: Iterable[tuple[str, str]], notice: RepairNotice) -> str:
     A LIST, because the pane collapses a blank line and two wrapped sentences then
     read as one block (#3522 D5/N2); the sentences themselves stay byte-identical
     to ``render_repair_notice``. An MCP key with no local name gets its URL as the
-    last list item (see :func:`_server_host`), PLAIN — the body is rendered as
+    last list item (see :func:`_server_host`), REDACTED to scheme, host and path
+    (:func:`_display_url`) and PLAIN — the body is rendered as
     Markdown but the reel is not, so a backtick-wrapped URL reached the operator
     with its formatting characters showing (#3522 round 2, D6/U7).
 
@@ -199,7 +230,9 @@ def render_body(askers: Iterable[tuple[str, str]], notice: RepairNotice) -> str:
     if _server_host(notice):
         from local_operator.network.credentials.types import mcp_url_from_key
 
-        lines.append(f"- {mcp_url_from_key(notice.key)}")
+        shown = _display_url(mcp_url_from_key(notice.key))
+        if shown:
+            lines.append(f"- {shown}")
     return "\n".join(lines)
 
 
@@ -423,25 +456,16 @@ def _close(notifications: Any, row: Mapping[str, Any]) -> int:
 def _mark_repaired(notifications: Any, row: Mapping[str, Any]) -> int:
     """Re-file a DISMISSED row as repaired (``dismissed_via=mesh_repair``); 0 if already.
 
-    Two token-bound writes, because the store refuses a ``dismiss`` on a row that is
-    already dismissed (``apply`` answers ``already`` and changes nothing): the row is
-    undismissed and dismissed again under the repaired reason. A row this module
-    already closed needs neither.
+    ONE token-bound store write (``refile_dismissal``), never an undismiss and a
+    dismiss: between those two commits the row was live and unread, and a row whose
+    first revision was never bannered was claimable there — a banner for a login
+    that had just been repaired (#3522 follow-up, review m1 = QA Q4). A row this
+    module already closed needs nothing.
     """
     if str(row.get("dismissed_via") or "") == DISMISSED_VIA:
         return 0
-    item_id, revision = str(row["id"]), int(row["revision"])
-    if not notifications.apply("undismiss", ids=[(item_id, revision)], via=DISMISSED_VIA).changed:
-        return 0
-    current = notifications.get_by_key(SESSION_ID, str(row.get("key") or ""))
-    if current is None:
-        return 0
-    notifications.apply(
-        "dismiss",
-        ids=[(str(current["id"]), int(current["revision"]))],
-        via=DISMISSED_VIA,
-    )
-    return 1
+    refiled = notifications.refile_dismissal(str(row["id"]), int(row["revision"]), DISMISSED_VIA)
+    return 1 if refiled else 0
 
 
 def _raise(notifications: Any, item: PlannedItem, generation: str) -> str:
@@ -475,15 +499,11 @@ def _raise(notifications: Any, item: PlannedItem, generation: str) -> str:
     if repaired_before and outcome.action == "absorbed":
         # A key this module closed as repaired is open again under the SAME token
         # (only possible for ``g0``, once the closing grant has itself left the
-        # window): a new episode, so the row comes back — undismissed and unread,
-        # the way ``notifications/remote_park._reopen`` revives a second park.
-        notifications.apply(
-            "undismiss", ids=[(outcome.item_id, outcome.revision)], via=DISMISSED_VIA
-        )
-        if outcome.read:
-            notifications.apply(
-                "unread", ids=[(outcome.item_id, outcome.revision)], via=DISMISSED_VIA
-            )
+        # window): a new episode, so the row comes back — undismissed, unread AND
+        # bannerable, in one transaction (``store.reopen``). The revision is the
+        # one the previous episode's banner already claimed, so an undismiss alone
+        # left a live row no banner leg would raise (#3522 follow-up, QA Q3).
+        notifications.reopen(outcome.item_id, outcome.revision)
         return "reopened"
     return str(outcome.action)
 

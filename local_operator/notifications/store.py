@@ -1407,6 +1407,87 @@ class NotificationStore:
 
         return self._write(body, "release")
 
+    def reopen(self, item_id: str, revision: int) -> bool:
+        """Bring a dismissed row back as a NEW EPISODE: live, unread AND unbannered.
+
+        For a producer that closed a keyed row itself (the credential repair
+        inbox's ``mesh_repair``) and later finds the same key broken again under
+        the same key — the collapse rule answers ``absorbed`` for an unchanged
+        text, so the producer has to revive the row by hand.
+
+        ONE TRANSACTION (#3522 follow-up, review m1 = QA Q4). It used to be an
+        ``undismiss`` then an ``unread``, two commits; a reader between them saw
+        a live row in a state no producer intended.
+
+        THE DELIVERY WATERMARK IS RELEASED (#3522 follow-up, QA Q3). The row
+        keeps its revision (the text did not change), and that revision was
+        bannered for the PREVIOUS episode, so ``undelivered`` skipped it and
+        ``claim_delivery`` refused it: an item and a badge, no banner, for a
+        login that died again. ``delivered_at`` goes too, as in
+        :meth:`release_delivery` — the cooldown suppresses repeat updates of ONE
+        episode, and the operator was told this one was over. The ladder's rules
+        are otherwise untouched: the reopened revision banners once, through the
+        same ``claim_delivery`` every other item uses.
+
+        Token-bound on ``(id, revision)`` like :meth:`apply`; True when it wrote.
+        A live row is left alone (``False``): reopening is for a settled row, and
+        resetting a live row's watermark would re-banner it.
+        """
+
+        def body(conn: sqlite3.Connection) -> bool:
+            row = conn.execute(
+                "SELECT revision, dismissed_at FROM items WHERE id=?", (item_id,)
+            ).fetchone()
+            if row is None or int(row["revision"]) != int(revision):
+                return False
+            if row["dismissed_at"] is None:
+                return False
+            conn.execute(
+                "UPDATE items SET seq=?, read_rev=0, read_at=NULL, read_via=NULL, "
+                "read_surface=NULL, dismissed_at=NULL, dismissed_via=NULL, delivered_rev=0, "
+                "delivered_by='', delivered_at=NULL WHERE id=?",
+                (self._next_seq(conn), item_id),
+            )
+            return True
+
+        return self._write(body, "reopen")
+
+    def refile_dismissal(
+        self, item_id: str, revision: int, via: str, *, now: int | None = None
+    ) -> bool:
+        """Change WHY a dismissed row is dismissed, without it ever being live.
+
+        ``apply("dismiss")`` refuses a row that is already dismissed, so the
+        repair inbox re-filed an operator's dismissal as ``mesh_repair`` with an
+        ``undismiss`` and a ``dismiss`` — two commits about 2 ms apart, and QA
+        polled the row live and unread once in 216 reads (#3522 follow-up,
+        review m1 = QA Q4). A row whose first revision was never claimed is
+        claimable in that window, so a feed tick could banner a login that had
+        just been repaired. One transaction leaves no such window.
+
+        ``dismissed_at`` is restamped, as the old dismiss did: the row was closed
+        for its new reason now. Token-bound on ``(id, revision)``; True when it
+        wrote, False for a live row, a stale token, or a row already filed so.
+        """
+        stamp = now if now is not None else now_ms()
+
+        def body(conn: sqlite3.Connection) -> bool:
+            row = conn.execute(
+                "SELECT revision, dismissed_at, dismissed_via FROM items WHERE id=?",
+                (item_id,),
+            ).fetchone()
+            if row is None or int(row["revision"]) != int(revision):
+                return False
+            if row["dismissed_at"] is None or str(row["dismissed_via"] or "") == via:
+                return False
+            conn.execute(
+                "UPDATE items SET seq=?, dismissed_at=?, dismissed_via=? WHERE id=?",
+                (self._next_seq(conn), stamp, via, item_id),
+            )
+            return True
+
+        return self._write(body, "refile")
+
     # -- retention ------------------------------------------------------------
 
     def delete_session(self, session_id: str) -> int:

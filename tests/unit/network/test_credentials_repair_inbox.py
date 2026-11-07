@@ -1270,3 +1270,146 @@ def test_D7_an_unnamed_mcp_key_leads_with_its_host() -> None:
         # 80 columns is the narrowest list the renderer clips for; the host is
         # inside the first 24 characters, so it is never the part that is cut.
         assert len(title[: title.index(" ")]) <= 24
+
+
+# ---------------------------------------------------------------------------
+# #3522 follow-up: QA Q3 (re-break banner), review m1 = QA Q4 (atomic re-file),
+# review m2 (the body's URL is redacted)
+# ---------------------------------------------------------------------------
+
+
+def _row(store: NotificationStore) -> dict[str, Any]:
+    rows = [
+        *store.list_items(state="all", session_id=repair_inbox.SESSION_ID)[0],
+        *store.list_items(state="dismissed", session_id=repair_inbox.SESSION_ID)[0],
+    ]
+    (row,) = rows
+    return row
+
+
+def test_Q3_a_re_break_after_a_sign_in_is_bannered_again(tmp_path: Any) -> None:
+    """QA Q3: sign in → the same login breaks again, no peer borrow in between.
+
+    Nothing advances the generation, so the break reuses the ``g0`` row the sign-in
+    closed. Its revision is the one the FIRST banner claimed; reopening it without
+    releasing that watermark gave an item and a badge but no banner leg would
+    raise it. The re-break is a new episode and must banner — exactly once.
+    """
+    episodes: dict[Any, Any] = {}
+    repair_inbox.publish_notices(tmp_path, _planned("g0"), [], episodes=episodes)
+    store = NotificationStore(tmp_path)
+    first = _row(store)
+    assert store.claim_delivery(first["id"], "feed"), "the first break's banner"
+
+    # The sign-in: the window shows the key repaired, nothing is open.
+    closed = repair_inbox.publish_notices(tmp_path, {}, ["openai"], episodes=episodes)
+    assert closed.closed == 1, closed
+    assert _row(store)["dismissed_via"] == repair_inbox.DISMISSED_VIA
+
+    # The same login breaks again, still ``g0``.
+    again = repair_inbox.publish_notices(tmp_path, _planned("g0"), [], episodes=episodes)
+    assert again.reopened == 1, again
+
+    pending = store.undelivered()
+    print(f"Q3 undelivered after re-break: {[(r['key'], r['revision']) for r in pending]}")
+    assert [r["id"] for r in pending] == [first["id"]]
+    claims = [store.claim_delivery(first["id"], "feed") for _ in range(3)]
+    print(f"Q3 claim_delivery x3: {claims}")
+    assert claims == [True, False, False]
+
+
+def test_Q4_the_re_file_is_never_observable_as_a_live_claimable_row(tmp_path: Any) -> None:
+    """review m1 = QA Q4: an operator's dismissal re-filed as ``mesh_repair`` atomically.
+
+    The first raise was never claimed (the operator dismissed it inside the feed's
+    grace), so a moment in which the row is live and unread is a moment a banner leg
+    could raise it — for a login that has just been repaired. Deterministic: a hook
+    after EVERY committed store write holds the publish while a concurrent reader
+    thread polls the row 200 times through its own connection.
+    """
+    import threading
+
+    repair_inbox.publish_notices(tmp_path, _planned("g0"), [], episodes={})
+    store = NotificationStore(tmp_path)
+    item = _row(store)
+    store.apply("dismiss", ids=[(item["id"], int(item["revision"]))], via="explicit")
+    reader = NotificationStore(tmp_path)
+
+    def exposed() -> bool:
+        row = reader.get(item["id"])
+        assert row is not None
+        live_unread = not row["dismissed"] and not row["read"]
+        return live_unread and int(row["delivered_rev"]) < int(row["revision"])
+
+    # After EVERY committed write the publish pauses until the reader thread has
+    # polled the row 200 more times on its own connection: each intermediate
+    # state a write can leave is held still and read, so the outcome does not
+    # depend on scheduling luck (QA's free-running poller hit the window 1 in 216).
+    seen_by_hook: list[tuple[str, bool]] = []
+    polls: list[bool] = []
+    lock = threading.Lock()
+    done = threading.Event()
+    original_write = NotificationStore._write  # noqa: SLF001 — the store's one write seam
+
+    def poll() -> None:
+        while not done.is_set():
+            flag = exposed()
+            with lock:
+                polls.append(flag)
+
+    def observed_write(self: NotificationStore, body: Any, what: str) -> Any:
+        result = original_write(self, body, what)
+        with lock:
+            target = len(polls) + 200
+        while len(polls) < target:
+            time.sleep(0.0005)
+        seen_by_hook.append((what, exposed()))
+        return result
+
+    thread = threading.Thread(target=poll)
+    thread.start()
+    try:
+        NotificationStore._write = observed_write  # type: ignore[method-assign]
+        try:
+            refiled = repair_inbox.publish_notices(tmp_path, {}, ["openai"], episodes={})
+        finally:
+            NotificationStore._write = original_write  # type: ignore[method-assign]
+    finally:
+        done.set()
+        thread.join(timeout=30)
+
+    print(f"Q4 writes seen by the hook: {seen_by_hook}")
+    print(f"Q4 reader polls: {len(polls)}, exposed: {sum(polls)}")
+    assert refiled.closed == 1, refiled
+    assert _row(store)["dismissed_via"] == repair_inbox.DISMISSED_VIA
+    assert seen_by_hook and not any(flag for _, flag in seen_by_hook), seen_by_hook
+    assert len(polls) >= 200 and not any(polls)
+    assert store.undelivered() == []
+
+
+def test_m2_the_body_shows_scheme_host_and_path_only() -> None:
+    """review m2: userinfo, query and fragment never reach the body (or a lock screen)."""
+    # Joined at runtime so the fixture reads as what it is: synthetic, not a secret.
+    userinfo = ":".join(("operator", "synthetic-pass"))
+    query = "=".join(("access_token", "synthetic-query-token"))
+    secret_bits = ("operator", "synthetic-pass", "access_token", "synthetic-query-token", "frag-x")
+    notice = RepairNotice(
+        network_id="n_x",
+        key=f"mcp:https://{userinfo}@MCP.example.invalid:8443/v1/mcp?{query}&x=1#frag-x",
+        borrower="d_" + "2" * 32,
+        borrower_name="build-box",
+        login_name="",
+        askers=(("d_" + "2" * 32, "build-box"),),
+        failure="interactive_required",
+        generation="g0",
+    )
+
+    body = repair_inbox.render_body(notice.askers, notice)
+
+    print(f"m2 body: {body!r}")
+    assert body.splitlines() == [
+        f"- {render_repair_notice('build-box', notice.key)}",
+        "- https://mcp.example.invalid:8443/v1/mcp",
+    ]
+    tail = body.splitlines()[-1]
+    assert not any(bit in tail for bit in secret_bits), tail
