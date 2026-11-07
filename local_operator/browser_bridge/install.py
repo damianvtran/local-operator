@@ -301,7 +301,12 @@ def render_systemd(port: int = DEFAULT_PORT, *, version: int | None | _Detect = 
     # answers with the stable shim when this machine has the layout, and ``None``
     # (either branded image or bare interpreter) when it does not.
     image = procname.supervised_image() or Path(sys.executable)
-    command = f"{image} -m local_operator.browser_bridge.daemon --port {port}"
+    # Quoted in systemd's own grammar like every sibling daemon: an unquoted
+    # interpreter under a path with a space splits into a non-executable argv[0],
+    # and a ``%`` in it is expanded as a specifier.
+    command = (
+        f"{supervisors.quoted(str(image))} -m local_operator.browser_bridge.daemon --port {port}"
+    )
     # ``_DETECT`` and not ``None`` as the default: ``None`` is a MEANINGFUL
     # version value here ("systemd is present but its version could not be
     # read"), so overloading it to also mean "caller did not pass one" would
@@ -311,10 +316,7 @@ def render_systemd(port: int = DEFAULT_PORT, *, version: int | None | _Detect = 
     resolved = systemd_version() if isinstance(version, _Detect) else version
     post_lines: list[str] = []
     if resolved is not None and resolved >= MIN_SYSTEMD_APPEND_VERSION:
-        post_lines = [
-            f"StandardOutput=append:{log_path()}",
-            f"StandardError=append:{log_path()}",
-        ]
+        post_lines = supervisors.append_redirect_lines(log_path())
     # One renderer for all four daemons (see supervisors.render_systemd_unit);
     # this call is the browser's parameterisation of it and its output is
     # byte-for-byte what this function wrote before.
@@ -1104,7 +1106,9 @@ def _recorded_log_path(registration: Path) -> str | None:
     # this build emits it only on systemd >= 240; older systemd logs to the
     # journal, so the absence of this line is expected rather than anomalous.
     match = re.search(r"^StandardOutput=append:(.+)$", text, re.MULTILINE)
-    return match.group(1).strip() if match else None
+    # The renderer percent-escapes this path; decode it so a root containing
+    # ``%`` is compared as the real filesystem path.
+    return supervisors.unescape_specifiers(match.group(1).strip()) if match else None
 
 
 def _default_root_dir_exists() -> bool:
