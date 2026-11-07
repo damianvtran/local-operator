@@ -92,6 +92,17 @@ def test_granted_peer_restarts_and_receipt_has_fresh_process_evidence(
     """The supervisor is the only replaced seam: it stops and starts a REAL relay."""
     server_a, server_b, record = _rig(devices, monkeypatch)
     _grant(server_a, record, server_b.identity.device_id)
+    # The confirm loop already polls the readiness signal (a fresh relay
+    # answering with new instance evidence); the window is only its hang
+    # backstop. The product's 15 s is a user-facing promise, not a test budget,
+    # and a loaded CI runner spent all of it reconnecting (#3410), so this cell
+    # owns its own backstop instead of betting on the product value. Measured on
+    # this cell (2026-11-07, M-series, 14 cores): n=15 quiet median 0.14 s /
+    # max 0.88 s; n=18 at 6-way concurrency and load average ~72, median
+    # 0.15 s / max 0.20 s. 60 s is ~70x that max and 4x the CI window that
+    # expired; it only fires on a genuine hang, which should still fail here
+    # rather than at the job's 25-minute ceiling.
+    monkeypatch.setattr(meshrestart, "RESTART_CONFIRM_WINDOW_S", 60.0)
     current = {"server": server_a}
     calls: list[str] = []
     restart_errors: list[BaseException] = []
