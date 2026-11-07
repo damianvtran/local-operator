@@ -502,6 +502,30 @@ def compaction_mid_turn_enabled_label() -> Msg:
     return Msg("wire.settings.compaction_mid_turn_enabled.label", {})
 
 
+def compaction_resume_replay_choice_card_description() -> Msg:
+    return Msg("wire.settings.compaction_resume_replay.choice.card.description", {})
+
+
+def compaction_resume_replay_choice_card_label() -> Msg:
+    return Msg("wire.settings.compaction_resume_replay.choice.card.label", {})
+
+
+def compaction_resume_replay_choice_full_description() -> Msg:
+    return Msg("wire.settings.compaction_resume_replay.choice.full.description", {})
+
+
+def compaction_resume_replay_choice_full_label() -> Msg:
+    return Msg("wire.settings.compaction_resume_replay.choice.full.label", {})
+
+
+def compaction_resume_replay_help() -> Msg:
+    return Msg("wire.settings.compaction_resume_replay.help", {})
+
+
+def compaction_resume_replay_label() -> Msg:
+    return Msg("wire.settings.compaction_resume_replay.label", {})
+
+
 def compaction_strategy_choice_auto_description() -> Msg:
     return Msg("wire.settings.compaction_strategy.choice.auto.description", {})
 

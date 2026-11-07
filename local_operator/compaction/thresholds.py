@@ -146,6 +146,31 @@ class CompactionSettings(BaseModel):
     mid_turn_enabled: bool = Field(
         default=True, description="Allow threshold compaction at safe tool-loop boundaries."
     )
+    # What a RESUMED context is rebuilt from (#3448). ``"full"`` is the
+    # historical replay — marker, every verbatim preserved user turn, the
+    # carried tier and the whole kept window — and stays the default so every
+    # existing session replays byte-identically. ``"card"`` is an opt-in cost
+    # trade: the pass stores a short resume card (objective, last actions with
+    # outcomes, open items, next step) and replay seats it, plus a small tail
+    # of the kept window, INSTEAD of the preserved turns and the full kept
+    # window. The price is a guarantee, not only tokens: the operator's
+    # verbatim turns (``extract_preserved_user_turns``) stop surviving a
+    # resume, so a constraint stated long ago reaches the model only as the
+    # summary's paraphrase. Text strategy only — a snapcompact archive's image
+    # frames have no card equivalent, so a snapcompact pass never writes one.
+    # The LIVE context after a pass is untouched in both modes; only what
+    # ``replay_entries(mode="context")`` rebuilds from disk differs.
+    resume_replay: Literal["full", "card"] = Field(
+        default="full",
+        description=(
+            "How a resumed session rebuilds context after a compaction. 'full'"
+            " re-injects the summary, every preserved user turn verbatim and the"
+            " whole kept window. 'card' replays the summary, a short resume card"
+            " and a small recent tail instead: far fewer tokens, but the"
+            " operator's earlier turns no longer survive verbatim. Text"
+            " strategy only; snapcompact passes always replay in full."
+        ),
+    )
     # ``None`` — not 0 — is the ordinary-session default, and the distinction
     # is the whole feature. A chat session's images are attachments the user
     # pasted: each one is distinct evidence and there is no "newer view of the

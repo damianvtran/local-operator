@@ -51,6 +51,10 @@ __all__ = [
     "CARRIED_TIER_ID_PREFIX",
     "CARRIED_TIER_KEY",
     "is_carried_tier",
+    "RESUME_CARD_ID",
+    "RESUME_CARD_KEY",
+    "is_resume_card",
+    "resume_tail_start",
 ]
 
 
@@ -202,6 +206,22 @@ CARRIED_TIER_ID_PREFIX = "compaction-carried"
 #: :data:`RENDERED_INJECTION_KEY` exists.
 CARRIED_TIER_KEY = "compaction_carried"
 
+#: Id of the RESUME CARD row (#3448), the replay-only stand-in for the verbatim
+#: preserved turns and the kept window when ``compaction.resume_replay`` is
+#: ``"card"``. Deliberately UNDER :data:`CARRIED_TIER_ID_PREFIX`: the card has
+#: exactly the carried tier's lifecycle — synthesized from the marker payload,
+#: never journalled, never a legal ``first_kept_entry_id``, never legitimate
+#: kept history — so every guard that already refuses the carried tier (the
+#: cut walker, the persist filter, both kept-window filters) refuses the card
+#: by construction instead of through a second predicate kept in step by hand.
+RESUME_CARD_ID = f"{CARRIED_TIER_ID_PREFIX}-resume-card"
+
+#: ``provider_payload`` flag on the rendered resume card. Distinguishes it from
+#: the carried tier for the ONE place the two differ: the next pass SUMMARIZES
+#: the card (it is the only trace of the kept-window middle a card replay
+#: dropped), whereas the carried tier is re-read from live state and excluded.
+RESUME_CARD_KEY = "compaction_resume_card"
+
 
 def is_carried_tier(message: AgentMessage) -> bool:
     """True for the synthetic carried-tier row (asks + decisions).
@@ -221,7 +241,56 @@ def is_carried_tier(message: AgentMessage) -> bool:
     if str(getattr(message, "id", "")).startswith(CARRIED_TIER_ID_PREFIX):
         return True
     payload = getattr(message, "provider_payload", None)
-    return isinstance(payload, dict) and bool(payload.get(CARRIED_TIER_KEY))
+    return isinstance(payload, dict) and bool(
+        payload.get(CARRIED_TIER_KEY) or payload.get(RESUME_CARD_KEY)
+    )
+
+
+def is_resume_card(message: AgentMessage) -> bool:
+    """True for the replay-only resume card (a member of the carried family).
+
+    Every resume card is also :func:`is_carried_tier`; this narrower test exists
+    for the summarization input only, which must KEEP the card (see
+    :data:`RESUME_CARD_KEY`) while still dropping the carried tier.
+    """
+    if not isinstance(message, Message):
+        return False
+    if str(getattr(message, "id", "")) == RESUME_CARD_ID:
+        return True
+    payload = getattr(message, "provider_payload", None)
+    return isinstance(payload, dict) and bool(payload.get(RESUME_CARD_KEY))
+
+
+def resume_tail_start(messages: Sequence[AgentMessage], budget_tokens: int) -> int:
+    """Index where a card replay's recent tail of ``messages`` begins.
+
+    Walks back until roughly ``budget_tokens`` are covered, then moves FORWARD
+    to the first boundary that keeps every tool call beside its result and does
+    not open on a tool row — the same pairing rule :func:`find_cut_point`
+    enforces, because an orphaned call or result breaks every provider. Forward
+    rather than backward so the tail never exceeds its budget by a long tool
+    chain; a window with no legal boundary inside the budget yields an empty
+    tail (``len(messages)``), since the card already summarizes it.
+    """
+    total = len(messages)
+    if total == 0 or budget_tokens <= 0:
+        return total
+    accumulated = 0
+    start = total
+    for index in range(total - 1, -1, -1):
+        accumulated += _message_tokens(messages[index])
+        if accumulated > budget_tokens:
+            break
+        start = index
+    safe = _pairing_safe_cuts(messages)
+    for index in range(start, total):
+        message = messages[index]
+        if index not in safe or is_carried_tier(message):
+            continue
+        if isinstance(message, Message) and message.role == "tool":
+            continue
+        return index
+    return total
 
 
 def is_rendered_injection(message: AgentMessage) -> bool:
