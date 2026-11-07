@@ -763,13 +763,15 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "Open a group or channel as this agent; the creator agent member "
                     "is added automatically, and the human owner only if you name "
                     "them. Members found with `directory` can be added here, so a "
-                    "group of several teammates' agents is one call."
+                    "group of several teammates' agents is one call. A taken name "
+                    "answers `channel_exists` + its id."
                 ),
             ),
             ToolDocOp(
                 op="channel_post",
                 blurb=(
-                    "Post one message into a conversation as this agent, and the "
+                    "Post one message into a conversation (id or name) as this "
+                    "agent. The "
                     "result carries `message_id`/`seq` so you can confirm it and "
                     "thread on it. `thread_root_id` posts as a reply in that "
                     "message's thread. This is the op for a ROOM, and for answering "
@@ -782,15 +784,15 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="channel_history",
                 blurb=(
-                    "A bounded page of one conversation. Bodies appear only for "
+                    "A bounded page of one conversation (id or name). "
+                    "Bodies appear only for "
                     "messages this agent admitted; everything else is metadata with "
                     "`body: null` (no local body cache). A null body with a "
                     "`body_state` means you have not been given that message (held, "
                     "not admitted, or your own post that could not be read back in "
                     "this read) - it is NOT an empty message; "
-                    "do not infer its content. This is also how you read "
-                    "the reply to a DM you opened, using the `conversation_id` the "
-                    "`dm` result gave you."
+                    "do not infer its content. Also reads the reply to a `dm` "
+                    "(its `conversation_id`)."
                 ),
             ),
             ToolDocOp(

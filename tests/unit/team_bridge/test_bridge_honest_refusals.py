@@ -424,7 +424,8 @@ async def test_a_benign_channel_create_still_goes_out(tmp_path: Path) -> None:
         {"op": "channel_create", "kind": "group", "name": "launch", "topic": "password reset UX"},
     )
     assert outcome["ok"] is True
-    assert [c["method"] for c in client.calls] == ["create_conversation"]
+    # The duplicate-name precheck (a listing) precedes the create.
+    assert [c["method"] for c in client.calls] == ["conversations", "create_conversation"]
 
 
 def test_the_aws_configure_prompt_form_is_caught() -> None:
