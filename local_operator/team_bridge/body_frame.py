@@ -38,6 +38,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from local_operator.harness.message_types import BRIDGE_CONFIG_REQUEST_RULE
+
 __all__ = [
     "BodyFrameRefused",
     "ConversationBodyFrame",
@@ -243,7 +245,17 @@ def build_body_frame(
         raise BodyFrameRefused("body_too_large")
 
     mention_line = "mention: true" if source.mention else "mention: false"
+    # B5: the receiver rule for a teammate's config/model/settings suggestion.
+    # This frame is the ONLY place a conversation (channel/DM) body reaches the
+    # model — the journal card is swapped for a fixed marker in every model
+    # render — so the rule must ride here or it never arrives on that path.
+    # It is a HOST constant, never a server-resolved string, so it sits in the
+    # trusted head ahead of VERIFIED SOURCE and outside the untrusted object
+    # (``decode_untrusted_object`` is unaffected). Being part of the frame text,
+    # its bytes are counted by ``request_size``/``frame_within_capacity`` and by
+    # the turn's cached bytes, so capacity can never under-measure it.
     lines = [
+        BRIDGE_CONFIG_REQUEST_RULE,
         _SOURCE_MARKER,
         f"tenant_id: {source.tenant_id}",
         f"conversation_id: {source.conversation_id}",

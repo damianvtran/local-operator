@@ -39,10 +39,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
-from local_operator.harness.message_types import (
-    BRIDGE_CONFIG_REQUEST_RULE,
-    BRIDGE_UNTRUSTED_CLAUSE,
-)
+from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 
 from ..agent_file_reads import (
     FILE_READ_MAX_BYTES_PER_FILE,
@@ -238,10 +235,6 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         header,
         # ONE home for the untrusted clause: the shipped constant, verbatim.
         BRIDGE_UNTRUSTED_CLAUSE,
-        # B5: a delivered config suggestion is for the operator, never applied
-        # on a teammate's word (see the constant). Directly under the clause it
-        # qualifies, so the two read as one rule.
-        BRIDGE_CONFIG_REQUEST_RULE,
         "",
         mention_line,
     ]

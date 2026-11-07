@@ -14,7 +14,10 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+from local_operator.harness.message_types import (
+    BRIDGE_BODY_READ_HEAD,
+    BRIDGE_UNTRUSTED_CLAUSE,
+)
 from local_operator.harness.types import ToolContext
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import host as host_mod
@@ -440,7 +443,7 @@ async def test_channel_history_reads_as_the_agent_endpoint() -> None:
             "endpoint_id": "bep_1",
         }
     ]
-    page = json.loads(outcome["content"][len(BRIDGE_UNTRUSTED_CLAUSE) + 2 :])
+    page = json.loads(outcome["content"][len(BRIDGE_BODY_READ_HEAD) + 2 :])
     assert page["messages"][0]["body"] is None
 
 
@@ -758,7 +761,7 @@ async def test_channel_thread_reads_as_the_agent_endpoint_untrusted_wrapped() ->
             "endpoint_id": "bep_1",
         }
     ]
-    page = json.loads(outcome["content"][len(BRIDGE_UNTRUSTED_CLAUSE) + 2 :])
+    page = json.loads(outcome["content"][len(BRIDGE_BODY_READ_HEAD) + 2 :])
     assert page["replies"][0]["body"] is None
 
 

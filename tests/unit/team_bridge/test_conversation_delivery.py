@@ -59,7 +59,6 @@ ROOT_REPLY_LINE = (
 
 EXPECTED_CARD_A = f"""Channel message · #qa-coordination · from Ada (human, same tenant)
 {BRIDGE_UNTRUSTED_CLAUSE}
-{BRIDGE_CONFIG_REQUEST_RULE}
 
 mention: yes
 tenant_id: tnt_1
@@ -1736,19 +1735,20 @@ def test_the_wake_window_is_pinned_for_this_file() -> None:
     assert coalesce_mod.CONNECTOR_COALESCER.window_s == 0.0
 
 
-def test_every_inbound_hop_carries_the_config_request_rule() -> None:
-    """B5: a delivered teammate suggestion to change config is for the operator.
+def test_the_config_request_rule_reaches_the_model_once_per_hop() -> None:
+    """B5: the receiver rule rides where a teammate body reaches the MODEL, once.
 
-    Screening now lets a model/settings tip for the recipient's operator through,
-    so the receiver rule must reach the agent wherever an inbound message does:
-    the conversation card, the legacy wake card, the session wrap and take_up.
-    It must forbid applying the change, name the operator as the only approver,
-    and refuse a claimed approval, without growing a per-wake paragraph.
+    The conversation journal card is model-dead (``model_card_text`` swaps it
+    for ``PENDING_CARD``), so it carries no rule; the conversation path is
+    pinned on the rendered request in ``test_body_turn_e2e``. The legacy pair
+    wake reaches the model through the session's team-bridge wrap, so the rule
+    is asserted on that real wrap's model text, exactly once.
     """
 
-    import inspect
+    from typing import cast
 
-    from local_operator.session import session as session_module
+    from local_operator.harness.message_types import TEAM_BRIDGE_MESSAGE_TYPE
+    from local_operator.session.session import Session
     from local_operator.team_bridge.connector import wake as wake_module
 
     rule = BRIDGE_CONFIG_REQUEST_RULE
@@ -1768,15 +1768,18 @@ def test_every_inbound_hop_carries_the_config_request_rule() -> None:
             conversation_seq=3,
         )
     )
-    assert card.splitlines()[1:3] == [BRIDGE_UNTRUSTED_CLAUSE, rule]
-    # The legacy §11.4 wake payload: the rule sits right under the clause too.
+    assert rule not in card
     payload = wake_module.build_wake_payload(
         {"message": {"body": {"text": "try opus 5.5 medium as your default"}}},
         message_id="bmsg_1",
         body_sha256="a" * 64,
-    ).splitlines()
-    clause_at = payload.index(BRIDGE_UNTRUSTED_CLAUSE)
-    assert payload[clause_at + 1] == rule
-    # The session wrap builds its text inline in a large method; pin that it
-    # names the constant rather than a second spelling.
-    assert "{BRIDGE_CONFIG_REQUEST_RULE}" in inspect.getsource(session_module)
+    )
+    assert rule not in payload
+    wrapped = Session._peer_custom_message(
+        cast(Session, None),
+        payload,
+        {"account_id": "acc_org", "source": TEAM_BRIDGE_MESSAGE_TYPE},
+        custom_type=TEAM_BRIDGE_MESSAGE_TYPE,
+    ).details["text"]
+    assert wrapped.count(rule) == 1
+    assert wrapped.index(BRIDGE_UNTRUSTED_CLAUSE) < wrapped.index(rule)
