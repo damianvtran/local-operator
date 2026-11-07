@@ -2118,6 +2118,8 @@ class _Walker:
         """
         st = self.state
         surface = _write_surface(name, args, st.home)
+        if name in ("ln", "gln"):
+            self._link_targets(args)
         if surface is None:
             return set()
         dests, fully = surface
@@ -2133,6 +2135,34 @@ class _Walker:
             dest_ids = {id(w) for w in dests}
             return {id(w) for w in args if id(w) not in dest_ids}
         return set()
+
+    def _link_targets(self, args: list[Expanded]) -> None:
+        """A link's TARGET, resolved where the link will live, is a touch.
+
+        WHY (review round 7). A glob is expanded at check time to catch a
+        symlink into session state — but a link made in the SAME command
+        does not exist yet. ``ln -s ../../<child> $P/m && sed -i … $P/m*/…``
+        would then pass, so a link pointing into ``sessions/``/``guardrails/``
+        ranks HIGH on its own.
+        """
+        st = self.state
+        operands = _plain_operands(args, _LN_FLAGS)
+        dest = _cluster_value(args, "t", "--target-directory")
+        if dest:
+            sources, link = operands, dest[0].text
+        elif len(operands) >= 2:
+            sources, link = operands[:-1], operands[-1].text
+        else:
+            sources, link = operands, "."
+        link_abs, _ = _absolute(link, st.cwd)
+        if link_abs is None:
+            return
+        base = link_abs if (dest or os.path.isdir(link_abs)) else os.path.dirname(link_abs)
+        for w in sources:
+            if not w.text or w.opaque:
+                continue
+            raw = w.text if w.text.startswith("/") else os.path.join(base, w.text)
+            self.result.touched.append(Target(path=os.path.normpath(raw), op="touch", program="ln"))
 
     def _backstop(
         self, name: str, args: list[Expanded], assigns: list[str], exempt: set[int]
@@ -2180,7 +2210,7 @@ class _Walker:
                     )
             if st.cwd is None:
                 for part in re.split(r"[\s/'\"=]+", text):
-                    if part and any(fnmatch.fnmatchcase(part, n) for n in _EVIDENCE_NAMES):
+                    if part and _names_evidence(part):
                         self.result.blind.append(part)
         for w in words:
             if w.opaque:
@@ -3055,6 +3085,18 @@ _EVIDENCE_NAMES = (
     "created.sqlite",
     "lineage.jsonl",
 )
+
+
+def _names_evidence(word: str) -> bool:
+    """Could ``word`` be an evidence file's name? Case-insensitive, with
+    sqlite's ``-wal``/``-shm``/``-journal`` side files, and in BOTH
+    directions so a glob word (``ORIG*.json``) counts (review round 7)."""
+    folded = word.casefold()
+    for name in _EVIDENCE_NAMES:
+        for candidate in (name, name + "-wal", name + "-shm", name + "-journal"):
+            if fnmatch.fnmatchcase(folded, candidate) or fnmatch.fnmatchcase(candidate, folded):
+                return True
+    return False
 
 
 def _literal_prefix(pattern: str) -> str:

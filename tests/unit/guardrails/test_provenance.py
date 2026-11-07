@@ -1252,3 +1252,62 @@ def test_operator_goal_cleanups_stay_low(home: Path, repo: Path) -> None:
     assert _verdict(home, "rm -rf ~/r6-wt").risk is Risk.LOW
     _create(home, f"git clone -q {repo} ~/r6-clone")
     assert _verdict(home, "rm -rf ~/r6-clone").risk is Risk.LOW
+
+
+# -- round 7: links, wide globs and evidence names ---------------------------------------
+
+
+def test_glob_through_a_symlink_into_session_state(home: Path) -> None:
+    """A glob that is lexically elsewhere is expanded at check time; a match
+    whose realpath is session state counts (CRITICAL as a destination)."""
+    child = home / ".local-operator" / "sessions" / CHILD
+    (child / "origin.json").write_text("{}")
+    (home / "work").mkdir()
+    os.symlink(child, home / "work" / "lnk1")
+    assert _verdict(home, "sed -i s/a/b/ ~/work/lnk*/origin.json").risk is Risk.CRITICAL
+    assert _verdict(home, "python3 x.py ~/work/lnk*/origin.json").risk is Risk.HIGH
+    assert _verdict(home, "python3 x.py ~/work/**/origin.json").risk is Risk.HIGH
+
+
+def test_same_command_link_into_session_state_is_high(home: Path) -> None:
+    """The link a later glob would follow does not exist yet at check time,
+    so a link TARGET into session state is HIGH on its own."""
+    pad = f"~/.local-operator/sessions/{SID}/scratchpad"
+    command = f"ln -s ../../{CHILD} {pad}/m && sed -i s/a/b/ {pad}/m*/origin.json"
+    assert _verdict(home, command).risk is not Risk.LOW
+    assert _verdict(home, f"ln -s {_S} ~/m2").risk is Risk.HIGH
+    assert _verdict(home, "ln -s ~/work/a ~/work/b").risk is Risk.LOW
+
+
+def test_too_wide_glob_is_protected(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from local_operator.guardrails import classify as cls
+
+    for k in range(5):
+        (home / f"wide{k}").mkdir()
+    monkeypatch.setattr(cls, "_GLOB_WALK_CAP", 2)
+    assert _verdict(home, "python3 x.py ~/*/f").risk is Risk.HIGH
+
+
+def test_state_root_glob_outside_evidence_is_low(home: Path) -> None:
+    """MINOR-1: ``logs/*.log`` in the state root is not evidence."""
+    (home / ".local-operator" / "logs").mkdir()
+    assert _verdict(home, "python3 x.py ~/.local-operator/logs/*.log").risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ORIGIN.JSON",
+        "Transcript.JSONL",
+        "created.sqlite-wal",
+        "lineage.jsonl-journal",
+        "orig*.json",
+    ],
+)
+def test_evidence_names_case_globs_and_side_files(home: Path, name: str) -> None:
+    """MINOR-2: under an unresolvable cwd, these all name evidence."""
+    assert _verdict(home, f"cd $(echo x) && touch {name}").risk is Risk.HIGH
+    from local_operator.guardrails.classify import _is_evidence_name
+
+    if "*" not in name and "lineage" not in name and "created" not in name:
+        assert _is_evidence_name(name)

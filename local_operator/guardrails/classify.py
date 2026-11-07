@@ -278,6 +278,21 @@ def _pattern_reaches(pattern: str, protected: str) -> bool:
 #: append — could forge a creating call, a child, or an operator's answer
 #: (review R1-MAJOR-1), so every op on them is CRITICAL.
 _EVIDENCE_FILES = ("transcript.jsonl", "origin.json", "asks.jsonl", "subagent-roster*.json")
+#: Matched case-insensitively (APFS/HFS+ are case-insensitive, so
+#: ``ORIGIN.JSON`` is the same file) and with sqlite's side files (review
+#: round 7, MINOR-2).
+_EVIDENCE_SUFFIXES = ("", "-wal", "-shm", "-journal")
+
+
+def _is_evidence_name(name: str) -> bool:
+    folded = name.casefold()
+    return any(
+        fnmatch.fnmatchcase(folded, f + suffix)
+        for f in _EVIDENCE_FILES
+        for suffix in _EVIDENCE_SUFFIXES
+    )
+
+
 _EVIDENCE_SAMPLES = {"subagent-roster*.json": "subagent-roster.v1.json"}
 
 
@@ -289,7 +304,7 @@ def _evidence_reason(path: str, target: Target, prot: _Protected) -> str | None:
         if not _under(path, sessions) or path == sessions:
             continue
         rel = path[len(sessions) + 1 :].split("/")
-        if len(rel) == 2 and any(fnmatch.fnmatchcase(rel[1], f) for f in _EVIDENCE_FILES):
+        if len(rel) == 2 and _is_evidence_name(rel[1]):
             return "a session's transcript, lineage or ask record"
         if len(rel) == 1 and target.op in ("overwrite", "append"):
             # Writing a directory INTO ``sessions/`` (``mv /tmp/x sessions/``)
@@ -342,10 +357,99 @@ def _touch_reason(target: Target, prot: _Protected) -> str | None:
                     return "the guardrail's own records"
                 if _pattern_hits(target.pattern, os.path.join(state, _SESSIONS_DIRNAME)):
                     return "session state (transcripts, lineage, ask stores)"
-                if prefix and _under(prefix, state):
-                    # A glob whose literal part already sits in the state root
-                    # (``~/.local-operator/*``) may land anywhere in it.
-                    return "session state (transcripts, lineage, ask stores)"
+            # Lexically elsewhere — but a match may be a SYMLINK into session
+            # state (``ln -s ../../<child> $P/m`` then ``$P/m*/origin.json``),
+            # so expand it now and judge each match by its realpath (review
+            # round 7). Over the cap there is no way to know: protected.
+            return _glob_matches_evidence(target.pattern, prot)
+    return None
+
+
+#: Bounds on the check-time glob expansion: matches, and directory entries
+#: visited (a ``**`` over ``$HOME`` must not walk the disk inside a tool
+#: call). Past either bound there is no way to know: protected.
+_GLOB_CAP = 2000
+_GLOB_WALK_CAP = 20_000
+
+
+def _expand_glob(pattern: str) -> list[str] | None:
+    """Matches of ``pattern`` (``**`` = any depth), or ``None`` past a bound.
+
+    Hand-rolled rather than ``glob.glob`` because that gives no way to bound
+    the WALK, only the results. ``**`` follows directory symlinks (fail
+    closed: some globbers do), each real directory once, so a link cycle
+    cannot loop.
+    """
+    parts = [c for c in pattern.split("/") if c]
+    found: list[str] = []
+    visited = 0
+    stack: list[tuple[str, int]] = [("/", 0)]
+    walked: set[tuple[str, int]] = set()
+    while stack:
+        base, k = stack.pop()
+        if k == len(parts):
+            found.append(base)
+            if len(found) > _GLOB_CAP:
+                return None
+            continue
+        part = parts[k]
+        if not any(ch in part for ch in "*?["):
+            nxt = os.path.join(base, part)
+            if os.path.lexists(nxt):
+                stack.append((nxt, k + 1))
+            continue
+        try:
+            entries = list(os.scandir(base))
+        except OSError:
+            continue
+        visited += len(entries)
+        if visited > _GLOB_WALK_CAP:
+            return None
+        if part == "**":
+            key = (os.path.realpath(base), k)
+            if key in walked:
+                continue
+            walked.add(key)
+            stack.append((base, k + 1))  # zero directories
+            for e in entries:
+                try:
+                    is_dir = e.is_dir()
+                except OSError:
+                    continue
+                if is_dir:
+                    stack.append((e.path, k))  # one more, still inside ``**``
+            continue
+        for e in entries:
+            if fnmatch.fnmatchcase(e.name, part):
+                stack.append((e.path, k + 1))
+    return found
+
+
+def _glob_matches_evidence(pattern: str, prot: _Protected) -> str | None:
+    matches = _expand_glob(pattern)
+    if matches is None:
+        return "a glob too wide to check against session state"
+    for match in matches:
+        real = os.path.realpath(match)
+        for state in prot.state_roots:
+            if _under(real, os.path.join(state, _LEDGER_DIRNAME)):
+                return "the guardrail's own records (through a link)"
+            if _under(real, os.path.join(state, _SESSIONS_DIRNAME)) and not any(
+                _under(real, pad) for pad in prot.own_scratchpad
+            ):
+                return "session state (through a link)"
+    return None
+    if len(matches) > _GLOB_CAP:
+        return "a glob too wide to check against session state"
+    for match in matches:
+        real = os.path.realpath(match)
+        for state in prot.state_roots:
+            if _under(real, os.path.join(state, _LEDGER_DIRNAME)):
+                return "the guardrail's own records (through a link)"
+            if _under(real, os.path.join(state, _SESSIONS_DIRNAME)) and not any(
+                _under(real, pad) for pad in prot.own_scratchpad
+            ):
+                return "session state (through a link)"
     return None
 
 
