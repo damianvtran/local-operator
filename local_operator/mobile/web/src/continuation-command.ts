@@ -76,6 +76,8 @@ export interface ContinuationReceipt {
 	    on every other reply (and on an older relay), so a caller cannot mistake
 	    "nothing expanded" for "the relay does not expand". */
 	skills?: SkillExpansionReceipt;
+	/** Carried through from `CommandReceipt.delivered_as` (api.ts). */
+	delivered_as?: "prompt" | "steer";
 }
 
 interface StoredContinuation {

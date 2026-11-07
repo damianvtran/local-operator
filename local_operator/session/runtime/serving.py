@@ -4000,12 +4000,16 @@ class ServingSessionHandle(SessionHandle):
         did not open instead of failing after admission (see
         ``_await_turn_lock_free``). It is True for every caller of THIS handle —
         the desktop route (``admit_prompt``), the phone's daemon, a peer
-        ``lop send`` and ``lop exec``'s headless turn all arrive here — and one
-        caller passes False: the boot inbox drain
+        ``lop send`` and ``lop exec``'s headless turn all arrive here — and two
+        callers pass False: the phone relay's live prompt (the wire frame's
+        ``wait_for_turn: false``, steered on refusal) and the boot inbox drain
         (``process._run_owner_prompt``) runs BEFORE the control socket listens,
         so waiting there would keep the runtime unreachable for a whole wake
         turn, and it already answers the refusal by steering the row into the
         turn in flight — which needs the refusal to arrive rather than the wait.
+        False refuses with :class:`TurnInFlight` BEFORE queueing whenever a turn
+        is streaming or a command is already queued, so the refusal is prompt
+        rather than one turn late.
 
         THE SEAM IS THIS HANDLE'S, and that is a deliberate boundary rather than
         an oversight: ``TuiSessionHandle.prompt`` has no equivalent, so a
@@ -4224,6 +4228,38 @@ class ServingSessionHandle(SessionHandle):
                 return receipt
             self._command_reservations.reject(command_id)
             raise self._retiring_refusal()
+        if not wait_for_turn and (
+            getattr(self._session, "is_streaming", False) or self._prompt_queue
+        ):
+            # A CALLER THAT ASKED NOT TO WAIT IS TOLD NOW, not after the turn
+            # ahead of it. Queueing here would park this receipt behind every
+            # command already in ``_prompt_queue`` -- the drain resolves
+            # ``admitted`` only when it reaches this command, i.e. after the turn
+            # in flight ENDS -- so the "refusal" ``wait_for_turn=False`` promises
+            # would arrive a whole turn late. The phone's relay is the caller
+            # that measured it: its ack is bounded at 15 s, so a prompt sent
+            # mid-turn answered 504 for a message that later ran as a separate
+            # turn. Both the relay (``mobile/daemon.py``'s prompt arm) and the
+            # boot inbox drain answer this refusal by STEERING under the same
+            # command id, which is the mid-turn channel; the identity is
+            # released first so that steer can reserve it (see
+            # ``CommandReservations.reject``).
+            #
+            # Checked AFTER the reservation, deliberately: a retry of an id that
+            # already landed (as a prompt or as the steer this refusal led to)
+            # must answer "already admitted" above, never be steered twice.
+            # A queued-but-not-yet-streaming command counts as busy: that is the
+            # drain's prelude window, and a steer queued there is taken by the
+            # turn it is opening (``Session._ensure_steering_wake``).
+            # ORDERING, intended: when the queue head is itself waiting out a
+            # foreign turn (e.g. a job-result delivery), the refused message is
+            # steered INTO that turn and so may be answered before a desktop
+            # prompt that was sent earlier and is still queued — steer semantics
+            # join the turn running now, they do not queue behind other input.
+            from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+            self._command_reservations.reject(command_id)
+            raise TurnInFlight(TURN_IN_FLIGHT)
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
             self._command_reservations.reject(command_id)
             raise RuntimeError(
@@ -5133,6 +5169,21 @@ class ServingSessionHandle(SessionHandle):
                             await self._await_turn_lock_free()
                     else:
                         await self._await_turn_lock_free()
+                elif getattr(self._session, "_compacting", False):
+                    # A COMPACTION IS WAITED OUT EVEN BY A NO-WAIT CALLER. The
+                    # admission-time refusal above keys on ``is_streaming`` and
+                    # the queue, and a manual compaction holds the turn lock with
+                    # neither, so the command was admitted; skipping this wait
+                    # would hand it to ``Session.prompt``, whose compaction
+                    # refusal ("context compaction is running") is not the
+                    # TURN_IN_FLIGHT sentence the phone relay steers on — the
+                    # message would be failed after admission (review round 1,
+                    # MINOR-1). Steering is not an option there either: there is
+                    # no turn to join. Compaction is short and ends by itself, so
+                    # the prompt lands as a turn once it does, as it did before
+                    # ``wait_for_turn=False`` existed. A streaming turn still takes
+                    # the immediate refusal and the steer path.
+                    await self._await_turn_lock_free()
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {

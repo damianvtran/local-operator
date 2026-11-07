@@ -3869,3 +3869,113 @@ def test_a_cold_prompt_expands_against_the_durable_cwd(tmp_path, monkeypatch) ->
     assert len(seen) == 1
     assert seen[0].startswith("$zz-probe fix the login bug\n\n")
     assert "Read primary sources." in seen[0]
+
+
+def _continuation_rig(tmp_path, monkeypatch, *, busy: bool) -> tuple[Any, list[dict[str, Any]]]:
+    """A live entry whose owner answers like a serving runtime, busy or idle.
+
+    The real ``/command`` route and the real ``daemon.request`` writer; only the
+    socket's far side is stood in. A BUSY owner refuses a ``wait_for_turn: false``
+    prompt with the wire form of ``TurnInFlight`` (an error frame carrying the
+    sentence and no code — what ``server.py`` emits for it) and acks a steer;
+    an owner that saw no opt-in would have parked past the 15 s ack bound,
+    which this rig marks by never answering at all.
+    """
+    from local_operator.session.errors import TURN_IN_FLIGHT
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = SessionRecord(
+        pid=5151,
+        kind="tui",
+        session_id="steer-me",
+        conversation_name="x",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    frames: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    class Writer:
+        def write(self, payload: bytes) -> None:
+            frame = json.loads(payload.decode())
+            frames.append(frame)
+            future = daemon._pending_reqs[(record.pid, frame["req"])]
+            if frame["command_id"] in seen:
+                detail = "already admitted"
+            elif frame["op"] == "prompt":
+                assert frame.get("wait_for_turn") is False, "a waiting prompt would 504"
+                if busy:
+                    future.set_result(
+                        {"op": "error", "req": frame["req"], "message": TURN_IN_FLIGHT}
+                    )
+                    return
+                detail = "prompt admitted"
+            else:
+                detail = "steering queued"
+            seen.add(frame["command_id"])
+            future.set_result({"op": "ack", "req": frame["req"], "detail": detail})
+
+        async def drain(self) -> None:
+            return None
+
+    entry.writer = Writer()  # type: ignore[assignment]
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    return client, frames
+
+
+_CONTINUATION = {
+    "text": "change course",
+    "images": [],
+    "command_id": "4f1d2c3b-5a69-4e7f-8a1b-2c3d4e5f6a7b",
+}
+
+
+def test_a_prompt_to_a_busy_session_is_steered_under_the_same_id(tmp_path, monkeypatch) -> None:
+    """Busy prompt → one refused no-wait prompt, one steer, a prompt 200.
+
+    The defect: the prompt was forwarded with the owner's default wait, so the
+    ack outlived ``daemon.request``'s 15 s bound and the phone was told ``504
+    session did not answer`` for a message the owner held. Now the route asks
+    not to wait and reconciles the refusal exactly as ``send_command`` does.
+    """
+    client, frames = _continuation_rig(tmp_path, monkeypatch, busy=True)
+    reply = client.post("/api/sessions/steer-me/command", json={"op": "prompt", **_CONTINUATION})
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": "steering queued", "delivered_as": "steer"}
+    assert [(f["op"], f["command_id"]) for f in frames] == [
+        ("prompt", _CONTINUATION["command_id"]),
+        ("steer", _CONTINUATION["command_id"]),
+    ]
+    assert "wait_for_turn" not in frames[1]
+
+    # The composer's envelope replay after a lost ack: same id, single delivery.
+    retry = client.post("/api/sessions/steer-me/command", json={"op": "prompt", **_CONTINUATION})
+    assert retry.status_code == 200
+    assert retry.json()["detail"] == "already admitted"
+    # NIT-1: the retry's own op is not how the message landed, so it is not reported.
+    assert "delivered_as" not in retry.json()
+    assert [f["op"] for f in frames[2:]] == ["prompt"]
+
+
+def test_a_prompt_to_an_idle_session_stays_a_prompt(tmp_path, monkeypatch) -> None:
+    client, frames = _continuation_rig(tmp_path, monkeypatch, busy=False)
+    reply = client.post("/api/sessions/steer-me/command", json={"op": "prompt", **_CONTINUATION})
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": "prompt admitted", "delivered_as": "prompt"}
+    assert [f["op"] for f in frames] == ["prompt"]
+
+
+def test_a_steer_is_forwarded_once_and_says_so(tmp_path, monkeypatch) -> None:
+    """A steer is never reconciled: the owner opens a turn for an idle steer."""
+    client, frames = _continuation_rig(tmp_path, monkeypatch, busy=False)
+    reply = client.post("/api/sessions/steer-me/command", json={"op": "steer", **_CONTINUATION})
+    assert reply.status_code == 200, reply.text
+    assert reply.json() == {"ok": True, "detail": "steering queued", "delivered_as": "steer"}
+    assert [f["op"] for f in frames] == ["steer"]
+    assert "wait_for_turn" not in frames[0]
