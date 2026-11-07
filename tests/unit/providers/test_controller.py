@@ -7,6 +7,7 @@ httpx transport.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import sqlite3
 import time
@@ -23,7 +24,12 @@ from local_operator.providers.registry import (
     credential_provider_id,
     get_provider_definition,
 )
-from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+from local_operator.providers.usage import (
+    ResetConsumeResult,
+    UsageAmount,
+    UsageLimit,
+    UsageReport,
+)
 from local_operator.providers.usage_cache import (
     USAGE_ACCOUNT_MAX_FAILURES,
     USAGE_REPORT_TTL_MS,
@@ -521,6 +527,118 @@ class TestConsumeUsageReset:
         await controller.consume_usage_reset("openai", "first@example.com", "r-1")
 
         assert cache.get(controller._usage_cache_key("openai")) is None
+
+    @pytest.mark.asyncio
+    async def test_a_ref_alone_resolves_the_row_without_a_label(
+        self, controller, store, monkeypatch
+    ):
+        """The desktop contract may send ONLY the ref, so a ref must resolve the
+        row itself instead of refusing for the label it was never handed.
+
+        The TUI always carries both; the route's contract allows either, and a
+        ref-only body that refused here would make ``usage.reset`` unusable
+        from the one surface that has the ref (a report row) and not the label.
+        """
+        self._seed(store, "first@example.com", "acct-1")
+        self._seed(store, "second@example.com", "acct-2")
+        target = next(
+            row for row in store.list_credentials("openai") if row.data["account_id"] == "acct-2"
+        )
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset", "windows_reset": 1}, requests)
+
+        result = await controller.consume_usage_reset(
+            "openai", None, "r-1", credential_ref=controller._credential_ref(target)
+        )
+
+        assert result.outcome == "reset"
+        (request,) = requests
+        assert request.headers["Authorization"] == "Bearer tok-acct-2"
+
+    @pytest.mark.asyncio
+    async def test_neither_identifier_is_refused_before_anything_is_sent(
+        self, controller, store, monkeypatch
+    ):
+        """With no label and no ref there is nothing to spend on, and a guess
+        would spend an unrecoverable credit on the cascade's current account."""
+        self._seed(store, "first@example.com", "acct-1")
+        requests: list[httpx.Request] = []
+        self._patch_transport(monkeypatch, {"code": "reset"}, requests)
+
+        result = await controller.consume_usage_reset("openai", None, "r-1")
+
+        assert result.outcome == "failed"
+        assert result.refused is True
+        assert requests == []
+
+    @staticmethod
+    def _patch_vendor(monkeypatch, behaviour) -> None:
+        """Stand in for the vendor call, keeping the rest of the redeem real."""
+        monkeypatch.setattr(
+            "local_operator.providers.controller.consume_openai_reset_credit", behaviour
+        )
+
+    @pytest.mark.asyncio
+    async def test_two_identical_attempts_at_once_reach_the_vendor_once(
+        self, store, usage_cache, monkeypatch
+    ):
+        """A double-submit of ONE attempt is one spend, not two.
+
+        TWO controller instances on purpose: the desktop builds one per request,
+        so an instance-level lock would guard nothing and both requests would
+        reach the vendor. The joiner is answered with the running attempt's
+        result rather than a second round trip.
+        """
+        self._seed(store, "race@example.com", "acct-1")
+        first = ProviderController(store, login_callbacks=None, usage_cache=usage_cache)
+        second = ProviderController(store, login_callbacks=None, usage_cache=usage_cache)
+        calls: list[str] = []
+
+        async def vendor(client, access_token, *, account_id, redeem_request_id):
+            calls.append(redeem_request_id)
+            await asyncio.sleep(0.02)
+            return ResetConsumeResult(outcome="reset", windows_reset=1)
+
+        self._patch_vendor(monkeypatch, vendor)
+
+        results = await asyncio.gather(
+            first.consume_usage_reset("openai", "race@example.com", "r-race"),
+            second.consume_usage_reset("openai", "race@example.com", "r-race"),
+        )
+
+        assert calls == ["r-race"]
+        assert [result.outcome for result in results] == ["reset", "reset"]
+        assert results[0] == results[1]
+
+    @pytest.mark.asyncio
+    async def test_two_distinct_attempts_on_one_login_are_serialized(
+        self, controller, store, monkeypatch
+    ):
+        """Two ids minted for one account queue instead of racing: a client that
+        double-confirms must not put two credits on the wire at once."""
+        self._seed(store, "serial@example.com", "acct-1")
+        calls: list[str] = []
+        running = 0
+        peak = 0
+
+        async def vendor(client, access_token, *, account_id, redeem_request_id):
+            nonlocal running, peak
+            calls.append(redeem_request_id)
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0.02)
+            running -= 1
+            return ResetConsumeResult(outcome="reset", windows_reset=1)
+
+        self._patch_vendor(monkeypatch, vendor)
+
+        await asyncio.gather(
+            controller.consume_usage_reset("openai", "serial@example.com", "r-a"),
+            controller.consume_usage_reset("openai", "serial@example.com", "r-b"),
+        )
+
+        assert sorted(calls) == ["r-a", "r-b"]
+        assert peak == 1
 
 
 class TestUsageIsPerAccount:
