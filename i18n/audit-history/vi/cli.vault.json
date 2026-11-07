@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "cli.vault",
-  "history_sha256": "df18166ef843ecde8e6f199742d666c624fe2b5f6567842c54f452e5c961f30d",
+  "history_sha256": "2c55797df50cb4cd0031243cb4ae6f2fea9139ba46e5191db54a9ebc91341195",
   "entries": [
     {
       "locale": "vi",
@@ -45,6 +45,27 @@
       },
       "status": "passed",
       "note": "Independent round-2 delta audit (not the translator) of cli.vault at source hash 0da8f67568d3 after remediation 4be71bb4 (supersedes the 0753443 row at the old hash). Scope is CHANGED/NEW keys only — 16 keys: new title, endpoint_row, fingerprint_label, fingerprint_held, compare_stop, connected_scope, waiting_seconds, key_unreadable, store_error; changed compare, connected_until, no_access, frozen, status_not_connected, disconnected, revoke_hint; unchanged keys carry the round-1 audit at 0753443 (transitive coverage, no full re-audit claimed); removed keys key_heading/status_open need no row. Checks: key set/order parity with en; ICU argument parity per repo check.py --catalogues-only (0 problems); backticked commands (`lop vault connect`, `lop vault disconnect`) byte-identical; Ctrl+C, Radient Vault and the '·' separator kept; NFC, no bidi/zero-width controls; plurals rendered with the repo formatter (disconnected at 1/2/5/21, waiting_seconds at 1/5/22). Safety meaning against en .context.json: compare/compare_stop keep compare-BEFORE-approving and stop-on-mismatch with no harness-verified claim; disconnected says the AGENT can no longer read; store_error says nothing was removed. Findings: 0 blocker / 0 major / 3 minor. Other-only plurals with #. (m, fixed) revoke_hint translated the console page title 'Agent access', but user-console is English-only (no i18n; page title 'Agent access' in src/lib/vault-agent-access.ts at user-console main cd7d559), so a translated name cannot be found on the page — now names the page verbatim in this locale's quotes, per the context note 'keep the console's term'. (m, fixed) connected_until 'Đã kết nối đến {until}' reads as 'connected to {until}' — now 'Đã kết nối, hiệu lực đến {until}.' Note: endpoint_row/fingerprint_label/fingerprint_held translate the console field labels; acceptable for CLI labels (the person compares the 16 groups, not the label), recorded, not a finding. Minor accepted: store_error renders the local secret store with the same head noun as 'vault' in fr (coffre), ru (хранилище) and vi (kho); this follows existing catalogue precedent (cli.qwencloud_help.migrate, relay.asks) and 'local' disambiguates, so not changed. Unresolved blocker/major: 0. Single independent audit pass by a different agent on the same model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification. Corrections applied by the auditor at the manager's instruction; those corrected strings have no second independent audit."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.vault",
+      "source_sha256": "f984257db196836d16265d4f1ffbe8712bbe29226ddf8fb843567ba7caad627d",
+      "translator": {
+        "agent": "i18n-translator (coder subagent, round-2 remediation hand-update)",
+        "session": "cbcaa1d210f3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (translation-auditor, radientdev team subagent, round 3)",
+        "session": "45670e86d2b4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-3 delta audit (not the translator) of cli.vault at source hash f984257db196 after remediation 9d46fbe9421 (supersedes the 3241500 row at the old hash). Scope: ONE new key, cli.vault.title_bare; the other 31 keys are byte-unchanged since 3241500 (git diff shows only the added line in every locale) and carry the round-1 (0753443) and round-2 (3241500) audits — transitive coverage, no full re-audit claimed. Checks: key set/order parity with en; no placeholders in source or translation; 'Radient Vault' verbatim; NFC, no bidi/zero-width controls; context-note rule verified mechanically — the translation equals this locale's cli.vault.title with exactly ' · {org}' removed, so the bare and org-qualified headings read identically. Accuracy/idiom/register inherit the round-2-audited title wording. 0 findings. Unresolved blocker/major: 0. The commit's invalid_id text is the INVALID_ID constant in local_operator/vault_agent/resolve.py, a model-facing tool refusal (English by design per that module's docstring and the glossary §1 model-facing rule), not a catalogue key, so it is out of scope. Single independent audit pass by a different agent on the same model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification."
     }
   ]
 }
