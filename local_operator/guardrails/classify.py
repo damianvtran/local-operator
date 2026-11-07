@@ -418,8 +418,11 @@ def _expand_glob(pattern: str, *, globstar: bool = False) -> list[tuple[str, boo
       once per real directory.
     * Dot entries ALWAYS match (review round 9): bash hides them unless
       ``dotglob``/``GLOBIGNORE``/``nocaseglob``-style options say otherwise,
-      and tracking every such option is a losing game. One level of dot
-      entries is cheap; the safety walk is a superset of what bash expands.
+      and tracking every such option is a losing game. The safety walk is
+      a superset of what bash expands. That is cheap for a one-level ``*``;
+      under a recursive ``**`` every level includes ``.git``/``.venv``/
+      ``node_modules/.pnpm``, so a deep walk over a large tree can hit the
+      cap and rank HIGH (round 10, NIT-1) — the fail-closed side.
 
     Hand-rolled rather than ``glob.glob`` because that bounds only results,
     not the walk. Each match carries whether ANY component on its way was a

@@ -14,8 +14,10 @@ bar for anything else:
    loop records what a bash call created (``plan_creations`` before it runs,
    ``commit_creations`` after) and ``owned_record`` answers "did this session,
    or one of its subagents, create this exact inode?". A record is keyed by
-   realpath AND ``st_dev``/``st_ino``, so a directory deleted and re-made by
-   someone else, or swapped for a symlink, no longer matches.
+   realpath AND ``st_dev``/``st_ino`` AND a creation stamp (see
+   ``creation_stamp``), so a directory deleted and re-made by someone else —
+   which on Linux tmpfs/ext4 routinely gets the SAME inode back — or swapped
+   for a symlink, no longer matches.
 2. **Clean linked worktree.** ``git worktree remove <path>`` without
    ``--force`` refuses tracked/untracked changes and the primary checkout by
    itself, but takes ignored files and a detached HEAD's commits with it.
@@ -190,6 +192,25 @@ def ledger_path(state_root: str | os.PathLike[str] | None = None) -> Path:
     return root / LEDGER_DIRNAME / LEDGER_FILENAME
 
 
+def creation_stamp(st: os.stat_result) -> int:
+    """An inode GENERATION stamp: ``dev+ino`` alone is reused after a delete.
+
+    * Birth time where the platform has it (macOS/BSD ``st_birthtime``): set
+      once at creation, never by later writes, so it is matched exactly.
+    * Otherwise (Linux; Python does not expose statx btime) ``st_ctime_ns``,
+      matched exactly too. A directory's ctime moves whenever an entry is
+      added, removed or renamed, or on chmod — so on Linux a ledger row stops
+      matching once the directory changes after the recording call. That is
+      deliberate: it fails CLOSED to the normal ranking, where the judge's
+      history evidence still covers a session's own directory. A ctime is
+      never accepted as "newer is fine": a recreation is exactly "newer".
+    """
+    birth = getattr(st, "st_birthtime", None)
+    if birth is not None:
+        return int(round(float(birth) * 1_000_000_000))
+    return int(st.st_ctime_ns)
+
+
 @dataclass(frozen=True)
 class CreationRecord:
     path: str
@@ -199,6 +220,9 @@ class CreationRecord:
     creator: str
     kind: str
     command: str
+    #: ``creation_stamp`` at record time; ``None`` on a pre-stamp row, which
+    #: therefore never matches.
+    stamp: int | None = None
 
     def describe(self) -> str:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created_at))
@@ -209,7 +233,7 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS created ("
     " owner TEXT NOT NULL, path TEXT NOT NULL, dev INTEGER NOT NULL, ino INTEGER NOT NULL,"
     " created_at REAL NOT NULL, creator TEXT NOT NULL, kind TEXT NOT NULL,"
-    " command TEXT NOT NULL, PRIMARY KEY (owner, path))"
+    " command TEXT NOT NULL, stamp INTEGER, PRIMARY KEY (owner, path))"
 )
 
 
@@ -220,6 +244,11 @@ def _connect(path: Path, *, create: bool) -> sqlite3.Connection | None:
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=_DB_TIMEOUT_S)
     conn.execute(_SCHEMA)
+    # A ledger written before the stamp column existed: add it (old rows keep
+    # NULL and so never match — fail closed).
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(created)")}
+    if "stamp" not in columns:
+        conn.execute("ALTER TABLE created ADD COLUMN stamp INTEGER")
     return conn
 
 
@@ -243,14 +272,31 @@ def write_records(
             continue
         written.append(path)
         for owner in owners:
-            rows.append((owner, path, st.st_dev, st.st_ino, now, creator, kind, command[:500]))
+            rows.append(
+                (
+                    owner,
+                    path,
+                    st.st_dev,
+                    st.st_ino,
+                    now,
+                    creator,
+                    kind,
+                    command[:500],
+                    creation_stamp(st),
+                )
+            )
     if not rows:
         return []
     conn = _connect(ledger_path(state_root), create=True)
     assert conn is not None
     try:
         with conn:
-            conn.executemany("INSERT OR REPLACE INTO created VALUES (?,?,?,?,?,?,?,?)", rows)
+            conn.executemany(
+                "INSERT OR REPLACE INTO created"
+                " (owner, path, dev, ino, created_at, creator, kind, command, stamp)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
     finally:
         conn.close()
     return written
@@ -264,8 +310,8 @@ def owned_record(
     Covers = the recorded directory itself or anything strictly inside it,
     compared on REALPATH so a symlink inside an owned directory that points
     elsewhere is not covered. The recorded directory must still be the same
-    inode: a path deleted and re-made by someone else is no longer this
-    session's. Any error means "not owned".
+    inode generation (dev, ino and ``creation_stamp``): a path deleted and
+    re-made by someone else is no longer this session's. Any error means "not owned".
     """
     if not session_id or not path:
         return None
@@ -276,7 +322,7 @@ def owned_record(
             return None
         try:
             rows = conn.execute(
-                "SELECT path, dev, ino, created_at, creator, kind, command FROM created"
+                "SELECT path, dev, ino, created_at, creator, kind, command, stamp FROM created"
                 " WHERE owner = ?",
                 (session_id,),
             ).fetchall()
@@ -296,6 +342,8 @@ def owned_record(
             continue
         if (st.st_dev, st.st_ino) != (rec.dev, rec.ino):
             continue
+        if rec.stamp is None or creation_stamp(st) != rec.stamp:
+            continue  # same inode number, different generation (or unstamped)
         if best is None or len(rec.path) > len(best.path):
             best = rec
     if best is not None and _foreign_inside(real, session_id, state_root=state_root):

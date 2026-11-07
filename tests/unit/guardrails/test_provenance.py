@@ -123,9 +123,43 @@ def test_mkdir_p_records_topmost_new_component_only(home: Path) -> None:
 
 
 def test_inode_mismatch_is_not_owned(home: Path) -> None:
+    """A delete + re-make by someone else is not this session's, even when
+    the filesystem hands back the SAME inode number (Linux tmpfs/ext4 do;
+    CI caught it). The generation stamp has to differ; on a coarse kernel
+    clock a same-tick re-make could share it, so re-make until it does."""
+    import time
+
     _create(home, "mkdir ~/qa-rig")
-    (home / "qa-rig").rmdir()
-    (home / "qa-rig").mkdir()  # same name, new inode: someone else's now
+    rig = home / "qa-rig"
+    before = prov.creation_stamp(os.stat(rig))
+    for _ in range(100):
+        rig.rmdir()
+        rig.mkdir()  # same name, maybe even the same inode: someone else's now
+        if prov.creation_stamp(os.stat(rig)) != before:
+            break
+        time.sleep(0.01)
+    assert prov.creation_stamp(os.stat(rig)) != before
+    assert _verdict(home, "rm -rf ~/qa-rig").risk is Risk.HIGH
+
+
+def test_reused_inode_number_with_new_stamp_is_not_owned(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deterministic on every OS: pin the inode match, vary only the stamp."""
+    _create(home, "mkdir ~/qa-rig")
+    assert _verdict(home, "rm -rf ~/qa-rig").risk is Risk.LOW
+    real = prov.creation_stamp
+    monkeypatch.setattr(prov, "creation_stamp", lambda st: real(st) + 1)
+    assert _verdict(home, "rm -rf ~/qa-rig").risk is Risk.HIGH
+
+
+def test_unstamped_legacy_row_is_not_owned(home: Path) -> None:
+    import sqlite3
+
+    _create(home, "mkdir ~/qa-rig")
+    db = prov.ledger_path(home / ".local-operator")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE created SET stamp = NULL")
     assert _verdict(home, "rm -rf ~/qa-rig").risk is Risk.HIGH
 
 
@@ -1467,3 +1501,16 @@ def test_dot_entries_keep_ordinary_globs_low(home: Path, command: str) -> None:
     repo.mkdir()
     _py_tree(repo)
     assert _rank_in(repo, home, command).risk is Risk.LOW
+
+
+@pytest.mark.parametrize("prefix", ["curl -O https://x/y", "gcc -O2 a.c", "python -O x.py"])
+def test_bare_dash_o_does_not_turn_on_the_deep_walk(home: Path, prefix: str) -> None:
+    """Round 10, MINOR-1: only ``globstar``/zsh/ksh/fish/setopt opt in."""
+    from local_operator.guardrails.resolve import resolve_command
+
+    assert not resolve_command(
+        f"{prefix}; ls **/*.py", cwd=str(home), env=_env(home), home=str(home)
+    ).globstar
+    assert resolve_command(
+        "bash -O globstar -c 'ls **'", cwd=str(home), env=_env(home), home=str(home)
+    ).globstar
