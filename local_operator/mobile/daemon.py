@@ -3253,6 +3253,60 @@ def _session_is_live(daemon: "MobileDaemon", session_id: str) -> bool:
     return entry is not None and entry.writer is not None
 
 
+def _is_turn_in_flight(exc: BaseException) -> bool:
+    """Is this the owner's "a turn holds the session" refusal?
+
+    The same two-sided test ``AttachClient.send_command`` makes: the TYPE when
+    this build raised it, the sentence when the refusal crossed the wire (the
+    error frame carries no code for it, so ``daemon.request`` rebuilds a plain
+    ``RuntimeError`` around :data:`TURN_IN_FLIGHT`).
+    """
+    from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+    return isinstance(exc, TurnInFlight) or (
+        isinstance(exc, RuntimeError) and TURN_IN_FLIGHT in str(exc)
+    )
+
+
+async def _deliver_continuation(
+    daemon: "MobileDaemon", pid: int, op: str, body: dict[str, Any]
+) -> tuple[dict[str, Any], str]:
+    """Deliver a live prompt/steer, steering a prompt that meets a running turn.
+
+    Returns the owner's reply and the op that actually carried the message
+    (``"prompt"`` or ``"steer"``), which the route reports as ``delivered_as``.
+
+    WHY THE PROMPT ASKS NOT TO WAIT. A serving owner's ``prompt`` otherwise
+    waits out the turn in flight before it acks (``ServingSessionHandle.prompt``'s
+    ``wait_for_turn``), and ``daemon.request`` bounds the ack at 15 s: a phone
+    prompt sent mid-turn was answered ``504 session did not answer`` while the
+    message sat queued, and the composer's same-id retry hung the same way
+    (measured on 0.101.12). With ``wait_for_turn: false`` a busy owner refuses
+    at once with ``TurnInFlight``, and that refusal is answered here exactly as
+    ``AttachClient.send_command`` answers it: one steer under the SAME command
+    id, so the message joins the running turn at its next boundary.
+
+    IDEMPOTENCY rides the owner's shared prompt/steer reservations: the refusal
+    releases the id before it is raised, the steer reserves it, and a retry of
+    the same id — as a prompt or a steer, during the turn or after it — finds
+    it reserved or durable and answers "already admitted". A turn that ends
+    between the refusal and the steer is covered by the owner too: a steer to an
+    idle session opens a turn for itself (``Session._ensure_steering_wake``).
+
+    Only ``prompt`` is reconciled; a ``steer`` is forwarded as-is (an idle steer
+    already starts a turn). An owner that predates the field ignores it and
+    keeps its old wait, which is the pre-change behaviour, not a regression.
+    """
+    if op != "prompt":
+        return await daemon.request(pid, op, **body), op
+    try:
+        return await daemon.request(pid, "prompt", **{**body, "wait_for_turn": False}), "prompt"
+    except RuntimeError as exc:
+        if not _is_turn_in_flight(exc):
+            raise
+    return await daemon.request(pid, "steer", **body), "steer"
+
+
 async def _engage_and_publish(
     daemon: "MobileDaemon",
     session_id: str,
@@ -8195,6 +8249,8 @@ def build_app(daemon: MobileDaemon):
             return denied
         # The receipt's additive ``skills`` block, filled only when expansion ran.
         expansion_note: dict[str, list[str]] | None = None
+        # The channel that carried a live continuation (see ``_deliver_continuation``).
+        delivered_as = op
 
         def receipt(detail: Any) -> dict[str, Any]:
             """This route's ack, carrying the ``skills`` block when one ran.
@@ -8440,7 +8496,7 @@ def build_app(daemon: MobileDaemon):
                 return JSONResponse({"ok": True, "detail": detail})
             if entry is None:
                 raise KeyError(session_id)
-            reply = await daemon.request(entry.record.pid, op, **body)
+            reply, delivered_as = await _deliver_continuation(daemon, entry.record.pid, op, body)
         except KeyError:
             return JSONResponse({"error": "session not connected"}, status_code=409)
         except TimeoutError:
@@ -8495,7 +8551,14 @@ def build_app(daemon: MobileDaemon):
             # both are additive fields, so a client built before them reads
             # ``detail`` exactly as it always did.
             return JSONResponse({"ok": True, "detail": detail, "tone": tone, "refused": refused})
-        return JSONResponse(receipt(reply.get("detail", "")))
+        answer = receipt(reply.get("detail", ""))
+        if op in ("prompt", "steer"):
+            # ADDITIVE: which channel carried a continuation, so the phone can say
+            # "steered into the running turn" rather than imply a new turn. Absent
+            # on every other op and on the cold-wake arm above (that delivery
+            # happens inside a freshly engaged client this route does not see).
+            answer["delivered_as"] = delivered_as
+        return JSONResponse(answer)
 
     async def api_operator_challenge(request: Request) -> Response:
         """Mint a per-action operator challenge for THIS session's live connection.

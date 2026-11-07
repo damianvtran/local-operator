@@ -8436,6 +8436,15 @@ class RuntimeServer:
             honours_wait = "wait_complete" in parameters and bool(frame.get("wait_complete"))
             if honours_wait:
                 fields["wait_complete"] = True
+            # THE OPPOSITE OPT-IN: refuse a busy session NOW instead of parking the
+            # ack behind the turn in flight. Only a literal ``false`` asks for it,
+            # and only the phone relay sends it (``mobile/daemon.py``), because it
+            # answers the ``TurnInFlight`` refusal by steering the same command
+            # id; every other producer omits the key and keeps the wait. Probed
+            # like the rest: a handle without the keyword (the TUI's) already
+            # refuses a busy session outright, which is the answer asked for.
+            if "wait_for_turn" in parameters and frame.get("wait_for_turn") is False:
+                fields["wait_for_turn"] = False
             if "command_id" in parameters:
                 fields["command_id"] = frame.get("command_id")
             # Silent input metadata (see ``Message.input_mode``), probed exactly
