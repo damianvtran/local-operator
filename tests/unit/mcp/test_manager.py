@@ -1399,34 +1399,98 @@ class TestHalfOpenBreaker:
         await manager.disconnect_all()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("history", ["never_tripped", "was_paused"])
-    async def test_a_failed_reconnect_repauses_only_a_server_that_was_paused(
+    @pytest.mark.parametrize("history", ["down_since_startup", "connected", "was_paused"])
+    async def test_a_failed_reconnect_restores_the_retry_state_it_found(
         self, project: Path, monkeypatch: pytest.MonkeyPatch, history: str
     ) -> None:
-        """#3523 R2-1: the re-pause is the breaker's, not every failed Reconnect's.
+        """#3523 R2-1 / #3541 Q5: a failed Reconnect hands back the retry state it found.
 
-        A server that never tripped and simply fails to connect keeps its
-        pre-breaker behaviour: not suspended, no probe, so the monitor never
-        says it "keeps dropping". ``was_paused`` is the control: a server the
-        breaker already held goes back to paused with one fresh probe.
+        * ``down_since_startup`` (QA Q1a): nothing retried it before, nothing
+          does after, exactly as before the breaker probed.
+        * ``connected``: never tripped, so it is NOT paused (the monitor would
+          say "keeps dropping"); it re-enters the ordinary ladder, and a server
+          that stays down then trips the breaker on its own.
+        * ``was_paused``: paused again with one fresh probe.
         """
-        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        if history == "down_since_startup":
+            manager = McpManager(str(project))
+            server = _FakeServer()
+            server.mode = "down"
+            monkeypatch.setattr(manager, "_connect_server", server.connect)
+            await manager.discover_and_connect()
+            real_sleep = asyncio.sleep
+            clock = _CooldownClock(real_sleep)
+            monkeypatch.setattr(asyncio, "sleep", clock.sleep)
+            assert manager.get_connection("fast") is None
+        else:
+            manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
         if history == "was_paused":
             await self._trip(manager, server, real_sleep)
         server.mode = "down"
 
         assert await manager.reconnect_server("fast") is None
-        await _spin(real_sleep)
-
         assert manager.get_connection("fast") is None
-        if history == "never_tripped":
-            assert manager.reconnect_suspended("fast") is False
-            assert manager._pending_probes == {}
-            assert clock.parked() == []
-        else:
+        if history == "was_paused":
+            await _spin(real_sleep)
             assert manager.reconnect_suspended("fast") is True
             assert list(manager._pending_probes) == ["fast"]
             assert clock.parked() == [60.0]
+        elif history == "connected":
+            # Back on the ladder, not paused, before the ladder has run.
+            assert manager.reconnect_suspended("fast") is False
+            assert manager._pending_probes == {}
+            assert "fast" in manager._pending_reconnects
+            # Still down: the ladder runs out and the breaker trips by itself.
+            for _ in range(200):
+                await real_sleep(0)
+                if manager.reconnect_suspended("fast"):
+                    break
+            await _spin(real_sleep)
+            assert manager.reconnect_suspended("fast") is True
+            assert list(manager._pending_probes) == ["fast"]
+            assert clock.parked() == [60.0]
+        else:
+            attempts = server.attempts.count("fast")
+            await _spin(real_sleep)
+            clock.elapse()
+            await _spin(real_sleep)
+            assert server.attempts.count("fast") == attempts  # nothing retries it
+            assert manager.reconnect_suspended("fast") is False
+            assert manager._pending_probes == {}
+            assert "fast" not in manager._pending_reconnects
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_server_heals_after_a_failed_reconnect(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3541 QA Q5: drop, Reconnect fails before any trip, server returns.
+
+        The failed Reconnect cancelled the ladder and tore down; if it then
+        arms nothing the server is never retried again. However the retry is
+        armed, the server must heal unattended once it is back.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        conn = manager.get_connection("fast")
+        assert conn is not None
+        # The drop: the ladder's first attempt parks inside its connect.
+        server.mode = "down"
+        server.hold = asyncio.Event()
+        conn.closed_event.set()
+        await _spin(real_sleep)
+        assert "fast" in manager._pending_reconnects
+        assert manager.reconnect_suspended("fast") is False
+        server.hold = None  # the parked attempt keeps its own event
+
+        assert await manager.reconnect_server("fast") is None
+
+        server.mode = "up"
+        await _spin(real_sleep)
+        if manager.get_connection("fast") is None:
+            clock.elapse()  # a cool-down-based retry gets its time too
+            await _spin(real_sleep)
+        assert manager.get_connection("fast") is not None
+        assert manager.reconnect_suspended("fast") is False
         await manager.disconnect_all()
 
     @pytest.mark.asyncio
