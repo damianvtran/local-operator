@@ -21397,6 +21397,20 @@ BROWSER_ACTIONS = (
     # DESKTOP_ONLY_METHODS for why the extension cannot deliver it.
     "hover",
     "select",
+    # Set a form control's VALUE in one action: a native <select> option by
+    # label or value, or an <input>/<textarea> (date/time inputs take the ISO
+    # string). It exists because the two actions beside it each fail one half of
+    # that job: `select` speaks only to a <select> (and to page-owned ARIA
+    # listboxes), and `type` cannot move a native select at all — in the measured
+    # incident the Environment combobox resisted `select`, a click on an option
+    # node and the keyboard alike, so three plausible actions all reported
+    # failures a caller could not act on.
+    #
+    # Non-cmux, DESKTOP-HOST only (see DESKTOP_ONLY_METHODS): it runs as one
+    # FIXED page program on the same generated-source transport the geometry
+    # reads use, which is why it can never become an arbitrary-code surface —
+    # the caller supplies data (a target and a value), never source.
+    "setvalue",
     "close",
     # scroll and logs are served by BOTH non-cmux hosts (the paired Local
     # Operator browser extension and the desktop app's browser host); the cmux
@@ -21503,6 +21517,11 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
         "press",
         "hover",
         "select",
+        # setvalue is one FIXED page program (a committed generated string, the same
+        # transport the geometry sources use), so it needs a host that runs page
+        # programs in the tab it owns. cmux exposes no such primitive, exactly as for
+        # the read actions below, so the refusal is typed rather than a silent no-op.
+        "setvalue",
         "scroll",
         "logs",
         "network_start",
@@ -21799,10 +21818,9 @@ class BrowserParams(BaseModel):
     selector: str = Field(
         default="",
         description="CSS selector, snapshot ref, or a11y locator for the "
-        'click/type/hover/select target (role=checkbox[name="Active"], label=…, text=…) '
-        "resolved against the a11y tree, so it survives framework ids. Also the "
-        "read/snapshot scope, query CSS, scroll element, 'press' focus target or "
-        "download/upload control.",
+        "click/type/hover/select/setvalue target (role=checkbox[name=…], label=…, text=…), "
+        "resolved against the a11y tree. Also the read/snapshot scope, query CSS, scroll "
+        "element, 'press' focus or file control.",
     )
     # The snapshot window. Three fields rather than a page token, because the
     # three questions an agent asks a cut tree are different: "give me the next
@@ -21826,8 +21844,9 @@ class BrowserParams(BaseModel):
     )
     text: str = Field(
         default="",
-        description="Text to enter for 'type'; the reason for 'retain'. NEVER a credential: "
-        "use 'secret_ref' so the value stays out of the transcript.",
+        description="'type': text to enter; 'setvalue': the value (select option, "
+        "input/textarea, ISO date/time; '' clears); 'retain': reason. NEVER a credential: "
+        "'secret_ref' is 'type'-only.",
     )
     secret_ref: str = Field(
         default="",
@@ -22726,10 +22745,13 @@ def _validate_locator_target(action: str, params: BrowserParams) -> str:
     kind = _locator_kind(params.selector)
     if not kind:
         return ""
-    if action in ("click", "type", "upload", "hover", "press", "select"):
+    if action in ("click", "type", "upload", "hover", "press", "select", "setvalue"):
         # `upload` resolves its input through the same ref/CSS/locator path in
         # both hosts, so `label="Choose file"` names a file input there too
-        # (agent review round 1, R1-5).
+        # (agent review round 1, R1-5). `setvalue` reuses that plumbing for the
+        # same reason an agent reaches for it: a form labels its fields in
+        # visible text, and the accessible name is often the only stable handle
+        # on a control whose id is generated.
         return ""
     if action == "snapshot":
         return (
@@ -23284,6 +23306,19 @@ def _browser_press_refusal(
     )
 
 
+#: The host refusal reasons that carry a control's OWN options as their remedy.
+#:
+#: Both need the list for the same reason — the caller named something that is
+#: not there, and the only way to retry correctly is to copy one that is.
+#: `option_not_found` is `select`'s; `option_ambiguous` is what a *multiple*
+#: `<select>` answers when a label or value matches more than one option, and it
+#: only exists on the `setvalue` path. One set, because the rendered sentence and
+#: the result's `details` must agree on which refusals get the list: telling a
+#: caller "there were options" without showing them is the retry-blind case the
+#: list exists to remove.
+_OPTION_LIST_REASONS = frozenset({"option_not_found", "option_ambiguous"})
+
+
 def _select_available_options(raw: Any) -> list[dict[str, Any]]:
     """Bound a host's suggestions too: page labels are untrusted/model-visible.
 
@@ -23470,6 +23505,23 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
                 "'select' needs options: labels/values (strings) or zero-based indexes (integers)"
             )
         return _validate_selector(params.selector, "select")
+    if action == "setvalue":
+        # Presence, not truthiness: an EMPTY string is a legitimate value (it
+        # clears an input or textarea) and the host implements exactly that,
+        # so truthiness here would publish one wire contract with two answers
+        # and silently withhold clearing from every caller.
+        if "text" not in params.model_fields_set:
+            return (
+                "'setvalue' needs 'text': the value to set (a <select> option's label "
+                "or value, the value for an input/textarea, or an ISO date/time). "
+                "Pass an empty string to clear a field."
+            )
+        # The target is still mandatory: without one there is nothing to write.
+        # Deliberately NOT _validate_typed_text: that guard exists because cmux's
+        # `--text` argv slot parses a leading dash as an option, and `setvalue`
+        # is a non-cmux method whose value travels as a JSON string field. A
+        # numeric <select> option can legitimately be "-5".
+        return _validate_selector(params.selector, "setvalue")
     if action == "hover":
         return _validate_hover_args(params)
     if action == "press":
@@ -25229,7 +25281,15 @@ async def _bridge_call(
                     "(or the browser extension), or pass a snapshot ref ('snapshot' shows "
                     "them) / a CSS selector instead."
                 )
-        if action == "select" and exc.data.get("reason") == "option_not_found":
+        if action in ("select", "setvalue") and (
+            str(exc.data.get("reason") or "") in _OPTION_LIST_REASONS
+        ):
+            # Shared with `setvalue` because both actions settle a value against
+            # the control's options, and a refusal that names the alternatives is
+            # the difference between a caller retrying blind and retrying
+            # correctly. The reason name is the host's; a host that words its own
+            # refusal differently still reaches the reader — it just arrives
+            # without this list.
             available = _select_available_options(exc.data.get("available"))
             message += "\nAvailable options (zero-based indexes):" + (
                 "\n"
@@ -25259,7 +25319,9 @@ async def _bridge_call(
         # it from the code alone (`busy` covers `record_active` and
         # `record_limit`), and substring-matching the rendered sentence is the
         # failure mode the typed code exists to remove (review round 2, F1).
-        if action == "select" and exc.data.get("reason") == "option_not_found":
+        if action in ("select", "setvalue") and (
+            str(exc.data.get("reason") or "") in _OPTION_LIST_REASONS
+        ):
             problem.details["available"] = _select_available_options(exc.data.get("available"))
         reason = exc.data.get("reason")
         if isinstance(reason, str) and reason:
@@ -28009,6 +28071,13 @@ async def _bridge_action(
     elif action == "select":
         wire["selector"] = params.selector.strip()
         wire["options"] = list(params.options)
+    elif action == "setvalue":
+        # Both halves always travel. `_validate_browser_args` already refused an
+        # absent target or value, so a field left at its pydantic default is not
+        # a deliberate omission here — and a host that could not tell the two
+        # apart would have to guess which of them was meant.
+        wire["selector"] = params.selector.strip()
+        wire["text"] = params.text
     elif action == "hover":
         # selector XOR x/y is guaranteed by _validate_browser_args; send only the
         # half the caller chose so the host never sees a second target.
@@ -28201,6 +28270,57 @@ async def _bridge_action(
             "browser",
             f"{operation} in {params.selector.strip()}{verdict}. "
             f"Page: {_page_line(title, href)}",
+            details=details,
+        )
+    if action == "setvalue":
+        # Render the host's READ-BACK, never an echo of what was asked for: a
+        # native <select> maps a visible label onto its own value, a date input
+        # normalises the ISO string, and a masked field reports its own format.
+        # That read-back is the whole point of the verb — one call tells an agent
+        # the control's state without a screenshot.
+        raw_value = result.get("value")
+        verified = result.get("verified")
+        got = "" if raw_value is None else str(raw_value)
+        # A credential's read-back must never reach the transcript: this is the
+        # one verb that reads a value INTO model-visible text, so it must not be
+        # the verb that surfaces a secret. TWO triggers, because a host can
+        # declare secrecy either way and keying off only one leaks the other:
+        # `input_type == "password"` (the control's own type echoed back) and
+        # `redacted: true` (the host stating it withheld the value itself). The
+        # fail-safe direction matters — a host that says `redacted` but still
+        # sends a value, or names a password without redacting, is a host we
+        # must not trust to have done it for us. Never inferred from the
+        # selector: a selector says WHERE a field is, not what it holds.
+        input_type = str(result.get("input_type") or "")
+        withheld = input_type == "password" or bool(result.get("redacted"))
+        # A host that could not read the value back says so rather than letting
+        # an empty string pass as "the field is now empty" — the same honesty
+        # `select`'s `verified` flag buys.
+        if withheld:
+            feedback = " (value withheld: a credential field)"
+        else:
+            feedback = (
+                " (value unverified — check the page)"
+                if verified is False or raw_value is None
+                else ""
+            )
+        details["kind"] = result.get("kind")
+        if input_type:
+            details["input_type"] = input_type
+        if result.get("redacted"):
+            details["redacted"] = True
+        if not withheld:
+            details["value"] = got
+        if isinstance(verified, bool):
+            details["verified"] = verified
+        if withheld:
+            message = f"Set {params.selector.strip()}{feedback}."
+        else:
+            message = f"Set {params.selector.strip()} to {got!r}{feedback}."
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{message} Page: {_page_line(title, href)}",
             details=details,
         )
     if action == "hover":
@@ -28464,7 +28584,7 @@ async def execute_browser(
     # a peer. Keep the preflight specific to this additive action so existing
     # actions retain their established validation/ownership ordering.
     preflight_action = str(args.get("action", "")).strip().lower()
-    if preflight_action in ("press", "hover", "select"):
+    if preflight_action in ("press", "hover", "select", "setvalue"):
         try:
             keyboard = BrowserParams(**args)
         except ValidationError as exc:
@@ -29113,9 +29233,12 @@ async def _execute_browser(
     refusal = _browser_press_refusal(tool_call_id, action, params)
     if refusal is not None:
         return refusal
-    if action in ("press", "hover", "select"):
+    if action in ("press", "hover", "select", "setvalue"):
         # Host-free target validation, before ANY discovery (the same ordering
-        # execute_browser's preflight gives the public entry point).
+        # execute_browser's preflight gives the public entry point). `setvalue`
+        # belongs here for the same reason as its neighbours: an absent target or
+        # value is a caller mistake that must not depend on a reachable host or
+        # on an ownership lane's side effects to be answered.
         invalid = _validate_browser_args(action, params)
         if invalid:
             return _error(tool_call_id, "browser", invalid)

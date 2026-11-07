@@ -192,6 +192,12 @@ CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
         # handler and would answer a bare `internal`.
         "hover",
         "select",
+        # setvalue exists only in builds that ship the `setvalue` page program. An
+        # older desktop host has no handler and would answer a bare `internal`,
+        # so the gate turns the same peer into a typed `capability_unsupported`.
+        # It is also DESKTOP_ONLY (below): the extension never advertises it, so
+        # there this gate is what produces the sentence naming the desktop host.
+        "setvalue",
         "download",
         "upload",
         "styles",
@@ -393,6 +399,12 @@ METHODS = (
     # depend on it matching the host's.
     "hover",
     "select",
+    # Setting a form control's value (native <select>, input/textarea). Listed
+    # here for the shared vocabulary and a stable order; DESKTOP_ONLY_METHODS
+    # below is what keeps the extension from serving or advertising it, because
+    # the verb is one FIXED page program and the extension's intentionally
+    # inactive tab cannot run the trusted input path the desktop host owns.
+    "setvalue",
     "close",
     "status",
     # tabs lists every live extension-owned surface. It exists because parallel
@@ -528,6 +540,13 @@ DESKTOP_ONLY_METHODS: tuple[str, ...] = (
     # substitute click uses is not a hover: it fires handlers but not CSS :hover
     # nor a trusted pointer. Desktop only, same reason as `press`.
     "hover",
+    # Setting a form control's value runs the `setvalue` page program in the tab
+    # the host owns and then reads the value back. The extension could run a page
+    # script, but NOT the trusted-input half that makes a synthetic value change
+    # stick on React-controlled inputs (its tab is kept intentionally inactive),
+    # and a value it cannot verify is exactly the false success this verb exists
+    # to remove. Desktop only, same class as `press`.
+    "setvalue",
     "network_start",
     "network_stop",
     "network_read",
@@ -583,6 +602,9 @@ COMMAND_TIMEOUTS = {
     "hover": 20.0,
     # DOM selection + bounded read-back; never waits for an OS popup.
     "select": 25.0,
+    # Same class as `select`: resolve the control, run one bounded page program,
+    # read the value back. No settle and no OS popup.
+    "setvalue": 25.0,
     "read": 20.0,
     "snapshot": 20.0,
     "screenshot": 20.0,

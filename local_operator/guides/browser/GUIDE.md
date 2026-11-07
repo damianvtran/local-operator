@@ -461,6 +461,11 @@ Same `browser` tool. Actions:
   selects only (custom controls get a typed desktop-only refusal). A miss lists
   up to 50 available options; use those, not guessed labels. Unverified
   selection is reported as such — inspect the page before retrying.
+- `setvalue selector="#environment" text="Production"`: set a form control's
+  VALUE in one action — a native `<select>` option by label or value, an
+  `<input>`/`<textarea>` (date and time inputs take the ISO string) — and the
+  result reports what the control holds AFTER the change, not what you asked
+  for. Desktop app host only (see below).
 - `scroll` (by direction, pixel delta, or scroll an element into view)
 - `logs` (the tab's console output and uncaught exceptions since it opened —
   for debugging web apps)
@@ -475,6 +480,102 @@ Same `browser` tool. Actions:
 - `record_start` / `record_stop` (record the tab's video to an `.mp4`, at an
   optional `width`/`height` and `quality: "high"` — desktop app host only; see below)
 - `close` (drop the surface and its tab)
+
+### Setting a value: native select, date pickers, rich pickers
+
+`setvalue` exists because a native `<select>` is otherwise unreachable: `select`
+speaks to the option model, `type` cannot move a native select at all, and a
+click on the option node fails when the popup is browser chrome rather than page
+DOM. Three worked cases, all against the control the page actually renders:
+
+```text
+# 1. Native <select> — an Apple-style settings form ("Environment")
+snapshot                                   # prints combobox "Environment" [e2]
+setvalue selector=e2 text="Production"     # the ref WITHOUT its brackets
+# -> Set e2 to 'production'. ...           the read-back is the OPTION's value
+
+# 2. <input type="date"> — ISO string, exactly as the DOM stores it
+setvalue selector="input[name=expires]" text="2027-03-01"
+
+# 3. A rich picker whose VISIBLE field is a real <input> (typeahead, date picker)
+setvalue selector="input[aria-label='Environment']" text="Production"
+#    the popup is only a suggestion list here; the value lives in the input,
+#    so nothing has to open, click or wait
+```
+
+How a value is matched and what comes back:
+
+- **Native `<select>`**: the option is matched by visible label, then by option
+  value; both are tried exact first, then case-insensitively. An absent match
+  (`option_not_found`) and an ambiguous one (`option_ambiguous`, a `multiple`
+  select whose label matched twice) are both refused and both name up to 50 of
+  the control's own options — copy one instead of guessing.
+- **`<input>` / `<textarea>`**: the value goes through the prototype's setter, so
+  a React-controlled field registers the edit, and `input` + `change` are
+  dispatched after it.
+- **Date/time**: `date`, `time`, `datetime-local`, `month` and `week` hold only
+  the ISO spelling the DOM itself stores (`2027-03-01`, `13:45`,
+  `2027-03-01T13:45`). A locale spelling (`01/03/2027`) is not translated — the
+  control's own sanitizer will not store it, so the host refuses the write as
+  `value_rejected` and names the format it does accept (`expected`:
+  `YYYY-MM-DD`). That refusal covers `number`, `range` and `color` too, because
+  a clamp and a fallback are the same failed write as a cleared date. The
+  refusal changes nothing: the host restores the value the field had and
+  dispatches no `input`/`change`, so the page never saw the bad string — fix the
+  format from `expected` and retry. A host predating that restore is the one
+  case that is not clean: it writes first and refuses after, so the field keeps
+  the sanitizer's reading (usually empty) and the page has been notified.
+- **The result reports the read-back** — the value the control holds after the
+  dispatch, which is not always what was asked for (a select maps a label onto
+  its value; a masked field reports its own format). If the host could not read
+  it, the sentence says `value unverified` instead of presenting an empty string
+  as success.
+- **A credential control reports no value.** The harness withholds it when the
+  host names `input_type: "password"` OR sets `redacted: true` — both, because a
+  host may declare secrecy one way and not the other — printing
+  `value withheld: a credential field` and leaving the value out of the details.
+  It is deliberate in the safe direction: a host that redacts but still sends a
+  value, or names a password without redacting, is not trusted to have done it
+  for us, so a page-held secret cannot reach the transcript either way.
+- **Refused**: a target that is not a form control (use `select` for a
+  page-owned ARIA listbox, or `type` for a `contenteditable`), a checkbox or
+  radio (`not_a_value_control` — its `value` is what it would SUBMIT and its
+  state is `checked`, so toggle it with `click`; writing the value would report
+  success on an unticked box), a disabled, inert or read-only control, a file
+  input (that is `upload`), or a missing target or value. An empty `text` is a
+  legitimate value: it clears an input or textarea.
+  A credential field is `type` with `secret_ref`, never `setvalue` — this action
+  carries a literal by definition and refuses a secret ref, so `type` is the only
+  action that can enter a stored secret. The one place a secret can still meet
+  `setvalue` is a target the caller did not know was a password box, so a
+  `password` control's result reports no value at all (see below).
+
+What `setvalue` is, and is not — the boundary is structural, not a promise:
+
+- It runs ONE **fixed page program** with a committed source string, the same
+  transport the structured reads (`styles`, `hit_test`, `ancestors`, `query`)
+  use. The caller supplies DATA — a target and a value — never source; there is
+  no expression, no callback and no evaluation hook anywhere in the path.
+- It runs in the resolved element's **own frame**, in the session's **own tab**,
+  reached through the existing surface registry and frame plumbing. It never
+  reaches a privileged (chrome/extension) context, never navigates, issues no
+  network request, and touches no node outside the target.
+- It cannot cross origins or frames that a `selector` could not already address:
+  a target inside an iframe is a cross-frame selector, and frames are driven the
+  way every other action drives them.
+- Which host: the desktop app's browser host only. The extension neither serves
+  nor advertises it, so it answers `'setvalue' is served only by the Local
+  Operator desktop app's browser` and every other action on that tab still
+  works — open the page with `backend="ui"` to set a value.
+
+When the control is not a form control, the tool you want is a different one.
+`select` owns the comboboxes you must OPEN: its target is the trigger, it clicks
+the trigger and then the option in the page's own DOM, so a page-owned ARIA
+listbox with no input behind it is its job, not this verb's. `type` owns the
+editors, where the "value" is a document rather than a value: `contenteditable`
+regions and rich-text fields take trusted keystrokes, and `secret_ref` lives on
+that action too. `setvalue` is for a control that already holds a value in the
+DOM — which is the whole difference, and the reason it can read it back.
 
 ### Network capture: what the tab actually sent and received
 

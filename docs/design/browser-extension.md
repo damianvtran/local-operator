@@ -341,6 +341,7 @@ except `open` and `status`.
 | `status` | — | `tab?, url?, title?, origin_mode` | Liveness probe; the bridge analogue of `_cmux_url_probe`-as-liveness (builtin.py:4998-5006). |
 | `upload` | `tab, ref \| selector, paths[]` | `inputs, accepted[], refused[]` | `DOM.setFileInputFiles` over the tab-scoped debugger session this extension already holds, followed by a READ-BACK of the input's `files` compared against what was set (the `type` rule, Python keeps the compare). The paths are absolute and were validated by PYTHON (`browser_files.check_upload`); the extension's own checks are defence in depth, and a refusal travels as `ok:true` with a `refused` list because an `ErrorCode` the extension emits can be dropped by an already-released daemon (section 4.4, `capability_unsupported`). |
 | `download` | — | — | **Not served by the extension, and not advertised by it.** Chrome refuses `Page.setDownloadBehavior` (`-32000 "Cannot not access browser-level commands"`) and `Browser.setDownloadBehavior` (`-32601`) to a tab-scoped `chrome.debugger` session, no browser target is attachable, and no `downloadWillBegin`/`downloadProgress` event is delivered — measured on Chrome 153.0.8010.53. The desktop app's host serves it (Electron's `will-download` + `setSavePath`); the harness answers a request on this host with a typed `capability_unsupported` naming where to go instead. |
+| `setvalue` | `tab, selector, text` | `value, kind?, verified?` | **Not served by the extension, and not advertised by it** (`DESKTOP_ONLY_METHODS`). It writes a form control's value through the DOM (a native `<select>` option by label/value, an `<input>`/`<textarea>` via the prototype setter, ISO strings for date/time inputs) and reads the value back. The program is a FIXED generated source string — a caller supplies a target and a value, never source — so there is no expression or `eval` surface anywhere in the path. Desktop-only for the same class of reason as `press`: the write must reach a page the host owns and can read back, and the harness turns an older host into a typed `capability_unsupported` before any socket dial (section 4.5). The extension's answer is the desktop-only sentence, not an update instruction. |
 
 Session-leg-only methods (answered by the daemon itself, never relayed):
 `ping` (health), used by `lop browser status`.
@@ -401,6 +402,13 @@ checks the record first (no socket call), so a pre-feature host produces a typed
 `capability_unsupported` instead of a command that burns its whole budget and
 returns a bare `internal`. The list is the extension's own dispatch table, so an
 advertised capability cannot drift from a served one.
+
+**`setvalue` is the newest desktop-only member** of that set, beside `press`,
+`hover` and the file/network/read additions: it is in `METHODS` (the shared
+vocabulary, so the wire has one spelling), in `CAPABILITY_GATED_METHODS` (the
+harness refuses it from the record before any socket dial), and in
+`DESKTOP_ONLY_METHODS` (so the extension neither serves nor advertises it, and
+its refusal is the desktop-only sentence rather than an update instruction).
 
 **An empty list needs its cause named, and the daemon stamps its own.** A
 record whose `capabilities` is empty can mean either "the extension advertised
@@ -1030,6 +1038,16 @@ governs subresources — and the doc for the popup says so.
 The extension re-validates scheme (http/https only) independently of the
 Python guard, so a compromised daemon still cannot send the tab to
 `chrome://settings` or `file://`.
+
+**Why `setvalue` adds no new authority here.** It writes a value through the DOM
+inside the tab the host already owns, in the resolved element's own frame, and
+it is a FIXED page program: the caller supplies a target and a value, never
+source, so there is no expression, `eval` or callback in the path and nothing to
+smuggle an origin change through. It does not navigate (so it never even reaches
+this allowlist), cannot originate a request, does not touch privileged surfaces
+(`chrome.*` APIs, extension contexts, `chrome://` documents) and modifies no
+node outside the target. The extension does not serve it at all — that refusal is
+the capability gate in section 4.5, one layer above this one.
 
 ## 7. lop-side integration
 
