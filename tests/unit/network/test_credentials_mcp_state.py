@@ -116,6 +116,11 @@ def test_an_unreadable_file_reads_as_no_evidence(root: Path) -> None:
 
 
 def test_state_for_code_is_the_one_mapping() -> None:
+    # THE OWNER'S "NOTHING IS SIGNED IN HERE" ANSWER (review round 1, R1-1): it was
+    # missing from the table, so an MCP borrow refused with it recorded nothing and
+    # the status could only guess at one of the three causes this table exists to
+    # distinguish.
+    assert mcp_state.state_for_code("no_local_credential") == "expired"
     assert mcp_state.state_for_code("interactive_required") == "expired"
     assert mcp_state.state_for_code("refresh_failed") == "expired"
     assert mcp_state.state_for_code("not_a_holder") == "revoked"

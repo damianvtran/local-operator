@@ -27,6 +27,9 @@ from typing import TYPE_CHECKING
 
 from local_operator.network.credentials.github import GITHUB_KEY, no_source_arms
 from local_operator.network.credentials.types import (
+    CAUSE_GRANT,
+    CAUSE_OWNER_LOGIN,
+    CAUSE_UNREACHABLE,
     BrokerError,
     is_secret_key,
     secret_name_from_key,
@@ -127,7 +130,9 @@ def render_broker_error(
     # every other arm keeps ``label`` exactly as it was.
     shown = render_key_name(label)
     is_mcp = key.startswith("mcp:")
-    login = f"/mcp login {key[4:]}" if is_mcp else f"lop login {label}"
+    # ONE SPELLING, and no URL in a command (review R1-1/R2): the sentence names a
+    # FORM here because this module has no config root to resolve a server name from.
+    login = mcp_login_command(key) if is_mcp else f"lop login {label}"
     is_github = provider == GITHUB_KEY or key == GITHUB_KEY
 
     if is_github:
@@ -420,6 +425,76 @@ def render_borrowed_signin(owner: str, name: str) -> str:
     return f"{owner}: /mcp login {name}"
 
 
+def render_mcp_disconnect(
+    key: str,
+    *,
+    cause: str,
+    code: str = "",
+    owner_name: str = "",
+    peer_name: str = "",
+) -> str:
+    """WHY a borrowed MCP sign-in stopped working, and the one command that repairs it.
+
+    WHY THIS IS NOT ANOTHER ``render_broker_error`` ARM. That function speaks about a
+    BORROW (it is rendered the moment the owner answers), and its subject is the
+    credential the owner refused to serve. This one speaks about a CONNECTION that
+    already held a borrowed sign-in and lost it, so its subject is the server and the
+    repair runs on the owning device — which is a different sentence even when both
+    derive from the same code.
+
+    THE FOUR CAUSES ARE THE FOUR THAT CAN BE PROVED, and each has a different
+    remedy. ``owner_login``: the server refused the sign-in the owner serves (the
+    owner's token expired or was signed out) — the owner signs in, then re-shares.
+    ``grant``: the share itself was withdrawn, so nothing on the owner needs signing
+    in. ``unreachable``: no answer from the owner, which proves nothing about the
+    credential and needs only a reconnect. ``unknown``: this build cannot classify
+    it, and says so rather than guessing one of the three.
+
+    WHERE IT IS RENDERED, AND WHAT A CLAMP COSTS. Three surfaces: the ``/mcp`` credential
+    row (``credential_status``'s ``_bounded``, 200 cells), the CLI's repair output, and
+    the startup/transcript hint — the manager's ``_credential_hint`` returns exactly
+    this row's ``reason`` for a borrowed ``expired``/``revoked`` row and passes it as
+    ``credential_hint`` into ``_auth_failure_text``; ``render_borrowed_signin`` is only
+    the fallback when that hint is empty. So this line IS toast text, and the toast
+    clamps to card width — there is no 32-cell variant of it. A reader must not assume
+    it is clamp-proof: the share command sits mid-sentence, so a narrow card truncates
+    the command, which is why the sentence leads with the owner and the cause and why
+    nothing here may claim otherwise.
+
+    ``key`` is the placement key (``mcp:<url>``), which is exactly what the share
+    verb takes, and ``peer_name`` is the device reading this line — the device the
+    share must name, since the grant is per holder. No value, no token and no path
+    is in reach of this function; it composes names only.
+    """
+    peer = peer_name or "<this device>"
+    owner = owner_name or "the owning device"
+    share = f"lop network credential share {key} --with {peer}"
+    if cause == CAUSE_OWNER_LOGIN:
+        # TWO LOGIN FAILURES, TWO FACTS, and the tail is where they differ: the
+        # server refused a bearer the owner had just served (``http_401``), or the
+        # owner could not refresh the token at all (``refresh_failed``). Calling a
+        # failed refresh "the server refused it" was untrue and sent the operator
+        # looking for a rejection the server never made.
+        if code == "refresh_failed":
+            detail = "the token refresh failed there"
+        elif code == "http_401":
+            detail = "the server rejected the sign-in there"
+        else:
+            detail = "its sign-in stopped working there"
+        return f"on {owner}: sign in to this server again, then '{share}' — {detail}"
+    if cause == CAUSE_GRANT:
+        return (
+            f"on {owner}: '{share}' — it no longer shares this server with {peer}, "
+            "and nothing here was changed"
+        )
+    if cause == CAUSE_UNREACHABLE:
+        return (
+            f"{owner} cannot be reached, so this borrowed sign-in cannot be repaired "
+            "yet; reconnect that device (nothing here was changed)"
+        )
+    return f"no usable sign-in for this server here or on {owner}; run 'lop network doctor'"
+
+
 def render_success(provider: str, owner_name: str, *, cached: bool = False) -> str:
     """What `lop network credential ... --json`-less output says about a live borrow."""
     verb = "using the borrowed" if cached else "borrowed"
@@ -429,13 +504,25 @@ def render_success(provider: str, owner_name: str, *, cached: bool = False) -> s
     )
 
 
+#: THE MCP LOGIN COMMAND, ONE SPELLING — and it never carries a URL.
+#:
+#: ``/mcp login`` resolves a server NAME (``mcp.grants.resolve_server`` ->
+#: ``manager.get_server_config``), so ``/mcp login <url>`` is a command the product
+#: refuses (review R1-1). This module renders on devices and about devices it cannot
+#: read, so the name is optional: given one, the command names it; without one, the
+#: placeholder ``<name>`` keeps the sentence a FORM rather than pretending to be
+#: something a reader can paste. Callers with a config root in hand pass the name
+#: (``readiness.mcp_server_name_for_url``).
+def mcp_login_command(key: str, *, name: str = "") -> str:
+    return f"/mcp login {name or '<name>'}" if key.startswith("mcp:") else ""
+
+
 #: The interactive login that clears an ``interactive_required`` repair — the ONE
 #: spelling of the command, shared by the wire diagnostic below, the owner-side
 #: repair notice (``credentials/repair.py``) and its doctor row's remedy: three
 #: surfaces tell a reader to run the same thing, so the thing is spelled once.
-def repair_command(key: str) -> str:
-    is_mcp = key.startswith("mcp:")
-    return f"/mcp login {key[4:]}" if is_mcp else f"/login {key}"
+def repair_command(key: str, *, name: str = "") -> str:
+    return mcp_login_command(key, name=name) if key.startswith("mcp:") else f"/login {key}"
 
 
 #: The WIRE DIAGNOSTIC an owner sends with an ``interactive_required`` refusal —
@@ -448,24 +535,32 @@ def repair_command(key: str) -> str:
 #: where they are the detail of a code this build cannot classify. On the wire, this
 #: string's reader is a human reading a wire capture or the owner's logs.
 #:
-#: The "owner-side toast" a first draft of this docstring described does not exist:
-#: the design's §4.7 row asked for a ``credential_repair`` op that raises a durable
-#: notice on the owning device, and NO SUCH OP IS BUILT. What ships instead is
-#: DERIVED from the ``credential.report`` audit record written beside this refusal:
-#: ``credentials/repair.py`` turns an open report into a ``credential_repair`` check
-#: row that ``lop network doctor`` (relay path and local fallback) and the
-#: ``/network`` panel show on the OWNER — which is the sense in which this wording
-#: now reaches an operator, recomposed on their own surface rather than sent to
-#: them. What the borrower has is the ``interactive_required`` sentence in
-#: :func:`render_broker_error` — which names the owner and the command to run there,
-#: and is the reason the composed MCP failure line can be truthful without a repair
-#: op.
+#: The design's §4.7 row asked for a ``credential_repair`` op that raises a durable
+#: notice on the owning device; NO SUCH OP IS BUILT, and none is needed. What ships
+#: is DERIVED from the ``credential.report`` audit record written beside this
+#: refusal: ``credentials/repair.py`` turns an open report into a
+#: ``credential_repair`` check row that ``lop network doctor`` (relay path and local
+#: fallback) and the ``/network`` panel show on the OWNER, and
+#: ``credentials/repair_inbox.py`` turns the same derivation into one
+#: ``notifications.db`` item per open key — high on its first raise, so the banner
+#: ladder tells the owner's operator once without a panel open (#3522). That is the
+#: sense in which this wording reaches an operator: recomposed on their own
+#: surfaces, never sent to them. What the borrower has is the
+#: ``interactive_required`` sentence in :func:`render_broker_error` — which names
+#: the owner and the command to run there, and is the reason the composed MCP
+#: failure line can be truthful without a repair op.
 #:
 #: ``key`` is the placement key (``mcp:<url>`` or a provider name); the quoting is
 #: deliberate, because the operator pastes the command.
-def render_repair_notice(peer_name: str, key: str) -> str:
+def render_repair_notice(peer_name: str, key: str, *, name: str = "") -> str:
+    """The owner-side sentence; ``name`` when the owner's config resolved one.
+
+    A reader of this sentence is being sent to a command on the device that holds
+    the login, so the same rule as :func:`mcp_login_command` applies: with a name
+    the command resolves, without one it stays a form (review R2/Q2).
+    """
     return (
-        f"{peer_name} needs '{repair_command(key)}' here — "
+        f"{peer_name} needs '{repair_command(key, name=name)}' here — "
         "its borrowed credential cannot be refreshed"
     )
 

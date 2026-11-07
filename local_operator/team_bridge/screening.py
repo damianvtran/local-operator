@@ -58,6 +58,7 @@ from local_operator.team_bridge.client import (
     SCREENING_TEMPLATES,
     SCREENING_VERSION_V1,
     SCREENING_VERSION_V3,
+    SCREENING_VERSION_V4,
     screening_template_sha256,
 )
 from local_operator.team_bridge.store import Store, StoreRefused
@@ -169,7 +170,15 @@ _MAX_REASON_CHARS = 200
 _NONCE_BYTES = 16
 _VERDICT_LINE = re.compile(r"^VERDICT: (deliver|hold|bounce)$")
 _REASON_LINE = re.compile(r"^REASON: (\S.*)$")
-_PLACEHOLDER = re.compile(r"\{\{(nonce|body|sender|organization|type|attachments)\}\}")
+#: The template's closed placeholder set. ``files`` is v4's slot (the file listing plus
+#: the text that follows it). The names are listed literally, not matched generically, so
+#: an unknown placeholder in a future template stays literal text — which the screener
+#: would read as content someone controls. The renderer asserts none survives.
+_PLACEHOLDER = re.compile(r"\{\{(nonce|body|sender|organization|type|attachments|files)\}\}")
+#: Any other ``{{name}}`` in a template is a slot nothing fills.
+_UNKNOWN_PLACEHOLDER = re.compile(
+    r"\{\{(?!(?:nonce|body|sender|organization|type|attachments|files)\}\})[a-z_]+\}\}"
+)
 #: The hub's per-message image bound; a carrier claiming more is malformed.
 _ATTACHMENTS_MAX = 4
 _ATTACHMENT_MIMES = ("image/png", "image/jpeg")
@@ -278,6 +287,11 @@ class ScreenResult:
     #: sends it as ``attachments_hash`` with the v3 template hash); every
     #: text-only verdict leaves it ``None``, so the images stay withheld.
     attachments_hash: str | None = None
+    #: The generic-file set this verdict SAW, or ``None`` when no file reached the
+    #: screener. The file sibling of ``attachments_hash``: the connector admits files
+    #: ONLY when the deliver carries the set it screened, so a verdict that lost its
+    #: binding can never grant bytes it did not judge.
+    files_hash: str | None = None
     #: The template that ACTUALLY rendered this screen (review R1-07). The
     #: stored receipt keeps the served policy's template because every store
     #: fence compares receipt == policy; for an image envelope the render is
@@ -385,6 +399,38 @@ class ScreeningAttachments:
 
 
 @dataclass(frozen=True)
+class ScreeningFiles:
+    """A message's generic-file set as the v4 screen must see it.
+
+    ``files_hash`` is the hub's NAME-FREE commitment (``BridgeFilesAdmissionHashV1``)
+    recomputed by the connector from the descriptors the hub showed. It joins the
+    envelope digest, so a text-only verdict can never be reused as a file grant and one
+    file set's verdict never covers another.
+
+    The LISTING is a PRIVATE carrier and deliberately not a field: for a text file it
+    contains that file's first bytes (the hub's ``{{files}}`` slot contract — "for a
+    TEXT-class file its first bytes follow that line"), which are submission data. It
+    reaches the one screening dispatch and nothing else — no receipt, no card, no log —
+    exactly as the body text and the image payloads are kept.
+    """
+
+    files_hash: str
+
+    def private_listing(self) -> str:
+        """The rendered ``{{files}}`` slot text, for the single dispatch."""
+
+        return self._private_listing  # type: ignore[attr-defined]
+
+
+def screening_files(files_hash: str, listing: str) -> ScreeningFiles:
+    """Build a :class:`ScreeningFiles` with its listing on the private carrier."""
+
+    files = ScreeningFiles(files_hash=files_hash)
+    object.__setattr__(files, "_private_listing", listing)
+    return files
+
+
+@dataclass(frozen=True)
 class Envelope:
     """Validated, bounded admission input derived from the fetched item.
 
@@ -409,11 +455,25 @@ class Envelope:
     #: envelope. Public (a hash, not content); the images themselves ride the
     #: private carrier read by :meth:`private_images`.
     attachments_hash: str | None = None
+    #: The generic-file set's NAME-FREE commitment, or ``None`` when the item carried
+    #: no files. Public (a hash the hub publishes), and bound into the admission digest
+    #: so a verdict reached without these files cannot be reused as a file grant.
+    files_hash: str | None = None
+    #: The sender CLASS the recipient's gated body read stated, and the only
+    #: thing that makes :attr:`sender_account` a verified identity (#3199
+    #: residual). Empty is unknown provenance — an account with no stated kind
+    #: is not attributable, and must never be charged as one.
+    sender_kind: str = ""
 
     def private_images(self) -> ScreeningAttachments | None:
         """The image set for the single dispatch, or ``None`` (text-only)."""
 
         return getattr(self, "_private_images", None)
+
+    def private_files(self) -> ScreeningFiles | None:
+        """The file set for the single dispatch, or ``None`` (no files)."""
+
+        return getattr(self, "_private_files", None)
 
     def private_body(self) -> str:
         """The raw body: a PRIVATE carrier, never a dataclass field (H3-Q7).
@@ -521,6 +581,46 @@ def validate_envelope(
         sender_account = ""
     if not isinstance(sender_account, str) or len(sender_account) > _ENVELOPE_LABEL_MAX:
         return None, "envelope_malformed"
+    # ALLOCATION identity is the account the HUB stored as this message's
+    # sender — never a client stamp, and never the display half (``name``,
+    # ``organization``). Two lanes state it in different blocks: the
+    # CONVERSATION lane in the participant block below, built from the gated
+    # classification body read; the PAIR/INBOX lane in the top-level block
+    # above, which ``connector/wake.py`` fills from ``wire.message`` verbatim
+    # (the authenticated DTO, so hub data rather than client data).
+    #
+    # So "the top-level block is a label" is true of its DISPLAY fields and
+    # false of its ``account_id``: reading it as label-only is exactly how
+    # security round 1 dropped the inbox lane's charge, which then made
+    # ordinary inbox volume fine every named sender.
+    #
+    # ACCOUNT is the attribution: it is what the ledger charges, what the
+    # retained proof pins and what every dispatch is re-checked against. KIND is
+    # a property OF that account, never a gate on it — a hub-verified account
+    # whose class an older server did not state is still the sender the
+    # dispatch saw. Gating the charge on the class was security round 1's
+    # S-1/S-2: the inbox lane states an account and no class, so its charge was
+    # dropped, and the resulting unattributed rows then exhausted every named
+    # sender. Guessing a class instead is the other failure (round 1 M1: an
+    # ``endpoint_id`` was being read as ``agent``), so a class with no account
+    # now names nobody rather than being inferred.
+    participant = message.get("sender")
+    participant = participant if isinstance(participant, Mapping) else {}
+    sender_kind = participant.get("kind", "")
+    account = participant.get("account_id", "")
+    if not isinstance(account, str) or len(account) > _ENVELOPE_LABEL_MAX:
+        return None, "envelope_malformed"
+    if sender_kind not in ("", "human", "agent"):
+        return None, "envelope_malformed"
+    if not account:
+        sender_kind = ""
+    if participant:
+        # A participant BLOCK is this item's allocation identity and decides the
+        # envelope's sender outright (an empty account is unknown, never the
+        # display label). An item WITHOUT one — the pair lane, whose stored
+        # sender arrives in the top-level block above — keeps the identity it
+        # already had, so an existing pair-lane digest does not move.
+        sender_account = account
     sender_name = sender.get("name")
     if sender_name is None or sender_name == "":
         sender_display = sender_account
@@ -587,6 +687,20 @@ def validate_envelope(
             return None, "envelope_malformed"
         attachments = raw_attachments
 
+    # Generic files: like images, ONLY the typed carrier the connector builds after it
+    # recomputed the hub's name-free commitment from the descriptors it was shown. A raw
+    # mapping/list is a caller asserting a file set it never verified, and refuses.
+    files: ScreeningFiles | None = None
+    if "files" in item:
+        raw_files = item.get("files")
+        if (
+            not isinstance(raw_files, ScreeningFiles)
+            or not _SHA256_HEX.fullmatch(raw_files.files_hash)
+            or not raw_files.private_listing()
+        ):
+            return None, "envelope_malformed"
+        files = raw_files
+
     digest_payload = json.dumps(
         {
             "sender": sender_account,
@@ -609,6 +723,12 @@ def validate_envelope(
                 if attachments is not None
                 else {}
             ),
+            # The file set's NAME-FREE commitment, present only on a file envelope: the
+            # digest then covers WHICH files the screener saw, so the same body screened
+            # without them can never reuse that verdict as a file grant. The listing
+            # itself is not hashed here — ``files_hash`` already covers every byte of
+            # every file through the hub's own commitment.
+            **({"files_hash": files.files_hash} if files is not None else {}),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -624,11 +744,15 @@ def validate_envelope(
         delivery_state=delivery_state,
         envelope_digest=hashlib.sha256(digest_payload.encode("utf-8")).hexdigest(),
         attachments_hash=attachments.attachments_hash if attachments is not None else None,
+        files_hash=files.files_hash if files is not None else None,
+        sender_kind=sender_kind,
     )
     # Private carrier: never a field, so repr/asdict/JSON stay content-free.
     object.__setattr__(envelope, "_private_body", body_text)
     if attachments is not None:
         object.__setattr__(envelope, "_private_images", attachments)
+    if files is not None:
+        object.__setattr__(envelope, "_private_files", files)
     return envelope, None
 
 
@@ -641,6 +765,7 @@ def render_prompt(
     nonce: str | None = None,
     version: str = SCREENING_VERSION_V1,
     attachments: str | None = None,
+    files: str | None = None,
 ) -> RenderedPrompt:
     """Single-pass substitution over an EMBEDDED template — the ONLY renderer.
 
@@ -655,10 +780,16 @@ def render_prompt(
     The template's three nonce occurrences are asserted, so a future template
     edit cannot silently change the delimiter contract.
 
-    ``attachments`` is the v3 listing line and is required EXACTLY when the
-    selected template has the ``{{attachments}}`` slot: an image envelope can
-    never render through a template that does not tell the screener images
-    follow, and a text-only template never silently drops a listing.
+    ``attachments`` is the attachment-slot listing (v3's image line, or the image part of
+    a v4 render) and is required EXACTLY when the selected template has the
+    ``{{attachments}}`` slot: an image envelope can never render through a template that
+    does not tell the screener images follow, and a text-only template never silently
+    drops a listing.
+
+    ``files`` is the v4 ``{{files}}`` slot — the file listing plus the text that follows
+    it — and follows the same rule against its own slot, so a file envelope cannot
+    render under v3 (where the hub would refuse the grant) and a file-free message never
+    renders under v4 (where the slot would be empty and the screener told files follow).
     """
 
     template = SCREENING_TEMPLATES.get(version)
@@ -676,6 +807,7 @@ def render_prompt(
         msg_type=msg_type,
         nonce=nonce,
         attachments=attachments,
+        files=files,
     )
 
 
@@ -689,6 +821,7 @@ def _render_with_template(
     msg_type: str,
     nonce: str | None,
     attachments: str | None,
+    files: str | None = None,
 ) -> RenderedPrompt:
     """The substitution and nonce rules behind :func:`render_prompt`.
 
@@ -707,9 +840,30 @@ def _render_with_template(
     """
 
     token = nonce if nonce is not None else secrets.token_hex(_NONCE_BYTES)
+    # A TEMPLATE slot with no supplied value would be spliced into the prompt verbatim and
+    # read by the screener as prose — v4's ``{{files}}`` slot shipped unfilled when the
+    # placeholder name list did not know it, and nothing complained. Check the TEMPLATE,
+    # never the rendered text: substituted values are inserted verbatim by design, so a
+    # body legitimately containing ``{{attachments}}`` must not fail a render.
+    unexpected = set(_PLACEHOLDER.findall(template)) - {
+        "nonce",
+        "body",
+        "sender",
+        "organization",
+        "type",
+        *(("attachments",) if attachments is not None else ()),
+        *(("files",) if files is not None else ()),
+    }
+    if unexpected:
+        raise ValueError("embedded template slot without a supplied value")
+    if _UNKNOWN_PLACEHOLDER.search(template) is not None:
+        raise ValueError("embedded template carries an unknown placeholder")
     has_slot = "{{attachments}}" in template
     if has_slot != (attachments is not None):
         raise ValueError("attachments listing and template slot must match")
+    has_files_slot = "{{files}}" in template
+    if has_files_slot != (files is not None):
+        raise ValueError("files listing and template slot must match")
     values = {
         "sender": sender,
         "organization": organization,
@@ -720,6 +874,10 @@ def _render_with_template(
         if template.count("{{attachments}}") != 1:
             raise ValueError("embedded template delimiter contract changed")
         values["attachments"] = attachments
+    if files is not None:
+        if template.count("{{files}}") != 1:
+            raise ValueError("embedded template delimiter contract changed")
+        values["files"] = files
     for name, value in values.items():
         if token in value:
             # A forged nonce literal inside untrusted data would let the
@@ -1116,9 +1274,10 @@ class _Prepared:
     fingerprint: str
     input_proof: dict[str, Any]
     provider: str
-    #: The hub-verified sender (allocation) and the conversation id, carried
-    #: ONLY for B4b's work-scope decision row (per-sender budget, S-6; the
-    #: release binds the conversation). Neither is a label.
+    #: The envelope's VERIFIED sender account — the one value the ledger charge
+    #: and B4b's per-sender hold budget both use (round 1 S-3) — plus the
+    #: conversation the work belongs to (its hold is released against it).
+    #: Neither is a display label.
     sender_account_id: str = ""
     conversation_id: str = ""
 
@@ -1336,8 +1495,10 @@ def _screen_prepare(
                 receipt=receipt,
                 screened_bytes=len(envelope.private_body().encode("utf-8")),
                 # The cache key includes the envelope digest, which binds the
-                # image set: a hit here IS a prior screen of these images.
+                # attachment SETS: a hit here IS a prior screen of these files and
+                # images.
                 attachments_hash=envelope.attachments_hash,
+                files_hash=envelope.files_hash,
             )
 
     # 6b. ANSWER cache: a re-screen of this exact tuple must re-read a MODEL
@@ -1456,6 +1617,13 @@ def _screen_prepare(
         "message": message_id,
         "tenant": owner.tenant_id,
         "logical": fingerprint,
+        # The verified allocation identity, pinned in the SAME registration the
+        # dispatch digest covers: ``_input_proof_mismatch`` refuses a bind whose
+        # job states a different sender, so the sender a message is charged to
+        # is the one that was screened. Both keys are ALWAYS written (empty
+        # meaning unknown) so the registered field set stays closed.
+        "sender_account_id": envelope.sender_account,
+        "sender_kind": envelope.sender_kind,
     }
 
     return _Prepared(
@@ -1465,7 +1633,10 @@ def _screen_prepare(
         fingerprint=fingerprint,
         input_proof=input_proof,
         provider=_canonical_provider,
-        sender_account_id=screening_allocation(item)[1],
+        # B4b's work-scope decision row AND (via ``_screen_spend``) the same
+        # envelope identity the charge uses, so the two surfaces cannot disagree
+        # (round 1 S-3/M2: they keyed on two different rules for one message).
+        sender_account_id=envelope.sender_account,
         conversation_id=_conversation_of(item),
     )
 
@@ -1495,7 +1666,7 @@ async def _screen_core(
     prepared = _screen_prepare(owner, item, config_dir=config_dir, policy=policy, runner=runner)
     if isinstance(prepared, ScreenResult):
         return prepared
-    tier, sender = screening_allocation(item)
+    tier = screening_allocation(item)
     return await _screen_spend(
         owner,
         prepared,
@@ -1505,32 +1676,53 @@ async def _screen_core(
         nonce=nonce,
         turn=turn,
         tier=tier,
-        sender_account_id=sender,
     )
 
 
-def screening_allocation(item: Mapping[str, Any]) -> tuple[int, str]:
-    """``(tier, verified sender)`` for the budget, from the item's hint.
+def _is_input_refusal(failure: BaseException) -> bool:
+    """Whether the PROVIDER rejected this submission's content, not the route.
+
+    Two sources, both production's own and both a typed boolean rather than
+    prose: the wire guard's scrub result (``model_boundary._scrub_wire_failure``
+    decides it on the raw failure before sanitizing, and keeps only the flag),
+    and ``providers.failover.is_input_refusal`` for a failure that never met
+    the guard. A 400 for a malformed image or an oversized body is NOT this
+    class — the predicate is narrow by design, so the breaker keeps those.
+    """
+
+    from local_operator.providers.failover import ProviderError, is_input_refusal
+
+    return getattr(failure, "tb_input_refusal", False) is True or (
+        isinstance(failure, ProviderError) and is_input_refusal(failure)
+    )
+
+
+def screening_allocation(item: Mapping[str, Any]) -> int:
+    """The budget TIER for the item, from the item's hint — and only the tier.
 
     The connector stamps ``allocation`` from hub-verified facts only (the
-    feed's mention bit, the body read's sender kind and conversation kind,
-    and the hub's sender account id when it sends one); see
-    ``Store.SCREENING_TIER_*``. An item WITHOUT the hint -- the pair lane,
-    every caller that predates the split -- is the (agent-)addressed tier with
-    no sender: a pair message is addressed to this agent by construction, and
-    an unknown caller is never fenced by a pool it does not know about. It is
-    never HUMAN_ADDRESSED: the last reserve is reachable only by a hub-stated
+    feed's mention bit, the body read's sender kind and conversation kind);
+    see ``Store.SCREENING_TIER_*``. An item WITHOUT the hint -- the pair lane,
+    every caller that predates the split -- is the (agent-)addressed tier: a
+    pair message is addressed to this agent by construction, and an unknown
+    caller is never fenced by a pool it does not know about. It is never
+    HUMAN_ADDRESSED: the last reserve is reachable only by a hub-stated
     person's DM or mention (#3400 S-4).
+
+    The hint's OWN ``sender_account_id`` is deliberately not returned any
+    more: the charged sender is the envelope's verified account, and the two
+    readers this used to feed (the charge and B4b's work-scope row) now take
+    that one value, so there is no second identity rule to drift (round 1
+    S-3/M2).
     """
 
     raw = item.get("allocation")
     if not isinstance(raw, Mapping):
-        return Store.SCREENING_TIER_ADDRESSED, ""
+        return Store.SCREENING_TIER_ADDRESSED
     tier = raw.get("tier")
     if not isinstance(tier, int) or isinstance(tier, bool) or tier not in (0, 1, 2, 3):
-        tier = Store.SCREENING_TIER_ADDRESSED
-    sender = raw.get("sender_account_id")
-    return tier, sender if isinstance(sender, str) else ""
+        return Store.SCREENING_TIER_ADDRESSED
+    return tier
 
 
 def _budget_hold_code(code: str) -> str:
@@ -1554,7 +1746,6 @@ async def _screen_spend(
     nonce: str | None,
     turn: str,
     tier: int,
-    sender_account_id: str,
 ) -> ScreenResult:
     """Steps 9-14 for ONE message: reserve, mint, render, dispatch, commit."""
 
@@ -1573,7 +1764,12 @@ async def _screen_spend(
             fingerprint=fingerprint,
             input_proof=input_proof,
             tier=tier,
-            sender_account_id=sender_account_id,
+            # The VERIFIED identity of the envelope this screen validated, never
+            # the item's allocation hint: that hint was a client-stamped claim
+            # nothing re-derived, so charging it let a caller spend against a
+            # sender that was never the dispatch.
+            sender_account_id=envelope.sender_account,
+            sender_kind=envelope.sender_kind,
         )
     except StoreRefused as failure:
         code = _HOLD_FOR_SCHEMA.get(failure.code)
@@ -1618,6 +1814,8 @@ async def _screen_spend(
         revision=snapshot.admission_revision,
         epoch=int(epoch),
         turn=turn,
+        sender_account_id=envelope.sender_account,
+        sender_kind=envelope.sender_kind,
     )
     fingerprint = job.digest
     try:
@@ -1634,6 +1832,7 @@ async def _screen_spend(
     # 10. Fresh nonce render. A polluted token or a changed delimiter
     #     contract refuses; regeneration is bounded (H3 hostile-input control).
     images = envelope.private_images()
+    files = envelope.private_files()
     rendered: RenderedPrompt | None = None
     for _ in range(8):
         try:
@@ -1643,14 +1842,28 @@ async def _screen_spend(
                 organization=envelope.organization,
                 msg_type=envelope.type_label,
                 nonce=nonce,
-                # An image envelope ALWAYS renders under v3 — the only
-                # embedded template whose wrapper tells the screener that
-                # the images which follow are submission data. The served
-                # policy (v1/v2) still governs the text-only path and the
-                # local policy/receipt binding; the image set is bound by
-                # the envelope digest instead (see validate_envelope).
-                version=SCREENING_VERSION_V3 if images is not None else snapshot.screening_version,
-                attachments=images.listing() if images is not None else None,
+                # A FILE envelope ALWAYS renders under v4 — the only embedded template
+                # whose wrapper tells the screener that the file text which follows is
+                # submission data, and the only one the hub accepts a files_hash under.
+                # An image-only envelope still renders under v3. The served policy
+                # (v1/v2) governs the text-only path and the local policy/receipt
+                # binding; the attachment sets are bound by the envelope digest instead
+                # (see validate_envelope).
+                version=(
+                    SCREENING_VERSION_V4
+                    if files is not None
+                    else SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
+                ),
+                attachments=(
+                    images.listing()
+                    if images is not None
+                    # v4 keeps v3's image slot beside the file slot, so a mixed message
+                    # renders ONE prompt under ONE template (one admission row); with no
+                    # images the slot still has to be filled, or the template's own
+                    # "line one lists the files and images" would be a false statement.
+                    else "" if files is not None else None
+                ),
+                files=files.private_listing() if files is not None else None,
             )
             break
         except ValueError:
@@ -1769,7 +1982,14 @@ async def _screen_spend(
             return ScreenResult("hold", hold_code=answered)
 
         failure_class = screening_failure_class(failure)
-        retry_at = _record_failure(store, owner, failure_class=failure_class)
+        # An input refusal is THIS submission, not a sick route: it still holds
+        # and still charges, but it must not open the account breaker and park
+        # every other inbound message for the retry window (#3199 residual).
+        retry_at = (
+            None
+            if _is_input_refusal(failure)
+            else _record_failure(store, owner, failure_class=failure_class)
+        )
         # A 402 is its own owner-visible reason (an empty balance only a
         # top-up clears), still a route failure for the breaker.
         from local_operator.team_bridge.model_boundary import provider_hold_code
@@ -1838,7 +2058,9 @@ async def _screen_spend(
         turn=turn,
         screened_bytes=rendered.screened_bytes,
         rendered_version=(
-            SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
+            SCREENING_VERSION_V4
+            if files is not None
+            else SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
         ),
         rendered_template_sha256=rendered.template_sha256,
         prompt_template_sha256=rendered.template_sha256,
@@ -2042,6 +2264,7 @@ def _conclude_parsed(
         receipt=receipt,
         screened_bytes=screened_bytes,
         attachments_hash=envelope.attachments_hash,
+        files_hash=envelope.files_hash,
         rendered_version=rendered_version,
         rendered_template_sha256=rendered_template_sha256,
     ).set_private_reason(reason)
@@ -2346,7 +2569,7 @@ def _copy_work_scope_decision(
             prompt_version=str(source["prompt_version"]),
             categories=tuple(hr.decoded_categories(source)),
             policy_epoch=int(source["policy_epoch"]),
-            sender_digest=hr.sender_digest(screening_allocation(item)[1]),
+            sender_digest=hr.sender_digest(envelope.sender_account),
             now=_time.time(),
             screener_verdict=str(source.get("screener_verdict") or ""),
             screener_hop=_hop_of(source),
@@ -3134,12 +3357,15 @@ async def _screen_batch_core(
     # The CALL's tier is its highest message's: a DM riding with room chatter
     # must never be fenced by the ambient pool (the connector groups by tier,
     # so in practice a call is one tier).
-    tier = max(screening_allocation(items[index])[0] for index, _ in pending)
+    tier = max(screening_allocation(items[index]) for index, _ in pending)
     entries = [
         {
             "message_id": prepared.envelope.message_id,
             "input_proof": prepared.input_proof,
-            "sender_account_id": screening_allocation(items[index])[1],
+            # The message's OWN verified identity, so a call charges each
+            # participating sender exactly as its own single screen would.
+            "sender_account_id": (prepared.envelope.sender_account),
+            "sender_kind": prepared.envelope.sender_kind,
         }
         for index, prepared in pending
     ]
@@ -3261,7 +3487,8 @@ async def _screen_batch_core(
             return _finish()
         from local_operator.team_bridge.model_boundary import provider_hold_code
 
-        _record_failure(store, owner, failure_class=failure_class)
+        if not _is_input_refusal(failure):
+            _record_failure(store, owner, failure_class=failure_class)
         _commit_each(provider_hold_code(failure), failure_class=failure_class)
         return _finish()
 
@@ -3360,4 +3587,6 @@ def _job_for(entry: "tuple[int, _Prepared, str, str]", *, owner: OwnerSnapshot, 
         revision=snapshot.admission_revision,
         epoch=int(prepared.epoch),
         turn=turn,
+        sender_account_id=envelope.sender_account,
+        sender_kind=envelope.sender_kind,
     )

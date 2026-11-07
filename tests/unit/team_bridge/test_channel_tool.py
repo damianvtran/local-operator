@@ -291,8 +291,9 @@ async def test_channel_create_adds_the_agent_and_not_the_human_owner() -> None:
     )
 
     assert outcome["ok"] is True
-    call = client.calls[0]
-    assert call["method"] == "create_conversation"
+    # The duplicate-name precheck lists first (see test_channel_names.py).
+    assert [c["method"] for c in client.calls] == ["conversations", "create_conversation"]
+    call = client.calls[-1]
     assert call["actor_endpoint_id"] == "bep_1"
     assert call["origin_session_id"] == "sess_1"
     assert call["body"] == {
@@ -489,8 +490,15 @@ async def test_a_malformed_channel_id_never_reaches_the_client(
 
     client = RecordingClient()
     outcome = await execute_bridge(_runtime(client), {"op": op, "channel_id": channel_id, **extra})
-    assert outcome["ok"] is False and outcome["code"] == "invalid_request"
-    assert client.calls == []
+    assert outcome["ok"] is False
+    if channel_id.startswith("bcv_") or not channel_id:
+        assert outcome["code"] == "invalid_request"
+        assert client.calls == []
+    else:
+        # Anything else is a room NAME: matched against the tenant listing (a
+        # query, never a path), so it still cannot reach an id-addressed call.
+        assert outcome["code"] == "channel_not_found"
+        assert {call["method"] for call in client.calls} == {"conversations"}
 
 
 @pytest.mark.asyncio

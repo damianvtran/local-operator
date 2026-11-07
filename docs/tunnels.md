@@ -207,7 +207,7 @@ once the operator tops up credit or reactivates it.
 ```console
 $ lop tunnel status
 Connector: parked — login required (since 14:32)
-  The connector's Radient login is no longer valid, so it stopped and will not retry by itself. Signing in again starts it again on its own.
+  The connector's Radient login is no longer valid, so it stopped instead of retrying. Only signing in to that same account restarts it.
 Login: sign-in expired — run lop login radient
 Tunnel: tunnel-1
 Status: active (cached — cloud read failed)

@@ -6256,6 +6256,105 @@ async def test_served_provider_is_none_when_the_wire_does_not_name_a_host() -> N
     assert next(e for e in events if isinstance(e, StreamEndEvent)).served_provider is None
 
 
+async def test_served_model_is_reported_on_the_end_event() -> None:
+    """The served SLUG, not the requested route.
+
+    The request above names ``openrouter/deepseek/deepseek-v4.1-flash`` -- the
+    route this harness asked for. What answered it is the upstream's own slug,
+    and that is the only thing that can answer "which family served this?" after
+    the fact. Reported on the end event because it is a fact about a completed
+    request, not about acceptance.
+    """
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {
+                    "id": "gen-1",
+                    "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+                    "choices": [{"delta": {"content": "ok"}, "index": 0}],
+                },
+                {
+                    "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+                    "choices": [{"delta": {}, "finish_reason": "stop", "index": 0}],
+                },
+            ],
+        ).stream(
+            ChatRequest(model=_spec("openrouter", "deepseek/deepseek-v4.1-flash")),
+            "sk-test",
+        )
+    )
+    end = next(e for e in events if isinstance(e, StreamEndEvent))
+    assert end.served_model == "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+
+
+async def test_the_last_chunk_naming_a_served_model_wins() -> None:
+    """A mid-stream host switch re-reports the slug, and the one that FINISHED
+    the turn is the honest record -- first-carrier-wins would keep the host that
+    only served the opening chunks."""
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"model": "vendor/first-host", "choices": [{"delta": {}, "index": 0}]},
+                {"choices": [{"delta": {"content": "o"}, "index": 0}]},
+                {"model": "vendor/second-host", "choices": [{"delta": {}, "index": 0}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]), "sk-test")
+    )
+    assert next(e for e in events if isinstance(e, StreamEndEvent)).served_model == (
+        "vendor/second-host"
+    )
+
+
+async def test_served_model_is_none_when_the_wire_does_not_name_one() -> None:
+    """No slug on the wire means None, never the requested model id: deriving it
+    would answer the incident question with the thing being asked about."""
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "choices": [{"delta": {"content": "ok"}, "index": 0}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]), "sk-test")
+    )
+    end = next(e for e in events if isinstance(e, StreamEndEvent))
+    assert end.served_model is None
+    assert end.served_model != "deepseek/deepseek-v4.1-flash"
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "vendor/bad\x00slug",
+        "vendor/line\nbreak",
+        "vendor/esc\x1b[31mred",
+        "x" * 129,
+        "   ",
+    ],
+)
+async def test_a_hostile_served_model_is_refused_not_recorded(hostile: str) -> None:
+    """The slug is provider-controlled text that a ledger stores per call, so it
+    passes the same gate as the served host: over-long, blank or
+    control-character-carrying values are REFUSED rather than sanitised into a
+    plausible-looking name the provider never sent."""
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"model": "vendor/good", "choices": [{"delta": {}, "index": 0}]},
+                {"model": hostile, "choices": [{"delta": {"content": "o"}, "index": 0}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]), "sk-test")
+    )
+    # The refused value leaves the previous good slug standing: the turn WAS
+    # served by whoever the earlier chunk named.
+    assert next(e for e in events if isinstance(e, StreamEndEvent)).served_model == "vendor/good"
+
+
 @pytest.mark.parametrize(
     ("provider", "model_id"),
     [

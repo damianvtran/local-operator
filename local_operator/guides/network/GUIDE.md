@@ -342,7 +342,10 @@ four that hold the verdict are these:
   and the remedy are in "The build gates the machinery".
 - **git_identity** — offloaded work that commits needs an author. The row's
   remedy suggests this device's own `user.name`/`user.email`; set them on the
-  peer when the work should commit as someone else.
+  peer when the work should commit as someone else. The row also names the GitHub
+  credential a push THERE would use — the peer's own copy or a brokered grant from
+  the device that shares one — and says so plainly when its build cannot report
+  its source, because the two behave differently after a share is revoked.
 - **model_credential** — the provider login the node serves or borrows
   (`lop network credentials`), so a session there can reach a model at all.
 

@@ -477,8 +477,12 @@ class CatalogEntry:
         if self.row.delegating is not None:
             return delegating_label(*self.row.delegating)
         if self.row.wakes and not self.row.wakes_dormant:
-            count = self.row.wakes
-            return f"Scheduled ({count} wake{'s' if count != 1 else ''})"
+            # THE WORDS COME FROM THE CATALOGUE, not from an f-string, because
+            # this label is generated HERE and printed verbatim by the client:
+            # the desktop sidebar's contract forbids re-deriving status, so an
+            # English literal here is an English row inside a French interface
+            # no client can fix. See :func:`scheduled_label`.
+            return scheduled_label(self.row.wakes)
         if self.row.live_state == "idle":
             # An exec run is named by what it IS rather than by "Ready", which
             # invites the user to treat a supervisor's one-shot as their own
@@ -624,6 +628,92 @@ def delegating_label(running: int, queued: int, jobs: int = 0) -> str:
             else f"{queued} {'subagent' if queued == 1 else 'subagents'} queued"
         )
     return " · ".join(parts)
+
+
+#: The product language last resolved, with the cheap stamp it was resolved
+#: under. Read and written only by :func:`_label_locale`.
+_label_locale_memo: tuple[tuple[Any, ...], str] | None = None
+
+
+def _label_locale_stamp() -> tuple[Any, ...]:
+    """Everything the language chain reads, without parsing the config.
+
+    ``resolve_language`` walks config → ``LOP_LANG`` → OS, and the OS probe is
+    memoised inside ``resolve`` already. The config half is the expensive one:
+    with no config WATCHER in the process, ``config_value`` builds a
+    ``ConfigManager`` and reads ``config.yml``. The file's ``(mtime_ns, size)``
+    is the same fact a watcher invalidates on, so a language switch still
+    reaches the rows on the next build and this memo has no TTL to guess at.
+    The two environment terms are there because they are part of the chain and
+    are free to read — a test that flips either one must not read a stale
+    answer.
+    """
+    try:
+        from local_operator.config import CONFIG_FILE_NAME
+        from local_operator.paths import config_dir
+
+        stat = (config_dir() / CONFIG_FILE_NAME).stat()
+        stamp: tuple[int, int] | None = (stat.st_mtime_ns, stat.st_size)
+    except Exception:  # noqa: BLE001 — an unreadable config is simply "no config"
+        stamp = None
+    return (stamp, os.environ.get("LOP_LANG"), os.environ.get("LOP_I18N"))
+
+
+def _label_locale() -> str:
+    """The language a server-generated row label is rendered in.
+
+    ``resolve_language`` stays the ONE authority (``docs/I18N.md``'s chain);
+    this only remembers its answer. It is not cheap enough to ask per row:
+    without a watcher it parses ``config.yml`` — measured at ~67 ms a call on
+    this machine — while :attr:`CatalogEntry.status` is a PROPERTY evaluated
+    once per row on every list read and every 15 s feed tick, which would put
+    seconds on a large catalogue for a label that rarely changes language.
+
+    The active-locale seam (``i18n.text``) is deliberately NOT consulted: it
+    starts at ``en`` and only the TUI moves it, so a serve/desktop process
+    would render English forever (``docs/design/backend-originated-strings.md``,
+    "the locale resolver and display locale are different seams").
+    """
+    global _label_locale_memo
+    stamp = _label_locale_stamp()
+    if _label_locale_memo is not None and _label_locale_memo[0] == stamp:
+        return _label_locale_memo[1]
+    from local_operator.i18n.resolve import resolve_language
+
+    locale = resolve_language()
+    _label_locale_memo = (stamp, locale)
+    return locale
+
+
+def scheduled_label(count: int, *, locale: str | None = None) -> str:
+    """The armed-wake row's words, in the product's own language.
+
+    WHY THIS IS A CATALOGUE KEY AND NOT A CLIENT STRING. The label is built
+    server-side and the desktop sidebar prints ``row.status.label`` verbatim —
+    its contract (``desktop-session-contract.ts``) forbids a client re-deriving
+    status — so any English word baked in here bypasses the whole client
+    catalogue layer. The contract's answer for backend-originated copy is the
+    ``{code, params, text}`` shape (``docs/I18N.md``, RFC §2.6): a stable key,
+    its parameters, and text rendered at the resolved language. The key lives
+    in ``wire.session`` with ICU plural arms, so a locale supplies its own CLDR
+    categories instead of inheriting an English ``s`` suffix.
+
+    ``locale=None`` means the process's product language (:func:`_label_locale`)
+    rather than ``messages.render``'s ``en`` default: that default exists for
+    hot paths that must not read configuration, and this one pays the read
+    behind a memo. A caller that already knows the language — a fixture pinning
+    one, a surface rendering for a remote peer — passes it and skips the read.
+
+    A missing catalogue or key degrades to the message CODE, the documented
+    additive contract: a wheel without its catalogues loses the copy, never the
+    app. That is a build-time defect the parity check catches, not a second
+    English literal kept here as a fallback.
+    """
+    from local_operator.i18n.keys import wire_session
+    from local_operator.i18n.messages import render
+
+    message = wire_session.status_scheduled(count=count)
+    return render(message.code, dict(message.params), locale=locale or _label_locale())
 
 
 def entry_for(row: SessionRow, attention: Mapping[str, Any] | None) -> CatalogEntry:

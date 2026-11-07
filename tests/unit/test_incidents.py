@@ -13,6 +13,7 @@ from local_operator.harness.message_types import (
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
 )
 from local_operator.incidents import (
+    MCP_BREAKER_REASON_PREFIX,
     classify_incident,
     format_incident_message,
     format_mcp_recovery_message,
@@ -768,22 +769,16 @@ def test_mcp_unavailable_warning_reads_as_a_capability_not_a_failure() -> None:
 def test_the_warning_promises_no_self_heal() -> None:
     """D2: "until it reconnects" asserted a future that never arrives.
 
-    The row is written for two families and neither heals by waiting: an expired
-    grant is refused by design (auto-reconnect is non-interactive, so only
-    ``/mcp reauth`` restores it) and a tripped breaker has auto-reconnect
-    SUSPENDED at the moment the row is written. The head is therefore
-    reason-agnostic and says "for now", and the last line puts the recovery in
-    the user's hands. Pinned as an absence because a well-meaning rewording is
-    exactly how the promise would come back: a phrase like "until it
-    reconnects" reads as "wait and it comes back" and is the sentence most
-    readers take away.
+    An expired grant is refused by design (auto-reconnect is non-interactive, so
+    only ``/mcp reauth`` restores it), so its row's last line puts the recovery
+    in the user's hands. The head is reason-agnostic and says "for now". The
+    breaker family now heals on a cool-down and has its own tail, pinned in
+    :func:`test_the_breaker_row_says_it_is_retried_and_names_the_app_action`.
+    Pinned as an absence because a well-meaning rewording is exactly how the
+    promise would come back: a phrase like "until it reconnects" reads as "wait
+    and it comes back" and is the sentence most readers take away.
     """
-    for reason in (
-        "/mcp reauth minerva-qa — sign-in expired",
-        "auto-reconnect suspended after >5 attempts in 60s; its tools are "
-        "unavailable until a reconnect succeeds",
-        "",
-    ):
+    for reason in ("/mcp reauth minerva-qa — sign-in expired", ""):
         text = format_mcp_unavailable_message("minerva-qa", reason)
         for promise in (
             "until it reconnects",
@@ -797,6 +792,38 @@ def test_the_warning_promises_no_self_heal() -> None:
         # The manual-recovery FACT is what replaces it, and it must be on every
         # variant — including the one with no reason line to name a command.
         assert "not callable until the user restores it" in text
+
+
+def test_the_breaker_row_says_it_is_retried_and_names_the_app_action() -> None:
+    """The flap breaker's row, pinned verbatim, in the shape the manager sends.
+
+    Since the breaker became half-open it heals unattended, so "not callable
+    until the user restores it" was false for it and contradicted its own
+    ``Reason:`` ("next attempt in 60s"). Any change to the last line must
+    re-verify BOTH routes it names: the manager's half-open probe
+    (``McpManager._schedule_probe``), and the desktop app's "Reconnect" row
+    action in Settings > Integrations (local-operator-ui
+    ``ui.settings.integrations.integration_model.reconnect`` = "Reconnect",
+    offered on a loaded server's row; a breaker only trips on a loaded server).
+    It still promises no time, so the D2 absences hold for it too.
+    """
+    reason = f"{MCP_BREAKER_REASON_PREFIX} >5 attempts in 30s; next attempt in 60s"
+    assert format_mcp_unavailable_message("slack", reason).split("\n") == [
+        "[session warning] MCP server 'slack' is unavailable: its tools are gone for now.",
+        "Reason: auto-reconnect paused after >5 attempts in 30s; next attempt in 60s",
+        "It is retried automatically; Reconnect on its row in the app's Integrations "
+        "settings restores it at once.",
+    ]
+    text = format_mcp_unavailable_message("slack", reason)
+    for promise in ("until it reconnects", "will reconnect", "available again", "comes back"):
+        assert promise not in text
+    # Only the breaker's own reason earns that tail; every other cause keeps the
+    # manual-recovery line, including a reason that merely mentions a reconnect.
+    for other in ("/mcp reauth slack — sign-in expired", "reconnect failed: refused", ""):
+        assert format_mcp_unavailable_message("slack", other).endswith(
+            "Its tools are not callable until the user restores it, and the agent "
+            "should not retry them in a loop."
+        )
 
 
 def test_mcp_unavailable_warning_omits_an_empty_reason() -> None:

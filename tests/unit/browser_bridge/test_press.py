@@ -96,7 +96,15 @@ def test_press_protocol_remains_registered_and_legacy_keys_unchanged() -> None:
     # Local vocabulary order only; the desktop host may append new methods in
     # a different order. Method names, not table positions, travel on the wire.
     offset = METHODS.index("click")
-    assert METHODS[offset : offset + 6] == ("click", "type", "press", "hover", "select", "close")
+    assert METHODS[offset : offset + 7] == (
+        "click",
+        "type",
+        "press",
+        "hover",
+        "select",
+        "setvalue",
+        "close",
+    )
     assert "press" in CAPABILITY_GATED_METHODS
     assert "press" in DESKTOP_ONLY_METHODS
     assert COMMAND_TIMEOUTS["press"] == 25.0
@@ -180,9 +188,10 @@ async def test_old_desktop_refusal_is_typed_actionable_and_never_sent(
     assert result.is_error
     assert (result.details or {})["error_code"] == "capability_unsupported"
     assert result.text == (
-        "the Local Operator desktop app's browser host does not provide 'press' — "
-        "the app that answered was built before this action existed. Please "
-        "update the desktop app, then retry; every other browser action still works."
+        "the Local Operator desktop app's browser host does not provide 'press', and "
+        "only that host serves it — the app that answered was built before this action "
+        "existed, and no desktop-app version floor is recorded for it. Please update "
+        "the desktop app, then retry; every other browser action still works."
     )
     assert app.sent == []
 

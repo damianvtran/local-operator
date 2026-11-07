@@ -178,6 +178,15 @@ def _status_text(
             # which `report.remedy()` already honours for `--json` (review round
             # 1, D5).
             lines.append("Login: sign-in expired (not in use — tunnel stopped)")
+        elif login.get("successor_credential_id") is not None:
+            # A newer sign-in to the SAME account is already on this device, so
+            # another sign-in would only rewrite that row: the fix is the
+            # re-point, named from the same table `report.remedy()` reads.
+            command = gateway.TERMINAL_REMEDY[gateway.LOGIN_SUPERSEDED]
+            lines.append(
+                "Login: sign-in expired; a newer sign-in for this account is here — "
+                f"run {command} to use it."
+            )
         else:
             command = gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED]
             lines.append(f"Login: sign-in expired — run {command}")
@@ -465,7 +474,14 @@ async def dispatch(args: argparse.Namespace) -> str:
         # re-pointed the configuration at the new row).
         requested = getattr(args, "credential_id", None)
         if requested is None:
-            requested = usable_credential_id(old.get("credential_id"))
+            # The cached record's owner is the same-account evidence a GONE pin
+            # can still offer (`api.same_account_successor`); a dead-but-present
+            # pin carries its own account on the row.
+            cached = old.get("record")
+            requested = usable_credential_id(
+                old.get("credential_id"),
+                owner_account=cached.get("owner_account_id") if isinstance(cached, dict) else None,
+            )
         selected = credential_id(requested)
         gateway_port = config.port(
             getattr(args, "gateway_port", None)

@@ -590,6 +590,26 @@ def format_error(
         return f"navigation failed: {error.message}"
     if error.code == ErrorCode.ELEMENT_NOT_FOUND:
         return _element_not_found_copy(error)
+    if error.code == ErrorCode.EMPTY_ELEMENT_TEXT:
+        # The host's own message is deliberately NOT relayed: it is composed by
+        # the peer and could quote what the page held, and this action's whole
+        # contract is that no copied value travels in a result, a log or an
+        # error string. Fixed copy, naming the likelier mistake instead.
+        return (
+            "the element held no text to copy (an empty value, or whitespace only), so "
+            "nothing was written to the clipboard. Name the element that CARRIES the "
+            "value — for a key shown once that is the field or the code block itself, "
+            "not the label beside it."
+        )
+    if error.code == ErrorCode.CLIPBOARD_WRITE_FAILED:
+        # Same rule, same reason (the page's text must not ride an error string),
+        # and the remedy is actionable without it: the value is still on the page.
+        return (
+            "the element's text was read but the OS clipboard refused the write, so "
+            "nothing landed — the value is still on the page. Retry once; if it "
+            "repeats, the desktop app's main process cannot reach the clipboard on "
+            "this machine."
+        )
     if error.code == ErrorCode.ORIGIN_PROMPT_PENDING:
         return pending_copy
     if error.code == ErrorCode.TAB_LIMIT:
@@ -738,6 +758,41 @@ _CAPABILITY_HOST_REMEDY = {
         "update the browser extension in Chrome when a newer version is offered, then retry"
     ),
     HOST_UI: "update the desktop app, then retry",
+}
+
+
+#: The first DESKTOP-APP version that serves each capability-gated method.
+#:
+#: EMPTY on purpose, and the refusal says so in words rather than guessing. The
+#: app half of a capability ships from a different repository on its own release
+#: train, so this runtime cannot derive a floor from its own version, and no
+#: released desktop build's floor has been measured for any method here. A
+#: number invented from the harness release is worse than no number: the measured
+#: 2026-11-06 incident is a user who read "update the desktop app" as a dead end
+#: — the app may already be current, and updating again cannot help — and
+#: photographed a tenant-wide admin API key off the screen instead of using
+#: `copy`, which that very build predated.
+#:
+#: Record a measured value here (as ``CAPABILITY_MIN_EXTENSION_VERSION`` does for
+#: the extension) and the floor sentence names it, comparing it against the
+#: app's own reported version, with no copy edit. The update wording itself stays
+#: in ``_CAPABILITY_HOST_REMEDY``.
+_CAPABILITY_MIN_APP_VERSION: dict[str, str] = {}
+
+#: Where a refused desktop-only method sends the reader when updating cannot help.
+#:
+#: "Update the desktop app, then retry" is a loop when the latest release does
+#: not serve the method either, and on 2026-11-06 that loop ended with an API key
+#: photographed off the screen. So `copy` names the way out that does not depend
+#: on any build: the service's own API or a download. Worded conditionally ("if
+#: the latest desktop app still refuses it") so it stays true after the app half
+#: ships. Methods without an entry keep the generic close.
+_CAPABILITY_APP_EXIT: dict[str, str] = {
+    "copy": (
+        "if the latest desktop app still refuses it, take the value from the service's "
+        "API or a download instead, never from the screen. Every other browser action "
+        "still works."
+    ),
 }
 
 
@@ -897,11 +952,32 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
             "the Chrome extension cannot do it. Open the page with backend='ui'."
         )
     if host == HOST_UI:
-        return (
-            f"the Local Operator desktop app's browser host does not provide '{method}' — "
-            f"the app that answered was built before this action existed. Please {remedy}; "
-            "every other browser action still works."
+        # Names the METHOD, the HOST that serves it and the VERSION story, because
+        # the copy that stopped at "update the desktop app" read as a dead end: it
+        # left the reader unable to tell "an update fixes this" from "this app is
+        # current and the action is not here at all" (measured 2026-11-06). The
+        # scope clause is DESKTOP_ONLY only — for a method both hosts serve,
+        # claiming the app is the only one that can would send the caller away from
+        # a host that works.
+        minimum = _CAPABILITY_MIN_APP_VERSION.get(method)
+        scope = ", and only that host serves it" if method in DESKTOP_ONLY_METHODS else ""
+        close = _CAPABILITY_APP_EXIT.get(method, "every other browser action still works.")
+        head = f"the Local Operator desktop app's browser host does not provide '{method}'{scope}"
+        if minimum and not extension_older(peer, minimum):
+            # A recorded floor the app already meets (or a version we cannot
+            # parse): "update" would be the misdiagnosis the extension arm's
+            # `extension_older` check exists to avoid, so offer only the exit.
+            return (
+                f"{head}. This app reports version {peer or 'unknown'}, and '{method}' "
+                f"first shipped in {minimum}, so updating is not the fix; {close}"
+            )
+        floor = (
+            f"this app ({peer}) predates {minimum}, the first desktop-app version that " "serves it"
+            if minimum
+            else "the app that answered was built before this action existed, and no "
+            "desktop-app version floor is recorded for it"
         )
+        return f"{head} — {floor}. Please {remedy}; {close}"
     if str(error.data.get("method") or "") in (error.data.get("disabled") or []):
         # The OPERATOR'S consent, not a version: this build serves the method and
         # the switch is off. Named by its own label and located, because a refusal

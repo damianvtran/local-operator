@@ -325,7 +325,18 @@ CREATE TABLE IF NOT EXISTS calls (
   ttft_ms REAL NOT NULL DEFAULT -1,
   preparation_ms REAL NOT NULL DEFAULT -1,
   outcome TEXT NOT NULL DEFAULT 'unknown',
-  usage_reported INTEGER NOT NULL DEFAULT 1
+  usage_reported INTEGER NOT NULL DEFAULT 1,
+  -- What the provider actually SERVED (its own vendor slug, '' when no chunk
+  -- named one), how many messages the composed request carried, and a one-way
+  -- digest of that request's context. See ``CallSnapshot.served_model`` /
+  -- ``message_count`` / ``prompt_hash`` for what each covers and, just as
+  -- importantly, what it must never be used for (``prompt_hash`` is a
+  -- COMPARISON digest, never a prompt-body log). Present here AND in
+  -- ``_MIGRATION_COLUMNS``: a fresh database gets them at creation, an existing
+  -- one gains them through the idempotent ALTER.
+  served_model TEXT NOT NULL DEFAULT '',
+  message_count INTEGER NOT NULL DEFAULT 0,
+  prompt_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_calls_session ON calls(session_id);
@@ -653,6 +664,9 @@ _CALL_COLUMNS = (
     "cache_miss_type",
     "cache_missed_tokens",
     "account_ref",
+    "served_model",
+    "message_count",
+    "prompt_hash",
 )
 
 #: Columns added AFTER the first shipped schema. A database created by an older
@@ -740,6 +754,25 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # cache diagnostics: the rollups have no ALTER-free way to take a new
     # dimension, and per-account questions are GROUP BYs over this window.
     ("account_ref", "TEXT"),
+    # What the provider actually served, and what it was given. Both were
+    # unanswerable after the fact before these columns: ``model_id`` is the
+    # REQUESTED route (an aggregator's ``auto`` can be answered by any family),
+    # and no byte-exact assembled prompt survived anywhere, so "which family
+    # answered?" and "was this the right context?" had no evidence at all.
+    #
+    # FORWARD-FILL, said out loud as every addition here says it: every row
+    # recorded before this release reads '' / 0 / '' -- NOT RECORDED, never a
+    # claim that the wire named no model or that the request was empty (no real
+    # call composes zero messages). Nothing can be recovered for them; the
+    # stream that carried the slug is long gone.
+    #
+    # ``prompt_hash`` is a one-way sha256 over the composed request (see
+    # ``analytics.model.request_fingerprint``): a COMPARISON key, not a body.
+    # It must never be turned into a prompt log -- the digest is what makes
+    # storing a request fingerprint safe at all.
+    ("served_model", "TEXT NOT NULL DEFAULT ''"),
+    ("message_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("prompt_hash", "TEXT NOT NULL DEFAULT ''"),
 )
 
 #: Columns added to the ``session_daily`` ROLLUP after it first shipped, in the
@@ -1269,6 +1302,9 @@ def _row_values(
         snapshot.cache_miss_type,
         int(snapshot.cache_missed_tokens),
         snapshot.account_ref,
+        snapshot.served_model,
+        int(snapshot.message_count),
+        snapshot.prompt_hash,
     )
 
 

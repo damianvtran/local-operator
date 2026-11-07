@@ -1012,10 +1012,11 @@ _UNHEALTHY_READY: dict[str, Any] = {
             "code": "no_credential",
             "detail": (
                 "if the `files` server needs a sign-in, this device has no MCP login for "
-                "https://mcp.example.test/files — sign in here first"
+                "https://mcp.example.test/files — run "
+                "`/mcp login https://mcp.example.test/files` here first"
             ),
             "remedies": [
-                "sign in here first, then `lop network "
+                "run `/mcp login https://mcp.example.test/files` here first, then `lop network "
                 "credential share mcp:https://mcp.example.test/files --with cloud-node-1`"
             ],
             "source": "local",
@@ -1058,7 +1059,7 @@ def test_the_ready_digest_keeps_fail_rows_and_remedies_on_an_unhealthy_report(
     text = _text(result)
     assert "FAIL readiness operator_authority cloud-node-1" in text
     assert "lop operator install" in text
-    assert "sign in here first, then" in text
+    assert "run `/mcp login https://mcp.example.test/files` here first, then" in text
     assert "credential share mcp:https://mcp.example.test/files" in text
     assert _payload(result)["code"] == "unhealthy"
 
@@ -1081,7 +1082,8 @@ def test_the_agent_digest_reads_a_non_gating_row_as_warn_not_fail() -> None:
             "ok": False,
             "code": "no_credential",
             "detail": (
-                "this device has no MCP login for https://mcp.slack.com/mcp; " "sign in here first"
+                "this device has no MCP login for https://mcp.slack.com/mcp; "
+                "run `/mcp login https://mcp.slack.com/mcp` here first"
             ),
             "remedies": [],
         },

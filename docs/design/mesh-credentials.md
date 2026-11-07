@@ -711,11 +711,78 @@ class MeshCredentialBroker:
 | Concern | Value | Where enforced | Why |
 |---|---|---|---|
 | Owner's answer for a token with remaining life ≥ 120 s | Served from the existing row, `refreshed: false` | `_needs_refresh`, `auth_store.py:68-80` | No gratuitous POSTs. Never refresh what is alive. |
-| Requester's copy of the bearer | `expires_at = min(token_expires_at_ms, now + grant_ttl_s)`; re-ask at `expires_at - 120 s` | `MeshAwareAuthStore` | 120 s > the owner's own 60 s skew, deliberately: the requester must not be the thing that discovers expiry. |
+| Requester's copy of the bearer — **for provider keys, see the as-built note below: this row no longer describes how a bearer is served** | `expires_at = min(token_expires_at_ms, now + grant_ttl_s)`; re-ask at `expires_at - 120 s` | `MeshAwareAuthStore` | 120 s > the owner's own 60 s skew, deliberately: the requester must not be the thing that discovers expiry. |
 | `grant_ttl_s` default | **900 s** (15 min) | `network.credentials.grant_ttl_s` in `config.yml` | Bounds the window in which a revoked peer still holds a live bearer (§3.7). |
-| Requester's local coalescing | one `asyncio.Future` per `(provider, session_id)` | `MeshAwareAuthStore._grant_futures` | A single turn issues several provider calls; they must share one grant. |
+| Requester's local coalescing — **as built: overlapping resolves only, see the as-built note below** | one `asyncio.Future` per `(provider, session_id)` | `MeshAwareAuthStore._grant_futures` | A single turn issues several provider calls; they must share one grant. |
 | Owner's refresh scheduling with several askers | one POST per `(credential_id, force)` per `_join_window_s`; the existing lease for the rest | §3.4 | N peers ⇒ 1 POST, not N. |
 | Proactive top-up (`/usage` style) | Not added. A borrow is demand-driven. | — | A background refresher on the owner would be a second scheduler for something the lease already bounds; the demand path is sufficient. |
+
+#### As-built note (2026-11-06): when the requester serves a cached bearer
+
+The "Requester's copy of the bearer" and "Requester's local coalescing" rows
+above state the design as first written, and are kept because their reasoning
+still governs the TTL. Two things they imply no longer hold for provider keys:
+that a borrower serves its own copy of the bearer until `expires_at - 120 s`,
+and that one turn's provider calls share one grant. Reading them as as-built is
+the divergence this note closes.
+
+**In normal operation, every provider resolve dials the owner.**
+`request_grant_sync` (`local_operator/network/credentials/client.py`) reads the
+grant cache ahead of the dial only behind `if is_github_key(key)`, so a rotation
+or a logout on the owner is picked up by the next resolve. The grant that comes
+back is still cached per `(key, session_id)`, its expiry capped at
+`now + grant_ttl_s` (`_bounded`), for the case below.
+
+**When the owner is unreachable, the cached grant is served.** A dial answered
+`owner_offline` or `owner_unreachable`, or one with no relay to go through,
+reaches `_held_or`, which serves that session's cached grant marked
+`held_offline` while it is still live (`Grant.usable_at`: until
+`grant_expires_at_ms`, with no re-ask margin). It does so only for an unforced
+resolve, and only while this device is still a member and a holder and the
+policy generation the grant was cached under is still current. MCP keys, the
+`github` key and device-bound providers never take this path.
+
+**Coalescing is per resolve, not per turn.** Overlapping resolves for the same
+(key, session, force) share one dial (`_borrow`'s in-flight future). Sequential
+provider calls each dial, and that per-request round trip is the accepted cost
+described in this note. The future lives in `MeshAwareAuthStore._grants`, keyed
+`(key, session_id, force_refresh)`; the `_grant_futures` the table names does not
+exist.
+
+**Where a cached grant is served without a dial.** The `github` key
+(`is_github_key` is `key == "github"`: no other forge key) and MCP bearers
+(`mcp_bearer._live_bearer`, which does no I/O) serve a cached grant until 120 s
+before its window ends (`GrantCache.get`). The gate is keyed on the key, not on
+how the owner sourced the token. `458a1474a4b` gave the reason for an App
+installation token — freshly minted and narrowed, not a provider login
+generation — but the owner's own token from the `token` or `gh` arm of the
+GitHub source ladder (`owner._grant_from_owner_token`) takes the same path.
+Neither path avoids the problem below: both accept it, for at most the grant
+window.
+
+**Why providers dial** (`0385927ab94`, "fix(mesh): resolve native borrowed auth
+in running sessions"). A grant TTL is not an upstream credential generation. A
+rotation or a logout does not rewrite the *borrower's* placement document — the
+owner's login state is invisible to it — so a provider bearer served from the
+cache would outlive the login it represents for up to `grant_ttl_s`, and would
+reach a turn the owner should have been asked about and would have refused. The
+held path above accepts that risk, and only while the owner cannot be asked at
+all.
+
+**So `grant_ttl_s` is still load-bearing.** It caps the expiry the owner hands
+out (`min(token_exp, now + grant_ttl_s)`) and the borrower's own copy of it. That
+one cap bounds how long a revoked peer holds a live bearer (§3.7), how long a
+provider bearer is held while its owner is unreachable, and how long the
+`github` and MCP paths serve a bearer without asking.
+
+**The test that holds the line.**
+`tests/unit/network/test_native_hot_access.py::test_live_grant_and_old_login_refusal_do_not_short_circuit_owner`
+plants a live grant and a cached refusal, then asserts that two resolves produce
+two owner dials (`len(calls) == 2`). It is parametrised over the first resolve's
+`force_refresh`; the second resolve is always unforced. Widening the
+`is_github_key` gate to providers turns it red. It drives `MeshCredentialClient`
+directly and never reaches `_borrow`, so a `_borrow` future kept past its borrow
+— a turn-level cache — is invisible to it.
 
 ### 3.6 The code seams (exact names)
 
@@ -853,10 +920,21 @@ does not surface, add it as a purely additive method there (§8 Q2).
 - **A malicious holder can spend the operator's quota.** `holders` is a real
   capability increase and is granted explicitly. Least authority is the
   defence: `scope: "session"` by default, `api-key-static` default-off.
-- **The owner is a single point of failure for the borrower.** When the owner
-  is offline, a borrower with no local login has no model access. That is
-  R14's intended trade (spending a rotating token off-device is worse), and
-  §4.1 gives the operator a one-command remedy.
+- **The owner is a single point of failure for the borrower.** As designed,
+  when the owner is offline a borrower with no local login has no model
+  access. That is R14's intended trade (spending a rotating token off-device
+  is worse), and §4.1 gives the operator a one-command remedy.
+  **As built, a bounded hold comes first** (§3.5's as-built note). While the
+  owner is unreachable, a provider borrow is served this session's still-live
+  cached grant, marked `held_offline`: never under `force_refresh`, and never
+  for MCP, `github` or device-bound keys. The hold ends at the grant's own
+  expiry, at most `grant_ttl_s` after the owner last served it. If the owner
+  is still unreachable then, `_held_or` drops the grant and returns the
+  owner's refusal (`owner_offline` or `owner_unreachable`), and the session
+  store returns no credential for that provider. From there the design's
+  statement holds: a borrower with no local login has none until the owner
+  answers again. The hold lives in process memory only (`GrantCache` has no
+  serializer), so a process restarted during the outage has nothing to hold.
 - **A pool must not persist a bearer.** §6.3 makes the pool's grant in-memory
   and expiry-bounded, and forbids the pool from declaring credentials at all.
 
@@ -879,7 +957,7 @@ which is the rule `incidents.py` already states for its own four records.
 | 4.4 | **Token expiry mid-turn** | The runtime's next resolve re-asks (`expires_at - 120 s`, §3.5). The failover driver's existing re-resolve on a credential-invalidated error (`is_invalidated_credential_error`, `failover.py:1541`; `is_direct_credential_rotation_error`, `failover.py:1564`) reaches the mesh rung on its second attempt. | On success: **nothing**. A gratuitous "refreshed your credential" toast on a normal mid-turn re-grant is noise; the grant is logged, not announced. On failure it becomes 4.1/4.2/4.3. |
 | 4.5 | **Two peers ask at once** | The owner coalesces (§3.4): **one** provider POST, one `credential.refresh` audit record, two `credential.grant` records sharing one `grant_id` when they arrived inside the join window, or two `grant_id`s from one refresh when they arrived outside it. Both requesters get a working bearer. | Nothing user-facing. |
 | 4.6 | **A peer asks for a credential it is not a holder for** | Refused with `not_a_holder`; `credential.grant_refused` audit record on the owner with the requesting device, the key and the reason; the requester caches the refusal for 60 s (`placement.state.json`) and does **not** re-ask this session. | Requester: `damian-mbp does not share 'openai' with this device.` Owner (in `lop network log` / the TUI's network view): `refused a credential request for openai from gpu-pod-3 (not a holder)`. |
-| 4.7 | **MCP interactive login needed remotely** | **Revised in review round 1 (audit round 2, F3/R1) to what ships.** `ensure_mcp_oauth_fresh` cannot refresh a stored grant whose own record calls it expired (`stored_token_expiry()` in the past), so the owner's broker refuses the borrow with `interactive_required` and writes a `credential.report {failure: interactive_required}` audit record; nothing opens a browser on either device. The *repair* path this row used to promise is **not built as an op**: there is no `credential_repair` verb, no owner-side toast and no `inbox.jsonl` entry — what ships is DERIVED from the `credential.report` row below (`network/credentials/repair.py`): a `credential_repair` check row in `lop network doctor` and a line in the `/network` panel, both reusing `messages.render_repair_notice`'s wording; that function remains what the owner puts on the WIRE as a diagnostic. On the requester the sentence is `render_broker_error`'s `interactive_required` row; on a BORROWING device the composed MCP failure line (`mcp/manager.py::_auth_failure_text`) names the owning device and puts the command there instead of the local `/mcp login <name> to authorize` — which a headless borrower cannot run, and which a browser-capable one would satisfy with a LOCAL grant that then wins over the borrow. | Requester (borrow surfaces): `'mcp:https://…' needs an interactive sign-in on damian-mbp before it can be lent out; the operator there can run '/mcp login https://…'.` Borrower's MCP failure line: `damian-mbp: /mcp login datadog` — composed into `failed: datadog — …` at 56 cells, so a 19-cell device name still fits whole (55); a longer server name keeps the OWNING DEVICE and the command's head, shedding the server name the command repeats from the row's own label (`failed: launchdarkly — damians-MacBook-Pro: /mcp login …`, design round 1 D1), and only below that does the command outrank the owner (`failed: linear — /mcp login line…`, D2 — the row base printed; `/mcp` and the durable notice carry the sentence whole) Owner: the `credential.report` audit record (`lop network log`). |
+| 4.7 | **MCP interactive login needed remotely** | **Revised in review round 1 (audit round 2, F3/R1) to what ships.** `ensure_mcp_oauth_fresh` cannot refresh a stored grant whose own record calls it expired (`stored_token_expiry()` in the past), so the owner's broker refuses the borrow with `interactive_required` and writes a `credential.report {failure: interactive_required}` audit record; nothing opens a browser on either device. The *repair* path this row used to promise is **not built as an op**: there is no `credential_repair` verb, no owner-side toast and no `inbox.jsonl` entry — what ships is DERIVED from the `credential.report` row below (`network/credentials/repair.py`): a `credential_repair` check row in `lop network doctor` and a line in the `/network` panel, both reusing `messages.render_repair_notice`'s wording; that function remains what the owner puts on the WIRE as a diagnostic. On the requester the sentence is `render_broker_error`'s `interactive_required` row; on a BORROWING device the composed MCP failure line (`mcp/manager.py::_auth_failure_text`) names the owning device and puts the command there instead of the local `/mcp login <name> to authorize` — which a headless borrower cannot run, and which a browser-capable one would satisfy with a LOCAL grant that then wins over the borrow. | Requester (borrow surfaces): `'mcp:https://…' needs an interactive sign-in on damian-mbp before it can be lent out; the operator there can run '/mcp login <name>' (the server's NAME — `/mcp login` resolves a config key, never a URL).` Borrower's MCP failure line: `damian-mbp: /mcp login datadog` — composed into `failed: datadog — …` at 56 cells, so a 19-cell device name still fits whole (55); a longer server name keeps the OWNING DEVICE and the command's head, shedding the server name the command repeats from the row's own label (`failed: launchdarkly — damians-MacBook-Pro: /mcp login …`, design round 1 D1), and only below that does the command outrank the owner (`failed: linear — /mcp login line…`, D2 — the row base printed; `/mcp` and the durable notice carry the sentence whole) Owner: the `credential.report` audit record (`lop network log`). |
 | 4.8 | **A remote session needs a `lop secret` value** | Not brokered, by design. The `bash` command runs on the peer, so the value must exist there; the session-scoped `/credential <key> <value>` verb (routed to the runtime, `session/credential_ops.py:1-26`) writes it there, on the peer, in the peer's store. A `$(lop secret get X)` in a peer session retrieves from the peer's broker, whose consent model is peer *process ancestry* on that host (`secrets/peer.py:421`) and therefore works exactly as it does locally. | If absent: `The secret 'X' is not stored on gpu-pod-3, where this session runs. Set it there: /credential X <value> (or 'lop secret set X' on gpu-pod-3).` |
 | 4.9 | **Owner's row is quota-blocked** | The owner's `_resolve` excludes blocked rows (`is_blocked_for_model`, `auth_store.py:79-80` region) and either picks a sibling or returns nothing. A *sibling pick* is a real behaviour change for a remote session and must be visible: the grant's `credential_ref.credential_id` changes, so the requester appends a new `mesh_credential_binding.v1` row recording that id and emits ONE operator-visible notice (§2.4 as-built; the earlier "only when the *owner* changed" reading is superseded — a same-owner sibling pick is a recorded, announced change, never a silent re-bind to another account for the same provider). The shipped sentence (design round 1, D1) states the FACT of the rotation without naming a cause, because the row cannot tell the block writers apart. | If a sibling exists: `The {provider} login on {owner} went out of rotation, and the next turn ran on another {provider} login ({label}).` If not: the existing no-credential sentence, plus `(openai is rate-limited on damian-mbp until 14:20).` |
 

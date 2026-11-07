@@ -41,6 +41,19 @@ from typing import Any, Mapping
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 
+from ..agent_file_reads import (
+    FILE_READ_MAX_BYTES_PER_FILE,
+    FILE_READ_MAX_BYTES_TOTAL,
+    FILE_SERVED_MIME,
+    FileDescriptor,
+    FileRejected,
+    FileText,
+    digest_file,
+    files_admission_hash,
+    parse_file_descriptors,
+    screen_listing,
+)
+from ..agent_file_reads import withheld_marker as file_withheld_marker
 from ..attachments import (
     AttachmentDescriptor,
     AttachmentRejected,
@@ -49,7 +62,13 @@ from ..attachments import (
     verify_and_bound,
     withheld_marker,
 )
-from ..client import SCREENING_TEMPLATE_V3_SHA256, BridgeRefusal
+from ..client import (
+    SCREENING_TEMPLATE_V3_SHA256,
+    SCREENING_TEMPLATE_V4_SHA256,
+    BridgeRefusal,
+    agent_file_reads_capability,
+    screening_template_v4_usable,
+)
 from ..hold_release import WORK_SCOPE_HOLD
 from ..types import ConversationFeedRef
 from .batch_screen import (
@@ -96,6 +115,13 @@ class ConversationCardMetadata:
     #: The explicit refusal line when those images were NOT admitted (D5),
     #: so an agent is told images exist rather than silently missing them.
     attachments_note: str | None = None
+    #: How many GENERIC FILES the message carries — a count, never bytes, ids or
+    #: filenames. The hub serves the count to every reader; the descriptors and the
+    #: bytes need this endpoint's own v4 file admission.
+    files: int = 0
+    #: The explicit line when those files were NOT admitted, so the agent is told
+    #: files exist (and why it cannot read them) rather than silently missing them.
+    files_note: str | None = None
     #: WAKE-ON-EVERY-MESSAGE (wake contract): every message one coalesced card
     #: names, oldest → newest; empty for a single-message card. ``message_id`` is
     #: always the NEWEST of them, so reply routing keeps binding to one id.
@@ -276,6 +302,19 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
             lines.append("view: bridge channel_thread with this thread_root_id returns the images")
         else:
             lines.append("view: bridge channel_history returns the admitted images")
+    if metadata.files:
+        # Same shape as images and for the same reason: a count is metadata, but the
+        # bytes reach an agent only through channel_history after this endpoint's own
+        # v4 file admission screened them. Never a filename — an agent is never shown
+        # one, and the file commitment is deliberately name-free.
+        noun = "file" if metadata.files == 1 else "files"
+        lines.append(f"files: {metadata.files} {noun}")
+        if metadata.files_note:
+            lines.append(_one_line(metadata.files_note))
+        elif metadata.thread_root_id:
+            lines.append("view: bridge channel_thread with this thread_root_id returns the files")
+        else:
+            lines.append("view: bridge channel_history returns the admitted files")
     if metadata.thread_root_id:
         # Thread context: where the reply lives and how to answer IN it, so an
         # agent coordinating in a thread does not answer at channel level.
@@ -321,6 +360,45 @@ def _one_line(value: Any, *, limit: int = 200) -> str:
     return " ".join(value.split())[:limit]
 
 
+def _allocation_sender(display: Mapping[str, Any]) -> dict[str, str]:
+    """The budget identity of one message, from the GATED body read ONLY.
+
+    ``display`` is the classification response's transient display block, and
+    its ``sender_account_id`` is the hub's STORED participant (agent-server
+    #327), so this is a verified claim rather than a label or client metadata.
+    The ACCOUNT is the attribution and is kept whenever the server states it;
+    the class is carried alongside when stated, and names nobody on its own.
+    An older server (pre-#327) states neither, so the pair is empty and the
+    message is budgeted conservatively instead of being attributed.
+
+    Raises ``ValueError`` on a malformed pair so the caller records a typed
+    hold; defaulting a sender here is the failure this helper exists to stop.
+    """
+
+    # ``or ""`` first: a key PRESENT but null is this server saying nothing,
+    # exactly as ``_card_metadata`` treats its own fields (round 1 N1). A
+    # non-string value is still malformed.
+    account = display.get("sender_account_id") or ""
+    kind = display.get("sender_kind") or ""
+    # Imported here for the same reason ``_owner_released`` does: the screening
+    # module is the connector's leaf, and this cap must be ITS cap — a 201-256
+    # char account used to pass here and then hold ``envelope_malformed``
+    # downstream (round 1 S-5).
+    from ..screening import _ENVELOPE_LABEL_MAX
+
+    if (
+        not isinstance(account, str)
+        or len(account) > _ENVELOPE_LABEL_MAX
+        or kind not in ("", "human", "agent")
+    ):
+        raise ValueError("invalid classification sender")
+    return {
+        "account_id": account,
+        "kind": kind if account else "",
+        "display_label": display.get("sender_label", ""),
+    }
+
+
 def _screening_item(
     *,
     owner: Any,
@@ -346,6 +424,14 @@ def _screening_item(
             "type": "note",
             "body": {"text": body},
             "body_hash": body_hash,
+            # The participant block is the ALLOCATION identity the store
+            # verifies (#3199 residual): ``validate_envelope`` takes the
+            # charged sender and its class from here, never from the display
+            # sender below, and pins both into the input proof.
+            "sender": {
+                "account_id": str(sender.get("account_id") or ""),
+                "kind": str(sender.get("kind") or ""),
+            },
             "recipient": {
                 "account_id": owner.account_id,
                 "endpoint_id": owner.endpoint_id,
@@ -416,10 +502,11 @@ async def _target_message(
 
 @dataclass(frozen=True)
 class _Fetched:
-    """The classification read: body, its hash, and the bound image set.
+    """The classification fetch: body, its hash, and the bound attachment sets.
 
-    ``attachments`` is ``None`` when the hub's descriptors were malformed
-    (the caller holds) and ``()`` for a text-only message or an older hub.
+    ``attachments`` and ``files`` are ``None`` when the hub's descriptors were
+    malformed (the caller withholds that class) and ``()`` for a message that
+    carries none, or for an older hub that has no such lane.
     """
 
     body: str
@@ -430,6 +517,8 @@ class _Fetched:
     display: Mapping[str, Any]
     attachments: tuple[AttachmentDescriptor, ...] | None = ()
     attachments_hash: str | None = None
+    files: tuple[FileDescriptor, ...] | None = ()
+    files_hash: str | None = None
 
 
 async def _body_from_history(
@@ -451,6 +540,11 @@ async def _body_from_history(
     if message.get("attachment_count") or message.get("attachments"):
         # An image message must be screened through the classification route
         # (which carries the binding hash); a history row cannot prove the set.
+        return None
+    if message.get("file_count") or message.get("files"):
+        # The same rule for generic files: only the classification route
+        # carries the name-free ``files_hash`` a v4 admission must bind, and
+        # a history row cannot prove the set.
         return None
     body = message.get("body")
     body_hash = message.get("body_hash")
@@ -496,6 +590,7 @@ async def _fetch_body(
     # transient label mapping alongside the image binding: both are facts of
     # the SAME authorized read, so one carrier keeps them from drifting apart.
     served_attachments_hash = fetched.get("attachments_hash")
+    served_files_hash = fetched.get("files_hash")
     return _Fetched(
         body=body,
         body_hash=body_hash,
@@ -504,6 +599,8 @@ async def _fetch_body(
         attachments_hash=(
             served_attachments_hash if isinstance(served_attachments_hash, str) else None
         ),
+        files=parse_file_descriptors(fetched.get("files")),
+        files_hash=served_files_hash if isinstance(served_files_hash, str) else None,
     )
 
 
@@ -788,6 +885,28 @@ def _withheld_note(count: int, reason: str) -> str:
     return _WITHHELD_REASONS[reason].format(n=count, noun=noun)
 
 
+async def _agent_file_reads_enabled(client: Any, owner: Any, access: Any) -> bool:
+    """Whether THIS hub advertises agent file reads (``files.agent_read``).
+
+    Asked of the live status rather than remembered: a rollout can turn the lane on or
+    off between messages, and a stale ``True`` would send a ``files_hash`` to a hub that
+    refuses it. A status failure reads as NO capability — the message text is still
+    delivered and only the files stay withheld, so an unreachable status degrades the
+    file lane and never the delivery.
+
+    ``agent_read`` is a separate field from ``agent_upload``: an endpoint allowed to
+    publish files is not thereby allowed to read them.
+    """
+
+    if not getattr(owner, "endpoint_id", None):
+        return False
+    try:
+        payload = await client.status(access=access)
+    except Exception:
+        return False
+    return agent_file_reads_capability(payload) is not None
+
+
 def _screener_sees_images(config_dir: Path) -> bool:
     """SEAM: whether the configured SCREENING model accepts image input (D5).
 
@@ -852,6 +971,136 @@ async def _screen_images(
             )
         )
     return images
+
+
+def _FILE_ID_OK(file_id: str) -> bool:
+    """Whether the transport would accept this file id (the ONE shared rule).
+
+    Read from the same constant the client validates with, so the screen path cannot
+    disagree with the fetch gate it is about to call.
+    """
+
+    from ..agent_file_reads import FILE_ID_PATTERN
+
+    return isinstance(file_id, str) and FILE_ID_PATTERN.fullmatch(file_id) is not None
+
+
+async def _fetch_file(
+    client: Any,
+    ref: ConversationFeedRef,
+    owner: Any,
+    descriptor: FileDescriptor,
+    *,
+    purpose: str,
+    access: Any,
+) -> bytes:
+    """One generic file's bytes, through the EXISTING message-scoped attachment route.
+
+    WHY NOT A SECOND HTTP PATH. That route already carries the membership, joined_seq,
+    class and admission gate for generic files, so a parallel client would have to
+    re-derive all four and could drift from them. ``served_types`` is the ONE widening
+    it needs: a file is served as ``application/octet-stream`` whatever its class,
+    because the class never becomes a response content type.
+    """
+
+    data, mime = await client.fetch_attachment(
+        ref.conversation_id,
+        ref.message_id,
+        descriptor.id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        purpose=purpose,
+        access=access,
+        served_types=(FILE_SERVED_MIME,),
+    )
+    if mime != FILE_SERVED_MIME:
+        raise FileRejected("file_mime_mismatch")
+    return data
+
+
+async def _screen_files(
+    client: Any,
+    ref: ConversationFeedRef,
+    owner: Any,
+    access: Any,
+    descriptors: tuple[FileDescriptor, ...],
+    served_hash: str | None,
+) -> tuple[Any, str | None]:
+    """Fetch TEXT-class file bodies with ``purpose=screen`` and build the v4 carrier.
+
+    Returns ``(ScreeningFiles | None, withheld_reason | None)``. The carrier is what the
+    v4 prompt renders into ``{{files}}`` and what the connector later binds on its allow;
+    ``None`` means these files were NOT screened, and the reason is the closed code the
+    card states.
+
+    WHY THE RUNTIME RE-DERIVES THE COMMITMENT FIRST. ``files_admission_hash`` over the
+    descriptors the hub showed must equal the hub's ``files_hash`` before a single byte
+    is fetched: that equality is the whole client half of the admission invariant — the
+    set the screener sees is the set the hub bound. A mismatch, a hub that sends
+    descriptors without a hash, or a set the commitment refuses withholds the files and
+    never calls them verified.
+
+    TEXT ONLY. A non-text class is LISTED for the screener ("I saw this file and it is
+    not text") and never fetched: the hub refuses those bytes to an agent anyway, and a
+    screener reasoning about an extractor's output would be worse than no feature.
+
+    THE BUDGET IS FAIL-CLOSED, NOT PER-FILE. An allow admits every file the commitment
+    covers, so a set whose text cannot fit one read within the total budget is not
+    screened at all — the message's text is still admitted, the files are stated as
+    withheld. A partial view behind a whole-set grant would hand a model text no
+    screener ever saw.
+
+    Every byte fetched here goes only to the isolated screening dispatch: never to the
+    store, a card, a log, or a later context read, which re-fetches after the allow (D1).
+    """
+
+    from ..screening import screening_files
+
+    if served_hash is None:
+        # Descriptors with no commitment are a set this runtime cannot prove.
+        return None, "unverified"
+    try:
+        expected = files_admission_hash(descriptors)
+    except FileRejected:
+        return None, "unverified"
+    if expected != served_hash:
+        return None, "unverified"
+
+    wanted = tuple(d for d in descriptors if d.readable and d.fetchable)
+    if sum(min(d.size, FILE_READ_MAX_BYTES_PER_FILE) for d in wanted) > FILE_READ_MAX_BYTES_TOTAL:
+        return None, "too_large"
+
+    # An id the transport refuses is refused HERE, before a fetch: a descriptor whose id
+    # the client will not put in a URL is a set this runtime cannot prove, and returning a
+    # withhold keeps the message (and its text) deliverable. Letting the client's own
+    # ValueError out of this function would escape into the delivery turn as
+    # ``conversation_failed`` — a malformed FILE would suppress the whole MESSAGE.
+    if any(not _FILE_ID_OK(d.id) for d in wanted):
+        return None, "unverified"
+
+    texts: dict[str, FileText] = {}
+    for descriptor in wanted:
+        try:
+            data = await _fetch_file(
+                client, ref, owner, descriptor, purpose="screen", access=access
+            )
+            texts[descriptor.id] = digest_file(descriptor, data)
+        except FileRejected:
+            return None, "unverified"
+        except BridgeRefusal as failure:
+            if not _is_not_found(failure):
+                raise
+            # The screen is closed for this endpoint, or the row is gone. Either way
+            # these are not the bytes the hub hashed, so no file grant can be written.
+            return None, "unverified"
+        except ValueError:
+            # Defence in depth for the same class as the guard above: ANY local refusal
+            # (a shape the client refuses, a bad purpose) withholds the file set rather
+            # than aborting a delivery. Deliberately narrower than ``Exception``: a
+            # transport or store failure must still propagate to the caller's own
+            # bounded hold, never be disguised as "this file was not read".
+            return None, "unverified"
+    return screening_files(expected, screen_listing(descriptors, texts)), None
 
 
 async def _images_admitted(
@@ -1216,7 +1465,6 @@ async def handle_conversation_available(
         # A durable ref is only a locator. No person-membership read or legacy
         # cached name can supply display provenance. Failed admission must not
         # post even a metadata-only card: that would still wake the recipient.
-        sender: Mapping[str, Any] = {}
 
         # The iteration's batch pass may already hold this message's body
         # read (connector/batch_screen.py); reuse it rather than a second GET.
@@ -1226,6 +1474,13 @@ async def handle_conversation_available(
             # the hold rather than treating a weaker history read as authority.
             return await held("body_unavailable")
         body_text, body_hash, display = fetched.body, fetched.body_hash, fetched.display
+        # ONLY this gated classification read supplies allocation identity.
+        # An older server omits it: keep unknown provenance (conservative
+        # budget), never recover it from a durable ref or a display label.
+        try:
+            sender: Mapping[str, Any] = _allocation_sender(display)
+        except ValueError:
+            return await held("sender_malformed")
         if fetched.attachments is None:
             # Descriptors the hub sent but this build cannot validate: never
             # screen a guessed subset of the images; keep it retryable.
@@ -1339,6 +1594,42 @@ async def handle_conversation_available(
                 attachments_note = _withheld_note(len(descriptors), withheld_reason)
                 metadata = replace(metadata, attachments_note=attachments_note)
 
+        # FILES. The same shape as images, with its OWN grant and its own template:
+        # the hub treats ``files_hash`` and ``attachments_hash`` independently, so a
+        # message may admit its images and withhold its files (or the reverse) without
+        # either class borrowing the other's verdict. Nothing is fetched or granted
+        # unless the hub advertises the agent READ lane — an upload grant is not a read
+        # grant, and an older hub would 404 the purpose=screen fetch itself.
+        screened_files: Any = None
+        files_descriptors = fetched.files
+        if files_descriptors is None:
+            # Malformed descriptor set: state the count, admit nothing.
+            malformed_count = int(fetched.display.get("file_count") or 0)
+            metadata = replace(
+                metadata,
+                files=malformed_count,
+                files_note=(
+                    file_withheld_marker(malformed_count, "unverified") if malformed_count else None
+                ),
+            )
+        elif files_descriptors:
+            files_capable = await _agent_file_reads_enabled(client, owner, access)
+            if not screening_template_v4_usable() or not files_capable:
+                # Either this client's v4 bytes are not the server's (a grant would be
+                # refused 409) or the hub serves no agent file reads at all. State the
+                # files, admit none: the message text still goes through.
+                metadata = replace(metadata, files=len(files_descriptors))
+            else:
+                screened_files, files_withheld = await _screen_files(
+                    client, ref, owner, access, files_descriptors, fetched.files_hash
+                )
+                metadata = replace(metadata, files=len(files_descriptors))
+                if files_withheld is not None:
+                    metadata = replace(
+                        metadata,
+                        files_note=file_withheld_marker(len(files_descriptors), files_withheld),
+                    )
+
         if recovery is not None:
             detail = await _hand_off_card(
                 owner, metadata, ref, session_id=designation, config_dir=config_dir
@@ -1379,6 +1670,8 @@ async def handle_conversation_available(
         )
         if screened_images is not None:
             item["attachments"] = screened_images
+        if screened_files is not None:
+            item["files"] = screened_files
         # EVERY screen carries its budget tier (#3400 round 1, M1 = Q-1 = S-3):
         # the single path is most live traffic (a one-message wake, the 21st
         # of a split, an image, a retry), and an unstamped item defaults to
@@ -1468,21 +1761,68 @@ async def handle_conversation_available(
             # between dispatch and here lost the binding. Never admit pixels
             # on it — hold and re-screen.
             return await held("attachments_unbound")
-        if _owner_released(receipt):
+        admitted_files_hash: str | None = None
+        if screened_files is not None:
+            if getattr(result, "files_hash", None) == screened_files.files_hash:
+                admitted_files_hash = screened_files.files_hash
+        released = _owner_released(receipt)
+        if screened_files is not None and admitted_files_hash is None and not released:
+            # The file sibling of ``attachments_unbound``: a verdict that lost the set
+            # it screened can never grant bytes it did not judge.
+            return await held("files_unbound")
+        if released:
+            # B4b OWNER RELEASE IS EXEMPT, and must be: a person's signed decision is
+            # that message's answer, taken BEFORE any dispatch, so its verdict carries no
+            # set hash by construction (``_consume_owner_release`` returns a text-only
+            # result with ``attachments_hash=None`` for the same reason). Holding here
+            # would make every released message that carries files wait forever —
+            # including its text, which is exactly what the release exists to deliver.
+            # Nothing is granted: ``admitted_files_hash`` stays ``None``, so the hub
+            # keeps the files withheld from this endpoint.
             metadata = replace(metadata, owner_released=True)
-        await client.conversation_admit(
-            ref.conversation_id,
-            message_id,
-            verdict="allow",
-            body_hash=body_hash,
-            tenant_id=owner.tenant_id,
-            endpoint_id=owner.endpoint_id,
-            # The hub requires the v3 hash with an image allow: it is the only
-            # template whose wrapper presented these images to the screener.
-            attachments_hash=admitted_hash,
-            template_sha256=SCREENING_TEMPLATE_V3_SHA256 if admitted_hash else None,
-            access=access,
+
+        async def _admit(*, files_hash: str | None, template: str | None) -> None:
+            await client.conversation_admit(
+                ref.conversation_id,
+                message_id,
+                verdict="allow",
+                body_hash=body_hash,
+                tenant_id=owner.tenant_id,
+                endpoint_id=owner.endpoint_id,
+                # ONE template whichever grants ride it: v4 when any FILE was screened
+                # (v4 keeps the image slot, so a mixed message is still one admission
+                # row), v3 when only images were, none when nothing was granted.
+                attachments_hash=admitted_hash,
+                template_sha256=template,
+                # The file grant rides ONLY a screen that rendered this exact set under
+                # v4, and it binds the name-free commitment recomputed from the
+                # descriptors the hub showed.
+                files_hash=files_hash,
+                access=access,
+            )
+
+        admit_template = (
+            SCREENING_TEMPLATE_V4_SHA256
+            if admitted_files_hash is not None
+            else SCREENING_TEMPLATE_V3_SHA256 if admitted_hash else None
         )
+        try:
+            await _admit(files_hash=admitted_files_hash, template=admit_template)
+        except BridgeRefusal as refusal:
+            if admitted_files_hash is None or refusal.http_status not in (400, 409):
+                raise
+            # A hub that will not take the file grant — an older one that does not know
+            # the field, or one whose stored ``files_hash`` disagrees with the set this
+            # endpoint screened — must not cost the member the MESSAGE. The text was
+            # screened and allowed on its own evidence, so admit ONCE more carrying only
+            # what that hub already understands: the image grant if this screen produced
+            # one, nothing otherwise. Bounded on purpose (one retry, a closed status set)
+            # and never a loop: a 409 also means a verdict may already exist, so a second
+            # refusal is the hub's real answer and the caller's hold stands.
+            await _admit(
+                files_hash=None,
+                template=SCREENING_TEMPLATE_V4_SHA256 if admitted_hash else None,
+            )
         # THE ADMISSION POINT (seam design, Revision 5): the hub has accepted
         # this message for this endpoint/member/consent tuple, so one
         # designated session now owes it a body. Recorded BEFORE the card —

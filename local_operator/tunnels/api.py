@@ -7,6 +7,9 @@ from typing import Any
 
 import httpx
 
+from local_operator.providers.account_successor import (
+    same_account_successor as _successor,
+)
 from local_operator.providers.auth_store import (
     AuthStore,
     AuthStoreError,
@@ -33,7 +36,35 @@ def credential_id(selected: int | None = None) -> int:
         return rows[0].id
 
 
-def usable_credential_id(selected: object) -> int | None:
+#: The hub every tunnel request goes to (``RadientTunnels.request`` below posts to
+#: ``DEFAULT_API_URL + "/v1/tunnels"``), in the spelling a Radient sign-in stamps
+#: into a row's ``api_endpoint`` (``https://api.radienthq.com/v1``). A successor
+#: row must be bound to THIS hub: an account label on another hub is a different
+#: binding (``auth_store._radient_account_identity``), and re-pointing the tunnel
+#: at it would send this tunnel's requests with a bearer minted elsewhere.
+TUNNEL_HUB = DEFAULT_API_URL + "/v1"
+
+
+def same_account_successor(
+    pin: object, *, owner_account: object = None, fresh_id: int | None = None
+) -> int | None:
+    """The live row that should own this tunnel instead of a dead ``pin``, if PROVABLE.
+
+    The proof (and why re-pointing on it is safe) is
+    :func:`local_operator.providers.account_successor.same_account_successor`,
+    shared with the Team Bridge enrollment heal so the two owners cannot drift.
+    This wrapper supplies what is the TUNNEL's: the ambient credential store and
+    :data:`TUNNEL_HUB`, the only hub a tunnel request ever goes to.
+    """
+    if not isinstance(pin, int) or isinstance(pin, bool):
+        return None  # before the open, as it always was: no pin, no store read
+    with closing(AuthStore()) as store:
+        return _successor(
+            pin, store=store, hub=TUNNEL_HUB, owner_account=owner_account, fresh_id=fresh_id
+        )
+
+
+def usable_credential_id(selected: object, *, owner_account: object = None) -> int | None:
     """``selected`` when it names a Radient oauth row this device still has.
 
     The predicate the tunnel commands' DEFAULT selection needs before trusting a
@@ -45,9 +76,19 @@ def usable_credential_id(selected: object) -> int | None:
     (``credential_id(None)``'s own rule); an EXPLICIT ``--credential-id`` is
     deliberately not routed through it, because selecting an id that names
     nothing is a typo or a stale note, and it must keep failing loudly.
+
+    A PIN THAT IS PRESENT BUT DEAD, or gone, yields to its provable same-account
+    successor (:func:`same_account_successor`) first: a dead-grant pin used to be
+    returned as-is, so bare `lop tunnel configure` re-proposed the very row the
+    IdP refused, and with two Radient logins on the device ``credential_id(None)``
+    could not pick one either. ``owner_account`` is the cached record's
+    ``owner_account_id``, the only same-account evidence left for a gone pin.
     """
     if not isinstance(selected, int) or isinstance(selected, bool):
         return None
+    successor = same_account_successor(selected, owner_account=owner_account)
+    if successor is not None:
+        return successor
     with closing(AuthStore()) as store:
         row = store.get_credential(selected)
     if row is None or row.provider != "radient" or row.credential_type != "oauth":

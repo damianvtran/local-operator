@@ -397,7 +397,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1978 -> 1977: canonical isolated renderer re-measured after the explicit
     # generic-file schema and compact description (including lowercase `read`).
     # This records actual doc cost; the 8 KiB soft cap is deliberately unchanged.
-    "bridge": 1977,
+    "bridge": 1985,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -445,8 +445,41 @@ MEASURED_TOKENS: dict[str, int] = {
     # 0.5-0.7 GB of RAM), so the note states the RAM cost and the tested
     # playback instead. Measured by this test's own print; the doc is 8190 chars against
     # the 8192 cap.
-    # No other tool's entry moved.
-    "browser": 2116,
+    # 2116 -> 2134 (+18, the `setvalue` action): one new op row, the `setvalue`
+    # arm of the `text`/`selector` parameter descriptions, and the `option_ambiguous`
+    # refusal it can meet. The doc sat at 8190 chars against an 8192 cap, so every
+    # added word had to be paid for, and the ledger below is what this test PRINTS
+    # on the finished tree rather than a sum of deltas. What paid, honestly:
+    # - `network_start` loses "exact" and "request"/"private"/"redirect links" (the
+    #   note below still states the exact-origin+path rule and the private file);
+    #   "safe URL" is RESTORED in that row - it is the doc's only statement that a
+    #   recorded URL has credentials and query values stripped, and it is
+    #   security-relevant, so it must not live only in docs/BROWSER.md.
+    # - the geometry note loses "(rect + computed styles + inline `--*` tokens)".
+    #   Those two facts did NOT vanish: the `styles` op row still says "rect +
+    #   computed styles", and the inline custom properties are documented in
+    #   `guide://browser` ("Reading layout: rects and computed styles").
+    # - `inspect_ownership` and `network_stop` are shortened to one clause each;
+    #   `download` says "private dir".
+    # 2134 -> 2118 (-16, the CI context-budget fix): this doc RENDERS the
+    # `BrowserParams` field descriptions, so trimming those to get the tools-array
+    # schema back under `bench_context_budget.py`'s budget shortened the doc too —
+    # the safe direction, and the reason the number moves here rather than in a
+    # prose edit. What left the model's copy: the two field helps lose the
+    # rationale clauses "so it survives framework ids" and "a select option's
+    # label or value" (both still stated in `guide://browser`), and `retain`'s
+    # "the reason for" becomes "reason". Every meaning the model needs stays: the
+    # `text` help still names 'type' (text to enter) and 'setvalue' (the value),
+    # and `selector` still names 'setvalue' with its CSS/ref/`role=`/`label=`/
+    # `text=` forms. Measured: 8,089 chars against the 8,192 cap — headroom up
+    # from 4 to 103.
+    # Nothing else about any other tool moved.
+    # RE-MEASURED after rebasing onto main's `copy` action (#3512), by this
+    # test's own print: main's ledger, copy row included, stands at 2,114 tokens
+    # (8,190 chars, per main's own note). This branch's net delta over that is
+    # +7 tokens: the `setvalue` row and its `selector`/`text` help, less the
+    # prose trims listed above. Rendered: 8,091 chars against the 8,192 cap.
+    "browser": 2121,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

@@ -3340,7 +3340,7 @@ class _ChildMcp:
     hold a session that has not been constructed yet.
 
     ``catalogue`` is a callable and not a string, matching the parent's
-    ``knowledge_hooks.mcp_catalogue`` exactly: ``/mcp reload`` replaces
+    ``knowledge_hooks.mcp_catalogue`` exactly: a ``reload()`` replaces
     ``McpManager._configs`` wholesale, and a catalogue frozen at child build
     would go on advertising a server the operator just removed while hiding
     one they just added.
@@ -3567,7 +3567,7 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
         session.set_fallback_tool_resolver(resolve_deferred)
 
     def own_turn_only_reason(server_name: str) -> str | None:
-        # Asked fresh per read: ``/mcp reload`` replaces the manager's configs
+        # Asked fresh per read: a ``reload()`` replaces the manager's configs
         # wholesale, so a snapshot taken at wiring time would go stale.
         if server_own_turn_only(manager.get_server_config(server_name)):
             return _OWN_TURN_ONLY_DENIED

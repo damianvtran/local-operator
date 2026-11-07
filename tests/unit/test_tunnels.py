@@ -58,13 +58,18 @@ from local_operator.tunnels.service import active
 HOST = "abc123-lop.radienthq.com"
 
 
-@pytest.fixture(scope="module")
-def signing_key():
+def make_signing_key():
+    """The module key, as a FUNCTION so a sibling test module can reuse it.
+
+    Importing a fixture object into another module and naming it as a parameter
+    is an F811 redefinition (see `tests/unit/aida/conftest.py`), so the body
+    lives here and each module wraps its own fixture around it.
+    """
     return rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
-@pytest.fixture
-def connection(signing_key):
+def make_connection(signing_key: rsa.RSAPrivateKey) -> dict[str, Any]:
+    """The synthetic tunnel connection, shared with `test_tunnel_pin_heal.py`."""
     public = json.loads(RSAAlgorithm.to_jwk(signing_key.public_key()))
     public.update(kid="origin-1", alg="RS256")
     return {
@@ -88,6 +93,16 @@ def connection(signing_key):
             "jwks": {"keys": [public]},
         },
     }
+
+
+@pytest.fixture(scope="module")
+def signing_key():
+    return make_signing_key()
+
+
+@pytest.fixture
+def connection(signing_key):
+    return make_connection(signing_key)
 
 
 def proof(signing_key, *, method="GET", target="/api/sessions", body=b"", **overrides):
@@ -3606,7 +3621,11 @@ def test_the_shared_park_sentence_names_no_command() -> None:
     from local_operator.tunnels import gateway
 
     sentence = gateway.TERMINAL_DETAIL[gateway.LOGIN_REQUIRED]
-    assert "signing in again starts it again on its own" in sentence.lower()
+    # The CONDITIONAL remedy is the part that must survive: an unconditional
+    # "signing in starts it again" is what the 2026-11-06 incident read while
+    # nothing was restarting the connector (see the entry's own comment).
+    assert "only signing in to that same account restarts it" in sentence.lower()
+    assert len(sentence) <= 138, "the shared sentence stays inside two 80-column rows"
     assert gateway.CONSOLE_URL not in sentence, "the terminal prints a billing block of its own"
     # No surface-specific spelling in the two entries this finding covers: not the
     # composer's slash form, and not a shell command either. (The lease-pending

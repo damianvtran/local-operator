@@ -255,7 +255,7 @@ def _clock(ms: int) -> str:
     return time.strftime("%H:%M", time.localtime(ms / 1000))
 
 
-def health_hint(row: Mapping[str, Any], now_ms: int) -> str | None:
+def health_hint(row: Mapping[str, Any], now_ms: int | None) -> str | None:
     """One line explaining a monitor that is not doing what the reader assumes.
 
     THE shared helper for every listing surface (the agent tool's rows, the
@@ -264,6 +264,16 @@ def health_hint(row: Mapping[str, Any], now_ms: int) -> str | None:
     (their session was never open), monitors with 0 deliveries after many
     checks, and one disabled by a flapping MCP tool — and every surface
     rendered all four as healthy rows.
+
+    ``now_ms is None`` means THE CALLER HOLDS A PUBLISHED ROW, NOT A CLOCK: the
+    owner writes a monitor row to the frontend state / index only on a change
+    event (§10.2), never on a quiet tick, so a viewer's copy of ``checks`` and
+    ``created_at`` is frozen at the last such event while its own clock keeps
+    moving. Judging that copy against ``now`` invents a failure the owner never
+    reported — the TUI band called a healthy, ticking watch "never checked" one
+    threshold after arming (agent review round 1, MAJOR-1). Every hint derived
+    from the row's own PUBLISHED fields (blind, unavailable, suppressed, the
+    counts) still stands; only the comparison to ``now`` is declined.
 
     Returns ``None`` when there is nothing to say (a normal, working monitor),
     which is the common case and must stay silent. ``format_age`` is
@@ -274,7 +284,14 @@ def health_hint(row: Mapping[str, Any], now_ms: int) -> str | None:
         # A disabled row already renders its own reason and count; the shared
         # hint would only restate it.
         return None
-    if isinstance(row, Mapping) and row.get("blind") and not _is_expired(row, now_ms):
+    if (
+        isinstance(row, Mapping)
+        and row.get("blind")
+        # With no clock the expiry test is skipped rather than assumed: ``until_at``
+        # is an absolute instant, so a caller that HAS a clock still lets it
+        # outrank blind, and the caller without one simply keeps the sentence.
+        and (now_ms is None or not _is_expired(row, now_ms))
+    ):
         # Blind outranks every other hint: the watch is armed, its call still
         # runs, and nothing it sees reaches the operator — the exact state the
         # 2026-10-20 Slack monitor rendered as healthy for seven missed replies.
@@ -294,7 +311,10 @@ def health_hint(row: Mapping[str, Any], now_ms: int) -> str | None:
     checks_n = int(checks) if isinstance(checks, int) and not isinstance(checks, bool) else 0
     if checks_n == 0:
         created = row.get("created_at")
-        if not isinstance(created, int) or isinstance(created, bool):
+        if now_ms is None or not isinstance(created, int) or isinstance(created, bool):
+            # No clock (a published row) or no arming instant: no such claim can
+            # be made. ``checks == 0`` on a snapshot means "no check had been
+            # published when this row was written", which is not the same fact.
             return None
         if now_ms - created > threshold:
             return "never checked — its session was not open since arming"
@@ -360,13 +380,21 @@ def unavailable_since_of(row: Mapping[str, Any]) -> int:
     return 0
 
 
-def is_idle(row: Mapping[str, Any], now_ms: int) -> bool:
+def is_idle(row: Mapping[str, Any], now_ms: int | None) -> bool:
     """Whether a monitor is overdue because nothing is hosting it (§D6).
 
     Overdue beyond ``max(2 × every, 5 min)`` and NOT held: a monitor ticks
     only while its session is open, so a dormant row is normal — but a reader
     looking at "next due 4 hours ago" needs to be told which of the two it is.
+
+    ``now_ms is None`` (a caller holding a published row, see ``health_hint``)
+    answers False, and the answer is not "healthy" but "this reader cannot
+    judge the deadline". ``next_due_at`` is advanced by every tick, so a copy
+    frozen at the last change event falls behind the wall clock and would turn
+    a live watch into an "idle" warning on the band built to show it.
     """
+    if now_ms is None:
+        return False
     if not isinstance(row, Mapping) or row.get("disabled") or is_held(row):
         return False
     due = row.get("next_due_at")

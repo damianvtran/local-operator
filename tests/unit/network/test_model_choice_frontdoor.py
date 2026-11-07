@@ -100,7 +100,7 @@ def _warmed_server(root: Path) -> relay.RelayServer:
     server = _server(root)
     server._warm_after_create = lambda *args, **kwargs: None
     server._engage_locally = lambda *args, **kwargs: ""
-    server._prompt_on = lambda *args, **kwargs: (True, "")
+    server._prompt_on = lambda *args, **kwargs: {"admitted": True, "state": "ran", "detail": ""}
     return server
 
 

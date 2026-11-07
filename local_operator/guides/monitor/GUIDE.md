@@ -99,6 +99,111 @@ reach you when they land (60 s is the sensible default), and reply only when
 someone messaged or tagged you or the delta genuinely needs attention. Being
 woken with nothing to do is a fine outcome — it is why monitors are quiet.
 
+## Watching a Slack channel or thread
+
+An MCP read tool returns its result as a JSON envelope holding a text log
+(`{"messages": "…"}`). The monitor splits that log into **one line per
+record** before comparing, so a channel read diffs per message, not per
+envelope:
+
+```
+monitor({op:"create", name:"product-feedback-watch",
+         tool:"mcp__slack_read_channel",
+         arguments:{"channel_id":"C06TXN4AD9R", "limit":25},
+         every:"5m",
+         description:"new messages and thread replies in #product-feedback — "
+                     "each new record is a feedback item to triage and report"})
+```
+
+- **`limit` must fit the stored baseline.** The snapshot holds 32,768
+  characters and a rich record (author, id, body, links) runs 800–1,600, so
+  25 is a safe ceiling and 15–20 is comfortable. Past that the stored baseline
+  is a clipped prefix and every tick depends on the spilled full body; if that
+  is evicted the watch goes `blind` and reports nothing.
+- **A new message is a record line**: added at the top when the window is not
+  full (`+1/-0`), or added while the oldest drops out (`+1/-1`) once it is —
+  the steady state for a busy channel is the second. Either way the added line
+  IS the message: author, a readable clock (`at 2026/11/05 22:37 EST`) and the
+  message id (`1793908014.147179`), so `mcp__slack_read_thread` can be called
+  straight from the wake.
+- **A record RESULT does not go through the materiality gate.** The decision
+  is the shape of the result, not the source: while a tool returns records, its
+  delta is judged structurally instead of by a model. That gate separates signal
+  from bookkeeping in opaque text, and the record view has already done it —
+  one line per record, the reply's paging fields dropped, header clocks readable
+  and body timestamps scrubbed. On real traffic the gate still called 5
+  of 6 genuine changes `non-material-metadata` and swallowed a thread reply
+  outright, so a record log's delta is delivered unjudged by design. The noise
+  controls that remain are `ignore`, `limit` and the hourly delivery cap.
+  A source that CHANGES shape (a plain-text watch that starts answering in
+  records) re-delivers its whole payload once, because the comparison basis
+  moved — then it behaves as a record watch.
+- **Thread replies** surface on the parent message's record line as its
+  `Thread: N replies (latest: …)` field changing — a CHANGED line, not an
+  added one, which is exactly why a thread watch must not be gate-judged. Read
+  the parent's id from that line and follow up with `mcp__slack_read_thread`.
+- **Do not `ignore` your own user id.** A reply to your message rides YOUR
+  parent record, so that pattern silences the replies the watch exists for
+  (and on a channel where you post, it can silence the channel). `ignore` a
+  bot author that never receives replies instead — on a Gong-fed channel the
+  bot is most of the volume.
+- **A multi-paragraph message is still one record.** Its body stays on the
+  line that carries the author and the id; a blank line inside a message does
+  not split it, so `ignore` and the delta both see one record.
+- **Ownership**: this watch only ticks while its session is hosted. A cold
+  session's watch is dormant — `lop monitor status` marks the row `idle` — so
+  a channel watch belongs to a session that stays up. Record where it lives
+  when you arm it, and treat the host as part of the arming.
+- **Hosting a watch costs a turn — say so when you arm it.** A watch lives only
+  as long as its session is hosted, so a channel that must not be missed needs
+  a host that stays up: an app tab left open on the session, or a recurring wake
+  (say every 2h) that re-hosts it so the next tick can run. Each wake fire is
+  one short turn even when nothing moved, and the monitor then delivers ONE
+  delta for the window it missed — bounded like any delivery (about 12 preview
+  lines, the delivery budget, the hourly cap), so it is not a replay of every
+  missed tick. That is the price of a watch that cannot miss: a wake is what
+  keeps a cold session's watch alive, and a cheaper way to host an idle
+  session does not exist today.
+- **A watch armed before the record split** keeps working: its stored
+  baseline is re-read in the new shape, so a message that landed during the
+  upgrade is still delivered. The exception is a baseline the old cap had
+  clipped — that one is re-captured on the first tick (no delivery), then
+  normal service.
+- **A quiet watch is not a working one**: the row reads `N changes
+  suppressed as non-material (M checks, 0 deliveries)` when the gate filed a
+  change as bookkeeping. Check that before concluding a channel had nothing to
+  say.
+
+## The snapshot must be at the granularity of the thing you watch
+
+A monitor compares ONE snapshot string per tick, and that string is the whole
+input to everything downstream: the diff, the materiality gate and `ignore` all
+judge the snapshot, never the thing you meant to watch. Get the granularity
+wrong and those three quietly judge the wrong object — a channel with new
+messages reads as "nothing changed", or as bookkeeping to suppress.
+
+Two worked examples from this guide:
+
+- **The Slack envelope.** `mcp__slack_read_channel` answers with a JSON
+  envelope holding a whole text log. The monitor splits it into one line per
+  record, so an added line IS one new message and the gate is skipped (a record
+  log has already done the separation the gate is asked to make). Watch the
+  same call collapsed onto one envelope line and every new message becomes a
+  change to one giant line: the gate sees opaque text, calls it metadata, and
+  the message is lost.
+- **A `read` of a growing file.** `read` numbers its lines and truncates at
+  ~8 KB with a `[truncated … N more lines]` footer. `read` pins the HEAD of the
+  file, so once it grows past that window you see the first lines and nothing
+  else: appended lines are invisible, and the watch can never report them.
+  Watch the counter (`wc -l <file>`, `tail -n 20`) instead — that is the right
+  object for a log.
+
+The test to apply before arming: **if one new item does not produce one new
+line, the watch is measuring something else.** Reshape the CALL — narrower
+arguments, a record-aware tool, a per-item listing — rather than arming it and
+tuning `ignore` afterwards; `ignore` cannot recover the items the snapshot
+never represented.
+
 ## What counts as material, and tuning noise
 
 Every tick that finds a difference delivers a delta — but two knobs and one
@@ -120,7 +225,9 @@ default keep "difference" honest:
   `description` leaves the gate guessing, and it will call a counter tick or a
   status line "bookkeeping" and suppress it. **Appended content is never
   gated**: a delta that only adds lines (a log tail, a new row) is delivered
-  as-is. Suppressions are counted (`suppressed.*` in the monitor's state file)
+  as-is, and **a record log is never gated at all** — one line per record has
+  already done the separation the gate is asked to make (see the channel
+  recipe above). Suppressions are counted (`suppressed.*` in the monitor's state file)
   and logged at INFO, and the listing says so: a row with checks, no deliveries
   and suppressions reads `N changes suppressed as non-material (M checks, 0
   deliveries) — the call may have changed without telling you`, not `nothing
@@ -134,7 +241,9 @@ default keep "difference" honest:
   metadata — the 2026-10-20 Slack monitor lost seven replies that way. A long
   changed line now shows a window around the first differing character, and if
   a preview still hides the difference the gate is skipped and the change is
-  delivered (fail open, by design).
+  delivered (fail open, by design). An ADDED line is not clipped at 200
+  characters at all: it gets whatever the delivery budget has left, because for
+  a record log the added line is the news itself.
 - **Long results are compared in full — up to a bound.** A result over the
   tool-output limit is spilled to disk and the model sees a head+tail
   projection; the monitor reads the FULL stored body back for its comparison,
@@ -175,11 +284,22 @@ on it). If the session goes cold, monitors go dormant and resume with it.
 A tool that is momentarily **unreachable** (an MCP server reconnecting or
 asking for a re-auth) is not a failed check: the monitor waits on its backoff
 ladder without counting failures, and if that lasts longer than 30 minutes you
-are told once, with a matching "running again" when it recovers. Only a
-genuine failure walks the disable ladder, and the monitor's departure is
-always announced: a disable, a stall and a recovery each arrive as a message
-naming the monitor, the cause, its delivery count and how to reactivate it.
-Nothing stops silently.
+are told once, with a matching "running again" when it recovers. An MCP server
+that dropped is retried automatically on a capped cool-down (1 minute, doubling
+to 15), so the watch waits without strikes and resumes with one delta when the
+server answers. The waiting
+is bounded: an MCP tool that never resolves does not wait forever — after 24
+hours the monitor disables itself with the same truthful notice, and because
+`unavailable_since` is persisted, re-hosting the session across wakes does not
+reset that clock. An MCP watch whose tool is missing because discovery
+**failed at startup** is that same kind of wait: it charges no failures, up to
+that 24-hour bound, and discovery is retried when the session restarts; a
+watch whose tool cannot be resolved against a completed discovery still
+disables itself — through the ladder, or through that 24-hour bound — rather
+than waiting forever. Only a genuine failure walks the disable ladder, and the
+monitor's departure is always announced: a disable, a stall and a recovery
+each arrive as a message naming the monitor, the cause, its delivery count and
+how to reactivate it. Nothing stops silently.
 
 A monitor can also be **blind**: its call still runs, but the full result it
 needs to compare is no longer available — the saved output was evicted from

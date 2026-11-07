@@ -591,7 +591,17 @@ def add_parser(
     )
     net_sessions.add_argument("--cwd", default="", help="with --create: where it should run")
     net_sessions.add_argument("--name", default="", help="with --create: its title")
-    net_sessions.add_argument("--prompt", default="", help="with --create: its first turn")
+    net_sessions.add_argument(
+        "--prompt",
+        default="",
+        help=(
+            "with --create: its first turn, run on that device once its runtime is up. "
+            "The receipt reports whether it settled — completed, failed (with the cause), "
+            "or still running — so a failure is reported here whenever that owner can "
+            "settle the turn; against an older owner the receipt says it cannot see the "
+            "end instead of claiming one"
+        ),
+    )
     # WHO THE SESSION IS (definitions.py). Three flags, each naming a DISTINCT
     # thing the local product can put on a session, because collapsing them would
     # make one word mean two and the frame already has to say which it got:
@@ -889,10 +899,26 @@ def add_parser(
     )
     identity_set_name.add_argument("--json", action="store_true")
 
-    actions.add_parser(
+    # ``--repair`` is the BORROWER-side sibling of ``lop network mcp credentials
+    # --repair`` (which is the OWNER's, and re-grants the references behind a
+    # shared server). This one re-asks every owner whose shared key this device is
+    # not currently able to use, once, through the ordinary grant path: the
+    # operator's answer to "the login expired and I fixed it on the other machine,
+    # do I have to restart the session?". Without the flag the listing is
+    # read-only, as it always was.
+    credentials_parser = actions.add_parser(
         "credentials",
         help="What this device owns, and what it borrows from whom",
-    ).add_argument("--json", action="store_true")
+    )
+    credentials_parser.add_argument("--json", action="store_true")
+    credentials_parser.add_argument(
+        "--repair",
+        action="store_true",
+        help=(
+            "Re-ask each owner whose share this device cannot use right now, then "
+            "list; prints why it still cannot when the owner has nothing to offer"
+        ),
+    )
 
     credential = actions.add_parser("credential", help="Share, revoke, or mark one credential")
     credential_actions = credential.add_subparsers(dest="credential_command")
@@ -2272,6 +2298,226 @@ def _owner_seen_at(record: Any, owner_device: str) -> float | None:
     return float(seen) if seen else None
 
 
+def _skip(key: str, reason: str) -> dict[str, Any]:
+    """One considered-but-not-asked key, and WHY. The shape the CLI prints."""
+    return {"credential_name": key, "asked": False, "reason": reason}
+
+
+def _repair_borrowed(
+    self_device: str, self_name: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Re-ask each owner this device borrows from, ONCE; report what came back.
+
+    Returns ``(outcomes, skipped)``. ``outcomes`` is one entry per ASK made (or the
+    one entry saying no ask could start at all); ``skipped`` is one entry per key the
+    selection CONSIDERED and did not ask, with the reason. A repair that finds
+    nothing must say so: a flag that prints its network summary, asks nobody and
+    exits 0 is indistinguishable from one that worked (QA round 3), and "nothing was
+    askable" and "the selection missed a key that should have been asked" are
+    different facts about the device.
+
+    WHY THE BORROWER NEEDS ITS OWN ``--repair``, and why it is not the owner's. A
+    share that stops working looks identical from here whether the owner signed out,
+    the share was withdrawn, or the owner is simply away — three different repairs,
+    two of which happen on the OTHER machine. What this device can do is the one
+    thing the session cannot: ask again NOW, and then say which of the three came
+    back. That is also the answer to "I fixed the login on the other machine, must I
+    restart the session?": after this the running session's next resolve reaches the
+    owner.
+
+    THE ASK IS ORDINARY (``heal_borrow`` passes ``force_refresh=False``): the owner
+    refuses a FORCED refresh from a device that is not its admin, and the repair the
+    operator needs must not require admin rights. What this clears first is this
+    device's own observation of the refusal (``forget_refusal``).
+
+    WHOSE KEYS ARE ASKABLE. Exactly the ones ``PlacementDocument.borrowable_keys``
+    names — this device is a HOLDER for the key and does not own it — in the network
+    the client belongs to. ``borrowable_keys`` is the decision, and the per-key
+    classification below only supplies the words for the keys it excludes, so the two
+    cannot drift into disagreeing about what was asked.
+
+    ``lop network mcp credentials --repair`` is the OWNER-side sibling (it re-grants
+    the secrets behind a shared server); this one mints nothing and grants nothing —
+    a device that is not permitted to ask is refused again, by the owner, on the
+    dial.
+    """
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from local_operator.network.credentials.state import PlacementState
+
+    try:
+        client = MeshCredentialClient.for_this_device()
+    except Exception:  # noqa: BLE001 — a repair that cannot start is reported, not raised
+        client = None
+    if client is None:
+        # TWO REASONS, TOLD APART. "No network" and "in a network but nothing is
+        # shared with this device" are the same absence of a client and different
+        # facts for the operator: the durable refusal record can outlive the placement
+        # document that produced it (QA round 3 hit exactly that), and telling them
+        # "you are not in an active network" while their network record is right there
+        # is the kind of wrong reason this flag exists to stop printing.
+        from local_operator.network import store as network_store
+
+        try:
+            networks = network_store.list_networks()
+        except Exception:  # noqa: BLE001 — an unreadable store is reported, not raised
+            networks = []
+        if networks:
+            # "holds no sharing list" was untrue for the owner this file is full of
+            # (review round 4, nit): an owner that shares its logins OUT and borrows
+            # nothing has a placement list and no borrowable key, which is exactly the
+            # state this branch describes. Say what the failed predicate actually
+            # means: `placement_for_store` returns None when no key owned elsewhere is
+            # held here — not when the device has no placement list at all.
+            reason = (
+                "this device is in "
+                f"{len(networks)} network record(s) but borrows nothing here — no key "
+                "is shared with it by another device (sharing its own logins out does "
+                "not create a borrow), so there is nothing to re-ask (a durable "
+                "refusal record outlives the placement document that produced it)"
+            )
+        else:
+            reason = (
+                "nothing to re-ask: this device is not in an active network, so no "
+                "credential here is borrowed"
+            )
+        return (
+            [
+                {
+                    "credential_name": "",
+                    "asked": False,
+                    "recovered": False,
+                    "code": "no_network",
+                    "cause": "unreachable",
+                    "reason": reason,
+                }
+            ],
+            [],
+        )
+    outcomes: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    wanted: list[str] = []
+    try:
+        ours = str(getattr(client, "network_id", "") or "")
+        asker = str(getattr(client, "self_device", "") or self_device or "")
+        documents = list(_placement_documents())
+        foreign: list[str] = []
+        for document in documents:
+            if ours and document.network_id != ours:
+                foreign.append(document.network_id)
+                for key in sorted(document.entries):
+                    skipped.append(
+                        _skip(
+                            key,
+                            f"in network '{document.network_id}', which this "
+                            f"device's relay cannot ask for — only '{ours}' is reachable",
+                        )
+                    )
+                continue
+            if not asker:
+                # No member id in this network means no holder row can name this
+                # device, so no key is askable from inside it.
+                for key in sorted(document.entries):
+                    skipped.append(
+                        _skip(
+                            key,
+                            "this device has no member id for the network — "
+                            "see 'lop network status'",
+                        )
+                    )
+                continue
+            state = PlacementState.load(document.network_id)
+            borrowable = set(document.borrowable_keys(asker))
+            for key in sorted(document.entries):
+                entry = document.entries[key]
+                # SECRET-KEY COPIES FIRST, BEFORE ``borrowable`` (review round 4, R4-1).
+                # ``borrowable_keys` filters on owner and holder only, so a ``secret:``
+                # copy this device materialised from an owner SATISFIES it — reading the
+                # holder test as "askable" dialled the owner for a value already sitting
+                # in the local store, and then reported a false "still refused" (or a
+                # false "repaired") about a credential that works fine. A copy is never
+                # asked for, whatever the holder predicate says.
+                if key.startswith("secret:"):
+                    skipped.append(
+                        _skip(
+                            key,
+                            "a copy — it is read from this device's own store, "
+                            "so no owner is asked",
+                        )
+                    )
+                elif key in borrowable:
+                    if state.status(key) == "active":
+                        # Already proven working: a re-ask would be a gratuitous dial
+                        # and a gratuitous grant on the owner.
+                        skipped.append(
+                            _skip(
+                                key,
+                                "already working — a grant was served, so there "
+                                "is nothing to repair",
+                            )
+                        )
+                        continue
+                    wanted.append(key)
+                    continue
+                elif entry.owner_device == asker:
+                    skipped.append(
+                        _skip(
+                            key,
+                            "owned here — the local login serves it, so there "
+                            "is no borrow to repair",
+                        )
+                    )
+                else:
+                    skipped.append(
+                        _skip(
+                            key,
+                            "not shared with this device (no holder row), so "
+                            "the owner would refuse the ask",
+                        )
+                    )
+        if not documents:
+            skipped.append(
+                _skip(
+                    "",
+                    f"no placement rows in '{ours or 'this network'}' — no key "
+                    "here is shared with this device, so there is nothing to "
+                    "re-ask (the last refusal stands until an owner shares one)",
+                )
+            )
+        elif not wanted and not skipped:
+            skipped.append(_skip("", "no placement entry was askable — see above"))
+        outcomes = asyncio.run(_repair_each(client, wanted, self_name=self_name))
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 — closing a client is not part of the answer
+                pass
+    return outcomes, skipped
+
+
+async def _repair_each(client: Any, keys: list[str], *, self_name: str) -> list[dict[str, Any]]:
+    """One healing re-ask per key, SERIALLY — a repair is not a fan-out.
+
+    Serial on purpose: every ask is a round trip to a device that may be refreshing
+    a token, and the operator's repair is a handful of keys at most. A parallel
+    version against one owner would be the retry storm the refusal cache exists to
+    prevent, with the cache deliberately bypassed.
+    """
+    from local_operator.network.credentials.healing import heal_borrow
+
+    outcomes: list[dict[str, Any]] = []
+    for key in keys:
+        outcome = await heal_borrow(
+            client,
+            key,
+            provider="mcp-oauth" if key.startswith("mcp:") else key,
+            peer_name=self_name,
+        )
+        outcomes.append(outcome.as_dict())
+    return outcomes
+
+
 def _cmd_credentials(args: argparse.Namespace) -> int:
     """``lop network credentials [--json]``: who owns what, and what this device borrows.
 
@@ -2454,6 +2700,31 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     shareable = _shareable_servers(self_device, self_name=self_name)
     shareable.extend(_shareable_providers(self_device))
     lines.extend(readiness_mod.shareable_lines(shareable))
+    # THE REPAIR RUNS BEFORE THE PAYLOAD IS BUILT, so the listing the operator reads
+    # already reflects what the owners just answered — the same order the pull takes
+    # above, and for the same reason: a row composed before the ask would show the
+    # state the repair exists to change.
+    repaired: list[dict[str, Any]] = []
+    repair_skipped: list[dict[str, Any]] = []
+    if bool(getattr(args, "repair", False)):
+        repaired, repair_skipped = _repair_borrowed(self_device, self_name)
+        for row in repaired:
+            name = str(row.get("credential_name") or "")
+            if row.get("recovered"):
+                lines.append(f"repaired: '{name}' — the owner served a working credential")
+            elif name:
+                lines.append(f"still refused: '{name}' — {row.get('reason') or ''}")
+            else:
+                lines.append(f"repair: {row.get('reason') or ''}")
+        # A CONSIDERED KEY THAT WAS NOT ASKED IS SAID OUT LOUD (QA round 3): the flag
+        # used to exit 0 with no line at all when its selection found nothing, which
+        # reads exactly like a repair that worked.
+        for row in repair_skipped:
+            name = str(row.get("credential_name") or "")
+            if name:
+                lines.append(f"skipped: '{name}' — {row.get('reason') or ''}")
+            else:
+                lines.append(f"repair: {row.get('reason') or ''}")
     payload = {
         "ok": True,
         "self_device": self_device,
@@ -2463,6 +2734,9 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         "refreshed": bool(pulled),
         "newly_borrowable": newly,
     }
+    if bool(getattr(args, "repair", False)):
+        payload["repaired"] = repaired
+        payload["repair_skipped"] = repair_skipped
     # A MEMBER WHOSE DOCUMENT COULD NOT BE MERGED IS SAID OUT LOUD (review round 5,
     # NIT 2). ``pull_placement`` refuses one unreadable document BY NAME and merges the
     # rest, which is the resilience we want — but that reply reached no surface: this
@@ -2559,9 +2833,11 @@ def _shareable_servers(self_device: str, *, self_name: str = "") -> list[dict[st
                 f" (run on {self_name or 'this device'}, which holds the login)"
             )
         elif dead:
-            remedy = readiness_mod.MCP_DEAD_LOGIN_REMEDY
+            # The runnable command needs the server NAME, which is the row's own
+            # key here — never the URL (review R1-1).
+            remedy = readiness_mod.mcp_dead_login_remedy(name=str(server.get("name") or ""))
         elif login_here is False:
-            remedy = readiness_mod.mcp_login_remedy(url)
+            remedy = readiness_mod.mcp_login_remedy(url, name=str(server.get("name") or ""))
         else:
             remedy = ""
         rows.append(
@@ -3203,9 +3479,10 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             from local_operator.network import readiness as readiness_mod
 
             payload["login_dead"] = True
+            dead_name = readiness_mod.mcp_server_name_for_url(_config_dir(), mcp_url_from_key(key))
             lines.append(
                 "note: this device's login is no longer valid — "
-                f"{readiness_mod.MCP_DEAD_LOGIN_REMEDY}"
+                f"{readiness_mod.mcp_dead_login_remedy(name=dead_name)}"
             )
     if verb == "share" and github_mod.is_github_key(key):
         # The disclosure names the ARM that will serve (§3.4): only the App is
@@ -3527,9 +3804,17 @@ def _require_local_credential(key: str, provider: str) -> None:
         raise MeshRefusal("no_local_credential", github_mod.no_source_message())
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
+        # THE REMAINDER IS THE NAME, RESOLVED FROM THIS DEVICE'S OWN CONFIG. The
+        # share verb knows only the ``mcp:<url>`` key, so the name is read back
+        # from the file the writers target rather than dropped: a URL in that
+        # position is a command ``/mcp login`` refuses (review R1-1). When this
+        # device has no user-scope entry for the URL, the clause names no command
+        # and the reader gets the form instead of a dead paste.
+        login_name = readiness_mod.mcp_server_name_for_url(_config_dir(), url)
         raise MeshRefusal(
             "no_local_credential",
-            f"this device has no MCP login for {url}; {readiness_mod.mcp_login_remedy(url)}",
+            f"this device has no MCP login for {url}; "
+            f"{readiness_mod.mcp_login_remedy(url, name=login_name)}",
         )
     raise MeshRefusal(
         "no_local_credential",
@@ -7617,6 +7902,36 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 str(detail.get("detail") or "")
                 or ("prompt admitted" if admitted else "the prompt was not admitted")
             )
+            # WHAT BECAME OF THAT FIRST TURN (CR-1). "prompt admitted" is the
+            # durable append, not the turn: a turn that failed a second later on
+            # that device was reported to nobody here, so the person watched a
+            # conversation that never answered (measured on a real peer,
+            # 2026-11-06). `--send` reads the same fact off a viewer stream; a
+            # create has no stream, so the OWNER settles its own turn and this
+            # renders what it reported.
+            #
+            # THE THREE STATES ARE THE OWNER'S OWN WORDS, and `settled` is the
+            # only one that may say "completed": it is carried by an owner that
+            # honoured the wait, never inferred from this side having asked
+            # (agent review round 1, BLOCKER-1 — an older peer's append ack is
+            # byte-identical to a settling peer's success).
+            turn = detail.get("turn")
+            if isinstance(turn, dict):
+                state = str(turn.get("state") or "")
+                if state == "failed":
+                    why = str(turn.get("detail") or "the turn ended in failure")
+                    lines.append(f"turn failed on {peer}: {why}")
+                elif state == "settled":
+                    lines.append(f"turn: completed on {peer}")
+                elif state == "running":
+                    # NO "FOLLOW IT WITH --peek" HERE (agent review round 1,
+                    # MAJOR-2): over the real journal a failed turn's assistant row
+                    # is `content: null` and its cause is an incident record with no
+                    # `.text`, so the peek window filters both out and shows the
+                    # user their own message and nothing else — the dead end this
+                    # whole slice exists to end. Saying the outcome is NOT reported
+                    # is true; naming a read that silently cannot show it is not.
+                    lines.append(f"turn: running on {peer} — this receipt cannot see how it ends")
         else:
             lines.append(
                 "no prompt sent — the session exists on that device; "

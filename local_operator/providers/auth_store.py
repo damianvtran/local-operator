@@ -2273,7 +2273,15 @@ class AuthStore:
                 ("identity_unattributed", self._now_ms(), legacy.id, json.dumps(legacy.data)),
             )
         self._conn.commit()
-        written = self._after_credential_write("radient", stored.id)
+        # `verified_login`: this is the one write that PROVES an identity, so it
+        # alone may re-point the tunnel at itself (`install.heal_pin_after_login`).
+        # ONLY FOR THE DEFAULT STORE (agent review round 1, m-1): the heal and its
+        # proof read the process-default store and `tunnel/config.json` beside it
+        # (`config_dir()`), so `stored.id` names "the row this login just wrote"
+        # only when THIS store is that one. A store opened on another
+        # `db_path` (a scratch or test store) still gets the plain re-arm.
+        verified_here = self._db_path.resolve() == default_db_path().resolve()
+        written = self._after_credential_write("radient", stored.id, verified_login=verified_here)
         self._org_hub_boundary("sign-in")
         return written
 
@@ -2581,7 +2589,9 @@ class AuthStore:
             return None
         return str(row[0]) if row and row[0] else None
 
-    def _after_credential_write(self, provider: str, credential_id: int | None) -> StoredCredential:
+    def _after_credential_write(
+        self, provider: str, credential_id: int | None, *, verified_login: bool = False
+    ) -> StoredCredential:
         """Read the row back, then run what a completed write implies.
 
         One exit for both the update and the insert path, so a later caller
@@ -2618,7 +2628,7 @@ class AuthStore:
         # receipt. Quarantine belongs after a verified exchange and the host's
         # cancellation check, never in this shared metadata-write hook.
         self._delete_blocks(stored.id)
-        self._rearm_parked_tunnel_login(provider, stored)
+        self._rearm_parked_tunnel_login(provider, stored, verified_login=verified_login)
         self._publish_account_file()
         return stored
 
@@ -2645,7 +2655,9 @@ class AuthStore:
             store_uid=self.store_uid,
         )
 
-    def _rearm_parked_tunnel_login(self, provider: str, stored: StoredCredential) -> None:
+    def _rearm_parked_tunnel_login(
+        self, provider: str, stored: StoredCredential, *, verified_login: bool = False
+    ) -> None:
         """Let a login that fixed a dead grant bring the tunnel connector back.
 
         The connector cannot notice by itself: parking exits SUCCESSFULLY
@@ -2658,7 +2670,11 @@ class AuthStore:
 
         Unconditional and cheap on purpose: `tunnels.install.rearm_if_parked`
         decides whether the write concerns the tunnel at all, and its first
-        guard is the park file, which does not exist in the ordinary case. The
+        guard is the park file, which does not exist in the ordinary case. A
+        VERIFIED login (``verified_login``) costs a little more first: the
+        same-account heal reads `tunnel/config.json` and, when a tunnel is
+        configured with a different pin, opens the store to scan its Radient
+        rows — still no network, and still off the loop (below). The
         import is lazy because `tunnels.install` reaches `launchd`, `paths` and
         the tunnels package, none of which belong on the import path of a
         credential write — and because this module is imported BY that package.
@@ -2681,16 +2697,28 @@ class AuthStore:
                 provider,
             )
             return
+        # The Team Bridge enrollment pins a credential row exactly as the tunnel
+        # does, and reads it from THIS store's root (``<root>/auth.db``), so a
+        # verified login here is also the bridge's same-account heal trigger.
+        bridge_root = self._db_path.parent
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             # No loop on this thread. Deliberately the same call rather than a
             # skipped one: a script driving a login still wants its connector
             # back, and there is no loop here to stall.
-            self._rearm_off_thread(install, provider, stored.id)
+            self._rearm_off_thread(install, provider, stored.id, verified_login, bridge_root)
             return
         try:
-            loop.run_in_executor(None, self._rearm_off_thread, install, provider, stored.id)
+            loop.run_in_executor(
+                None,
+                self._rearm_off_thread,
+                install,
+                provider,
+                stored.id,
+                verified_login,
+                bridge_root,
+            )
         except RuntimeError:
             # A running loop whose default executor is ALREADY SHUT DOWN — and
             # this is the one line in the guard chain that can fail there, so it
@@ -2711,17 +2739,56 @@ class AuthStore:
             # describes — a loop on its way out is not serving anyone, so the
             # blocking call it can no longer hand to a thread costs no request,
             # and `_rearm_off_thread` never raises.
-            self._rearm_off_thread(install, provider, stored.id)
+            self._rearm_off_thread(install, provider, stored.id, verified_login, bridge_root)
 
     @staticmethod
-    def _rearm_off_thread(install: Any, provider: str, credential_id: int) -> None:
+    def _rearm_off_thread(
+        install: Any,
+        provider: str,
+        credential_id: int,
+        verified_login: bool = False,
+        bridge_root: Path | None = None,
+    ) -> None:
         """The re-arm itself, where a blocking call costs nobody a turn.
 
         Never raises: a re-arm that fails must not fail the login that triggered
         it — and on the executor path an exception would surface only as an
         unretrieved future exception, which is neither a log line nor a shrug.
+
+        A VERIFIED login first tries the same-account re-point
+        (``install.heal_pin_after_login``), in THIS thread and BEFORE the re-arm,
+        because the two are one decision about one connector: the heal re-points
+        a pin the re-arm would decline (``owns != credential_id``) and restarts
+        the connector itself, so when it acted the re-arm is skipped rather than
+        racing it with a second kickstart from another thread.
+
+        The Team Bridge heal runs FIRST and on its own: it is independent of the
+        tunnel's outcome (the tunnel heal's early return must not skip it), and
+        ``heal_credential_pin`` never raises. ``fresh_id`` makes the row this
+        login just wrote the only acceptable successor.
         """
+        if verified_login and provider == "radient" and bridge_root is not None:
+            try:
+                from local_operator.team_bridge.heal import (
+                    TRIGGER_LOGIN,
+                    heal_credential_pin,
+                )
+
+                bridged = heal_credential_pin(
+                    config_dir=bridge_root, trigger=TRIGGER_LOGIN, fresh_id=credential_id
+                )
+            except Exception:  # noqa: BLE001 — a login must not fail over the bridge
+                bridged = ""
+            if bridged:
+                logger.info("%s", bridged)
         try:
+            if verified_login:
+                healed = install.heal_pin_after_login(
+                    provider=provider, credential_id=credential_id
+                )
+                if healed:
+                    logger.info("%s (provider=%s)", healed, provider)
+                    return
             note = install.rearm_if_parked(provider=provider, credential_id=credential_id)
         except Exception:  # noqa: BLE001 — a login must not fail over a service restart
             logger.warning(

@@ -324,13 +324,17 @@ _OWNER_ONLY_CAPABILITY_PROBES = frozenset(
         "has_pending_fork",
         "journal_credential_change",
         "measure_preloaded_context",
-        # A viewer never holds a monitor scheduler — the scheduler is
-        # IN-PROCESS only (monitor contract §10.4) — and the read is
-        # owner-gated exactly as the deliberate-stop read below is:
-        # `_mark_own_monitors_dormant` is reached only through
-        # `_stop_local_session`'s owner branch, so a viewer's `/stop` never
-        # walks it (its owner stamps the dormant marker on the control rung).
-        "monitor_scheduler",
+        # ``monitor_scheduler`` USED TO SIT HERE and no longer may. The entry
+        # said "a viewer never holds a monitor scheduler — the scheduler is
+        # IN-PROCESS only", which was true of the SCHEDULER and false of the
+        # READ: `lop` binds a viewer for every local user, the wake panel reads
+        # the member off whatever host object it holds, and the default it got
+        # back made an armed monitor paint nothing on the band built to show it
+        # (measured in three sessions, three design rounds). The viewer's answer
+        # is a snapshot over canonical ``monitors`` — the same rows the owner
+        # publishes — so the member is declared on the protocol and the one
+        # owner-gated reader (`_mark_own_monitors_dormant`, reached only through
+        # `_stop_local_session`'s owner branch) simply never runs on a viewer.
         # A viewer never owns a session to dispose, so it has no deliberate
         # stop to record: a viewer's `/stop` goes over the socket, where the
         # OWNER records the verdict. `_stop_local_session` returns before
@@ -910,17 +914,18 @@ def test_remote_session_satisfies_the_viewer_protocol_at_runtime() -> None:
     which is this guard's job, and pyright catches the signatures.
 
     What it does NOT catch, contrary to what this docstring claimed for two
-    rounds, is an ``__init__``-assigned attribute disappearing. The eight below
+    rounds, is an ``__init__``-assigned attribute disappearing. The nine below
     are hand-assigned to satisfy ``__new__``, so the ``isinstance`` passes
     whether or not ``__init__`` still sets them — the reviewer deleted
     ``runtime_version`` from the class outright and got 7 tests passing against 2
-    pyright errors (review round 2, MINOR-2). For those eight the division of
+    pyright errors (review round 2, MINOR-2). For those nine the division of
     labour runs the other way: **pyright is the guard and this test is
     structurally blind.** Stated here because a test believed to cover a case it
     cannot is worse than an uncovered case.
 
-    Four of the eight arrived with the engine-state block: declaring ``jobs``,
-    ``wake_scheduler``, ``mcp_manager`` and ``mcp_startup`` on
+    Five of the nine arrived with the engine-state block: declaring ``jobs``,
+    ``wake_scheduler``, ``monitor_scheduler``, ``mcp_manager`` and
+    ``mcp_startup`` on
     ``ViewerSessionProtocol`` makes them contract members of THAT protocol, and
     the contract is checked HERE, on an instance, not only by pyright — a
     Protocol member that an instance lacks fails ``isinstance`` even when the
@@ -931,6 +936,7 @@ def test_remote_session_satisfies_the_viewer_protocol_at_runtime() -> None:
     from local_operator.session.frontend_state import (
         SnapshotJobs,
         SnapshotMcpManager,
+        SnapshotMonitorScheduler,
         SnapshotWakeScheduler,
     )
 
@@ -938,16 +944,18 @@ def test_remote_session_satisfies_the_viewer_protocol_at_runtime() -> None:
     # The instance attributes are assigned in ``__init__``, which dials a
     # socket. Set them directly: presence is what the protocol requires, and
     # constructing a real facade would make this a network test. See the
-    # docstring: this assignment is exactly why the eight are pyright's to guard.
+    # docstring: this assignment is exactly why the nine are pyright's to guard.
     session.runtime_version = ""
     session.runtime_source_ref = ""
     session.degraded_reason = ""
     session.saved_preview_partial = False
     # The engine-state snapshots, exactly as `AttachedSession.__init__` builds
     # them (`attached.py`): a follower's read-only view of the runtime's jobs,
-    # wakes and MCP servers, and the startup outcome `None` until one is read.
+    # wakes, monitors and MCP servers, and the startup outcome `None` until one
+    # is read.
     session.jobs = SnapshotJobs()
     session.wake_scheduler = SnapshotWakeScheduler()
+    session.monitor_scheduler = SnapshotMonitorScheduler()
     session.mcp_manager = SnapshotMcpManager()
     session.mcp_startup = None
 

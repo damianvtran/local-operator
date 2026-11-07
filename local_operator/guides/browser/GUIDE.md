@@ -425,6 +425,9 @@ Same `browser` tool. Actions:
 - `open` (start a surface at an http/https URL) · `goto` (navigate the surface)
 - `read` (page text; `selector` scopes it) · `snapshot` (accessibility tree
   with click refs like `e5`)
+- `copy` (write ONE element's text to the clipboard — desktop app host only, and
+  the result is a receipt, never the text; use it for a value the page shows
+  once. See "Copying a value the page shows once" below)
 - `screenshot` (writes a PNG; works on the background tab)
 - `click` / `type` (by CSS selector or a snapshot ref; trusted input events)
 - `press key="Control+K"` (ONE key chord to the owned page; desktop app only).
@@ -458,6 +461,11 @@ Same `browser` tool. Actions:
   selects only (custom controls get a typed desktop-only refusal). A miss lists
   up to 50 available options; use those, not guessed labels. Unverified
   selection is reported as such — inspect the page before retrying.
+- `setvalue selector="#environment" text="Production"`: set a form control's
+  VALUE in one action — a native `<select>` option by label or value, an
+  `<input>`/`<textarea>` (date and time inputs take the ISO string) — and the
+  result reports what the control holds AFTER the change, not what you asked
+  for. Desktop app host only (see below).
 - `scroll` (by direction, pixel delta, or scroll an element into view)
 - `logs` (the tab's console output and uncaught exceptions since it opened —
   for debugging web apps)
@@ -472,6 +480,102 @@ Same `browser` tool. Actions:
 - `record_start` / `record_stop` (record the tab's video to an `.mp4`, at an
   optional `width`/`height` and `quality: "high"` — desktop app host only; see below)
 - `close` (drop the surface and its tab)
+
+### Setting a value: native select, date pickers, rich pickers
+
+`setvalue` exists because a native `<select>` is otherwise unreachable: `select`
+speaks to the option model, `type` cannot move a native select at all, and a
+click on the option node fails when the popup is browser chrome rather than page
+DOM. Three worked cases, all against the control the page actually renders:
+
+```text
+# 1. Native <select> — an Apple-style settings form ("Environment")
+snapshot                                   # prints combobox "Environment" [e2]
+setvalue selector=e2 text="Production"     # the ref WITHOUT its brackets
+# -> Set e2 to 'production'. ...           the read-back is the OPTION's value
+
+# 2. <input type="date"> — ISO string, exactly as the DOM stores it
+setvalue selector="input[name=expires]" text="2027-03-01"
+
+# 3. A rich picker whose VISIBLE field is a real <input> (typeahead, date picker)
+setvalue selector="input[aria-label='Environment']" text="Production"
+#    the popup is only a suggestion list here; the value lives in the input,
+#    so nothing has to open, click or wait
+```
+
+How a value is matched and what comes back:
+
+- **Native `<select>`**: the option is matched by visible label, then by option
+  value; both are tried exact first, then case-insensitively. An absent match
+  (`option_not_found`) and an ambiguous one (`option_ambiguous`, a `multiple`
+  select whose label matched twice) are both refused and both name up to 50 of
+  the control's own options — copy one instead of guessing.
+- **`<input>` / `<textarea>`**: the value goes through the prototype's setter, so
+  a React-controlled field registers the edit, and `input` + `change` are
+  dispatched after it.
+- **Date/time**: `date`, `time`, `datetime-local`, `month` and `week` hold only
+  the ISO spelling the DOM itself stores (`2027-03-01`, `13:45`,
+  `2027-03-01T13:45`). A locale spelling (`01/03/2027`) is not translated — the
+  control's own sanitizer will not store it, so the host refuses the write as
+  `value_rejected` and names the format it does accept (`expected`:
+  `YYYY-MM-DD`). That refusal covers `number`, `range` and `color` too, because
+  a clamp and a fallback are the same failed write as a cleared date. The
+  refusal changes nothing: the host restores the value the field had and
+  dispatches no `input`/`change`, so the page never saw the bad string — fix the
+  format from `expected` and retry. A host predating that restore is the one
+  case that is not clean: it writes first and refuses after, so the field keeps
+  the sanitizer's reading (usually empty) and the page has been notified.
+- **The result reports the read-back** — the value the control holds after the
+  dispatch, which is not always what was asked for (a select maps a label onto
+  its value; a masked field reports its own format). If the host could not read
+  it, the sentence says `value unverified` instead of presenting an empty string
+  as success.
+- **A credential control reports no value.** The harness withholds it when the
+  host names `input_type: "password"` OR sets `redacted: true` — both, because a
+  host may declare secrecy one way and not the other — printing
+  `value withheld: a credential field` and leaving the value out of the details.
+  It is deliberate in the safe direction: a host that redacts but still sends a
+  value, or names a password without redacting, is not trusted to have done it
+  for us, so a page-held secret cannot reach the transcript either way.
+- **Refused**: a target that is not a form control (use `select` for a
+  page-owned ARIA listbox, or `type` for a `contenteditable`), a checkbox or
+  radio (`not_a_value_control` — its `value` is what it would SUBMIT and its
+  state is `checked`, so toggle it with `click`; writing the value would report
+  success on an unticked box), a disabled, inert or read-only control, a file
+  input (that is `upload`), or a missing target or value. An empty `text` is a
+  legitimate value: it clears an input or textarea.
+  A credential field is `type` with `secret_ref`, never `setvalue` — this action
+  carries a literal by definition and refuses a secret ref, so `type` is the only
+  action that can enter a stored secret. The one place a secret can still meet
+  `setvalue` is a target the caller did not know was a password box, so a
+  `password` control's result reports no value at all (see below).
+
+What `setvalue` is, and is not — the boundary is structural, not a promise:
+
+- It runs ONE **fixed page program** with a committed source string, the same
+  transport the structured reads (`styles`, `hit_test`, `ancestors`, `query`)
+  use. The caller supplies DATA — a target and a value — never source; there is
+  no expression, no callback and no evaluation hook anywhere in the path.
+- It runs in the resolved element's **own frame**, in the session's **own tab**,
+  reached through the existing surface registry and frame plumbing. It never
+  reaches a privileged (chrome/extension) context, never navigates, issues no
+  network request, and touches no node outside the target.
+- It cannot cross origins or frames that a `selector` could not already address:
+  a target inside an iframe is a cross-frame selector, and frames are driven the
+  way every other action drives them.
+- Which host: the desktop app's browser host only. The extension neither serves
+  nor advertises it, so it answers `'setvalue' is served only by the Local
+  Operator desktop app's browser` and every other action on that tab still
+  works — open the page with `backend="ui"` to set a value.
+
+When the control is not a form control, the tool you want is a different one.
+`select` owns the comboboxes you must OPEN: its target is the trigger, it clicks
+the trigger and then the option in the page's own DOM, so a page-owned ARIA
+listbox with no input behind it is its job, not this verb's. `type` owns the
+editors, where the "value" is a document rather than a value: `contenteditable`
+regions and rich-text fields take trusted keystrokes, and `secret_ref` lives on
+that action too. `setvalue` is for a control that already holds a value in the
+DOM — which is the whole difference, and the reason it can read it back.
 
 ### Network capture: what the tab actually sent and received
 
@@ -646,6 +750,95 @@ does not have to be the visible one: recording reads the same pixels
   `record_size` capability and is refused before any capture; the copy says to
   update it or drop the size for a 1280x720 clip. The Chrome extension host
   cannot record at a chosen size at all and says so.
+
+### Copying a value the page shows once (an API key, a recovery code)
+
+Some pages show a value exactly once and never again — a freshly created API key,
+a recovery code, a webhook secret. Move it to the clipboard and into the secret
+store without it passing through the conversation:
+
+```text
+browser open  https://app.example.test/settings/keys
+snapshot                    # take the ref BEFORE a value is in the field, e.g. e9
+copy selector=e9            # writes the element's text to the clipboard
+```
+
+Then, in `bash`, in this order and without printing the value:
+
+```bash
+printf '%s' "$(pbpaste)" | lop secret set MY_NEW_KEY   # store it
+lop secret describe MY_NEW_KEY --length --fingerprint   # verify without revealing
+lop secret list                                         # it is stored, and under the right name
+```
+
+- **The whole point of this recipe is that the value never enters the
+transcript.** `copy` answers with a receipt — how many characters, a `sha256`
+prefix, which element, and whether the clipboard readback matched — and never
+the text. So a one-time key can go from a page into the encrypted store while no
+tool result, log line or error message ever holds it. Never `echo` the value,
+never print it to check it, never paste it into a message to the user or to
+another tool.
+- **Take the ref before the value is in the field.** A snapshot reports a
+control's value on its line, so a one-time key already sitting in a field rides
+that line into the transcript and into every later result that quotes it. Snapshot
+before the page shows the key, or reach the element with a CSS `selector` instead
+of a ref when the value is already on the page. Find that selector from markup you
+saw before the key appeared. Once the key is showing, run no `snapshot`,
+`screenshot` or `query` at all, not just at that element: an unscoped `snapshot`
+covers the whole page and prints the input's value, a full-page `screenshot`
+shows the key, and `query` returns an input's value. `read` returns the element's
+text (`textContent`, or `innerText` on cmux), which leaves out an `<input>`'s
+value but not a key shown as text: a server-filled `<textarea>`, `<pre>` or
+`<code>` holds it as child text, and every host's `read` prints it. So never run
+an unscoped `read` then either; scope it only to a container you saw before the
+key appeared, and only when the key sits in an `<input>`.
+- **Use `printf '%s' "$(pbpaste)"`, not bare `pbpaste`.** Command substitution
+strips the trailing newline a page may have written, and that newline would
+become part of the stored secret — every later use of it then fails in a way
+that looks exactly like a wrong key.
+- **A page is never given clipboard access, and cannot read the clipboard.** A
+driven page is granted no clipboard permission at all: when its own Copy button
+asks, the host performs that write on the page's behalf from the app's main
+process and never grants — or implements — a read, so `clipboard-read` stays
+denied for every page and `readText()` keeps rejecting. The clipboard is a
+one-way street out of the page: the site being driven cannot take anything off
+it. Treat `copy` as a write, never as a way to move a secret INTO a page —
+`secret_ref` on `type` is how a credential gets in.
+- Where the page HAS a working Copy button, clicking it is equally fine — the
+same `pbpaste` recipe follows. `copy` is the fallback that needs no affordance on
+the page at all, which is what makes a one-time key recoverable from a page whose
+button is broken.
+- **`copy` is served by the desktop app's browser host only.** The Chrome
+extension has no main process to write the clipboard from and cmux has no
+page-script read, so both refuse it with a typed message naming the desktop app.
+- **A value inside an iframe is out of reach of both clipboard routes.** On a
+desktop app that serves the page's clipboard write, the page's own Copy button
+works in the TOP-LEVEL document only: a button inside a same-process child frame
+is refused. The host serves that write itself rather than granting the page a
+permission, and it decides the click was a real gesture by reading
+`navigator.userActivation.isActive` in an isolated world the page cannot patch —
+but a child frame's isolated activation reading mirrors the TOP frame's, so
+admitting children would let any frame borrow the top frame's activation. The
+`copy` action cannot reach it either: it resolves its selector in the top
+document, and selectors cannot cross frames. The way out is the frame's own
+document — if the iframe's `src` is a page this session can `goto`, open it
+top-level and copy there; otherwise use the API or download route below.
+- **If the desktop app refuses `copy`, the page's own Copy button is dead on that
+build too**, in every frame. The app half ships separately from this runtime, so a machine can hold
+one without the other: an app build that predates the action advertises no
+`copy`, and the capability gate refuses it before a command is sent — the
+refusal names the method, the host that serves it and the version story. Do not
+create a one-time key you have no way to capture: prefer an API or a download
+route to the same credential. If the key must be created, treat it as a
+compromise — rotate or deactivate it once the real route exists — and never
+treat a screenshot read with OCR as the routine fallback; the value then exists
+on the screen, in an image, and wherever that image goes.
+- **Hygiene, once the value is confirmed stored: clear the clipboard.**
+`printf '' | pbcopy` — after `lop secret describe … --fingerprint` has shown the
+value landed, not before. Not a requirement of the recipe (the store is what
+matters), just the difference between a value sitting on this machine's
+clipboard for the rest of the turn and one that is gone; anything that can read
+the clipboard can see it until then.
 
 ### Typing a credential: use `secret_ref`, never `text`
 

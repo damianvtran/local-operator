@@ -213,6 +213,17 @@ def state_db_path(config_dir: Path) -> Path:
     return Path(config_dir) / "team_bridge" / "state.sqlite3"
 
 
+#: The same-account credential heal's audit receipt (``team_bridge.heal``): one
+#: row per re-point, old row -> new row, which enrollment, which trigger, when.
+#: Ids, the account id and a trigger word only — no token, no name.
+_CREDENTIAL_HEALS_DDL = (
+    "CREATE TABLE IF NOT EXISTS credential_heals ("
+    "owner_key TEXT NOT NULL, old_credential_id INTEGER NOT NULL, "
+    "new_credential_id INTEGER NOT NULL, enrollment_generation INTEGER NOT NULL, "
+    "account_id TEXT NOT NULL, trigger TEXT NOT NULL, at REAL NOT NULL, "
+    "PRIMARY KEY (owner_key, at))"
+)
+
 _CORE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
@@ -764,6 +775,15 @@ def _canonical_proof_digest(registered: Any, attempt_id: Any, turn: Any) -> str 
             registered.get("revision"),
             registered.get("epoch"),
             turn,
+            # Provenance rides the derivation ONLY when an account was recorded:
+            # an empty pair is byte-identical to the pre-provenance encoding, so
+            # a proof registered by an older build keeps verifying instead of
+            # reading as damage (the same rule AdmissionJob.digest states).
+            *(
+                [registered["sender_account_id"], registered.get("sender_kind", "")]
+                if registered.get("sender_account_id")
+                else []
+            ),
         ]
     )
 
@@ -801,6 +821,14 @@ def _canonical_job_digest(job: Any) -> str:
             getattr(job, "revision", None),
             getattr(job, "epoch", None),
             getattr(job, "turn", None),
+            # Mirrors AdmissionJob.digest and the retained-proof derivation
+            # above, on the same both-or-neither rule, so the three encoders
+            # cannot drift apart.
+            *(
+                [job.sender_account_id, job.sender_kind]
+                if getattr(job, "sender_account_id", "")
+                else []
+            ),
         ]
     )
 
@@ -830,8 +858,29 @@ def _decode_bound_proof(raw: Any) -> tuple[str, dict[str, Any]]:
         raise StoreRefused("proof_corrupt", "registered input proof is unreadable") from error
     if not isinstance(registered, dict):
         raise StoreRefused("proof_corrupt", "registered input proof is not a mapping")
-    if set(registered) != set(_PROOF_FIELDS):
+    fields = set(registered)
+    # Operators upgrade mid-flight: a proof registered before provenance was
+    # carried has only ``_PROOF_FIELDS``, and it must stay decodable. Anything
+    # else — an extra, a missing, or half a provenance pair — is damage.
+    if fields not in (
+        set(_PROOF_FIELDS),
+        set(_PROOF_FIELDS) | {"sender_account_id", "sender_kind"},
+    ):
         raise StoreRefused("proof_corrupt", "registered input proof has an unexpected field set")
+    account = registered.get("sender_account_id", "")
+    kind = registered.get("sender_kind", "")
+    if (
+        not isinstance(account, str)
+        or not isinstance(kind, str)
+        or kind not in ("", "human", "agent")
+        or (kind and not account)
+    ):
+        # The registered identity is what the charge is re-derived from, so a
+        # mistyped class, or a class naming no account, refuses here rather
+        # than becoming an allowance. An ACCOUNT with no class is valid: it is
+        # the sender, and its class is simply not stated (round 1 S-1/S-2 —
+        # requiring the class here dropped the inbox lane's verified account).
+        raise StoreRefused("proof_corrupt", "registered sender provenance is invalid")
     for field in _PROOF_FIELDS:
         value = registered[field]
         if field == "approved":
@@ -898,6 +947,12 @@ def _input_proof_mismatch(registered: Any, fingerprint: str, job: Any) -> str | 
         return "dispatch job approved map does not match the registered input proof"
     if registered.get("epoch") != int(getattr(job, "epoch", -1)):
         return "dispatch job epoch does not match the registered input proof"
+    # THE provenance check: the sender the registration pinned is the sender the
+    # dispatch states. A body that claims one sender and a job that would be
+    # charged to another is exactly the allowance-laundering this refuses.
+    for field in ("sender_account_id", "sender_kind"):
+        if registered.get(field, "") != getattr(job, field, ""):
+            return "dispatch sender attribution changed after registration"
     # NOTE: the registered "logical" value is the PACKED pre-job fingerprint;
     # the ``fingerprint`` argument is the job digest this bind CREATES. The
     # digest is the product of the bind, not an input to compare — comparing
@@ -2587,7 +2642,10 @@ class Store:
         A missing/corrupt/unsupported database reads as "no authority"; the
         caller must stop (the handoff's fail-closed law). ``credential_id``
         narrows to the EXACT pinned credential: a same-account re-login with a
-        new credential row is a DIFFERENT owner and needs explicit rebinding.
+        new credential row does not match until ``team_bridge.heal`` re-points
+        the enrollment at it (provable same-account successor only; a login or
+        the receiver's recheck triggers it). Anything it cannot prove still
+        needs an explicit re-enrolment.
         """
 
         try:
@@ -3974,6 +4032,8 @@ class Store:
         *,
         cos_session_id: str | None = None,
         require_no_owner: bool = False,
+        expected_credential_id: int | None = None,
+        heal_trigger: str | None = None,
     ) -> None:
         """Atomically commit authority: exact owner + server consent receipt.
 
@@ -3991,9 +4051,28 @@ class Store:
         3/40). Under ``BEGIN IMMEDIATE`` the count and the insert cannot
         interleave, and it closes the cross-process case too (a second `lop`
         process), which no in-process lock could have.
+
+        ``expected_credential_id`` + ``heal_trigger`` are the SAME-ACCOUNT
+        CREDENTIAL HEAL (``team_bridge.heal``): a sign-in to the same Radient
+        account landed on a new credential row, and the committed pin still
+        names the old one, so every bridge call answers "sign in" to someone
+        who is. The heal is NOT a new consent — it moves which local row
+        carries the same account's bearer — so everything authority-bearing is
+        re-checked HERE, under the write lock, against the row being replaced:
+        the committed row must still name ``expected_credential_id`` and the
+        same account/tenant/endpoint/hub, and the receipt and designation the
+        caller read must still be the stored ones. Any difference is
+        ``owner_moved`` (a concurrent re-enrolment, a Turn-off, an edited
+        designation) and nothing is written. The designation is carried
+        because ``designated_session`` is written from ``cos_session_id``
+        below and ``_reservation`` filters on it: a heal that dropped it would
+        silently end wake delivery. The audit receipt row commits in the same
+        transaction as the re-point, so neither exists without the other.
         """
 
         owner.validated()
+        if (expected_credential_id is None) != (heal_trigger is None):
+            raise StoreRefused("invalid_heal", "a heal names both the old pin and its trigger")
         if not receipt.consent_version.strip() or not receipt.consent_ref.strip():
             raise StoreRefused("invalid_receipt", "consent receipt must name version + ref")
         with self._connect() as conn:
@@ -4017,9 +4096,22 @@ class Store:
                         "this machine already holds a committed owner",
                     )
             existing = conn.execute(
-                "SELECT enrollment_generation, state FROM enrollments WHERE owner_key = ?",
+                "SELECT * FROM enrollments WHERE owner_key = ?",
                 (_owner_key(owner),),
             ).fetchone()
+            if expected_credential_id is not None and (
+                existing is None
+                or existing["state"] != "committed"
+                or int(existing["credential_id"]) != expected_credential_id
+                or existing["account_id"] != owner.account_id
+                or existing["tenant_id"] != owner.tenant_id
+                or existing["endpoint_id"] != owner.endpoint_id
+                or existing["canonical_base_url"] != owner.canonical_base_url
+                or existing["consent_version"] != receipt.consent_version
+                or existing["consent_ref"] != receipt.consent_ref
+                or existing["designated_session"] != cos_session_id
+            ):
+                raise StoreRefused("owner_moved", "the enrollment changed since the heal read it")
             if (
                 existing is not None
                 and existing["state"] == "committed"
@@ -4052,6 +4144,29 @@ class Store:
                 ),
             )
             conn.execute("INSERT OR IGNORE INTO sync (owner_key) VALUES (?)", (_owner_key(owner),))
+            if heal_trigger is not None and existing is not None:
+                # Created here, not in ``_CORE_SCHEMA``: a stamped store never
+                # re-runs that DDL (``_init_layout`` VERIFIES and returns), so a
+                # table declared only there would exist on fresh stores alone —
+                # exactly not the broken installs this receipt is for. Plain
+                # ``execute`` keeps it inside this transaction (``executescript``
+                # would commit it). Additive and optional — nothing verifies or
+                # reads it on open — so no ``schema_version`` move.
+                conn.execute(_CREDENTIAL_HEALS_DDL)
+                conn.execute(
+                    "INSERT INTO credential_heals (owner_key, old_credential_id, "
+                    "new_credential_id, enrollment_generation, account_id, trigger, at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        _owner_key(owner),
+                        int(existing["credential_id"]),
+                        owner.credential_id,
+                        owner.enrollment_generation,
+                        owner.account_id,
+                        heal_trigger,
+                        time.time(),
+                    ),
+                )
             # A generation bump makes every reservation bound to an older
             # credential/generation permanently unclaimable: ``owner_key`` is
             # unchanged across a same-account re-login, so nothing else will
@@ -4746,15 +4861,19 @@ class Store:
         """Add the per-call allocation columns to a ledger that predates them.
 
         ``batch_id`` groups the logical rows of ONE screening call (the budget
-        unit), ``priority`` is the call's tier (``SCREENING_TIER_*``), and
-        ``sender_account_id`` is the verified sender a row is charged to.
+        unit), ``priority`` is the call's tier (``SCREENING_TIER_*``),
+        ``sender_account_id`` is the verified sender a row is charged to, and
+        ``sender_kind`` is what MAKES it verified (``human``/``agent`` from the
+        hub's stored participant; anything else is unattributed).
 
         ADDITIVE AND NULLABLE, so no schema stamp moves (the rule of
         :meth:`_ensure_hold_failure_class_column`): an older binary sharing the
         file never names them, and a pre-upgrade row reads NULL — its own unit,
         counted at the ADDRESSED tier (so it still counts against the account
-        ceiling and can never let a lower tier past its own fence) and charged
-        to no sender.
+        ceiling and can never let a lower tier past its own fence) and, having
+        no verified provenance, counted in the UNATTRIBUTED pool: it fences
+        unattributed work, which sees all spend, and fines no named sender (see
+        :meth:`_check_budget`).
         Not in ``_V3_COLUMNS``: a ledger without them is not damaged.
         """
 
@@ -4763,6 +4882,7 @@ class Store:
             ("batch_id", "TEXT"),
             ("priority", "INTEGER"),
             ("sender_account_id", "TEXT"),
+            ("sender_kind", "TEXT"),
         ):
             if column not in columns:
                 conn.execute(f"ALTER TABLE screening_attempts ADD COLUMN {column} {kind}")
@@ -4798,11 +4918,31 @@ class Store:
                 raise StoreRefused(
                     "unaddressed_exhausted", f"{kind} unaddressed units/hour exhausted"
                 )
-        for sender in {s for s in senders if s}:
+        for sender in set(senders):
+            # FAIL CLOSED FOR UNATTRIBUTED WORK, WITHOUT FINING NAMED SENDERS
+            # (#3199 residual; security round 1 S-1). Two rules, and the second
+            # is why this query has TWO arms where the first version had three:
+            #   * an UNATTRIBUTED caller (``sender == ""``) sees ALL spend, so
+            #     losing provenance can never buy a fresh allowance. This arm is
+            #     what closes the evasion, and it is why the loop no longer
+            #     reads ``{s for s in senders if s}`` — that filter exempted
+            #     exactly the callers with no provenance.
+            #   * a NAMED sender is charged only its OWN units. Rows with no
+            #     attribution are somebody else's work: counting them here let
+            #     ordinary inbox volume — whose lane states an account and no
+            #     class on older hubs, and whose every pre-upgrade row is NULL —
+            #     exhaust EVERY named sender's share while the account and tier
+            #     ceilings still had room. Measured on the live lane as a tier-3
+            #     person DM held ``budget_exhausted`` with no row
+            #     (security round 1 S-1). Unattributed work is bounded by the
+            #     account and tier ceilings, exactly as it was before this PR.
+            # A unit counts ONCE however many rows ride it (DISTINCT coalesce),
+            # so a batch never spends a sender's allowance twice for one call.
             spent = conn.execute(
                 "SELECT COUNT(DISTINCT COALESCE(batch_id, attempt_id)) FROM screening_attempts "
-                "WHERE account_scope = ? AND kind = ? AND at > ? AND sender_account_id = ?",
-                (scope, kind, now - 3600.0, sender),
+                "WHERE account_scope = ? AND kind = ? AND at > ? AND "
+                "(? = '' OR sender_account_id = ?)",
+                (scope, kind, now - 3600.0, sender, sender),
             ).fetchone()[0]
             if int(spent) >= self.screening_budget.sender:
                 # The sender id never leaves this refusal's caller: it is the
@@ -4959,6 +5099,7 @@ class Store:
         fingerprint: str | None,
         tier: int = 3,
         sender_account_id: str = "",
+        sender_kind: str = "",
     ) -> str:
         """Durably charge ONE attempt of ``kind`` BEFORE its I/O.
 
@@ -4974,7 +5115,7 @@ class Store:
         return self._reserve_units(
             owner,
             kind=kind,
-            entries=[(message_id, fingerprint, sender_account_id)],
+            entries=[(message_id, fingerprint, sender_account_id, sender_kind)],
             tier=tier,
             batch=False,
         )[0]
@@ -4984,7 +5125,7 @@ class Store:
         owner: OwnerSnapshot,
         *,
         kind: str,
-        entries: Sequence[tuple[str | None, str | None, str]],
+        entries: Sequence[tuple[str | None, str | None, str, str]],
         tier: int,
         batch: bool,
     ) -> list[str]:
@@ -5013,16 +5154,16 @@ class Store:
                     kind,
                     now,
                     tier=tier,
-                    senders=[sender for _, _, sender in entries],
+                    senders=[sender for _, _, sender, _ in entries],
                 )
                 ids: list[str] = []
-                for message_id, fingerprint, sender in entries:
+                for message_id, fingerprint, sender, sender_kind in entries:
                     attempt_id = str(uuid.uuid4())
                     conn.execute(
                         "INSERT INTO screening_attempts "
                         "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, "
-                        "at, batch_id, priority, sender_account_id) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        "at, batch_id, priority, sender_account_id, sender_kind) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             attempt_id,
                             kind,
@@ -5034,6 +5175,9 @@ class Store:
                             batch_id,
                             int(tier),
                             sender or None,
+                            # BOTH or NEITHER: an account with no verified class is
+                            # unattributed (NULL), never a sender charged by default.
+                            (sender_kind or None) if sender else None,
                         ),
                     )
                     ids.append(attempt_id)
@@ -5051,14 +5195,14 @@ class Store:
     ) -> list[str]:
         """The LOGICAL charge for ONE batched screening call: one unit, N rows.
 
-        Each entry is ``{message_id, input_proof, sender_account_id}``; the
-        proof is registered exactly as :meth:`reserve_screening_attempt`
+        Each entry is ``{message_id, input_proof, sender_account_id, sender_kind}``;
+        the proof is registered exactly as :meth:`reserve_screening_attempt`
         registers it, so ``bind_attempt_fingerprint`` and every later fence
         see a row indistinguishable from a single-message reservation — only
         the shared ``batch_id`` differs. Returns the attempt ids in order.
         """
 
-        rows: list[tuple[str | None, str | None, str]] = []
+        rows: list[tuple[str | None, str | None, str, str]] = []
         for entry in entries:
             proof = entry.get("input_proof")
             stored = (
@@ -5071,6 +5215,7 @@ class Store:
                     str(entry["message_id"]),
                     stored if isinstance(stored, str) else None,
                     str(entry.get("sender_account_id") or ""),
+                    str(entry.get("sender_kind") or ""),
                 )
             )
         return self._reserve_units(owner, kind="logical", entries=rows, tier=tier, batch=True)
@@ -5084,16 +5229,19 @@ class Store:
         input_proof: Mapping[str, Any] | None = None,
         tier: int = 3,
         sender_account_id: str = "",
+        sender_kind: str = "",
     ) -> str:
         """The LOGICAL screening charge, optionally bound to message + tuple.
 
-        ``tier`` / ``sender_account_id`` place the unit in its pool and charge
-        it to a verified sender (see the budget constants). The defaults —
-        the top tier (fenced only by the account ceiling), no sender — are what
-        a DIRECT caller that predates the split gets, so none of them is fenced
-        by a pool it never knew about. The screening pipeline never relies on
-        them: it always passes the item's tier (``screening_allocation``),
-        whose own no-hint default is agent-addressed, never the top tier.
+        ``tier`` / ``sender_account_id`` / ``sender_kind`` place the unit in its
+        pool and charge it to a verified sender (see the budget constants). The
+        defaults — the top tier (fenced only by the account ceiling), no
+        sender — are what a DIRECT caller that predates the split gets, so none
+        of them is fenced by a pool it never knew about; an unattributed unit
+        is bounded by the sender ceiling as unattributed work (see
+        :meth:`_check_budget`), never exempt from it. The screening pipeline
+        never relies on the defaults: it passes the item's tier and the
+        envelope's verified provenance.
 
         The pipeline ALWAYS binds (message + full policy fingerprint); the
         unbound form exists for budget accounting talk (QA probes, breaker
@@ -5119,6 +5267,7 @@ class Store:
             fingerprint=stored,
             tier=tier,
             sender_account_id=sender_account_id,
+            sender_kind=sender_kind,
         )
 
     def reserve_http_attempt(

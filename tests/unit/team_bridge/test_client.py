@@ -10,6 +10,7 @@ so the owner-pin rules run against rows, not against a resolver stub.
 
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1448,3 +1449,140 @@ async def test_owned_invitations_on_an_old_hub_is_outdated_hub_but_a_coded_404_i
     with pytest.raises(BridgeRefusal) as info:
         await client.owned_agent_invitations(expected_account_id="acc_1")
     assert info.value.code == "tenant_not_found"
+
+
+# ---------------------------------------------------------------------------
+# fetch_attachment: the human FILE lane
+#
+# ``mode="file"`` is the one widening the member byte route needed for a person
+# to save a file another member sent them. These rows pin the transport half:
+# what the request negotiates, what answer it accepts, and that the AGENT lanes
+# cannot reach the wider body through the same switch.
+# ---------------------------------------------------------------------------
+
+FILE_CID = "bcv_" + "b" * 32
+FILE_MID = "bcmsg_" + "c" * 16
+FILE_AID = "batt_0f8fad5b-d9cb-469f-a165-70867728950e"
+
+
+async def test_a_file_read_negotiates_octet_stream_and_the_file_cap():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200, content=b"%PDF-1.7", headers={"content-type": "application/octet-stream"}
+        )
+
+    client = _make_client(handler)
+    data, mime = await client.fetch_attachment(
+        FILE_CID, FILE_MID, FILE_AID, tenant_id="tnt_1", expected_account_id="acc_1", mode="file"
+    )
+    assert (data, mime) == (b"%PDF-1.7", "application/octet-stream")
+    # No image type is named, so a negotiating hop cannot answer this lane with
+    # image bytes; identity keeps the bound measuring wire bytes.
+    assert seen[0].headers["accept"] == "application/octet-stream, application/json"
+    assert seen[0].headers["accept-encoding"] == "identity"
+
+
+async def test_a_file_read_refuses_an_image_body():
+    client = _make_client(
+        lambda request: httpx.Response(
+            200, content=b"\x89PNG\r\n", headers={"content-type": "image/png"}
+        )
+    )
+    with pytest.raises(BridgeRefusal) as info:
+        await client.fetch_attachment(FILE_CID, FILE_MID, FILE_AID, mode="file")
+    assert info.value.code == "bridge_invalid_response"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mode": "file", "served_types": ("application/octet-stream",)},
+        {"mode": "file", "purpose": "context", "endpoint_id": "bep_1"},
+        {"mode": "file", "endpoint_id": "bep_1"},
+        {"mode": "file-ish"},
+    ],
+    ids=["second-type-knob", "agent-purpose", "agent-endpoint", "unknown-mode"],
+)
+async def test_file_mode_refuses_a_second_type_knob_or_an_agent_lane(kwargs):
+    client = _make_client(lambda request: pytest.fail("no request may be sent"))
+    with pytest.raises(ValueError):
+        await client.fetch_attachment(FILE_CID, FILE_MID, FILE_AID, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("mode", "served", "refused"),
+    [("file", "application/octet-stream", False), ("image", "image/png", True)],
+    ids=["an-empty-file-is-a-file", "an-empty-image-is-refused"],
+)
+async def test_an_empty_body_is_refused_on_the_image_lane_only(mode, served, refused):
+    """The hub accepts and serves a zero-byte GENERIC file, so the file lane must
+    hand it on; zero bytes are never a decodable image, so the image lane must not."""
+
+    client = _make_client(
+        lambda request: httpx.Response(200, content=b"", headers={"content-type": served})
+    )
+    if refused:
+        with pytest.raises(BridgeRefusal) as info:
+            await client.fetch_attachment(FILE_CID, FILE_MID, FILE_AID, mode=mode)
+        assert info.value.code == "bridge_invalid_response"
+        return
+    data, mime = await client.fetch_attachment(FILE_CID, FILE_MID, FILE_AID, mode=mode)
+    assert (data, mime) == (b"", "application/octet-stream")
+
+
+@pytest.mark.parametrize(
+    ("served", "refused"),
+    [
+        ("application/octet-stream", False),
+        ("image/png", True),
+        ("image/jpeg", True),
+    ],
+    ids=["an-empty-file-is-a-file", "an-empty-png-is-refused", "an-empty-jpeg-is-refused"],
+)
+async def test_owner_audit_refuses_an_empty_body_on_the_image_lane_only(served, refused):
+    """The owner-audit byte read mirrors :meth:`fetch_attachment` (#3521): the hub
+    serves a zero-byte GENERIC file, so the auditor must receive it; zero bytes are
+    never a decodable image, so an empty png/jpeg stays refused."""
+
+    client = _make_client(
+        lambda request: httpx.Response(200, content=b"", headers={"content-type": served})
+    )
+    if refused:
+        with pytest.raises(BridgeRefusal) as info:
+            await client.owner_audit_attachment(
+                FILE_CID, FILE_MID, FILE_AID, expected_account_id="acc_1"
+            )
+        assert info.value.code == "bridge_invalid_response"
+        assert info.value.http_status == 502
+        return
+    data, mime = await client.owner_audit_attachment(
+        FILE_CID, FILE_MID, FILE_AID, expected_account_id="acc_1"
+    )
+    assert (data, mime) == (b"", "application/octet-stream")
+
+
+def test_file_mode_has_exactly_one_caller_the_desktop_route():
+    """``mode`` is the human save lane's switch; the agent lanes stay image-only.
+
+    The client refuses file mode alongside ``purpose``/``endpoint_id``, but a new
+    agent-side caller could still pass ``mode`` alone and read a 25 MiB body of an
+    unnamed type. Pinning the call sites makes that adoption a visible, reviewed
+    change to this test instead of a silent widening.
+    """
+
+    package = Path(tb_client.__file__).resolve().parents[1]
+    callers: set[str] = set()
+    for source in package.rglob("*.py"):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "fetch_attachment"
+                and any(keyword.arg == "mode" for keyword in node.keywords)
+            ):
+                callers.add(source.relative_to(package).as_posix())
+    assert callers == {"server/routes/desktop_team_bridge.py"}

@@ -384,8 +384,128 @@ def test_durable_evidence_beats_a_live_holder_row(
     rows = server_states(str(cwd), base=root, configs=configs)
 
     assert rows["linear"]["state"] == "expired", rows
-    assert rows["linear"]["reason"] == "macbook: sign in again", rows["linear"]["reason"]
-    assert "sign in again — sign in again" not in rows["linear"]["reason"]
+    # THE REASON NOW CARRIES THE REPAIR, not only the diagnosis: the owner has to
+    # sign in THERE, and then re-run the share so the new login is what it serves.
+    # Both halves are asserted, because the whole point of the sentence is that a
+    # reader on the BORROWING device cannot act on "sign in again" here.
+    reason = rows["linear"]["reason"]
+    assert reason.startswith("on macbook: "), reason
+    assert "sign in to this server again" in reason, reason
+    assert f"lop network credential share {credential_key_for_mcp(URL)} --with" in reason, reason
+    assert "sign in again — sign in again" not in reason
+
+
+def test_a_permission_code_renders_the_grant_remedy_not_a_sign_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CAUSE decides the remedy, not the coarse evidence state.
+
+    ``grant_invalid`` and ``not_authorised`` both arrive as ``unauthorized`` — a 401
+    the owner answered — but the classifier calls them ``grant``: signing in anywhere
+    cannot restore a permission this device no longer has, so the row must print the
+    share command and say the share is what changed (review round 1, R1-2). Selecting
+    on the state word alone rendered "sign in to this server again" for both.
+    """
+    from local_operator.network.credentials import mcp_state
+
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    store.save(_record(), root)
+    _place(root)
+    configs = {"linear": MCPHttpServerConfig(url=URL, auth=MCPAuthConfig(type="oauth"))}
+
+    for code in ("grant_invalid", "not_authorised"):
+        mcp_state.record(
+            NETWORK,
+            KEY,
+            state="unauthorized",
+            code=code,
+            owner_device=PEER,
+            owner_name="macbook",
+            root=root,
+        )
+        row = server_states(str(cwd), base=root, configs=configs)["linear"]
+        assert row["state"] == "revoked", (code, row)
+        reason = row["reason"]
+        assert "sign in" not in reason, (code, reason)
+        assert "lop network credential share" in reason, (code, reason)
+
+
+def test_each_row_names_its_own_networks_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``--with`` in a remedy command names THIS network's member, not another's.
+
+    ``_mesh_context`` used to keep ONE ``self_name`` for every network — whichever
+    record was read first — so a remedy for a server in network B could tell the
+    operator to re-share ``--with`` the name this machine uses in network A. The
+    command is run by a person on another machine, so a wrong name is a failed
+    repair, not a cosmetic slip.
+    """
+    second_net = "net-second"
+    root = tmp_path / "cfg"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+
+    def _record_for(network_id: str, name: str) -> types.NetworkRecord:
+        record = types.NetworkRecord(
+            network_id=network_id,
+            name=network_id,
+            self_device_id=SELF,
+            self_role="admin",
+            self_capabilities=sorted(types.capabilities_for_role("admin")),
+            epoch=1,
+        )
+        record.members.append(
+            types.MemberRecord(
+                device_id=SELF,
+                name=name,
+                public_key=wire.b64u(b"a" * 32),
+                role="admin",
+                capabilities=sorted(types.capabilities_for_role("admin")),
+                added_via="self",
+            )
+        )
+        return record
+
+    store.save(_record_for(NETWORK, "node-in-a"), root)
+    store.save(_record_for(second_net, "node-in-b"), root)
+
+    other_url = "https://other.example.test/mcp"
+    other_key = credential_key_for_mcp(other_url)
+    for network_id, key in ((NETWORK, KEY), (second_net, other_key)):
+        with placement_mod.mutate(network_id, root=root, self_device=PEER) as document:
+            document.declare(
+                key,
+                owner_device=PEER,
+                owner_device_name="macbook",
+                provider="mcp-oauth",
+                by=PEER,
+            )
+            document.grant(key, SELF, by=PEER)
+        mcp_state.record(
+            network_id,
+            key,
+            state="revoked",
+            code="not_a_holder",
+            owner_device=PEER,
+            owner_name="macbook",
+            root=root,
+        )
+
+    configs = {
+        "linear": MCPHttpServerConfig(url=URL, auth=MCPAuthConfig(type="oauth")),
+        "other": MCPHttpServerConfig(url=other_url, auth=MCPAuthConfig(type="oauth")),
+    }
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    rows = server_states(str(cwd), base=root, configs=configs)
+    assert "--with node-in-a" in rows["linear"]["reason"], rows["linear"]["reason"]
+    assert "--with node-in-b" in rows["other"]["reason"], rows["other"]["reason"]
+    assert "node-in-a" not in rows["other"]["reason"], rows["other"]["reason"]
 
 
 def test_a_configured_server_dropped_by_discovery_still_has_a_row(

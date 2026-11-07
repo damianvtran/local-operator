@@ -297,9 +297,24 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.
     ("local_operator/network/cli.py", "_cmd_sessions", "detail"): (
-        4,
+        5,
         "the relay's own sentence — the 4th read is the model receipt's detail, which "
-        "says why a requested model was not applied",
+        "says why a requested model was not applied; the 5th is the first turn's CAUSE, "
+        "the owner runtime's own error sentence (the provider's reason, e.g. a rate "
+        "limit or an expired login), carried verbatim on purpose: it is the one fact "
+        "that tells the reader whether to retry, re-auth or pick another model",
+    ),
+    # ``_op_session_create`` hands the owner's first-turn cause to the requesting
+    # device (``_prompt_on``'s ``detail``). DELIBERATELY RAW, and the counter-example
+    # to this file's rule rather than an exception to its spirit: the value is the
+    # OWNER's own sentence — its runtime's ``FirstTurnFailed`` message, which is the
+    # provider's error text (agent review round 1, MAJOR-3) — and paraphrasing it
+    # here would replace the model's actual reason with this side's guess about it.
+    # The other ``detail`` values on this op stay the relay's own composed prose.
+    ("local_operator/network/relay.py", "RelayServer._op_session_create", "detail"): (
+        1,
+        "the owner's own sentence for a failed first turn — the provider's error text, "
+        "carried verbatim to the requester rather than paraphrased",
     ),
     # The move's arrival engage, when the caller asked for one (``engage_on_arrival``).
     # ``detail`` is the ENGAGE PATH'S OWN SENTENCE — ``RelayServer.engage_session``
@@ -509,9 +524,19 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # prose can ever reach it, unlike the mesh reasons the glosses exist for. The
     # remedy in that sentence is authored here, and the same token rides the `--json`
     # payload for a script.
+    # ...plus (review round 5) the four reads `credentials --repair` added: the
+    # ``skipped:``/``still refused:``/``repair:`` lines. Every value they print is
+    # authored on THIS device -- ``_skip``'s literals and the no-askable branch's
+    # prose in this file, and ``HealOutcome.sentence``, which ``healing.repair_for``
+    # composes from the cause and the owner's NAME (the bearer never leaves the
+    # client's cache). The one token that can appear is an owner code this build
+    # cannot classify, quoted inside the sentence that sends the operator at
+    # ``lop network doctor`` -- deliberate, and not a peer's prose.
     ("local_operator/network/cli.py", "_cmd_credentials", "reason"): (
-        1,
-        "the credential client's own two-token vocabulary, not a peer's prose",
+        5,
+        "the credential client's own two-token skip vocabulary plus the repair "
+        "receipt's locally composed sentences (skips, no-askable prose, "
+        "healing.repair_for), none of them peer prose",
     ),
     # The incident receipt's per-peer rows: ``reason`` here is either the PEER'S OWN
     # refusal sentence (the authoriser's prose, carried verbatim — the panicking device
@@ -709,6 +734,21 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/rollouts.py", "_audit_member_state", "detail"): (
         1,
         "the member's own receipt prose, passed into the origin's member row",
+    ),
+    # The browser tool's bridge layer. A refused browser command carries the PAGE
+    # PROGRAM's own token in ``data.reason`` -- ``option_not_found``,
+    # ``option_ambiguous``, ``value_rejected``, ``not_a_value_control`` -- and this
+    # function reads it only to CHOOSE A HINT. Both counted reads make the same
+    # decision, whether to attach the host's available-options list: one appends it
+    # to the rendered message, the other to the error's ``details``. The token
+    # itself is never printed; the reader gets
+    # the host's own sentence plus that list. Not a mesh surface at all: this
+    # function imports nothing from ``local_operator.network``'s vocabulary, it is
+    # collected here because every module naming the mesh joins this guard.
+    ("local_operator/tools/builtin.py", "_bridge_call", "reason"): (
+        2,
+        "the browser host's page-program refusal token, read only to decide "
+        "whether to attach the options list; never rendered to a person",
     ),
 }
 

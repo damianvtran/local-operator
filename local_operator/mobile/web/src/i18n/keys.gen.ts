@@ -854,6 +854,7 @@ export type MessageParams = {
   "wire.remote_compute.unknown_run": undefined;
   "wire.remote_compute.unreachable": undefined;
   "wire.remote_compute.unreadable_envelope": undefined;
+  "wire.session.status.scheduled": { "count": number };
   "wire.sessions.approval_stop_local": { "address": string };
   "wire.sessions.approval_stop_peer": { "address": string; "peer": string };
   "wire.sessions.stop_pending": { "name": string; "seconds": string };

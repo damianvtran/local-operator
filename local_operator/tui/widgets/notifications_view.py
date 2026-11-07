@@ -90,6 +90,10 @@ class NotificationsViewOpenConversation(Message):
         self.session_id = session_id
 
 
+class NotificationsViewOpenNetwork(Message):
+    """``o`` on an owner credential-repair item: open the ``/network`` panel (#3522 D1)."""
+
+
 class NotificationsViewCountsChanged(Message):
     """The badge figures moved; the app repaints the sidebar note from them."""
 
@@ -194,6 +198,10 @@ class NotificationsView(Vertical):
         #: The painted state. ``None`` until the first read lands, which is the
         #: page's loading state; an empty Snapshot is the caught-up state.
         self.snapshot: model.Snapshot | None = None
+        #: Session ids on the loaded page with NO conversation directory here (see
+        #: :meth:`_conversation_target`), resolved off-thread with each load so a
+        #: hint repaint never touches the disk.
+        self._no_conversation: frozenset[str] = frozenset()
         self.cursor_id = ""
         #: True while the detail pane owns the keys (DT3). In the wide layout the
         #: detail is a second scrollable pane next to the list; without a mode
@@ -279,6 +287,21 @@ class NotificationsView(Vertical):
             snapshot = await asyncio.to_thread(model.load, self._root, filters)
         except Exception as error:  # noqa: BLE001 - the page states the failure
             snapshot = model.Snapshot(error=str(error) or type(error).__name__)
+        try:
+            # The DETAIL row's session rides along with the page's (#3522 round 2,
+            # Q2): opening a row under the unread filter marks it read, the reload
+            # then drops it from the page, and a set rebuilt from the remaining rows
+            # alone forgot that its session has no conversation — so the open detail
+            # offered `o` again and printed "no longer available". The union below
+            # cannot go stale the same way: a session is asked about while it is on
+            # the page OR pinned in the detail.
+            self._no_conversation = await asyncio.to_thread(
+                _sessions_without_conversation,
+                self._root,
+                _sessions_on_screen(snapshot.rows, self.detail_row),
+            )
+        except Exception:  # noqa: BLE001 - unknown keeps `o` offered, as before
+            self._no_conversation = frozenset()
         try:
             self._stamp = await asyncio.to_thread(_store_stamp, self._root)
         except Exception:  # noqa: BLE001
@@ -663,12 +686,47 @@ class NotificationsView(Vertical):
     def _token_key(row: dict[str, Any]) -> tuple[str, int]:
         return (str(row["id"]), int(row.get("revision") or 1))
 
+    def _conversation_target(self, row: dict[str, Any] | None) -> str:
+        """Where ``o`` goes for ``row``: ``conversation``, ``network`` or ``""`` (nowhere).
+
+        THE FIRST ITEMS WITH NO CONVERSATION BEHIND THEM (#3522 D1/U2). An owner's
+        credential-repair item (``credentials/repair_inbox``) is filed under a
+        pseudo-session, so ``o`` used to close the page and print "This conversation
+        is no longer available" — untrue (nothing was removed) and it threw away
+        the operator's place on the one item that asks them to act. That item's
+        full rows live in the ``/network`` panel, and its source label already
+        says ``/network``, so ``o`` opens it. Any OTHER row whose session has no
+        conversation directory here offers no ``o`` (and no ``a``) at all.
+        """
+        session_id = str(((row or {}).get("session") or {}).get("id") or "")
+        if not session_id:
+            return ""
+        from local_operator.network.credentials.repair_inbox import (
+            SESSION_ID as REPAIR_SESSION_ID,
+        )
+
+        if session_id == REPAIR_SESSION_ID:
+            return "network"
+        return "" if session_id in self._no_conversation else "conversation"
+
+    def _open_hint(self, row: dict[str, Any]) -> list[tuple[str, str]]:
+        """The ``o`` hint for ``row``, or none. ``/network`` is the command, not copy."""
+        target = self._conversation_target(row)
+        if target == "network":
+            return [("o", "/network")]  # i18n: ignore a slash command is a technical identifier
+        if target == "conversation":
+            return [("o", _t(_k.hint_conversation()))]
+        return []
+
     def action_open_conversation(self) -> None:
         if self._confirm is not None:
             return
         row = self.detail_row
-        session_id = str(((row or {}).get("session") or {}).get("id") or "")
-        if session_id:
+        target = self._conversation_target(row)
+        if target == "network":
+            self.post_message(NotificationsViewOpenNetwork())
+        elif target == "conversation":
+            session_id = str(((row or {}).get("session") or {}).get("id") or "")
             self.post_message(NotificationsViewOpenConversation(session_id))
 
     def action_cycle(self, attribute: str) -> None:
@@ -955,10 +1013,11 @@ class NotificationsView(Vertical):
         note records.
         """
         is_ask = row.get("source") == "ask"
-        labels: list[tuple[str, str]] = [
-            ("o", _t(_k.hint_conversation())),
-            ("a", _t(_k.hint_answer())),
-        ]
+        labels = self._open_hint(row)
+        if self._conversation_target(row) == "conversation":
+            # `a` answers an open ask IN a conversation: with none behind the row
+            # it did nothing at all, silently (#3522 U2).
+            labels.append(("a", _t(_k.hint_answer())))
         if not is_ask:
             # An ask offers no dismiss (the reel never dismisses an open ask,
             # §2.3); not naming the key is how both surfaces say so.
@@ -1021,7 +1080,29 @@ class NotificationsView(Vertical):
                 ):
                     labels.append(("A", _t(_k.hint_mark_all())))
                 labels.append(("u", read_label))
-                labels.append(("o", _t(_k.hint_conversation())))
+                labels.extend(self._open_hint(row))
                 labels.append(("f", _t(_k.hint_filter())))
         labels.append(("esc", _t(_k.hint_clear()) if self.selected_ids else _t(_k.hint_back())))
         return labels
+
+
+def _sessions_on_screen(
+    rows: list[dict[str, Any]], detail: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """``rows`` plus the detail row, de-duplicated: what the page can offer `o` for."""
+    seen = {str(r.get("id") or "") for r in rows}
+    if detail is not None and str(detail.get("id") or "") not in seen:
+        return [*rows, detail]
+    return rows
+
+
+def _sessions_without_conversation(root: Path, rows: list[dict[str, Any]]) -> frozenset[str]:
+    """The session ids among ``rows`` with no conversation directory under ``root``.
+
+    One ``is_dir`` per distinct id on the page, off the UI thread. A row the reel
+    files under a pseudo-session (an owner's credential repair, a future mesh-side
+    item) has nowhere for ``o`` to go, and naming the key there is a dead end.
+    """
+    ids = {str((row.get("session") or {}).get("id") or "") for row in rows}
+    ids.discard("")
+    return frozenset(sid for sid in ids if not (Path(root) / "sessions" / sid).is_dir())

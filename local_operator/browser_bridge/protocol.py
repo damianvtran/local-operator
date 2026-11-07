@@ -192,6 +192,12 @@ CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
         # handler and would answer a bare `internal`.
         "hover",
         "select",
+        # setvalue exists only in builds that ship the `setvalue` page program. An
+        # older desktop host has no handler and would answer a bare `internal`,
+        # so the gate turns the same peer into a typed `capability_unsupported`.
+        # It is also DESKTOP_ONLY (below): the extension never advertises it, so
+        # there this gate is what produces the sentence naming the desktop host.
+        "setvalue",
         "download",
         "upload",
         "styles",
@@ -208,6 +214,14 @@ CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
         # app is older than the action".
         "record_start",
         "record_stop",
+        # Copying an element's text to the clipboard. Gated on the record like
+        # every other action an older app has no handler for: a pre-`copy` app
+        # answers a bare `internal`, and the gate turns that into "update the
+        # desktop app" before a socket is dialled. The action is also
+        # DESKTOP_ONLY, so the extension's refusal never consults this set —
+        # the desktop-only arm of `capability_refusal` fires first and names the
+        # one host that can serve it.
+        "copy",
     }
 )
 
@@ -385,6 +399,12 @@ METHODS = (
     # depend on it matching the host's.
     "hover",
     "select",
+    # Setting a form control's value (native <select>, input/textarea). Listed
+    # here for the shared vocabulary and a stable order; DESKTOP_ONLY_METHODS
+    # below is what keeps the extension from serving or advertising it, because
+    # the verb is one FIXED page program and the extension's intentionally
+    # inactive tab cannot run the trusted input path the desktop host owns.
+    "setvalue",
     "close",
     "status",
     # tabs lists every live extension-owned surface. It exists because parallel
@@ -418,6 +438,21 @@ METHODS = (
     # safe to expose. It never writes, navigates or evaluates caller code, so
     # it is a READ by construction rather than by promise.
     "query",
+    # Clipboard WRITE of one element's text, desktop-host only. It exists
+    # because the page's own Copy affordance cannot be made to work from a
+    # daemon (the page's clipboard write needs a permission the page's origin
+    # holds, and a key shown exactly once on a page that offers no button at all
+    # is lost on the way past), while a key shown exactly once and never copied
+    # is the failure this action is for. The write happens in the APP's MAIN
+    # process (`clipboard.writeText`), never through a page permission, so
+    # granting it is not a way for any page to reach the user's clipboard: the
+    # wire names an element, the host reads that element's own text, and the
+    # answer is a receipt (`chars`, a sha256 prefix, whether the readback matched)
+    # — never the text, and never a page-supplied string: the element is named by
+    # the caller's selector. Desktop-only because the extension has no main process
+    # to write from (`chrome.clipboard` does not exist) and cmux has no page-script
+    # read.
+    "copy",
     # Site-permission flow (agent-legible approvals). ``request_access`` raises
     # the pending approval in the extension and returns immediately;
     # ``await_access`` blocks for a BOUNDED slice (the extension caps it well
@@ -505,6 +540,13 @@ DESKTOP_ONLY_METHODS: tuple[str, ...] = (
     # substitute click uses is not a hover: it fires handlers but not CSS :hover
     # nor a trusted pointer. Desktop only, same reason as `press`.
     "hover",
+    # Setting a form control's value runs the `setvalue` page program in the tab
+    # the host owns and then reads the value back. The extension could run a page
+    # script, but NOT the trusted-input half that makes a synthetic value change
+    # stick on React-controlled inputs (its tab is kept intentionally inactive),
+    # and a value it cannot verify is exactly the false success this verb exists
+    # to remove. Desktop only, same class as `press`.
+    "setvalue",
     "network_start",
     "network_stop",
     "network_read",
@@ -515,6 +557,12 @@ DESKTOP_ONLY_METHODS: tuple[str, ...] = (
     # wire shape differs there and this vocabulary is the desktop one.
     "record_start",
     "record_stop",
+    # Copying an element's text to the OS clipboard needs a MAIN process to
+    # write from (`clipboard.writeText` on the app's own Electron instance). The
+    # extension has no such process — an offscreen document's
+    # `navigator.clipboard` is the page-permission path this action exists to
+    # avoid — so it neither advertises nor serves `copy`.
+    "copy",
 )
 
 
@@ -554,6 +602,9 @@ COMMAND_TIMEOUTS = {
     "hover": 20.0,
     # DOM selection + bounded read-back; never waits for an OS popup.
     "select": 25.0,
+    # Same class as `select`: resolve the control, run one bounded page program,
+    # read the value back. No settle and no OS popup.
+    "setvalue": 25.0,
     "read": 20.0,
     "snapshot": 20.0,
     "screenshot": 20.0,
@@ -579,6 +630,10 @@ COMMAND_TIMEOUTS = {
     # query runs the same one-shot `executeScript` class as the reads above and
     # walks at most 50 elements, so it shares their budget.
     "query": 20.0,
+    # copy is one bounded element read plus a main-process `clipboard.writeText`
+    # and, at most, a compare-only readback — no navigation, no OS dialog,
+    # nothing that waits on a human, so it shares the reads' budget.
+    "copy": 20.0,
     # request_access only writes the pending record and raises the prompt
     # surfaces — it returns immediately, never waiting on the human.
     "request_access": 20.0,
@@ -755,6 +810,25 @@ class ErrorCode(StrEnum):
     INVALID_GRID = "invalid_grid"
     CONSOLE_CAPTURE_FULL = "console_capture_full"
     CAPTURE_UNAVAILABLE = "capture_unavailable"
+    # --- The desktop app's browser-host clipboard actions ---
+    #
+    # Emitted by the APP's RPC host and parsed by a session, on exactly the terms
+    # the console codes above are: nothing in the extension or the daemon ever
+    # produces them, so an older session that receives one fails `Response`
+    # decoding and reports an unreadable response — which is that build's
+    # compatibility story, not a wire break, and no protocol version moves.
+    #
+    # They exist because a `copy` that fails has three causes a model must not
+    # have to guess apart: the selector found nothing (`ELEMENT_NOT_FOUND`, the
+    # shared code, unchanged), the element is there but carries no text to write,
+    # and the OS clipboard refused the write. The last two have no existing code
+    # that would be honest — reusing `internal` would render as "the bridge
+    # broke" for a page-level fact — and the empty case is deliberately NOT
+    # reported as a successful copy of nothing: a receipt claiming `chars: 0`
+    # would read as "the key is on your clipboard", which is the exact failure
+    # this action exists to prevent.
+    EMPTY_ELEMENT_TEXT = "empty_element_text"
+    CLIPBOARD_WRITE_FAILED = "clipboard_write_failed"
     INTERNAL = "internal"
 
 

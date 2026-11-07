@@ -80,6 +80,19 @@ def _plane(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test its own full per-account bucket.
+
+    The route reads the PROCESS throttle, which outlives a test, so without this
+    a test's outcome depended on how many resolves the tests before it spent and
+    how fast the box refilled them — measured: adding the round-2 parametrised
+    cases turned thirteen unrelated tests into ``429 rate_limited``. Tests of the
+    throttle itself still install their own, which wins because it is set later.
+    """
+    monkeypatch.setattr(desktop_link_preview, "get_resolve_throttle", ResolveThrottle)
+
+
+@pytest.fixture(autouse=True)
 def _pinned_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin every name the fixtures use; IP literals keep their own identity.
 
@@ -398,6 +411,335 @@ async def test_a_non_http_scheme_is_absent_without_a_request(
             response = await _post(client, {"url": url, "index": 0, "expected_account_id": ACCOUNT})
             assert response.status_code == 200
             assert response.json()["result"] == {"kind": "absent", "reason": "unsupported-scheme"}
+    assert seen == []
+
+
+def _spy_dns(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every name the address guard asks DNS about; return the log.
+
+    Replaces the pinned fixture for one test by putting the PRODUCTION
+    ``_resolve_host_ips`` back and spying one layer lower, on
+    ``socket.getaddrinfo`` — so the resolver's own handling (the IP-literal
+    short-circuit, the gaierror split, the undecodable-name refusal) is what runs,
+    and only the network is replaced. The spy IDNA-encodes a ``str`` host first,
+    which is what the real ``getaddrinfo`` does before it sends anything: ``.`` or
+    ``a..b`` raises the same ``UnicodeError`` QA measured against real DNS (it
+    used to become a 500).
+    """
+    looked_up: list[str] = []
+
+    def _getaddrinfo(host: str, port: object, *args: object, **kwargs: object) -> list[Any]:
+        looked_up.append(host)
+        host.encode("idna")
+        address = "10.0.0.7" if host == "private.test" else "93.184.216.34"
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 0))]
+
+    monkeypatch.setattr(fetch_service, "_resolve_host_ips", _RESOLVE_HOST_IPS_REAL)
+    monkeypatch.setattr(fetch_service.socket, "getaddrinfo", _getaddrinfo)
+    return looked_up
+
+
+#: Inputs a message can carry that are NOT absolute http(s) URLs with a host,
+#: and the coded absence each must answer. Scheme-less spellings are refused as
+#: ``unsupported-scheme`` (no http/https scheme at all) rather than having
+#: ``https://`` prepended — QA measured ``README.md`` being fetched as the site
+#: ``https://README.md`` after a real DNS lookup. A URL that names http(s) but no
+#: usable host, or does not parse, is ``blocked-host``: the code the renderer
+#: draws as "could not be used" with no Retry.
+_REFUSED_TARGETS = [
+    ("README.md", "unsupported-scheme"),
+    ("example.com/login", "unsupported-scheme"),
+    ("//evil.example/p", "unsupported-scheme"),
+    ("./notes/plan.md", "unsupported-scheme"),
+    ("#section", "unsupported-scheme"),
+    ("mailto:x@y", "unsupported-scheme"),
+    ("javascript:", "unsupported-scheme"),
+    ("https:///no-host", "blocked-host"),
+    ("https://./x", "blocked-host"),
+    ("https://[::1/unterminated", "blocked-host"),
+    ("https://preview.test:99999/x", "blocked-host"),
+    # A COLLAPSED SCHEME is refused too, and that is a deliberate narrowing: the
+    # shared fetcher repairs ``https:/host`` to ``https://host``, but a preview's
+    # contract is an absolute URL, and keeping the repair here would be a second
+    # spelling of "guess what the operator meant". The renderer already shows the
+    # original text, so nothing is lost but a fetcher-shaped reinterpretation.
+    ("https:/preview.test/x", "blocked-host"),
+    # A TAB, CR OR LF ANYWHERE in the target is refused (security S-3): ``urlsplit``
+    # strips them (WHATWG), so the guard saw ``preview.test``, but the fetcher's
+    # collapsed-scheme repair saw ``https:`` + ``\t//...`` and built a URL with no
+    # host — a retryable error whose Retry could never work. Refusing the raw
+    # spelling makes the guard and the fetcher read one string the same way.
+    ("https:\t//preview.test/x", "blocked-host"),
+    ("https://pre\nview.test/x", "blocked-host"),
+    # A host over DNS's 253-octet total, though every label is a legal 63 (S-4):
+    # the per-label IDNA check passes it, so only a total-length check keeps it
+    # from costing a lookup.
+    ("https://" + ".".join(["a" * 63] * 5) + "/x", "blocked-host"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("url", "reason"), _REFUSED_TARGETS)
+async def test_a_non_absolute_url_is_a_coded_absence_with_no_lookup_or_fetch(
+    url: str, reason: str, monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(monkeypatch, lambda request: httpx.Response(200, content=_html("")))
+    async with _client() as client:
+        response = await _post(client, {"url": url, "index": 0, "expected_account_id": ACCOUNT})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"kind": "absent", "reason": reason}
+    assert looked_up == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "lookups"),
+    [
+        # The control: an ordinary absolute https URL is still looked up and fetched.
+        ("https://preview.test/page", ["preview.test"]),
+        # A non-ASCII path is a real URL, not a parse error: it is fetched.
+        ("https://preview.test/caf\u00e9/notes", ["preview.test"]),
+        # A public IP literal is a real host; it is judged directly, with no DNS.
+        ("http://93.184.216.34/page", []),
+        # A Unicode (IDN) host is looked up AS the punycode the request will carry
+        # (QA Q2): it used to be looked up in Unicode and then crash encoding the
+        # Host header, so it could never preview.
+        ("https://caf\u00e9.test/p", ["xn--caf-dma.test"]),
+    ],
+)
+async def test_an_absolute_http_url_with_a_host_is_still_resolved(
+    url: str, lookups: list[str], monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            content=_html("<title>Fixture</title>"),
+        ),
+    )
+    async with _client() as client:
+        response = await _post(client, {"url": url, "index": 0, "expected_account_id": ACCOUNT})
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["kind"] == "ready", result
+    assert result["preview"]["title"] == "Fixture"
+    assert looked_up == lookups
+    assert len(seen) >= 1
+
+
+#: Absolute http(s) URLs that pass the preview's own spelling guard but that no
+#: request can be built from: httpx (the parser the request is built with) refuses
+#: the host, or a character in the URL. Each used to escape every handler as
+#: ``httpx.InvalidURL`` — a 500 the UI maps to a Retry that can never succeed
+#: (security S-1). The fetcher now refuses them as ``PolicyRefusal("host")`` BEFORE
+#: the lookup, so each is a coded absence that cost no DNS and no request.
+_UNBUILDABLE_TARGETS = [
+    "https://ex\u00adample.com/",  # a soft hyphen inside the host
+    "https://\uff25\uff38\uff21\uff2d\uff30\uff2c\uff25.com/",  # fullwidth letters
+    "http://0177.0.0.1/",  # octal IPv4: platforms disagree on what it means
+    "https://preview.test/page#x\x00",  # a NUL in the fragment
+    # An A-label httpx cannot decode passed the guard, cost a lookup and then
+    # raised at request time — a 500 (security S-1a); a port httpx accepts but
+    # no socket can use is the same class (review R2-1).
+    "https://xn--zz.preview.test/",
+    "https://preview.test:99999/",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", _UNBUILDABLE_TARGETS)
+async def test_a_url_no_request_can_be_built_from_is_blocked_host_with_no_lookup(
+    url: str, monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(monkeypatch, lambda request: httpx.Response(200, content=_html("")))
+    async with _client() as client:
+        response = await _post(client, {"url": url, "index": 0, "expected_account_id": ACCOUNT})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert looked_up == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_an_idn_host_carries_its_punycode_in_the_host_header(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The name that is looked up, sent as ``Host`` and used for SNI is ONE name.
+
+    HTTP and TLS carry ASCII only, so the Unicode spelling could never be sent;
+    and resolving one spelling (Python's IDNA 2003 codec) while presenting another
+    (httpx's IDNA 2008) would pin the socket to one name's address and verify the
+    certificate against a different name.
+    """
+    _spy_dns(monkeypatch)
+    hosts: list[tuple[str | None, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append((request.headers.get("host"), request.extensions.get("sni_hostname")))
+        return httpx.Response(
+            200, headers={"content-type": "text/html"}, content=_html("<title>Café</title>")
+        )
+
+    _route_transport(monkeypatch, handler)
+    async with _client() as client:
+        response = await _post(
+            client,
+            {"url": "https://caf\u00e9.test/p", "index": 0, "expected_account_id": ACCOUNT},
+        )
+    assert response.json()["result"]["kind"] == "ready"
+    assert hosts == [("xn--caf-dma.test", "xn--caf-dma.test")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decoration",
+    [
+        '<link rel="icon" href="https://a..b/x.ico">',
+        '<meta property="og:image" content="https://./x.png">',
+        '<meta property="og:image" content="https://ex\u00adample.com/x.png">',
+        # A port or an A-label the request parser cannot use (R2-1, S-1d): these
+        # used to raise past ``_store_artifact`` as a bare ``ValueError``.
+        '<link rel="icon" href="https://public.test:99999/x.ico">',
+        '<link rel="icon" href="https://public.test:65536/x.ico">',
+        '<meta property="og:image" content="https://xn--zz.public.test/x.png">',
+    ],
+)
+async def test_a_malformed_icon_or_image_host_drops_the_decoration_not_the_card(
+    decoration: str, monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The page author writes the icon and image URLs, so they are hostile input.
+
+    A host the resolver cannot even encode (``a..b``, ``.``) or that no request can
+    be built from (a soft hyphen) used to raise past ``_store_artifact`` and turn
+    every reader's card for that page into a 500 (review R1-1, security S-1). It
+    is now the fetcher's own ``PolicyRefusal``, which the sub-fetch already drops.
+    """
+    _spy_dns(monkeypatch)
+    page = _html("<title>Decorated</title>" + decoration)
+    _route_transport(
+        monkeypatch,
+        lambda request: httpx.Response(200, headers={"content-type": "text/html"}, content=page),
+    )
+    async with _client() as client:
+        response = await _post(
+            client, {"url": "https://preview.test/page", "index": 0, "expected_account_id": ACCOUNT}
+        )
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["kind"] == "ready", result
+    assert result["preview"]["title"] == "Decorated"
+    assert "favicon" not in result["preview"]
+    assert "image" not in result["preview"]
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_to_a_malformed_host_is_a_cached_blocked_host(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """An unusable host is a DELIBERATELY cached absence (review R1-2, S-2, QA Q1).
+
+    It is the fetcher's ``PolicyRefusal("host")`` now — the same class as a name
+    that does not exist — so it takes the same 30-minute negative-cache path: the
+    spelling is a property of the origin's redirect, and asking again changes
+    nothing. A second resolve is a cache hit that costs the origin no request.
+    """
+    _spy_dns(monkeypatch)
+    seen = _route_transport(
+        monkeypatch,
+        lambda request: httpx.Response(302, headers={"location": "https://a..b/next"}),
+    )
+    body = {"url": "https://preview.test/moved", "index": 0, "expected_account_id": ACCOUNT}
+    async with _client() as client:
+        first = await _post(client, body)
+        second = await _post(client, body)
+    assert first.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert second.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert seen == ["/moved"]
+
+
+#: ``Location`` values that used to escape as a 500 or as a retryable error the
+#: card's Retry could never fix (review R2-1, security S-1b/c, QA Q3). The origin
+#: writes the header, so each must be a coded ``blocked-host`` after ONE request
+#: and no lookup of the unusable hop. Raw bytes: what a real origin sends.
+_UNUSABLE_LOCATIONS = [
+    b"https://u:[p]@preview.test/x",
+    b"https://public.test:99999/x",
+    b"https://public.test:65536/x",
+    b"https://xn--zz.public.test/x",
+    b"http://[::1/x",
+    b"http://0177.0.0.1/x",
+    b"https:\\\\evil.test/x",
+    b"https://ex\xc2\xadample.test/x",
+    b"https://pre\tview.test/x",
+    b"https://preview.test/a\x00b",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", _UNUSABLE_LOCATIONS)
+async def test_an_unusable_redirect_location_is_blocked_host_after_one_request(
+    location: bytes, monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(
+        monkeypatch, lambda request: httpx.Response(302, headers=[(b"location", location)])
+    )
+    async with _client() as client:
+        response = await _post(
+            client,
+            {"url": "https://preview.test/moved", "index": 0, "expected_account_id": ACCOUNT},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+    assert seen == ["/moved"]
+    assert looked_up == ["preview.test"]
+
+
+@pytest.mark.asyncio
+async def test_the_shared_fetcher_still_absolutises_what_a_preview_refuses(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """The scheme prepend STAYS in the shared fetcher; only the preview refuses.
+
+    ``normalize_url`` is shared by ``fetch``, ``fetch_bytes`` and the ``web_fetch``
+    tool, where a model genuinely means ``example.com`` and the prepend is the
+    documented repair. Rewriting it would change those callers instead, so this
+    test pins the boundary: the same string is absolutised by the fetcher and
+    refused by the preview, in one place where a future "simplification" that
+    moved the rule into ``normalize_url`` would go red.
+    """
+    from local_operator.web_fetch.service import normalize_url
+
+    assert normalize_url("README.md") == "https://README.md"
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(monkeypatch, lambda request: httpx.Response(200, content=_html("")))
+    async with _client() as client:
+        response = await _post(
+            client, {"url": "README.md", "index": 0, "expected_account_id": ACCOUNT}
+        )
+    assert response.json()["result"] == {"kind": "absent", "reason": "unsupported-scheme"}
+    assert looked_up == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_private_ip_literal_is_refused_without_a_fetch(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    looked_up = _spy_dns(monkeypatch)
+    seen = _route_transport(monkeypatch, lambda request: httpx.Response(200, content=b""))
+    async with _client() as client:
+        response = await _post(
+            client, {"url": "http://10.0.0.7/admin", "index": 0, "expected_account_id": ACCOUNT}
+        )
+    assert response.status_code == 200
+    assert response.json()["result"] == {"kind": "absent", "reason": "local-or-private"}
+    assert looked_up == []
     assert seen == []
 
 
@@ -1312,6 +1654,43 @@ async def test_a_credentialed_refusal_does_not_poison_the_plain_spelling(
         plain = await _post(client, _resolve_body())
         assert plain.json()["result"]["kind"] == "ready", plain.text
     # One entry, written by the plain resolve: the refusal stored nothing.
+    assert preview_cache_for_test.stats().entries == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attack", "victim"),
+    [
+        ("http://preview.test/page#\x01", "http://preview.test/page"),
+        ("http://preview.test/page#x\x00", "http://preview.test/page"),
+        ("http://preview.test/page#\x7f", "http://preview.test/page"),
+        ("http://preview.test/page?a=\x01", "http://preview.test/page?a=%01"),
+        ("http://preview.test/page?b=\x01&a=1", "http://preview.test/page?a=1&b=%01"),
+    ],
+)
+async def test_an_unrequestable_spelling_does_not_poison_its_canonical_twin(
+    attack: str,
+    victim: str,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_in: None,
+    preview_cache_for_test: PreviewCache,
+) -> None:
+    """A refusal decided from the string alone is never cached (security S-5).
+
+    The key drops the fragment and re-encodes the query, so ``page#\x01`` and
+    ``page`` are ONE key. A cached ``blocked-host`` for the unrequestable spelling
+    would deny the legitimate URL its card for ``NEGATIVE_TTL_S`` — the same class
+    as the credential refusal (Q2-1), closed the same way: refused on the raw
+    target, before the key exists.
+    """
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        attacked = await _post(client, _resolve_body(attack))
+        assert attacked.json()["result"] == {"kind": "absent", "reason": "blocked-host"}
+        assert seen == [], "the refusal must not reach the origin"
+
+        legitimate = await _post(client, _resolve_body(victim))
+        assert legitimate.json()["result"]["kind"] == "ready", legitimate.text
     assert preview_cache_for_test.stats().entries == 1
 
 

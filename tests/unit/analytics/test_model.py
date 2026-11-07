@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 
@@ -22,6 +23,7 @@ from local_operator.analytics.model import (
     apportion_components,
     condense_label,
     price_snapshot,
+    request_fingerprint,
     session_table_labels,
     snapshot_component_chars,
     split_system_prompt,
@@ -717,3 +719,296 @@ def test_a_provider_reported_dollar_is_stored_unscaled_by_any_schedule(monkeypat
     )
     snapshot = dataclasses.replace(_peak_priced_snapshot(_PEAK_MS), usd_cost=0.0075)
     assert price_snapshot(snapshot) == (7500, True)
+
+
+# -- the request fingerprint -------------------------------------------------
+#
+# ``prompt_hash`` exists because nothing else retained after a call says what
+# the model was actually given. These tests pin its three load-bearing
+# properties: same context -> same digest, changed context -> changed digest,
+# and every non-context input ignored so two calls over the same prefix stay
+# comparable.
+
+
+def _fingerprint_request(**overrides):
+    base = ChatRequest(
+        model=ModelSpec(provider="radient", model_id="auto"),
+        system_blocks=["persona", "## Available tools\ntools", "env", "<skills/>"],
+        messages=[Message(role="user", content=[TextContent(text="hello")])],
+        tools=[
+            AgentTool(
+                name="bash",
+                description="run",
+                parameters={"type": "object", "properties": {"command": {"type": "string"}}},
+                execute=_noop,
+            )
+        ],
+    )
+    return base.model_copy(update=overrides) if overrides else base
+
+
+def test_request_fingerprint_is_stable_for_the_same_request() -> None:
+    """Recomputable from the same request, which is the whole point: a stored
+    digest is only evidence if a later replay of the request reproduces it."""
+    first = request_fingerprint(_fingerprint_request())
+    second = request_fingerprint(_fingerprint_request())
+    assert first == second
+    assert len(first[0]) == 64
+
+
+def test_request_fingerprint_changes_when_a_message_is_appended() -> None:
+    request = _fingerprint_request()
+    grown = request.model_copy(
+        update={
+            "messages": [
+                *request.messages,
+                Message(role="assistant", content=[TextContent(text="hi")]),
+            ]
+        }
+    )
+    assert request_fingerprint(grown)[0] != request_fingerprint(request)[0]
+
+
+def test_request_fingerprint_changes_when_prompt_context_changes() -> None:
+    """Every covered input moves the digest: a swapped system block, a renamed
+    tool, an edited tool result. A digest that survives a changed block would be
+    unable to answer "was this the right context?"."""
+    base = _fingerprint_request()
+    for changed in (
+        {"system_blocks": ["persona EDITED", "## Available tools\ntools", "env", "<skills/>"]},
+        {"messages": [Message(role="user", content=[TextContent(text="goodbye")])]},
+        {"tools": []},
+        # The route is NOT on this list any more: as of form version 2 the digest
+        # means "this context", not "this context on this route" (round-1 review
+        # R1-2), so a different ``ModelSpec`` must NOT move it. That direction is
+        # pinned by ``test_request_fingerprint_is_blind_to_the_route_that_serves_it``.
+    ):
+        assert request_fingerprint(base.model_copy(update=changed))[0] != (
+            request_fingerprint(base)[0]
+        ), changed
+
+
+def test_request_fingerprint_ignores_routing_and_sampling_knobs() -> None:
+    """``prompt_cache_key``, the host pin, sampling and effort choose HOW the
+    same context is served. Folding them in would make two calls over identical
+    context hash differently and defeat the comparison."""
+    base = _fingerprint_request()
+    variant = base.model_copy(
+        update={
+            "prompt_cache_key": "session-abc",
+            "provider_affinity": "AtlasCloud",
+            "provider_avoid": ["Novita"],
+            "temperature": 0.9,
+            "max_tokens": 1234,
+            "effort_ceiling": "low",
+            "purpose": "compaction",
+        }
+    )
+    assert request_fingerprint(variant) == request_fingerprint(_fingerprint_request())
+
+
+def test_request_fingerprint_counts_the_composed_messages() -> None:
+    """``message_count`` is the composed count (system blocks + messages), taken
+    before any per-dialect adaptation, so it means one thing on every wire and
+    matches what the hash covers."""
+    request = _fingerprint_request()
+    assert request_fingerprint(request)[1] == len(request.system_blocks) + len(request.messages)
+
+
+def test_request_fingerprint_summarises_media_without_hashing_bytes() -> None:
+    """An image counts as PRESENCE, never as bytes: digesting media on the turn's
+    own path would copy megabytes per call, and counts already answer the
+    question. Adding a second image must still move the digest."""
+    one = _fingerprint_request(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="look"),
+                    ImageContent(data="aGVsbG8=", mime_type="image/png"),
+                ],
+            )
+        ]
+    )
+    two = _fingerprint_request(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="look"),
+                    ImageContent(data="aGVsbG8=", mime_type="image/png"),
+                    ImageContent(data="d29ybGQ=", mime_type="image/png"),
+                ],
+            )
+        ]
+    )
+    assert request_fingerprint(one)[0] != request_fingerprint(two)[0]
+    # Different BYTES for the same single image deliberately share a digest:
+    # bytes are excluded, presence is what is covered.
+    other_bytes = _fingerprint_request(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="look"),
+                    ImageContent(data="d29ybGQ=", mime_type="image/png"),
+                ],
+            )
+        ]
+    )
+    assert request_fingerprint(other_bytes)[0] == request_fingerprint(one)[0]
+
+
+def test_request_fingerprint_is_blind_to_the_route_that_serves_it() -> None:
+    """Round-1 review R1-2: the digest means "this context", never "this context
+    on this route".
+
+    ``provider`` / ``model_id`` left the canonical form at version 2 because the
+    comparison this column exists for IS the failover one: identical context
+    served from a different provider must compare equal, with the route left
+    legible in the row's own ``provider`` / ``model_id`` / ``served_model``
+    columns. Before the change these two requests hashed differently.
+    """
+    base = _fingerprint_request()
+    failover = base.model_copy(
+        update={"model": ModelSpec(provider="openrouter", model_id="deepseek/deepseek-v4.1")}
+    )
+    assert request_fingerprint(failover) == request_fingerprint(base)
+
+
+def test_request_fingerprint_sees_a_tool_error_flag() -> None:
+    """Round-1 review R1-1: ``is_error`` reaches the wire -- the Anthropic client
+    sends ``is_error: true`` on the ``tool_result`` block -- so it changes what
+    the model reads. The record omitted it while the docstring claimed it was
+    covered; the two now agree."""
+    ok = _fingerprint_request(
+        messages=[Message(role="tool", tool_call_id="c1", content=[TextContent(text="boom")])]
+    )
+    failed = _fingerprint_request(
+        messages=[
+            Message(
+                role="tool",
+                tool_call_id="c1",
+                is_error=True,
+                content=[TextContent(text="boom")],
+            )
+        ]
+    )
+    assert request_fingerprint(failed)[0] != request_fingerprint(ok)[0]
+
+
+def test_request_fingerprint_sees_where_media_sits_among_text() -> None:
+    """R1-1: ORDER matters, not just membership. The old record collected the
+    texts and collapsed media into a sorted count, so these two messages -- the
+    same two text blocks and the same single image, interleaved differently --
+    hashed alike."""
+    media_between = _fingerprint_request(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="before"),
+                    ImageContent(data="aGVsbG8=", mime_type="image/png"),
+                    TextContent(text="after"),
+                ],
+            )
+        ]
+    )
+    media_last = _fingerprint_request(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextContent(text="before"),
+                    TextContent(text="after"),
+                    ImageContent(data="aGVsbG8=", mime_type="image/png"),
+                ],
+            )
+        ]
+    )
+    assert request_fingerprint(media_between)[0] != request_fingerprint(media_last)[0]
+
+
+def test_request_fingerprint_covers_the_native_replay_substrate() -> None:
+    """R1-1: replayed native items ARE request context -- all four wire builders
+    splice them back into the outgoing body -- so a rebuild that drops the
+    payload changes what the model is given and must move the digest.
+
+    It must stay BOUNDED while doing so: the items are the response's own bytes
+    (one reasoning block can outweigh the whole visible turn) and this runs on
+    the event loop, so the summary covers item type/id and the true count, never
+    the content. The collisions that trade accepts are pinned below.
+    """
+
+    def _with_items(items: list[dict[str, Any]]) -> Any:
+        return _fingerprint_request(
+            messages=[
+                Message(
+                    role="assistant",
+                    content=[TextContent(text="done")],
+                    provider_payload={"native_replay": {"items": items}},
+                )
+            ]
+        )
+
+    carried = _with_items(
+        [
+            {"type": "reasoning", "id": "rs_1", "content": "x" * 100_000},
+            {"type": "message", "id": "msg_1"},
+        ]
+    )
+    dropped = _fingerprint_request(
+        messages=[Message(role="assistant", content=[TextContent(text="done")])]
+    )
+    assert request_fingerprint(carried)[0] != request_fingerprint(dropped)[0]
+    # Stable across a recomposition of the same context -- the one property the
+    # column is worth anything for.
+    assert request_fingerprint(carried) == request_fingerprint(
+        _with_items(
+            [
+                {"type": "reasoning", "id": "rs_1", "content": "x" * 100_000},
+                {"type": "message", "id": "msg_1"},
+            ]
+        )
+    )
+    # Content is NOT covered (a different reasoning body under the same item
+    # types/ids collides). Stated here so nobody reads that as a bug later.
+    assert (
+        request_fingerprint(
+            _with_items(
+                [
+                    {"type": "reasoning", "id": "rs_1", "content": "y" * 100_000},
+                    {"type": "message", "id": "msg_1"},
+                ]
+            )
+        )[0]
+        == request_fingerprint(carried)[0]
+    )
+    # Truncation cannot collide with a genuinely shorter list: the true count is
+    # recorded beside the capped marker prefix.
+    assert (
+        request_fingerprint(
+            _with_items([{"type": "message", "id": f"m{index}"} for index in range(32)])
+        )[0]
+        != request_fingerprint(
+            _with_items([{"type": "message", "id": f"m{index}"} for index in range(33)])
+        )[0]
+    )
+
+
+def test_request_fingerprint_never_raises_on_a_hostile_tool_schema() -> None:
+    """A diagnostic must not be the thing that breaks a turn. A non-JSON value is
+    rendered as its type name — stable across calls, content-blind by design."""
+    hostile = _fingerprint_request(
+        tools=[
+            AgentTool(
+                name="weird",
+                description="",
+                parameters={"type": "object", "properties": {"x": object()}},
+                execute=_noop,
+            )
+        ]
+    )
+    digest = request_fingerprint(hostile)
+    assert len(digest[0]) == 64
+    assert digest == request_fingerprint(hostile)

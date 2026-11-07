@@ -1005,6 +1005,10 @@ def test_every_action_degrades_without_cmux(monkeypatch) -> None:
         if action == "hover":
             # Same rule: a well-formed target reaches the unavailable-host refusal.
             args["selector"] = "#menu"
+        if action == "setvalue":
+            # Both halves are required, so a bare action would stop at the
+            # argument refusal instead of the host one this loop is about.
+            args.update(selector="#field", text="value")
         result = _run(forced, "t1", args, context)
         if action == "inspect_ownership":
             assert not result.is_error

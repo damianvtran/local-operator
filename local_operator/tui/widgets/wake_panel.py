@@ -285,11 +285,26 @@ class WakePanel(Container):
     def _monitor_rows(self, session: Any) -> tuple[tuple[str, ...], ...]:
         """Monitor rows as paint-relevant tuples — the wake fingerprint's twin.
 
-        Read from the LIVE scheduler (the runtime the session owns), not the
-        derived index: a monitor's health lives in its counters (next due, the
-        disabled reason, the failure count the auto-disable ladder walks), and
-        the index is only rewritten on change events, so a cold reader would
-        paint stale health on the surface that exists to make it visible.
+        Two hosts answer the same two reads (``.monitors``,
+        ``.runtime(id).counters``) with rows of different freshness:
+
+        - the OWNER's live scheduler, whose counters move on every tick (next
+          due, checks, the failure count the auto-disable ladder walks);
+        - a VIEWER's ``SnapshotMonitorScheduler`` — and the TUI opens every
+          session as a viewer (``cli.py``'s ``viewer_factory``: "a VIEWER,
+          never an owner") — whose rows are the fields the owner PUBLISHED at
+          its last change event (§10.2), not the counters as they stand.
+
+        The READ needs no branch: an owner-only member read as "no monitors" is
+        how the band came to paint nothing for an armed watch, the
+        hide-when-empty rule doing the rest. What differs is how far a row may
+        be judged against a clock, so ``live_clocks`` is read off the scheduler
+        rather than guessed from the class: a published row's
+        ``next_due_at``/``checks`` are the owner's last statement, and comparing
+        them to this process's clock is how a healthy quiet watch was painted
+        ``idle`` in warning ink (agent review round 1, MAJOR-1). An object
+        without the marker is treated as LIVE, which the owner's scheduler is.
+
         Defensive like the rest of ``sync``: any failure yields no monitor
         rows rather than taking the band down.
         """
@@ -298,6 +313,7 @@ class WakePanel(Container):
             specs = list(scheduler.monitors) if scheduler is not None else []
         except Exception:
             return ()
+        live_clocks = not bool(getattr(scheduler, "clocks_are_published", False))
         rows: list[tuple[str, ...]] = []
         for spec in specs:
             counters: dict[str, Any] = {}
@@ -308,11 +324,13 @@ class WakePanel(Container):
                         counters = dict(runtime.counters or {})
                 except Exception:
                     counters = {}
-            rows.append(self._monitor_fingerprint(spec, counters))
+            rows.append(self._monitor_fingerprint(spec, counters, live_clocks=live_clocks))
         return tuple(rows)
 
     @classmethod
-    def _monitor_fingerprint(cls, spec: Any, counters: dict[str, Any]) -> tuple[str, ...]:
+    def _monitor_fingerprint(
+        cls, spec: Any, counters: dict[str, Any], *, live_clocks: bool = True
+    ) -> tuple[str, ...]:
         """One monitor as a paint-relevant tuple; the wake fingerprint's shape.
 
         ``(id, due_or_state, every, name, ink, health, rank)``. Two rules here
@@ -330,10 +348,24 @@ class WakePanel(Container):
 
         ``rank`` orders the section worst-first (D5): the cap is two rows, and a
         hidden row must never be the one carrying the news.
+
+        ``live_clocks=False`` means the counters are a PUBLISHED copy (a viewer
+        attached to a runtime another process owns), so nothing here may be
+        judged against ``now``: ``idle`` and ``never checked`` are comparisons
+        the owner alone can make, and the failure count is published history
+        rather than a live alarm. What survives is every state the owner
+        publishes AS AN EVENT — ``disabled``, ``blind``, ``stalled`` — plus the
+        counts the row states as counts. This is the difference between a band
+        that shows a watch and a band that invents one (agent review round 1,
+        MAJOR-1: a healthy quiet watch went ``idle`` in warning ink minutes
+        after arming because its published ``next_due_at`` stopped moving).
         """
         from local_operator.monitors import store as monitor_store
 
         now_ms = int(time.time() * 1000)
+        # The ONE clock the fingerprint may judge deadlines with; ``None`` is the
+        # published-row case the store's helpers read as "cannot judge".
+        clock = now_ms if live_clocks else None
         row = {
             **counters,
             "id": getattr(spec, "id", ""),
@@ -355,8 +387,22 @@ class WakePanel(Container):
         failures = counters.get("consecutive_failures")
         fail_count = failures if isinstance(failures, int) and not isinstance(failures, bool) else 0
         failing = fail_count > 0
-        idle = (not disabled) and (not unavailable) and monitor_store.is_idle(row, now_ms)
-        hint = monitor_store.health_hint(row, now_ms)
+        # EXPIRY IS THE ONE DEADLINE EVERY HOST MAY JUDGE: ``until_at`` is a spec
+        # instant the owner never moves, and past it the owner never checks the
+        # watch again, so "it is not running" is true however old the published
+        # copy is. Declining the clock here as well would paint a finished watch
+        # as an armed one due at a past time. The state word stays 88a6e's
+        # ``idle``; the CLI's ``expired`` is QA round 1's Q2, deferred because it
+        # is a new word in a state vocabulary that is not keyed yet.
+        idle_clock = now_ms if expired else clock
+        idle = (not disabled) and (not unavailable) and monitor_store.is_idle(row, idle_clock)
+        hint = monitor_store.health_hint(row, clock)
+        if clock is None and counters.get("blind") and not blind:
+            # Expired outranks blind (F5, above). The store, holding no clock for
+            # a published row, cannot judge expiry and keeps the BLIND sentence;
+            # the band judged it, so that sentence must not reach the neutral
+            # branch below and describe a watch that will never check again.
+            hint = None
         # BEFORE ``idle``, and the order is the whole finding (design round 2,
         # D10): a watch that has never run a check is overdue by definition, so
         # an idle-first order rendered the one state this PR exists to surface
@@ -381,7 +427,20 @@ class WakePanel(Container):
         elif idle:
             label = "idle"
         elif isinstance(due, int) and not isinstance(due, bool):
-            label = format_wake_time(due)
+            if not live_clocks and due <= now_ms:
+                # A PUBLISHED DUE TIME IS A PROMISE ONLY UNTIL IT ARRIVES (design
+                # round 2, D6; review R2-MINOR-1). The owner advances
+                # ``next_due_at`` on every quiet tick without publishing (§10.2),
+                # so once the published instant has passed it is the owner's
+                # last statement, not its next check — and `1:01 PM EST` painted
+                # at 1:13 reads as a stall. ``armed`` is the header's own word and
+                # true of the published row. The next due is deliberately NOT
+                # extrapolated from the interval: that would assert ticks this
+                # process cannot see. The label is part of the fingerprint, so
+                # the band's 1 Hz sync repaints within a second of the deadline.
+                label = "armed"
+            else:
+                label = format_wake_time(due)
         else:
             label = "waiting"
 
@@ -421,7 +480,16 @@ class WakePanel(Container):
             ink, rank = "warning", 4
         elif failing:
             health = f"{fail_count} failed"
-            ink, rank = "warning", 6
+            # WARNING INK IS AN ALARM, AND A PUBLISHED COUNT CANNOT RAISE ONE.
+            # ``consecutive_failures`` is reset by the first quiet success and
+            # deliberately publishes nothing (one index rewrite per tick is the
+            # cost §10.2 refuses), so a viewer's copy is the count at the last
+            # change event — a stale alarm after a recovery, and blind to the
+            # strikes it never saw. The row still states the count; it stops
+            # claiming the watch is failing right now. The ladder's TERMINAL
+            # state (disable) does publish, as an event, and keeps its ink.
+            ink = "muted" if not live_clocks else "warning"
+            rank = 6
         elif hint and "suppressed as non-material" in hint:
             # A SUPPRESSED change is not a quiet watch (design review round 1,
             # D1): the gate filed real deltas as bookkeeping, so the row is

@@ -37,10 +37,40 @@ def test_snapshot_round_trip_and_truncation_flag(tmp_path: Path) -> None:
         "monitor_id": "m1",
         "snapshot": "01234",
         "snapshot_truncated": True,
+        "normalizer": monitor_state.NORMALIZER_TAG,
     }
     monitor_state.write_snapshot(root, "sess", "m1", "full", truncated=False)
     blob = monitor_state.read_snapshot(root, "sess", "m1")
     assert blob is not None and blob["snapshot_truncated"] is False
+
+
+def test_the_normalizer_tag_is_pinned_to_its_released_value() -> None:
+    """Bump deliberately: the tag says which OUTPUT SHAPE a blob holds.
+
+    A change to ``diff.normalize()``'s output for the same input must bump
+    this, because a stored snapshot is compared against a future tick's result
+    and a silent change of basis is the bug class this tag exists for (the
+    2026-11-05 record split).
+    """
+    assert monitor_state.NORMALIZER_TAG == "record-view-1"
+    assert monitor_state.LEGACY_NORMALIZER != monitor_state.NORMALIZER_TAG
+
+
+def test_a_blob_without_a_normalizer_tag_reads_back_as_legacy(tmp_path: Path) -> None:
+    """An upgrade must never fail a monitor's state read (absent ⇒ pre-split)."""
+    root = tmp_path / "cfg"
+    path = monitor_state.snapshot_path(root, "sess", "m1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"schema": 1, "monitor_id": "m1", "snapshot": "x", "snapshot_truncated": False}),
+        encoding="utf-8",
+    )
+    blob = monitor_state.read_snapshot(root, "sess", "m1")
+    assert blob is not None
+    assert monitor_state.snapshot_normalizer(blob) == monitor_state.LEGACY_NORMALIZER
+    assert monitor_state.snapshot_normalizer({"monitor_id": "m1"}) == (
+        monitor_state.LEGACY_NORMALIZER
+    )
 
 
 def test_writes_are_atomic_and_leave_no_temp_files(tmp_path: Path) -> None:

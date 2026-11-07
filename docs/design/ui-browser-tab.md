@@ -661,7 +661,7 @@ below is now argued per row rather than asserted.
 | `open` | yes | creates a `WebContentsView` + tab; the active tab does not change (the extension's `active: false` equivalent, `commands/nav.ts:179`); a pinned `ui:` handle resumes its tab, and `tab_closed` re-creates it (same rule as `_bridge_open`, `builtin.py:9036-9050`). **New in rev 2:** accepts the optional `handle` param (R2 hand-over, §6.3) — the wire's existing `tab` field (`commands/nav.ts:126`, `requireSurface(params.tab)`) |
 | `goto` | yes | `webContents.loadURL` (web-contents.md:1087) + settle on `did-finish-load`/`did-fail-load`/`did-navigate-in-page` |
 | `read` | yes | `executeJavaScriptInIsolatedWorld` (web-contents.md:1446-1455) — **not** `executeJavaScript`, which would run in the main world |
-| `snapshot` | yes | `Accessibility.getFullAXTree` over `webContents.debugger`, then the shared `ax-compact` pruner |
+| `snapshot` | yes | `Accessibility.getFullAXTree` over `webContents.debugger`, then the shared `ax-compact` pruner. The pruner also projects a control's VALUE onto the line — `- combobox "Environment" [e12] [collapsed] = "Production"` — for `combobox`/`listbox`/`option`/`textbox`/`searchbox`/`spinbutton`/`slider`, preferring the AX `valuetext` property, clipped at 40 characters, appended after the ref and state markers so the locator grammar is untouched (docs/BROWSER.md, "Values in the snapshot") |
 | `screenshot` | yes | `Page.captureScreenshot` over CDP → base64 → Python keeps path resolution, PNG validation (`PNG_MAGIC`) and write approval (`builtin.py:9497-9527`). **Not** `capturePage`: it has visibility semantics (web-contents.md:1815, "The page is considered visible when its browser window is hidden and the capturer count is non-zero") and would change the hidden-window question |
 | `click` | yes | `Input.dispatchMouseEvent` at the ref's box, with the extension's ref-epoch rule (§6.4) |
 | `type` | yes | `Input.insertText` + read-back comparison |
@@ -683,6 +683,7 @@ below is now argued per row rather than asserted.
 | `status` (method) | yes | the host's own state: proto, app version, profile path, tabs, per-surface url/title |
 | `download` | **PR B** | the UI host is the ONLY host that can serve this: `will-download` + `item.setSavePath()` picks the destination before the bytes land, with no CDP primitive and no new permission (the extension's two candidate primitives are refused by Chrome — `docs/design/browser-file-transfer.md`). The harness already refuses it on a host whose record does not advertise it, so an old app answers with a typed `capability_unsupported` rather than a mystery failure |
 | `upload` | yes | `DOM.setFileInputFiles` over `webContents.debugger`, plus the read-back comparison; the shared `driver/file-transfer-policy.ts` is vendored for the host-side name check, and Python's `browser_files.check_upload` remains the control |
+| `copy` | **new** | reads ONE element's text in the isolated world (`executeJavaScriptInIsolatedWorld`, the class `read` uses; a form control's `value`, else its trimmed `textContent`) and writes those bytes to the OS clipboard from MAIN (`clipboard.writeText`), then reports a receipt only — `chars`, the first 16 hex of the sha256 of the bytes, and whether a compare-only readback matched. The bytes never leave main, and neither does any page-controlled string: the element is named by the CALLER'S selector, and an earlier `{tag, id, name}` field was dropped in review because a grammar loose enough for real ids is loose enough for a token-shaped secret. So a key shown once reaches `lop secret set` without entering a transcript. It needs no page permission, which is the point: §11.6 describes how the page's own Copy button is served by the host without granting the page anything. Desktop-only (`DESKTOP_ONLY_METHODS`): the extension has no main process to write from (an offscreen document's `navigator.clipboard` IS the page-permission path this avoids) and cmux has no page-script read, so both get the typed `capability_unsupported` naming the desktop app; an app build that predates the action advertises no `copy` and is refused by the capability gate before a socket is dialled |
 | `retitle` (method) | **served as a no-op, never called** | the UI has no tab *groups*; Python should skip `ui:` the way it already skips cmux for this method (`retitle_browser_surface` returns early for anything not `bridge:`, `builtin.py:9549`). The UI tab label is the page title, which is strictly more informative than a session title |
 | `owner_recover` / `owner_finish` / `owner_retain` / `owner_release` (methods) | yes | implemented against an in-process ledger keyed by `session_id` + `owner_proof` + `owner_generation`, with the same param contract (`resources.py:248-280`). Requires the Python-side host selection of §10.5 |
 
@@ -2140,6 +2141,22 @@ case the honest way (probe P13, §15) rather than asserting the default is fine.
   `setPermissionCheckHandler` to get complete permission handling… Most web APIs
   do a permission check and then make a permission request if the check is denied"
   (session.md:985-987, :1066-1068). Both handlers are needed; one is a hole.
+- **The clipboard: no page permission at all, and only ever a WRITE.**
+  A page's own Copy button has to work, and the measured 2026-11-06 failure is the
+  one where it did not: in the app's browser host `navigator.clipboard.writeText`
+  rejected `NotAllowedError`, so an API key shown exactly once was lost. The fix
+  is deliberately NOT a permission grant. This runtime treats a page's write as
+  gated on `clipboard-read`, so granting the write would hand the page a READ as
+  well — the one thing a driven page must never have. Instead the host serves the
+  page's requested write ITSELF, in the app's main process, from a host-authored
+  main-world shim, and reports read as still denied: pages keep EVERY clipboard
+  permission denied, `clipboard-read` stays `denied`, and `readText()` keeps
+  rejecting. Stated mechanism-neutrally on purpose — whether the shim intercepts
+  `writeText`, a copy event, or the site's own button, the invariant a future
+  change must preserve is the same: the page is granted nothing, the host performs
+  the write, and no page ever reads. The `copy` ACTION is the harness-side route
+  and shares that invariant from the other direction: it writes from MAIN as well,
+  so it works where a page offers no Copy affordance and needs no grant either.
 - **Downloads**: `session.on('will-download')` (session.md:91-99) →
   `event.preventDefault()` and tell the user; the extension lists downloads as a
   non-goal too, and a download UI is a separate feature with its own security

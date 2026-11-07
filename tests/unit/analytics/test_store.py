@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from local_operator.analytics.model import CallSnapshot
+from local_operator.analytics.model import CallSnapshot, request_fingerprint
 from local_operator.analytics.store import (
     SESSION_NAME_RANK_BACKFILL,
     SESSION_NAME_RANK_PROVISIONAL,
@@ -1529,3 +1529,263 @@ def test_exclusions_partition_both_origins_without_changing_model_rates(tmp_path
         assert stats.recorded == 6
     finally:
         store.close()
+
+
+_REASONING_TOKENS_COLUMN = "rea" "soning_tokens"
+
+
+def test_served_model_count_and_hash_are_recorded_and_migrated(tmp_path):
+    """A pre-change ledger gains the three columns on open and keeps its history
+    honest: old rows read the documented "not recorded" defaults, never NULL and
+    never a claim that the wire named no model."""
+    import dataclasses
+
+    db = tmp_path / "preserved.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          {_REASONING_TOKENS_COLUMN} INTEGER, context_tokens INTEGER,
+          cost_micro INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 0,
+          {_PRE_IMAGES_COMPONENT_COLUMNS}, c_images INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    conn.execute(
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id, ok, input_tokens, "
+        f"output_tokens, cache_read_tokens, cache_write_tokens, {_REASONING_TOKENS_COLUMN}, "
+        "context_tokens) VALUES (1, 'old', 'radient', 'auto', 1, 1, 1, 0, 0, 0, 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    stamped = dataclasses.replace(
+        _snap(),
+        served_model="deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        message_count=7,
+        prompt_hash="0" * 64,
+    )
+    assert store.record_batch([stamped, _snap()]) == 2
+    conn = store._connect()
+    assert conn is not None
+    rows = conn.execute(
+        "SELECT session_id, served_model, message_count, prompt_hash FROM calls ORDER BY id"
+    ).fetchall()
+    assert rows == [
+        # Forward-fill: '' / 0 / '' is UNKNOWN, said out loud in the migration
+        # registry -- nothing about the old call's wire can be recovered.
+        ("old", "", 0, ""),
+        ("s1", "deepseek-ai/DeepSeek-V4.1-Flash-1017", 7, "0" * 64),
+        ("s1", "", 0, ""),
+    ]
+    # And the columns are part of the optional-column contract, so a DB that
+    # failed the ALTER drops them from the insert instead of failing writes.
+    from local_operator.analytics.store import _OPTIONAL_COLUMN_NAMES
+
+    assert {"served_model", "message_count", "prompt_hash"} <= _OPTIONAL_COLUMN_NAMES
+    store.close()
+
+
+def test_the_telemetry_columns_survive_a_db_missing_message_count(tmp_path):
+    """A DB whose ``message_count`` column is absent still lands the OTHER two
+    telemetry values in their OWN columns.
+
+    Why this needs its own test (round-1 review R1-5): the optional-column
+    contract drops an absent column from BOTH the insert SQL and the row tuple
+    (``_insert_indices``), and the failure that hides there is POSITIONAL. A
+    selector that dropped ``served_model`` or ``prompt_hash`` as well, or
+    shifted the selector by one, still writes a row and still returns 1 -- so
+    only reading the columns back proves the values did not slide into each
+    other's slots. Membership in ``_OPTIONAL_COLUMN_NAMES`` says nothing about
+    the index alignment that actually writes the row.
+    """
+    import dataclasses
+    import sqlite3
+
+    db = tmp_path / "no_message_count.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          {_REASONING_TOKENS_COLUMN} INTEGER, context_tokens INTEGER,
+          cost_micro INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 0,
+          {_PRE_IMAGES_COMPONENT_COLUMNS}
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    store._connect()  # runs the migration, which would normally add the column
+    # Drop what the migration just added, so the insert really hits a table that
+    # lacks it: flipping ``_present_optional`` alone would leave the column in
+    # place and a broken plan that still named it would succeed unnoticed.
+    conn = store._connect()
+    assert conn is not None
+    conn.execute("ALTER TABLE calls DROP COLUMN message_count")
+    conn.commit()
+    from local_operator.analytics.store import _OPTIONAL_COLUMN_NAMES
+
+    store._present_optional = _OPTIONAL_COLUMN_NAMES - {"message_count"}
+    store._rebuild_insert_plan()
+
+    stamped = dataclasses.replace(
+        _snap(),
+        served_model="deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        message_count=7,
+        prompt_hash="a" * 64,
+    )
+    assert store.record_batch([stamped]) == 1
+
+    conn = store._connect()
+    assert conn is not None
+    row = conn.execute("SELECT served_model, prompt_hash FROM calls").fetchone()
+    # No shift and no cross-contamination: each value is in its own column.
+    assert row == ("deepseek-ai/DeepSeek-V4.1-Flash-1017", "a" * 64)
+    store.close()
+
+
+def test_served_model_is_never_the_requested_route(tmp_path):
+    """The two are different facts and the ledger keeps both: ``model_id`` is the
+    route this harness requested, ``served_model`` is what the vendor said
+    answered it. A reader must be able to see ``radient/auto`` served by a named
+    checkpoint family."""
+    import dataclasses
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    stamped = dataclasses.replace(
+        _snap(provider="radient", model_id="auto"),
+        served_model="deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    )
+    assert store.record_batch([stamped]) == 1
+    conn = store._connect()
+    assert conn is not None
+    row = conn.execute("SELECT provider, model_id, served_model FROM calls").fetchone()
+    assert row == ("radient", "auto", "deepseek-ai/DeepSeek-V4.1-Flash-1017")
+    store.close()
+
+
+def test_served_model_and_context_fingerprint_reach_the_ledger_from_a_turn(tmp_path):
+    """End to end through the ONE seam every provider call funnels through.
+
+    ``SessionStreamFn._record_stream`` is where the request is still the composed
+    one and the end event still carries what the wire said. Both facts are
+    written once there: the served slug from the end event, and the context
+    digest plus composed message count snapshotted before streaming. This is the
+    whole point of the change -- after the turn, these three columns are the
+    only retained evidence of which family answered and what it was given.
+    """
+    import asyncio
+
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.harness.types import (
+        ChatRequest,
+        Message,
+        ModelSpec,
+        StreamEndEvent,
+        TextContent,
+        Usage,
+    )
+    from local_operator.model.configure import SessionStreamFn
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = object.__new__(SessionStreamFn)
+    fn._session_id = "sess-served"
+    fn._counts_as_child_request = False
+    request = ChatRequest(
+        model=ModelSpec(provider="radient", model_id="auto"),
+        system_blocks=["persona", "tools", "env", "knowledge"],
+        messages=[
+            Message(role="user", content=[TextContent(text="hi")]),
+            Message(role="assistant", content=[TextContent(text="hello")]),
+        ],
+    )
+
+    async def _stream():
+        yield StreamEndEvent(
+            stop_reason="stop",
+            usage=Usage(input_tokens=100, output_tokens=10, context_tokens=100),
+            served_model="deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        )
+
+    async def _drain():
+        async for _event in fn._record_stream(request, _stream()):
+            pass
+
+    asyncio.run(_drain())
+    rec.flush_for_test()
+    conn = store._connect()
+    assert conn is not None
+    row = conn.execute("SELECT model_id, served_model, message_count, prompt_hash FROM calls")
+    assert row.fetchone() == (
+        # The requested route stays the route; the served slug is its own column.
+        "auto",
+        "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        6,
+        request_fingerprint(request)[0],
+    )
+    rec.close()
+    store.close()
+
+
+def test_a_turn_whose_wire_names_no_model_records_an_empty_served_slug(tmp_path):
+    """No served slug on the wire records '' (not recorded / not named), and the
+    digest is still written: the context fingerprint never depends on what the
+    provider volunteered."""
+    import asyncio
+
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.harness.types import (
+        ChatRequest,
+        Message,
+        ModelSpec,
+        StreamEndEvent,
+        TextContent,
+        Usage,
+    )
+    from local_operator.model.configure import SessionStreamFn
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = object.__new__(SessionStreamFn)
+    fn._session_id = "sess-unserved"
+    fn._counts_as_child_request = False
+    request = ChatRequest(
+        model=ModelSpec(provider="anthropic", model_id="claude-opus-5"),
+        system_blocks=["persona"],
+        messages=[Message(role="user", content=[TextContent(text="hi")])],
+    )
+
+    async def _stream():
+        yield StreamEndEvent(
+            stop_reason="stop",
+            usage=Usage(input_tokens=10, output_tokens=2, context_tokens=10),
+        )
+
+    async def _drain():
+        async for _event in fn._record_stream(request, _stream()):
+            pass
+
+    asyncio.run(_drain())
+    rec.flush_for_test()
+    conn = store._connect()
+    assert conn is not None
+    served_model, message_count, prompt_hash = conn.execute(
+        "SELECT served_model, message_count, prompt_hash FROM calls"
+    ).fetchone()
+    assert served_model == ""
+    assert message_count == 2
+    assert prompt_hash == request_fingerprint(request)[0]
+    rec.close()
+    store.close()

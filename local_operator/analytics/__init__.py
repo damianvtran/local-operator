@@ -45,6 +45,7 @@ from local_operator.analytics.model import (
     UsagePeriod,
     apportion_components,
     price_snapshot,
+    request_fingerprint,
     snapshot_component_chars,
     split_system_prompt,
 )
@@ -67,6 +68,7 @@ __all__ = [
     "UsagePeriod",
     "apportion_components",
     "price_snapshot",
+    "request_fingerprint",
     "snapshot_component_chars",
     "split_system_prompt",
     "AnalyticsRecorder",

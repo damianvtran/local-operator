@@ -163,6 +163,16 @@ REENROLMENT_REQUIRED = "reenrolment_required"
 #: declared here, beside the reason codes, so its remedy below is keyed by the
 #: same word the verdict reports and the two cannot drift (issue #1711).
 OWNER_MISSING = "owner_missing"
+#: The pinned login is DEAD (or gone) but a newer sign-in to the SAME Radient
+#: account is already on this device (`api.same_account_successor` proves it).
+#: Not a state the verdict reports — the verdict stays `login_required` /
+#: `owner_missing`, which is still the truth about the pinned row — but a REMEDY
+#: key: the sign-in that `LOGIN_REQUIRED` offers has already happened, and a
+#: second one writes the same new row again, so the fix is the re-point. A
+#: verified sign-in performs that re-point itself (`install.heal_pin_after_login`);
+#: this remedy is for when it could not (a stopped tunnel brought back, a build
+#: that predates the heal wrote the login).
+LOGIN_SUPERSEDED = "login_superseded"
 
 # What a phone is shown: self-contained, and carrying any link it needs, because
 # there is nothing to type on that surface.
@@ -268,26 +278,33 @@ TERMINAL_DETAIL = {
     # not a billing event. The PHONE copy above keeps its link because a phone
     # has no billing block to read it from.
     #
-    # LENGTH: 138 cells, two rendered rows at 80 columns as the indented
-    # continuation `lop tunnel status` prints (140 cells with that two-cell
-    # indent, which is how QA round 1's Q1 counted it). Deliberately NOT trimmed
-    # on the round-2 pass, and the reason is what the sentence has to carry for
-    # readers that have no other line: the CAUSE (a Radient login that is no
-    # longer valid), the CONSEQUENCE that makes this a park rather than a retry
-    # (it stopped and will not retry by itself — the incident's own shape, and the
-    # one clause a reader cannot recover from any other surface once the
-    # connector has exited), and the REMEDY's shape (signing in again starts it
-    # again on its own, i.e. no restart command is needed). It is also the copy
-    # `state.json` persists and `DESKTOP_API.md` forwards as `connector.detail`,
-    # so a shorter sentence here is a shorter sentence everywhere. What D2 fixed
-    # was the WELDING — this sentence is now its own indented continuation row
-    # under a ONE-ROW state line, wrapping in the terminal the way prose does,
-    # rather than being the third clause of a 317-cell paragraph that buried the
-    # command. A future trim should weigh those three clauses against each other
-    # rather than against the row count.
+    # LENGTH: 134 cells, two rendered rows at 80 columns as the indented
+    # continuation `lop tunnel status` prints (136 cells with that two-cell
+    # indent, which is how QA round 1's Q1 counted it). It carries, for readers
+    # that have no other line: the CAUSE (a Radient login that is no longer
+    # valid), the CONSEQUENCE that makes this a park rather than a retry (it
+    # stopped instead of retrying — the incident's own shape, and the one clause
+    # a reader cannot recover from any other surface once the connector has
+    # exited), and the REMEDY's shape, which is CONDITIONAL and has to be: a
+    # sign-in to the SAME account re-points the tunnel at the new credential row
+    # and restarts it (`install.heal_pin_after_login`), so it needs no command —
+    # while a sign-in to a DIFFERENT account must never move that pin, and saying
+    # so here is what stops the sentence promising what the identity check
+    # refuses to do. The 2026-11-06 incident is the reason that distinction is in
+    # the copy at all: the previous clause promised "signing in again starts it
+    # again on its own" unconditionally, nothing re-bound the pin, and the
+    # promise was false in the one case an operator was reading it from. It is
+    # also the copy `state.json` persists and `DESKTOP_API.md` forwards as
+    # `connector.detail`, so a shorter sentence here is a shorter sentence
+    # everywhere. What D2 fixed was the WELDING — this sentence is its own
+    # indented continuation row under a ONE-ROW state line, wrapping in the
+    # terminal the way prose does, rather than being the third clause of a
+    # 317-cell paragraph that buried the command. A future trim should weigh
+    # those three clauses against each other rather than against the row count,
+    # and the remedy clause may not go back to being unconditional.
     LOGIN_REQUIRED: (
-        "The connector's Radient login is no longer valid, so it stopped and will not "
-        "retry by itself. Signing in again starts it again on its own."
+        "The connector's Radient login is no longer valid, so it stopped instead of "
+        "retrying. Only signing in to that same account restarts it."
     ),
 }
 
@@ -317,6 +334,11 @@ TERMINAL_REMEDY = {
     # to the current login (see `tunnels/cli.py`), and it says which account owns
     # the tunnel when the current login is not that account.
     OWNER_MISSING: "lop tunnel configure",
+    # The same re-point, for a dead pin whose account already signed in again:
+    # bare `lop tunnel configure` falls back from it to that same-account row
+    # (`api.usable_credential_id`). Its own key rather than a reuse of
+    # `OWNER_MISSING`'s, so the two causes can diverge without a hunt.
+    LOGIN_SUPERSEDED: "lop tunnel configure",
     # Names the CHECK rather than a fix, by the rule above: this state clears itself,
     # and handing the operator `lop login radient` for it would be the misdirection
     # this code exists to remove.
@@ -342,6 +364,7 @@ REASON_LABEL = {
     LEASE_PENDING: "waiting for authorization",
     LOGIN_REQUIRED: "login required",
     OWNER_MISSING: "tunnel login missing",
+    LOGIN_SUPERSEDED: "newer sign-in not in use",
     LOCAL_PREREQUISITE: "prerequisite missing",
     REENROLMENT_REQUIRED: "needs re-enrolment",
 }

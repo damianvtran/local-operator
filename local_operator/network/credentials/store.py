@@ -176,10 +176,10 @@ class MeshAwareAuthStore:
         self._mesh_delegate = mesh
         self._discover_mesh = discover_mesh
         self.config_dir = config_dir
-        #: One future per ``(provider, session_id)`` so several provider calls in one
-        #: turn share ONE borrow (design §3.5). Without it a turn issues one request
-        #: per provider call, and each is a round trip to a device that may be
-        #: refreshing.
+        #: One IN-FLIGHT future per ``(key, session_id, force_refresh)``, so provider
+        #: calls that overlap share ONE borrow (design §3.5). It is not a cache: a
+        #: finished borrow is not reused and sequential calls each dial, by design
+        #: (``_borrow`` says why).
         self._grants: dict[tuple[str, str, bool], asyncio.Future[Any]] = {}
         #: The synthetic id of the credential last borrowed for ``(provider,
         #: session_id)``, so a later failure can be attributed to the BORROW rather
@@ -575,13 +575,32 @@ class MeshAwareAuthStore:
         model_id: str,
         force_refresh: bool,
     ) -> Grant | BrokerError | None:
-        """One borrow, shared with the other provider calls in this turn.
+        """One borrow, shared with the provider calls that overlap it.
 
-        THE FUTURE IS THE COALESCER: the first caller creates it, later callers in
-        the same turn await the same one. The event loop is this session's own, so
-        the future belongs to it; a borrow that is already finished is not cached
-        here — the CLIENT caches grants (15 min, in memory), which is where the TTL
-        belongs because it is a fact about the token rather than about the turn.
+        THE FUTURE IS THE COALESCER: the first caller creates it, and callers that
+        arrive while it is still pending await the same one. The event loop is this
+        session's own, so the future belongs to it. A finished borrow is not reused
+        here, so sequential provider calls each dial: that per-request round trip is
+        the accepted cost, not a missing optimisation.
+
+        A PROVIDER KEY DIALS THE OWNER ON EVERY RESOLVE. The CLIENT caches the grant
+        a dial returns (expiry capped at ``now + grant_ttl_s``), but
+        ``MeshCredentialClient.request_grant_sync`` reads that cache ahead of the
+        dial only for the ``github`` key (``is_github_key``); MCP bearers read it in
+        ``mcp_bearer``. A grant TTL is not an upstream credential generation, and an
+        owner logout does not rewrite THIS device's placement document, so a
+        provider bearer served from the cache would outlive the login it represents
+        (0385927ab9 removed the unconditional short-circuit; 458a1474a4 restored it
+        for the ``github`` key only). The one provider exception is
+        ``MeshCredentialClient._held_or``: when the owner is unreachable, a
+        still-live cached grant is served marked ``held_offline``, which is why
+        ``grant_ttl_s`` still bounds what this device can serve unasked.
+
+        ``test_native_hot_access.test_live_grant_and_old_login_refusal_do_not_short_circuit_owner``
+        fails if the client's cache read is widened to providers. It drives the
+        client directly and never reaches this method, so keeping this future past
+        its borrow would be a turn-level cache that test cannot see. Design §3.5's
+        as-built note has the detail.
         """
         from local_operator.network.credentials.effective import (
             effective_access,
@@ -761,6 +780,25 @@ class MeshAwareAuthStore:
             )
         self._note_lent_failure(pair, error, api_key)
         self._report_failure(pair[0], error=error, session_id=session_id or "", model_id=model_id)
+        # THE HEALING RE-ASK, AND WHY IT BELONGS ON THIS LINE. A failed borrowed
+        # bearer is the one moment this device knows the owner's answer may have
+        # moved: the token died under us, or the owner re-signed-in after the last
+        # refusal was recorded here. ``forget_refusal`` drops only THIS device's own
+        # observation of that refusal — never a grant, never an authorisation — so
+        # the failure surfaces stop reporting a state the operator may have just
+        # fixed, and a ``quota_blocked`` short-circuit cannot swallow the turn's own
+        # re-resolve (which the failover driver performs after a rotation). The dial
+        # itself is answered from the owner's CURRENT login and grants, so nothing is
+        # assumed: an owner that still has nothing, or a device still not permitted
+        # to ask, refuses again, and that refusal's own sentence is what the session
+        # then reports (``no_credential_reason``).
+        forget = getattr(self._mesh, "forget_refusal", None)
+        if callable(forget):
+            try:
+                forget(pair[0])
+            except Exception:  # noqa: BLE001 — a cache repair must not fail the turn
+                pass
+        self._refusals.pop(pair[0], None)
         # Still ``False``: there is no LOCAL sibling. The driver's rotation leg
         # re-resolves regardless, and the demotion noted above is what moves that
         # re-ask to another of the owner's rows on a server-side fault.

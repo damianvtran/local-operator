@@ -137,9 +137,13 @@ class GrantCache:
         AN ATTRIBUTION READ, NOT A USABILITY READ. When a provider has just refused
         a bearer, the grant that carried it may be inside ``REASK_MARGIN_MS`` — the
         window where :meth:`get` reads as absent — and that grant is exactly the one
-        a report must name. Nothing serves a bearer from here, so a grant inside
-        the margin is still never handed out: the resolve path keeps using
-        :meth:`get`.
+        a report must name. The reads that serve a bearer without dialling (the
+        ``github`` gate in ``request_grant_sync``, MCP's ``_live_bearer``) use
+        :meth:`get`, so they never hand out a grant inside the margin.
+
+        ONE CALLER DOES SERVE FROM HERE: ``_held_or``, the owner-unreachable path.
+        It applies its own ``Grant.usable_at`` check, which has no margin, so it
+        serves a grant marked ``held_offline`` right up to the grant's expiry.
         """
         with self._lock:
             return self._grants.get((key, session_id))
@@ -567,6 +571,45 @@ class MeshCredentialClient:
         if error.code not in _HOLDABLE_REFUSALS:
             note_resolution(self.root, key, error)
         self._remember_evidence(key, error)
+        self._save_state()
+
+    def forget_refusal(self, key: str) -> None:
+        """Forget THIS device's cached "no" for ``key``, so the next ask dials.
+
+        WHAT THIS IS FOR, and what it is NOT. It removes one observation from
+        ``placement.state.json`` — the document that records what THIS device last
+        learned about a key. It does NOT re-enable a borrow that the owner refuses:
+        a provider borrow is re-resolved with the owner on every request, so a
+        repaired login is picked up by the next turn anyway, and a withdrawn share is
+        refused again on the next dial whether or not this memo exists.
+
+        The two things the observation DOES change, which is why a repair clears it:
+
+        * ``request_grant_sync`` short-circuits on a cached refusal of ONE code,
+          ``quota_blocked`` (the owner-stated backpressure). A quota verdict whose
+          window has passed must not keep answering for an owner that would serve now;
+        * every status surface reads this document. Left in place it keeps reporting
+          the failure the operator has just fixed, which is the "why is it still
+          broken" the repair path exists to end.
+
+        CALLED ONLY WHERE A REPAIR IS PLAUSIBLE — the failure that makes it so is a
+        bearer the provider refused (``MeshAwareAuthStore.rotate_sibling`` and
+        ``mcp_bearer``'s 401 arm), never an ordinary resolve: clearing it per call
+        would rebuild the ask-per-call the cache exists to prevent. No new state is
+        written and nothing is cached: the next borrow asks the owner, which decides
+        from its current login and its current grants. A device still not permitted
+        to ask stays refused, because that refusal comes back from the owner.
+
+        A POLICY FENCE IS NOT PART OF THIS. ``PlacementState.clear`` keeps the
+        ``held_fence*`` fields (``HELD_FENCE_FIELDS``), because a deny's recorded
+        diagnosis outlives the retry cache by design — clearing a transient
+        ``owner_offline`` must not erase it. The client does nothing extra to
+        preserve them; it relies on that one rule rather than restating it.
+        """
+        try:
+            self.state.clear(key)
+        except Exception:  # noqa: BLE001 — a cache is best-effort; never fail a turn
+            return
         self._save_state()
 
     def _bounded(self, grant: Grant) -> Grant:

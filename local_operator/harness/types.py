@@ -5018,6 +5018,24 @@ class StreamEndEvent(BaseModel):
     #: boundary, and a stream that dies mid-way must not move the pin onto a
     #: host that did not actually serve a turn.
     served_provider: str | None = None
+    #: The upstream VENDOR's identifier for the model that actually answered, as
+    #: that upstream reported it in the stream itself (``model`` on an
+    #: OpenAI-compatible chunk, ``response.model`` on the Responses dialect,
+    #: ``message.model`` on Anthropic, ``modelVersion`` on Google). ``None`` when
+    #: the wire never named one.
+    #:
+    #: WHY it is not ``model_id``: that is the REQUESTED route this harness
+    #: stamped on the request (``radient/auto``), and an aggregator may answer an
+    #: ``auto`` request with any family. The two are different facts, and the only
+    #: place the served fact exists is the provider's own stream, which is why it
+    #: is captured there and nowhere else -- never derived from ``model_id``.
+    #:
+    #: Same discipline as ``served_provider``: bounded and control-character
+    #: gated at the client (``providers.clients._served_model_slug``), the LAST
+    #: chunk that carries it wins, a refused value leaves the previous one
+    #: standing, and on the END event for the same reason (acceptance is the
+    #: start boundary; a stream that dies mid-way must not claim a serve).
+    served_model: str | None = None
     #: The provider's own words about an abnormal end. For ``refusal`` this is
     #: the refusal message (or a line naming the provider's terminal marker when
     #: it sent no prose). Refusals used to be mapped onto ``stop``, which ended

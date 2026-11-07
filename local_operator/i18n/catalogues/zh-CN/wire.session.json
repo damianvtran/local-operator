@@ -1,0 +1,3 @@
+{
+  "wire.session.status.scheduled": "已定时（{count, plural, other {#次唤醒}}）"
+}

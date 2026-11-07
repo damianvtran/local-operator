@@ -27,6 +27,11 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.monitors.spec import MonitorSpec
+from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
+from local_operator.session.session import (
+    MCP_DISCOVERY_FAILED_DETAIL,
+    MCP_NOT_READY_DETAIL,
+)
 from tests.unit.session.test_session import ScriptedStream, make_session
 
 SERVER = "datadog"
@@ -203,12 +208,36 @@ async def test_auth_required_names_its_own_remedy(tmp_path: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_suspended_reconnect_is_unavailable(tmp_path: Any) -> None:
+    """The flap breaker's detail, pinned verbatim.
+
+    It becomes the stall notice's ``Reason:``, so it must agree with that
+    notice's "retrying" body. Any change to this sentence must re-verify the
+    route it promises: the manager's half-open probe retries a tripped server
+    unattended (``McpManager._schedule_probe``). It names no ``/mcp reauth``: a
+    flap has a valid grant, and reauth would re-spend it.
+    """
     manager = FakeManager([], status="disconnected", suspended=True)
     session = _session(tmp_path, manager)
     try:
-        state, detail = session._monitor_availability(mcp_name())
-        assert state == "unavailable"
-        assert "/mcp reauth datadog" in detail
+        assert session._monitor_availability(mcp_name()) == (
+            "unavailable",
+            'MCP server "datadog" keeps dropping; reconnects are paused and retried automatically',
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_probe_mid_connect_reads_connecting_not_paused(tmp_path: Any) -> None:
+    """The breaker stays open until the probe's connect lands, so for that
+    instant the server is both suspended and connecting; connecting is true."""
+    manager = FakeManager([], status="connecting", suspended=True)
+    session = _session(tmp_path, manager)
+    try:
+        assert session._monitor_availability(mcp_name()) == (
+            "unavailable",
+            'MCP server "datadog" is still connecting',
+        )
     finally:
         await session.dispose()
 
@@ -412,5 +441,169 @@ async def test_a_declared_inventory_still_bounds_the_fallback(tmp_path: Any) -> 
         assert session._resolve_monitor_tool(mcp_name()) is None
         session._declared_tools = None
         assert session._resolve_monitor_tool(mcp_name()) is not None
+    finally:
+        await session.dispose()
+
+
+# --- The lazy-MCP window (mcp__ names only) -------------------------------
+#
+# Every test below pins the same distinction: an MCP tool that is absent
+# because the session has not STARTED yet is not the same thing as a tool that
+# is gone. The first class cost a real strike in production (m4, 2026-11-05).
+
+
+@pytest.mark.asyncio
+async def test_a_session_without_its_mcp_layer_is_unavailable_not_a_strike(tmp_path: Any) -> None:
+    """MEASURED (m4, 2026-11-05): a scheduled wake re-hosted a cold session, the
+    monitor's tick landed before the MCP layer connected, and the absent tool
+    charged ``consecutive_failures: 1`` with "it is not in this session's tool
+    set". Nothing had been removed — calling the tool answered ``Tool not
+    found``, and after the server was asked for a tool (which connects it
+    lazily) the same session read the channel — so the tick must WAIT, or five
+    wake cycles silently disable a watch everyone believes is armed.
+    """
+    session = _session(tmp_path, None)
+    assert session.mcp_manager is None
+    try:
+        assert session._monitor_availability(mcp_name()) == ("unavailable", MCP_NOT_READY_DETAIL)
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome["kind"] == "unavailable"
+        assert outcome["error"] == MCP_NOT_READY_DETAIL
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_manager_with_no_enabled_servers_is_gone_not_waiting(tmp_path: Any) -> None:
+    """The excuse above is scoped to a session with NO manager, and this is the
+    boundary. A manager exists only after ``attach_mcp_dispose``, which runs
+    after the connect round, so a manager with an empty registry means zero
+    ENABLED servers (disabled entries never reach it) — a real absence, not a
+    load in progress. Calling that "the runtime is still starting" would be an
+    untrue diagnosis for 24 hours, which is the class this method removes.
+    """
+    manager = FakeManager([], servers=[])
+    session = _session(tmp_path, manager)
+    try:
+        assert session._monitor_availability(mcp_name()) == ("gone", "")
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome.get("kind") is None
+        assert "not in this session's tool set" in str(outcome["error"])
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_manager_whose_discovery_did_not_complete_is_unavailable(tmp_path: Any) -> None:
+    """Discovery RAISING leaves an ATTACHED manager with no roster at all.
+
+    MEASURED by the reviewer of #3506 against the real discovery wrapper: the
+    manager is built before the raise, so the session holds one with
+    ``_configs`` never populated — an empty roster that read as "nothing is
+    configured" and charged ``consecutive_failures: 1`` with "it is not in this
+    session's tool set". Nothing was removed: the config was never read. The
+    wiring records that raise on the session, and that record is the
+    difference between this shape and a real removal (the test below).
+    """
+    manager = FakeManager([], servers=[])
+    session = _session(tmp_path, manager)
+    session.mcp_startup = McpStartupOutcome(failures={MCP_DISCOVERY_KEY: "config layer exploded"})
+    try:
+        assert session._monitor_availability(mcp_name()) == (
+            "unavailable",
+            MCP_DISCOVERY_FAILED_DETAIL,
+        )
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome["kind"] == "unavailable"
+        assert outcome["error"] == MCP_DISCOVERY_FAILED_DETAIL
+    finally:
+        await session.dispose()
+
+
+def test_the_discovery_failed_copy_is_the_verified_sentence() -> None:
+    """The exact sentence, pinned, because every earlier version named a route
+    that does not retry discovery for this state: ``/mcp reload`` (no such
+    verb, review round 2), the app's Reload (its catalog rows never carry one,
+    round 3) and ``/reload`` (viewer-only in shipped builds, round 4).
+
+    A change to this copy must re-verify, against a FRESH runtime, every route
+    it names before this pin moves: the sentence is the operator's only way
+    out of the wait, and a route that does not work is worse than none.
+    """
+    from local_operator.monitors.delivery import NOTICE_ERROR_CHARS
+
+    assert MCP_DISCOVERY_FAILED_DETAIL == (
+        "MCP discovery failed at startup; it is retried when the session restarts"
+    )
+    assert len(MCP_DISCOVERY_FAILED_DETAIL) < NOTICE_ERROR_CHARS
+
+
+@pytest.mark.asyncio
+async def test_a_completed_discovery_with_an_empty_roster_is_still_gone(tmp_path: Any) -> None:
+    """CONTROL for the test above: the SAME empty roster with a COMPLETED round.
+
+    ``McpStartupOutcome()`` is what the factory writes when discovery ran and
+    found nothing configured — zero enabled servers, a real absence — so the
+    excuse must not extend to it. A session with NO record at all
+    (``mcp_startup is None``) is pinned one test up and answers ``gone`` too.
+    """
+    manager = FakeManager([], servers=[])
+    session = _session(tmp_path, manager)
+    session.mcp_startup = McpStartupOutcome()
+    try:
+        assert session._monitor_availability(mcp_name()) == ("gone", "")
+        outcome = await session._run_monitor_check(_spec())
+        assert outcome.get("kind") is None
+        assert "not in this session's tool set" in str(outcome["error"])
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_name_outside_a_completed_rounds_roster_is_still_gone(tmp_path: Any) -> None:
+    """CONTROL, nearer corner: the discovery key is ALSO the collapse target
+    when every configured server failed for one setup reason (the MCP SDK
+    missing) — a COMPLETED round that knows its roster. A name that roster does
+    not mint is a stale name, not a discovery in flight, so the strike stays.
+    """
+    manager = FakeManager([], servers=[])
+    session = _session(tmp_path, manager)
+    session.mcp_startup = McpStartupOutcome(
+        configured=("datadog",), failures={MCP_DISCOVERY_KEY: "the MCP SDK is missing"}
+    )
+    try:
+        assert session._monitor_availability("mcp__retired_tool") == ("gone", "")
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_non_mcp_tool_that_is_gone_still_charges_a_strike(tmp_path: Any) -> None:
+    """CONTROL for the two tests above: the excuse is scoped to ``mcp__`` names.
+    A builtin whose absence is real (a settings flip, a pruned tool) keeps the
+    ordinary ladder, and the outcome carries no ``kind`` — which is what makes
+    the scheduler charge the strike.
+    """
+    session = _session(tmp_path, None)
+    try:
+        assert session._monitor_availability("bash") == ("gone", "")
+        outcome = await session._run_monitor_check(_spec(tool="bash"))
+        assert outcome.get("kind") is None
+        assert "not in this session's tool set" in str(outcome["error"])
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_status_this_build_does_not_know_is_unavailable_and_named(tmp_path: Any) -> None:
+    """A state outside the documented four is not proof of removal either, and
+    reporting it as "disconnected" would invent a cause the manager never gave.
+    """
+    manager = FakeManager([], status="warming-up")
+    session = _session(tmp_path, manager)
+    try:
+        state, detail = session._monitor_availability(mcp_name())
+        assert state == "unavailable"
+        assert 'reported status "warming-up"' in detail
     finally:
         await session.dispose()

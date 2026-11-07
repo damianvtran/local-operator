@@ -9,17 +9,22 @@ task on Windows. All three record the store the connector serves
 from __future__ import annotations
 
 import json
+import logging
 import os
 import plistlib
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from local_operator import launchd, procname, procstate, supervisors
 from local_operator.paths import CONFIG_DIR_ENV, config_dir
 from local_operator.tunnels import config, gateway, state
+
+logger = logging.getLogger(__name__)
 
 LABEL = "com.local-operator.tunnel"
 
@@ -454,22 +459,61 @@ def rearm_if_parked(*, provider: str, credential_id: int) -> str:
         # string) must not match a `credential_id` of the same kind: the guard is
         # "this is the credential the tunnel owns", and None == None is not that.
         return ""
+    return _kick_connector(kind, restart=False)
+
+
+def _kick_connector(kind: str, *, restart: bool, declined: list[str] | None = None) -> str:
+    """Start (or restart) the installed connector, if this store owns it.
+
+    Shared by :func:`rearm_if_parked` (``restart=False``: a parked connector is
+    stopped) and :func:`heal_pin_after_login` (``restart=True``: the connector
+    reads `tunnel/config.json` once at startup, so after a re-point a RUNNING
+    connector that is being refused must be restarted, not merely started).
+    Keeps the two guards both callers need, for the reason `rearm_if_parked`'s
+    docstring gives: only a store in the real home, and only an installed unit,
+    because `launchctl` addresses the real session whatever ``HOME`` says.
+    Never raises.
+
+    ``declined`` is the HEAL's, and stays optional so the re-arm path is
+    untouched: a caller that passed no list gets exactly the strings it always
+    did. The heal needs the difference the return value cannot carry — "" means
+    "this store may not start a service, or nothing is installed", which is the
+    same silence for four different reasons, and a park left saying
+    ``login_required`` after a re-point sends the operator back to a sign-in that
+    has already happened. Each early return therefore names its own cause in this
+    list, and the heal turns that into the park's reason.
+    """
+
+    def decline(code: str) -> str:
+        if declined is not None:
+            declined.append(code)
+        return ""
+
     try:
         if not supervisors.config_lives_in_real_home(config_dir()):
-            return ""
+            return decline(HEAL_NOT_THIS_STORE)
         if kind == supervisors.SCHTASKS:
             # Windows keeps its own copy of a task, so there is no registration
             # FILE this installer owns to check — the addressability guard is
             # the shared one `action()` uses for the same reason.
             if not supervisors.task_scheduler_is_addressable(config_dir()):
-                return ""
+                return decline(HEAL_NOT_THIS_STORE)
+            if restart:
+                # A RUNNING task must end first: `/Run` on a running task is a
+                # no-op, and the point of a restart is that the connector
+                # re-reads `tunnel/config.json`. "not running" is the parked
+                # case, where there is nothing to end.
+                ended = supervisors.schtasks(*supervisors.task_end_args(TASK_NAME))
+                detail = ((ended.stderr or ended.stdout) or "").lower()
+                if ended.returncode and "running" not in detail:
+                    raise ValueError(detail.strip()[:200])
             started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
             if started.returncode:
                 raise ValueError(((started.stderr or started.stdout) or "").strip()[:200])
             return "The Radient tunnel connector is starting again."
         path = service_path()
         if not path.exists():
-            return ""
+            return decline(HEAL_UNIT_MISSING)
         if kind == supervisors.LAUNCHCTL:
             # kickstart, not `launchd.reload_job`: that sequence exists for the
             # case where the plist was just REWRITTEN, and its own docstring
@@ -477,16 +521,211 @@ def rearm_if_parked(*, provider: str, credential_id: int) -> str:
             # plist is already correct and the job is loaded but stopped, so
             # there is nothing to tear down and a reload would discard a
             # pending plist repair mid-flight. The mobile installer starts its
-            # own daemon the same way.
+            # own daemon the same way. `-k` is also what makes this the RESTART
+            # the re-point needs: it kills a running instance before starting,
+            # and starts a stopped (parked) one, so one call covers both.
             result = _launchctl("kickstart", "-k", f"gui/{os.getuid()}/{LABEL}")
             if result.returncode:
                 raise ValueError(result.stderr.strip())
         else:
-            # Started, not restarted: the unit is inactive by definition here.
-            _run(["systemctl", "--user", "start", path.name])
+            # `start` for a park (the unit is inactive by definition there);
+            # `restart` after a re-point, which also starts an inactive unit and
+            # is the only verb that makes a RUNNING connector re-read its config.
+            _run(["systemctl", "--user", "restart" if restart else "start", path.name])
     except (OSError, ValueError, subprocess.SubprocessError):
+        if declined is not None:
+            declined.append(HEAL_RESTART_REFUSED)
         return "Signed in, but the tunnel connector could not be restarted; run lop tunnel install."
     return "The Radient tunnel connector is starting again."
+
+
+#: WHY a same-account heal could not restart the connector, one fixed literal per
+#: cause. Recorded as the `detail` of a `gateway.LOCAL_PREREQUISITE` park, which
+#: is the vocabulary that already exists for "this machine is missing something"
+#: — so the status tells an operator which of the four it was instead of leaving
+#: the stale ``login_required`` in place, which sends them back to a sign-in that
+#: has already happened and cannot run a service for them.
+#:
+#: These are DETAILS, not advice: the command is `TERMINAL_REMEDY`'s, appended by
+#: each surface in its own spelling, and the rule that keeps the shared sentences
+#: command-free applies here for the same reason. No path and no credential id in
+#: any of them — the park file is world-readable by design (0600, but written into
+#: the desktop payload as `connector.detail`) and neither belongs in copy.
+HEAL_NO_SERVICE_MANAGER = (
+    "The tunnel's saved login now points at the new sign-in, but this computer has no "
+    "service manager to start the connector with."
+)
+HEAL_NOT_THIS_STORE = (
+    "The tunnel's saved login now points at the new sign-in, but these tunnel files are "
+    "outside the real home, so the supervised connector was left untouched."
+)
+HEAL_UNIT_MISSING = (
+    "The tunnel's saved login now points at the new sign-in, but the connector's service "
+    "unit is not installed on this computer, so nothing was started."
+)
+HEAL_RESTART_REFUSED = (
+    "The tunnel's saved login now points at the new sign-in, but the service manager "
+    "refused to start the connector."
+)
+
+#: The audit record a same-account heal writes beside the configuration: which row
+#: the pin moved OFF, which it moved TO, the tunnel it belongs to and when.
+#: Deliberately its own small file rather than a field in `config.json` — the
+#: configuration is rewritten by every connect and is what the connector reads at
+#: startup, while this is a receipt for a person (and for the test that has to
+#: prove the re-bind happened without watching `launchctl`).
+HEAL_RECEIPT_NAME = "login-heal.json"
+
+
+def heal_receipt_path() -> Path:
+    """Where a same-account pin heal records what it did."""
+    return config.directory() / HEAL_RECEIPT_NAME
+
+
+def last_heal_receipt() -> dict[str, Any] | None:
+    """The last pin heal this store recorded, or ``None`` if it never did.
+
+    One answer for absent/unreadable/unusable, like :func:`state.read` and for the
+    same reason: a reader asking "was this tunnel re-pointed?" must not raise over
+    a file it happens to find. The credential IDs it names are LOCAL row ids, never
+    tokens — the store's bearer material stays in the credential store.
+    """
+    try:
+        value = json.loads(heal_receipt_path().read_text())
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _record_heal_receipt(*, old: int, new: int, tunnel_id: object, account_id: object) -> None:
+    """Write the re-bind receipt; never let an audit write fail the sign-in.
+
+    Narrow ``OSError`` rather than a blanket except: an unwritable tunnel directory
+    is the only failure this has in practice (the login that triggered it has
+    already succeeded and must still report success), and anything else is a bug
+    that should surface rather than be swallowed here.
+    """
+    receipt = {
+        "old_credential_id": old,
+        "new_credential_id": new,
+        "tunnel_id": tunnel_id if isinstance(tunnel_id, str) else None,
+        "account_id": account_id if isinstance(account_id, str) else None,
+        "at": int(time.time()),
+    }
+    try:
+        config.private_write(heal_receipt_path(), json.dumps(receipt, indent=2) + "\n")
+    except OSError:
+        pass
+
+
+def _park_heal_prerequisite(detail: str, credential_id: int) -> None:
+    """Say WHY the connector did not start, in place of the stale login park.
+
+    Requirement, not decoration (2026-11-06): the park file is what every surface
+    reads, so a heap that re-pointed the pin and then could not start the service
+    would leave ``login_required`` standing — the exact sentence the operator
+    reported as false, and the one state the heal exists to end. `LOCAL_PREREQUISITE`
+    is the existing code for this class, and its own remedy (`lop tunnel install`)
+    is the right next step for three of the four; the fourth (a different config
+    root) is at least told the truth instead of being sent to sign in again.
+
+    Narrow ``OSError`` for the receipt's reason: this runs after the pin has
+    already moved, in a login that has already succeeded.
+    """
+    try:
+        state.mark_parked(
+            reason=gateway.LOCAL_PREREQUISITE, detail=detail, credential_id=credential_id
+        )
+    except OSError:
+        pass
+
+
+def heal_pin_after_login(*, provider: str, credential_id: int) -> str:
+    """Re-point the tunnel at a VERIFIED same-account sign-in that replaced a dead pin.
+
+    THE GAP `rearm_if_parked` CANNOT CLOSE (2026-11-06): a sign-in to the very
+    account that owns the tunnel can land on a NEW credential row (the pinned
+    row predates endpoint-stamped identity keys, so the upsert does not match
+    it), and the re-arm then declines because ``owns != credential_id``. The
+    configuration keeps pinning the row the IdP refused, every surface keeps
+    saying ``login_required``, and the sign-in they offer re-writes the new row
+    and changes nothing. A desktop operator had no way out short of a terminal.
+
+    So, after a COMPLETED, VERIFIED Radient login only (``AuthStore.complete_radient_login``
+    — never a generic metadata or refresh write, which proves no identity), when
+    :func:`api.same_account_successor` proves the fresh row is the same account
+    on the tunnel's own hub and the pin is dead or gone: rewrite
+    ``tunnel/config.json``'s ``credential_id`` (every other key kept, including
+    ``cloudflared_path`` and ``mobile_password``) and restart the connector,
+    which reads its credential once at startup — parked OR running-but-refused.
+    Same account is what makes this safe without the cloud read
+    ``report.login_verdict``'s docstring says a GENERAL re-point needs: the
+    owner of the tunnel does not change, only which local row carries its bearer.
+
+    THE GUARDS ARE SPLIT BETWEEN THE FILE AND THE SERVICE, deliberately:
+
+    * The re-point needs only proof, a configured tunnel and not ``stopped`` (a
+      stopped tunnel is one the operator is not using, which every automatic
+      repair here leaves alone). It writes the configuration that belongs to the
+      SAME store root the login just wrote, so it is contained wherever that
+      root lives — a sandboxed store re-points its own sandboxed tunnel, which
+      is also what makes the surfaces' verdict honest there.
+    * The restart keeps every guard `rearm_if_parked` has, for its reasons:
+      ``LOP_TUNNEL_NO_REARM``, a supervisor, a real-home store and an installed
+      unit (`_kick_connector`), since `launchctl` addresses the real session
+      whatever ``HOME`` says.
+
+    RE-CHECKED IMMEDIATELY BEFORE WRITING: the configuration is re-read just
+    before the save and left alone if anything moved its ``credential_id`` (a
+    concurrent `lop tunnel configure`). That is not under a lock, so a narrow
+    window remains; it is the same window every writer of this file has.
+
+    Returns a sentence for the log, or "" when it did nothing. Never raises: the
+    caller is a login that has already succeeded.
+    """
+    if provider != "radient":
+        return ""
+    try:
+        from local_operator.tunnels import api
+
+        value = config.load()
+        if value.get("stopped"):
+            return ""
+        pin = value.get("credential_id")
+        # A pin that is not a plain row id (absent, hand-edited, or a string from
+        # an older build) names no row a sign-in could have superseded, so there
+        # is nothing to heal — and the receipt below records an `int` old id.
+        if not isinstance(pin, int) or isinstance(pin, bool) or pin == credential_id:
+            return ""
+        record = value.get("record")
+        owner = record.get("owner_account_id") if isinstance(record, dict) else None
+        if api.same_account_successor(pin, owner_account=owner, fresh_id=credential_id) is None:
+            return ""
+        current = config.load()
+        if current.get("credential_id") != pin or current.get("stopped"):
+            return ""
+        config.save({**current, "credential_id": credential_id})
+        tunnel_id = current.get("tunnel_id")
+    except Exception:  # noqa: BLE001 — a login must not fail over a tunnel repair
+        return ""
+    try:
+        _record_heal_receipt(old=pin, new=credential_id, tunnel_id=tunnel_id, account_id=owner)
+    except Exception:  # noqa: BLE001 — the audit write must not fail the sign-in
+        # `_record_heal_receipt` already absorbs the unwritable-directory case;
+        # this is the docstring's "never raises" for anything else (review R3-n1).
+        logger.warning("could not record the tunnel re-bind receipt")
+    note = f"Tunnel re-pointed from credential {pin} to {credential_id} (same Radient account)."
+    if not _rearm_allowed():
+        return note
+    kind = supervisors.supervisor()
+    if kind is None:
+        _park_heal_prerequisite(HEAL_NO_SERVICE_MANAGER, credential_id)
+        return note
+    declined: list[str] = []
+    kicked = _kick_connector(kind, restart=True, declined=declined)
+    if declined:
+        _park_heal_prerequisite(declined[0], credential_id)
+    return f"{note} {kicked}" if kicked else note
 
 
 def _rearm_allowed() -> bool:

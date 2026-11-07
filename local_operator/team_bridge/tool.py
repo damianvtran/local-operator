@@ -38,6 +38,16 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   creator agent member is added automatically (the server requires it); the
   human owner is added ONLY when named explicitly, because an agent-created
   channel is the agent's own space, not a silent copy of its owner's.
+  A NAME is never duplicated: an open room of the same kind the owner can see
+  with the same trimmed, case-insensitive name refuses ``channel_exists`` with
+  that room's ``conversation_id`` (local precheck, and the hub's 409
+  ``conversation_name_taken`` mapped to the same answer). Never create a
+  coordination room to work around a lookup refusal — post in the existing one.
+- **rooms by name** — channel_post and channel_history take a channel NAME
+  ("qa-coordination" or "#qa-coordination") in ``channel_id`` (or ``name``)
+  when no ``bcv_`` id is known, resolved to the one open tenant-visible channel
+  with that name; the result carries ``resolved_channel_id``. This is how a
+  task session, refused ``channels``, still reaches a known room.
 - **files** — absolute local paths on dm/channel_post only (file-only, mixed
   image/file, and thread replies). Requires fresh files v1 enabled + agent_upload
   true; an absent/failed capability refuses, never sends text alone or as human.
@@ -260,6 +270,19 @@ CONVERSATION_PAGE_MAX = 100
 #: and taken from the member row by the server; this one is what another
 #: member sees until the channel's members relabel it.
 CHANNEL_CREATE_DEFAULT_LABEL = "agent"
+
+#: How many conversation pages (``CONVERSATION_PAGE_MAX`` rows each) a NAME
+#: lookup may read before it gives up. A name lookup is a convenience on top of
+#: an id-addressed op, so it must stay a bounded read: 5 pages is 500 open
+#: conversations, far past any real organization's room count today, and a
+#: tenant larger than that gets a typed ``channel_not_found`` that still tells
+#: the agent NOT to create a room (the failure that motivated the lookup).
+CHANNEL_NAME_LOOKUP_MAX_PAGES = 5
+
+#: The hub's refusal for a create whose name an open, caller-visible room of
+#: the same kind already holds (HTTP 409; ``details.conversation_id`` is that
+#: room). Mapped to the tool's ``channel_exists`` answer.
+CONVERSATION_NAME_TAKEN_CODE = "conversation_name_taken"
 
 #: The most images ONE channel_history call puts into context. A 100-message
 #: page could otherwise carry 400 images (each up to 1 MiB after bounding) —
@@ -1864,7 +1887,12 @@ def _validate_reply_destination(
         )
     channel_id = args.get("channel_id", "")
     if not isinstance(channel_id, str):
-        return _error("channel_post needs a conversation id (bcv_…)")
+        return _error("channel_post needs a conversation id (bcv_…) or a channel name")
+    if _CONVERSATION_ID.fullmatch(channel_id.strip()) is None:
+        # A channel NAME (or none) resolves only after admission — a wire read.
+        # The binding is re-checked against the RESOLVED id there, so deferring
+        # here never lets a reply land in a different conversation.
+        return None
     if row["conversation_id"] != channel_id.strip():
         return _error(
             "in_reply_to_message_id belongs to a different conversation; nothing was sent",
@@ -1885,6 +1913,215 @@ def _channel_create_free_text(args: Mapping[str, Any]) -> str:
     if isinstance(members, list):
         parts.extend(m.get("display_label") for m in members if isinstance(m, Mapping))
     return "\n".join(part for part in parts if isinstance(part, str) and part)
+
+
+# -- rooms by NAME -------------------------------------------------------------
+#
+# WHY (operator incident, 2026-11-06). With Team Bridge signed out for several
+# sessions, a task session needed #qa-coordination, could not list rooms
+# (``channels`` is the chief-of-staff's and answers ``not_designated``), was
+# refused by channel_post/channel_history for lacking a ``bcv_`` id, and
+# CREATED a second channel with the same name. A split coordination room is
+# worse than a failed post. Two fixes live here: a room can be addressed by its
+# NAME (so the lookup the agent needed exists), and ``channel_create`` refuses a
+# duplicate name and hands back the existing id (so a blind create turns into
+# that same lookup).
+
+
+def _room_name_key(name: str, *, allow_hash: bool) -> str:
+    """The comparison form of a room name: trimmed and case-insensitive.
+
+    The hub's duplicate rule is ``strings.TrimSpace`` plus Go's
+    ``strings.EqualFold`` (SIMPLE case folding). ``str.lower()`` is the closest
+    Python match; ``casefold()`` is FULL folding ("Straße" == "STRASSE") and
+    would refuse creates the hub accepts. The two can still disagree on rare
+    non-ASCII letters, which is why the create precheck is only best-effort and
+    the hub's 409 stays authoritative (``allow_hash=False``). A LOOKUP also
+    drops one leading ``#``: people write "#qa-coordination", and the stored
+    name never carries the sigil.
+    """
+
+    key = name.strip()
+    if allow_hash and key.startswith("#"):
+        key = key[1:].strip()
+    return key.lower()
+
+
+async def _list_open_conversations(
+    runtime: BridgeRuntime,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Up to ``CHANNEL_NAME_LOOKUP_MAX_PAGES`` pages of the tenant's open list.
+
+    Returns ``(rows, truncated)``: ``truncated`` is True when the page bound
+    stopped the read with a cursor still pending, so a "not found" is only
+    "not found in the rows read" and the refusal must say so. Raises whatever
+    the client raises; callers decide whether a failed listing refuses (a
+    lookup) or proceeds (the create precheck).
+    """
+
+    rows: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _ in range(CHANNEL_NAME_LOOKUP_MAX_PAGES):
+        page = await runtime.client.conversations(
+            tenant_id=runtime.tenant_id, limit=CONVERSATION_PAGE_MAX, cursor=cursor
+        )
+        if not isinstance(page, dict):
+            return rows, False
+        items = page.get("conversations")
+        if isinstance(items, list):
+            rows.extend(row for row in items if isinstance(row, dict))
+        next_cursor = page.get("next_cursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            return rows, False
+        cursor = next_cursor
+    return rows, True
+
+
+def _is_tenant_visible_channel(row: Mapping[str, Any]) -> bool:
+    # ``discoverable`` is the hub's own flag for a tenant-visible channel the
+    # owner has not joined, so it counts even on a row that omits visibility.
+    return row.get("kind") == "channel" and (
+        row.get("visibility") == "tenant" or row.get("discoverable") is True
+    )
+
+
+async def _resolve_channel_name(
+    runtime: BridgeRuntime, op: str, name: str
+) -> tuple[str | None, dict[str, Any] | None]:
+    """A channel NAME to its ``bcv_`` id, or a typed refusal — never both.
+
+    A NARROW DISCLOSURE, deliberately. ``channels`` stays chief-of-staff-only
+    (``not_designated`` for a task session) because it is the owner's whole
+    human conversation list. This answers one question instead: the id of the
+    single OPEN, TENANT-VISIBLE channel with this name — a room every member of
+    the organization can already discover and join. Private channels, groups
+    and DMs never match, so the owner's private rooms are neither returned nor
+    confirmed to exist. It runs under the OUTBOUND fence channel_post and
+    channel_history already pass; it does not widen what a task session may do,
+    only how it names the room it may already post in.
+    """
+
+    key = _room_name_key(name, allow_hash=True)
+    # A MALFORMED id ("bcv_x/messages") is a bad id, not a room name: refusing
+    # it keeps the bcv_ grammar the one gate before any id-addressed path.
+    if not key or key.startswith("bcv_"):
+        return None, _error(f"{op} needs a conversation id (bcv_…) or a channel name")
+    try:
+        rows, truncated = await _list_open_conversations(runtime)
+    except Exception as failure:
+        return None, _error(
+            f"could not look up the channel '{name.strip()}': {_failure_text(failure)}. "
+            "Do not create a channel to work around this; retry, or ask your chief "
+            "of staff or the operator for the conversation id",
+            code="channel_lookup_failed",
+        )
+    ids: list[str] = []
+    for row in rows:
+        row_name = row.get("name")
+        row_id = row.get("id")
+        if (
+            _is_tenant_visible_channel(row)
+            and isinstance(row_name, str)
+            and isinstance(row_id, str)
+            and _room_name_key(row_name, allow_hash=False) == key
+            and row_id not in ids
+        ):
+            ids.append(row_id)
+    if len(ids) == 1:
+        return ids[0], None
+    if not ids:
+        # Past the page bound the room may still exist further down the list:
+        # say how far the read went rather than claim it does not exist.
+        where = (
+            f" in the first {CHANNEL_NAME_LOOKUP_MAX_PAGES * CONVERSATION_PAGE_MAX} "
+            "conversations"
+            if truncated
+            else ""
+        )
+        return None, _error(
+            f"no tenant-visible channel named '{name.strip()}' was found{where}. "
+            "Do not create one; ask your chief of staff or the operator for the "
+            "conversation id (bcv_…)",
+            code="channel_not_found",
+        )
+    return None, _error(
+        f"more than one tenant-visible channel is named '{name.strip()}' "
+        f"({', '.join(ids)}); pass the intended conversation id as channel_id",
+        code="channel_ambiguous",
+    )
+
+
+def _channel_exists(kind: str, name: str, conversation_id: str) -> dict[str, Any]:
+    """The one answer a duplicate-name create gets, local precheck or hub 409."""
+
+    return {
+        "ok": False,
+        "code": "channel_exists",
+        "conversation_id": conversation_id,
+        "error": (
+            f"a {kind} named '{name}' already exists ({conversation_id}) — post there "
+            f"with channel_post channel_id={conversation_id}; do not create another"
+        ),
+    }
+
+
+async def _existing_room_named(
+    runtime: BridgeRuntime, kind: str, name: str
+) -> tuple[str, str] | None:
+    """BEST-EFFORT precheck: an open room of ``kind`` already holding ``name``.
+
+    The hub's rule: a channel collides when it is tenant-visible or the
+    caller's account is a member; a group only when the account is a member.
+    The owner's list is authoritative for only part of that — tenant-visible
+    channels and rooms the owner belongs to AS A PERSON. A group or private
+    channel the account joined only through its agent is absent from that list,
+    so this precheck misses it and the hub's 409 ``conversation_name_taken``
+    catches it instead (one extra round trip, same ``channel_exists`` answer).
+    A listing failure returns None and the create proceeds for the same reason:
+    this read only saves a round trip and must never be the reason a legitimate
+    create is refused.
+
+    A NARROW DISCLOSURE, the hub's own: ``channel_create`` sits on the relaxed
+    outbound fence, so a task session that guesses a name learns that a group
+    or private channel the OWNER is already in exists, and its id. That is the
+    same answer the hub's 409 gives the same caller; rooms the owner is not in
+    never match here or there.
+    """
+
+    key = _room_name_key(name, allow_hash=False)
+    try:
+        rows, _truncated = await _list_open_conversations(runtime)
+    except Exception:
+        return None
+    for row in rows:
+        row_name = row.get("name")
+        row_id = row.get("id")
+        if (
+            row.get("kind") == kind
+            and isinstance(row_name, str)
+            and isinstance(row_id, str)
+            and row_id
+            and _room_name_key(row_name, allow_hash=False) == key
+        ):
+            return row_id, row_name
+    return None
+
+
+def _name_taken(failure: BaseException) -> tuple[str, str] | None:
+    """The existing room a hub 409 ``conversation_name_taken`` names, if any."""
+
+    details = getattr(failure, "details", None)
+    if not isinstance(details, Mapping):
+        return None
+    conversation_id = details.get("conversation_id")
+    if getattr(failure, "code", None) != CONVERSATION_NAME_TAKEN_CODE and not (
+        details.get("rule") == "taken" and details.get("field") == "name"
+    ):
+        return None
+    if not isinstance(conversation_id, str) or not conversation_id:
+        return None
+    stored = details.get("name")
+    return conversation_id, stored if isinstance(stored, str) else ""
 
 
 async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
@@ -2231,6 +2468,12 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             body["topic"] = params.topic.strip()
         if params.visibility is not None:
             body["visibility"] = params.visibility
+        if params.name.strip():
+            # Never split a room: a same-named open room of this kind the owner
+            # can see is the answer, returned with its id (see _channel_exists).
+            existing = await _existing_room_named(runtime, params.kind, params.name)
+            if existing is not None:
+                return _channel_exists(params.kind, existing[1], existing[0])
         try:
             result = await runtime.client.create_conversation(
                 body,
@@ -2238,6 +2481,11 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 origin_session_id=runtime.session_id,
             )
         except Exception as failure:
+            taken = _name_taken(failure)
+            if taken is not None:
+                # The hub's authoritative rule caught what the precheck missed
+                # (a race, a failed or truncated listing).
+                return _channel_exists(params.kind, taken[1] or params.name.strip(), taken[0])
             return _error(
                 f"the channel was not created: {_failure_text(failure)}", code="create_failed"
             )
@@ -2271,8 +2519,27 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
 
     if params.op == "channel_post":
         channel_id = params.channel_id.strip()
+        resolved_from_name = ""
         if _CONVERSATION_ID.fullmatch(channel_id) is None:
-            return _error("channel_post needs a conversation id (bcv_…)")
+            # Not an id: a room NAME (channel_id, else ``name``). See
+            # _resolve_channel_name for why this is a narrow, safe disclosure.
+            resolved_from_name = channel_id or params.name.strip()
+            resolved, refused = await _resolve_channel_name(
+                runtime, "channel_post", resolved_from_name
+            )
+            if refused is not None or resolved is None:
+                return refused or _error("channel_post could not resolve that channel name")
+            channel_id = resolved
+            # Same contract as a named recipient: from here on ``args`` carries
+            # the resolved id, so every later reader of ``args["channel_id"]``
+            # (the reply-binding checks, the pre-HTTP guard) binds against the
+            # real room instead of silently deferring on a name.
+            args = {**args, "channel_id": channel_id}
+            if params.in_reply_to_message_id.strip():
+                # The pre-admission binding check deferred on a name; bind now.
+                refused = _validate_reply_destination(runtime, args)
+                if refused is not None:
+                    return refused
         if not params.body.strip() and not params.files:
             return _error("channel_post needs non-empty body")
         inline_image = await agent_attachments.refuse_inline_image_data_for(runtime, params.body)
@@ -2549,6 +2816,10 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         )
         if file_batch:
             receipt["file_ids"] = list(file_batch.staged)
+        if resolved_from_name:
+            # Teach the id: the next call can address the room directly.
+            receipt["resolved_channel_id"] = channel_id
+            receipt["resolved_from_name"] = resolved_from_name
         attachment_warning = _annotate_attachments(receipt, staged_images)
         return _with_warnings(
             receipt,
@@ -2595,8 +2866,17 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
 
     if params.op == "channel_history":
         channel_id = params.channel_id.strip()
+        resolved_from_name = ""
         if _CONVERSATION_ID.fullmatch(channel_id) is None:
-            return _error("channel_history needs a conversation id (bcv_…)")
+            # Same name lookup as channel_post (see _resolve_channel_name).
+            resolved_from_name = channel_id or params.name.strip()
+            resolved, refused = await _resolve_channel_name(
+                runtime, "channel_history", resolved_from_name
+            )
+            if refused is not None or resolved is None:
+                return refused or _error("channel_history could not resolve that channel name")
+            channel_id = resolved
+            args = {**args, "channel_id": channel_id}
         if params.before_seq is not None and params.after_seq is not None:
             return _error(
                 "channel_history takes at most one of before_seq/after_seq "
@@ -2629,15 +2909,29 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         else:
             restored = set()
         images = await _history_images(runtime, channel_id, result, endpoint_id, restored)
+        # Generic files ride the SAME read: the descriptors come from the page the hub
+        # just returned, and the bytes are fetched here (see _history_files). They join
+        # the tool result as their own untrusted blocks rather than inside the page, so
+        # the JSON page a model parses stays byte-identical to what the hub served.
+        files = await _history_files(runtime, channel_id, result, endpoint_id)
+        resolved_keys: dict[str, str] = (
+            {"resolved_channel_id": channel_id, "resolved_from_name": resolved_from_name}
+            if resolved_from_name
+            else {}
+        )
         return {
             "ok": True,
             "state": "ok",
-            # See _shared_history: content is the raw page, the bounded copy rides
-            # the private key so ``details`` keeps what humans read.
+            **resolved_keys,
+            # See _shared_history: content is the RAW page (details keeps it, for a
+            # human's renderer) and the model-facing copy rides the private key. File
+            # blocks go on the MODEL copy only: they are fetched sender content, and
+            # "bytes never ride details" is the rule the raw page has to keep.
             "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
-            _INLINE_DATA_KEY: (
+            _INLINE_DATA_KEY: _with_files(
                 f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
-                f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}"
+                f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}",
+                files,
             ),
             _IMAGES_KEY: images,
         }
@@ -2684,15 +2978,19 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         images = await _history_images(
             runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
         )
+        files = await _history_files(runtime, channel_id, {"messages": thread_rows}, endpoint_id)
         return {
             "ok": True,
             "state": "ok",
-            # See _shared_history: content is the raw page, the bounded copy rides
-            # the private key so ``details`` keeps what humans read.
+            # See _shared_history: content is the RAW page (details keeps it, for a
+            # human's renderer) and the model-facing copy rides the private key. File
+            # blocks go on the MODEL copy only: they are fetched sender content, and
+            # "bytes never ride details" is the rule the raw page has to keep.
             "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
-            _INLINE_DATA_KEY: (
+            _INLINE_DATA_KEY: _with_files(
                 f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
-                f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}"
+                f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}",
+                files,
             ),
             _IMAGES_KEY: images,
         }
@@ -2704,6 +3002,30 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         f"unknown bridge op {params.op!r}",
         code="invalid_request",
     )
+
+
+def _with_files(content: str, blocks: list[str]) -> str:
+    """Append each message's file blocks to a read's model-facing content.
+
+    Every block carries its OWN untrusted clause (see ``_file_provenance``), so the
+    clause leads both the page and the file text rather than only the first of them —
+    the ordering the bridge's model boundary depends on.
+
+    WHY EACH BLOCK IS BOUNDED *HERE*, BEFORE THE JOIN. ``_execute`` still applies
+    ``bound_inline_data_uris`` to the whole model copy as the one choke point, but that
+    function truncates at ``min(512, marker position)`` measured from the START of the
+    string it is given. Handed the joined text, a fetched file that merely MENTIONS
+    ``;base64,`` — a note about embedding images, a log line, a page of our own docs —
+    would cut the PAGE at 512 characters: every row of the history lost, the marker
+    reporting page-plus-files length as if one body had been withheld. Bounding each
+    block first means the marker can only ever cost that file its own tail, and the
+    page never contains the token by the time the choke point sees it. A false positive
+    is a false positive about ONE file, which is what its docstring promises.
+    """
+
+    if not blocks:
+        return content
+    return "\n\n".join([content, *(bound_inline_data_uris(block) for block in blocks)])
 
 
 def _screener_sees_images(runtime: BridgeRuntime) -> bool:
@@ -2950,6 +3272,238 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
             row["body_state"] = {"state": "unavailable"}
         else:
             row["body_state"] = {"state": "not_admitted"}
+
+
+def _strip_display_names(page: Any) -> None:
+    """Erase any ``display_name`` from a file descriptor before a model can read it.
+
+    The hub's agent projection already clears it (``withFiles``'s ``withName``), and this
+    is the receiving side's own belt: a filename is uploader content an agent is never
+    shown, and the file commitment is name-free precisely because of that. Defensive
+    rather than load-bearing — but a future projection must not leak one into context
+    silently, and removing it here costs nothing.
+    """
+
+    if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+        return
+    for message in page["messages"]:
+        if not isinstance(message, dict):
+            continue
+        raw = message.get("files")
+        if not isinstance(raw, list):
+            continue
+        for entry in raw:
+            if isinstance(entry, dict):
+                entry.pop("display_name", None)
+
+
+async def _history_files(
+    runtime: BridgeRuntime,
+    channel_id: str,
+    page: Any,
+    endpoint_id: str,
+) -> list[str]:
+    """Per message carrying GENERIC FILES: one untrusted caption, then the text.
+
+    WHY A FRESH CONTEXT FETCH. The hub lists file descriptors to an agent only after an
+    ``allow`` bound to the message's ``files_hash``, and serves ``purpose=context`` bytes
+    under that same predicate. These bytes are fetched HERE, at read time, every time:
+    never cached in the team-bridge store, sqlite, disk or a log, and never reused from
+    the connector's screening fetch (a different, private carrier).
+
+    WHY NO SERVED ``files_hash`` IS REQUIRED HERE. The hub publishes ``files_hash`` on the
+    BODY fetch only; its history and thread views carry ``files[]`` + ``file_count`` and
+    no set hash (agent-server ``BridgeConversationMessageView``). That is the same shape
+    the image lane has always worked under — ``_history_images`` never recomputes a set
+    hash the hub does not serve — so this read binds the way images do: the descriptors
+    are present only for an endpoint the hub has already granted, and each file's bytes
+    are verified against its OWN descriptor (exact size and sha256). The commitment is
+    still computed from those descriptors, and sent by the connector on the grant; the
+    comparison is the SERVER's to make, because the server is the only side holding the
+    stored value. A page that DOES carry a hash (a future projection) is checked too, and
+    a disagreement there withholds the set.
+
+    WHAT REACHES THE MODEL. TEXT-class files only, at most
+    :data:`FILE_READ_MAX_FILES` files per read, 64 KiB per file and 128 KiB in total,
+    each under its descriptor (id, class, size) and its exact coverage. A non-text class
+    is stated and never fetched: the hub refuses those bytes to an agent, and this
+    runtime must not imply it read something it did not. Every caption leads with the
+    bridge untrusted clause, because file content is sender-controlled data exactly like
+    a body.
+    """
+
+    from .agent_file_reads import (
+        FILE_READ_MAX_BYTES_PER_FILE,
+        FILE_READ_MAX_BYTES_TOTAL,
+        FILE_READ_MAX_FILES,
+        FileRejected,
+        context_caption,
+        digest_file,
+        fetch_plan,
+        files_admission_hash,
+        parse_file_descriptors,
+    )
+
+    if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+        return []
+    _strip_display_names(page)
+    blocks: list[str] = []
+    budget = FILE_READ_MAX_BYTES_TOTAL
+    remaining = FILE_READ_MAX_FILES
+    for message in page["messages"]:
+        if not isinstance(message, dict) or not isinstance(message.get("id"), str):
+            continue
+        descriptors = parse_file_descriptors(message.get("files"))
+        count = message.get("file_count")
+        count = count if isinstance(count, int) and not isinstance(count, bool) else 0
+        if descriptors is None:
+            # A malformed descriptor set (or an id the transport would refuse): the
+            # message still reads, the files are stated as unreadable. Never a raise —
+            # a bad FILE must not cost the agent the MESSAGE.
+            blocks.append(
+                _file_provenance(
+                    channel_id,
+                    message,
+                    [
+                        f"[{count or 'some'} file(s) withheld: the descriptors could not "
+                        "be verified]"
+                    ],
+                    [],
+                )
+            )
+            continue
+        if not descriptors:
+            if count > 0:
+                blocks.append(
+                    _file_provenance(
+                        channel_id,
+                        message,
+                        [f"[{count} file(s) withheld: not admitted by screening]"],
+                        [],
+                    )
+                )
+            continue
+        served = message.get("files_hash")
+        if isinstance(served, str) and served:
+            try:
+                recomputed = files_admission_hash(descriptors)
+            except FileRejected:
+                recomputed = None
+            if recomputed != served:
+                # Only possible on a projection that serves the hash; when it does, a
+                # disagreement is final and nothing is fetched.
+                blocks.append(
+                    _file_provenance(
+                        channel_id,
+                        message,
+                        context_caption(
+                            [],
+                            [(d, "set_mismatch") for d in descriptors],
+                            source=(
+                                "the file set does not match the hub's commitment: "
+                                "no bytes were read"
+                            ),
+                        ).splitlines(),
+                        [],
+                    )
+                )
+                continue
+        wanted, rest = fetch_plan(descriptors, max_files=remaining)
+        texts: list[Any] = []
+        unread: list[tuple[Any, str]] = []
+        for descriptor in rest:
+            if not descriptor.readable:
+                unread.append((descriptor, "class"))
+            elif not descriptor.fetchable:
+                unread.append((descriptor, "expired"))
+            else:
+                # Readable, live, and simply past this read's file budget.
+                unread.append((descriptor, "budget_files"))
+        for descriptor in wanted:
+            if min(descriptor.size, FILE_READ_MAX_BYTES_PER_FILE) > budget:
+                # Bound every buffer BEFORE the request: the read's total is a hard
+                # ceiling, and a file that would cross it is stated as unread rather than
+                # fetched and shortened (which would spend hub traffic and a model's
+                # context on bytes nothing will show).
+                unread.append((descriptor, "budget_bytes"))
+                continue
+            try:
+                data = await _fetch_context_file(
+                    runtime, channel_id, message, endpoint_id, descriptor
+                )
+            except Exception:  # noqa: BLE001 — a refusal is a line, never a crash
+                # A 404/revocation/unreachable read names its own cause, never the
+                # budget: the budget is not why this file is missing.
+                unread.append((descriptor, "refused"))
+                continue
+            try:
+                item = digest_file(descriptor, data)
+            except FileRejected:
+                # Bytes that do not hash to the descriptor are a tamper signal, not a
+                # size limit; saying "over the budget" here would be a false cause.
+                unread.append((descriptor, "unverified"))
+                continue
+            budget -= item.shown_bytes
+            remaining -= 1
+            texts.append(item)
+        caption = context_caption(
+            texts,
+            unread,
+            source=f"files for message {message.get('id')} in {channel_id}:",
+        )
+        blocks.append(_file_provenance(channel_id, message, caption.splitlines(), texts))
+    return blocks
+
+
+async def _fetch_context_file(
+    runtime: BridgeRuntime,
+    channel_id: str,
+    message: dict[str, Any],
+    endpoint_id: str,
+    descriptor: Any,
+) -> bytes:
+    """One text file's bytes under THIS endpoint's admission, through the shared route."""
+
+    from .agent_file_reads import FILE_SERVED_MIME
+
+    data, mime = await runtime.client.fetch_attachment(
+        channel_id,
+        str(message["id"]),
+        descriptor.id,
+        tenant_id=runtime.tenant_id,
+        endpoint_id=endpoint_id,
+        purpose="context",
+        served_types=(FILE_SERVED_MIME,),
+    )
+    if mime != FILE_SERVED_MIME:
+        raise ValueError("served type is not a generic file")
+    return data
+
+
+def _file_provenance(
+    channel_id: str, message: dict[str, Any], lines: list[str], texts: list[Any]
+) -> str:
+    """The caption and bodies for one message's files: untrusted clause first.
+
+    The clause leads because a file's text is sender-controlled data exactly like a body.
+    Provenance follows (which message, which channel, who sent it), then the descriptor
+    lines, then each file's content under its own ``--- file N ---`` marker so a model can
+    see where one file ends and the next begins.
+    """
+
+    raw_sender = message.get("sender")
+    sender: dict[str, Any] = raw_sender if isinstance(raw_sender, dict) else {}
+    label = str(sender.get("display_label") or "member").replace("\n", " ")[:200]
+    kind = str(sender.get("kind") or "unknown")[:16]
+    head = (
+        f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+        f"Files from message {message.get('id')} in {channel_id} "
+        f"(seq {message.get('seq')}) from {label} ({kind}):"
+    )
+    body = "\n".join([head, *lines])
+    for index, item in enumerate(texts, start=1):
+        body += f"\n\n--- file {index}: {item.descriptor.id} ---\n{item.text}"
+    return body
 
 
 async def _history_images(

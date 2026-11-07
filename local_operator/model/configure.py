@@ -7528,12 +7528,23 @@ class SessionStreamFn:
 
         Latency contract: recording happens ONLY after the stream is fully
         consumed (``async for`` completes), so it adds nothing to the response
-        the caller is awaiting. The single piece of event-loop work — reading
-        the request's component character lengths — is done up front into a
-        scalar snapshot because the transcript mutates the messages after the
-        call returns; tokenising, apportioning, and the SQLite write all happen
-        on the recorder's background thread. Everything is wrapped so a failure
-        in analytics can never break a turn.
+        the caller is awaiting. TWO pieces of event-loop work happen up front,
+        into a scalar snapshot, because the transcript mutates the messages
+        after the call returns: reading the request's component character
+        lengths, and the canonical context digest
+        (:func:`local_operator.analytics.request_fingerprint` — JSON
+        canonicalisation plus one sha256). Tokenising, apportioning, and the
+        SQLite write all happen on the recorder's background thread. Everything
+        is wrapped so a failure in analytics can never break a turn.
+
+        The digest's cost is MEASURED, not assumed: at the 291k-token scale
+        (1.16 MB of context) it is 3.5 ms of event-loop time per call and 2.4 MB
+        of peak Python allocation — bounded, linear in the context, and accepted
+        deliberately rather than moved off the loop. Deferring it to the writer
+        thread would be the worse trade it looks like a fix for: the transcript
+        is mutated after this returns, so a later read would fingerprint a
+        DIFFERENT context and the column would quietly stop describing what was
+        sent.
         """
         started_at = time.monotonic()
         request_id = uuid.uuid4().hex
@@ -7579,14 +7590,30 @@ class SessionStreamFn:
         # sub-millisecond even on a very large context) and safe to hand a
         # background thread, unlike the live message objects.
         try:
-            from local_operator.analytics import snapshot_component_chars
+            from local_operator.analytics import (
+                request_fingerprint,
+                snapshot_component_chars,
+            )
 
             component_chars = snapshot_component_chars(request)
+            # Beside the component lengths and for the same reason: both are read
+            # off the composed request at ONE site per call, before the stream
+            # hands anything back, so the record describes the context that was
+            # actually sent. The transcript mutates afterwards, which is why this
+            # cannot be recomputed later -- and why the digest is the only
+            # surviving evidence of what the model was given.
+            prompt_hash, message_count = request_fingerprint(request)
         except Exception:  # noqa: BLE001 — analytics must never break a turn
             component_chars = {}
+            prompt_hash, message_count = "", 0
 
         final_usage: Usage | None = None
         upstream_host: str | None = None
+        #: The model the upstream says actually served this call, from
+        #: ``StreamEndEvent.served_model``. Kept beside the upstream host and for
+        #: the same reason: the request names the ROUTE this harness asked for, so
+        #: without this the ledger cannot say which family answered.
+        served_model = ""
         ok = True
         counted_child_request = self._counts_as_child_request
         if counted_child_request:
@@ -7702,6 +7729,14 @@ class SessionStreamFn:
                     # read -- captured unconditionally so an aborted/errored
                     # end frame still names the host that was contacted.
                     upstream_host = str(served)
+                served_vendor_model = getattr(event, "served_model", None)
+                if served_vendor_model:
+                    # Same frame and the same rule as the host above: captured even
+                    # on an errored or aborted end, because who answered is a fact
+                    # about the attempt and the ledger records failed calls too.
+                    # Never derived from the request's model id -- that is the
+                    # route, not the checkpoint that served it.
+                    served_model = str(served_vendor_model)
                 if served and stop_reason is not None and stop_reason not in ("error", "aborted"):
                     # Re-pin IMMEDIATELY when the served host differs from the
                     # current pin, with no hysteresis: that host is the one
@@ -7877,6 +7912,9 @@ class SessionStreamFn:
                 output_deltas=output_deltas,
                 cache_miss_type=cache_miss_type,
                 cache_missed_tokens=cache_missed_tokens,
+                served_model=served_model,
+                message_count=message_count,
+                prompt_hash=prompt_hash,
             )
             # The observation rides AFTER the analytics ledger, alongside it in
             # the same ``finally``: same facts, ONE clock read (``duration_ms``
@@ -7913,8 +7951,16 @@ class SessionStreamFn:
         cache_miss_type: str = "",
         cache_missed_tokens: int = 0,
         usage_estimated: bool = False,
+        served_model: str = "",
+        message_count: int = 0,
+        prompt_hash: str = "",
     ) -> None:
         """Enqueue one call sample. Off the hot path; never raises.
+
+        ``served_model``/``message_count``/``prompt_hash`` describe what the
+        provider served and what it was given; all three default to the schema's
+        "not recorded" values so a caller that does not know them stays honest
+        rather than inventing a claim (see ``CallSnapshot``).
 
         ``usage_estimated`` marks ``usage`` as the harness's estimate for a call
         the consumer cut (``_estimate_consumer_cut_usage``): it is priced by the
@@ -8066,6 +8112,9 @@ class SessionStreamFn:
                     decode_calls=measured_calls,
                     cache_miss_type=cache_miss_type,
                     cache_missed_tokens=int(cache_missed_tokens),
+                    served_model=served_model,
+                    message_count=int(message_count),
+                    prompt_hash=prompt_hash,
                 )
             )
         except Exception:  # noqa: BLE001 — recording is best-effort

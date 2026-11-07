@@ -24,7 +24,8 @@ the per-host clients in `local_operator/browser_bridge/backend.py` and
 Tests: `tests/unit/tools/test_browser_tool.py`,
 `tests/unit/browser_bridge/test_tool_selection.py`,
 `tests/unit/tools/test_browser_file_transfer.py`,
-`tests/unit/test_browser_files.py`, and the capability gate in
+`tests/unit/test_browser_files.py`, the `setvalue` contract in
+`tests/unit/browser_bridge/test_setvalue.py`, and the capability gate in
 `tests/unit/browser_bridge/test_capability_gate.py`.
 
 ## Site approval scopes
@@ -88,7 +89,7 @@ an operator action.
 ## Actions
 
 The non-cmux hosts answer the same wire methods; cmux can serve a subset, and
-the rest (`scroll`, `logs`, `tabs`, `download`, `upload`, the site-approval trio,
+the rest (`scroll`, `logs`, `tabs`, `download`, `upload`, `copy`, the site-approval trio,
 `network_start`/`network_stop`/`network_read`/`network_clear`) degrade with a
 typed error naming the hosts that can. The table below is the CMUX
 mapping (the full list is the docstring of `BROWSER_ACTIONS`).
@@ -102,6 +103,7 @@ mapping (the full list is the docstring of `BROWSER_ACTIONS`).
 | `screenshot` | PNG to a path (verified before it is reported) | `browser --surface <s> screenshot --out <p>` |
 | `click` | Click a CSS selector or a snapshot ref | `browser --surface <s> click --selector <sel>` |
 | `type` | Replace the value of a field | `browser --surface <s> fill --selector <sel> --text <t>` |
+| `setvalue` | Set a form control's value: a native `<select>` option by label/value, or an `<input>`/`<textarea>` (date/time take ISO) | not available (typed refusal) |
 | `close` | Close the surface and drop the handle | `close-surface --surface <s>` |
 | `download` | Save what the page offers into the session's download directory | not available (typed refusal) |
 | `upload` | Attach local files to a `<input type=file>` | not available (typed refusal) |
@@ -111,6 +113,7 @@ mapping (the full list is the docstring of `BROWSER_ACTIONS`).
 | `network_clear` | Drop the buffer and its counters | not available (typed refusal) |
 | `record_start` | Record the owned tab's video to an `.mp4` | not available (typed refusal) |
 | `record_stop` | Stop and save the recording | not available (typed refusal) |
+| `copy` | Write ONE element's text (named by `selector`) to the OS clipboard and report a receipt — `chars`, the first 16 hex of the sha256 of the bytes, and whether the host's readback matched. The text itself is never returned, and the receipt carries no page-supplied strings. Desktop app only (cmux and the extension refuse it, naming the app); the recipe that keeps the value out of the transcript is in `guide://browser` | not available (typed refusal) |
 
 One surface per session, owned by the `Session` and injected into every rebuilt
 `ToolContext` as `ToolContext.browser`. `open` called a second time navigates
@@ -193,6 +196,164 @@ limitation honestly. No match uses existing `element_not_found` with
 (capped at 50 entries, strings capped at 120 characters). The harness renders that
 correction list, so agents need not hallucinate labels. Older hosts refuse before
 send with `capability_unsupported`. `select` stays write-tier like click/type.
+
+## Setting a value
+
+`setvalue` is the one action that WRITES a control's value through the DOM rather
+than through pointer or keyboard input, and it exists because a native
+`<select>` is otherwise unreachable on this host: `select` drives the option
+model, `type` cannot move a native select, and clicking an option node fails when
+the list is browser chrome rather than page DOM.
+
+Wire contract, which the desktop host implements as follows:
+
+- Params `{tab, selector, text}` — no new parameter and no new method beside
+  `setvalue` itself. `selector` resolves exactly as `click`/`select` do (CSS,
+  snapshot ref, `role=`/`label=`/`text=` locator); `text` is the value.
+- Result `{value, kind?, input_type?, redacted?, verified?, url, title}`, where
+  `value` is what the control HOLDS after the dispatch — a native select maps a
+  label onto its own option value, and the harness renders that read-back rather
+  than echoing the request. `verified:false` (or an absent `value`) makes the
+  tool say `value unverified` instead of reporting an empty read as success.
+- **A credential write reports no value, and the harness enforces it on TWO
+  triggers**: `input_type == "password"` (the control's own type, echoed back)
+  and `redacted: true` (the host stating it withheld the value). Either one makes
+  the result render as `value withheld: a credential field`, with `details`
+  carrying `redacted`/`input_type` and no `value`. Both triggers are needed
+  because a host may declare secrecy one way and not the other, and keying off
+  `input_type` alone leaks a `redacted` host's value. The direction is
+  deliberately fail-safe: a host that says `redacted` and still sends a value,
+  or names `password` without redacting, is not trusted to have done it for us.
+  What the PAIRED host sends: it declares secrecy as `input_type: "password"`
+  with `value` absent — it consumes the page program's `redacted` to decide that
+  omission and does not forward the flag, so `details.redacted` cannot appear
+  from it. The harness still accepts `redacted: true` from any host that does
+  send it, and withholds on either trigger.
+- Native `<select>`: an option is matched by trimmed label, then option value,
+  exact before case-insensitive; `multiple` requires exactly one match. No match
+  (or an ambiguous one) is `element_not_found` with `data.reason` written the way
+  `select` writes it and `data.available:[{index,label,value}]`, so the harness
+  can print the same correction list.
+- `<input>`/`<textarea>`: the value is set through the prototype setter, then
+  `input` and `change` are dispatched, in that order. `date`, `time`,
+  `datetime-local`, `month` and `week` hold only the ISO spelling the DOM stores
+  and refuse a value they cannot hold (a locale `01/03/2027` is not translated);
+  a host predating that refusal keeps `""` and answers `verified:false` instead,
+  which the harness renders `value unverified` and never as a clean write. An
+  empty `text` is a legitimate value (it clears an input/textarea); presence is
+  checked by type, never by truthiness.
+- Refused, typed, before any mutation: a target that is not a form control
+  (a `contenteditable` is `type`'s, a page-owned ARIA listbox is `select`'s), a
+  disabled/inert/read-only control, and a file input (`upload`). A secret cannot
+  travel through this action at all: `secret_ref` is `type`-only and is refused
+  here, so a credential field is `type` with a ref, never a literal in `text`.
+- **The refusal vocabulary is the host's eight tokens**, carried in `data.reason`
+  so a caller branches on the token and never on prose: `disabled`, `readonly`,
+  `file_input`, `not_a_form_control`, `not_a_value_control`, `value_rejected`,
+  `option_not_found`, `option_ambiguous`. Two of them need saying, because the
+  remedy is a different action rather than a retry:
+  - `not_a_value_control` — the target is a `checkbox` or a `radio`, whose
+    `value` is what the control would SUBMIT and whose state is `checked`.
+    Writing the value would answer `verified:true` while the box stayed unticked,
+    so it is refused; toggle it with `click`, which fires real activation.
+  - `value_rejected` — the control's own sanitizer would not store the value as
+    asked; the refusal carries `input_type` plus `expected`, the format that type
+    accepts (`YYYY-MM-DD`, `HH:MM or HH:MM:SS`, `YYYY-MM-DDTHH:MM`, `YYYY-MM`,
+    `YYYY-Www`, `a number`, `a number between the control's min and max` for
+    `range`, `#rrggbb`). It is a refusal and not a coercion,
+    because a `range` clamps and a `color` falls back rather than clearing, and
+    both were once the same silent success. The refusal is TOTAL: the host
+    snapshots the prior value, samples the write, and on rejection restores that
+    value through the same setter WITHOUT dispatching `input`/`change` — so the
+    control is exactly as it was and the page never saw the value. (A host
+    predating that restore writes first and refuses after: there the field keeps
+    the sanitizer's reading — usually empty — and the page has fired
+    `input`/`change`. Re-read the control if you may be on one.)
+- The option-list refusal has two reasons, and the harness renders the list for
+  both: `option_not_found` and `option_ambiguous` (a `multiple` select whose
+  label matched more than one option). One set, `_OPTION_LIST_REASONS`, so the
+  sentence and `details.available` cannot disagree about which refusals carry it.
+
+The page program is a FIXED generated source string (`geometry-sources.gen.ts`
+style, one per driver function), so a caller supplies data and never source: no
+expression, no `eval`, no cross-origin escalation beyond what a selector can
+address, no navigation and no network request. It runs in the resolved element's
+own frame of the session's own tab, through the existing surface registry and
+frame plumbing.
+
+Host coverage: **desktop app only**. The extension neither serves nor advertises
+`setvalue` (it is in `DESKTOP_ONLY_METHODS`), so it answers with the sentence
+naming the desktop app; cmux is unsupported for the same reason as the other
+page-program actions. The harness refuses an unadvertised method from the
+discovery record, before any socket dial.
+
+## Values in the snapshot
+
+A control's current value rides on its snapshot line, after the ref and every
+state marker:
+
+```
+- combobox "Environment" [e12] [collapsed] = "Production"
+- textbox "App name" [e13] = "release-bot"
+- slider "Volume" [e14] = "3"
+- textbox "Password" [e15]
+```
+
+`<role> "<name>" [<ref>] [<state>]… = "<value>"` is the whole shape, and the
+order is the contract: the value arrives strictly after everything that was
+already there, so refs, state markers and the `role=`/`label=`/`text=` locator
+grammar keep their positions and their meaning. Nothing before the ` = ` changes
+because a value exists.
+
+- **Only the roles an agent acts on**: `combobox`, `listbox`, `option`,
+  `textbox`, `searchbox`, `spinbutton`, `slider`. A `button` or a `heading`
+  carries a value in the accessibility tree too — it duplicates the name, so
+  printing it would lengthen every line and, because `snapshot --search` matches
+  the rendered line, silently change what a search term returns.
+- **A password field that Chromium MASKS never reports a value**, not even its
+  length. Chromium masks a password's value before the driver sees it — one U+2022
+  BULLET per character (measured on Chromium 152.0.7977.78, this repository's
+  Electron 44.3.0, and on Chrome 156.0.8078.81: a 14-character password arrives as
+  14 bullets) — and the projection refuses a masked value outright, so the line
+  stops at the ref: `textbox "Password" [e15]`. The `protected` accessibility
+  property is honoured the same way, for a browser that sends one (this one does
+  not).
+  The rule the code actually holds is **masked ⇒ suppressed**, not *password ⇒
+  suppressed*, and the gap between those two sentences is a limit worth stating
+  plainly because this bullet will be cited in a security argument. Chromium is
+  the masking party; this projection is a pure function of the AX payload and has
+  no DOM handle, so it cannot ask for `type="password"`. A field Chromium does
+  **not** mask therefore prints its value in full — measured on this head, a
+  `textbox "Password"` carrying an unmasked value renders `= "not-masked-secret"`
+  while the same field carrying 14 bullets renders nothing — and, because
+  `snapshot --search` matches the rendered line, such a value is findable by
+  search too. A secret typed into an ordinary `textbox` behaves the same way: the
+  field's role and name never enter into it.
+  One capability change follows, and an agent filling a login form will meet it: a
+  password line no longer separates an EMPTY field from a filled one — both are
+  `textbox "Password" [e15]` — so a snapshot cannot tell you whether the field
+  already holds something.
+- **Nothing is invented**: an absent or empty value, and a value identical to the
+  accessible name, print nothing at all. Whitespace is collapsed, and the value is
+  quoted and clipped at 40 **code points** (not UTF-16 units, so a clip can never
+  orphan half of an emoji) with a trailing `…`.
+
+The value comes from the AX tree the snapshot already fetched — no extra protocol
+round trip and no page script. Measured on a real page: a native `<select>` puts
+the selected option's text on the combobox node (`value` `"Production"`, with
+`expanded: false`, hence `[collapsed]` beside it), a `<textarea>`'s text collapses
+to one line with the whitespace runs squeezed, `option` nodes carry no value of
+their own (only a `selected` bool), and a native `<input type=range>` carries a
+`valuetext` property whose text **equals** its numeric value.
+
+`valuetext` is preferred over the raw value where a Chromium supplies one, and
+that is future-proofing rather than an observable difference today: measured on
+Chromium 152 (this repository's Electron) and Chrome 156, the property appears
+only on native `range`/`number` inputs
+and never differs from the number, while an author's `aria-valuetext` **never**
+reaches it — a `div[role=slider]` with `aria-valuetext="Medium"` prints `= "3"`.
+A browser that starts rendering `Medium` there gets it printed with no code
+change.
 
 ## Network telemetry
 
