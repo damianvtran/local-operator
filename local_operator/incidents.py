@@ -1532,10 +1532,16 @@ MCP_BREAKER_REASON_PREFIX = "auto-reconnect paused after"
 #: (local-operator-ui ``ui.settings.integrations.integration_model.reconnect``,
 #: offered on a loaded server's row in the error state, and in its overflow menu
 #: whenever it is not connected; a breaker only ever trips on a loaded server).
+#:
+#: Two clauses, one per reader (#3523 design review D1, D2). The model's: it need
+#: not call the tools while the probe owns recovery, the don't-hammer
+#: instruction every other unavailable row carries. The operator's: Reconnect
+#: "retries it now", never "restores it", because a Reconnect against a server
+#: that is still down fails and the server goes back to paused.
 MCP_BREAKER_TAIL = (
     # i18n: ignore model-facing incident block
-    "It is retried automatically; Reconnect on its row in the app's "
-    "Integrations settings restores it at once."
+    "It is retried automatically, so the agent need not call its tools until it "
+    "is back; Reconnect on its row in the app's Integrations settings retries it now."
 )
 
 

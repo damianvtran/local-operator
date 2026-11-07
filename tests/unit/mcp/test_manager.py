@@ -1398,6 +1398,97 @@ class TestHalfOpenBreaker:
         assert manager.reconnect_suspended("fast") is False
         await manager.disconnect_all()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("history", ["never_tripped", "was_paused"])
+    async def test_a_failed_reconnect_repauses_only_a_server_that_was_paused(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, history: str
+    ) -> None:
+        """#3523 R2-1: the re-pause is the breaker's, not every failed Reconnect's.
+
+        A server that never tripped and simply fails to connect keeps its
+        pre-breaker behaviour: not suspended, no probe, so the monitor never
+        says it "keeps dropping". ``was_paused`` is the control: a server the
+        breaker already held goes back to paused with one fresh probe.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        if history == "was_paused":
+            await self._trip(manager, server, real_sleep)
+        server.mode = "down"
+
+        assert await manager.reconnect_server("fast") is None
+        await _spin(real_sleep)
+
+        assert manager.get_connection("fast") is None
+        if history == "never_tripped":
+            assert manager.reconnect_suspended("fast") is False
+            assert manager._pending_probes == {}
+            assert clock.parked() == []
+        else:
+            assert manager.reconnect_suspended("fast") is True
+            assert list(manager._pending_probes) == ["fast"]
+            assert clock.parked() == [60.0]
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_reconnect_never_repauses_a_server_connected_meanwhile(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3523 R2-2: another route connected the server while the dial was out.
+
+        ``before_result`` registers a connection the way a ``reload`` landing
+        mid-dial does, then the manual dial fails. The server is live, so the
+        failure must leave it unsuspended with no probe armed against it.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        await self._trip(manager, server, real_sleep)
+        cfg = manager._configs["fast"]
+        other_route = _make_conn("fast", cfg)
+
+        def a_reload_lands() -> None:
+            server.before_result = None
+            manager._register_connection(other_route)
+
+        server.mode = "down"
+        server.before_result = a_reload_lands
+        assert await manager.reconnect_server("fast") is None
+        await _spin(real_sleep)
+
+        assert manager.get_connection("fast") is other_route
+        assert manager.reconnect_suspended("fast") is False
+        assert manager._pending_probes == {}
+        assert clock.parked() == []
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_probe_that_finds_the_server_connected_stands_down(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The probe checks the connection before tearing anything down.
+
+        A connection registered while the probe slept, yet with the breaker
+        still open (the state #3523 R2-2 produced), is live: the probe closes
+        the breaker and exits without a teardown or a redial. Contrast
+        :meth:`test_a_call_site_trip_arms_the_probe_too`, where the connection
+        in the slot is the failing one the probe was armed against.
+        """
+        manager, server, clock, real_sleep = await self._boot(project, monkeypatch)
+        await self._trip(manager, server, real_sleep)
+        live = _make_conn("fast", manager._configs["fast"])
+        manager._connections["fast"] = live  # bypasses the breaker-closing choke point
+        attempts = server.attempts.count("fast")
+
+        server.mode = "up"
+        clock.elapse()
+        await _spin(real_sleep)
+
+        assert server.attempts.count("fast") == attempts  # no redial
+        assert manager.get_connection("fast") is live  # not torn down
+        assert manager.reconnect_suspended("fast") is False
+        assert "fast" not in manager._reconnect_history
+        assert manager._pending_probes == {}
+        assert clock.parked() == []
+        await manager.disconnect_all()
+
 
 class TestToolNameCollision:
     """MCP-09: cross-server collisions resolved by stable origin key."""

@@ -30815,11 +30815,12 @@ class Session:
                 # ``/mcp reauth`` would re-spend a perfectly valid grant. This
                 # text becomes the stall notice's ``Reason:``, whose body says
                 # the watch is retrying; the two must agree. Pinned verbatim in
-                # tests/unit/session (re-verify the probe if it changes).
+                # tests/unit/monitors (re-verify the probe if it changes), with
+                # a 100-char server name still inside the 200-char notice clip.
                 return (
                     "unavailable",
                     f"MCP server {detail} keeps dropping; reconnects are paused "
-                    "and retried automatically",
+                    "for a cool-down, then retried automatically",
                 )
             if status == "connected":
                 return (
