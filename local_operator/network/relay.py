@@ -4537,6 +4537,13 @@ class PeerLink:
         # capability this device expects. An old peer sends none and this is
         # `{}` — "not known", never a default that would read as parity.
         self.peer_build: dict[str, Any] = dict(result.peer_build or {})
+        #: Whether admitting this link runs the slices' ``on_link_up`` hooks. False
+        #: only for the pairing ceremony's own link: that is the joiner's CLI socket,
+        #: which closes the moment the ceremony ends, so a slice reacting to it would
+        #: send its first frames into a link about to die (measured: a first-contact
+        #: definitions push sent there stalled the member's first sync to 26 s). The
+        #: joiner's RELAY linking afterwards is the first contact that counts.
+        self.link_up_hooks = True
         self.peer_addr = ""
         self.opened_at = time.time()
         self.last_frame_at = time.time()
@@ -5497,6 +5504,11 @@ class RelayServer:
         #: source parks a session ``prepared`` for the link that asked — must learn
         #: that the link is gone, because no frame will ever arrive to say so.
         self._slice_link_closed_hooks: list[tuple[str, Callable[[PeerLink, str], Any]]] = []
+        #: Slice callbacks run when a peer link is ADMITTED (``register_ops``'s
+        #: ``on_link_up``): the one moment a slice cadence learns a member is
+        #: reachable now — a freshly paired device above all — instead of finding
+        #: out on its next timer (the definitions syncer's first-contact nudge).
+        self._slice_link_up_hooks: list[tuple[str, Callable[[PeerLink], Any]]] = []
         self._slow_lock = threading.Lock()
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
@@ -7204,6 +7216,20 @@ class RelayServer:
             # A LINK IS UP: the redial schedule for this device resets, and its
             # surfaces stop saying "reconnecting" (``redial.RedialTracker``).
             self.note_link_activity(link, force=True)
+            # Inline on the admitting thread and best-effort, like the link-closed
+            # hooks: a hook only records and signals (it must not dial from here),
+            # and one slice's failure must not unwind an admitted link. ``getattr``
+            # for the same reduced shapes ``link_closed`` tolerates (a server whose
+            # slices never installed; a stand-in link without the flag).
+            for label, hook in (
+                getattr(self, "_slice_link_up_hooks", ())
+                if getattr(link, "link_up_hooks", True)
+                else ()
+            ):
+                try:
+                    hook(link)
+                except Exception as exc:  # noqa: BLE001 — see above
+                    logger.warning("mesh relay: link-up hook %s failed (%s)", label, exc)
         return refusal
 
     def register_link(
@@ -7940,6 +7966,7 @@ class RelayServer:
         on_start: Mapping[str, Callable[[], Any]] | None = None,
         on_stop: Mapping[str, Callable[[], Any]] | None = None,
         on_link_closed: Mapping[str, Callable[[PeerLink, str], Any]] | None = None,
+        on_link_up: Mapping[str, Callable[[PeerLink], Any]] | None = None,
     ) -> None:
         """Let a slice module serve its ops without editing this file.
 
@@ -7952,7 +7979,9 @@ class RelayServer:
         ``on_stop`` maps a LABEL to a callable run when the relay stops, INLINE
         on the stopping thread. ``on_link_closed`` maps a LABEL to a callable run
         with ``(link, reason)`` each time a peer link closes, inline on the closing
-        thread after that link's waiters have been failed.
+        thread after that link's waiters have been failed. ``on_link_up`` maps a
+        LABEL to a callable run with ``(link)`` each time a peer link is admitted,
+        inline on the admitting thread, so it must only record and signal.
 
         WHY ``on_start`` EXISTS. Some slice state can only be settled by a relay
         that is up: the move's crash recovery has to run when a relay starts on a
@@ -8029,8 +8058,16 @@ class RelayServer:
                 raise TypeError(f"link-closed hook {label!r} is not callable")
             if any(label == existing for existing, _hook in self._slice_link_closed_hooks):
                 raise ValueError(f"a link-closed hook named {label!r} is already registered")
+        for label, hook in (on_link_up or {}).items():
+            if not callable(hook):
+                raise TypeError(f"link-up hook {label!r} is not callable")
+            if any(label == existing for existing, _hook in self._slice_link_up_hooks):
+                raise ValueError(f"a link-up hook named {label!r} is already registered")
         self._slice_link_closed_hooks.extend(
             (label, hook) for label, hook in (on_link_closed or {}).items()
+        )
+        self._slice_link_up_hooks.extend(
+            (label, hook) for label, hook in (on_link_up or {}).items()
         )
         self._slice_start_hooks.extend((label, hook) for label, hook in (on_start or {}).items())
         self._slice_stop_hooks.extend((label, hook) for label, hook in (on_stop or {}).items())
@@ -12104,6 +12141,8 @@ class RelayServer:
                 reader=reader,
             )
             link.peer_addr = peer_addr
+            # NOT A FIRST CONTACT FOR THE SLICES: see ``PeerLink.link_up_hooks``.
+            link.link_up_hooks = False
             if self._admit_link(link):
                 # The relay stopped while the two people were confirming. The member
                 # row this ceremony just wrote STANDS — the admission is durable and

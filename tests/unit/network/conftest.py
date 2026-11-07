@@ -229,3 +229,24 @@ def _no_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     from local_operator.network.credentials import github as github_mod
 
     monkeypatch.setattr(github_mod, "_resolve_program", lambda name, path=None: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_first_contact_nudge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The definitions syncer's first-contact nudge is OFF unless a cell opts in.
+
+    A peer link coming up nudges a running relay's definitions syncer to serve that
+    member at once (``definitions._on_link_up``). Cells in this directory pair real
+    relays and then drive the cadence's steps BY HAND, counting the exact pushes,
+    pulls, refusals and audit rows they cause; they were written against a syncer
+    whose first timed tick is 15 s away, i.e. quiet for the whole cell. With the
+    nudge armed, the same steps also run on the syncer thread at a moment the cell
+    does not control: measured, 10 cells across 8 files then saw an extra refusal,
+    a concurrent memory batch (``bad_memory``), a dial after a fence, or a cache the
+    background step had already filled. Pinning the seam here keeps that contract
+    for every file, present and future; ``test_mesh_first_contact.py`` re-arms it
+    for the cells that pin the nudge itself (fixture ``first_contact_nudge``).
+    """
+    from local_operator.network import definitions
+
+    monkeypatch.setattr(definitions, "_on_link_up", lambda _server, _link: None, raising=False)
