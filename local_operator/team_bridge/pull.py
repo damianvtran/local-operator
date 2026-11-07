@@ -57,6 +57,7 @@ from local_operator.team_bridge.types import (
     InboxPage,
     MessageRef,
     OwnerSnapshot,
+    ScreeningObservation,
     ScreeningReceipt,
     TeamBridgeTypeError,
     project_events_batch,
@@ -379,6 +380,10 @@ async def ack(
         access=access,
         client=client,
         recheck_confirmed=target == "read",
+        # Telemetry about THIS verdict's screener (agent-server §8.5). It is
+        # in-memory only — never part of the recorded intent — so a crash
+        # replay of the same intent simply sends no block.
+        screening_observation=getattr(receipt, "observation", None),
     )
 
 
@@ -390,6 +395,7 @@ async def flush_ack(
     access: OAuthAccess | None,
     client: WireClient | None = None,
     recheck_confirmed: bool = False,
+    screening_observation: ScreeningObservation | None = None,
 ) -> AckOutcome:
     """Replay ONE pending intent with its exact stored tuple (crash recovery).
 
@@ -397,6 +403,12 @@ async def flush_ack(
     different verdict is a NEW write-once conflict (the server keeps the first
     outcome), not a retry. Only a definite business refusal ends an intent;
     every ambiguity keeps it pending and replayable with the SAME tuple+ref.
+
+    ``screening_observation`` (observe-only, §8.5) rides only the FIRST send of
+    a pending intent; it is passed to the wire only when present, so a call
+    without it is exactly the pre-#332 call. It never influences the outcome
+    mapping below. A confirmed intent's standing re-check is a repeat, not a
+    new screening, and carries none.
     """
 
     store = Store(config_dir)
@@ -443,6 +455,11 @@ async def flush_ack(
 
     wire = _client_for(config_dir, client)
     _guard_destination(owner, wire)
+    observed: dict[str, Any] = (
+        {"screening_observation": screening_observation}
+        if screening_observation is not None
+        else {}
+    )
     try:
         result = await wire.ack(
             intent["message_id"],
@@ -451,6 +468,7 @@ async def flush_ack(
             screening=receipt,
             client_ref=intent["client_ref"],
             access=access,
+            **observed,
         )
     except Exception as failure:  # noqa: BLE001 - classified below; never blindly re-sent
         code = getattr(failure, "code", None) or type(failure).__name__

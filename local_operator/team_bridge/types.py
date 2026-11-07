@@ -687,6 +687,40 @@ def feed_seq(value: int | str) -> FeedSeq:
 # ---------------------------------------------------------------------------
 
 
+#: The three ``selection_stage`` values the hub's observe-only catalog knows
+#: (agent-server docs/TEAM-BRIDGE.md §8.5). ``unknown`` is a real answer, not
+#: an error: it is what a client WITHOUT trusted answering-hop provenance
+#: sends, and the hub would rather count it than a guessed stage.
+OBSERVATION_STAGES = ("preferred", "fallback", "unknown")
+
+
+@dataclass(frozen=True)
+class ScreeningObservation:
+    """WHICH screener actually answered, captured at answer time. Telemetry only.
+
+    WHY IT EXISTS: the hub counts (when its operator enables collection) which
+    provider/model served Team Bridge screening and whether that was a
+    PREFERRED screener or the failover cascade, so the cascade's real use is
+    visible (agent-server PR #332, docs/TEAM-BRIDGE.md §8.5 and the
+    conversations doc §10).
+
+    CONSTRAINTS:
+
+    * ``provider``/``model`` are the hop that ANSWERED, never the configured or
+      preferred one: a failover that served the call reports the failover.
+    * ``selection_stage`` comes only from the trusted chain's answering hop
+      (``ScreenChainRunner.answered_hop.preferred``); without that provenance
+      it is ``unknown`` — never inferred from a model name.
+    * It is NOT evidence and decides nothing: it never enters the §6.2 tuple,
+      a cache key, a store row, a release predicate or a retry. A missing
+      observation omits the wire block entirely.
+    """
+
+    provider: str
+    model: str
+    selection_stage: str
+
+
 @dataclass(frozen=True)
 class ScreeningReceipt:
     """Typed evidence from the (future) screener — never a permission to act.
@@ -711,6 +745,13 @@ class ScreeningReceipt:
     #: verdict from a fallback screener is never reused from the receipt cache
     #: and never feeds a B4b release.
     screener_preferred: bool = False
+    #: In-memory screener provenance for the hub's observe-only telemetry
+    #: block (:class:`ScreeningObservation`). ``compare=False`` keeps it out of
+    #: equality and hashing, and it is absent from :meth:`tuple_key` and
+    #: :meth:`to_json`, so a receipt with and without it is the SAME verdict to
+    #: every fence. It is never persisted: a receipt reloaded from the store
+    #: (cache hit, recorded intent replay) carries ``None`` and sends no block.
+    observation: ScreeningObservation | None = field(default=None, compare=False)
 
     def validated(self) -> "ScreeningReceipt":
         if self.verdict not in _VERDICTS:

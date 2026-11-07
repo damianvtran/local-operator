@@ -88,6 +88,7 @@ from local_operator.providers.radient_credentials import (
     org_oauth_destination_allowed,
 )
 from local_operator.team_bridge import availability
+from local_operator.team_bridge import screening_observation as _observation
 
 # The hub serves a generic FILE as one type whatever its class, and that name is
 # the contract's (agent-server ``BridgeFileServedMime``). Imported rather than
@@ -114,12 +115,31 @@ from local_operator.team_bridge.settings import (
 )
 from local_operator.team_bridge.types import (
     ATTACHMENT_ID_PATTERN,
+    ScreeningObservation,
     reply_window_params,
     validate_member_mention,
     validate_send_recipient,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _attach_observation(
+    body: dict[str, Any], base_url: str, observation: ScreeningObservation | None
+) -> None:
+    """Add the observe-only ``screening_observation`` key, or leave ``body`` untouched.
+
+    Untouched is the common case and must stay byte-identical to the pre-#332
+    request: no provenance, no advertised hub support, or nothing honest to say
+    (``screening_observation.wire_block``) each leave the key out entirely.
+    """
+
+    if observation is None or not _observation.hub_accepts(base_url):
+        return
+    block = _observation.wire_block(observation)
+    if block is not None:
+        body[_observation.WIRE_KEY] = block
+
 
 # ---------------------------------------------------------------------------
 # Embedded served texts (fallbacks; the server is each text's canonical home)
@@ -2163,7 +2183,12 @@ class TeamBridgeClient:
             extra["expected_account_id"] = expected_account_id
         if pre_http_guard is not None:
             extra["pre_http_guard"] = pre_http_guard
-        return await self._send("GET", "/messaging/status", access=access, **extra)
+        payload = await self._send("GET", "/messaging/status", access=access, **extra)
+        # Every status read this process ALREADY makes primes the observe-only
+        # block's hub gate (screening_observation.py): no read is ever added
+        # for it, and the payload is returned untouched.
+        _observation.note_hub_status(self.base_url, payload)
+        return payload
 
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         """The caller's endpoint + consent record + policies (§6.1)."""
@@ -2272,6 +2297,7 @@ class TeamBridgeClient:
         screening: Mapping[str, Any],
         client_ref: str,
         access: OAuthAccess | None = None,
+        screening_observation: ScreeningObservation | None = None,
     ) -> dict[str, Any]:
         """Advance MY delivery state with a hash-bound screening verdict (§6.2).
 
@@ -2280,9 +2306,14 @@ class TeamBridgeClient:
         recorded as its intent — this method never re-derives, reorders into
         a different shape, or replaces it. ``client_ref`` rides the body (the
         bridge's deviation from the Idempotency-Key header, §6.2).
+
+        ``screening_observation`` is TELEMETRY beside the verdict, never in it
+        (agent-server §8.5): attached only when this hub advertised the block,
+        and nothing here reads anything about it back from the response.
         """
 
         body = {"state": state, "screening": dict(screening), "client_ref": client_ref}
+        _attach_observation(body, self.base_url, screening_observation)
         return await self._send(
             "POST",
             f"/messaging/messages/{message_id}/ack",
@@ -4152,6 +4183,7 @@ class TeamBridgeClient:
         refusal_class: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
+        screening_observation: ScreeningObservation | None = None,
     ) -> dict[str, Any]:
         """Record the screening verdict. ``reject`` is terminal.
 
@@ -4184,6 +4216,12 @@ class TeamBridgeClient:
         before the request leaves the machine, and the pinned constant is what makes it
         honest: a rebuilt client whose v4 bytes drifted says so here rather than at the
         hub.
+
+        ``screening_observation`` is the observe-only screener provenance (§8.5),
+        attached only once this hub has advertised it: a pre-#332 hub decodes this
+        body strictly and would refuse the unknown key, which must never cost a
+        message its admission. It rides every attempt identically, so it never
+        changes which attempt is made.
         """
 
         if (attachments_hash is not None or files_hash is not None) != (
@@ -4218,6 +4256,7 @@ class TeamBridgeClient:
             body["template_sha256"] = template_sha256
         if tenant_id:
             body["tenant_id"] = tenant_id
+        _attach_observation(body, self.base_url, screening_observation)
         params = {"endpoint_id": endpoint_id} if endpoint_id else None
         path = f"/messaging/conversations/{conversation_id}/messages/{message_id}/admit"
         if refusal_class is not None:
