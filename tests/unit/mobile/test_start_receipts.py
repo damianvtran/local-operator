@@ -60,11 +60,15 @@ class Rig:
             self.root.mkdir(parents=True, exist_ok=True)
             self.daemon._start_receipts = StartReceipts(self.root, capacity=capacity)
         self.spawns: list[tuple[str, str | None, str | None, str | None]] = []
+        # The birth level each spawn received, index-aligned with ``spawns``;
+        # a separate list so every existing cell's 4-tuple assertions stand.
+        self.efforts: list[str | None] = []
         self.calls = 0
 
-        async def spawn(cwd, provider=None, model_id=None, resume=None):
+        async def spawn(cwd, provider=None, model_id=None, resume=None, effort=None):
             self.calls += 1
             self.spawns.append((cwd, provider, model_id, resume))
+            self.efforts.append(effort)
             return 970123
 
         monkeypatch.setattr(self.daemon, "spawn_session", spawn)
@@ -209,7 +213,7 @@ def test_lost_response_retry_replays_the_exact_session(tmp_path, monkeypatch):
     r = rig(tmp_path, monkeypatch)
     original = r.daemon.spawn_session
 
-    async def dies_after_claim(cwd, provider=None, model_id=None, resume=None):
+    async def dies_after_claim(cwd, provider=None, model_id=None, resume=None, effort=None):
         raise ConnectionResetError("client went away mid-spawn")
 
     monkeypatch.setattr(r.daemon, "spawn_session", dies_after_claim)
@@ -333,7 +337,7 @@ def test_cancelled_request_leaves_a_queryable_receipt(tmp_path, monkeypatch):
     gate = asyncio.Event()
     released: list[str] = []
 
-    async def slow(cwd, provider=None, model_id=None, resume=None):
+    async def slow(cwd, provider=None, model_id=None, resume=None, effort=None):
         # The receipt path always resumes under the SID it claimed; a missing
         # one would be the defect this cell exists to catch.
         assert resume is not None
@@ -636,6 +640,7 @@ def test_capability_is_advertised_only_on_an_authenticated_listing(tmp_path, mon
         "version": 1,
         "durable_idempotency": True,
         "receipt_capacity": 4096,
+        "effort": True,
     }
     anonymous = TestClient(build_app(r.daemon), follow_redirects=False)
     assert anonymous.get("/api/sessions").status_code in (401, 403)
@@ -653,7 +658,99 @@ def test_protocol_doc_matches_the_advertised_contract():
         "create_capacity",
         "create_receipts_unavailable",
         "start_request_too_large",
+        "invalid_start_effort",
     ):
         assert token in doc
     # The documented byte cap is the enforced one.
     assert f"{START_BODY_MAX_BYTES:,} bytes" in doc
+
+
+# --------------------------------------------------------------------------
+# Birth effort (operator build-453 feedback: "make sure that both model and
+# effort are selectable")
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("keyed", [True, False])
+def test_chosen_effort_reaches_the_spawn_normalised(tmp_path, monkeypatch, keyed):
+    r = rig(tmp_path, monkeypatch)
+    payload = body(effort=" Medium ") if keyed else {"cwd": "~", "effort": "Medium"}
+    response = r.start(payload)
+    assert response.status_code == 200, response.text
+    assert r.efforts == ["medium"]
+    if keyed:
+        # Stored in both the fingerprinted intent and the frozen resolution, so
+        # a replay re-spawns (or reconciles) at the level first admitted.
+        assert json.loads(r.rows()[0][1])["effort"] == "medium"
+
+
+@pytest.mark.parametrize("keyed", [True, False])
+@pytest.mark.parametrize("effort", ["turbo", 3, ["high"]])
+def test_unknown_effort_is_refused_before_any_side_effect(tmp_path, monkeypatch, keyed, effort):
+    r = rig(tmp_path, monkeypatch)
+    payload = body(effort=effort) if keyed else {"cwd": "~", "effort": effort}
+    response = r.start(payload)
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_start_effort"
+    assert r.calls == 0
+    assert r.rows() == []
+
+
+@pytest.mark.parametrize("keyed", [True, False])
+@pytest.mark.parametrize("omitted", [{}, {"effort": None}, {"effort": "  "}])
+def test_omitted_effort_spawns_on_the_configured_default(tmp_path, monkeypatch, keyed, omitted):
+    r = rig(tmp_path, monkeypatch)
+    payload = {**body(), **omitted} if keyed else {"cwd": "~", **omitted}
+    assert r.start(payload).status_code == 200
+    # ``None`` is the spawn's "no birth level": the child reads ``model_effort``
+    # itself, exactly as before the field existed.
+    assert r.efforts == [None]
+    if keyed:
+        assert "effort" not in json.loads(r.rows()[0][1])
+
+
+def test_an_effortless_request_fingerprints_exactly_as_before_the_field():
+    """Receipts already on disk were fingerprinted without ``effort``; their
+    retries must keep matching, or every one answers ``create_conflict``."""
+    _, request = canonical_request(body())
+    assert request == ('{"cwd":"~","model_id":"fixture-model","provider":"openai"}')
+    _, chosen = canonical_request(body(effort="high"))
+    assert json.loads(chosen)["effort"] == "high"
+
+
+def test_the_same_key_with_a_different_effort_is_a_conflict(tmp_path, monkeypatch):
+    r = rig(tmp_path, monkeypatch)
+    assert r.start(body(effort="low")).status_code == 200
+    conflict = r.start(body(effort="high"))
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "create_conflict"
+    assert r.calls == 1
+
+
+def test_effort_reaches_the_child_environment_and_absence_scrubs_it(tmp_path, monkeypatch):
+    """The real ``_spawn_session`` env, up to the process boundary: a chosen
+    level rides ``LOP_MOBILE_CHILD_EFFORT`` (the channel ``process.amain``
+    reads), and an omitted one must not inherit a parent session's level."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("LOP_MOBILE_CHILD_EFFORT", "max")  # inherited from a parent
+    daemon = MobileDaemon(port=0, password="fixture-password")
+    envs: list[dict[str, str]] = []
+
+    class Spawned(Exception):
+        pass
+
+    def capture(*_args, env, **_kwargs):
+        envs.append(dict(env))
+        raise Spawned
+
+    import local_operator.mobile.daemon as daemon_module
+
+    monkeypatch.setattr(daemon_module, "spawn_disclaimed", capture)
+    for effort in ("medium", None):
+        with pytest.raises(Spawned):
+            asyncio.run(daemon._spawn_session(str(tmp_path), None, None, SID, effort))
+    assert envs[0]["LOP_MOBILE_CHILD_EFFORT"] == "medium"
+    assert "LOP_MOBILE_CHILD_EFFORT" not in envs[1]
+    # A level alone is a birth sample, not a model override.
+    assert "LOP_MODEL_SELECTION_OVERRIDE" not in envs[0]

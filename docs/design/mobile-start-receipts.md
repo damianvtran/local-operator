@@ -19,7 +19,9 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
 
 ```json
 "capabilities": {
-  "session_start": { "version": 1, "durable_idempotency": true, "receipt_capacity": 4096 }
+  "session_start": {
+    "version": 1, "durable_idempotency": true, "receipt_capacity": 4096, "effort": true
+  }
 }
 ```
 
@@ -27,6 +29,10 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
   ignores unknown start-body fields, so a client MUST NOT send
   `create_request_id` unless this object is present.
 - `receipt_capacity` is the hard bound on recorded keys for that installation.
+- `effort: true` means the start body accepts `effort` (below). A client MUST
+  NOT send `effort` unless it reads `true` here: an older relay refuses it on a
+  keyed request (`invalid_start_request`) and silently drops it on an unkeyed
+  one, which would start the session at the configured default instead.
 - A server may refuse a *new* key when full (`create_capacity`) even while
   advertising the capability: the field is a build fact, not a writability
   promise. Storage faults are reported the same way, as a typed refusal.
@@ -37,7 +43,7 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
 ## Request
 
 ```json
-{ "create_request_id": "<uuid>", "cwd": "…", "provider": "…", "model_id": "…" }
+{ "create_request_id": "<uuid>", "cwd": "…", "provider": "…", "model_id": "…", "effort": "medium" }
 ```
 
 - `create_request_id` is optional. **Omitting it preserves the shipped
@@ -48,9 +54,17 @@ Authenticated `GET /api/sessions` and the `sessions` SSE frame carry:
 - `cwd`, `provider` and `model_id` are optional strings. Keyed requests are
   refused with `400 invalid_start_request` for unknown top-level fields, so a
   later field cannot silently alias an earlier admission.
+- `effort` is an optional birth reasoning level, keyed or not: one of
+  `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (case-insensitive;
+  `null` or blank means "the configured default", exactly as omitting it). Any
+  other value is `400 invalid_start_effort`, before a receipt or a spawn. A
+  level the chosen model's ladder lacks is clamped to its nearest rung by the
+  session, as every other birth level is; the configured default the phone
+  should display is `GET /api/models` → `default.effort`.
 - The **fingerprint** is the canonical JSON of
-  `{cwd, provider, model_id}` exactly as requested. Omitted values are not part
-  of it.
+  `{cwd, provider, model_id}` exactly as requested, plus `effort` only when one
+  was chosen — so a request without `effort` fingerprints byte-for-byte as it
+  did before the field existed. Omitted values are not part of it.
 
 ## Response
 
@@ -73,6 +87,7 @@ answers `create_indeterminate` (below) instead of a stale number.
 | 400 | `invalid_create_request_id` | Not a UUID, or longer than 36 characters |
 | 400 | `invalid_start_request` | Unknown top-level field, or a non-string value longer than 4096 characters |
 | 400 | `invalid_start_directory` | `cwd` is not an existing directory the spawn gate admits |
+| 400 | `invalid_start_effort` | `effort` is not a string in the level vocabulary (keyed and unkeyed) |
 | 400 | `invalid_start_selection` | The resolved provider/model pair is missing or unusable |
 | 409 | `create_conflict` | Same key, different fingerprint or input |
 | 409 | `create_indeterminate` | Uncertain outcome; carries the authoritative `session_id` |

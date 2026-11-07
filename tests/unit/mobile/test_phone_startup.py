@@ -746,7 +746,7 @@ async def test_the_resume_route_starts_the_session_in_its_recorded_move(tmp_path
     daemon = MobileDaemon(password="pw")
     spawned: list[str] = []
 
-    async def fake_spawn(cwd: str, provider=None, model_id=None, resume=None) -> int:
+    async def fake_spawn(cwd: str, provider=None, model_id=None, resume=None, effort=None) -> int:
         spawned.append(cwd)
         return 4242
 

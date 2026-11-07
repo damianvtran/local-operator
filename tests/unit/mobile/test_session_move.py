@@ -219,7 +219,7 @@ def test_directories_default_is_the_same_function_the_start_route_uses(
 
     spawns: list[tuple[str, str | None]] = []
 
-    async def fake_spawn(cwd, provider=None, model_id=None, resume=None) -> int:
+    async def fake_spawn(cwd, provider=None, model_id=None, resume=None, effort=None) -> int:
         spawns.append((cwd, resume))
         return 1234
 
@@ -277,7 +277,7 @@ def test_move_dials_a_throwaway_only_when_no_viewer_is_attached(tmp_path, monkey
 
     monkeypatch.setattr("local_operator.mobile.attach_client.AttachClient", FakeAttachClient)
 
-    async def fake_spawn(cwd, provider=None, model_id=None, resume=None) -> int:
+    async def fake_spawn(cwd, provider=None, model_id=None, resume=None, effort=None) -> int:
         return 4321
 
     monkeypatch.setattr(daemon, "spawn_session", fake_spawn)

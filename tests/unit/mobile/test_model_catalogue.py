@@ -112,7 +112,10 @@ def test_cold_radient_oauth_models_refresh_parse_and_cache_off_loop(monkeypatch,
                     "connected": True,
                     "aggregated": True,
                 },
-            ]
+            ],
+            # This fresh HOME configures no hosting, so the relay resolves no
+            # default and says so with ``null`` rather than naming a row.
+            "default": None,
         }
         assert client.get("/api/models").json() == first.json()
     assert len(requests) == 1  # Second picker open reads the real fresh cache.
@@ -177,7 +180,7 @@ def test_no_login_or_disabled_login_never_fetches_public_catalogue(monkeypatch):
         store.disable_credential(row.id, "test")
     with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
         client.post("/login", data={"password": "pw"})
-        assert client.get("/api/models").json() == {"models": []}
+        assert client.get("/api/models").json()["models"] == []
     assert calls == []
 
 
@@ -543,3 +546,78 @@ def test_gzip_leaves_a_head_request_and_an_incompressible_body_alone():
     _maybe_gzip(_Request(), incompressible)
     assert "content-encoding" not in incompressible.headers
     assert len(incompressible.body) == original
+
+
+# --------------------------------------------------------------------------
+# The configured default (operator build-453 feedback: the app painted the
+# top-ranked row as "the default" because the relay named none)
+# --------------------------------------------------------------------------
+
+
+def _write_config(values: dict) -> None:
+    from local_operator.config import ConfigManager
+
+    ConfigManager(config_dir()).update_config(values)
+
+
+def _models(client: TestClient) -> dict:
+    client.post("/login", data={"password": "pw"})
+    response = client.get("/api/models")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_models_publish_the_configured_default_model_and_clamped_effort():
+    _write_config(
+        {"hosting": "anthropic", "model_name": "claude-opus-5-5", "model_effort": "medium"}
+    )
+    with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
+        payload = _models(client)
+    assert payload["default"] == {
+        "selector": "anthropic/claude-opus-5-5",
+        "provider": "anthropic",
+        "model_id": "claude-opus-5-5",
+        "effort": "medium",
+    }
+
+
+def test_default_is_the_pair_the_keyed_start_resolves(monkeypatch):
+    """Display and behaviour share ONE resolver, so they cannot disagree."""
+    import local_operator.mobile.daemon as daemon_module
+
+    _write_config({"hosting": "anthropic", "model_name": "claude-opus-5-5"})
+    published = daemon_module._configured_default()
+    assert published is not None
+    assert daemon_module._resolve_start_model(None, None) == (
+        published["provider"],
+        published["model_id"],
+    )
+
+
+def test_unconfigured_effort_publishes_the_models_own_default():
+    _write_config({"hosting": "anthropic", "model_name": "claude-opus-5-5"})
+    with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
+        effort = _models(client)["default"]["effort"]
+    from local_operator.model.effort import default_effort
+
+    assert effort == default_effort("claude-opus-5-5")
+
+
+def test_an_unresolvable_default_is_null_not_absent_and_never_fails_the_sheet(monkeypatch):
+    """``null`` = this relay resolved nothing (render "unavailable"); an absent
+    key is reserved for an older relay that publishes no default."""
+    import local_operator.mobile.daemon as daemon_module
+
+    def refuse(*_args):
+        raise ValueError("no hosting configured")
+
+    monkeypatch.setattr(daemon_module, "_resolve_start_model", refuse)
+    with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
+        payload = _models(client)
+    assert "default" in payload and payload["default"] is None
+    assert payload["models"] == []
+
+
+def test_models_default_requires_authentication():
+    with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
+        assert client.get("/api/models").status_code == 401
