@@ -172,3 +172,101 @@ def test_an_id_shaped_memory_read_argument_is_redacted_before_retention(path):
     assert masked is True and raw is not None
     assert kept == {"memory_arguments_redacted": True, "path": "memory://"}
     assert json.loads(raw) == kept
+
+
+async def _run_memory_store(tmp_path, args):
+    """Drive ONE ``memory`` call through a real Session/loop; return (session, transcript)."""
+    from local_operator.tools.memory_tools import build_memory_tool
+
+    original = json.dumps(args)
+    calls = 0
+
+    def stream(request, signal):
+        nonlocal calls
+        calls += 1
+
+        async def events():
+            if calls == 1:
+                yield StreamToolCallDelta(
+                    index=0, id="feedback-memory", name="memory", argument_delta=original
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+            else:
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+        return events()
+
+    transcript = Transcript(tmp_path / "sessions" / "feedback-session")
+    session = Session(
+        model=ModelSpec(provider="test", model_id="deterministic", context_window=100000),
+        stream_fn=stream,
+        tools=[build_memory_tool()],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable"],
+        session_id="feedback-session",
+        yolo=True,
+        cwd=str(tmp_path),
+    )
+    await session.prompt("Remember the TestFlight feedback")
+    assert calls == 2
+    return session, transcript
+
+
+def _tool_result_text(transcript) -> str:
+    results = [e for e in transcript.entries() if e.payload.get("role") == "tool"]
+    assert results
+    return json.dumps(results[-1].payload)
+
+
+@pytest.mark.asyncio
+async def test_operator_feedback_with_tunnel_host_and_attachment_path_stores(tmp_path):
+    """The regression: TestFlight feedback with ids from screenshots is a storable fact."""
+    from local_operator.session.attachments import attachments_dir
+    from tests.unit.test_memory_guard_shapes import DIGEST64, TUNNEL_HEX, feedback_text
+
+    text = feedback_text(f"~/.local-operator/attachments/{DIGEST64}.bin") + (
+        f"\n10. Live blob {attachments_dir() / DIGEST64}.bin"
+    )
+    session, transcript = await _run_memory_store(tmp_path, {"op": "store", "text": text})
+    result = _tool_result_text(transcript)
+    assert "refused" not in result, result
+    serialized = json.dumps([entry.payload for entry in transcript.entries()])
+    assert f"{TUNNEL_HEX}-lop.radienthq.com" in serialized  # retained verbatim, not redacted
+    assert "memory_arguments_redacted" not in serialized
+    stored = (session._config_dir / "memory").rglob("*")
+    assert any(
+        p.is_file() and f"{TUNNEL_HEX}-lop.radienthq.com".encode() in p.read_bytes() for p in stored
+    ), "the fact must actually land in the session bank"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fragment_index", range(6))
+async def test_a_credential_in_a_store_is_refused_with_field_kind_span_and_masked_retention(
+    tmp_path, fragment_index
+):
+    from tests.unit.test_memory_guard_shapes import SECRET_CORPUS
+
+    fragment, kind = SECRET_CORPUS[fragment_index]
+    text = f"Feedback item 3: {fragment} (seen in the screenshot)"
+    session, transcript = await _run_memory_store(tmp_path, {"op": "store", "text": text})
+    result = _tool_result_text(transcript)
+    assert f"text: {kind} at chars " in result, result
+    from local_operator.memory import SensitiveValueError, guard
+
+    with pytest.raises(SensitiveValueError) as caught:
+        guard(text, field="text")
+    span = next(s for s in caught.value.spans if s.kind == kind)
+    secret = text[span.start : span.end]
+    assert f"{span.start}-{span.end}" in result
+    serialized = json.dumps([entry.payload for entry in transcript.entries()])
+    assert secret not in serialized
+    for path in transcript.directory.iterdir():
+        if path.is_file():
+            assert secret.encode() not in path.read_bytes()
+    # The agent's own transcript keeps the rest of the call, masked at the span only.
+    assert "Feedback item 3: " in serialized and "(seen in the screenshot)" in serialized
+    assert f"[redacted:{kind}]" in serialized
+    assert not (session._config_dir / "memory").exists()
+    await session.dispose()

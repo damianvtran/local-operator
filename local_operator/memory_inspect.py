@@ -21,8 +21,8 @@ migration to a command whose whole contract is that a human can look without
 changing anything; do that as a separate, explicitly reviewed surface.
 
 Bodies and titles are withheld when ``local_operator.memory.guard`` refuses
-them, using the SAME rule the write path applies — including the stricter
-``opaque=True`` pass ``validate_fact`` runs on title/body. Without that pass
+them, using the SAME rule the write path applies (``guard`` has one rule for
+every field, its opaque-run check included). Without it
 this surface would print a value the write path refused, which is the one
 thing a listing must never do. Such a row is already in the store (an
 arbitrary import can put it there), but re-exporting it through a listing
@@ -117,25 +117,19 @@ def _read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
         db.close()
 
 
-def _exportable(text: Any, *, opaque: bool = True) -> bool:
+def _exportable(text: Any, *, field: str | None = None) -> bool:
     """Whether the existing privacy guard would let this value out.
 
     Uses the store's own rule rather than a second opinion: a value the write
-    path refuses is exactly a value a listing must not print.
-
-    ``opaque`` MUST match the pass the write path runs on the same field.
-    ``validate_fact`` applies ``guard(value, opaque=True)`` to title, body,
-    subject, tags and aliases — that pass is what enables the long-hex/base64
-    rule, because an unnamed 40-hex string is how a leaked API key would be
-    kept. Defaulting to it here is what makes this listing no stronger a
-    reader than the write path is a writer. Only source locators are written
-    through the plain ``guard(dict)`` pass, so only they pass ``opaque=False``
-    (see :func:`_provenance`).
+    path refuses is exactly a value a listing must not print. ``field`` is the
+    key path the write path's recursive ``guard(fact)`` reports for the same
+    value; it is the context the opaque-run rule reads, so passing the same
+    path keeps this reader exactly as strict as the writer.
     """
     if not isinstance(text, str):
         return False
     try:
-        guard(text, opaque=opaque)
+        guard(text, field=field)
     except MemoryError:
         return False
     return True
@@ -160,16 +154,15 @@ def _provenance(fact: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         value = source.get(key)
         if not isinstance(value, str) or not value:
             continue
-        # ``opaque=False`` matches the write path exactly: ``validate_fact``
-        # runs its opaque title/body pass over free-text fields only, and
-        # guards the WHOLE fact — ``source`` included — through the plain
-        # recursive ``guard(dict)``. Every provenance string therefore gets
-        # that same plain pass, with no field exempt: an earlier version
+        # ``field=source.<key>`` matches the write path exactly: ``validate_fact``
+        # guards the WHOLE fact — ``source`` included — through the recursive
+        # ``guard(dict)``, which names each value by its key path. Every
+        # provenance string therefore gets that same pass, with no field exempt: an earlier version
         # trusted ``author`` (free text) and echoed a card number from an
         # imported row. ``kind`` is a closed vocabulary and ``session`` is
         # ``safe_segment``'d + guarded at write, so both pass unchanged — that
         # is verified in the tests, not assumed.
-        if _exportable(value, opaque=False):
+        if _exportable(value, field=f"source.{key}"):
             kept[key] = value
         else:
             redacted = True

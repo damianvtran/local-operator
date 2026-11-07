@@ -6,6 +6,7 @@ fails by name.
 """
 
 import hashlib
+import json
 
 import pytest
 
@@ -71,7 +72,7 @@ def test_sensitive_shapes_are_refused(text):
     ],
 )
 def test_benign_neighbours_stay_storable(text):
-    assert not refused(text, opaque=True), text
+    assert not refused(text), text
 
 
 @pytest.mark.parametrize(
@@ -81,9 +82,12 @@ def test_benign_neighbours_stay_storable(text):
         "token-ish aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gI3kM5oQ7sU9wY",
     ],
 )
-def test_opaque_tokens_are_refused_for_stores_but_searchable(text):
-    assert refused(text, opaque=True)
-    assert not refused(text), "a search query may carry an id or SHA"
+def test_unnamed_opaque_tokens_are_refused_by_the_one_rule(text):
+    # One rule for every caller: there is no longer a plain pass that admits what the
+    # store refuses. A search for an id or SHA names it ("commit <sha>") or is a minted
+    # structural reference (``structural_reference``), both of which pass.
+    assert refused(text)
+    assert not refused(f"commit {text}") or not text[:1].isdigit()
 
 
 def test_search_of_a_long_numeric_id_is_not_refused(tmp_path):
@@ -103,7 +107,7 @@ def test_guard_is_structurally_linear_on_pathological_input():
             or pattern is memory._ANCHORED
         ), pattern.pattern
     assert not refused("a" * 8000) and not refused("password " * 900)
-    assert not refused("- " * 4000, opaque=True)
+    assert not refused("- " * 4000)
 
 
 def test_validate_fact_refuses_with_a_name_reference_example():
@@ -286,3 +290,164 @@ def test_real_iban_and_card_in_fact_payload_still_refused(tmp_path, fact):
     store = MemoryStore(tmp_path, MemoryIdentity("s1"), origin="d_cd474787b1adaa67f8cb5934196c4834")
     with pytest.raises(MemoryError, match="Sensitive value refused"):
         store.put("global", fact)
+
+
+# --- One rule, explainable refusals (the TestFlight-feedback regression) ---------------
+#
+# An agent's ``memory op=store`` of TestFlight feedback (prose + ids lifted from
+# screenshots) was refused because a tunnel hostname label and an attachment digest are
+# long hex runs, and the refusal named nothing, so the agent could not correct it. These
+# pin: public identifiers pass, real credential shapes are refused with field + kind +
+# span and never the value, and ``guard`` agrees with the tool path on one corpus.
+
+from local_operator.memory import SensitiveValueError  # noqa: E402
+from local_operator.memory_privacy import (  # noqa: E402
+    refusal_message,
+    retained_arguments,
+)
+
+TUNNEL_HEX = "3933a4f1c983a20eaa12228c90054b9f"
+DIGEST64 = hashlib.sha256(b"synthetic screenshot").hexdigest()
+# Synthetic credentials only, assembled so no literal secret sits in the source.
+SYNTH_GITHUB = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+SYNTH_JWT = (
+    "eyJhbGciOiJIUzI1NiJ9" + "." + "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IlN5bnRoIn0"
+    "." + "c2lnbmF0dXJlLXN5bnRoZXRpYy12YWx1ZS0xMjM0NQ"
+)
+SYNTH_PEM = (
+    "-----BEGIN "
+    + "PRIVATE KEY-----\n"
+    + "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7syntheticSYNTHETICkeyMaterial0\n"
+    + "-----END "
+    + "PRIVATE KEY-----"
+)
+SYNTH_BEARER_VALUE = "abcDEF123456ghiJKL789012mnoPQR345678stu"
+SYNTH_AWS = "AKIA" + "IOSFODNN7SYNTHETIC"[:16]
+
+
+def feedback_text(attachment: str) -> str:
+    return "\n".join(
+        [
+            "TestFlight feedback build 412 (from screenshots):",
+            "1. Login button clipped on iPhone SE.",
+            f"2. Pairing fails against tunnel {TUNNEL_HEX}-lop.radienthq.com after sleep.",
+            f"3. Host https://{TUNNEL_HEX}-lop.radienthq.com/health returns 502.",
+            f"4. Screenshot: {attachment}",
+            "5. Session id 8024f1204e16 shows a stale title.",
+            f"6. Crash digest sha256 {DIGEST64}.",
+            "7. Ask id 0b9e7c2a-5d41-4f7e-9c3b-2a1d6e8f0a4b never resolves.",
+            "8. Job 3f2a91 stalls at 99%.",
+            "9. Dark mode contrast on the settings sheet is too low.",
+        ]
+    )
+
+
+PUBLIC_CORPUS = [
+    f"tunnel {TUNNEL_HEX}-lop.radienthq.com",
+    f"https://{TUNNEL_HEX}-lop.radienthq.com/",
+    f"see {TUNNEL_HEX}.lop.example.com.",
+    f"screenshot ~/.local-operator/attachments/{DIGEST64}.bin",
+    f"commit {DIGEST64[:40]}",
+    f"sha256: {DIGEST64}",
+    f"session id {TUNNEL_HEX}",
+    f"job_id={TUNNEL_HEX}",
+    "ask 0b9e7c2a-5d41-4f7e-9c3b-2a1d6e8f0a4b",
+    feedback_text(f"~/.local-operator/attachments/{DIGEST64}.bin"),
+]
+
+SECRET_CORPUS = [
+    (f"key {SYNTH_GITHUB} for CI", "github-token"),
+    (f"the JWT is {SYNTH_JWT}", "jwt"),
+    (f"deploy key:\n{SYNTH_PEM}", "pem-private-key"),
+    (f"Authorization: Bearer {SYNTH_BEARER_VALUE}", "authorization-bearer"),
+    (f"aws {SYNTH_AWS}", "aws-access-key-id"),
+    (f"api_key={TUNNEL_HEX}", "credential-assignment"),
+    (f"token {TUNNEL_HEX}", "named-secret"),
+    (f"bare {TUNNEL_HEX}", "opaque-hex"),
+    (f"/docs/{TUNNEL_HEX}", "opaque-hex"),
+]
+
+
+@pytest.mark.parametrize("text", PUBLIC_CORPUS)
+def test_public_identifiers_and_locators_are_storable(text):
+    assert not refused(text), text
+
+
+@pytest.mark.parametrize("text,kind", SECRET_CORPUS)
+def test_credential_shapes_are_refused_with_field_kind_and_span_never_value(text, kind):
+    with pytest.raises(SensitiveValueError) as caught:
+        validate_fact({"title": "T", "body": text})
+    message = str(caught.value)
+    span = next(s for s in caught.value.spans if s.kind == kind)
+    assert span.field == "body"
+    assert f"body: {kind} at chars {span.start}-{span.end}" in message
+    secret = text[span.start : span.end]
+    assert len(secret) >= 16 and secret not in message
+
+
+@pytest.mark.parametrize("text", PUBLIC_CORPUS + [text for text, _ in SECRET_CORPUS])
+def test_guard_and_the_tool_path_agree(text):
+    """One rule: a direct ``guard`` call predicts the loop pre-check and the store."""
+    direct = refused(text)
+    loop = refusal_message("memory", {"op": "store", "text": text}) is not None
+    store = False
+    try:
+        validate_fact({"title": "T", "body": text})
+    except SensitiveValueError:
+        store = True
+    except MemoryError:
+        pass  # the bare fact lacks source metadata; only the privacy verdict matters
+    assert direct is loop is store, (text, direct, loop, store)
+
+
+@pytest.mark.parametrize("text,kind", SECRET_CORPUS)
+def test_retention_masks_only_the_offending_span(text, kind):
+    args = {"op": "store", "text": f"keep this context. {text} and this tail."}
+    kept, raw, masked = retained_arguments("memory", args)
+    assert masked is True
+    assert "memory_arguments_redacted" not in kept
+    assert kept["op"] == "store"
+    assert kept["text"].startswith("keep this context.")
+    assert kept["text"].endswith("and this tail.")
+    assert f"[redacted:{kind}]" in kept["text"]
+    assert raw is not None and json.loads(raw) == kept
+    for span in _spans_of(args["text"]):
+        assert span.start is not None
+        assert args["text"][span.start : span.end] not in kept["text"]
+        assert args["text"][span.start : span.end] not in raw
+
+
+def _spans_of(text):
+    try:
+        guard(text, field="text")
+    except SensitiveValueError as exc:
+        return exc.spans
+    return []
+
+
+def test_a_folded_only_match_keeps_the_whole_call_redaction():
+    # Offsets cannot be trusted when invisible characters moved them: fail closed.
+    args = {"op": "store", "text": "SSN 1\u200b23-45-6789"}
+    kept, _raw, masked = retained_arguments("memory", args)
+    assert masked is True and kept == {"memory_arguments_redacted": True, "op": "store"}
+
+
+def test_low_variety_runs_are_padding_not_keys():
+    assert not refused("a" * 64)
+    assert refused("a3bf" * 10)
+
+
+def test_a_live_attachment_blob_path_is_a_locator_and_nothing_else_in_config_is():
+    from local_operator.paths import config_dir
+    from local_operator.session.attachments import attachments_dir
+
+    blob = attachments_dir() / f"{DIGEST64}.bin"
+    assert not refused(f"screenshot {blob}")
+    assert not refused(f"screenshot {attachments_dir() / TUNNEL_HEX}.bin.")
+    # Only a digest-named direct child of the store is lifted; the config-dir root
+    # verdict still refuses a non-digest name and anything else under the config dir.
+    assert refused(f"see {attachments_dir() / 'notes.txt'}")
+    assert refused(f"see {attachments_dir() / 'nested' / DIGEST64}.bin")
+    assert refused(f"see {config_dir() / 'memory' / 'bank.sqlite'}")
+    with pytest.raises(SensitiveValueError, match=r"Sensitive path refused \(value: "):
+        guard(f"see {config_dir() / 'memory'}")

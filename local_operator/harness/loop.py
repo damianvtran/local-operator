@@ -5485,13 +5485,15 @@ class AgentLoop:
         # the tools exempt (a read's ``q``, a recall's ``text``) are decided here
         # too — see _plan_guard_inputs; the executor below still gets the
         # caller's own arguments.
-        from local_operator.memory_privacy import retained_arguments
+        from local_operator.memory_privacy import refusal_message
 
         guard_arguments, guard_raw = _plan_guard_inputs(
             call.name, call.arguments, call.raw_arguments
         )
-        _, _, sensitive_memory = retained_arguments(call.name, guard_arguments, guard_raw)
-        if sensitive_memory:
+        # The reason names field, kind and span (never the value), so the agent can
+        # correct the call instead of retrying blind.
+        refusal = refusal_message(call.name, guard_arguments, guard_raw)
+        if refusal is not None:
             from local_operator.memory import (
                 MEMORY_TOOL_CONTRACT_ERROR,
                 valid_memory_tool_arguments,
@@ -5505,14 +5507,7 @@ class AgentLoop:
                 tool=tool,
                 failure=self._synthetic_result(
                     call,
-                    (
-                        MEMORY_TOOL_CONTRACT_ERROR
-                        if invalid_contract
-                        else (
-                            "Sensitive value refused. Use lop secret; "
-                            "memory may hold its NAME only."
-                        )
-                    ),
+                    (MEMORY_TOOL_CONTRACT_ERROR if invalid_contract else refusal),
                     details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
                 ),
             )

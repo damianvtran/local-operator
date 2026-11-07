@@ -760,7 +760,7 @@ def _admitted(body: str, tag: str, *, standalone: bool = True, floor: bool = Fal
     nature); every candidate that would become its own fact takes the debris
     rule in :func:`_debris` as well; ``floor`` adds its length floor (carry arm).
 
-    ``guard(body, opaque=True)`` is not sufficient on its own. ``persist`` builds a
+    ``guard(body)`` is not sufficient on its own. ``persist`` builds a
     fact (defaults plus source) and ``validate_op`` re-dumps THAT mapping; a
     credential-shaped run can appear only across the JSON boundary once those
     keys are present. Measured on a real carry line containing the literal
@@ -771,7 +771,7 @@ def _admitted(body: str, tag: str, *, standalone: bool = True, floor: bool = Fal
     """
     if standalone and _debris(body, floor=floor):
         raise MemoryError("Capture debris.")
-    guard(body, opaque=True)
+    guard(body)
     probe = validate_fact(
         {
             "title": body[:100],
@@ -783,7 +783,7 @@ def _admitted(body: str, tag: str, *, standalone: bool = True, floor: bool = Fal
             "source": {"session": "probe", "entry": "probe", "kind": "compaction"},
         }
     )
-    guard(_dump(probe), opaque=True)
+    guard(_dump(probe))
 
 
 def _emit(

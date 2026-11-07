@@ -352,7 +352,7 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
         lifetime = _LIFETIMES[scope]
         path = "memory://" + scope
         if args["op"] == "store":
-            guard(text, opaque=True)
+            guard(text, field="text")
             payload = {
                 "title": text.strip().splitlines()[0][:100] if text.strip() else "",
                 "body": text,
