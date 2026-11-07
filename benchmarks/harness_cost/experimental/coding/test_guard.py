@@ -67,7 +67,7 @@ class GuardTests(unittest.TestCase):
         self.assertNotIn("lop_shim.py", adapters)
         self.assertNotIn("07c324e9", adapters + launcher + (driver.HERE / "driver.py").read_text())
 
-    def test_paid_lop_rejected_even_with_claimed_attestations(self):
+    def _paid_fixture(self):
         task_root = self.root / "tasks"
         task = task_root / "task0"
         task.mkdir(parents=True)
@@ -161,10 +161,66 @@ class GuardTests(unittest.TestCase):
                 }
             },
         }
+        return args, prereg, wire, oracle
+
+    def test_paid_lop_rejected_even_with_claimed_attestations(self):
+        args, prereg, wire, oracle = self._paid_fixture()
         with patch.object(driver, "frozen", side_effect=[prereg, {"frozen": True}, wire, oracle]):
             # No container S4 record: the hold refuses before reading anything.
             with self.assertRaisesRegex(ValueError, "HARDBLOCK PAID CODING"):
                 driver.preflight(args)
+
+    def test_toolwire_harness_set_must_equal_the_preregistration(self):
+        # S9d: an attestation covering other harnesses than the preregistration
+        # attests a different run; both directions and duplicates refuse.
+        args, prereg, wire, oracle = self._paid_fixture()
+        for harnesses in (None, [], ["omp"], ["local-operator", "omp"],
+                          ["local-operator", "local-operator"]):
+            with self.subTest(harnesses=harnesses), \
+                    patch.object(driver, "block_paid_coding"), \
+                    patch.object(driver, "check_meter_caps"), \
+                    patch.object(driver, "frozen", side_effect=[
+                        prereg, {"frozen": True}, {**wire, "harnesses": harnesses}, oracle]):
+                with self.assertRaisesRegex(ValueError, "toolwire harness set"):
+                    driver.preflight(args)
+        # The matching set passes this check and stops at a later gate.
+        with patch.object(driver, "block_paid_coding"), \
+                patch.object(driver, "check_meter_caps"), \
+                patch.object(driver, "frozen", side_effect=[
+                    prereg, {"frozen": True}, {**wire, "harnesses": ["local-operator"]}, oracle]):
+            with self.assertRaises(ValueError) as caught:
+                driver.preflight(args)
+            self.assertNotIn("toolwire harness set", str(caught.exception))
+
+    def test_hermes_identity_is_the_verified_commit_and_its_frozen_tags(self):
+        # S9d: Hermes' CLI says "vunknown" and its dist metadata 0.0.0, so the
+        # version comes from the verified source commit plus the captured tags.
+        commit = "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab"
+        self.assertEqual(driver.HARNESS["hermes"][1], "0.22.6")
+        self.assertEqual(driver.HERMES_SOURCE_REVISION, commit)
+        evidence = json.loads((driver.HERE / driver.HERMES_TAG_EVIDENCE).read_text())
+        self.assertIn(f"{commit}\trefs/tags/v0.22.6^{{}}", evidence["ls_remote_lines"])
+        self.assertIn(f"{commit}\trefs/tags/rc.3-v0.22.6^{{}}", evidence["ls_remote_lines"])
+        verified = {"commit": commit, "checked_files": 22066, "missing": 0, "mismatched": 0,
+                    "unsupported_git_entries": 0, "all_checked_match": True}
+        self.assertEqual(driver.hermes_version({"hermes_tracked_source": verified}), "0.22.6")
+        for bad in ({"commit": "0" * 40}, {"all_checked_match": False}, {"mismatched": 1},
+                    {"missing": 2}, {"checked_files": 0}, {"unsupported_git_entries": 1}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                driver.hermes_version({"hermes_tracked_source": {**verified, **bad}})
+        with self.assertRaises(ValueError):
+            driver.hermes_version({})
+        # Tag evidence that no longer maps the commit to v0.22.6 refuses.
+        lines = [line for line in evidence["ls_remote_lines"] if "refs/tags/v0.22.6" not in line]
+        with self.assertRaisesRegex(ValueError, "tag evidence"):
+            driver.hermes_version({"hermes_tracked_source": verified},
+                                  evidence={**evidence, "ls_remote_lines": lines})
+        # Preflight's runtime record must carry that commit, not just the string.
+        driver.check_source_revision("hermes", {"source_revision": commit})
+        for record in ({}, {"source_revision": "0" * 40}):
+            with self.subTest(record=record), self.assertRaisesRegex(ValueError, "Hermes"):
+                driver.check_source_revision("hermes", record)
+        driver.check_source_revision("omp", {})  # other harnesses keep their version check
 
     def test_entrypoints_refuse_implicit_dispatch(self):
         for script in ("driver.py", "oracle_sweep.py"):

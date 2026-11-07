@@ -189,7 +189,7 @@ class PublicProvenanceTests(unittest.TestCase):
                 if accepted:
                     asyncio.run(
                         adapter._preinference_checks(
-                            SimpleNamespace(logs_dir=None),
+                            SimpleNamespace(logs_dir=self.root / "trial/agent"),
                             SimpleNamespace(exec=execute),
                         )
                     )
@@ -197,7 +197,7 @@ class PublicProvenanceTests(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         asyncio.run(
                             adapter._preinference_checks(
-                                SimpleNamespace(logs_dir=None),
+                                SimpleNamespace(logs_dir=self.root / "trial/agent"),
                                 SimpleNamespace(exec=execute),
                             )
                         )
@@ -266,9 +266,23 @@ def _sha(data: bytes) -> str:
 
 
 HERE = Path(__file__).resolve().parent
-TASK_ROOT = Path(os.environ.get(
-    "BENCH_TASK_ROOT",
-    Path.home() / "workspace/harness-cost-bench/coding/tasks/terminal-bench-2-1"))
+# R12 F33: the real-task tests prove F27 against real task bytes, so a missing
+# task root must FAIL, not skip: a scratch-HOME gate run used to report OK with
+# them silently skipped. No HOME-relative default; BENCH_TASK_ROOT is required
+# unless a developer opts out with BENCH_TASK_ROOT_OPTIONAL=1, which the
+# publication gate never sets (README "Tests").
+TASK_ROOT = Path(os.environ["BENCH_TASK_ROOT"]) if os.environ.get("BENCH_TASK_ROOT") else None
+
+
+def _task_dir(case, name=None):
+    """The real task (or root) directory, or fail loudly when it is required."""
+    path = TASK_ROOT if name is None or TASK_ROOT is None else TASK_ROOT / name
+    if path is not None and path.is_dir():
+        return path
+    reason = f"BENCH_TASK_ROOT task sources absent ({path}); the real-task F27 tests need them"
+    if os.environ.get("BENCH_TASK_ROOT_OPTIONAL") == "1":
+        case.skipTest(reason)
+    case.fail(reason)
 
 
 class DerivedProvenanceTests(unittest.TestCase):
@@ -400,11 +414,10 @@ class DerivedProvenanceTests(unittest.TestCase):
             for pair in entry["public_files"]:
                 self.assertIn(pair["origin"], ("dockerfile-copy",)) if "source" in pair else None
                 self.assertRegex(pair["justification"], r"environment/\S+:\d+")
-        if not TASK_ROOT.is_dir():
-            self.skipTest("task root not present; re-derivation needs the task sources")
+        root = _task_dir(self)
         for name, entry in policy["tasks"].items():
             with self.subTest(task=name):
-                task = TASK_ROOT / name
+                task = root / name
                 derived = provenance_derive._copy_pairs(task, set(driver.gold_digests(task)))[0]
                 frozen = [p for p in entry["public_files"] if p["origin"] == "dockerfile-copy"]
                 self.assertEqual(sorted(derived, key=lambda p: p["path"]), frozen)
@@ -826,10 +839,9 @@ class PostAgentDisclosureTests(unittest.TestCase):
         self.assertEqual([m["class"] for m in iso["refusing_matches"]], ["verifier-hidden"])
         self.assert_refused(iso)
 
-    @unittest.skipUnless((TASK_ROOT / "schemelike-metacircular-eval").is_dir(), "task root absent")
     def test_r11_shadow_test_repro_refuses(self):
         # R11 F27 repro: the "agent" wrote tests/shadow_test/binary_tree.scm to /app.
-        task = TASK_ROOT / "schemelike-metacircular-eval"
+        task = _task_dir(self, "schemelike-metacircular-eval")
         policy = json.loads((HERE / "public-provenance.json").read_text())
         image = policy["tasks"]["schemelike-metacircular-eval"]["image_digest"]
         manifest = driver.public_provenance(task, image)
@@ -874,6 +886,47 @@ class PostAgentDisclosureTests(unittest.TestCase):
                     self.receipt(**overrides)
                 record = self.assert_refused(iso)
                 self.assertFalse(record["preflight_receipt"]["ok"])
+
+    def test_preinference_refuses_a_log_dir_it_cannot_place_the_receipt_beside(self):
+        # R12 F32: a Harbor layout change must abort setup, not silently skip
+        # the receipt and turn every graded late match into a refusal.
+        adapter = _load()
+        calls = []
+
+        async def execute(command, **kwargs):
+            calls.append(command)
+            return SimpleNamespace(stdout='{"ok":true}', return_code=0)
+
+        for logs in (None, self.trial / "logs"):
+            with self.subTest(logs=logs), patch.dict(os.environ, self.env), \
+                    patch.object(adapter, "provenance_args", return_value=[]):
+                environment = SimpleNamespace(exec=execute, session_id="sess")
+                with self.assertRaisesRegex(RuntimeError, "agent log dir"):
+                    asyncio.run(adapter._preinference_checks(
+                        SimpleNamespace(logs_dir=logs), environment))
+        self.assertEqual(calls, [])
+
+    def test_missing_task_root_fails_instead_of_skipping(self):
+        # R12 F33: run the real-task tests with their inputs absent; they must
+        # FAIL (not skip) unless the developer opt-out is set explicitly.
+        import subprocess
+        import sys
+        names = [f"test_public_provenance.{cls}.{test}" for cls, test in (
+            ("PostAgentDisclosureTests", "test_r11_shadow_test_repro_refuses"),
+            ("PostAgentDisclosureTests", "test_frozen_sanitize_entries_validate_against_the_task"),
+            ("DerivedProvenanceTests",
+             "test_frozen_policy_entries_are_cited_and_rederive_from_the_task_sources"))]
+        base = {k: v for k, v in os.environ.items()
+                if k not in ("BENCH_TASK_ROOT", "BENCH_TASK_ROOT_OPTIONAL")}
+        for extra, expect in (({}, "failures=3"),
+                              ({"BENCH_TASK_ROOT": str(self.root / "absent")}, "failures=3"),
+                              ({"BENCH_TASK_ROOT_OPTIONAL": "1"}, "skipped=3")):
+            with self.subTest(extra=extra):
+                run = subprocess.run([sys.executable, "-m", "unittest", *names], cwd=HERE,
+                                     env={**base, **extra}, capture_output=True, text=True,
+                                     timeout=120)
+                self.assertIn(expect, run.stderr)
+                self.assertEqual(run.returncode != 0, expect.startswith("failures"))
 
     def test_preinference_writes_a_host_side_trial_bound_receipt(self):
         adapter = _load()
@@ -974,7 +1027,7 @@ class PostAgentDisclosureTests(unittest.TestCase):
                 patch.object(adapter, "provenance_args", return_value=[]):
             with self.assertRaisesRegex(RuntimeError, "pre-inference isolation"):
                 asyncio.run(adapter._preinference_checks(
-                    SimpleNamespace(logs_dir=None), SimpleNamespace(exec=execute)))
+                    SimpleNamespace(logs_dir=self.trial / "agent"), SimpleNamespace(exec=execute)))
 
     def test_flag_table_counts_graded_and_refused_trials_separately(self):
         # F29.
@@ -1008,9 +1061,8 @@ class PostAgentDisclosureTests(unittest.TestCase):
             self.assertIn("assert contaminated_text == decontaminated_text",
                           fixture["cites"][-1]["text"])
 
-    @unittest.skipUnless((TASK_ROOT / "sanitize-git-repo").is_dir(), "task root absent")
     def test_frozen_sanitize_entries_validate_against_the_task(self):
-        task = TASK_ROOT / "sanitize-git-repo"
+        task = _task_dir(self, "sanitize-git-repo")
         policy = json.loads((HERE / "public-provenance.json").read_text())
         manifest = driver.public_provenance(
             task, policy["tasks"]["sanitize-git-repo"]["image_digest"])

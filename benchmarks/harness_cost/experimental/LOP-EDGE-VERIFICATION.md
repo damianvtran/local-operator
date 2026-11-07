@@ -205,7 +205,7 @@ seeded-keychain base home, against a loopback Anthropic/Responses fixture
 | dsh 0.2.0-rc.2 | rc 0 | yes | none | — | **fenced** |
 | local-operator v0.94.22 | rc 0 (S4) | yes | none | — | **fenced** (via edge) |
 | opencode 2.0.27 | rc 1 — `Transport: Was there a typo in the url or port?` | no | `remote:*:<ephemeral>` (its own internal loopback server) | rc 0, 2 Messages | **unfenced** (fixed port allowlist cannot name it) |
-| hermes 0.22.6 | rc 1 — `no dependency environment is committed for this install; run \`hermes pm repair\`` | no | none | rc 1, same error | **unfenced, not measured** (smoke base home lacks the prepared Hermes venv) |
+| hermes 0.22.6 (source f0d94882; CLI reports `vunknown`) | rc 1 — `no dependency environment is committed for this install; run \`hermes pm repair\`` | no | none | rc 1, same error | **unfenced, not measured** (smoke base home lacks the prepared Hermes venv) |
 
 **Real path at the S6 head** (rig `bfaaadc3…`): S4 `native` 10/10 passes —
 oracle 7 = edge 7, fixture 5/5, 0 denials, ledger clean, no voids. S5

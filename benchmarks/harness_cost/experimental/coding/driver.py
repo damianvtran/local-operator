@@ -49,6 +49,43 @@ HARNESS = {
     "hermes": ("FrozenHermes", "0.22.6"),
     "dsh": ("Dsh", "0.2.0-rc.2"),
 }
+# Hermes' CLI says "vunknown" and its dist metadata 0.0.0, so its version is
+# derived (hermes_version), never read from the binary: the built source is
+# this commit, the peeled target of both rc.3-v0.22.6 and the final v0.22.6
+# (an automated promotion of rc.3), per the frozen ls-remote capture.
+HERMES_SOURCE_REVISION = "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab"
+HERMES_TAG_EVIDENCE = "hermes-tag-evidence.json"
+
+
+def hermes_version(source_verification, evidence=None):
+    """Hermes' version from its verified source tree, or raise.
+
+    ``source_verification`` is the host source check (source-verification.json):
+    every tracked file of HERMES_SOURCE_REVISION hashed against the toolchain
+    copy. The version is the release tag the frozen ls-remote lines peel to
+    that commit; HARNESS["hermes"] must equal it. Runtime builders call this
+    instead of parsing ``hermes --version``.
+    """
+    tree = source_verification.get("hermes_tracked_source") or {}
+    if (tree.get("commit") != HERMES_SOURCE_REVISION or tree.get("all_checked_match") is not True
+            or not isinstance(tree.get("checked_files"), int) or tree["checked_files"] <= 0
+            or any(tree.get(k) != 0 for k in ("missing", "mismatched", "unsupported_git_entries"))):
+        raise ValueError("Hermes source tree is not the verified pinned commit")
+    if evidence is None:
+        evidence = json.loads((HERE / HERMES_TAG_EVIDENCE).read_text())
+    lines, pin = set(evidence.get("ls_remote_lines", [])), HARNESS["hermes"][1]
+    for tag in (f"v{pin}", f"rc.3-v{pin}"):
+        if f"{HERMES_SOURCE_REVISION}\trefs/tags/{tag}^{{}}" not in lines:
+            raise ValueError(f"Hermes tag evidence does not peel {tag} to the pinned commit")
+    return pin
+
+
+def check_source_revision(harness, record):
+    """Source-pinned harnesses: the runtime record must name the pinned commit."""
+    if harness == "local-operator" and record.get("source_revision") != SOURCE_REVISION:
+        raise ValueError("Local Operator must be released v0.94.22 source 500883ef")
+    if harness == "hermes" and record.get("source_revision") != HERMES_SOURCE_REVISION:
+        raise ValueError("Hermes must be verified source f0d94882 (v0.22.6)")
 
 
 def digest(path):
@@ -571,6 +608,12 @@ def preflight(args):
         or wire.get("verified") is not True
     ):
         raise ValueError("frozen prereg/runtime and verified toolwire attestations required")
+    # S9d: the toolwire attestation must cover exactly the preregistered arms;
+    # a subset (an arm excluded as RED) or superset attests a different run.
+    attested, planned = wire.get("harnesses"), prereg.get("harnesses")
+    if (not isinstance(attested, list) or not isinstance(planned, list) or not attested
+            or len(set(attested)) != len(attested) or set(attested) != set(planned)):
+        raise ValueError("toolwire harness set differs from the preregistration")
     expected = {
         "billing_tier": args.billing_tier,
         "model": args.model,
@@ -677,10 +720,7 @@ def preflight(args):
             path = (args.toolchain / relative).resolve()
             if not path.is_relative_to(args.toolchain.resolve()) or digest(path) != sha:
                 raise ValueError("runtime file hash mismatch")
-        if harness == "local-operator" and record.get("source_revision") != SOURCE_REVISION:
-            raise ValueError(
-                "Local Operator must be released v0.94.22 source 500883ef"
-            )
+        check_source_revision(harness, record)
     if not args.request_log.is_file():
         raise ValueError("existing external metering log needed")
     if not os.environ.get("OPENROUTER_API_KEY"):

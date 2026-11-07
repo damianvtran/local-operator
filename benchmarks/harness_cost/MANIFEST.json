@@ -49,13 +49,13 @@
     },
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
-      "bytes": 11427,
-      "sha256": "d66795e212e44eae5ff17b5c545f78f1ce62b03f1a9ac632b132d087d411be71"
+      "bytes": 11580,
+      "sha256": "7329f1178d0dce24d9f7ccbcd4dcf05223c17ef3738969ef8030f853fb3fc590"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
-      "bytes": 21327,
-      "sha256": "7cd528f32bf3060e2221fc033a353762763850288895b1526d873348f7c7c1a5"
+      "bytes": 21369,
+      "sha256": "2ecaa48c82f11b298f57232a4c5e219b9fa63a284453962b384360011e2ccff1"
     },
     {
       "path": "experimental/PREREGISTRATION.md",
@@ -144,8 +144,8 @@
     },
     {
       "path": "experimental/coding/README.md",
-      "bytes": 13863,
-      "sha256": "bd13f3e93165673ab7a38d99c03561aef8fef282a742bf2e0068d34c725de931"
+      "bytes": 14901,
+      "sha256": "78808f581a4b136ec92daa42fbfcc4f2acab5f4ba4b5301e1be0c65d03d89b5e"
     },
     {
       "path": "experimental/coding/SOURCE_MAP.md",
@@ -164,8 +164,8 @@
     },
     {
       "path": "experimental/coding/adapters.py",
-      "bytes": 20719,
-      "sha256": "c0b5e55d5c46d52f3ed0c9f2654f497a8faa87cf2b66caccb6443576c17fe321"
+      "bytes": 21309,
+      "sha256": "06a1843ca93e0c358645e116b1fa499b0de94aadf4aa4b06b9d861476d6560a9"
     },
     {
       "path": "experimental/coding/bench_verifier.py",
@@ -184,8 +184,8 @@
     },
     {
       "path": "experimental/coding/driver.py",
-      "bytes": 50717,
-      "sha256": "2a641e6ad6685132f0541f8eb123586e3adca59e120aa535c4d973322e822b77"
+      "bytes": 53251,
+      "sha256": "1f2a13b41d88f7fb7c95df360e05923bf446e9a46e6586b6e8da85bd9c9455e6"
     },
     {
       "path": "experimental/coding/egress.py",
@@ -201,6 +201,11 @@
       "path": "experimental/coding/gold_probe.py",
       "bytes": 20705,
       "sha256": "a03256d9c59d507a65dbadf29d4589165edf948c7dc2c1ff53ad5af52f20e4f7"
+    },
+    {
+      "path": "experimental/coding/hermes-tag-evidence.json",
+      "bytes": 2774,
+      "sha256": "12ab015931d71cfc94413eccf4ddd75f10d7b4851900bc3f5f92d31d7a7f1638"
     },
     {
       "path": "experimental/coding/lop_launch.py",
@@ -259,8 +264,8 @@
     },
     {
       "path": "experimental/coding/test_guard.py",
-      "bytes": 7849,
-      "sha256": "5bf759f765c33ddaad7c707f3223243b7a6d6591d4a9bb59e924f14eb6b62009"
+      "bytes": 11625,
+      "sha256": "280c19cc6a30749bd8ce50a4b6a438034bf01c0b2ff9f36a1b828ebc811f8084"
     },
     {
       "path": "experimental/coding/test_lop_container.py",
@@ -274,8 +279,8 @@
     },
     {
       "path": "experimental/coding/test_public_provenance.py",
-      "bytes": 53794,
-      "sha256": "dc00800b07b51cad3ffa5993e616825bb7149e2d34734cd9986e549020e2904f"
+      "bytes": 56731,
+      "sha256": "0ee509d3d0029c522269be3e1028d0798dbaea603126aba21d9b07ad291fd35b"
     },
     {
       "path": "experimental/evaluate.py",

@@ -29,6 +29,7 @@ not Codex as shipped. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ```sh
 python3 -B -m unittest -v test_guard test_driver_safety test_adapters test_lop_container
+BENCH_TASK_ROOT=<terminal-bench-2-1 task root> python3 -B -m unittest -v test_public_provenance
 python3 -B -c 'from pathlib import Path; [compile(p.read_text(), str(p), "exec") for p in Path(".").glob("*.py")]'
 python3 -B driver.py --help
 ```
@@ -37,6 +38,10 @@ The stdlib-only tests exercise preflight refusals, disk thresholds, frozen-file
 hashes, CLI refusal and the container contracts (egress override, pull guard,
 gold/quiescence/egress probe, gate relay, verifier record). They do **not** import Harbor, run ASGI,
 start Docker, execute Linux runtimes or verify model-tool translation.
+`test_public_provenance` re-derives the F27 policy from real task bytes, so it
+FAILS, not skips, when `BENCH_TASK_ROOT` is unset or lacks the tasks (R12 F33).
+`BENCH_TASK_ROOT_OPTIONAL=1` downgrades that to a skip for local iteration only;
+the publication gate never sets it.
 
 ## External dependencies and paths
 
@@ -56,6 +61,17 @@ through the per-run TLS edge (`../lop_edge.py`) on the host, reached from the
 task container through the bench gate (`egress.py`, see STATUS.md); no endpoint
 shim exists. A matching source/runtime attestation is still mandatory, and paid
 dispatch needs a container S4 record bound to `driver.CONTAINER_CLOSURE`.
+
+Hermes is pinned to **v0.22.6 = source commit
+`f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab`**. Its CLI reports `vunknown` and
+its package metadata 0.0.0, so the version is never read from the binary:
+`driver.hermes_version` derives it from the host source check (every tracked
+file of that commit, 22066 files, hashed against the toolchain copy) and the
+frozen `git ls-remote --tags` capture in `hermes-tag-evidence.json`, where both
+`rc.3-v0.22.6` and the final `v0.22.6` (an automated promotion of rc.3) peel to
+that commit. Preflight also requires the Hermes runtime record's
+`source_revision` to be that commit. Every other harness keeps its probed
+version check.
 
 A separately operated meter must accept `/r/<run_id>/v1/messages`, authenticate
 upstream using **`OPENROUTER_API_KEY` from its environment**, enforce the explicitly

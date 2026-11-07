@@ -122,6 +122,8 @@ VERSIONS = {
     "claude-code": "2.1.274",
     "codex-best": "0.147.0",
     "opencode": "2.0.27",
+    # Not the CLI string ("vunknown"): driver.hermes_version derives it from the
+    # verified source commit f0d94882 and the frozen tag evidence (S9d).
     "hermes": "0.22.6",
 }
 
@@ -139,6 +141,9 @@ async def _preinference_checks(agent, environment) -> None:
     listener; it must be unreachable from ``main`` (R6 F16). The JSON
     results are kept on the host beside the agent logs.
     """
+    # R12 F32: the receipt lives beside ``agent/``; refuse at setup, before any
+    # probe, rather than skip it and silently refuse every late match.
+    _receipt_dir(agent)
     digests = os.environ.get("BENCH_GOLD_DIGESTS", "")
     ports = os.environ.get("BENCH_GATE_PORTS", "")
     canary = os.environ.get("BENCH_EGRESS_CANARY_PORT", "")
@@ -181,13 +186,19 @@ def _write_preflight_receipt(agent, environment, results, *, ok: bool) -> None:
     a container mount, unlike ``/logs/agent`` (bench-preinference.json), so
     nothing in ``main`` can forge it. Bound to trial id, image and manifest.
     """
-    logs = getattr(agent, "logs_dir", None)
-    if logs is None or Path(logs).name != "agent":
-        return
+    trial_dir = _receipt_dir(agent)
     receipt = {**preflight_binding(getattr(environment, "session_id", "")), "ok": ok,
                "isolation_sha256": hashlib.sha256(
                    "".join(results.get("isolation", [])).encode()).hexdigest()}
-    (Path(logs).parent / PREFLIGHT_RECEIPT).write_text(json.dumps(receipt, sort_keys=True) + "\n")
+    (trial_dir / PREFLIGHT_RECEIPT).write_text(json.dumps(receipt, sort_keys=True) + "\n")
+
+
+def _receipt_dir(agent) -> Path:
+    """The trial dir, or raise: Harbor's layout is ``<trial>/agent`` (0.25 paths)."""
+    logs = getattr(agent, "logs_dir", None)
+    if logs is None or Path(logs).name != "agent":
+        raise RuntimeError(f"preflight receipt needs an agent log dir named 'agent', got {logs}")
+    return Path(logs).parent
 
 
 def _write_preinference(agent, results) -> None:

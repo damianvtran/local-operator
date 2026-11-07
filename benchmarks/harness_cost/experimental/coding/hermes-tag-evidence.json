@@ -1,0 +1,40 @@
+{
+ "captured_at": "2026-11-07T22:42:13Z",
+ "command": "GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 git ls-remote --tags https://github.com/NousResearch/hermes-agent",
+ "commit": "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab",
+ "full_output_lines": 444,
+ "full_output_sha256": "463b627f38d43747287d2894e5ca9200ce4c5fb531ee2a6eab31d4a3bb819d93",
+ "ls_remote_lines": [
+  "76b4793078821add5676e228b61f0023a29c18fd\trefs/tags/rc.3-v0.22.6",
+  "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab\trefs/tags/rc.3-v0.22.6^{}",
+  "49138a605822a48a0cc4824a7723f09276786861\trefs/tags/v0.22.6",
+  "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab\trefs/tags/v0.22.6^{}"
+ ],
+ "repository": "https://github.com/NousResearch/hermes-agent",
+ "tag_objects": {
+  "rc.3-v0.22.6": {
+   "message": "{\"attempt\":3,\"autopublish\":false,\"claimEpoch\":1793635086,\"commit\":\"f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab\",\"lanes\":[\"bootstrap-version\",\"ci\",\"docker\",\"docker-tests\",\"install-e2e\",\"nix\",\"pm-bundle\",\"smoke\",\"termux-checks\",\"upgrade\",\"windows-live\",\"windows-store\"],\"lanesRevision\":2,\"schema\":1,\"version\":\"0.22.6\"}\n",
+   "object": "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab",
+   "object_type": "commit",
+   "tag_object": "76b4793078821add5676e228b61f0023a29c18fd",
+   "tagger": {
+    "date": "2026-11-02T15:58:06Z",
+    "name": "Teknium"
+   }
+  },
+  "v0.22.6": {
+   "message": "{\"archive\":\"releases/tag/rc.3-v0.22.6/\",\"autopublish\":false,\"candidateManifestSha256\":\"c795a76d6104807ddba41125741d9da25cd5d1a5fbf4250dce96a62d2a44d5d3\",\"claimEpoch\":1793635086,\"claimTag\":\"rc.3-v0.22.6\",\"claimTagObject\":\"76b4793078821add5676e228b61f0023a29c18fd\",\"commit\":\"f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab\",\"dockerManifestDigest\":\"sha256:d27689bc6e8581ec884a7227c9101fdaebf6c853cff8859020dac14f21452b4d\",\"releaseId\":431662574,\"schema\":1,\"version\":\"0.22.6\"}\n",
+   "object": "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab",
+   "object_type": "commit",
+   "tag_object": "49138a605822a48a0cc4824a7723f09276786861",
+   "tagger": {
+    "date": "2026-11-02T17:18:31Z",
+    "name": "Hermes Release Automation"
+   }
+  }
+ },
+ "tag_objects_note": "tagger e-mail addresses omitted for publication; name and date as returned by the GitHub API",
+ "tag_objects_via": "GET https://api.github.com/repos/NousResearch/hermes-agent/git/tags/<tag_object>",
+ "version": "0.22.6",
+ "why": "Hermes' CLI reports 'vunknown' and its dist metadata 0.0.0, so the pinned version cannot come from the binary. driver.hermes_version maps the verified source commit (source-verification.json hermes_tracked_source) to a version only through these captured ls-remote lines: v0.22.6 is the final release tag, an automated promotion of rc.3-v0.22.6, and both peel to the same commit."
+}
