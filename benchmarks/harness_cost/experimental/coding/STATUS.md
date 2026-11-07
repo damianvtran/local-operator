@@ -26,7 +26,10 @@
   a disclosed `agent-processes-survived-into-grading` flag; never killed, never
   a void), attaches the uplink, then runs Harbor's stock verifier unchanged
   (R6 F15: nginx-request-logging and kv-store-grpc grade the agent's running
-  server). Only a gold-isolation failure refuses grading. The isolation scan
+  server). Only a gold-isolation failure refuses grading; since S9b a hidden
+  digest first seen after the agent phase is disclosed and graded unless it is
+  verifier code or the trial shows a fence anomaly (README "Gold isolation").
+  The isolation scan
   hashes every regular file streaming, with no size cut-off (R6 F20);
   partial-content matches (archives, concatenations) are out of scope.
 * **Budget:** the external meter is the single budget authority for both lanes

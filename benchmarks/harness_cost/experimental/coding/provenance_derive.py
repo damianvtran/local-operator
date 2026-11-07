@@ -224,6 +224,54 @@ def derive(task_dir: Path, gold: set[str], clone_cache: Path | None = None) -> d
             "limitations": limitations}
 
 
+# S9b post-agent rule: a hidden digest that first appears AFTER the agent phase
+# is disclosed and graded, unless it is verifier CODE. Code is what the
+# verifier executes: the entry script, pytest-collected files, any .sh, .py
+# modules a code file imports, and files a code file names on a line that
+# executes or compiles something. Everything else in tests/ is a data fixture
+# (e.g. sanitize-git-repo's expected ``process.py`` is opened and compared,
+# never run). Errs toward "code": misreading a fixture as code only restores
+# the old strict refusal; the reverse would grade a leaked verifier.
+_CODE_NAMES = re.compile(
+    r"^(test\.sh|conftest\.py|__init__\.py|test\.py|test_.*\.py|.*_test\.py|.*\.sh)$")
+_EXEC_LINE = re.compile(r"(\bpython3?\b|\bpytest\b|\bbash\b|\bsh\b|\bsource\b|\bgcc\b"
+                        r"|\bg\+\+|\bcc\b|\bclang\b|\bmake\b|\bnode\b|\bexec\b|subprocess"
+                        r"|\bcompile\b|\./)")
+
+
+def classify_tests(task_dir: Path) -> dict[str, dict]:
+    """``relpath -> {"class", "reason"}`` for every regular file in ``tests/``."""
+    tests = Path(task_dir) / "tests"
+    files = {str(p.relative_to(tests)): p for p in sorted(tests.rglob("*")) if p.is_file()}
+    out = {rel: {"class": "verifier-code", "reason": "entry/pytest/shell name"}
+           for rel in files if _CODE_NAMES.match(Path(rel).name)}
+    changed = True
+    while changed:  # imports/exec references of code files make more code
+        changed = False
+        texts = {rel: files[rel].read_text(errors="replace") for rel in out}
+        for rel, path in files.items():
+            if rel in out:
+                continue
+            name, stem = path.name, path.stem
+            for code_rel, text in texts.items():
+                hit = None
+                if path.suffix == ".py" and re.search(
+                        rf"^\s*(import|from)\s+[\w.]*?\b{re.escape(stem)}\b", text, re.M):
+                    hit = f"imported by {code_rel}"
+                else:
+                    for no, line in enumerate(text.splitlines(), 1):
+                        if name in line and _EXEC_LINE.search(line):
+                            hit = f"executed/compiled at tests/{code_rel}:{no}"
+                            break
+                if hit:
+                    out[rel] = {"class": "verifier-code", "reason": hit}
+                    changed = True
+                    break
+    for rel in files:
+        out.setdefault(rel, {"class": "tests-fixture", "reason": "data: not executed"})
+    return dict(sorted(out.items()))
+
+
 def main(argv: list[str]) -> int:
     import driver
 

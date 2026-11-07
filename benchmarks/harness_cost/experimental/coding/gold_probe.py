@@ -136,6 +136,19 @@ def _solution_tree(base: Path) -> dict[str, str]:
 
 
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+DISCLOSABLE = frozenset({"solution", "tests-fixture"})
+CLASSES = DISCLOSABLE | {"verifier-code"}
+
+
+def _digest_classes(manifest, digests) -> dict[str, str] | None:
+    """The manifest's frozen class map, or ``None`` (all matches refuse)."""
+    classes = manifest.get("digest_classes") if isinstance(manifest, dict) else None
+    if (not isinstance(classes, dict) or set(classes) != set(digests)
+            or not all(v in CLASSES for v in classes.values())):
+        return None
+    return classes
+
+
 # The oracle upload target; a module constant so offline tests can relocate it.
 SOLUTION = Path("/solution")
 
@@ -213,9 +226,34 @@ def isolation(digests: set[str], root: str = "/", *, manifest=None,
         and not Path("/tests").exists()
         and not verifier_logs
     )
+    # S9b pre-grading rule. ``ok`` above stays the strict decision (and the
+    # exit code), which is all the pre-inference boundary reads. A hidden match
+    # that reached grading was absent pre-inference (that scan refuses any), so
+    # with /tests withheld and the fence intact it can only be the agent's own
+    # work -- e.g. a correct answer equal to an expected-output fixture. Such
+    # solution/tests-fixture matches are DISCLOSED and graded; verifier-code or
+    # unclassified matches, and every structural failure, still refuse. The
+    # fence half of the rule is checked host-side by BenchVerifier.
+    classes = _digest_classes(manifest, digests) if error is None else None
+    disclosed, refusing = [], []
+    for match in rejected:
+        kind = (classes or {}).get(match["sha256"], "unclassified")
+        (disclosed if kind in DISCLOSABLE else refusing).append({**match, "class": kind})
+    post_agent_ok = (
+        error is None
+        and not refusing
+        and not overlap
+        and not truncated
+        and solution_ok
+        and not Path("/tests").exists()
+        and not verifier_logs
+    )
     return {
         "check": "gold-isolation",
         "ok": ok,
+        "post_agent_ok": post_agent_ok,
+        "disclosed_matches": disclosed,
+        "refusing_matches": refusing,
         "strict_ok": not found and not truncated and not Path("/solution").exists()
         and not Path("/tests").exists() and not verifier_logs,
         "scanned_files": scanned,

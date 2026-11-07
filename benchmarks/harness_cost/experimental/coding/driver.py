@@ -96,6 +96,7 @@ CONTAINER_CLOSURE = (
     "gate_relay.py",
     "gold_probe.py",
     "public-provenance.json",
+    "post-agent-classes.json",
     # Re-derives the frozen COPY pairs at trial start (driver.public_provenance).
     "provenance_derive.py",
     "lop_launch.py",
@@ -302,11 +303,74 @@ def public_provenance(task_dir, image_digest):
             public.append({"path": entry["path"], "sha256": entry["sha256"]})
     solutions = sorted({digest(p) for p in (task_dir / "solution").rglob("*")
                         if p.is_file()} - {EMPTY_SHA256})
-    return {"version": 1, "task_payload_sha256": payload,
-            "image_digest": image_digest, "policy_sha256": digest(policy_path),
-            "public_files": public, "solution_digests": solutions,
-            "gold_digests": gold_digests(task_dir),
-            "gold_exclusions": gold_exclusions(task_dir)}
+    manifest = {"version": 1, "task_payload_sha256": payload,
+                "image_digest": image_digest, "policy_sha256": digest(policy_path),
+                "public_files": public, "solution_digests": solutions,
+                "gold_digests": gold_digests(task_dir),
+                "gold_exclusions": gold_exclusions(task_dir)}
+    classes = digest_classes(task_dir, payload, solutions)
+    if classes is not None:
+        manifest["digest_classes"] = classes
+        manifest["classes_policy_sha256"] = digest(HERE / "post-agent-classes.json")
+    return manifest
+
+
+def digest_classes(task_dir, payload, solutions):
+    """Frozen ``gold digest -> solution | tests-fixture | verifier-code`` (S9b).
+
+    Feeds the pre-grading rule: a hidden digest first seen after the agent
+    phase is disclosed and graded unless it is verifier code. The class map is
+    reviewed and frozen in post-agent-classes.json, bound to the task payload,
+    and re-derived here; a task without an entry gets ``None``, which keeps the
+    old strict refusal (fail closed), never a permissive default.
+    """
+    import provenance_derive
+
+    path = HERE / "post-agent-classes.json"
+    frozen = json.loads(path.read_text()) if path.is_file() else {"tasks": {}}
+    entry = frozen["tasks"].get(Path(task_dir).name)
+    if entry is None:
+        return None
+    derived = {rel: {"sha256": digest(Path(task_dir) / "tests" / rel), **row}
+               for rel, row in provenance_derive.classify_tests(task_dir).items()}
+    if entry["task_payload_sha256"] != payload or entry["tests"] != derived:
+        raise ValueError("stale post-agent classes; task requires review")
+    code = {row["sha256"] for row in derived.values() if row["class"] == "verifier-code"}
+    return {sha: "verifier-code" if sha in code else "solution" if sha in solutions
+            else "tests-fixture" for sha in gold_digests(task_dir)}
+
+
+def post_agent_flags(job):
+    """S9b disclosure for one trial, from BenchVerifier's host-side record.
+
+    Counts per origin class plus the (path, digest, class) rows; hashes and
+    paths only, never bytes. ``None`` when the verifier record is missing.
+    """
+    records = list(Path(job).glob("*/verifier/bench-isolation.json"))
+    if len(records) != 1:
+        return None
+    record = json.loads(records[0].read_text())
+    rows = record.get("post_agent_disclosed") or []
+    counts = {k: sum(1 for r in rows if r.get("class") == k)
+              for k in ("solution", "tests-fixture")}
+    return {"counts": counts, "matches": rows, "graded": record.get("graded"),
+            "fence_ok": (record.get("fence") or {}).get("ok")}
+
+
+def flag_table(output):
+    """Publish ``task -> harness -> class -> count`` beside runs.jsonl (S9b)."""
+    table = {}
+    for line in (Path(output) / "runs.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        counts = (row.get("post_agent_flags") or {}).get("counts") or {}
+        cell = table.setdefault(row.get("task", "?"), {}).setdefault(
+            row["harness"], {"trials": 0, "solution": 0, "tests-fixture": 0})
+        cell["trials"] += 1
+        for key, value in counts.items():
+            cell[key] += value
+    (Path(output) / "post-agent-flags.json").write_text(
+        json.dumps(table, indent=1, sort_keys=True) + "\n")
+    return table
 
 
 @contextmanager
@@ -914,6 +978,8 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
     }
     # Harbor-process-only inputs for the pre-inference and verifier checks:
     # hashes and port numbers, never task bytes or credentials.
+    package_logs = [egress_log / "connections.jsonl"] + (
+        [args.output / "edge" / run_id / "package-egress.jsonl"] if edge else [])
     provenance_json = json.dumps(provenance, sort_keys=True, separators=(",", ":"))
     provenance_sha = hashlib.sha256(provenance_json.encode()).hexdigest()
     (args.output / (run_id + ".public-provenance.json")).write_text(provenance_json + "\n")
@@ -927,6 +993,9 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
         BENCH_GOLD_DIGESTS=",".join(gold_digests(args.task_root / task["name"])),
         BENCH_GATE_PORTS=",".join(str(p) for p in plan["ports"]),
         BENCH_EGRESS_CANARY_PORT=str(canary),
+        # Host-side fence logs BenchVerifier reads before grading a late hidden
+        # match (S9b); the same files package_egress_summary records below.
+        BENCH_PACKAGE_EGRESS_LOGS=",".join(str(p) for p in package_logs),
     )
     started, disk_stop = time.time(), False
     with (args.output / (run_id + ".log")).open("x") as stream:
@@ -961,13 +1030,13 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
         "verified": bool(rows) and reward is not None and not disk_stop and code == 0,
         "public_provenance_sha256": provenance_sha,
         "public_provenance_policy_sha256": provenance["policy_sha256"],
-        "package_egress": package_egress_summary(
-            [egress_log / "connections.jsonl"]
-            + ([args.output / "edge" / run_id / "package-egress.jsonl"] if edge else [])
-        ),
+        "package_egress": package_egress_summary(package_logs),
+        "task": task["name"],
+        "post_agent_flags": post_agent_flags(job),
     }
     with (args.output / "runs.jsonl").open("a") as stream:
         stream.write(json.dumps(record) + "\n")
+    flag_table(args.output)
     print(json.dumps(record))
     if code or disk_stop or not record["verified"]:
         raise RuntimeError(

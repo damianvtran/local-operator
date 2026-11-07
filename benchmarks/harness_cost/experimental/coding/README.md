@@ -154,6 +154,35 @@ bytes are unmetered; each connection is logged and reported per trial
 container closure and the preregistration input, voiding earlier records. The
 verifier phase keeps Harbor's own uplink and does not use this proxy.
 
+## Gold isolation: strict before inference, disclosed after (S9b)
+
+Identical for all seven arms; native Harbor grading unchanged; raw strict
+matches are always retained in `bench-isolation.json`.
+
+* **Pre-inference (unchanged, strict):** any whole-file match of a hidden
+  `solution/`/`tests/` digest outside the frozen public pairs
+  (`public-provenance.json`) refuses the trial before the first model request.
+* **Pre-grading:** a hidden digest that appears only after the agent phase can
+  come only from the agent's own work or a fence breach, because the strict
+  pre-inference scan held, the fence held (canary, model-host denial, exact
+  package allowlist, github.com denied) and `/tests` is uploaded only after
+  the agent phase. A correct answer equal to an expected-output fixture
+  (sanitize-git-repo) is the first case. Such matches are **recorded and
+  graded**: `post_agent_disclosed` rows (path, digest, class `solution` or
+  `tests-fixture`) plus the `hidden-digest-appeared-after-agent-phase` flag.
+* **Still refuse grading:** a match on verifier **code** (what the verifier
+  executes: `test.sh`, pytest files, `.sh`, imported `.py`, files named on an
+  execute/compile line; frozen per task in `post-agent-classes.json`, bound to
+  the task payload, re-derived by the driver; a task without an entry stays
+  strict); any late match with a fence anomaly (denied model-host row, an
+  allowed connection outside the allowlist, or a failed fresh egress/canary
+  probe); premature `/tests` or verifier logs; scan truncation or failure.
+* **Published:** each `runs.jsonl` record carries `task` and
+  `post_agent_flags` (per-class counts, rows, fence result);
+  `post-agent-flags.json` aggregates `task -> harness -> counts`.
+* **Oracle qualification** (`oracle_qualification.py`, zero-model only) keeps
+  its receipt-bound authorized-source mode; the paid driver never selects it.
+
 ## Oracle continuation (not run for this port)
 
 `oracle_sweep.py` requires `--execute`, external `CODING_TASK_ROOT`, external

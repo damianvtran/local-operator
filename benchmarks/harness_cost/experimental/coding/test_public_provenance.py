@@ -719,5 +719,218 @@ class OracleQualificationTests(unittest.TestCase):
             self.assertNotIn("oracle", json.dumps(spec, default=str).lower(), harness)
 
 
+class _ProbeEnv:
+    """Harbor environment stand-in whose probe replies carry their exit codes."""
+
+    session_id = "sess"
+
+    def __init__(self, replies, calls):
+        self.replies, self.calls = list(replies), calls
+
+    async def exec(self, command, user=None):
+        self.calls.append(command)
+        stdout, code = self.replies.pop(0)
+        return SimpleNamespace(stdout=stdout, return_code=code)
+
+
+class PostAgentDisclosureTests(unittest.TestCase):
+    """S9b: late hidden matches are disclosed and graded, behind a strict pre-inference
+    scan, an intact fence and a verifier-code exception; identical for all arms."""
+
+    MANIFEST_SHA = "d" * 64
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD"))
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.fixture, self.code, self.solve = b"sanitized expected", b"def test_x(): ...", b"sh"
+        self.manifest = {
+            "version": 1, "task_payload_sha256": "a" * 64,
+            "image_digest": "sha256:" + "b" * 64, "policy_sha256": "c" * 64,
+            "public_files": [], "solution_digests": [_sha(self.solve)],
+            "gold_digests": sorted({_sha(self.fixture), _sha(self.code), _sha(self.solve)}),
+            "digest_classes": {_sha(self.fixture): "tests-fixture",
+                               _sha(self.code): "verifier-code", _sha(self.solve): "solution"},
+        }
+        self.log = self.root / "connections.jsonl"
+        self.env = {"BENCH_PUBLIC_PROVENANCE_SHA256": self.MANIFEST_SHA,
+                    "BENCH_GOLD_DIGESTS": "e" * 64, "BENCH_GATE_PORTS": "8787",
+                    "BENCH_EGRESS_CANARY_PORT": "41999",
+                    "BENCH_PACKAGE_EGRESS_LOGS": str(self.log)}
+
+    def scan(self, manifest=None):
+        return gold_probe.isolation(
+            set(self.manifest["gold_digests"]), root=str(self.root / "image"),
+            manifest=manifest or self.manifest, task_payload_sha256="a" * 64,
+            image_digest="sha256:" + "b" * 64)
+
+    def verify(self, iso, egress_ok=True):
+        verifier, _env, calls = _load_verifier([])
+        replies = [(json.dumps({**iso, "manifest_sha256": self.MANIFEST_SHA}),
+                    0 if iso["ok"] else 1), ('{"survivors": []}', 0),
+                   (json.dumps({"check": "egress", "ok": egress_ok}), 0 if egress_ok else 1)]
+        environment = _ProbeEnv(replies, calls)
+        paths = SimpleNamespace(verifier_dir=self.root / "verifier")
+        with patch.dict(os.environ, self.env), \
+                patch.object(verifier, "provenance_args", return_value=[]), \
+                patch.object(verifier, "compose_project", return_value="proj"), \
+                patch.object(verifier, "connect_uplink", return_value="cid") as uplink:
+            try:
+                result = asyncio.run(verifier.BenchVerifier(environment, paths).verify())
+            except RuntimeError:
+                result = None
+        record = json.loads((paths.verifier_dir / "bench-isolation.json").read_text())
+        return result, record, calls, uplink
+
+    def test_expected_output_fixture_match_is_graded_and_flagged(self):
+        # sanitize-git-repo: the correct answer equals tests/process.py.
+        _write(self.root / "image/app/dclm/ray_processing/process.py", self.fixture)
+        iso = self.scan()
+        self.assertFalse(iso["ok"])  # strict decision (and pre-inference) unchanged
+        self.assertTrue(iso["post_agent_ok"])
+        self.assertEqual([(m["class"]) for m in iso["disclosed_matches"]], ["tests-fixture"])
+        self.assertEqual(iso["raw_matches"][0]["sha256"], _sha(self.fixture))
+        result, record, calls, uplink = self.verify(iso)
+        self.assertEqual(result, "graded")
+        self.assertEqual(calls[-1], "stock-verify")
+        uplink.assert_called_once()
+        self.assertIn("hidden-digest-appeared-after-agent-phase", record["flags"])
+        self.assertEqual(record["post_agent_disclosed"][0]["class"], "tests-fixture")
+        self.assertTrue(record["fence"]["ok"])
+        self.assertFalse(record["isolation_after_agent"]["strict_ok"])
+
+    def test_solution_digest_match_is_disclosed_too(self):
+        _write(self.root / "image/app/out.sh", self.solve)
+        iso = self.scan()
+        self.assertTrue(iso["post_agent_ok"])
+        self.assertEqual(iso["disclosed_matches"][0]["class"], "solution")
+
+    def test_verifier_code_match_refuses_grading(self):
+        _write(self.root / "image/app/dclm/process.py", self.fixture)
+        _write(self.root / "image/app/test_outputs.py", self.code)
+        iso = self.scan()
+        self.assertFalse(iso["post_agent_ok"])
+        self.assertEqual([m["class"] for m in iso["refusing_matches"]], ["verifier-code"])
+        result, record, calls, uplink = self.verify(iso)
+        self.assertIsNone(result)
+        self.assertFalse(record["graded"])
+        self.assertNotIn("stock-verify", calls)
+        uplink.assert_not_called()
+
+    def test_unclassified_task_keeps_the_strict_refusal(self):
+        _write(self.root / "image/app/process.py", self.fixture)
+        manifest = {k: v for k, v in self.manifest.items() if k != "digest_classes"}
+        iso = self.scan(manifest)
+        self.assertFalse(iso["post_agent_ok"])
+        self.assertEqual(iso["refusing_matches"][0]["class"], "unclassified")
+
+    def test_structural_failures_still_refuse(self):
+        _write(self.root / "image/app/process.py", self.fixture)
+        original = Path.exists
+        with patch.object(Path, "exists",
+                          lambda p: str(p) == "/tests" or original(p)):
+            self.assertFalse(self.scan()["post_agent_ok"])
+        with patch.object(gold_probe, "MAX_FILES", 0):
+            self.assertFalse(self.scan()["post_agent_ok"])
+        self.assertFalse(self.scan({**self.manifest, "version": 2})["post_agent_ok"])
+
+    def test_fence_anomaly_refuses_a_late_match(self):
+        _write(self.root / "image/app/process.py", self.fixture)
+        iso = self.scan()
+        for rows, egress_ok in (
+                ([{"host": "api.anthropic.com", "port": 443, "allowed": False,
+                   "reason": "model-host"}], True),
+                ([{"host": "evil.example", "port": 443, "allowed": True}], True),
+                ([{"host": "github.com", "port": 443, "allowed": False,
+                   "reason": "not-allowlisted"}], False)):  # canary breach on re-probe
+            with self.subTest(rows=rows, egress_ok=egress_ok):
+                self.log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+                result, record, calls, uplink = self.verify(iso, egress_ok=egress_ok)
+                self.assertIsNone(result)
+                self.assertFalse(record["fence"]["ok"])
+                self.assertNotIn("stock-verify", calls)
+                uplink.assert_not_called()
+        # Ordinary denials alone are the fence working, not an anomaly.
+        result, record, _calls, _uplink = self.verify(iso)
+        self.assertEqual(result, "graded")
+        with patch.dict(self.env, {"BENCH_PACKAGE_EGRESS_LOGS": ""}):
+            result, record, _calls, _uplink = self.verify(iso)
+        self.assertIsNone(result)
+        self.assertEqual(record["fence"]["reason"], "missing fence inputs")
+
+    def test_pre_inference_stays_strict(self):
+        _write(self.root / "image/app/process.py", self.fixture)
+        iso = {**self.scan(), "manifest_sha256": self.MANIFEST_SHA}
+        self.assertTrue(iso["post_agent_ok"])
+        adapter = _load()
+
+        async def execute(command, **kwargs):
+            body = json.dumps(iso) if " isolation " in command else '{"ok":true}'
+            return SimpleNamespace(stdout=body, return_code=1 if " isolation " in command else 0)
+
+        with patch.dict(os.environ, self.env), \
+                patch.object(adapter, "provenance_args", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "pre-inference isolation"):
+                asyncio.run(adapter._preinference_checks(
+                    SimpleNamespace(logs_dir=None), SimpleNamespace(exec=execute)))
+
+    def test_trial_record_and_flag_table_publish_counts_per_task_and_arm(self):
+        job = self.root / "job"
+        _write(job / "trial/verifier/bench-isolation.json", json.dumps({
+            "graded": True, "fence": {"ok": True}, "post_agent_disclosed": [
+                {"path": "/app/p.py", "sha256": "f" * 64, "class": "tests-fixture"}]}))
+        flags = driver.post_agent_flags(job)
+        self.assertEqual(flags["counts"], {"solution": 0, "tests-fixture": 1})
+        out = self.root / "out"
+        rows = [{"task": "sanitize-git-repo", "harness": h, "post_agent_flags": flags}
+                for h in ("omp", "omp", "local-operator")]
+        _write(out / "runs.jsonl", "".join(json.dumps(r) + "\n" for r in rows))
+        table = driver.flag_table(out)
+        self.assertEqual(table["sanitize-git-repo"]["omp"],
+                         {"trials": 2, "solution": 0, "tests-fixture": 2})
+        self.assertEqual(json.loads((out / "post-agent-flags.json").read_text()), table)
+
+    @unittest.skipUnless((TASK_ROOT / "sanitize-git-repo").is_dir(), "task root absent")
+    def test_frozen_classes_cover_the_cohort_and_classify_sanitize_as_fixtures(self):
+        frozen = json.loads((HERE / "post-agent-classes.json").read_text())
+        self.assertEqual(len(frozen["tasks"]), 30)
+        task = TASK_ROOT / "sanitize-git-repo"
+        manifest = driver.public_provenance(
+            task, json.loads((HERE / "public-provenance.json").read_text())
+            ["tasks"]["sanitize-git-repo"]["image_digest"])
+        # The three a18da995 post-oracle matches (process.py, ray_cluster.yaml, json).
+        for name in ("process.py", "ray_cluster.yaml",
+                     "rw_v2_fasttext_openhermes_vs_rw_v2_bigram_0.1_arcade100k.json"):
+            self.assertEqual(manifest["digest_classes"][driver.digest(task / "tests" / name)],
+                             "tests-fixture")
+        for name in ("test.sh", "test_outputs.py"):
+            self.assertEqual(manifest["digest_classes"][driver.digest(task / "tests" / name)],
+                             "verifier-code")
+
+    def test_drifted_class_map_is_refused(self):
+        task = self.root / "fixture"
+        _write(task / "solution/solve.sh", b"s")
+        _write(task / "tests/test.sh", b"pytest /tests/test_outputs.py")
+        _write(task / "tests/expected.txt", b"answer")
+        _write(task / "environment/Dockerfile", "FROM scratch\n")
+        payload = driver.task_payload(task)[0]
+        policy = self.root / "policy"
+        policy.mkdir()
+        (policy / "public-provenance.json").write_text('{"version": 1, "tasks": {}}')
+        tests = {rel: {"sha256": driver.digest(task / "tests" / rel), **row}
+                 for rel, row in provenance_derive.classify_tests(task).items()}
+        frozen = {"version": 1, "tasks": {"fixture": {"task_payload_sha256": payload,
+                                                      "tests": tests}}}
+        (policy / "post-agent-classes.json").write_text(json.dumps(frozen))
+        with patch.object(driver, "HERE", policy):
+            classes = driver.public_provenance(task, "sha256:" + "b" * 64)["digest_classes"]
+            self.assertEqual(classes[_sha(b"answer")], "tests-fixture")
+            self.assertEqual(classes[_sha(b"pytest /tests/test_outputs.py")], "verifier-code")
+            tests["expected.txt"]["class"] = "verifier-code"
+            (policy / "post-agent-classes.json").write_text(json.dumps(frozen))
+            with self.assertRaisesRegex(ValueError, "stale post-agent classes"):
+                driver.public_provenance(task, "sha256:" + "b" * 64)
+
+
 if __name__ == "__main__":
     unittest.main()

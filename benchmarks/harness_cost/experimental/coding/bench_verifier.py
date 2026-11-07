@@ -21,7 +21,12 @@ runs, this wrapper, in order:
    ``test.sh``, reward parsing), i.e. grading is Harbor's stock behaviour.
 
 Only step 1 can refuse grading: a gold-isolation failure means the agent saw
-hidden inputs, so the score would not measure the agent. Results of 1-2 go to
+hidden inputs, so the score would not measure the agent.
+S9b narrows that for the pre-grading scan only: a hidden digest first seen
+after the agent phase (the strict pre-inference scan already refused any
+earlier one) is disclosed and graded when the probe classes it as solution
+or tests-fixture output AND ``_fence_check`` finds the fence intact; verifier
+code, unclassified digests and structural failures still refuse. Results of 1-2 go to
 ``<trial>/verifier/bench-isolation.json`` on the host, written before tests
 are uploaded, so the record cannot be shaped by them.
 
@@ -41,12 +46,43 @@ import importlib
 import json
 import os
 import shlex
+from pathlib import Path
 
 from egress import GATE_PYTHON, SUPPORT, UPLINK_NETWORK, run_docker
 from gold_probe import provenance_args
 
 PROBE = f"{GATE_PYTHON} {SUPPORT}/gold_probe.py"
 SURVIVOR_FLAG = "agent-processes-survived-into-grading"
+DISCLOSED_FLAG = "hidden-digest-appeared-after-agent-phase"
+ALLOWLIST = Path(__file__).resolve().parent / "package-egress-allowlist.json"
+
+
+def fence_anomalies(log_paths: list[str], allow: set[str]) -> list[dict[str, object]]:
+    """Package-egress rows that void the S9b disclosure (not the trial).
+
+    A denied model-host attempt, or an allowed connection to a host outside
+    the frozen allowlist (a policy that let something unexpected through),
+    means the fence cannot vouch that a late hidden match was the agent's own
+    work. Ordinary denials (github.com, unlisted mirrors) are the fence
+    working and are not anomalies. A missing log file means no connection.
+    """
+    anomalies = []
+    for raw in log_paths:
+        path = Path(raw)
+        if not path.is_file():
+            continue
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line) if line else None
+            except ValueError:
+                row = {"unparsed": True}
+            if not isinstance(row, dict):
+                continue
+            if (row.get("unparsed") or row.get("reason") == "model-host"
+                    or (row.get("allowed") is True and row.get("host") not in allow)):
+                anomalies.append({k: row.get(k) for k in ("host", "port", "allowed",
+                                                          "reason", "unparsed")})
+    return anomalies
 
 
 def gold_digests() -> list[str]:
@@ -101,6 +137,25 @@ class BenchVerifier(_verifier_base()):  # type: ignore[misc]
         """
         return []
 
+    async def _fence_check(self) -> dict[str, object]:
+        """Fence evidence for a late hidden match: logs plus a fresh egress probe.
+
+        Fail closed: missing driver inputs or an unparsed probe is an anomaly.
+        """
+        logs = [p for p in os.environ.get("BENCH_PACKAGE_EGRESS_LOGS", "").split(",") if p]
+        ports = os.environ.get("BENCH_GATE_PORTS", "")
+        canary = os.environ.get("BENCH_EGRESS_CANARY_PORT", "")
+        if not logs or not canary.isdigit() or not ports or not all(
+                p.isdigit() for p in ports.split(",")):
+            return {"ok": False, "reason": "missing fence inputs"}
+        allow = set(json.loads(ALLOWLIST.read_text())["allow"])
+        anomalies = fence_anomalies(logs, allow)
+        probe = await self.environment.exec(
+            f"{PROBE} egress --canary {canary} " + " ".join(ports.split(",")), user="root")
+        egress = _parse(probe.stdout)
+        return {"ok": not anomalies and probe.return_code == 0 and egress.get("ok") is True,
+                "package_anomalies": anomalies, "egress_after_agent": egress}
+
     async def verify(self):  # noqa: D102 -- see module docstring
         record: dict[str, object] = {}
         run = self.environment.exec
@@ -114,12 +169,20 @@ class BenchVerifier(_verifier_base()):  # type: ignore[misc]
         record["flags"] = [SURVIVOR_FLAG] if record["survivors"] else []
         if "survivors" not in quiet:
             record["flags"].append("quiescence-probe-unparsed")
-        record["graded"] = (
-            isolation.return_code == 0
-            and record["isolation_after_agent"].get("ok") is True
-            and record["isolation_after_agent"].get("manifest_sha256")
-            == os.environ.get("BENCH_PUBLIC_PROVENANCE_SHA256")
-        )
+        iso = record["isolation_after_agent"]
+        bound = iso.get("manifest_sha256") == os.environ.get("BENCH_PUBLIC_PROVENANCE_SHA256")
+        strict = isolation.return_code == 0 and iso.get("ok") is True
+        disclosed = iso.get("disclosed_matches")
+        record["post_agent_disclosed"] = disclosed if isinstance(disclosed, list) else []
+        late_ok = False
+        if bound and not strict and record["post_agent_disclosed"] and (
+                isolation.return_code in (0, 1) and iso.get("post_agent_ok") is True):
+            # S9b: grade and disclose, but only behind an intact fence.
+            record["fence"] = await self._fence_check()
+            late_ok = record["fence"]["ok"]
+            if late_ok:
+                record["flags"].append(DISCLOSED_FLAG)
+        record["graded"] = bound and (strict or late_ok)
         out = self.trial_paths.verifier_dir / "bench-isolation.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(record, indent=1) + "\n")
