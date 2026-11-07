@@ -3006,10 +3006,16 @@ class AuthStore:
         self._publish_account_file()
 
     def is_blocked(self, credential_id: int, provider: str) -> bool:
+        # Read-only stores answer too: the hub's no-network login probe
+        # (``radient_oauth_login_usable_since``) must see the same block the
+        # resolver's selection skips, from a store that writes nothing.
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return False
         credential = self.get_credential(credential_id)
         provider = self._storage_id(provider)
         provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
-        row = self._conn.execute(
+        row = conn.execute(
             "SELECT blocked_until_ms FROM auth_credential_blocks"
             " WHERE credential_id = ? AND provider_key = ? AND block_scope = ''",
             (credential_id, provider_key),

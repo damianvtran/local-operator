@@ -131,6 +131,13 @@ class HubSyncRunner:
         )
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
+        # Set by ``wake()``: cuts the CURRENT sleep short so the next tick runs
+        # now. Consumed by ``_sleep`` (cleared when it returns because of it), so
+        # a wake that lands mid-tick still shortens the sleep that follows.
+        self._wake = asyncio.Event()
+        # The loop ``run_forever`` runs on, recorded so ``wake()`` can hand the
+        # event set to it from a thread (asyncio.Event is not thread-safe).
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._reported: set[tuple[str, str]] = set()
         self._last_credential: str | None = None
         # The policy values last read LIVE off disk. A torn read must never
@@ -162,6 +169,39 @@ class HubSyncRunner:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def wake(self) -> None:
+        """Run the next scheduled check NOW instead of at the end of the interval.
+
+        WHY: a check that ran while the operator was signed out persists
+        ``no-credential`` on every linked item, and only the next SUCCESSFUL check
+        clears it. The schedule is 15 min +-10 %, so a sign-in alone left the
+        desktop telling the operator to sign in for up to ~16.5 min. The verified
+        Radient sign-in hook calls this so the stale state clears in seconds.
+
+        It shortens the sleep, it does not add a check path: what runs is the
+        ordinary ``tick`` (same lock, policy gates and first-run grace), and the
+        interval restarts after it. A wake during the boot-time startup delay
+        cuts that delay short too (the same interruptible sleep), which is
+        still exactly one ordinary tick under the lock. Idempotent (a burst of wakes is one early
+        tick), safe from any thread, and never raises; a no-op before
+        ``run_forever`` has started or after ``stop()``.
+        """
+
+        try:
+            loop = self._loop
+            if loop is None or loop.is_closed() or self._stop.is_set():
+                return
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+            if running is loop:
+                self._wake.set()
+            else:
+                loop.call_soon_threadsafe(self._wake.set)
+        except Exception:  # noqa: BLE001 - a wake is a nicety; the sign-in must not fail
+            logger.debug("could not wake the hub update runner", exc_info=True)
 
     def begin_reload(self) -> None:
         """Park future timer/manual dispatch; preserve the same runner/due state."""
@@ -213,17 +253,27 @@ class HubSyncRunner:
         return await asyncio.shield(task)
 
     async def _sleep(self, seconds: float) -> bool:
-        """Sleep, waking early on stop. True = stopped."""
+        """Sleep, ending early on stop or ``wake()``. True = stopped."""
 
+        stop = asyncio.ensure_future(self._stop.wait())
+        wake = asyncio.ensure_future(self._wake.wait())
         try:
-            await asyncio.wait_for(self._stop.wait(), timeout=max(0.0, seconds))
+            await asyncio.wait(
+                {stop, wake}, timeout=max(0.0, seconds), return_when="FIRST_COMPLETED"
+            )
+        finally:
+            for waiter in (stop, wake):
+                waiter.cancel()
+        if self._stop.is_set():
             return True
-        except asyncio.TimeoutError:
-            return False
+        # Consume the wake: the tick it asked for is the one about to run.
+        self._wake.clear()
+        return False
 
     async def run_forever(self) -> None:
         """Never raises. Cancellation propagates (lifespan shutdown)."""
 
+        self._loop = asyncio.get_running_loop()
         if await self._sleep(self._startup_delay):
             return
         reason: Literal["timer", "startup", "manual"] = "startup"

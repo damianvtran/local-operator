@@ -315,3 +315,78 @@ def resolve_radient_oauth_access_sync(config_dir: Path | None, base_url: str) ->
     except RuntimeError:
         return asyncio.run(resolve_radient_oauth_access(config_dir, base_url))
     raise RuntimeError("Await resolve_radient_oauth_access inside an async host")
+
+
+def radient_oauth_login_usable_since(config_dir: Path, base_url: str) -> int | None:
+    """When the newest Radient login :func:`resolve_radient_oauth_access` could use
+    was written (epoch ms, the row's ``updated_at``), or ``None`` for no such login.
+
+    LOCAL AND NO-NETWORK BY CONTRACT, for a status read that must not refresh a
+    token (the hub links/status projections ask "is a stored ``no-credential``
+    stale because the operator has since signed in?"). It answers with the
+    resolver's own LOCAL refusals, so the two cannot drift apart silently:
+
+    * the destination guard (:func:`org_oauth_destination_allowed`) -- a
+      refused destination resolves nothing, whatever the store holds;
+    * the kind rule -- only an ``oauth`` row is a hub sign-in; a pasted
+      ``radient-key`` API key resolves to ``None`` there, so it does not count;
+    * the terminal verdicts ``AuthStore._ensure_oauth_fresh`` raises
+      ``CredentialInvalidError`` for before any network: the IdP's dead-grant
+      tombstone, the family-moved marker, and an ENDED delegation on a token
+      that needs a refresh -- plus a LIVE delegation on such a token, which that
+      method refuses with ``RefreshDelegatedError``. These rows stay listed
+      (they are deliberately not ``disabled_cause``), which is why a bare
+      "any enabled OAuth row" probe reported a dead login as signed in (PR #3536
+      review M1 / QA Q1);
+    * an account-wide credential block (``AuthStore.is_blocked``) still in
+      force -- the resolver's selection skips that row (review r2 m1).
+
+    What it CANNOT see is an outcome only the network decides (a refresh that
+    fails transiently, a block a LATER failed call writes). The timestamp is
+    the guard for those: a caller compares it with the time the refusal was
+    recorded and treats the refusal as stale only when this login is NEWER -- a
+    refusal recorded after the login is a current fact.
+
+    Runtime/config API-key overrides (``set_runtime_api_key`` /
+    ``set_config_api_key``) also make the resolver answer ``None``, but they are
+    per-instance, in-memory state: the resolver reads a FRESH store
+    (:func:`_radient_auth_store`) that carries none, so they cannot apply to it
+    and are not mirrored here.
+
+    Never raises: any doubt (unreadable store, malformed row) reads as no usable
+    login, which only leaves a stored refusal reported as it was.
+    """
+    try:
+        if not org_oauth_destination_allowed(base_url):
+            return None
+        store = AuthStore.open_read_only(Path(config_dir) / "auth.db")
+        try:
+            rows = store.list_credentials("radient")
+            blocked = {row.id for row in rows if store.is_blocked(row.id, "radient")}
+        finally:
+            store.close()
+        now_ms = AuthStore._now_ms()
+        newest: int | None = None
+        for row in rows:
+            if row.credential_type != "oauth" or not isinstance(row.data, dict):
+                continue
+            creds = row.data
+            # An account-wide backoff a failed call wrote: the resolver's
+            # selection skips a blocked row, so it is no sign-in here either
+            # (PR #3536 review r2 m1). It expires on its TTL, after which the
+            # row counts again -- the same moment the resolver would use it.
+            if row.id in blocked:
+                continue
+            if AuthStore._grant_dead_at(creds) is not None:
+                continue
+            if AuthStore._family_moved_at(creds) is not None:
+                continue
+            if AuthStore._needs_refresh(creds) and (
+                AuthStore._ended_delegation(creds, now_ms=now_ms) is not None
+                or AuthStore._delegated(creds, now_ms=now_ms) is not None
+            ):
+                continue
+            newest = max(newest or 0, int(row.updated_at or 0))
+        return newest
+    except Exception:  # noqa: BLE001 - a status probe must never fail its read
+        return None

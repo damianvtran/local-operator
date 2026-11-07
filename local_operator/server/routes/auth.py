@@ -92,9 +92,38 @@ async def get_desktop_auth(
         from local_operator.server.utils.desktop_rehome import rehome_after_login
 
         app = request.app
-        host.rehome = lambda provider: rehome_after_login(app, provider)
+
+        def after_login(provider: str):
+            # The hook runs only after a VERIFIED sign-in, so it is also where the
+            # hub runner learns the login exists (see ``_wake_hub_sync``).
+            _wake_hub_sync(app, provider)
+            return rehome_after_login(app, provider)
+
+        host.rehome = after_login
         request.app.state.desktop_auth = host
     return host
+
+
+def _wake_hub_sync(app: Any, provider: str) -> None:
+    """Ask the hub update runner for a check now, after a Radient sign-in.
+
+    WHY: checks that ran while signed out persisted ``no-credential`` per linked
+    item, and only the next successful check clears it -- up to ~16.5 min away on
+    the schedule. Radient only: no other provider's login changes what the hub
+    can read. Best effort and never raises (``HubSyncRunner.wake``); a server with
+    no runner (embedded host, tests) has nothing to wake.
+
+    Only an in-process sign-in reaches here. ``lop login radient`` in a terminal
+    writes the auth store from another process, and the server has no watcher on
+    that store to wake from, so a CLI sign-in still waits for the next tick.
+    """
+
+    if provider != "radient":
+        return
+    runner = getattr(getattr(app, "state", None), "hub_sync", None)
+    wake = getattr(runner, "wake", None)
+    if callable(wake):
+        wake()
 
 
 def _suggestion(hosting: str, *, oauth: bool = False) -> dict[str, str] | None:
