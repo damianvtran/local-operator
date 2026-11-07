@@ -2029,6 +2029,12 @@ class TeamBridgeClient:
             pre_http_guard=pre_http_guard,
         )
         if response.status_code >= 400:
+            if response.status_code == 400 and body is not None and _observation.WIRE_KEY in body:
+                # The one choke point every ack and admit passes: a 400 to a
+                # body that carried the observe-only block clears this hub's
+                # gate, so the next attempt omits it (screening_observation.
+                # note_hub_refused). The refusal itself is raised unchanged.
+                _observation.note_hub_refused(self.base_url)
             raise _refusal(response)
         if empty_result:
             # Cancellation acknowledges a CAS with {msg} and no result. Opt in
@@ -2309,7 +2315,7 @@ class TeamBridgeClient:
 
         ``screening_observation`` is TELEMETRY beside the verdict, never in it
         (agent-server §8.5): attached only when this hub advertised the block,
-        and nothing here reads anything about it back from the response.
+        and only a 400 to a body carrying it is read back (it clears the gate).
         """
 
         body = {"state": state, "screening": dict(screening), "client_ref": client_ref}
@@ -4220,8 +4226,9 @@ class TeamBridgeClient:
         ``screening_observation`` is the observe-only screener provenance (§8.5),
         attached only once this hub has advertised it: a pre-#332 hub decodes this
         body strictly and would refuse the unknown key, which must never cost a
-        message its admission. It rides every attempt identically, so it never
-        changes which attempt is made.
+        message its admission. It never changes which attempt is made: a 400 to a
+        body that carried it clears this hub's gate, so the bounded retry below and
+        any later re-drive go out without it (review S-1).
         """
 
         if (attachments_hash is not None or files_hash is not None) != (
@@ -4274,6 +4281,11 @@ class TeamBridgeClient:
                 # else (409 verdict conflict, 403, 5xx) is not about it.
                 if refusal.http_status != 400:
                     raise
+            # That 400 may have been the block's (a stale advertisement), and
+            # ``_send`` has cleared the gate if so: re-apply it, so the existing
+            # retry carries the block only while the hub still accepts it.
+            body.pop(_observation.WIRE_KEY, None)
+            _attach_observation(body, self.base_url, screening_observation)
         return await self._send(
             "POST",
             path,

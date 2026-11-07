@@ -29,8 +29,10 @@ INVARIANTS (each pinned in tests/unit/team_bridge/test_screening_observation.py)
   into a 400. The contract's answer is the status advertisement
   ``features.team_bridge_screening_observation: 1``: a client that has not seen
   it omits the block. The memo below is fed by status reads this process
-  ALREADY makes (no extra read), and the client never reads anything back
-  from an ack/admit response about the block.
+  ALREADY makes (no extra read). The one thing read back is a 400 to a body
+  that carried the block, which clears the memo for that hub (a stale
+  advertisement after a rollback); nothing else in an ack/admit response is
+  read about it.
 """
 
 from __future__ import annotations
@@ -76,6 +78,28 @@ def note_hub_status(base_url: str, payload: Any) -> None:
     supported = type(version) is int and version == OBSERVATION_VERSION
     with _HUB_LOCK:
         _HUB_SUPPORT[_hub_key(base_url)] = supported
+
+
+def note_hub_refused(base_url: str) -> None:
+    """A 400 answered a request that carried the block: stop sending it here.
+
+    An advertisement can go stale under a running process — a rollback below
+    #332, or a rolling update serving both decoders behind one origin — and a
+    pre-#332 admit decoder answers the unknown key with a 400. Only a status
+    read would otherwise clear the memo, and the conversation lane reads
+    status per message only when files ride it, so the stale ``True`` could
+    keep failing every re-drive for up to the status cache's TTL. Each failed
+    re-drive of an unsent FALLBACK allow retires it and screens again: a
+    second paid call that may land on another model (review S-1/m1).
+
+    Clearing is the safe direction whatever caused the 400: losing telemetry
+    until the next advertising status read costs nothing. No retry is added
+    here; the caller's existing hold/re-drive (or the admit's own bounded
+    retry) simply goes out without the block.
+    """
+
+    with _HUB_LOCK:
+        _HUB_SUPPORT[_hub_key(base_url)] = False
 
 
 def hub_accepts(base_url: str) -> bool:

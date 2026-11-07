@@ -2392,10 +2392,12 @@ def _replay_consumed_release(
             template_sha256=str(committed["template_sha256"]),
             body_sha256=str(committed["body_sha256"]),
             categories=tuple(committed["categories"]),
-            # The replayed release still names the screener that answered
-            # (the signed release row), so a re-driven Deliver reports the
-            # same provenance as the first one. Telemetry only.
-            observation=_release_observation(release),
+            # No observe-only block on a replay (review S-2/m2): the first
+            # Deliver already reported this screen and the hub counts per
+            # request, exactly like a crash-replayed ack intent; and on the
+            # setting-off path this runs BEFORE ``verify_row``, so nothing for
+            # the hub may be read from the unverified row here.
+            observation=None,
         ),
         screened_bytes=len(envelope.private_body().encode("utf-8")),
     )

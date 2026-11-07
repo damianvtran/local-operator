@@ -1813,8 +1813,9 @@ async def handle_conversation_available(
                 # descriptors the hub showed.
                 files_hash=files_hash,
                 access=access,
-                # Telemetry only, identical on the bounded files retry below, so
-                # it never decides which attempt runs (agent-server §8.5).
+                # Telemetry only, never deciding which attempt runs (agent-server
+                # §8.5); a 400 to a body carrying it clears the hub's gate, so the
+                # bounded files retry below then omits it.
                 **_observed(receipt),
             )
 

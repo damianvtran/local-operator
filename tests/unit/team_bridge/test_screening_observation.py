@@ -17,6 +17,7 @@ pull lane's ``FakeWire``, and B4b's conversation spine from
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -144,6 +145,64 @@ def test_a_wire_429_on_the_preferred_hop_also_reports_fallback(tmp_path, monkeyp
     assert result.receipt.observation == ScreeningObservation(
         "deepseek", "deepseek-flash", "fallback"
     )
+
+
+def test_a_generic_provider_error_on_the_preferred_hop_reports_fallback(
+    tmp_path, monkeypatch
+) -> None:
+    """A plain route-failure ``ProviderError`` (5xx), not a quota: the cascade
+    advances and the block names the hop that answered (review m3)."""
+
+    _store, owner = _setup(tmp_path)
+    _cascade_config(tmp_path, ["deepseek/deepseek-flash"])
+    wire = _Wire({"gpt-5.4": ("fail", 503), "deepseek-flash": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4", "deepseek-flash"]
+    assert result.receipt.observation == ScreeningObservation(
+        "deepseek", "deepseek-flash", "fallback"
+    )
+
+
+def test_a_batch_screen_stamps_the_answering_hop_on_every_item(tmp_path, monkeypatch) -> None:
+    """The batch conclude reads the same answering hop as the single path (review m3).
+
+    One model call screens both messages, so both receipts carry the one hop
+    that answered that call — the fallback here, never the configured model.
+    """
+
+    from local_operator.team_bridge import scheduler as _scheduler
+    from tests.unit.team_bridge.test_batch_screening import _triples
+    from tests.unit.team_bridge.test_screening import _consent_status, _item
+
+    _store, owner = _setup(tmp_path)
+    _cascade_config(tmp_path, ["deepseek/deepseek-flash"])
+    reply = _triples(("m1", "deliver"), ("m2", "deliver"))
+    wire = _Wire({"gpt-5.4": ("fail", 503), "deepseek-flash": ("reply", reply)})
+    _install_wire(monkeypatch, wire)
+    raw = _consent_status(owner, {"version": "bridge_consent_v1", "text": "v1 consent"})
+    verified = _scheduler.VerifiedStatus(_scheduler._VERIFIED_TOKEN, raw)
+
+    async def fetch() -> Any:
+        return verified
+
+    results = asyncio.run(
+        _scheduler.run_screening_cycle(
+            config_dir=tmp_path,
+            owner=owner,
+            items=[_item(body="a", message_id="bmsg_1"), _item(body="b", message_id="bmsg_2")],
+            auth_store=None,
+            status_fetcher=fetch,
+            batch=True,
+        )
+    )
+
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4", "deepseek-flash"]
+    assert [r.disposition for r in results] == ["deliver", "deliver"]
+    fallback = ScreeningObservation("deepseek", "deepseek-flash", "fallback")
+    assert [r.receipt.observation for r in results] == [fallback, fallback]
 
 
 def test_without_trusted_hop_provenance_the_stage_is_unknown() -> None:
@@ -349,7 +408,7 @@ async def test_a_hub_that_stops_advertising_stops_receiving_the_block() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_bounded_retries_carry_the_same_block_and_the_same_attempts() -> None:
+async def test_the_bounded_retries_make_the_same_attempts_with_or_without_the_block() -> None:
     """The refusal_class 400 retry runs exactly as before; the block never decides it."""
 
     async def attempts(with_block: bool) -> list[dict[str, Any]]:
@@ -380,7 +439,68 @@ async def test_the_bounded_retries_carry_the_same_block_and_the_same_attempts() 
     with_block, without = await attempts(True), await attempts(False)
     assert [("refusal_class" in b) for b in with_block] == [True, False]
     assert [{k: v for k, v in b.items() if k != obs.WIRE_KEY} for b in with_block] == without
-    assert all(obs.WIRE_KEY in b for b in with_block)
+    # The 400 rode the block, so the gate is cleared (S-1) and the existing
+    # retry goes out without it: same attempts, the block only on the first.
+    assert [(obs.WIRE_KEY in b) for b in with_block] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_a_400_to_a_request_carrying_the_block_clears_that_hubs_gate() -> None:
+    """S-1 / m1: an advertisement gone stale (a rollback below #332, or a
+    rolling update serving both decoders) is cleared by the 400 it causes.
+
+    The admit that drew the 400 still fails — no retry is added for it — but
+    the connector's existing hold/re-drive then goes out without the block.
+    That matters for a fallback allow: an unsent one is retired and screened
+    again on re-drive, a second paid call that may land on another model.
+    """
+
+    seen: list[httpx.Request] = []
+
+    def mixed_hub(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/messaging/status"):
+            return _ok({"features": {obs.OBSERVATION_FEATURE: 1}})
+        if obs.WIRE_KEY.encode() in request.content:
+            return httpx.Response(400, json={"error": "invalid request body", "code": "invalid"})
+        if request.url.path.endswith("/ack"):
+            return _ok({"delivery": {"state": "read", "state_at": "t"}})
+        return _ok({"status": "recorded"})
+
+    client = _make_client(mixed_hub)
+    await client.status()
+    with pytest.raises(tb_client.BridgeRefusal) as refused:
+        await _admit(client, PREFERRED)
+    assert refused.value.http_status == 400
+    assert len(seen) == 2  # the refused admit was not retried here
+    assert obs.hub_accepts(client.base_url) is False
+
+    assert await _admit(client, PREFERRED) == {"status": "recorded"}
+    assert obs.WIRE_KEY.encode() not in seen[-1].content
+
+    # The pair ack the same way; a later advertisement re-opens the gate.
+    await client.status()
+    with pytest.raises(tb_client.BridgeRefusal):
+        await _ack(client, PREFERRED)
+    assert obs.hub_accepts(client.base_url) is False
+    await _ack(client, PREFERRED)
+    assert obs.WIRE_KEY.encode() not in seen[-1].content
+
+
+@pytest.mark.asyncio
+async def test_a_400_to_a_request_without_the_block_leaves_the_gate_alone() -> None:
+    """A 400 the block did not ride says nothing about the block."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messaging/status"):
+            return _ok({"features": {obs.OBSERVATION_FEATURE: 1}})
+        return httpx.Response(400, json={"error": "invalid request body", "code": "invalid"})
+
+    client = _make_client(handler)
+    await client.status()
+    with pytest.raises(tb_client.BridgeRefusal):
+        await _admit(client, None)
+    assert obs.hub_accepts(client.base_url) is True
 
 
 # -- the pull lane: the block rides the first send of an intent only --------
@@ -503,3 +623,37 @@ def test_b4b_owner_deliver_admits_with_the_released_screeners_block(
     )
     # The release itself is untouched: same outcome row the B4b suite pins.
     assert store.owner_release(owner, thr.MESSAGE_ID)["outcome"] == "admitted"
+
+
+def test_a_replayed_owner_deliver_sends_no_block_on_either_setting(
+    rig: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811 - the imported B4b fixture
+) -> None:
+    """S-2 / m2: a re-driven Deliver of an ALREADY consumed release omits the block.
+
+    Same rule as a crash-replayed ack intent: the hub counts per request, so a
+    replay must not count the screen again, and on the setting-off path the
+    release row is not signature-verified before the replay is answered, so
+    nothing may be read from it for the hub.
+    """
+
+    from tests.unit.team_bridge import test_hold_release as thr
+
+    config_dir, store, owner = rig
+    thr._screen(config_dir, owner, thr.Runner(thr.NEW_WORK))
+    thr._decide(config_dir, owner, "deliver")
+    first = thr._screen(config_dir, owner, thr.Runner(thr.DELIVER))
+    assert first.disposition == "deliver" and first.receipt is not None
+    assert first.receipt.observation is not None
+
+    again = thr.Runner(thr.DELIVER)
+    replay_on = thr._screen(config_dir, owner, again)
+    assert replay_on.disposition == "deliver" and again.calls == 0
+    assert replay_on.receipt is not None
+    assert replay_on.receipt.observation is None
+
+    thr._setting(config_dir, False)
+    later = thr.Runner(thr.DELIVER)
+    replay_off = thr._screen(config_dir, owner, later)
+    assert replay_off.disposition == "deliver" and later.calls == 0
+    assert replay_off.receipt is not None
+    assert replay_off.receipt.observation is None
