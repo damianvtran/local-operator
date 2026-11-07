@@ -598,8 +598,11 @@ def add_parser(
             "with --create: its first turn, run on that device once its runtime is up. "
             "The receipt reports whether it settled — completed, failed (with the cause), "
             # "45 s" is ``relay.FIRST_TURN_WAIT_S``, spelled out because the relay
-            # module is imported lazily here; a test pins the two together.
-            "or still running after up to 45 s, with the --peek that shows its reply — so a "
+            # module is imported lazily here; a test pins the two together. The
+            # runtime's start-up comes out of that budget (``first_turn_wait_s``),
+            # which the README says and the help must too (#3547 review NIT-2).
+            "or still running after up to 45 s, less any time spent starting its runtime, "
+            "with the --peek that shows its reply — so a "
             "failure is reported here whenever that owner can settle the turn; against an "
             "older owner the receipt says it cannot see the end instead of claiming one"
         ),
@@ -7941,12 +7944,19 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                     # the prose and the backticks with it — backticks a shell runs as a
                     # command substitution. Alone and unquoted it selects and pastes
                     # as-is. Safe to add a line here: ``--json`` prints the payload and
-                    # never these lines (``_emit``), and the agent's network tool hands
-                    # the text back verbatim; no reader parses the receipt by line.
+                    # never these lines (``_emit``), and the agent's network tool runs
+                    # this verb with ``--json`` and parses that payload
+                    # (``network/tool.py``), so it never sees these lines either; no
+                    # reader parses the receipt by line.
+                    #
+                    # "ITS REPLY SHOWS HERE:" (design D4 on #3547): the longer wording
+                    # put this line at 83-93 columns, so it wrapped on an 80-column
+                    # terminal. Short enough now that a peer name of up to ~20
+                    # characters keeps it inside 80; a test pins the width.
                     waited = round(float(turn["waited_s"]), 1)
                     lines.append(
                         f"turn: still running on {peer} after {waited:g} s — "
-                        "its reply shows here once it arrives:"
+                        "its reply shows here:"
                     )
                     lines.append(f"  lop network sessions --peer {peer} --peek {minted}")
                 elif state == "running":

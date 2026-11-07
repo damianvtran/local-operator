@@ -232,6 +232,98 @@ def test_slow_admission_is_bounded(root: Path, monkeypatch: pytest.MonkeyPatch) 
         server.stop()
 
 
+@pytest.mark.parametrize("creates", [4, 6])
+def test_a_burst_of_creates_never_holds_the_workers_a_borrow_needs(
+    root: Path, creates: int
+) -> None:
+    """QA Q3 / review MINOR-1 on #3547: creates get a lane of their own.
+
+    On the shared four workers, four held first turns left a ``net_broker`` queued
+    behind them until its borrower's 8 s deadline passed (``owner_offline``). Here
+    every create is held for the whole test, and the broker must still RUN at once
+    on a shared worker. Every create must also answer exactly once: those on a
+    create worker with "may still complete", those the cap held past their
+    deadline with "never started" — a receipt either way, never silence.
+    """
+    server = _unstarted(root)
+    release = threading.Event()
+    sent: list[dict[str, Any]] = []
+    sent_lock = threading.Lock()
+    broker_ran = threading.Event()
+    threads: dict[int, str] = {}
+
+    class _Link:
+        link_id = "l_fake"
+
+        def send(self, frame: dict[str, Any]) -> bool:
+            with sent_lock:
+                sent.append(frame)
+            return True
+
+    def held_create(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        threads[int(frame["req"])] = threading.current_thread().name
+        release.wait(20)
+        return {"late": True}
+
+    def broker(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        broker_ran.set()
+        return {"granted": True}
+
+    create_deadline_s = 1.5
+    try:
+        for req in range(1, creates + 1):
+            assert (
+                server._dispatch_slow(  # noqa: SLF001
+                    _Link(),  # type: ignore[arg-type]
+                    {"req": req},
+                    held_create,
+                    types.Granted(action="net_session_create"),
+                    create_deadline_s,
+                )
+                is None
+            )
+        time.sleep(0.2)  # every create worker is now inside its handler
+        began = time.monotonic()
+        assert (
+            server._dispatch_slow(  # noqa: SLF001
+                _Link(),  # type: ignore[arg-type]
+                {"req": 99},
+                broker,
+                types.Granted(action="net_broker"),
+                30.0,
+            )
+            is None
+        )
+        assert broker_ran.wait(5.0), "the borrow queued behind the creates"
+        latency = time.monotonic() - began
+        print(f"\nborrow ran {latency:.3f} s into a burst of {creates} held creates")  # evidence
+        assert latency < 1.0, latency
+        # Each create's ONE answer arrives by its deadline (plus timer slack).
+        deadline = time.monotonic() + create_deadline_s + 5.0
+        while time.monotonic() < deadline:
+            with sent_lock:
+                answered = {f["req"] for f in sent if f.get("req") != 99}
+            if len(answered) == creates:
+                break
+            time.sleep(0.05)
+        with sent_lock:
+            replies = [f for f in sent if f.get("req") != 99]
+        assert sorted(f["req"] for f in replies) == list(range(1, creates + 1)), replies
+        running = [f for f in replies if "may still complete" in f["message"]]
+        never = [f for f in replies if "it never started" in f["message"]]
+        assert len(running) == min(creates, relay.SESSION_CREATE_WORKERS), replies
+        assert len(running) + len(never) == creates, replies
+        assert all(name.startswith("mesh-slow-create") for name in threads.values()), threads
+    finally:
+        release.set()
+        server.stop()
+    # The late handler answers are dropped, not sent as second replies.
+    time.sleep(0.3)
+    with sent_lock:
+        per_req = [f["req"] for f in sent]
+    assert len(per_req) == len(set(per_req)), sent
+
+
 # ---------------------------------------------------------------------------
 # A handler may not ask the peer it is answering, over the same link
 # ---------------------------------------------------------------------------

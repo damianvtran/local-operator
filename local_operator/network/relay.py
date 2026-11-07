@@ -398,6 +398,35 @@ ACCEPT_WAKE_CONNECT_S = 0.25
 #: protects the host.
 SLOW_OP_WORKERS = 4
 
+#: Workers for ``net_session_create``, in a pool of ITS OWN rather than the four
+#: above (#3547 follow-up: QA Q3 / agent review MINOR-1).
+#:
+#: WHY A SEPARATE LANE. A create holds its worker for its whole first-turn wait
+#: (up to ``FIRST_TURN_WAIT_S``, 45 s), so on the shared pool a burst of four
+#: creates pinned every worker, and a credential borrow (``net_broker``) arriving
+#: then queued past its borrower's 8 s client deadline and surfaced as
+#: ``owner_offline`` — while sessions were being offloaded, the moment a borrow
+#: matters most. A cap enforced INSIDE a shared worker (a semaphore taken in the
+#: handler) cannot fix that: the waiting create already holds the worker it is
+#: starving others of. A cap enforced BEFORE submission needs a hand-rolled
+#: deferred-submit queue beside the executor. A second lazily built executor is
+#: the pattern this module already has (``_slow_executor``), and its own queue IS
+#: the cap: creates past it wait without taking anything the broker, a move or a
+#: sync needs.
+#:
+#: WHY ``SLOW_OP_WORKERS - 1``. It keeps the create share where the review set
+#: it (never all of a pool's worth at once), and three parallel first-turn waits
+#: still answer a burst inside the requester's hop: a create queued behind them
+#: gets the remainder of its OWN deadline, which ``_dispatch_slow`` starts at
+#: the frame's arrival, so the wait for this cap is counted (``first_turn_wait_s``)
+#: and a create the cap held past its deadline hears the lane's overdue sentence
+#: ("it never started, so nothing was changed") — a receipt, never silence.
+#: These threads mostly wait on a runtime's socket, so they cost the host little.
+SESSION_CREATE_WORKERS = SLOW_OP_WORKERS - 1
+
+#: The ops that run on the create lane above instead of the shared slow pool.
+SESSION_CREATE_LANE_OPS = frozenset({"net_session_create"})
+
 #: Slow ops admitted at once — running plus queued for a worker. Past this a slow op
 #: is refused IMMEDIATELY with a sentence rather than queued without bound: an
 #: unbounded queue would turn a peer that retries into a memory leak here, and a
@@ -4173,6 +4202,11 @@ FIRST_TURN_REPLY_MARGIN_S = 5.0
 #: ("did not finish within …") could win the race against the real receipt.
 FIRST_TURN_FINISH_SLACK_S = 2.0
 
+#: The shortest first-turn wait: long enough to READ the owner's reply rather
+#: than send blind (see :func:`first_turn_wait_s`), and below the finish slack so
+#: it still ends before the create's deadline when the slack is all that is left.
+FIRST_TURN_MIN_WAIT_S = 1.0
+
 
 def create_op_deadline_s(op_wait_s: float = wire.OP_WAIT_S) -> float:
     """The owner-side deadline of ``net_session_create`` on the slow-op lane.
@@ -4192,11 +4226,20 @@ def first_turn_wait_s(due: float, op_wait_s: float, now: float) -> float:
     reply past the requester's hop. At most :data:`FIRST_TURN_WAIT_S`; floored at
     ``op_wait_s`` (the budget this hop had before the first-turn wait existed)
     only while that floor still fits — the floor is ``min(op_wait_s, remaining)``,
-    so the reply can never be scheduled after ``due``. Nothing left answers at
-    once (``0``): an honest "still running" beats a reply nobody is waiting for.
+    so the reply can never be scheduled after ``due``.
+
+    NEVER BELOW :data:`FIRST_TURN_MIN_WAIT_S` (#3547 review MINOR-2): with nothing
+    left the wait used to be ``0``, and ``OwnerDial.exchange(timeout_s=0)`` sends
+    the prompt and returns without reading a frame — so the receipt said
+    ``admitted`` and "still running … after 0 s" for an append nobody confirmed.
+    One second reads the owner's reply (a fast turn's settle, a refusal, or a
+    closed socket the ``eof`` check reports), so ``waited_s`` names a wait that
+    really happened. It fits inside :data:`FIRST_TURN_FINISH_SLACK_S`; past even
+    that, the lane's own overdue sentence answers first, which is still a receipt.
     """
     remaining = max(0.0, due - FIRST_TURN_FINISH_SLACK_S - now)
-    return max(min(FIRST_TURN_WAIT_S, remaining), min(op_wait_s, remaining))
+    wait = max(min(FIRST_TURN_WAIT_S, remaining), min(op_wait_s, remaining))
+    return max(FIRST_TURN_MIN_WAIT_S, wait)
 
 
 def engage_hop_bound_s(op_wait_s: float = wire.OP_WAIT_S) -> float:
@@ -5430,6 +5473,9 @@ class RelayServer:
         self._slow_lock = threading.Lock()
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
+        #: The create lane (``SESSION_CREATE_WORKERS``), under the same lock.
+        self._create_pool: ThreadPoolExecutor | None = None
+        self._create_slots: threading.BoundedSemaphore | None = None
         #: THE DEFERRED SOURCE-AVAILABILITY LANE (complete peer-source
         #: contract): one coalesced wait per session per wave, admitted up to
         #: ``SOURCE_AVAILABILITY_MAX_PENDING``, every answer sent from the page
@@ -5786,8 +5832,9 @@ class RelayServer:
         # the link, and a move that starts during shutdown is the worst time for
         # one. A handler already running keeps its worker until it returns.
         with self._slow_lock:
-            if self._slow_pool is not None:
-                self._slow_pool.shutdown(wait=False, cancel_futures=True)
+            for pool in (self._slow_pool, self._create_pool):
+                if pool is not None:
+                    pool.shutdown(wait=False, cancel_futures=True)
         # THE PAGE LOOP STOPS WITH THE RELAY, AND IS CLOSED BY ITS OWN THREAD.
         # ``loop.stop`` only ends ``run_forever``: the loop's selector, its
         # self-pipe and its default executor stay open until ``loop.close()``, so a
@@ -7568,14 +7615,28 @@ class RelayServer:
 
     # -- slow ops (build plan §0 finding 4) ---------------------------------
 
-    def _slow_executor(self) -> tuple[ThreadPoolExecutor, threading.BoundedSemaphore]:
-        """The worker pool and its admission bound, built on first use.
+    def _slow_executor(self, op: str = "") -> tuple[ThreadPoolExecutor, threading.BoundedSemaphore]:
+        """The worker pool and its admission bound for ``op``, built on first use.
 
         LAZY on purpose: most relays never serve a slow op, and the test suite
         constructs hundreds of servers that never start — four idle threads each
         would be paid for nothing.
+
+        A create gets its OWN pool and admission bound (``SESSION_CREATE_WORKERS``):
+        a burst of creates neither holds a shared worker nor uses up the shared
+        ``SLOW_OP_MAX_PENDING`` slots, so a borrow is never refused or queued
+        behind first-turn waits.
         """
         with self._slow_lock:
+            if op in SESSION_CREATE_LANE_OPS:
+                if self._create_pool is None:
+                    self._create_pool = ThreadPoolExecutor(
+                        max_workers=SESSION_CREATE_WORKERS,
+                        thread_name_prefix="mesh-slow-create",
+                    )
+                    self._create_slots = threading.BoundedSemaphore(SLOW_OP_MAX_PENDING)
+                assert self._create_slots is not None
+                return self._create_pool, self._create_slots
             if self._slow_pool is None:
                 self._slow_pool = ThreadPoolExecutor(
                     max_workers=SLOW_OP_WORKERS, thread_name_prefix="mesh-slow"
@@ -7607,7 +7668,7 @@ class RelayServer:
         """
         req = frame.get("req")
         op = granted.action
-        pool, slots = self._slow_executor()
+        pool, slots = self._slow_executor(op)
         if not slots.acquire(blocking=False):
             return wire.refusal_frame(
                 req,
