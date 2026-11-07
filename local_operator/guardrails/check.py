@@ -430,6 +430,10 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             continue
         if (
             ranked.risk is Risk.CRITICAL
+            # A session-state path handed to an unknown program: nothing was
+            # created there, so no citation can cover it — the context-free
+            # judge (or the operator) decides, as for an unresolved target.
+            or t.op == "touch"
             or t.path is None
             or t.opaque
             or t.unknown_cwd

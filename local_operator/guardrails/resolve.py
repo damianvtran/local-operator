@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from local_operator.tools.search_guard import (
@@ -941,13 +941,24 @@ class Resolution:
     #: Directories the command may create (see :class:`Creation`). Never used
     #: to rank THIS command; the loop records them after it runs.
     created: list[Creation] = field(default_factory=list)
-    #: EVERY path a non-read-only program was handed (operands, flag values,
-    #: ``key=value`` values) and every output redirection, whatever the
-    #: program. Not a list of destroyed paths: ``classify`` checks only whether
-    #: any lands in the guard's own evidence (``<state>/sessions/``,
-    #: ``<state>/guardrails/``) — a structural rule, so a writer this resolver
-    #: does not model (``rsync``, ``ln``, ``tar -C``, ``unzip -d``, ``ditto``…)
-    #: is still caught (review R2-MAJOR-1).
+    #: Paths checked against the guard's own evidence (``<state>/sessions/``,
+    #: ``<state>/guardrails/``) by ``classify._touch_reason``. Two shapes, by
+    #: ``Target.op``:
+    #:
+    #: * ``"write"`` — WRITE-SHAPED: every output redirection and the
+    #:   destination of a known writer (``ln``, ``rsync``, ``ditto``, ``cp``,
+    #:   ``install``, ``tar -x -C``, ``unzip -d``, ``touch``, ``truncate``,
+    #:   ``dd of=``, ``perl -i``, ``sqlite3`` without ``-readonly``). With the
+    #:   resolver's own destroyed/created targets these rank CRITICAL: they
+    #:   are how a forged child session or transcript gets planted (review
+    #:   R2-MAJOR-1, QA Q6).
+    #: * ``"touch"`` — a path-shaped word handed to a program this resolver
+    #:   neither models nor knows to be read-only (``python3 ana.py <path>``).
+    #:   What it does with the path is unknowable, so it ranks HIGH and the
+    #:   context-free judge (or the operator) can lift it — CRITICAL there
+    #:   refused routine transcript analysis with no way through (R3-MAJOR-2).
+    #:
+    #: Sources (``cp``/``rsync``/``zip``/``tar -c`` inputs) are not touches.
     touched: list[Target] = field(default_factory=list)
 
 
@@ -1509,7 +1520,7 @@ class _Walker:
                 for exp in expand_all(raw, st.env, st.home):
                     if exp.text.startswith("/dev/"):
                         continue
-                    self.result.touched.append(_target(exp, "append", op, st))
+                    self.result.touched.append(_target(exp, "write", op, st))
                     if op in (">", ">|", ">>"):
                         self._add(exp, "append" if op == ">>" else "overwrite", op)
             elif op == "<<<":
@@ -1563,7 +1574,10 @@ class _Walker:
             return
         name = os.path.basename(words[0].text)
         args = words[1:]
-        if not read_only_argv(name, [w.text for w in args]):
+        # An inline assignment of a pager/git variable can run a program even
+        # under a read-only subcommand (``GIT_PAGER=sh git log``).
+        assigned = [a.split("=", 1)[0] for a in raw_assigns]
+        if not read_only_argv(name, [w.text for w in args], assigned=assigned):
             self._touch(name, args)
         if name in _SHELL_C_WORDS:
             self._shell(
@@ -1653,7 +1667,8 @@ class _Walker:
             # ``sqlite3 FILE [SQL]`` writes FILE whatever the SQL says; the
             # guard's ledger is a sqlite file (R1-MAJOR-1).
             operands, _ = _operands(args, _SQLITE_VALUE_FLAGS)
-            if operands:
+            # ``-readonly`` opens the file read-only (R3-MAJOR-2 false positive).
+            if operands and not any(w.text == "-readonly" for w in args):
                 self._add(operands[0], "append", name)
             return
         if name in ("sed", "gsed") and _in_place_edit(name, args):
@@ -2068,21 +2083,29 @@ class _Walker:
         self._add(root, "clean", "git clean")
 
     def _touch(self, name: str, args: list[Expanded]) -> None:
-        """Record every path-shaped argument for the evidence check (``touched``)."""
+        """Record write destinations and unknown-program paths (``touched``)."""
         st = self.state
+        dests = _write_destinations(name, args, st.home)
+        if dests is not None:
+            for w in dests:
+                if w.text and not w.vanished:
+                    self.result.touched.append(_target(w, "write", name, st))
+            return
+        if name in _MODELLED_WRITERS:
+            # Its destroyed/created paths are the resolver's own targets and
+            # creations, which ``classify`` checks as write-shaped; its other
+            # operands are sources or data.
+            return
         for w in args:
             text = w.text
-            values = [w]
             if text.startswith("-") and "=" not in text:
                 continue  # a bare flag; its value, if any, is the next word
             if "=" in text and not w.opaque:
-                value = _tilde_value(text.split("=", 1)[1], st.home)
-                values.append(Expanded(text=value, empty=w.empty))
-                if text.startswith("-"):
-                    values = values[1:]
-            for value in values:
-                if value.text and not value.vanished:
-                    self.result.touched.append(_target(value, "append", name, st))
+                w = Expanded(text=_tilde_value(text.split("=", 1)[1], st.home), empty=w.empty)
+            # Only words that LOOK like paths: a bare ``commit`` or ``update
+            # notes`` resolved against a cwd under ``sessions/`` is not one.
+            if w.text and not w.vanished and (w.opaque or _path_shaped(w.text)):
+                self.result.touched.append(_target(w, "touch", name, st))
 
     # -- creation (provenance ledger) ------------------------------------------
     def _literal_dir(self, exp: Expanded, base: str | None = None) -> str | None:
@@ -2301,13 +2324,34 @@ READ_ONLY_PROGRAMS = frozenset(
         "!",
     }
 )
-_READ_ONLY_GIT = frozenset({"log", "status", "show", "diff"})
+_READ_ONLY_GIT = frozenset({"log", "status", "show", "diff", "rev-parse", "ls-files"})
+#: Git words that make even a read-only subcommand write a file or run a
+#: program (review R3-MAJOR-1: ``git log --output=<file>`` wrote the lineage
+#: registry at LOW). ``-c``/``--config-env`` can set ``core.pager`` and
+#: friends; ``-p``/``--paginate``/``--pager`` start the pager.
+_GIT_UNSAFE = (
+    "--output",
+    "-o",
+    "-c",
+    "--config-env",
+    "--ext-diff",
+    "--textconv",
+    "--exec-path",
+    "--git-dir",
+    "--work-tree",
+    "--pager",
+    "--paginate",
+    "-p",
+    "--no-index",
+)
+#: Variables that make git (or its pager) run something else.
+_GIT_UNSAFE_ENV_RE = re.compile(r"^(GIT_|PAGER$|LESS|EDITOR$|VISUAL$)")
 _FIND_WRITES = frozenset(
     {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
 )
 
 
-def read_only_argv(name: str, argv: list[str]) -> bool:
+def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) -> bool:
     """Is ``name argv…`` a provably read-only invocation? Conservative: unknown → no."""
     if name in READ_ONLY_PROGRAMS:
         return True
@@ -2316,11 +2360,191 @@ def read_only_argv(name: str, argv: list[str]) -> bool:
     if name == "sqlite3":
         return "-readonly" in argv
     if name == "git":
+        if any(_GIT_UNSAFE_ENV_RE.match(a) for a in assigned):
+            return False
         rest = list(argv)
         while rest and rest[0].startswith("-"):
-            rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
-        return bool(rest) and rest[0] in _READ_ONLY_GIT
+            if rest[0] != "-C" and rest[0].split("=", 1)[0] in _GIT_UNSAFE:
+                return False
+            rest = rest[2:] if rest[0] == "-C" else rest[1:]
+        if not rest or rest[0] not in _READ_ONLY_GIT:
+            return False
+        sub, tail = rest[0], rest[1:]
+        for a in tail:
+            if a == "--":
+                break
+            key = a.split("=", 1)[0]
+            if key in _GIT_UNSAFE and not (key == "-p" and sub in ("log", "show", "diff")):
+                return False
+            # ``-o<file>`` / ``--output<…>`` glued forms.
+            if a.startswith("--output") or (a.startswith("-o") and sub in ("log", "show", "diff")):
+                return False
+        return True
     return False
+
+
+#: Programs whose write destinations the resolver already models as targets
+#: or creations (``rm`` operands, ``mv`` sources and destination, ``tee``,
+#: ``sed -i``, ``mkdir``, ``git clone``/``worktree add``…). ``classify`` checks
+#: those as write-shaped; their other operands are not touches.
+_MODELLED_WRITERS = frozenset(
+    {
+        *DELETE_PROGRAMS,
+        "mv",
+        "gmv",
+        "tee",
+        "sed",
+        "gsed",
+        "mkdir",
+        "gmkdir",
+        "mktemp",
+        "zip",
+        "chmod",
+        "chown",
+        "chgrp",
+        "xattr",
+    }
+)
+_LN_VALUE_FLAGS = frozenset({"-t", "--target-directory", "-S", "--suffix"})
+_TAR_VALUE_FLAGS = frozenset({"-f", "--file", "-C", "--directory", "-T", "--files-from", "-X"})
+
+
+def _flag_value(args: list[Expanded], short: str, long: str) -> list[Expanded]:
+    """Values of ``-X v``, ``-Xv``, ``--long v`` and ``--long=v`` in ``args``."""
+    out: list[Expanded] = []
+    for k, w in enumerate(args):
+        t = w.text
+        if t in (short, long) and k + 1 < len(args):
+            out.append(args[k + 1])
+        elif t.startswith(long + "="):
+            out.append(Expanded(text=t.split("=", 1)[1], empty=w.empty))
+        elif short and t.startswith(short) and len(t) > len(short) and not t.startswith("--"):
+            out.append(Expanded(text=t[len(short) :], empty=w.empty))
+    return out
+
+
+def _write_destinations(name: str, args: list[Expanded], home: str) -> list[Expanded] | None:
+    """The paths a known writer WRITES, or ``None`` when ``name`` is not one.
+
+    Destinations only — a copy's sources and an archive's inputs are reads.
+    The list is the set of programs that plant a directory or file without a
+    model elsewhere in this resolver (review R2-MAJOR-1's planters).
+    """
+    if name in ("ln", "gln", "ditto", "rsync", "cp", "gcp", "install", "ginstall"):
+        flags = {
+            "ln": _LN_VALUE_FLAGS,
+            "gln": _LN_VALUE_FLAGS,
+            "rsync": _RSYNC_VALUE_FLAGS,
+        }.get(name, _MV_VALUE_FLAGS)
+        operands, opts = _operands(args, flags)
+        target_dir = _flag_value(args, "-t", "--target-directory")
+        if target_dir:
+            return target_dir
+        if name in ("install", "ginstall") and _has_short(opts, "d"):
+            return operands
+        if name in ("ln", "gln") and len(operands) == 1:
+            # ``ln -s TARGET`` links into the cwd under the target's basename.
+            return [Expanded(text=os.path.basename(operands[0].text.rstrip("/")) or ".")]
+        return operands[-1:] if len(operands) >= 2 else []
+    if name in ("tar", "gtar", "bsdtar"):
+        if _tar_mode(args) != "extract":
+            return []  # create/append/list: ``-C`` names where INPUTS are read
+        return _flag_value(args, "-C", "--directory") or [Expanded(text=".")]
+    if name == "unzip":
+        return _flag_value(args, "-d", "--dir") or [Expanded(text=".")]
+    if name in ("touch", "gtouch", "truncate", "gtruncate"):
+        values = {"-r", "--reference", "-d", "--date", "-t", "-s", "--size", "-A"}
+        out: list[Expanded] = []
+        skip = False
+        for w in args:
+            if skip:
+                skip = False
+                continue
+            if w.text in values:
+                skip = True
+                continue
+            if not w.text.startswith("-"):
+                out.append(w)
+        return out
+    if name == "dd":
+        return [
+            Expanded(text=_tilde_value(w.text[3:], home), empty=w.empty)
+            for w in args
+            if w.text.startswith("of=")
+        ]
+    if name == "perl":
+        if not any(_PERL_INPLACE_RE.match(w.text) for w in args):
+            return []
+        out = []
+        script_seen = False
+        skip = False
+        for w in args:
+            if skip:
+                skip = False
+                continue
+            if w.text.startswith("-"):
+                if re.match(r"^-[a-zA-Z]*[eE]$", w.text):
+                    skip = script_seen = True  # the next word is the program text
+                continue
+            if not script_seen:
+                script_seen = True  # the first operand is the script file
+                continue
+            out.append(w)
+        return out
+    if name == "sqlite3":
+        operands, _ = _operands(args, _SQLITE_VALUE_FLAGS)
+        return operands[:1]
+    if name == "git":
+        # ``git log/show/diff --output=<file>`` writes the file (R3-MAJOR-1:
+        # it forged the lineage registry at LOW). Clone/worktree destinations
+        # are the resolver's creations, checked as write-shaped in classify.
+        return _flag_value(args, "", "--output") + [
+            Expanded(text=w.text[2:], empty=w.empty)
+            for w in args
+            if w.text.startswith("-o") and len(w.text) > 2 and not w.text.startswith("--")
+        ]
+    return None
+
+
+#: ``-i`` / ``-pi`` / ``-i.bak``: in-place editing; only switch letters may
+#: precede it in a cluster, so ``-Mstrict`` is not read as ``-i``.
+_PERL_INPLACE_RE = re.compile(r"^-[lnpaesw0]*i")
+
+
+def _tar_mode(args: list[Expanded]) -> str:
+    """``extract`` / ``create`` / ``list`` for a tar argv (unknown → ``extract``,
+    the writing reading, so a planter is never missed)."""
+    skip = False
+    for k, w in enumerate(args):
+        t = w.text
+        if skip:
+            skip = False
+            continue
+        if t in ("--create", "--append", "--update"):
+            return "create"
+        if t == "--list":
+            return "list"
+        if t in ("--extract", "--get"):
+            return "extract"
+        if t in _TAR_VALUE_FLAGS:
+            skip = True  # ``-C DIR`` / ``-f FILE``: the value is not a mode
+            continue
+        # A short cluster (``-czf``), or the dashless first word (``tar xf``).
+        if (t.startswith("-") and not t.startswith("--")) or (k == 0 and t.isalpha()):
+            letters = t.lstrip("-")
+            # Letters after ``f``/``C``/``T``/``X`` in a cluster are its value.
+            letters = re.split(r"[fCTX]", letters, maxsplit=1)[0]
+            if "x" in letters:
+                return "extract"
+            if any(c in letters for c in "cru"):
+                return "create"
+            if "t" in letters:
+                return "list"
+    return "extract"
+
+
+def _path_shaped(text: str) -> bool:
+    return "/" in text or text.startswith((".", "~", "$"))
 
 
 def resolve_command(

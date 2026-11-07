@@ -33,7 +33,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from local_operator.guardrails.resolve import Target, resolve_command
+from local_operator.guardrails.resolve import Creation, Target, resolve_command
 
 _STATE_DIRNAME = ".local-operator"
 _CONFIG_FILE = "config.yml"
@@ -299,12 +299,13 @@ def _evidence_reason(path: str, target: Target, prot: _Protected) -> str | None:
 
 
 def _touch_reason(target: Target, prot: _Protected) -> str | None:
-    """Does a path handed to a non-read-only program land in the guard's evidence?
+    """Does ``target`` land in the guard's evidence?
 
-    The structural rule (review R2-MAJOR-1, QA Q6): anything at or under
-    ``<state>/sessions/`` outside this session's own scratchpad, or under
-    ``<state>/guardrails/``, whatever the program — a deny-list of writers
-    would keep missing ``rsync``/``ln``/``tar -C``/``unzip -d``/``ditto``. An
+    Evidence = anything at or under ``<state>/sessions/`` outside this
+    session's own scratchpad, or under ``<state>/guardrails/`` (review
+    R2-MAJOR-1, QA Q6). The CALLER decides the rank by the touch's shape:
+    write-shaped → CRITICAL, an unknown program handed the path → HIGH
+    (R3-MAJOR-2; see ``resolve.Resolution.touched``). An
     unresolvable part keeps the literal directory above it, so
     ``sessions/$ID`` lands on ``sessions/`` and still counts.
     """
@@ -620,14 +621,33 @@ def classify_targets(
     scratchpad: str | None,
     session_id: str = "",
     touched: Sequence[Target] = (),
+    created: Sequence[Creation] = (),
 ) -> Verdict:
-    prot = _protected(env, scratchpad, session_id) if (targets or touched) else None
+    prot = _protected(env, scratchpad, session_id) if (targets or touched or created) else None
     evidence_hits: list[RankedTarget] = []
     if prot is not None:
-        for t in touched:
+        # Write-shaped: redirections and known writers' destinations
+        # (``touched`` op ``write``), plus everything the resolver itself
+        # destroys or creates. Those plant or forge evidence → CRITICAL. A
+        # path merely handed to an unknown program (op ``touch``) is HIGH so
+        # the judge or the operator can lift it (review R3-MAJOR-2).
+        writes = (
+            [t for t in touched if t.op != "touch"]
+            + list(targets)
+            + [Target(path=c.path, op="write", program=c.kind) for c in created]
+        )
+        for t in writes:
             reason = _touch_reason(t, prot)
             if reason is not None:
                 evidence_hits.append(RankedTarget(t, Risk.CRITICAL, reason))
+        for t in touched:
+            if t.op != "touch":
+                continue
+            reason = _touch_reason(t, prot)
+            if reason is not None:
+                evidence_hits.append(
+                    RankedTarget(t, Risk.HIGH, f"{reason}, handed to {t.program or 'a program'}")
+                )
     if not targets and not opaque_reasons and not evidence_hits:
         return Verdict(Risk.LOW)
     prot = prot or _protected(env, scratchpad, session_id)
@@ -638,7 +658,7 @@ def classify_targets(
     # One row per path: a redirection is both a destroyed target and a
     # touched path, and the refusal should not name it twice.
     seen = {(r.target.path, r.risk) for r in ranked}
-    ranked.extend(h for h in evidence_hits if (h.target.path, Risk.CRITICAL) not in seen)
+    ranked.extend(h for h in evidence_hits if (h.target.path, h.risk) not in seen)
     risk = max((r.risk for r in ranked), default=Risk.LOW)
     if opaque_reasons:
         risk = max(risk, Risk.HIGH)
@@ -664,4 +684,5 @@ def classify_bash(
         scratchpad=scratchpad,
         session_id=session_id,
         touched=resolution.touched,
+        created=resolution.created,
     )

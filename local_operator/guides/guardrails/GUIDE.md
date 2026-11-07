@@ -82,13 +82,20 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   a directory planted later is born after it. That is a narrowing, not a seal —
   macOS `utimes` can move a birth time backwards. Symlinked session directories,
   transcripts and `origin.json` files are never read.
-  Any shell command that is not provably read-only (`ls`, `cat`, `head`, `grep`,
-  `find` without `-delete`/`-exec`, `stat`, `du`, `jq`, `sqlite3 -readonly`,
-  `git log/status/show/diff` …) and hands a path, flag value or redirection
-  (`>`, `>>`, `>|`, `&>`, `>&`) at or under `<config_dir>/sessions/` (outside
-  your own scratchpad) or `<config_dir>/guardrails/` is CRITICAL, whatever the
-  program (`rsync`, `ln`, `tar -C`, `unzip -d`, `ditto`, an interpreter given
-  the path). The `write`, `edit` and `browser` (screenshot/recording `path`)
+  Writes into `<config_dir>/sessions/` (outside your own scratchpad) or
+  `<config_dir>/guardrails/` are CRITICAL: every redirection (`>`, `>>`, `>|`,
+  `&>`, `>&`), the destination of a known writer (`cp`, `mv`, `rsync`, `ditto`,
+  `install`, `ln`, `tar -x -C`, `unzip -d`, `git clone`, `git worktree add`,
+  `git log/show/diff --output`, `mkdir`, `touch`, `truncate`, `dd of=`, `tee`,
+  `sed -i`, `perl -i`, `sqlite3` without `-readonly`) and any `rm`/`rmdir`/
+  `unlink` or `rsync --delete` there. Reading is not writing: sources of `cp`,
+  `rsync`, `zip` and `tar -c` are fine, as are `ls`, `cat`, `sed -n`, `grep`,
+  `find` (no `-delete`/`-exec`), `jq`, `sqlite3 -readonly` and
+  `git status/log/show/diff/rev-parse/ls-files` without `--output`, `-c`,
+  `--config-env`, `--ext-diff`, `--textconv`, `--git-dir`/`--work-tree`, a
+  pager flag or a `GIT_*`/`PAGER` assignment. A path there handed to any other
+  program (`python3 ana.py <transcript>`, `awk`, `sort`) ranks HIGH and goes
+  to the context-free judge, which can let a read through. The `write`, `edit` and `browser` (screenshot/recording `path`)
   tools refuse those files the same way. An interpreter that computes the path
   itself (`python -c`, `node -e`) is the documented ceiling, as for any
   interpreter delete. The judge must answer

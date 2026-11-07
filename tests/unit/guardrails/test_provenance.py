@@ -809,7 +809,6 @@ async def test_file_tools_elsewhere_are_unchanged(home: Path) -> None:
         f"rsync -a --delete ~/empty/ ~/.local-operator/sessions/{SID}/",
         "echo hi >| ~/.local-operator/guardrails/lineage.jsonl",
         "echo x &> ~/.local-operator/sessions/newid/origin.json",
-        "python3 rig.py --out=~/.local-operator/sessions/newid",
         "cd ~/.local-operator/sessions && mkdir newid",
         "find ~/.local-operator/sessions -name x -delete",
     ],
@@ -907,3 +906,113 @@ def test_nested_repo_in_allowlisted_ignored_dir_is_dirty(home: Path, repo: Path)
 )
 def test_more_declines_are_never_consent(answer: str) -> None:
     assert prov._DECLINE_RE.search(answer)
+
+
+# -- round 3 ---------------------------------------------------------------------------
+
+#: QA round 3's planter list (rows 6.1-6.13): every one stays CRITICAL.
+_PLANTERS = [
+    "rsync -a ~/fake ~/.local-operator/sessions/",
+    f"rsync ~/fake/origin.json ~/.local-operator/sessions/{CHILD}/transcript.jsonl",
+    f"rsync -a --delete ~/fake/ ~/.local-operator/sessions/{CHILD}/",
+    "ln -s ~/fake ~/.local-operator/sessions/qa3plant0001",
+    f"ln -sf ~/forged.jsonl ~/.local-operator/sessions/{CHILD}/transcript.jsonl",
+    f"ln -sf /nonexistent ~/.local-operator/sessions/{CHILD}/origin.json",
+    "tar -xf ~/x.tar -C ~/.local-operator/sessions",
+    "tar -xf ~/x.tar --directory=$HOME/.local-operator/sessions",
+    "unzip -q ~/x.zip -d ~/.local-operator/sessions/qa3plant0002",
+    "git clone -q ~/srcrepo ~/.local-operator/sessions/qa3plant0003",
+    "git -C ~/.local-operator/sessions clone -q ~/srcrepo qa3plant0004",
+    "mkdir ~/.local-operator/sessions/qa3plant0005",
+    "mkdir -p ~/.local-operator/sessions/qa3plant0006/x",
+    "cd ~/.local-operator/sessions && mkdir x",
+    "(cd ~/.local-operator/sessions; mkdir x)",
+    "echo id | xargs -I{} mkdir ~/.local-operator/sessions/{}",
+    "install -d ~/.local-operator/sessions/qa3plant0007",
+    f"echo x >| ~/.local-operator/sessions/{CHILD}/transcript.jsonl",
+    f"echo x &> ~/.local-operator/sessions/{CHILD}/origin.json",
+    "echo x >& ~/.local-operator/guardrails/lineage.jsonl",
+    f"ls > ~/.local-operator/sessions/{CHILD}/transcript.jsonl",
+    "ditto ~/fake ~/.local-operator/sessions/qa3plant0008",
+    "cp -R ~/fake ~/.local-operator/sessions/qa3plant0009",
+    f"touch ~/.local-operator/sessions/{CHILD}/origin.json",
+    f'cp ~/fake/x "$HOME/.local-operator/sessions/{CHILD}/origin.json"',
+    # R3-MAJOR-1: git's own file writers.
+    "git log --output=$HOME/.local-operator/guardrails/lineage.jsonl",
+    "git diff --output ~/.local-operator/guardrails/lineage.jsonl",
+    "git show -o$HOME/.local-operator/guardrails/lineage.jsonl",
+    "sqlite3 ~/.local-operator/guardrails/created.sqlite 'select count(*) from created'",
+    f"perl -pi -e 's/a/b/' ~/.local-operator/sessions/{CHILD}/transcript.jsonl",
+    "dd if=/dev/zero of=~/.local-operator/guardrails/created.sqlite count=1",
+    "truncate -s0 ~/.local-operator/guardrails/lineage.jsonl",
+]
+
+
+@pytest.mark.parametrize("command", _PLANTERS)
+def test_write_shaped_planters_stay_critical(home: Path, command: str) -> None:
+    assert _verdict(home, command).risk is Risk.CRITICAL, command
+
+
+#: R3-MAJOR-2's false positives: reads of session state rank LOW (modelled or
+#: read-only) or HIGH (an unknown program handed the path — liftable).
+_READS = [
+    (f"python3 ana.py ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
+    (f"python3 ana.py ~/.local-operator/sessions/{SID}/transcript.jsonl", Risk.HIGH),
+    (f"sed -n 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.LOW),
+    (f"awk 'NR==1' ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
+    (f"sort ~/.local-operator/sessions/{CHILD}/transcript.jsonl | uniq -c", Risk.HIGH),
+    (f"xxd ~/.local-operator/sessions/{CHILD}/transcript.jsonl | head", Risk.HIGH),
+    (f"shasum ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
+    (f"python3 -m json.tool ~/.local-operator/sessions/{CHILD}/origin.json", Risk.HIGH),
+    (f"cp ~/.local-operator/sessions/{CHILD}/transcript.jsonl ~/work/t.jsonl", Risk.LOW),
+    (f"rsync -a ~/.local-operator/sessions/{CHILD}/ ~/work/bk/", Risk.LOW),
+    (f"zip -r ~/work/b.zip ~/.local-operator/sessions/{CHILD}", Risk.LOW),
+    (f"tar -czf ~/work/b.tgz ~/.local-operator/sessions/{CHILD}", Risk.LOW),
+    (f"tar -C ~/.local-operator/sessions -czf ~/work/b2.tgz {CHILD}", Risk.LOW),
+    (f"python3 ~/.local-operator/sessions/{OTHER}/scratchpad/rig.py", Risk.HIGH),
+    (f"cd ~/.local-operator/sessions/{OTHER}/scratchpad && git commit -m 'update notes'", Risk.LOW),
+    (f"cd ~/.local-operator/sessions/{CHILD} && npm test", Risk.LOW),
+    (f"git -C ~/.local-operator/sessions/{CHILD} status", Risk.LOW),
+    ("sqlite3 -readonly ~/.local-operator/guardrails/created.sqlite 'select 1'", Risk.LOW),
+    ("cat ~/.local-operator/guardrails/lineage.jsonl", Risk.LOW),
+    ("python3 rig.py --out=~/.local-operator/sessions/newid", Risk.HIGH),
+]
+
+
+@pytest.mark.parametrize(("command", "risk"), _READS)
+def test_reads_of_session_state_are_not_critical(home: Path, command: str, risk: Risk) -> None:
+    (home / "work").mkdir(exist_ok=True)
+    assert _verdict(home, command).risk is risk, command
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["log", "--output=x"],
+        ["-c", "core.pager=sh", "log"],
+        ["--config-env=core.pager=X", "log"],
+        ["diff", "--ext-diff"],
+        ["log", "--textconv"],
+        ["--git-dir=/x", "log"],
+        ["-p", "log"],
+        ["commit", "-m", "x"],
+    ],
+)
+def test_git_read_only_is_exact(argv: list[str]) -> None:
+    from local_operator.guardrails.resolve import read_only_argv
+
+    assert not read_only_argv("git", argv)
+    assert read_only_argv("git", ["log", "-p", "-1"])
+    assert not read_only_argv("git", ["log"], assigned=["GIT_PAGER"])
+
+
+@pytest.mark.asyncio
+async def test_unknown_program_touch_goes_to_the_context_free_judge(home: Path) -> None:
+    """HIGH from an unknown program handed a session path is liftable: no
+    citation can cover it, so the context-free judge's plain ALLOW decides."""
+    ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=SID)
+    command = f"python3 ana.py ~/.local-operator/sessions/{CHILD}/transcript.jsonl"
+    outcome = await check_tool_call(
+        "bash", {"command": command}, ctx, judge=_Judge("ALLOW"), settings=GuardSettings()
+    )
+    assert outcome is not None and not outcome.blocked
