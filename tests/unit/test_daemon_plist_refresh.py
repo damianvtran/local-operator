@@ -1293,6 +1293,95 @@ def test_a_parked_tunnel_is_left_stopped(
     ], calls
 
 
+def _replaced_pin_park() -> None:
+    """The 2026-11-06 v0.101.6 state: parked on a pin whose row a same-account
+    sign-in replaced while no heal ran, so the connector's start-time reconcile
+    WOULD heal it — if anything started the connector."""
+    from contextlib import closing
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.tunnels import api
+
+    with closing(AuthStore()) as store:
+        gone = store.upsert_credential(
+            "radient", {"type": "oauth", "account_id": "acct-a", "access": "x", "refresh": "y"}
+        ).id
+        store._conn.execute("DELETE FROM auth_credentials WHERE id = ?", (gone,))
+        store._conn.commit()
+        store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "acct-a",
+                "api_endpoint": api.TUNNEL_HUB,
+                "access": "a",
+                "refresh": "r",
+            },
+        )
+    tunnel_config.save(
+        {"stopped": False, "credential_id": gone, "record": {"owner_account_id": "acct-a"}}
+    )
+    tunnel_state.mark_parked(reason="login_required", detail="old build's sentence")
+
+
+def test_a_park_the_start_time_heal_resolves_is_started_by_the_refresh(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE UPDATE PATH for the start-time heal (2026-11-06, v0.101.6).
+
+    A parked connector exited 0, launchd will not retry it, and the gate used
+    to refuse every park — so the update that shipped the heal never ran it and
+    the tunnel stayed parked on the old build's sentence. A ``login_required``
+    park whose pin heal is already provable is no longer waiting on a person:
+    the refresh starts it once, and the connector heals itself in-process.
+    """
+    monkeypatch.delenv("LOP_TUNNEL_NO_REARM", raising=False)
+    calls: list[tuple[str, ...]] = []
+    module, _path, label = _stopped_tunnel(targets, tmp_path, monkeypatch, calls)
+    _replaced_pin_park()
+
+    outcome = module.refresh_plist_if_stale()
+
+    domain = launchd.job_domain()
+    assert calls == [
+        ("print", f"{domain}/{label}"),
+        ("print", f"{domain}/{label}"),
+        ("kickstart", "-k", f"{domain}/{label}"),
+        ("print", f"{domain}/{label}"),
+    ], calls
+    assert outcome.summary() == (
+        "tunnel daemon: restarted after stopping silently — remote access should return"
+    ), outcome
+
+
+@pytest.mark.parametrize("why", ["no_rearm", "different_account", "not_login"])
+def test_a_park_the_heal_cannot_resolve_is_still_left_stopped(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    why: str,
+) -> None:
+    """Every guard holds: the re-arm opt-out, a proof that declines, another park."""
+    monkeypatch.delenv("LOP_TUNNEL_NO_REARM", raising=False)
+    calls: list[tuple[str, ...]] = []
+    module, _path, label = _stopped_tunnel(targets, tmp_path, monkeypatch, calls)
+    _replaced_pin_park()
+    if why == "no_rearm":
+        monkeypatch.setenv("LOP_TUNNEL_NO_REARM", "1")
+    elif why == "different_account":
+        value = tunnel_config.load()
+        tunnel_config.save({**value, "record": {"owner_account_id": "acct-b"}})
+    else:
+        tunnel_state.mark_parked(reason="local_prerequisite", detail="install cloudflared")
+
+    outcome = module.refresh_plist_if_stale()
+
+    assert outcome.kind == "left-stopped", outcome
+    assert "kickstart" not in [call[0] for call in calls], calls
+
+
 def test_a_deliberately_stopped_tunnel_is_left_stopped(
     targets: dict[str, Target],
     tmp_path: Path,

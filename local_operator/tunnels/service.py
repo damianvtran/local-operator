@@ -26,7 +26,7 @@ from local_operator.providers.auth_store import (
     CredentialInvalidError,
     RefreshUnconfirmedError,
 )
-from local_operator.tunnels import config, state
+from local_operator.tunnels import config, install, state
 from local_operator.tunnels.api import RadientTunnels
 from local_operator.tunnels.errors import (
     LocalPrerequisite,
@@ -469,6 +469,18 @@ async def run() -> int:
         # in use at all.
         state.clear()
         return 0
+    # START-TIME RECONCILE, before anything reads the pin (2026-11-06): a
+    # same-account sign-in that landed on a new row while no heal was running
+    # (an older build, or a login that never reached the hook) leaves this pin
+    # naming a gone or dead row, and the login hook will not run again without
+    # a person signing in once more. The proof declines for a live pin, so this
+    # is a no-op on every healthy start. When it re-points, carry on IN-PROCESS
+    # with the healed configuration: this process is the connector, and the
+    # park an older build left is withdrawn below once it serves.
+    if await asyncio.to_thread(install.heal_pin_at_start) is not None:
+        healed = config.load()
+        _announce(f"pin re-pointed at start to credential {healed.get('credential_id')}")
+        value = healed
     binary = cloudflared_binary(value.get("cloudflared_path"))
     # Bind before contacting the cloud or starting cloudflared: a conflicting
     # listener must never receive an enabled public route even momentarily.

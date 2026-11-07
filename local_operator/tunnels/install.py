@@ -597,7 +597,9 @@ def last_heal_receipt() -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _record_heal_receipt(*, old: int, new: int, tunnel_id: object, account_id: object) -> None:
+def _record_heal_receipt(
+    *, old: int, new: int, tunnel_id: object, account_id: object, trigger: str
+) -> None:
     """Write the re-bind receipt; never let an audit write fail the sign-in.
 
     Narrow ``OSError`` rather than a blanket except: an unwritable tunnel directory
@@ -610,6 +612,7 @@ def _record_heal_receipt(*, old: int, new: int, tunnel_id: object, account_id: o
         "new_credential_id": new,
         "tunnel_id": tunnel_id if isinstance(tunnel_id, str) else None,
         "account_id": account_id if isinstance(account_id, str) else None,
+        "trigger": trigger,
         "at": int(time.time()),
     }
     try:
@@ -638,6 +641,132 @@ def _park_heal_prerequisite(detail: str, credential_id: int) -> None:
         )
     except OSError:
         pass
+
+
+HEAL_TRIGGER_LOGIN = "login"
+HEAL_TRIGGER_CONNECTOR_START = "connector_start"
+"""The receipt's ``trigger``: which path re-pointed the pin.
+
+Two paths write the same receipt — a verified sign-in, and the connector's own
+start-time reconcile — and an operator (or a later incident read) asking "why
+did my tunnel move to credential N?" needs to tell "I signed in" from "the
+connector found the pin dead when it started" without correlating logs.
+"""
+
+
+def _repoint_pin(*, fresh_id: int | None, trigger: str) -> tuple[int, int] | None:
+    """Re-point ``config.json``'s pin at its PROVEN same-account successor.
+
+    THE FILE-SIDE HALF OF EVERY PIN HEAL, shared rather than copied: the login
+    hook (:func:`heal_pin_after_login`, ``fresh_id`` = the row the sign-in just
+    wrote — a membership check) and the connector's start-time reconcile
+    (:func:`heal_pin_at_start`, ``fresh_id=None`` — the single current
+    same-account row, so any number of replacements while no heal ran still
+    resolves). Two copies of a re-point that moves which row carries the
+    tunnel's bearer would drift, and a drift here is a tunnel connected as the
+    wrong account.
+
+    The guards are the proof's (:func:`api.same_account_successor`: dead or
+    gone pin, same account, same hub, exactly one candidate) plus a configured,
+    not-``stopped`` tunnel with a plain integer pin. The configuration is
+    re-read just before the save and left alone if anything moved its pin (a
+    concurrent `lop tunnel configure`) — the compare-and-swap this file has
+    always had, with the same unlocked window every writer of it has.
+
+    Returns ``(old, new)`` when it moved the pin, ``None`` when the proof (or a
+    guard) declined. MAY RAISE on an unreadable configuration or store: the
+    callers decide what that means for them (a login swallows it; a connector
+    start carries on with the pin it has and fails the way it always did).
+    """
+    from local_operator.tunnels import api
+
+    value = config.load()
+    if value.get("stopped"):
+        return None
+    pin = value.get("credential_id")
+    # A pin that is not a plain row id (absent, hand-edited, or a string from
+    # an older build) names no row a sign-in could have superseded, so there
+    # is nothing to heal — and the receipt below records an `int` old id.
+    if not isinstance(pin, int) or isinstance(pin, bool) or pin == fresh_id:
+        return None
+    record = value.get("record")
+    owner = record.get("owner_account_id") if isinstance(record, dict) else None
+    successor = api.same_account_successor(pin, owner_account=owner, fresh_id=fresh_id)
+    if successor is None:
+        return None
+    current = config.load()
+    if current.get("credential_id") != pin or current.get("stopped"):
+        return None
+    config.save({**current, "credential_id": successor})
+    try:
+        _record_heal_receipt(
+            old=pin,
+            new=successor,
+            tunnel_id=current.get("tunnel_id"),
+            account_id=owner,
+            trigger=trigger,
+        )
+    except Exception:  # noqa: BLE001 — the audit write must not undo a done re-point
+        # `_record_heal_receipt` already absorbs the unwritable-directory case;
+        # this is the "never raises" for anything else (review R3-n1): the pin
+        # has moved, and both callers must still report it as moved.
+        logger.warning("could not record the tunnel re-bind receipt")
+    return pin, successor
+
+
+def heal_pin_at_start() -> int | None:
+    """The connector's start-time reconcile: heal a dead pin with no sign-in at all.
+
+    WHY THE LOGIN HOOK IS NOT ENOUGH (2026-11-06, v0.101.6): the operator signed
+    out and back in as the same account while the machine still ran a build
+    with no heal, so the pin went 136 → 137 with nothing to re-point it, and the
+    upgrade that shipped the heal found a connector parked ``login_required``
+    over a pin whose row was gone. :func:`heal_pin_after_login` only runs from a
+    VERIFIED sign-in, so every install that broke BEFORE updating stayed broken
+    until its owner signed in a third time — the exact population the fix has
+    to repair on upgrade. Team Bridge closed the same gap with a start-time
+    reconcile in its receiver (``connector/loop.py``, trigger
+    ``receiver_start``); this is the tunnel's.
+
+    Run by ``service.run`` before it reads its pinned credential, which is safe
+    on every start because the proof declines for a live pin (two logins to one
+    account are the operator's choice) and is local store reads only. No
+    supervisor kick: the caller IS the connector, and carries on in-process with
+    the healed pin.
+
+    Returns the new credential id when it re-pointed, else ``None``. Never
+    raises: a reconcile that cannot run leaves the connector starting exactly as
+    it did before this existed.
+    """
+    try:
+        moved = _repoint_pin(fresh_id=None, trigger=HEAL_TRIGGER_CONNECTOR_START)
+    except Exception:  # noqa: BLE001 — never block the start the heal is for
+        logger.warning("tunnel start-time pin reconcile could not run")
+        return None
+    return None if moved is None else moved[1]
+
+
+def _start_heal_provable() -> bool:
+    """Whether a connector started now would heal its own pin (read-only).
+
+    The update refresh's question for a ``login_required`` park: the person the
+    park waits on has nothing left to do when the proof already holds, so the
+    park no longer belongs to them. The SAME proof and guards
+    :func:`_repoint_pin` applies — asked here without writing, because the
+    connector it starts is the one owner of the re-point. Never raises.
+    """
+    try:
+        from local_operator.tunnels import api
+
+        value = config.load()
+        if value.get("stopped"):
+            return False
+        pin = value.get("credential_id")
+        record = value.get("record")
+        owner = record.get("owner_account_id") if isinstance(record, dict) else None
+        return api.same_account_successor(pin, owner_account=owner) is not None
+    except Exception:  # noqa: BLE001 — unknown reads as "leave it parked"
+        return False
 
 
 def heal_pin_after_login(*, provider: str, credential_id: int) -> str:
@@ -686,34 +815,12 @@ def heal_pin_after_login(*, provider: str, credential_id: int) -> str:
     if provider != "radient":
         return ""
     try:
-        from local_operator.tunnels import api
-
-        value = config.load()
-        if value.get("stopped"):
-            return ""
-        pin = value.get("credential_id")
-        # A pin that is not a plain row id (absent, hand-edited, or a string from
-        # an older build) names no row a sign-in could have superseded, so there
-        # is nothing to heal — and the receipt below records an `int` old id.
-        if not isinstance(pin, int) or isinstance(pin, bool) or pin == credential_id:
-            return ""
-        record = value.get("record")
-        owner = record.get("owner_account_id") if isinstance(record, dict) else None
-        if api.same_account_successor(pin, owner_account=owner, fresh_id=credential_id) is None:
-            return ""
-        current = config.load()
-        if current.get("credential_id") != pin or current.get("stopped"):
-            return ""
-        config.save({**current, "credential_id": credential_id})
-        tunnel_id = current.get("tunnel_id")
+        moved = _repoint_pin(fresh_id=credential_id, trigger=HEAL_TRIGGER_LOGIN)
     except Exception:  # noqa: BLE001 — a login must not fail over a tunnel repair
         return ""
-    try:
-        _record_heal_receipt(old=pin, new=credential_id, tunnel_id=tunnel_id, account_id=owner)
-    except Exception:  # noqa: BLE001 — the audit write must not fail the sign-in
-        # `_record_heal_receipt` already absorbs the unwritable-directory case;
-        # this is the docstring's "never raises" for anything else (review R3-n1).
-        logger.warning("could not record the tunnel re-bind receipt")
+    if moved is None:
+        return ""
+    pin = moved[0]
     note = f"Tunnel re-pointed from credential {pin} to {credential_id} (same Radient account)."
     if not _rearm_allowed():
         return note
@@ -762,9 +869,26 @@ def _revive_allowed() -> bool:
     ``stopped`` cannot be verified, the conservative answer is the one that
     cannot undo a decision the operator may have made by deleting the file.
     Never raises: every failure mode here reads as "leave it stopped".
+
+    ONE PARK IS NO LONGER A PERSON'S (2026-11-06, v0.101.6): a ``login_required``
+    park over a pin whose same-account successor is already PROVABLE
+    (:func:`_start_heal_provable`). The sign-in it waits on has happened — on a
+    build with no heal, so nothing re-pointed the pin — and the connector's
+    start-time reconcile (:func:`heal_pin_at_start`) completes it with no
+    further act. Without this arm the update that ships the heal never runs it:
+    a park exits 0, launchd does not retry it, and this gate refused it, so the
+    operator's tunnel stayed parked on the old build's sentence after updating.
+    ``LOP_TUNNEL_NO_REARM`` binds here too: it is a park re-arm, and a run that
+    opted out of re-arms (tests, review worktrees) must not get one by update.
+    The real-home and own-plist guards are the refresh's own, asked before this.
     """
-    if state.parked() is not None:
-        return False
+    parked = state.parked()
+    if parked is not None:
+        return (
+            parked.get("reason") == gateway.LOGIN_REQUIRED
+            and _rearm_allowed()
+            and _start_heal_provable()
+        )
     try:
         return not config.load().get("stopped")
     except (OSError, ValueError):
