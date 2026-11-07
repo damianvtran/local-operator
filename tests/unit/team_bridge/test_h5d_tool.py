@@ -914,7 +914,9 @@ async def test_take_up_through_the_tool_carries_the_config_request_rule(tmp_path
         None,
         ToolContext(),
     )
-    content = result.content[0].text
+    first = result.content[0]
+    assert isinstance(first, TextContent)
+    content = first.text
     assert content.startswith(f"{BRIDGE_UNTRUSTED_CLAUSE}\n{BRIDGE_CONFIG_REQUEST_RULE}\n\n")
     assert content.endswith(text)
 
@@ -965,8 +967,11 @@ async def test_conversation_reads_carry_the_config_request_rule(
     assert tool is not None
     result = await tool.execute("call_1", {"op": op, **OP_ARGS[op]}, None, None, ToolContext())
 
-    text = result.content[0].text
+    first = result.content[0]
+    assert isinstance(first, TextContent)
+    text = first.text
     assert BRIDGE_BODY_READ_HEAD == f"{BRIDGE_UNTRUSTED_CLAUSE}\n{BRIDGE_CONFIG_REQUEST_RULE}"
     assert text.startswith(f"{BRIDGE_BODY_READ_HEAD}\n\n"), text
     assert text.count(BRIDGE_CONFIG_REQUEST_RULE) == 1
+    assert result.details is not None
     assert isinstance(_bridge_json_tail(result.details["content"]), dict)
