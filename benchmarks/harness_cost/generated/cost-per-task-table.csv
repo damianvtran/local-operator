@@ -1,0 +1,11 @@
+evidence_status,corrections,population,population_label,harness,n,passed,observed_usd_per_task,historical_cold_usd_per_task,cross_run_cold_usd_per_task
+EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/,CORRECTIONS.md,clean,Clean — 16 short tasks,local-operator,16,13,0.02396874375,0.07942074375,0.07942074375
+EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/,CORRECTIONS.md,clean,Clean — 16 short tasks,omp,16,13,0.020372575,0.047094625,0.047129575
+EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/,CORRECTIONS.md,clean,Clean — 16 short tasks,opencode,16,13,0.023884946562500002,0.0364033465625,0.0364927015625
+EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/,CORRECTIONS.md,clean,Clean — 16 short tasks,claude-code,16,12,0.05922129375,0.12417729375,0.12108129375
+EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/,CORRECTIONS.md,clean,Clean — 16 short tasks,codex,16,12,0.05754231875,0.06001026875,0.06001026875
+EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/,CORRECTIONS.md,full,Full — 24 tasks (excluding Codex),local-operator,24,16,0.043440625000000004,0.11004562500000001,0.11004562500000001
+EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/,CORRECTIONS.md,full,Full — 24 tasks (excluding Codex),omp,24,17,0.06822684166666666,0.15884484166666668,0.15884484166666668
+EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/,CORRECTIONS.md,full,Full — 24 tasks (excluding Codex),opencode,24,17,0.07923297666666666,0.09070817666666667,0.09079008541666667
+EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/,CORRECTIONS.md,full,Full — 24 tasks (excluding Codex),claude-code,24,14,0.09238198333333333,0.12594078333333333,0.12284568333333333
+EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/,CORRECTIONS.md,codex-full,Codex full — 4 selected long tasks,codex,4,3,5.7520388,5.7520388,5.7520388

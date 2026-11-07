@@ -1,0 +1,106 @@
+{
+  "label": "EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/",
+  "currency": "USD",
+  "rows": [
+    {
+      "population": "clean",
+      "population_label": "Clean — 16 short tasks",
+      "harness": "local-operator",
+      "n": 16,
+      "passed": 13,
+      "observed_usd_per_task": 0.02396874375,
+      "historical_cold_usd_per_task": 0.07942074375,
+      "cross_run_cold_usd_per_task": 0.07942074375
+    },
+    {
+      "population": "clean",
+      "population_label": "Clean — 16 short tasks",
+      "harness": "omp",
+      "n": 16,
+      "passed": 13,
+      "observed_usd_per_task": 0.020372575,
+      "historical_cold_usd_per_task": 0.047094625,
+      "cross_run_cold_usd_per_task": 0.047129575
+    },
+    {
+      "population": "clean",
+      "population_label": "Clean — 16 short tasks",
+      "harness": "opencode",
+      "n": 16,
+      "passed": 13,
+      "observed_usd_per_task": 0.023884946562500002,
+      "historical_cold_usd_per_task": 0.0364033465625,
+      "cross_run_cold_usd_per_task": 0.0364927015625
+    },
+    {
+      "population": "clean",
+      "population_label": "Clean — 16 short tasks",
+      "harness": "claude-code",
+      "n": 16,
+      "passed": 12,
+      "observed_usd_per_task": 0.05922129375,
+      "historical_cold_usd_per_task": 0.12417729375,
+      "cross_run_cold_usd_per_task": 0.12108129375
+    },
+    {
+      "population": "clean",
+      "population_label": "Clean — 16 short tasks",
+      "harness": "codex",
+      "n": 16,
+      "passed": 12,
+      "observed_usd_per_task": 0.05754231875,
+      "historical_cold_usd_per_task": 0.06001026875,
+      "cross_run_cold_usd_per_task": 0.06001026875
+    },
+    {
+      "population": "full",
+      "population_label": "Full — 24 tasks (excluding Codex)",
+      "harness": "local-operator",
+      "n": 24,
+      "passed": 16,
+      "observed_usd_per_task": 0.043440625000000004,
+      "historical_cold_usd_per_task": 0.11004562500000001,
+      "cross_run_cold_usd_per_task": 0.11004562500000001
+    },
+    {
+      "population": "full",
+      "population_label": "Full — 24 tasks (excluding Codex)",
+      "harness": "omp",
+      "n": 24,
+      "passed": 17,
+      "observed_usd_per_task": 0.06822684166666666,
+      "historical_cold_usd_per_task": 0.15884484166666668,
+      "cross_run_cold_usd_per_task": 0.15884484166666668
+    },
+    {
+      "population": "full",
+      "population_label": "Full — 24 tasks (excluding Codex)",
+      "harness": "opencode",
+      "n": 24,
+      "passed": 17,
+      "observed_usd_per_task": 0.07923297666666666,
+      "historical_cold_usd_per_task": 0.09070817666666667,
+      "cross_run_cold_usd_per_task": 0.09079008541666667
+    },
+    {
+      "population": "full",
+      "population_label": "Full — 24 tasks (excluding Codex)",
+      "harness": "claude-code",
+      "n": 24,
+      "passed": 14,
+      "observed_usd_per_task": 0.09238198333333333,
+      "historical_cold_usd_per_task": 0.12594078333333333,
+      "cross_run_cold_usd_per_task": 0.12284568333333333
+    },
+    {
+      "population": "codex-full",
+      "population_label": "Codex full — 4 selected long tasks",
+      "harness": "codex",
+      "n": 4,
+      "passed": 3,
+      "observed_usd_per_task": 5.7520388,
+      "historical_cold_usd_per_task": 5.7520388,
+      "cross_run_cold_usd_per_task": 5.7520388
+    }
+  ]
+}

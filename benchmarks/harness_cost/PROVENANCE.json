@@ -1,0 +1,66 @@
+{
+  "classification": "EXPLORATORY v1; materially confounded; numerical reproduction only",
+  "source": "frozen v1-snapshot from the original harness-cost benchmark; never live logs",
+  "original_frozen_files": [
+    {
+      "name": "requests.jsonl",
+      "sha256": "0d36d4382289457243d0c02bfe234b3d6f8726e25f60e963d96b54d6fad8e167"
+    },
+    {
+      "name": "runs.jsonl",
+      "sha256": "ec42b0babe4bc9407f1586a3b68dba24a53b90fa48229219aba2c14a89aa68ae"
+    },
+    {
+      "name": "tasks.json",
+      "sha256": "88b3db9285d390d833c9766f1d4c4c7170afb66a4687142e1afc0c88a832fba9"
+    },
+    {
+      "name": "results.json",
+      "sha256": "e4d7a98aea55ab1fcf926ad3f47a21180c82ad5fdfb1f508323153f383303b4a"
+    },
+    {
+      "name": "figure_data.json",
+      "sha256": "6a28de1eff7e184e4e75cb9eb038d83774d0ca00f82eaee30f7000870eb4bb1a"
+    },
+    {
+      "name": "cost_components_long.json",
+      "sha256": "a46eaa6698fa4caeae10c584844b0b909e9a8777eb06a701f6f6fba933e85073"
+    },
+    {
+      "name": "call_sequences.json",
+      "sha256": "9fb2ed1c9557bd072ef0921a9f0e5dd5cf7d24e3f1c4897efbb89b2be89ab95d"
+    }
+  ],
+  "other_source_hashes": {
+    "REVIEW-RIGOR-R1.md": "60208a85092e8a290953fcbe1c12e154d226bd4d0478787e1fbd4d79e7fbb0ad",
+    "analyze.py": "9bbfbc11d68455be3cad8946baba0f014a47698d19e10deee2291fbc0822e774",
+    "report.py": "58199280c3758f7912fd97d6303d3ffed8e0a56b23eb23ad7eb94d48298ae069",
+    "figure_cost.py": "fd23116de7768df938e3b4cea4a6cf166829d81a8a03290e0a6561efb5ea09d8",
+    "review-rigor/cold.py": "8b30b67f7f122e488cfa60d0b87c69b96517a7fa95911d03d8e6096cf837290a",
+    "review-rigor/feasibility.py": "63b4649957d6916e02cf1d06c22b927f35d51d3a95f30ff07aebe578169ef045",
+    "review-rigor/recompute.py": "4dcb7d291855bfb651c7d25774910dcce5f3d79ea2f712974409b259d6cb4941",
+    "review-rigor/rescore.py": "7cde330f2ef8aa2600f048642889655e2f28f2344819d4d289a0d5b3049e7743",
+    "review-rigor/stats.py": "4b1bee70636dca7ca6914f8d083ccc6d304d4977b0d630aba964929d360e7da1"
+  },
+  "projection": {
+    "requests": "Explicit top-level allowlist in publication.py; usage retains only integer token counts, cache TTL subtotals, usage.cost. Drop identities, errors, thinking/output configuration, stop-reason, BYOK and cost_details. No request bodies were read/copied. Preserve row order.",
+    "runs": "All 186 scored metadata rows, no duplicate IDs/cells. No paths/prompts/identities.",
+    "tasks": "Only id, _domain, _tier from 24 task specs; no instructions, URLs, fixture paths or evaluator state.",
+    "historical_outputs": "Four numeric JSON references, checked for personal paths/PII/secret indicators; original figures and promotional REPORT excluded.",
+    "review": "Attributed historical review with path/command sanitization and declared count correction. Scripts adapted for public rate function/output locations; external private fixtures explicitly required for rescoring.",
+    "public_loadout": "Selected audited public schema/instruction/fetch/capture/replay files; portable refusal-to-overwrite home renderer; no private basehome scripts or caches."
+  },
+  "derivations": "regenerate.py and CORRECTIONS.md; no model/API/harness calls used for reproduction",
+  "upstream_universe_correction": {
+    "tasks": 368,
+    "multi_apps": 101,
+    "authority": "coordinated pinned OSWorld task manifest audit (not the erroneous 369/102 historical prose)"
+  },
+  "privacy_status": "Curated field projection plus publication.py bounded text-pattern/filename scan; public schema placeholders and upstream license attribution are intentionally public, not secret values",
+  "publication_hardening": {
+    "invocation_metadata": "LaunchDarkly offline dummy is generated in memory only; command metadata stores an explicit non-credential marker. The generated invocation equals the previously accepted offline invocation. No real keys or recapture used.",
+    "invariance": "All 493 tools across nine servers, per-server schema bytes/hashes, package pins, source URLs and licenses unchanged from local integration commit; only one command metadata element changed.",
+    "csv": "Explicit LF in DictWriter; no CRLF normalization after export.",
+    "privacy": "Credential-shaped dummy literals are rejected by shape-based scanning, including all-zero placeholders. No dummy exemption or push-protection bypass."
+  }
+}

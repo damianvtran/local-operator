@@ -610,18 +610,31 @@ jobs:
     # an env override.
     steps:
       - uses: actions/checkout@v7
+        with:
+          # This job reads tracked files but never pushes or fetches again.
+          # Do not leave checkout credentials available to offline controls.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            benchmarks/harness_cost/reviews/requirements.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+
+      # The benchmark is a separately pinned analysis kit, not an application
+      # runtime dependency. Whole-tree type checking still reads its modules,
+      # so this job needs the real optional scientific packages rather than
+      # import ignores, fake stubs, or inflated application dependencies.
+      - name: Install standalone benchmark analysis dependencies
+        run: python -m pip install -r benchmarks/harness_cost/reviews/requirements.txt
 
       # Node's default V8 old-space cap is ~4 GB; pyright's whole-tree analyzer
       # OOMed at heap 3885 MB on the 16 GB ubuntu-latest runner (run
@@ -631,6 +644,33 @@ jobs:
         env:
           NODE_OPTIONS: "--max-old-space-size=6144"
         run: pyright
+
+      # These are standalone, zero-spend benchmark controls. An empty HOME and
+      # allowlisted environment prevent a test from inheriting CI credentials;
+      # no model, native harness, Docker, fixture download or login is invoked.
+      - name: Verify benchmark analysis and offline guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISO=$(mktemp -d "$RUNNER_TEMP/harness-cost.XXXXXX")
+          trap 'rm -rf "$ISO"' EXIT
+          PYTHON=$(command -v python)
+          offline_python() {
+            env -i HOME="$ISO" TMPDIR="$ISO" PATH="$PATH" \
+              LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" LOCAL_OPERATOR_SCRATCHPAD="$ISO" \
+              MPLCONFIGDIR="$ISO/mpl" PYTHONDONTWRITEBYTECODE=1 \
+              GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
+              "$PYTHON" "$@"
+          }
+          cd benchmarks/harness_cost
+          offline_python publication.py verify
+          offline_python -m unittest -q test_kit
+          offline_python regenerate.py --out "$ISO/generated"
+          cd experimental
+          offline_python -m unittest -q test_cache_namespace test_cache_forwarder \
+            test_adapters test_runner_v2 test_bridge_sse test_cache_bridge.PluginBoundaryTests test_clone_path
+          cd coding
+          offline_python -m unittest -q test_guard test_driver_safety test_guard_asgi test_adapters
 
       - name: Verify browser extension protocol sync
         # Main CI owns this too: a Python-only protocol edit must fail even if
