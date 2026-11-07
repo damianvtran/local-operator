@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -1391,12 +1392,14 @@ def test_globstar_only_when_the_command_enables_it(home: Path) -> None:
         cls._GLOB_WALK_CAP = cls_cap
 
 
-def test_wildcards_skip_dot_entries_like_bash(home: Path) -> None:
+def test_wildcards_always_include_dot_entries(home: Path) -> None:
+    """Round 9: the safety walk is a superset of bash — dot entries always
+    match, so ``dotglob``/``GLOBIGNORE`` need no tracking."""
     child = home / ".local-operator" / "sessions" / CHILD
     (child / "origin.json").write_text("{}")
     (home / "work").mkdir()
     os.symlink(child, home / "work" / ".hid")
-    assert _verdict(home, "sed -i s/a/b/ ~/work/*/origin.json").risk is Risk.LOW
+    assert _verdict(home, "sed -i s/a/b/ ~/work/*/origin.json").risk is Risk.CRITICAL
     assert _verdict(home, "sed -i s/a/b/ ~/work/.h*/origin.json").risk is Risk.CRITICAL
 
 
@@ -1409,3 +1412,58 @@ def test_relative_glob_first_component_is_a_mention(home: Path, command: str) ->
     work.mkdir()
     os.symlink(child, work / "lnk1")
     assert _rank_in(work, home, command).risk is Risk.HIGH
+
+
+# -- round 9: option-independent glob walk, case-insensitive volumes ---------------------
+
+
+@pytest.mark.parametrize(
+    ("rig", "command"),
+    [
+        ("dot", "shopt -s dotglob; sed -i s/a/b/ */origin.json"),
+        ("dot", "GLOBIGNORE=x; sed -i s/a/b/ */origin.json"),
+        ("deep", "bash -O globstar -c 'sed -i s/a/b/ **/origin.json'"),
+        ("deep", "zsh -c 'sed -i s/a/b/ **/origin.json'"),
+        ("deep", "ksh -c 'sed -i s/a/b/ **/origin.json'"),
+        ("deep", "setopt globstarshort; sed -i s/a/b/ **/origin.json"),
+        ("deep", "shopt -s globstar; sed -i s/a/b/ **/origin.json"),
+        ("deep", "shopt -s globstar; shopt -u globstar; sed -i s/a/b/ **/origin.json"),
+    ],
+)
+def test_glob_options_cannot_hide_a_link_into_evidence(home: Path, rig: str, command: str) -> None:
+    """The round-9 review table: each ranked LOW at ddc601ee59e."""
+    child = home / ".local-operator" / "sessions" / CHILD
+    (child / "origin.json").write_text("{}")
+    work = home / "w"
+    if rig == "dot":
+        work.mkdir()
+        os.symlink(child, work / ".hid")
+    else:
+        (work / "a").mkdir(parents=True)
+        os.symlink(child, work / "a" / "lnk")
+    assert _rank_in(work, home, command).risk is not Risk.LOW
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="case-insensitive volume by default")
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i s/a/b/ ~/.LOCAL-OPERATOR/sess*/*/origin.json",
+        f"sed -i s/a/b/ ~/.LOCAL-OPERATOR/SESSIONS/{CHILD}/origin.json",
+        "cp x ~/.Local-Operator/Guardrails/created.sqlite",
+    ],
+)
+def test_case_variant_state_root_is_evidence(home: Path, command: str) -> None:
+    child = home / ".local-operator" / "sessions" / CHILD
+    (child / "origin.json").write_text("{}")
+    assert _verdict(home, command).risk is not Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "command", ["ls *", "ruff check pkg/**/*.py", "cp pkg/*/*.py out/", "rm -rf pkg/*/build/*"]
+)
+def test_dot_entries_keep_ordinary_globs_low(home: Path, command: str) -> None:
+    repo = home / "repo"
+    repo.mkdir()
+    _py_tree(repo)
+    assert _rank_in(repo, home, command).risk is Risk.LOW

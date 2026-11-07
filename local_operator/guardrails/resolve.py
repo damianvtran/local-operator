@@ -966,7 +966,8 @@ class Resolution:
     #: unresolvable (``cd $(…)``, a glob or CDPATH ``cd``): it may be the one
     #: under ``sessions/``. ``classify`` ranks each HIGH (review R6-MINOR-1).
     blind: list[str] = field(default_factory=list)
-    #: The command turns on ``shopt -s globstar``: only then does ``**`` match
+    #: The command may make ``**`` recursive (set by ``resolve_command`` from
+    #: the raw text; see ``_RECURSIVE_GLOB_RE``). Only then does ``**`` match
     #: any depth (bash's default treats it as ``*``; review round 8, MAJOR-1).
     globstar: bool = False
 
@@ -1550,9 +1551,6 @@ class _Walker:
                 self._assign(a)
             return
         name = os.path.basename(words[0].text)
-        if name == "shopt" and any(w.text == "-s" for w in words[1:]):
-            if any(w.text == "globstar" for w in words[1:]):
-                self.result.globstar = True
         if name in _DECLARE_WORDS:
             for w in words[1:]:
                 if _ASSIGN_RE.match(w.text):
@@ -3128,11 +3126,23 @@ def _mention_path(raw: str, home: str, cwd: str | None) -> str | None:
     return os.path.normpath(text)
 
 
+#: Anything that can make ``**`` recursive for this command (review round 9,
+#: MAJOR-1): bash's ``globstar`` (``shopt -s``, ``bash -O globstar``), any
+#: ``-O`` option at all, and shells where ``**/`` recurses by default or by
+#: ``setopt``. Over-matching (``curl -O``) only costs a wider, still bounded,
+#: walk; a cap overflow ranks HIGH, never CRITICAL.
+_RECURSIVE_GLOB_RE = re.compile(r"globstar|(?<![\w-])-O|\b(?:zsh|ksh|fish|setopt)\b")
+
+
 def resolve_command(
     command: str, *, cwd: str | None, env: Mapping[str, str], home: str
 ) -> Resolution:
     """Every path ``command`` would destroy, resolved statically. Never runs it."""
     walker = _Walker(env, cwd, home)
+    # Raw text, not parsed words, so a nested ``bash -c``/``zsh -c`` string
+    # counts too. Deliberately one-way: ``shopt -u globstar`` is ignored
+    # because a wider walk only errs safe (review round 9, NIT-1).
+    walker.result.globstar = bool(_RECURSIVE_GLOB_RE.search(command))
     try:
         walker.walk(command)
     except Exception as exc:  # noqa: BLE001 — a parser fault must not wave a call through

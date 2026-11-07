@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import enum
 import fnmatch
+import functools
 import os
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -178,6 +180,30 @@ def _canonical_dir_by_listing(directory: str) -> str | None:
 
 def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+@functools.lru_cache(maxsize=8)
+def _case_insensitive(probe: str) -> bool:
+    """Is the volume holding ``probe`` case-insensitive? Probed once per path
+    per process: does the case-swapped spelling of the nearest existing
+    ancestor resolve? Unknown → the platform default (APFS/HFS+ on darwin
+    are case-insensitive by default)."""
+    path = probe
+    while path not in ("", "/"):
+        flipped = path.swapcase()
+        if flipped != path and os.path.lexists(path):
+            return os.path.lexists(flipped)
+        path = os.path.dirname(path)
+    return sys.platform == "darwin"
+
+
+def _under_evidence(path: str, root: str) -> bool:
+    """``_under`` for the evidence check: case-folded on a case-insensitive
+    volume, where ``~/.LOCAL-OPERATOR/sessions`` IS the state root
+    (review round 9, MINOR-1)."""
+    if _under(path, root):
+        return True
+    return _case_insensitive(root) and _under(path.casefold(), root.casefold())
 
 
 def _is_ancestor_or_self(path: str, of: str) -> bool:
@@ -339,10 +365,10 @@ def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -
         return None
     for spelled in {s for p in lexical for s in _spellings(p)}:
         for state in prot.state_roots:
-            if _under(spelled, os.path.join(state, _LEDGER_DIRNAME)):
+            if _under_evidence(spelled, os.path.join(state, _LEDGER_DIRNAME)):
                 return "the guardrail's own records"
-            if _under(spelled, os.path.join(state, _SESSIONS_DIRNAME)) and not any(
-                _under(spelled, pad) for pad in prot.own_scratchpad
+            if _under_evidence(spelled, os.path.join(state, _SESSIONS_DIRNAME)) and not any(
+                _under_evidence(spelled, pad) for pad in prot.own_scratchpad
             ):
                 return "session state (transcripts, lineage, ask stores)"
         if target.pattern is not None:
@@ -350,12 +376,20 @@ def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -
             # A glob cannot climb out of its literal directory (``*`` never
             # crosses ``/``), so one rooted in this session's scratchpad stays
             # there.
-            if prefix and any(_under(prefix, pad) for pad in prot.own_scratchpad):
+            if prefix and any(_under_evidence(prefix, pad) for pad in prot.own_scratchpad):
                 return None
             for state in prot.state_roots:
-                if _pattern_hits(target.pattern, os.path.join(state, _LEDGER_DIRNAME)):
+                if _pattern_hits(
+                    target.pattern,
+                    os.path.join(state, _LEDGER_DIRNAME),
+                    fold=_case_insensitive(state),
+                ):
                     return "the guardrail's own records"
-                if _pattern_hits(target.pattern, os.path.join(state, _SESSIONS_DIRNAME)):
+                if _pattern_hits(
+                    target.pattern,
+                    os.path.join(state, _SESSIONS_DIRNAME),
+                    fold=_case_insensitive(state),
+                ):
                     return "session state (transcripts, lineage, ask stores)"
             # Lexically elsewhere — but a match may be a SYMLINK into session
             # state (``ln -s ../../<child> $P/m`` then ``$P/m*/origin.json``),
@@ -379,11 +413,13 @@ def _expand_glob(pattern: str, *, globstar: bool = False) -> list[tuple[str, boo
     8, MAJOR-1: an any-depth ``**`` walked whole repositories, cost up to
     1.7 s per call and ranked ordinary ``**/*.py`` commands HIGH/CRITICAL):
 
-    * ``**`` is ``*`` — one level — unless the command ran
-      ``shopt -s globstar``; then it is any depth, following directory links
+    * ``**`` is ``*`` — one level — unless the command may make it
+      recursive (``resolve._RECURSIVE_GLOB_RE``); then it is any depth, following directory links
       once per real directory.
-    * A wildcard never matches a leading ``.`` unless the pattern component
-      itself starts with ``.`` (no ``dotglob``).
+    * Dot entries ALWAYS match (review round 9): bash hides them unless
+      ``dotglob``/``GLOBIGNORE``/``nocaseglob``-style options say otherwise,
+      and tracking every such option is a losing game. One level of dot
+      entries is cheap; the safety walk is a superset of what bash expands.
 
     Hand-rolled rather than ``glob.glob`` because that bounds only results,
     not the walk. Each match carries whether ANY component on its way was a
@@ -421,7 +457,6 @@ def _expand_glob(pattern: str, *, globstar: bool = False) -> list[tuple[str, boo
         visited += len(entries)
         if visited > _GLOB_WALK_CAP:
             return None
-        hidden_ok = part.startswith(".")
         if deep:
             # ``**`` = zero or more directories: try the NEXT part against
             # these same entries (no second scan), and descend into each
@@ -430,8 +465,6 @@ def _expand_glob(pattern: str, *, globstar: bool = False) -> list[tuple[str, boo
             if nxt_part is None:
                 found.append((base, linked))
             for e in entries:
-                if e.name.startswith(".") and not hidden_ok:
-                    continue
                 via = linked or e.is_symlink()
                 if nxt_part is not None and _component_matches(e.name, nxt_part):
                     stack.append((e.path, k + 2, via))
@@ -443,8 +476,6 @@ def _expand_glob(pattern: str, *, globstar: bool = False) -> list[tuple[str, boo
             continue
         match_part = "*" if part == "**" else part
         for e in entries:
-            if e.name.startswith(".") and not hidden_ok:
-                continue
             if fnmatch.fnmatchcase(e.name, match_part):
                 stack.append((e.path, k + 1, linked or e.is_symlink()))
     return found
@@ -453,8 +484,6 @@ def _expand_glob(pattern: str, *, globstar: bool = False) -> list[tuple[str, boo
 def _component_matches(name: str, part: str) -> bool:
     if not any(ch in part for ch in "*?["):
         return name == part
-    if name.startswith(".") and not part.startswith("."):
-        return False
     return fnmatch.fnmatchcase(name, part)
 
 
@@ -475,22 +504,24 @@ def _glob_matches_evidence(pattern: str, prot: _Protected, *, globstar: bool = F
             continue
         real = os.path.realpath(match)
         for state in prot.state_roots:
-            if _under(real, os.path.join(state, _LEDGER_DIRNAME)):
+            if _under_evidence(real, os.path.join(state, _LEDGER_DIRNAME)):
                 return "the guardrail's own records (through a link)"
-            if _under(real, os.path.join(state, _SESSIONS_DIRNAME)) and not any(
-                _under(real, pad) for pad in prot.own_scratchpad
+            if _under_evidence(real, os.path.join(state, _SESSIONS_DIRNAME)) and not any(
+                _under_evidence(real, pad) for pad in prot.own_scratchpad
             ):
                 return "session state (through a link)"
     return None
 
 
-def _pattern_hits(pattern: str, root: str) -> bool:
+def _pattern_hits(pattern: str, root: str, *, fold: bool = False) -> bool:
     """Could ``pattern`` match ``root``, an ancestor of it, or anything under it?
 
     Component-wise over the shared length, so ``~/.local-operator/sess*/x/f``
     reaches ``sessions`` (``_pattern_reaches`` alone stops at patterns no
     longer than ``root``). Over-matches dotfiles on purpose: fail closed.
     """
+    if fold:
+        pattern, root = pattern.casefold(), root.casefold()
     pat = [c for c in pattern.split("/") if c]
     prot = [c for c in root.split("/") if c]
     return all(fnmatch.fnmatchcase(p, q) for p, q in zip(prot, pat, strict=False))
