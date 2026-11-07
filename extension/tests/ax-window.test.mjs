@@ -281,3 +281,154 @@ test("framesInScope counts only the scope's own frames", async () => {
     await close();
   }
 });
+
+/*
+ * VALUE IN THE SNAPSHOT
+ *
+ * Every fixture below is the shape `Accessibility.getFullAXTree` actually
+ * returned when probed against Electron 44.3.0 (Chromium) on 2026-11-06 — see
+ * the measurement notes on each case. The gap they close: a native `<select>`
+ * printed `combobox "Environment" [collapsed]` with no sign of which environment
+ * was selected, so an agent could only learn the value from a screenshot.
+ */
+function valueTree(control, options = []) {
+  const root = { nodeId: "1", role: { value: "RootWebArea" }, name: { value: "" }, childIds: ["2", ...options.map((_, index) => `o${index}`)] };
+  return [root, control, ...options];
+}
+
+async function renderValue(control, options = []) {
+  const { loaded, close } = await load("src/driver/ax-compact.ts");
+  try {
+    return loaded.compactAX(valueTree(control, options), 1).snapshot;
+  } finally {
+    await close();
+  }
+}
+
+test("a native select's selected option is rendered as the control's value", async () => {
+  // Measured: `<select><option selected>Production</option></select>` produces a
+  // combobox node whose `value` is the option's TEXT ("Production") and whose
+  // `expanded` is boolean false — so the line carries both [collapsed] and the
+  // value, in that order.
+  const rendered = await renderValue(
+    { nodeId: "2", backendDOMNodeId: 1, role: { value: "combobox" }, name: { value: "Environment" }, value: { value: "Production" },
+      properties: [{ name: "focusable", value: { value: true } }, { name: "expanded", value: { value: false } }], childIds: ["o0", "o1"] },
+    [
+      { nodeId: "o0", role: { value: "option" }, name: { value: "Sandbox" }, properties: [{ name: "selected", value: { value: false } }], childIds: [] },
+      { nodeId: "o1", role: { value: "option" }, name: { value: "Production" }, properties: [{ name: "selected", value: { value: true } }], childIds: [] },
+    ],
+  );
+  assert.ok(rendered.includes('combobox "Environment" [e1] [collapsed] = "Production"'), rendered);
+  // The value must not have moved the ref or the state marker: the locator
+  // grammar reads both positionally and refuses an unknown bracketed predicate.
+  assert.ok(rendered.includes('[e1] [collapsed]'), rendered);
+});
+
+test("a textbox renders its text, including a multi-line one", async () => {
+  // Measured: a `<textarea>`'s value arrives verbatim, newlines and the page's
+  // own indentation included.
+  const single = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "App name" }, value: { value: "release-bot" }, childIds: [] });
+  assert.ok(single.includes('textbox "App name" [e1] = "release-bot"'), single);
+
+  const multiline = await renderValue({
+    nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Notes" },
+    value: { value: "first line\n      second line       third line" },
+    properties: [{ name: "multiline", value: { value: true } }], childIds: [],
+  });
+  assert.ok(multiline.includes('textbox "Notes" [e1] = "first line second line third line"'), multiline);
+});
+
+test("an empty value and a value identical to the name render nothing", async () => {
+  const empty = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "combobox" }, name: { value: "Environment" }, value: { value: "" }, childIds: [] });
+  assert.ok(empty.trimEnd().endsWith('combobox "Environment" [e1]'), empty);
+
+  const blank = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "App name" }, value: { value: "   " }, childIds: [] });
+  assert.ok(blank.trimEnd().endsWith('textbox "App name" [e1]'), blank);
+
+  // <option value="production">Production</option> — the name already says it.
+  // (`option` mints no ref: it is not clickable on its own, so the whole line is
+  // role + name and nothing else.)
+  const duplicate = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "option" }, name: { value: "Production" }, value: { value: "Production" }, childIds: [] });
+  assert.equal(duplicate.trimEnd().split("\n").pop().trim(), '- option "Production"');
+});
+
+test("a long value clips at 40 characters and marks the cut with an ellipsis", async () => {
+  const sixty = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWX";
+  assert.equal(sixty.length, 60);
+  const rendered = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Long" }, value: { value: sixty }, childIds: [] });
+  assert.ok(rendered.includes(` = "${sixty.slice(0, 40)}…"`), rendered);
+  // Exactly 40 is NOT clipped: the cap applies to the value, and the ellipsis
+  // only appears when characters were dropped.
+  const forty = "abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+  assert.equal(forty.length, 40);
+  const exact = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Exact" }, value: { value: forty }, childIds: [] });
+  assert.ok(exact.includes(` = "${forty}"`), exact);
+  assert.ok(!exact.includes("…"), exact);
+
+  // The clip counts CODE POINTS, not UTF-16 units: 39 "a"s followed by emoji put
+  // the 40th code point inside a surrogate PAIR. Slicing units there orphans a
+  // high surrogate, and JSON.stringify prints it as the six ASCII characters
+  // `\ud83d` — which an agent reads as the field's actual content rather than as
+  // a truncation.
+  const emoji = "a".repeat(39) + "😀".repeat(3);
+  const straddled = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Emoji" }, value: { value: emoji }, childIds: [] });
+  assert.ok(straddled.includes(` = "${"a".repeat(39)}😀…"`), straddled);
+  assert.ok(!straddled.includes("\\ud83d"), straddled);
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(straddled), "no lone surrogate in the rendered line");
+});
+
+test("valuetext outranks the raw value when Chromium sends one", async () => {
+  // Measured: a native `<input type=range|number>` carries a `valuetext`
+  // property; an ARIA `div[role=slider]` with aria-valuetext does NOT get one
+  // (Chromium 152 drops it), so the numeric fallback is what prints there.
+  const rendered = await renderValue({
+    nodeId: "2", backendDOMNodeId: 1, role: { value: "slider" }, name: { value: "Volume" }, value: { value: 3 },
+    properties: [{ name: "valuetext", value: { value: "Medium" } }], childIds: [],
+  });
+  assert.ok(rendered.includes('slider "Volume" [e1] = "Medium"'), rendered);
+
+  const fallback = await renderValue({
+    nodeId: "2", backendDOMNodeId: 1, role: { value: "slider" }, name: { value: "Quality" }, value: { value: 3 },
+    properties: [{ name: "valuetext", value: { value: "" } }], childIds: [],
+  });
+  assert.ok(fallback.includes('slider "Quality" [e1] = "3"'), fallback);
+});
+
+test("only the roles an agent acts on carry a value", async () => {
+  // A button's "value" duplicates its name; printing it would lengthen every
+  // line and (since `search` matches the rendered line) change search results.
+  const button = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "button" }, name: { value: "Save" }, value: { value: "Save" }, childIds: [] });
+  assert.ok(!button.includes("="), button);
+});
+
+test("a password field yields no value segment at all, not even its length", async () => {
+  // Measured on `<input type=password value="hunter2-SECRET">` against Chromium
+  // 152 and Chrome 156: the browser hands over a BULLET RUN (one U+2022 per character),
+  // never the text, and this Chromium's AX payload carries no `protected`
+  // property to identify the field by. Printing the run would publish the
+  // secret's exact length, so the projection refuses a masked value outright.
+  //
+  // The assertion is written to FAIL on any value segment whatsoever: no quote
+  // after an ` = `, no bullet, no secret. That is the property the operator
+  // asked for, and it is the only one a synthetic AX payload can prove — the
+  // masking itself is Chromium's, and only a real-path probe can cover it.
+  const masked = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Password" }, value: { value: "\u2022".repeat(24) }, childIds: [] });
+  assert.ok(!masked.includes(' = "'), masked);
+  assert.ok(!masked.includes("\u2022"), masked);
+  assert.ok(!/hunter2|secret/i.test(masked), masked);
+  assert.ok(masked.includes('textbox "Password" [e1]'), masked);
+
+  // The same refusal through the AX property a future Chromium may send.
+  const protectedField = await renderValue({
+    nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Password" },
+    value: { value: "hunter2-SECRET" }, properties: [{ name: "protected", value: { value: true } }], childIds: [],
+  });
+  assert.ok(!protectedField.includes(' = "'), protectedField);
+  assert.ok(!/hunter2|secret/i.test(protectedField), protectedField);
+
+  // And the refusal is TARGETED: an ordinary field with a real value still
+  // prints, so the mask rule cannot quietly mute every text box.
+  const ordinary = await renderValue({ nodeId: "2", backendDOMNodeId: 1, role: { value: "textbox" }, name: { value: "Password hint" }, value: { value: "ask the operator" }, childIds: [] });
+  assert.ok(ordinary.includes('textbox "Password hint" [e1] = "ask the operator"'), ordinary);
+});
+

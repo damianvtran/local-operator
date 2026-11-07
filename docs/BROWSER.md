@@ -195,6 +195,74 @@ limitation honestly. No match uses existing `element_not_found` with
 correction list, so agents need not hallucinate labels. Older hosts refuse before
 send with `capability_unsupported`. `select` stays write-tier like click/type.
 
+## Values in the snapshot
+
+A control's current value rides on its snapshot line, after the ref and every
+state marker:
+
+```
+- combobox "Environment" [e12] [collapsed] = "Production"
+- textbox "App name" [e13] = "release-bot"
+- slider "Volume" [e14] = "3"
+- textbox "Password" [e15]
+```
+
+`<role> "<name>" [<ref>] [<state>]… = "<value>"` is the whole shape, and the
+order is the contract: the value arrives strictly after everything that was
+already there, so refs, state markers and the `role=`/`label=`/`text=` locator
+grammar keep their positions and their meaning. Nothing before the ` = ` changes
+because a value exists.
+
+- **Only the roles an agent acts on**: `combobox`, `listbox`, `option`,
+  `textbox`, `searchbox`, `spinbutton`, `slider`. A `button` or a `heading`
+  carries a value in the accessibility tree too — it duplicates the name, so
+  printing it would lengthen every line and, because `snapshot --search` matches
+  the rendered line, silently change what a search term returns.
+- **A password field that Chromium MASKS never reports a value**, not even its
+  length. Chromium masks a password's value before the driver sees it — one U+2022
+  BULLET per character (measured on Chromium 152.0.7977.78, this repository's
+  Electron 44.3.0, and on Chrome 156.0.8078.81: a 14-character password arrives as
+  14 bullets) — and the projection refuses a masked value outright, so the line
+  stops at the ref: `textbox "Password" [e15]`. The `protected` accessibility
+  property is honoured the same way, for a browser that sends one (this one does
+  not).
+  The rule the code actually holds is **masked ⇒ suppressed**, not *password ⇒
+  suppressed*, and the gap between those two sentences is a limit worth stating
+  plainly because this bullet will be cited in a security argument. Chromium is
+  the masking party; this projection is a pure function of the AX payload and has
+  no DOM handle, so it cannot ask for `type="password"`. A field Chromium does
+  **not** mask therefore prints its value in full — measured on this head, a
+  `textbox "Password"` carrying an unmasked value renders `= "not-masked-secret"`
+  while the same field carrying 14 bullets renders nothing — and, because
+  `snapshot --search` matches the rendered line, such a value is findable by
+  search too. A secret typed into an ordinary `textbox` behaves the same way: the
+  field's role and name never enter into it.
+  One capability change follows, and an agent filling a login form will meet it: a
+  password line no longer separates an EMPTY field from a filled one — both are
+  `textbox "Password" [e15]` — so a snapshot cannot tell you whether the field
+  already holds something.
+- **Nothing is invented**: an absent or empty value, and a value identical to the
+  accessible name, print nothing at all. Whitespace is collapsed, and the value is
+  quoted and clipped at 40 **code points** (not UTF-16 units, so a clip can never
+  orphan half of an emoji) with a trailing `…`.
+
+The value comes from the AX tree the snapshot already fetched — no extra protocol
+round trip and no page script. Measured on a real page: a native `<select>` puts
+the selected option's text on the combobox node (`value` `"Production"`, with
+`expanded: false`, hence `[collapsed]` beside it), a `<textarea>`'s text collapses
+to one line with the whitespace runs squeezed, `option` nodes carry no value of
+their own (only a `selected` bool), and a native `<input type=range>` carries a
+`valuetext` property whose text **equals** its numeric value.
+
+`valuetext` is preferred over the raw value where a Chromium supplies one, and
+that is future-proofing rather than an observable difference today: measured on
+Chromium 152 (this repository's Electron) and Chrome 156, the property appears
+only on native `range`/`number` inputs
+and never differs from the number, while an author's `aria-valuetext` **never**
+reaches it — a `div[role=slider]` with `aria-valuetext="Medium"` prints `= "3"`.
+A browser that starts rendering `Medium` there gets it printed with no code
+change.
+
 ## Network telemetry
 
 Four actions expose the owned tab's request stream: `network_start`,
