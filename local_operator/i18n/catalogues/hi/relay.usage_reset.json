@@ -1,0 +1,14 @@
+{
+  "relay.usage_reset.badge": "रीसेट · {count}",
+  "relay.usage_reset.confirm_title": "{provider} · खाता {index}/{count}",
+  "relay.usage_reset.confirm_prompt": "{count, plural, one {आपका आख़िरी रीसेट क्रेडिट लगेगा; इस खाते की रेट-लिमिट विंडो साफ़ हो जाएँगी।} other {# में से 1 रीसेट क्रेडिट लगेगा; इस खाते की रेट-लिमिट विंडो साफ़ हो जाएँगी।}}",
+  "relay.usage_reset.cancel": "रद्द करें",
+  "relay.usage_reset.confirm": "रीसेट करें",
+  "relay.usage_reset.busy": "रीसेट हो रहा है…",
+  "relay.usage_reset.outcome_reset": "{count, plural, =0 {रीसेट लागू हुआ।} one {रीसेट लागू हुआ — # विंडो साफ़ हुई।} other {रीसेट लागू हुआ — # विंडो साफ़ हुईं।}}",
+  "relay.usage_reset.outcome_already_redeemed": "यह रीसेट पहले ही लागू हो चुका था।",
+  "relay.usage_reset.outcome_no_credit": "कोई रीसेट क्रेडिट नहीं बचा है।",
+  "relay.usage_reset.outcome_nothing_to_reset": "कुछ भी सीमा से ऊपर नहीं था, इसलिए किसी विंडो को साफ़ करने की ज़रूरत नहीं पड़ी।",
+  "relay.usage_reset.outcome_failed": "रीसेट की पुष्टि नहीं हो सकी। जाँचने के लिए फिर से कोशिश करें — दोबारा कोशिश करने पर दूसरा क्रेडिट नहीं लगेगा।",
+  "relay.usage_reset.refused": "वह रीसेट अस्वीकार कर दिया गया। सूची रीफ़्रेश करके फिर से कोशिश करें।"
+}

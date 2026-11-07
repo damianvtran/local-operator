@@ -1,0 +1,14 @@
+{
+  "relay.usage_reset.badge": "ری سیٹ · {count}",
+  "relay.usage_reset.confirm_title": "{provider} · اکاؤنٹ {index} از {count}",
+  "relay.usage_reset.confirm_prompt": "{count, plural, one {آپ کا آخری ری سیٹ کریڈٹ استعمال ہو گا؛ اس اکاؤنٹ کی ریٹ لِمٹ ونڈوز صاف ہو جائیں گی۔} other {# میں سے 1 ری سیٹ کریڈٹ استعمال ہو گا؛ اس اکاؤنٹ کی ریٹ لِمٹ ونڈوز صاف ہو جائیں گی۔}}",
+  "relay.usage_reset.cancel": "منسوخ کریں",
+  "relay.usage_reset.confirm": "ری سیٹ کریں",
+  "relay.usage_reset.busy": "ری سیٹ ہو رہا ہے…",
+  "relay.usage_reset.outcome_reset": "{count, plural, =0 {ری سیٹ لاگو ہو گیا۔} one {ری سیٹ لاگو ہو گیا — 1 ونڈو صاف ہوئی۔} other {ری سیٹ لاگو ہو گیا — # ونڈوز صاف ہوئیں۔}}",
+  "relay.usage_reset.outcome_already_redeemed": "یہ ری سیٹ پہلے ہی لاگو ہو چکا تھا۔",
+  "relay.usage_reset.outcome_no_credit": "کوئی ری سیٹ کریڈٹ باقی نہیں۔",
+  "relay.usage_reset.outcome_nothing_to_reset": "کوئی ونڈو حد سے اوپر نہیں تھی، اس لیے کچھ صاف کرنے کی ضرورت نہیں پڑی۔",
+  "relay.usage_reset.outcome_failed": "ری سیٹ کی تصدیق نہیں ہو سکی۔ جانچنے کے لیے دوبارہ کوشش کریں — اس سے دوسرا کریڈٹ خرچ نہیں ہو گا۔",
+  "relay.usage_reset.refused": "وہ ری سیٹ مسترد کر دیا گیا۔ فہرست ریفریش کر کے دوبارہ کوشش کریں۔"
+}

@@ -1,0 +1,14 @@
+{
+  "relay.usage_reset.badge": "Reiniciar · {count}",
+  "relay.usage_reset.confirm_title": "{provider} · Cuenta {index} de {count}",
+  "relay.usage_reset.confirm_prompt": "{count, plural, one {Usa tu último crédito de reinicio; libera las ventanas de límite de esta cuenta.} many {Usa 1 de # de créditos de reinicio; libera las ventanas de límite de esta cuenta.} other {Usa 1 de # créditos de reinicio; libera las ventanas de límite de esta cuenta.}}",
+  "relay.usage_reset.cancel": "Cancelar",
+  "relay.usage_reset.confirm": "Reiniciar",
+  "relay.usage_reset.busy": "Reiniciando…",
+  "relay.usage_reset.outcome_reset": "{count, plural, =0 {Reinicio aplicado.} one {Reinicio aplicado — 1 ventana liberada.} many {Reinicio aplicado — # de ventanas liberadas.} other {Reinicio aplicado — # ventanas liberadas.}}",
+  "relay.usage_reset.outcome_already_redeemed": "Este reinicio ya se había aplicado.",
+  "relay.usage_reset.outcome_no_credit": "No quedan créditos de reinicio.",
+  "relay.usage_reset.outcome_nothing_to_reset": "Ninguna ventana superaba su límite; no hacía falta liberar ninguna.",
+  "relay.usage_reset.outcome_failed": "No se pudo confirmar el reinicio. Reinténtalo para comprobarlo — no gastará otro crédito.",
+  "relay.usage_reset.refused": "Se rechazó ese reinicio. Actualiza la lista y reinténtalo."
+}

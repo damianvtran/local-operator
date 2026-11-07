@@ -1,0 +1,14 @@
+{
+  "relay.usage_reset.badge": "重置 · {count}",
+  "relay.usage_reset.confirm_title": "{provider} · 第{index}个账户（共{count}个）",
+  "relay.usage_reset.confirm_prompt": "{count, plural, =1 {将消耗最后1次重置，并清除此账户的速率限制窗口。} other {将消耗1次重置（现有#次），并清除此账户的速率限制窗口。}}",
+  "relay.usage_reset.cancel": "取消",
+  "relay.usage_reset.confirm": "重置",
+  "relay.usage_reset.busy": "正在重置……",
+  "relay.usage_reset.outcome_reset": "{count, plural, =0 {重置已生效。} other {重置已生效 — 已清除#个窗口。}}",
+  "relay.usage_reset.outcome_already_redeemed": "此次重置此前已生效。",
+  "relay.usage_reset.outcome_no_credit": "已无剩余重置次数。",
+  "relay.usage_reset.outcome_nothing_to_reset": "没有窗口达到上限，因此无需清除。",
+  "relay.usage_reset.outcome_failed": "未能确认重置结果。请重试以核实 — 重试不会再消耗一次重置。",
+  "relay.usage_reset.refused": "此次重置请求被拒绝。请刷新列表后重试。"
+}
