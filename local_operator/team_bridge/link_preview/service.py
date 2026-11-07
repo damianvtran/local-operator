@@ -72,6 +72,7 @@ from local_operator.web_fetch.service import (
     PolicyRefusal,
     WebFetchService,
     url_has_credentials,
+    vet_url_spelling,
 )
 
 if TYPE_CHECKING:
@@ -167,13 +168,24 @@ async def resolve_preview(
         return _absent("cap")
 
     # The URL that is FETCHED and RETURNED stays the caller's; only the key is
-    # normalised (see the cache module). A bare host keeps its scheme-less form
-    # here and is absolutised by the fetcher, which is why the card reports the
-    # URL that actually answered rather than the string it was handed.
+    # normalised (see the cache module), which is why the card reports the URL
+    # that actually answered rather than the string it was handed.
+    #
+    # A PREVIEW REQUIRES AN ABSOLUTE http(s) URL WITH A REAL HOST, and that rule is
+    # enforced HERE, before any key, cache read, DNS lookup or request (QA defect
+    # 1-3, core 0.101.4). The shared fetcher is deliberately more forgiving —
+    # :func:`~local_operator.web_fetch.service.normalize_url` prepends ``https://``
+    # to a bare host because a model or a ``read`` sugar realistically hands it
+    # ``example.com`` — and a preview must not inherit that: the string it is
+    # handed is display text out of a chat message, so ``README.md`` is a FILENAME
+    # the operator sees as plain text, not the third-party site ``https://README.md``.
+    # Absolutising it made the machine fetch an arbitrary domain that nobody
+    # named. The prepend therefore stays untouched in the shared path, where other
+    # callers legitimately rely on it, and the refusal lives in this path only.
     target = url.strip()
-    scheme_refusal = _scheme_refusal(target)
-    if scheme_refusal is not None:
-        return _absent(scheme_refusal)
+    target_refusal = _target_refusal(target)
+    if target_refusal is not None:
+        return _absent(target_refusal)
 
     # A URL CARRYING CREDENTIALS IS REFUSED HERE, ON THE RAW SPELLING, BEFORE THE
     # KEY IS BUILT (QA Q2-1). ``canonical_url`` DROPS userinfo — that is what
@@ -260,6 +272,14 @@ async def _resolve_origin(
         return _absent(_policy_reason(refusal.reason))
     except FetchError as error:
         return _error(retryable=_retryable(error))
+    # NO BROAD FLOOR HERE, deliberately (review R1-3). A spelling no request can be
+    # built from, or a host the resolver cannot encode, is refused at its source —
+    # ``validate_public_url`` raises ``PolicyRefusal("host")`` for it on the page,
+    # every redirect hop and both decoration sub-fetches — and lands in the arm
+    # above as a ``blocked-host`` that is CACHED like any other refusal, because
+    # it is a property of the URL and asking again changes nothing. A blanket
+    # ``except ValueError`` would also swallow a real bug in the fetcher as a
+    # silent, cached absence; that must stay a visible failure instead.
 
     # A refusal or a broken origin is not a page. 4xx can be a WAF challenge and
     # 5xx can be a rolling deploy, so the class decides whether another try could
@@ -499,17 +519,90 @@ async def _store_artifact(
     return stored, raster
 
 
-def _scheme_refusal(target: str) -> AbsentReason | None:
-    """Refuse a non-http(s) scheme before anything resolves it.
+#: The characters ``urlsplit`` deletes from a URL before parsing it (WHATWG URL
+#: parsing; the stdlib's ``_UNSAFE_URL_BYTES_TO_REMOVE``, private, so restated).
+_STRIPPED_BY_URLSPLIT = ("\t", "\r", "\n")
 
-    A bare host has no scheme and is NOT refused: the fetcher normalises it to
-    https, and a link pasted without ``https://`` is the commonest case there is.
+#: RFC 1035's limit on a whole name in presentation form, trailing dot excluded.
+_MAX_HOST_OCTETS = 253
+
+
+def _target_refusal(target: str) -> AbsentReason | None:
+    """Why ``target`` cannot be previewed as an absolute URL, or ``None`` if it can.
+
+    The contract is exactly one shape — an absolute ``http``/``https`` URL with a
+    real host — and everything else is a CODED, NON-RETRYABLE absence. The codes
+    are the module's existing vocabulary, chosen so the renderer draws the right
+    thing with no Retry control:
+
+    * no usable scheme at all (``README.md``, ``example.com/login``,
+      ``//evil.example/p``, ``./notes/plan.md``, ``#section``) and a non-http(s)
+      scheme (``mailto:``, ``javascript:``, ``file:``) are
+      ``unsupported-scheme``: this surface does not fetch them now and never
+      will, so a retry is a control that cannot succeed.
+    * a http(s) URL whose host is missing, unparsable or not encodable is
+      ``blocked-host`` — the code the card already draws for "no host to judge".
+
+    NOTHING HERE RESOLVES OR FETCHES, and that is the point of refusing on the
+    spelling: a refusal must cost zero DNS lookups. It also closes the crash QA
+    measured — ``./notes/plan.md`` reached ``socket.getaddrinfo``, whose IDNA
+    encode of ``.`` raised ``UnicodeError`` past every handler and became a 500 the
+    UI mapped to a Retry that could never work. A host that cannot be IDNA-encoded
+    is refused here for the same reason, one layer earlier.
+
+    The depth defence is unchanged: :func:`~local_operator.web_fetch.service.
+    validate_public_url` still re-checks every hop, including redirects a parse
+    here never sees.
     """
     if not target:
         return "no-metadata"
-    scheme = urlsplit(target).scheme.lower()
-    if scheme and scheme not in ("http", "https"):
+    if any(character in target for character in _STRIPPED_BY_URLSPLIT):
+        # ``urlsplit`` silently deletes these (WHATWG), so ``https:\t//host`` would
+        # pass the checks below as ``https://host`` — while the fetcher's
+        # collapsed-scheme repair reads the same string as ``https:`` plus
+        # ``\t//host`` and builds a URL with no host, a retryable error whose
+        # Retry never works (security S-3). Refusing the raw spelling keeps the
+        # guard and the fetcher judging one string; no real link contains them.
+        return "blocked-host"
+    try:
+        parts = urlsplit(target)
+        scheme = parts.scheme.lower()
+        # ``hostname`` also validates the netloc (an unterminated IPv6 literal
+        # raises), and ``port`` raises on an out-of-range one; a URL that fails
+        # either is one nothing downstream could use.
+        host = parts.hostname
+        # Reading ``port`` is a VALIDATION, not a use: urlsplit defers the port
+        # parse, so an out-of-range one raises only when the attribute is read.
+        parts.port
+    except ValueError:
+        return "blocked-host"
+    if scheme not in ("http", "https"):
         return "unsupported-scheme"
+    if not host:
+        return "blocked-host"
+    try:
+        encoded = host.encode("idna")
+    except UnicodeError:
+        # ``.`` or an over-long label: the resolver's own encode would raise the
+        # same way after a lookup was already attempted.
+        return "blocked-host"
+    if len(encoded.rstrip(b".")) > _MAX_HOST_OCTETS:
+        # The codec checks each label (<= 63) but not the total, so five legal
+        # labels would still cost a lookup for a name DNS cannot hold (S-4).
+        return "blocked-host"
+    # EVERY OTHER REFUSAL THE FETCHER CAN DECIDE FROM THE STRING, ON THE RAW TARGET
+    # (security S-5). The cache key drops the fragment and re-encodes the query, so
+    # ``page#\x01`` and ``page`` (or ``?a=\x01`` and ``?a=%01``) are ONE key; had
+    # the fetcher refused the raw spelling and the answer been cached under that
+    # key, one sender's unrequestable link would deny every reader the legitimate
+    # card for ``NEGATIVE_TTL_S``. Refused here, before the key exists, it is
+    # never cached — the credential refusal's placement, for the same reason.
+    # Only refusals that are a property of the NORMALISED URL (a name that does
+    # not exist, a private address, an unusable redirect hop) reach the cache.
+    try:
+        vet_url_spelling(target)
+    except PolicyRefusal as refusal:
+        return _policy_reason(refusal.reason)
     return None
 
 

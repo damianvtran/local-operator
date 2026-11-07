@@ -385,16 +385,23 @@ def _pin_request(url: str, pinned_ip: str | None) -> tuple[str, dict[str, str], 
     """
     if not pinned_ip:
         return url, {}, {}
-    parsed = urlparse(url)
-    hostname = parsed.hostname or ""
+    origin = httpx.URL(url)
+    # Host and SNI carry the ASCII (IDNA 2008) name httpx builds the request with
+    # — the same name :func:`validate_public_url` resolved. HTTP and TLS are ASCII
+    # on the wire, so the Unicode spelling ``urlparse`` returns for an IDN host
+    # (``café.test``) could never be sent: it failed the header encode and made
+    # every IDN link unfetchable.
+    hostname = _request_host(origin)
     # httpx.URL.copy_with(host=...) brackets IPv6 literals automatically and
     # preserves scheme/port/path/query, so the request targets the IP verbatim.
-    pinned_url = str(httpx.URL(url).copy_with(host=pinned_ip))
-    # Host carries the port when the original URL did, matching what the server
-    # would have seen without pinning.
+    pinned_url = str(origin.copy_with(host=pinned_ip))
+    # Host carries a non-default port, matching what the server would have seen
+    # without pinning. Read from the SAME parser the guard judged (review R2-1): a
+    # second reading with ``urlparse`` disagreed with httpx about the port, so the
+    # guard passed a URL the pin then raised on.
     host_header = hostname
-    if parsed.port is not None:
-        host_header = f"{hostname}:{parsed.port}"
+    if origin.port is not None:
+        host_header = f"{hostname}:{origin.port}"
     return pinned_url, {"Host": host_header}, {"sni_hostname": hostname}
 
 
@@ -476,6 +483,16 @@ def _resolve_host_ips(hostname: str) -> list[str]:
         pass
     try:
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+    except UnicodeError as exc:
+        # getaddrinfo IDNA-encodes a ``str`` host BEFORE it sends anything, and an
+        # empty or over-long label (``a..b``, ``.``) raises here rather than
+        # answering. No DNS can ever hold such a name, so it is the same permanent
+        # policy answer as ``EAI_NONAME`` — and refusing it here, where every
+        # lookup happens, covers the page, every redirect hop and the icon/image
+        # sub-fetches at once instead of one handler per caller.
+        raise PolicyRefusal(
+            f"refusing host {hostname!r}: not a name DNS can hold ({exc})", reason="host"
+        ) from exc
     except socket.gaierror as exc:
         # ONLY a permanent "no such name" is a POLICY answer. No amount of
         # waiting changes what DNS knows about a name that does not exist, so
@@ -531,6 +548,167 @@ def url_has_credentials(url: str) -> bool:
     return parts.username is not None or parts.password is not None
 
 
+def _request_host(origin: httpx.URL) -> str:
+    """The ASCII host httpx will put on the wire for ``origin``.
+
+    ``raw_host`` is httpx's IDNA 2008 encoding (``xn--caf-dma.test``); an ASCII
+    host and an IP literal come back as themselves. It is the ONE spelling the
+    lookup, the ``Host`` header and SNI all use — Python's own ``idna`` codec is
+    IDNA 2003, which maps ``faß.de`` to a different name than httpx sends.
+    """
+    return origin.raw_host.decode("ascii")
+
+
+def _parse_request_url(url: str) -> httpx.URL:
+    """Parse ``url`` with the parser the request is built with, or refuse it.
+
+    ``urlparse`` accepts spellings httpx then refuses while building the request:
+    a soft hyphen or fullwidth letters in the host (Python's IDNA 2003 codec maps
+    them, httpx's IDNA 2008 does not), an octal IPv4 (``0177.0.0.1``, which macOS
+    and glibc even resolve to different addresses), a NUL anywhere, a lone
+    surrogate. Each used to cost a real DNS lookup and then raise
+    ``httpx.InvalidURL``/``UnicodeEncodeError`` — an exception no caller expected,
+    so a link preview answered 500 and the tool fell into its defensive arm.
+    Parsing here, before the lookup, makes it the guard's own ``host`` refusal.
+
+    PARSING IS NOT ENOUGH: httpx also ACCEPTS spellings it cannot use, and each of
+    those is refused here too, from the string alone (review R2-1, security S-1):
+
+    * **The port.** httpx keeps ``:99999`` and ``:-1`` as integers and silently
+      DROPS ``: 443`` and fullwidth digits (so the pin would connect to the
+      default port, not the one written). The stdlib's strict reading — ASCII
+      digits only, 0–65535 — is the gate, and httpx's effective port must agree
+      with it, so the guard and the pin judge one port.
+    * **The host must decode.** httpx's ASCII branch passes an A-label such as
+      ``xn--zz`` untouched, and the request then failed decoding it for the pool
+      key — after a real lookup. A host that does not survive decode + re-encode
+      (IDNA 2008, the codec httpx itself uses) is refused instead.
+    * **The length.** The IDNA codec checks each label (<= 63) but not the
+      total, so a name past DNS's 253 octets would still cost a lookup.
+    """
+    try:
+        origin = httpx.URL(url)
+        # Reading ``.port`` IS the strict validation: ``urlparse`` defers the port
+        # parse, so an out-of-range or non-ASCII one raises only when read.
+        written_port = urlparse(url).port
+        # ``.host`` is httpx's own IDNA decode — the call the request makes.
+        round_trip = origin.copy_with(host=origin.host).raw_host
+    except (httpx.InvalidURL, UnicodeError, ValueError) as exc:
+        raise PolicyRefusal(
+            f"refusing {url!r}: no request can be built from this URL ({exc})", reason="host"
+        ) from None
+    default_port = _DEFAULT_PORTS.get(origin.scheme)
+    if (origin.port or default_port) != (written_port or default_port):
+        raise PolicyRefusal(
+            f"refusing {url!r}: no request can be built from this URL "
+            "(its port is not the one a request would use)",
+            reason="host",
+        )
+    if round_trip != origin.raw_host:
+        raise PolicyRefusal(
+            f"refusing {url!r}: no request can be built from this URL "
+            "(its host does not survive an IDNA round trip)",
+            reason="host",
+        )
+    if len(origin.raw_host.rstrip(b".")) > _MAX_HOST_OCTETS:
+        raise PolicyRefusal(
+            f"refusing {url!r}: no request can be built from this URL "
+            f"(its host is longer than DNS's {_MAX_HOST_OCTETS} octets)",
+            reason="host",
+        )
+    return origin
+
+
+#: The port a scheme implies. httpx reports it as ``None`` and ``urlparse`` as the
+#: integer when it is written, so both map through this before they are compared.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+#: RFC 1035's limit on a whole name in presentation form, trailing dot excluded.
+_MAX_HOST_OCTETS = 253
+
+
+def vet_url_spelling(url: str) -> str:
+    """Refuse ``url`` on its spelling alone, or return the ASCII host to look up.
+
+    Everything :func:`validate_public_url` decides WITHOUT DNS: the scheme, URL
+    credentials, a missing host, and a URL no request can be built from. Raises
+    :class:`PolicyRefusal`; never resolves, never connects.
+
+    PUBLIC because the same string-only verdict is needed AHEAD of two things the
+    guard itself runs behind: the agent tool's enrichment probes (``/p.md`` is a
+    buildable sibling of ``/p#x\\x00``, so it was looked up and fetched before the
+    refusal — security S-7), and the link preview's cache key. The key drops the
+    fragment and re-encodes the query, so a refusal decided from the RAW string
+    and then cached under the key would deny the legitimate twin its card
+    (security S-5); the preview therefore calls this on the raw target before the
+    key exists and caches nothing. One function, so the three places cannot
+    disagree about what is refusable.
+    """
+    try:
+        # ``urlsplit`` itself raises on some netlocs (an unterminated ``[``, or
+        # brackets inside the userinfo); that is the same "no request" verdict.
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise PolicyRefusal(
+            f"refusing {url!r}: no request can be built from this URL ({exc})", reason="host"
+        ) from None
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise PolicyRefusal(
+            f"refusing {url!r}: only http:// and https:// are allowed", reason="scheme"
+        )
+    # CREDENTIALS IN THE URL ARE REFUSED, NEVER FORWARDED. httpx turns URL
+    # userinfo into an ``Authorization: Basic`` header, so honouring
+    # ``http://user:secret@host/x`` would send those credentials to a third
+    # party in a request this process signs — and a previewed link is written by
+    # whoever sent the message, not by the reader. Checked BEFORE any lookup or
+    # connect, so refusing costs no DNS and no socket, and it runs on every
+    # redirect hop for the same reason the rest of this function does. The URL is
+    # deliberately absent from the message: it carries the credential itself.
+    if url_has_credentials(url):
+        raise PolicyRefusal(
+            "refusing a URL carrying credentials: userinfo is never forwarded", reason="host"
+        )
+    if not hostname:
+        raise PolicyRefusal(f"refusing {url!r}: no host in URL", reason="host")
+    # Judged even under ``allow_private``: a URL httpx cannot build a request from
+    # fails either way, and a coded refusal beats an exception out of the send.
+    return _request_host(_parse_request_url(url))
+
+
+#: Characters a redirect ``Location`` may not carry. Parsers disagree about each:
+#: WHATWG reads ``\`` as ``/`` and strips tab/CR/LF, the stdlib keeps them, and a
+#: soft hyphen vanishes under one IDNA mapping but not the other. Any of them in a
+#: header the origin writes is a parser differential, never a real redirect.
+_REFUSED_IN_LOCATION = frozenset("\\\u00ad\x7f") | frozenset(chr(code) for code in range(0x20))
+
+
+def _redirect_target(current: str, location: str) -> str:
+    """The absolute URL a redirect points at, or a non-retryable refusal.
+
+    The origin writes ``Location``, so a value no request can be built from is
+    the guard's ``host`` refusal — like any other unusable hop — and never an
+    exception: ``urljoin`` raises a bare ``ValueError`` for brackets inside the
+    userinfo and for an unterminated IPv6 literal, which used to surface as a 500
+    (review R2-1). The joined URL is then judged by :func:`validate_public_url`
+    on the next hop, through the same parse as every other URL.
+    """
+    if any(character in _REFUSED_IN_LOCATION for character in location):
+        raise PolicyRefusal(
+            f"refusing the redirect from {current!r}: its Location carries a character "
+            "parsers disagree about",
+            reason="host",
+        )
+    try:
+        return urljoin(current, location)
+    except ValueError as exc:
+        raise PolicyRefusal(
+            f"refusing the redirect from {current!r}: no request can be built from its "
+            f"Location ({exc})",
+            reason="host",
+        ) from None
+
+
 def validate_public_url(url: str, *, allow_private: bool) -> str | None:
     """Validate ``url``'s target and return the vetted IP to PIN the connection to.
 
@@ -550,32 +728,24 @@ def validate_public_url(url: str, *, allow_private: bool) -> str | None:
     refused outright; the first address is the one returned to pin to, and since
     every address passed, any of them is safe.
     """
-    parsed = urlparse(url)
-    if parsed.scheme.lower() not in ("http", "https"):
-        raise PolicyRefusal(
-            f"refusing {url!r}: only http:// and https:// are allowed", reason="scheme"
-        )
-    # CREDENTIALS IN THE URL ARE REFUSED, NEVER FORWARDED. httpx turns URL
-    # userinfo into an ``Authorization: Basic`` header, so honouring
-    # ``http://user:secret@host/x`` would send those credentials to a third
-    # party in a request this process signs — and a previewed link is written by
-    # whoever sent the message, not by the reader. Checked BEFORE any lookup or
-    # connect, so refusing costs no DNS and no socket, and it runs on every
-    # redirect hop for the same reason the rest of this function does. The URL is
-    # deliberately absent from the message: it carries the credential itself.
-    if url_has_credentials(url):
-        raise PolicyRefusal(
-            "refusing a URL carrying credentials: userinfo is never forwarded", reason="host"
-        )
-    hostname = parsed.hostname
-    if not hostname:
-        raise PolicyRefusal(f"refusing {url!r}: no host in URL", reason="host")
+    # Every refusal decided from the string alone runs first, before any lookup.
+    lookup_host = vet_url_spelling(url)
     if allow_private:
         # The escape hatch turns off IP judgement entirely, so there is nothing
         # to pin to and no rebinding threat model to defend (the operator opted
         # into local targets knowingly). Let httpx resolve as usual.
         return None
-    resolved = _resolve_host_ips(hostname)
+    try:
+        resolved = _resolve_host_ips(lookup_host)
+    except FetchError as exc:
+        # The lookup runs on the punycode, but the reader wrote the Unicode
+        # spelling (review R2-2): name both, or ``xn--nx-cja.test`` reads as a
+        # host nobody typed. The exception is amended in place so its class,
+        # ``reason`` and ``failure`` — what callers decide on — are untouched.
+        written = urlparse(url).hostname
+        if written and written != lookup_host and exc.args:
+            exc.args = (f"{exc.args[0]} (the URL spells it {written!r})", *exc.args[1:])
+        raise
     vetted: str | None = None
     for ip_str in resolved:
         try:
@@ -949,6 +1119,11 @@ class WebFetchService:
         # ``enrich`` switch and skipped for ``raw`` (the caller asked for the
         # source verbatim, not a cleaner rendition).
         if self.settings.enrich and not raw:
+            # The primary URL's string-only refusals run BEFORE the probes
+            # (security S-7): a probe is a different, buildable URL (``/p.md`` for
+            # ``/p#x\x00``), so it was looked up and fetched for a target the
+            # guard was always going to refuse.
+            vet_url_spelling(normalized)
             enriched = await self._try_enrichment(owner, normalized, ceiling, budget)
             if enriched is not None:
                 return enriched
@@ -1006,7 +1181,7 @@ class WebFetchService:
             )
             location = headers.get("location")
             if status in (301, 302, 303, 307, 308) and location:
-                current = urljoin(current, location)
+                current = _redirect_target(current, location)
                 continue
             return current, status, headers, body, complete
         raise FetchError(
@@ -1449,18 +1624,32 @@ class WebFetchService:
                         del buffer[ceiling:]
                         complete = False
                         break
+        except httpx.RemoteProtocolError as exc:
+            if not str(exc).startswith(_UNPARSABLE_LOCATION):
+                raise _transport_error(url, exc, attempt_timeout) from exc
+            # httpx builds its own ``next_request`` from ``Location`` even with
+            # redirects off, and wraps a parse failure there in THIS class, which
+            # the classifier reads as a dropped connection: retryable, so the
+            # origin was asked three times for a header it sends every time (QA
+            # Q3, security S-1c). The origin wrote that URL, so it is the guard's
+            # non-retryable refusal. The prefix is httpx's own wording; the
+            # redirect tests pin it, so a change upstream fails them, not prod.
+            raise PolicyRefusal(
+                f"refusing the redirect from {url!r}: no request can be built from its "
+                f"Location ({exc})",
+                reason="host",
+            ) from None
+        except (httpx.InvalidURL, UnicodeError) as exc:
+            # The same builder raises these UNWRAPPED for other spellings
+            # (``https:\\evil.test``). Neither is an ``HTTPError``, so they escaped
+            # every handler as a 500. A backstop: ``_redirect_target`` refuses what
+            # it can see, but this raise happens before it sees anything.
+            raise PolicyRefusal(
+                f"refusing the request to {url!r}: no request can be built ({exc})",
+                reason="host",
+            ) from None
         except (httpx.TimeoutException, httpx.HTTPError) as exc:
-            # The message is built from the CLASSIFIER, never from ``str(exc)``:
-            # ``httpx.ReadTimeout.__str__()`` is the empty string, which is how
-            # the shipped error came to read ``timed out fetching '<url>': ``
-            # with nothing after the colon. ``str(exc)`` is appended only when it
-            # actually says something.
-            failure = classify_exception(exc, timeout_s=attempt_timeout)
-            detail = str(exc).strip()
-            message = f"{failure.detail or 'the request failed'}: {url}"
-            if detail:
-                message += f" ({detail})"
-            raise FetchError(message, failure=failure) from exc
+            raise _transport_error(url, exc, attempt_timeout) from exc
         return status, headers, bytes(buffer), complete
 
     def _render(
@@ -1562,6 +1751,26 @@ class _Diagnostics(TypedDict):
     block_vendor: str | None
     block_reference: str | None
     retry_after_s: float | None
+
+
+#: httpx's wording when ``Location`` cannot be parsed into its ``next_request``.
+_UNPARSABLE_LOCATION = "Invalid URL in location header"
+
+
+def _transport_error(url: str, exc: Exception, attempt_timeout: float | None) -> FetchError:
+    """The classified :class:`FetchError` for one transport-level failure.
+
+    The message is built from the CLASSIFIER, never from ``str(exc)``:
+    ``httpx.ReadTimeout.__str__()`` is the empty string, which is how the shipped
+    error came to read ``timed out fetching '<url>': `` with nothing after the
+    colon. ``str(exc)`` is appended only when it actually says something.
+    """
+    failure = classify_exception(exc, timeout_s=attempt_timeout)
+    detail = str(exc).strip()
+    message = f"{failure.detail or 'the request failed'}: {url}"
+    if detail:
+        message += f" ({detail})"
+    return FetchError(message, failure=failure)
 
 
 def _diagnostics(telemetry: _Telemetry) -> _Diagnostics:
