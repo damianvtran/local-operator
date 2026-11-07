@@ -261,6 +261,22 @@ class TestBuildSchedule:
         assert "error" not in carried
         assert carried["schedule"].origin == "tool", "a carried-back message is not a reword"
 
+        # Padding is not authorship (round 7, QA minor): the request arrives
+        # un-stripped while the row's text was stripped on the way in, so a
+        # whitespace-only "edit" must not look like a reword — re-stamping here
+        # would erase a notice for words the operator never changed.
+        padded = build_wake_edit(
+            {"message": "   check the build   "},
+            [model_row],
+            model_row.id,
+            NOW,
+            editor_origin="desktop",
+        )
+        assert "error" not in padded
+        assert padded["schedule"].origin == "tool", "padding alone is not a reword"
+        assert padded["schedule"].message_author == "model"
+        assert padded["schedule"].message == model_row.message
+
         # Time only: the words did not move, so neither did the author.
         retimed = build_wake_edit(
             {"in": "45m"}, [model_row], model_row.id, NOW, editor_origin="desktop"

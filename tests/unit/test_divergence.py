@@ -34,7 +34,6 @@ from local_operator.divergence import (
 )
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.rows import divergence_notice
-from local_operator.harness.wake_types import WakeOrigin
 from local_operator.harness.types import (
     AgentMessage,
     AgentTool,
@@ -50,6 +49,7 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolResult,
 )
+from local_operator.harness.wake_types import WakeOrigin
 
 MODEL = ModelSpec(provider="test", model_id="m")
 

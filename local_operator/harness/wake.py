@@ -642,7 +642,15 @@ def build_wake_edit(
     # THE WORDS, not the request: a caller may send ``message`` back unchanged
     # (the TUI posts its whole form, the desktop its whole body), and a request
     # that merely CARRIES the old text has not re-authored it.
-    reworded = merged["message"] != target.message
+    #
+    # STRIPPED ON BOTH SIDES (round 7, QA minor): the request arrives raw, but
+    # every stored row's message was stripped by ``build_wake_schedule`` on the
+    # way in. Comparing them raw made a padding-only edit look like a reword, so
+    # the row was re-stamped operator-authored while its bytes still matched the
+    # model's — erasing the notice that should have fired. A non-str ``message``
+    # is not a reword; the validator below rejects it.
+    reported = merged["message"]
+    reworded = isinstance(reported, str) and reported.strip() != target.message.strip()
     outcome = build_wake_schedule(
         merged,
         [schedule for schedule in existing if schedule.id != wake_id],
