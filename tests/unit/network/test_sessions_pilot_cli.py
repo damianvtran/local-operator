@@ -530,3 +530,84 @@ async def test_a_peek_reads_a_live_tail_over_a_real_pair(
         assert "first turn" in said, payload
     finally:
         await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
+async def test_a_peek_names_the_model_the_owner_says_served_the_turn(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Operator report, 2026-11-07, over the wire: which model wrote the reply.
+
+    The owner's mock stream is made to carry the serving identity production's
+    failover layer stamps on every usage event (``failover._stamp_serving_spec``,
+    which the mock path bypasses), plus an ``account_ref`` beside it. What is
+    asserted is the ORIGIN's ``--peek`` child: the identity crossed the real
+    display window and is printed, and the account reference is not.
+    """
+    from local_operator.harness.types import StreamEndEvent, StreamUsageEvent, Usage
+    from local_operator.providers import clients
+
+    original = clients.MockClient.stream
+
+    def stamped(usage: Usage | None) -> Usage | None:
+        if usage is None:
+            return None
+        return usage.model_copy(
+            update={
+                "provider": "openai",
+                "model_id": "gpt-6.1-sol",
+                "account_ref": "acct-must-not-cross",
+            }
+        )
+
+    async def stream(self: Any, *args: Any, **kwargs: Any) -> Any:
+        async for event in original(self, *args, **kwargs):
+            if isinstance(event, (StreamUsageEvent, StreamEndEvent)):
+                event = event.model_copy(update={"usage": stamped(event.usage)})
+            yield event
+
+    monkeypatch.setattr(clients.MockClient, "stream", stream)
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="pilot-served",
+        prompt="Reply with exactly: SOL_OK",
+    )
+    try:
+        root_a = created.server_a.root
+        (root_a / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+        )
+        code, out, err = await asyncio.to_thread(
+            _run_cli,
+            root_a,
+            _home(tmp_path),
+            "sessions",
+            "--json",
+            "--peer",
+            "device-b",
+            "--peek",
+            "pilot-served",
+        )
+        assert code == 0, (code, out, err)
+        rows = json.loads(out)["rows"]
+        assistant = [row for row in rows if row["role"] == "assistant"]
+        assert assistant and assistant[-1]["model"] == "openai/gpt-6.1-sol", rows
+        assert "acct-must-not-cross" not in out
+
+        code, out, err = await asyncio.to_thread(
+            _run_cli,
+            root_a,
+            _home(tmp_path),
+            "sessions",
+            "--peer",
+            "device-b",
+            "--peek",
+            "pilot-served",
+        )
+        assert code == 0, (code, out, err)
+        assert "assistant (openai/gpt-6.1-sol): Hello from the mock provider!" in out, out
+        assert "acct-must-not-cross" not in out
+    finally:
+        await asyncio.to_thread(created.stop)

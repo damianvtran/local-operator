@@ -502,6 +502,81 @@ def test_the_set_model_hop_carries_the_desktops_reasoning_effort(
     assert frames[0].get("effort") == sent, frames[0]
 
 
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        (
+            {"op": "error", "message": "catalogue metadata unavailable"},
+            "model: openai/gpt-6.1-sol not applied — the session keeps its own model\n"
+            "why: catalogue metadata unavailable",
+        ),
+        # M3: no reply is a dropped socket OR a timeout; the switch may have landed.
+        (
+            None,
+            "model: openai/gpt-6.1-sol may not have been applied\n"
+            "why: no reply from the session",
+        ),
+    ],
+)
+def test_an_unapplied_model_says_the_session_keeps_its_own(
+    root: Path,
+    reply: dict[str, Any] | None,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator report, 2026-11-07: the receipt named the reason, not the consequence.
+
+    ``--create --model openai/gpt-6.1-sol`` on a peer printed a bare
+    ``catalogue metadata unavailable`` and its first turn ran the session's own
+    model. The receipt now leads with the pair and the consequence (key-first,
+    design D2) and keeps the runtime's reason verbatim on its own ``why:`` line
+    (D3); a missing reply is hedged, because the runtime may have switched (M3).
+    """
+    identity.mint(root, name="cloud-node-1")
+    server = _warmed_server(root)
+
+    class _Dial:
+        def exchange(self, frame: dict[str, Any], *, timeout_s: float) -> dict[str, Any] | None:
+            return reply
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(server, "_dial_owned", lambda *args, **kwargs: _Dial())
+
+    result = server._set_model_on(  # noqa: SLF001
+        SESSION, {"provider": "openai", "model_id": "gpt-6.1-sol"}
+    )
+
+    assert result == {"applied": False, "detail": expected}
+    assert all(len(line) <= 80 for line in expected.splitlines())
+
+
+def test_an_unreachable_runtime_says_the_model_was_not_applied(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, M2: a dial failure answers the same not-applied receipt."""
+    from local_operator.network import dial as session_dial
+
+    identity.mint(root, name="cloud-node-1")
+    server = _warmed_server(root)
+
+    def unreachable(*_args: Any, **_kwargs: Any) -> Any:
+        raise session_dial.OwnerUnreachable("the session's runtime is not running")
+
+    monkeypatch.setattr(server, "_dial_owned", unreachable)
+
+    result = server._set_model_on(  # noqa: SLF001
+        SESSION, {"provider": "openai", "model_id": "gpt-6.1-sol"}
+    )
+
+    assert result == {
+        "applied": False,
+        "detail": "model: openai/gpt-6.1-sol not applied — the session keeps its own model\n"
+        "why: the session's runtime is not running",
+    }
+
+
 def test_effort_rides_the_model_choice_so_a_team_only_create_keeps_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

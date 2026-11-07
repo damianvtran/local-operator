@@ -512,3 +512,90 @@ def test_a_promptless_receipt_prints_no_turn(
     printed = capsys.readouterr().out
     assert "no prompt sent" in printed, printed
     assert "turn" not in printed, printed
+
+
+_NOT_APPLIED = (
+    "model: openai/gpt-6.1-sol not applied — the session keeps its own model\n"
+    "why: catalogue metadata unavailable"
+)
+
+
+@pytest.mark.parametrize(
+    ("turn", "lead"),
+    [
+        ({"state": "settled", "detail": ""}, "see which model replied:"),
+        ({"state": "running", "detail": ""}, "see which model replies:"),
+    ],
+)
+def test_an_unapplied_model_points_at_the_read_that_names_the_server(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    turn: dict[str, Any],
+    lead: str,
+) -> None:
+    """Design round 1 on #3554, D1: the receipt names the read that answers "which model".
+
+    The model line says the session keeps "its own model", which this person
+    never saw, and the turn lines below it read as success. ``--peek`` names the
+    model each reply came from, so the receipt prints that command alone on an
+    indented line with no backticks (#3547's form). Every line fits 80 columns.
+    """
+    from local_operator.network import cli as network_cli
+
+    args = _args(
+        monkeypatch,
+        admitted=True,
+        detail="",
+        model={"applied": False, "detail": _NOT_APPLIED},
+        turn=turn,
+    )
+    assert network_cli._cmd_sessions(args) == 0  # noqa: SLF001
+    lines = capsys.readouterr().out.splitlines()
+    assert _NOT_APPLIED.splitlines()[0] in lines, lines
+    assert "why: catalogue metadata unavailable" in lines, lines
+    at = lines.index(lead)
+    assert lines[at + 1] == "  lop network sessions --peer build-box --peek sess00000001", lines
+    assert "`" not in lines[at + 1]
+    assert all(len(line) <= 80 for line in lines), [line for line in lines if len(line) > 80]
+
+
+@pytest.mark.parametrize(
+    ("model", "turn"),
+    [
+        ({"applied": True, "detail": ""}, {"state": "settled", "detail": ""}),
+        ({"applied": False, "detail": ""}, {"state": "settled", "detail": ""}),
+        ({"applied": False, "detail": _NOT_APPLIED}, {"state": "failed", "detail": "boom"}),
+    ],
+)
+def test_no_model_pointer_when_the_choice_landed_or_no_reply_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    model: dict[str, Any],
+    turn: dict[str, Any],
+) -> None:
+    """Applied, nothing asked, or a FAILED turn (no reply row to show): no pointer."""
+    from local_operator.network import cli as network_cli
+
+    args = _args(monkeypatch, admitted=True, detail="", model=model, turn=turn)
+    assert network_cli._cmd_sessions(args) == 0  # noqa: SLF001
+    printed = capsys.readouterr().out
+    assert "see which model" not in printed and "--peek" not in printed, printed
+
+
+def test_the_waited_branch_prints_its_peek_command_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The still-running branch already prints the same command: never twice."""
+    from local_operator.network import cli as network_cli
+
+    args = _args(
+        monkeypatch,
+        admitted=True,
+        detail="",
+        model={"applied": False, "detail": _NOT_APPLIED},
+        turn={"state": "running", "detail": "", "waited_s": 45.0},
+    )
+    assert network_cli._cmd_sessions(args) == 0  # noqa: SLF001
+    printed = capsys.readouterr().out
+    assert printed.count("--peek sess00000001") == 1, printed
+    assert "see which model" not in printed, printed
