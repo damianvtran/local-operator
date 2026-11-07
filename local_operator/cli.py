@@ -13455,6 +13455,18 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
         message = str(item.get("message") or "")
         if message:
             print(f"  {_safe(message, limit=2000)}")
+        for field in item.get("fields") or []:
+            # A ``--prefer`` that settled an edit/removal by REMOVING the file
+            # discarded the other side's edit; say so, not just "merged" (agent
+            # review round 2, m1). Only side-taken files carry the prefer note.
+            regions = field.get("regions") or []
+            if field.get("merged") is None and any(
+                str(r.get("note") or "").startswith("prefer=") for r in regions
+            ):
+                print(
+                    # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                    f"  removed {_safe(field.get('field'))} (the other side's edit was discarded)"
+                )
         if code == "merge-refused" and item.get("outcome") == "needs-review":
             print(
                 # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)

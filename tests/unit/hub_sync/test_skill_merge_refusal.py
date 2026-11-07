@@ -461,3 +461,96 @@ def test_verification_still_reports_real_drift_beside_the_name_rewrite(
 
     assert payload["verified"] is False and payload["verification_reason"] == "head-differs"
     assert payload["exit_code"] == 1
+
+
+def _set_description(text: str, description: str) -> str:
+    return text.replace("description: Example skill\n", f"description: {description}\n", 1)
+
+
+def _hub_edit(hub: Any, *, description: str | None = None, rule: str | None = None) -> None:
+    for row in hub.document["files"]:
+        if row["path"] == "SKILL.md":
+            if description is not None:
+                row["content"] = _set_description(row["content"], description)
+            if rule is not None:
+                row["content"] = row["content"].replace(STALE, rule)
+    if description is not None:
+        hub.document["description"] = description
+    hub.revision = '"revision-hub-edit"'
+
+
+@pytest.mark.parametrize(
+    ("shape", "side"),
+    [
+        # Both sides rewrote the description (the frontmatter copy conflicts too).
+        ("description-edit-edit", "local"),
+        ("description-edit-edit", "remote"),
+        # Only local rewrote the description; both rewrote the body, so SKILL.md
+        # is side-taken and the description must follow it.
+        ("local-description-body-conflict", "remote"),
+        ("local-description-body-conflict", "local"),
+    ],
+)
+def test_prefer_takes_the_description_with_the_chosen_skill_md(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    shape: str,
+    side: str,
+) -> None:
+    """M1 (PR #3574 round 2): description and SKILL.md frontmatter are ONE fact.
+
+    Merging the description passage by passage while SKILL.md was taken whole
+    produced a pair the document constructor refused, and ``--prefer`` then
+    named itself as the next step forever.
+    """
+
+    root, _storage, _identity, document, hub = _rig(tmp_path, monkeypatch)
+    if shape == "description-edit-edit":
+        local_desc, hub_desc = "Never cite sources.", "Cite sources only in footnotes."
+        _edit_skill_md(root, document.name, lambda s: _set_description(s, local_desc))
+        _hub_edit(hub, description=hub_desc)
+    else:
+        local_desc, hub_desc = "Use for coordination rules.", "Example skill"
+        _edit_skill_md(
+            root,
+            document.name,
+            lambda s: _set_description(s, local_desc).replace(STALE, LOCAL_RULE),
+        )
+        _hub_edit(hub, rule=HUB_RULE)
+    local_md, hub_md = _local_skill_md(root, document.name), hub.skill_md()
+    assert _sync(root, document.name, capsys)[0] == 1
+
+    code, out, _err = _sync(root, document.name, capsys, prefer=side)
+
+    (item,) = json.loads(out)["reports"]
+    assert code == 0, item
+    on_disk = _local_skill_md(root, document.name)
+    assert on_disk == (local_md if side == "local" else hub_md)
+    expected = local_desc if side == "local" else hub_desc
+    assert f"description: {expected}\n" in on_disk
+    assert _sync(root, document.name, capsys)[0] == 0
+    payload = _push(root, document.name, capsys)
+    assert payload["exit_code"] == 0, payload
+    if side == "local":
+        assert payload["state"] == "pushed" and payload["verified"] is True
+        assert hub.document["description"] == expected and hub.skill_md() == local_md
+    else:
+        assert payload["state"] == "no-op"
+
+
+def test_a_removal_settled_by_prefer_is_named_in_the_human_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """m1 (round 2): a discarded edit is visible, not just "merged"."""
+
+    root, _storage, _identity, document, hub = _rig(tmp_path, monkeypatch)
+    inert = root / "skills" / document.name / "scripts" / "inert.py"
+    inert.write_text(inert.read_text().replace("never run", "never load"))
+    hub.document["files"] = [r for r in hub.document["files"] if r["path"] != "scripts/inert.py"]
+    hub.revision = '"revision-hub-edit"'
+
+    code, out, _err = _sync(root, document.name, capsys, prefer="remote", json=False)
+
+    assert code == 0 and not inert.exists()
+    assert "removed scripts/inert.py (the other side's edit was discarded)" in out

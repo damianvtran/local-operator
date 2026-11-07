@@ -92,9 +92,10 @@ def merge_skill_file(
         # Both sides ADDED this path with different content: a conflict at the
         # FILE level, decided before the text merge can union them (QN4).
         if side is not None:
-            return local if side == "local" else remote, take_file_side(
+            taken = take_file_side(
                 path, base=base, local=local, remote=remote, take=side  # type: ignore[arg-type]
             )
+            return taken.merged, taken  # type: ignore[return-value]
         return None, file_add_conflict(path, local, remote)
     # The engine runs WITHOUT ``prefer``: an explicit side choice applies to a
     # file the merge could not settle, as that side's WHOLE file (see
@@ -115,7 +116,7 @@ def merge_skill_file(
         taken = take_file_side(
             path, base=base, local=local, remote=remote, take=side  # type: ignore[arg-type]
         )
-        return local if side == "local" else remote, taken
+        return taken.merged, taken  # type: ignore[return-value]
     if not skill_file_present(local, remote, result.merged):
         return None, result
     return _preserve_side_bytes(result.merged, local=local, remote=remote), result
@@ -209,9 +210,12 @@ def merge_skill_document(
             local=local_doc.description,
             remote=remote_doc.description,
         ),
-        opts,
+        # Without ``prefer``, like every file: an explicit side choice is applied
+        # below, to the description and SKILL.md as ONE fact.
+        dataclasses.replace(opts, prefer="none"),
     )
     results.append(description)
+    side = opts.prefer if opts.prefer in ("local", "remote") else None
 
     def files_of(doc: SkillDocument | None) -> dict[str, str]:
         return {file.path: file.content for file in doc.files} if doc is not None else {}
@@ -222,6 +226,7 @@ def merge_skill_document(
         files_of(remote_doc),
     )
     merged_files: dict[str, str] = {}
+    skill_md_taken = False
     for path in sorted(set(base_files) | set(local_files) | set(remote_files)):
         content, result = merge_skill_file(
             path,
@@ -237,6 +242,26 @@ def merge_skill_document(
         results.append(result)
         if content is not None:
             merged_files[path] = content
+        if path == "SKILL.md":
+            skill_md_taken = result.engine.mode == "replace"
+    if side is not None and (description.outcome == "needs-review" or skill_md_taken):
+        # The description is stored TWICE -- the manifest field and SKILL.md's
+        # frontmatter -- and a document whose two copies disagree is invalid. So
+        # when the chosen side's SKILL.md was taken whole, or the description
+        # itself could not be settled, the description comes from that same
+        # side. Merging it separately produced a pair the constructor refused,
+        # and ``--prefer`` then printed itself as the next step forever (agent
+        # review round 2, M1 on PR #3574).
+        from local_operator.hub_sync.merge import take_file_side
+
+        description = take_file_side(
+            "description",
+            base=base_doc.description if base_doc is not None else None,
+            local=local_doc.description,
+            remote=remote_doc.description,
+            take=side,  # type: ignore[arg-type]
+        )
+        results[0] = description
     if any(result.outcome in ("needs-review", "refused") for result in results):
         return None, results
 
@@ -250,15 +275,22 @@ def merge_skill_document(
     except SkillValidationError:
         # The per-file merge may have produced a SKILL.md whose frontmatter
         # description no longer matches the merged description field (they are
-        # the same fact stored twice). Re-render the scalar; anything still
+        # the same fact stored twice). Build the document with the description
+        # SKILL.md actually carries -- constructing it with the merged field
+        # first is exactly what was refused, so the old fallback could never
+        # run -- then re-render that scalar to the merged field. Anything still
         # invalid (a removed SKILL.md, bad paths, caps) refuses instead.
+        from local_operator.hub_sync.skill_document import parse_frontmatter
+
         try:
-            merged = SkillDocument(
-                remote_doc.name,
-                merged_description,
-                tuple(SkillFile(path, content) for path, content in sorted(merged_files.items())),
-            ).with_description(merged_description)
-        except SkillValidationError:
+            files = tuple(
+                SkillFile(path, content) for path, content in sorted(merged_files.items())
+            )
+            carried = str(parse_frontmatter(merged_files["SKILL.md"])["description"])
+            merged = SkillDocument(remote_doc.name, carried, files).with_description(
+                merged_description
+            )
+        except (SkillValidationError, KeyError):
             return None, results
     return merged.to_json(), results
 
