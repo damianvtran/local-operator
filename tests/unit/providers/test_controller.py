@@ -710,14 +710,21 @@ class TestUsageIsPerAccount:
         ]
 
     @pytest.mark.asyncio
-    async def test_two_logins_sharing_one_email_get_distinct_refs(
+    async def test_two_logins_sharing_one_email_are_fetched_with_one_token_and_offered_no_ref(
         self, controller, store, monkeypatch
     ) -> None:
-        """Q1: the ref is what a spend resolves by. Two rows behind one email
-        share a LABEL, so a label-keyed stamp handed both panel rows the same
-        ref: either chip spent on one login and the other credit -- whose count
-        is not even shown -- could not be reached."""
+        """R9/Q1: the tokens decide what a report can honestly claim.
+
+        ``accesses_by_id`` holds ONE bearer per label, so two stored logins
+        behind one email are both fetched with the last login's token. The
+        numbers on the other row are therefore not that row's numbers, and a
+        per-row ref would let the panel offer a chip that spends a credit on a
+        login the reader is not looking at. A token-dependent fake is what
+        exposes it: the pre-R9 fixture returned the same report for both
+        tokens, so duplicate refs looked like the only defect.
+        """
         self._shared_email_rows(store)
+        tokens: list[tuple[str, str | None]] = []
 
         async def fake_fetch(
             client,
@@ -729,25 +736,97 @@ class TestUsageIsPerAccount:
             oauth_creds=None,
             extra_creds=None,
         ):
-            return UsageReport(provider=provider, limits=[], resets_available=2)
+            tokens.append((access_token, account_id))
+            # A's login reports 1 credit, B's reports 4: the counts differ, so
+            # which token was used is visible in the reports.
+            resets = 1 if access_token == "tok-A" else 4
+            return UsageReport(provider=provider, limits=[], resets_available=resets)
 
         monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
         reports = await controller.fetch_usage(["anthropic"])
 
+        from local_operator.tui.widgets.usage_panel import reset_candidates
+
+        # Both reports came from B's bearer: the fetch cannot tell the rows
+        # apart, which is the whole reason a ref would be a lie here.
+        assert tokens == [("tok-B", "acct-B"), ("tok-B", "acct-B")], tokens
         assert [r.identity for r in reports] == ["twin@x", "twin@x"]
-        refs = [r.credential_ref for r in reports]
-        assert refs == ["twin@x|acct-A", "twin@x|acct-B"], refs
-        # The one property that matters: no two rows share a spendable handle.
-        assert len(set(refs)) == len(refs)
+        assert [r.resets_available for r in reports] == [4, 4]
+        assert [r.credential_ref for r in reports] == [None, None]
+        # The panel draws chips and ``x`` from this one derivation: no
+        # candidates means ``consume_usage_reset`` is unreachable from the
+        # panel for this pair.
+        assert reset_candidates(reports) == []
 
     @pytest.mark.asyncio
-    async def test_a_second_login_the_refs_cannot_reach_gets_no_ref(
+    async def test_distinct_emails_keep_distinct_refs_under_a_token_dependent_fetch(
         self, controller, store, monkeypatch
     ) -> None:
-        """The list of refs can be shorter than the reports when a login minted
-        no bearer this cycle. The unpaired report keeps NO ref: the panel then
-        renders it as a plain count, because a spend aimed by its label would be
-        refused as ambiguous anyway."""
+        """The other half of R9: uniqueness is only worth anything if each ref
+        names the login whose numbers the reader sees. Distinct labels must
+        keep their own token, their own count and their own ref."""
+        store.upsert_credential(
+            "anthropic", {"type": "oauth", "access": "a-1", "refresh": "r-1", "email": "one@x"}
+        )
+        store.upsert_credential(
+            "anthropic", {"type": "oauth", "access": "a-2", "refresh": "r-2", "email": "two@x"}
+        )
+        store.oauth_accounts["anthropic"] = [
+            types.SimpleNamespace(
+                access_token="tok-1",
+                credential_id=1,
+                account_id=None,
+                email="one@x",
+                org_id=None,
+                api_endpoint=None,
+                kind="oauth",
+                raw=None,
+                credential_invalid=False,
+            ),
+            types.SimpleNamespace(
+                access_token="tok-2",
+                credential_id=2,
+                account_id=None,
+                email="two@x",
+                org_id=None,
+                api_endpoint=None,
+                kind="oauth",
+                raw=None,
+                credential_invalid=False,
+            ),
+        ]
+
+        async def fake_fetch(
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
+        ):
+            resets = 1 if access_token == "tok-1" else 4
+            return UsageReport(provider=provider, limits=[], resets_available=resets)
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+        reports = await controller.fetch_usage(["anthropic"])
+
+        assert [(r.identity, r.resets_available, r.credential_ref) for r in reports] == [
+            ("one@x", 1, "one@x"),
+            ("two@x", 4, "two@x"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_shared_label_gets_no_ref_even_when_only_one_login_minted_a_bearer(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """A pair whose second login minted no bearer still names two stored
+        logins under one label. The panel shows that label twice and cannot say
+        which of the two a spend would reach -- the controller refuses the label
+        as ambiguous -- so neither row is offered a chip, not even the one whose
+        own bearer produced both copies of the numbers.
+        """
         self._shared_email_rows(store)
         # Only the first row can mint a bearer.
         store.oauth_accounts["anthropic"] = store.oauth_accounts["anthropic"][:1]
@@ -769,7 +848,7 @@ class TestUsageIsPerAccount:
 
         assert [r.identity for r in reports] == ["twin@x", "twin@x"]
         refs = [r.credential_ref for r in reports]
-        assert refs == ["twin@x|acct-A", None], refs
+        assert refs == [None, None], refs
 
     @pytest.mark.asyncio
     async def test_one_failing_account_does_not_hide_the_others(

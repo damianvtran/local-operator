@@ -211,6 +211,63 @@
   "tui.usage.paid.continue": [
    "core-fix/vi/changes.jsonl"
   ],
+  "tui.usage.resets.accept": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.already": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.badge": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.busy": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.cancel": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.changed": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.choose": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.choose_title": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_detail": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title_account": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.dismiss": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.done": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.failed": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.hint": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.more": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.no_credit": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.nothing": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
+  "tui.usage.resets.recheck": [
+   "i18n/audit-history/vi/tui.usage.json"
+  ],
   "wire.errors.agents.team_pull_local_failure": [
    "core-fix/vi/changes.jsonl"
   ],
@@ -1678,5 +1735,5 @@
    "wire.tunnel_setup.unavailable": "a67f1ee707b1d4fc9cc99f318bc81b0d59f01fd49bc377be1061a0be6c01e97f"
   }
  },
- "manifest_sha256": "f2ccc0d97018adca4881916018016ed837fa21649e5228326ba80d669c131b7a"
+ "manifest_sha256": "e07a9fe604806aa14fe76d9d0dfe7fa75d21c54a3b9bc2051e17374ddcf038db"
 }

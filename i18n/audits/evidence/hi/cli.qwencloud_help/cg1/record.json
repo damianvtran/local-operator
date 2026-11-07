@@ -40,7 +40,7 @@
     "target": "b61617c9858f85a70acc55168594517be3b890b1843f8d8ac86f8390ebe7b5cc",
     "style_guide": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5",
     "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
-    "audited_input_manifest": "2c94af45f15a6d80b7442287fb696e8b8c5eb8344c749a0c8eb98341d58db9c4"
+    "audited_input_manifest": "bf1e0121574bc9fc7fdc5c0535d71f0eac61d571ca745d977bbdb36d407969d2"
   },
   "input_paths": {
     "en": "local_operator/i18n/catalogues/en/cli.qwencloud_help.json",

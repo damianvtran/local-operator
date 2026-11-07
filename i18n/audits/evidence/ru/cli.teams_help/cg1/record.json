@@ -34,7 +34,7 @@
     "target": "8ff084d669cf6ee8327e13f336a554f3dfef086ae016796fa52bfdc304f967d7",
     "style_guide": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5",
     "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
-    "audited_input_manifest": "709b08324b17e369405f0ec6217c89f8f4c2f57f011954eff93b6d51855679ac"
+    "audited_input_manifest": "e5275819688b0218e08a626f66defbfc176107f87029bee21b259205896c0c7b"
   },
   "input_paths": {
     "en": "local_operator/i18n/catalogues/en/cli.teams_help.json",

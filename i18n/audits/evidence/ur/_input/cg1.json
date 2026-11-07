@@ -196,6 +196,63 @@
   "tui.small.session_picker.all_archived": [
    "core-fix/ur/changes.jsonl"
   ],
+  "tui.usage.resets.accept": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.already": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.badge": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.busy": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.cancel": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.changed": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.choose": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.choose_title": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_detail": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title_account": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.dismiss": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.done": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.failed": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.hint": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.more": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.no_credit": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.nothing": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
+  "tui.usage.resets.recheck": [
+   "i18n/audit-history/ur/tui.usage.json"
+  ],
   "wire.errors.agents.variable_not_found": [
    "core-argorder/ur/changes.jsonl"
   ],
@@ -1685,5 +1742,5 @@
    "wire.tunnel_setup.unavailable": "07167c5e574cdf1f61c648618f3ad8350dcd44e667e28153f291dfd4b13d3df9"
   }
  },
- "manifest_sha256": "5d89259f0320c437e0a44e6e5a5779bba865fc9d162b3f951da327bad9d35cd0"
+ "manifest_sha256": "30396d3dbd94ee0be14675524f3f898420478b0f45577297003bbd75ab91c5d3"
 }

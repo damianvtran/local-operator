@@ -1292,6 +1292,23 @@ class ProviderController:
         return dataclasses.replace(report, identity=None, notes=notes, credential_ref=None)
 
     @staticmethod
+    def _stored_row_label(row: Any) -> str | None:
+        """The display label :meth:`_expected_oauth_identities` gives a row.
+
+        The SAME chain, so "two stored logins share a label" is decided from
+        the spelling the fetch and the reports actually use. Only the label is
+        wanted here -- never raises out of a method that reads stored shapes.
+        """
+        data = getattr(row, "data", None)
+        label = None
+        if isinstance(data, dict):
+            label = data.get("email") or data.get("account_id")
+        label = label or getattr(row, "identity_key", None) or f"cred:{getattr(row, 'id', 0)}"
+        if not label or str(label).startswith("oauth:"):
+            return None
+        return str(label)
+
+    @staticmethod
     def _credential_ref(row: Any) -> str:
         """The stable ref naming ONE stored credential row.
 
@@ -2388,6 +2405,7 @@ class ProviderController:
         now_ms: int,
         force: bool,
         refs: dict[str, list[str]] | None = None,
+        ambiguous_labels: set[str] | None = None,
     ) -> list[UsageReport]:
         """Union of this fetch's successes and last-good for everyone else.
 
@@ -2448,12 +2466,23 @@ class ProviderController:
             pool = (refs or {}).get(identity) or ()
             index = cursor.get(identity, 0)
             cursor[identity] = index + 1
+            if identity in (ambiguous_labels or ()) or len(pool) > 1:
+                # More than one stored login answers to this label, so the
+                # fetch asked ONE of their bearers for every report carrying
+                # it (see ``accesses_by_id``). None of those reports is the
+                # row it sits beside, so none may carry a ref: a ref is a
+                # spendable handle, and this one would spend on a login whose
+                # numbers the reader cannot be shown (R9/Q1).
+                stamped.append(dataclasses.replace(report, credential_ref=None))
+                continue
             if index < len(pool):
                 stamped.append(dataclasses.replace(report, credential_ref=pool[index]))
                 continue
             if pool:
                 # More reports than stored rows for this label: this one cannot
-                # be aimed at a row, so it must not be spendable.
+                # be aimed at a row, so it must not be spendable. Defensive
+                # only -- a label with two rows is caught by
+                # ``ambiguous_labels`` above, before the pool is consulted.
                 stamped.append(dataclasses.replace(report, credential_ref=None))
                 continue
             # No ref knowledge this cycle (the account did not fetch, or a
@@ -2712,13 +2741,28 @@ class ProviderController:
             # two chips spending on one login (Q1). The merge pairs each report
             # with its own entry of this list instead.
             refs_by_row: dict[int, str] = {}
+            # How many STORED logins carry each label. A label shared by two
+            # rows cannot be fetched for both: ``accesses_by_id`` below keeps
+            # ONE bearer per label (last wins), so the per-identity loop asks
+            # that same token twice and BOTH reports describe that one login.
+            # The numbers on the other panel row would then not be that row's
+            # numbers, and a chip beside them would spend a credit on a login
+            # the reader is not looking at (R9). No ref is stamped for such a
+            # label, so the panel offers no chip at all -- honest, where a
+            # ref would be a promise the fetch cannot keep.
+            labels_by_row: dict[str, int] = {}
             try:
                 for row in self.auth_store.list_credentials(self._storage_id(provider)):
                     row_id = int(getattr(row, "id", 0) or 0)
                     if row_id:
                         refs_by_row[row_id] = self._credential_ref(row)
+                    label = self._stored_row_label(row)
+                    if label:
+                        labels_by_row[label] = labels_by_row.get(label, 0) + 1
             except Exception:  # noqa: BLE001 — refs are labels; the fetch still runs
                 refs_by_row = {}
+                labels_by_row = {}
+            ambiguous_labels = {label for label, count in labels_by_row.items() if count > 1}
             refs_by_id: dict[str, list[str]] = {}
             try:
                 accesses = await self.auth_store.list_oauth_accesses(provider)
@@ -2848,6 +2892,7 @@ class ProviderController:
                 now_ms=now_ms,
                 force=force_refresh,
                 refs=refs_by_id,
+                ambiguous_labels=ambiguous_labels,
             )
         # The API-key route, reached when the provider has no stored OAuth
         # identity at all. The console ticket is threaded through HERE TOO, not

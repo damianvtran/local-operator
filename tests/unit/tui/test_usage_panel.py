@@ -37,6 +37,7 @@ from local_operator.tui.widgets.usage_panel import (
     PANEL_PADDING_ROWS,
     PANEL_WIDTH_MARGIN,
     RESET_CHOOSE_MAX,
+    UsageDismissed,
     UsagePanel,
     UsageRefreshRequested,
     UsageResetRequested,
@@ -783,6 +784,8 @@ class _PanelHost(App[None]):
         #: Every `r`, so a panel test can prove the key actually refetches
         #: rather than only dismissing the receipt that named it.
         self.refresh_requests: list[UsageRefreshRequested] = []
+        #: Every Escape that CLOSED the card, rather than only its band (R13).
+        self.dismissals: list[UsageDismissed] = []
 
     def compose(self) -> ComposeResult:
         with Container(id="usage-host"):
@@ -795,6 +798,10 @@ class _PanelHost(App[None]):
     def on_usage_refresh_requested(self, message: UsageRefreshRequested) -> None:
         message.stop()
         self.refresh_requests.append(message)
+
+    def on_usage_dismissed(self, message: UsageDismissed) -> None:
+        message.stop()
+        self.dismissals.append(message)
 
 
 @asynccontextmanager
@@ -3693,6 +3700,36 @@ async def test_a_refresh_that_keeps_the_credit_updates_the_question() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_refresh_that_only_stamps_a_ref_keeps_the_question() -> None:
+    """R10: a report decoded from a cache row written before ``credential_ref``
+    existed resolves by its LABEL; the refetch re-keys the same account by its
+    ref. The credits did not move, so withdrawing the band with "credits
+    changed -- nothing was spent" told the reader something untrue. The count,
+    not the key, is what a change to a credit is."""
+    async with _panel_app(size=(120, 30)) as panel:
+        panel.show_reports([_reset_report("me@corp.com", 2)] + _many_reports(2))
+        panel.action_reset()
+        panel.action_select_reset(1)
+        assert panel._reset_state == "confirm"
+        assert panel._reset_account is not None
+        assert panel._reset_account.key == "me@corp.com"
+        stamped = _reset_report("me@corp.com", 2)
+        stamped.credential_ref = "row-a"
+        panel.show_reports([stamped] + _many_reports(2))
+        band = "\n".join(row.plain for row in panel._reset_band_rows())
+        # The band is still the question, now resolving by the new ref.
+        assert panel._reset_state == "confirm"
+        assert "nothing was spent" not in band, band
+        assert panel._reset_account is not None
+        assert panel._reset_account.key == "row-a"
+        # The row vanishing still withdraws the question: the fallback adopts a
+        # surviving account, it does not keep one alive.
+        panel.show_reports([_reset_report("me@corp.com", 0)] + _many_reports(2))
+    assert panel._reset_state == "result"
+    assert "credits changed" in "\n".join(panel.render_lines_for_test())
+
+
+@pytest.mark.asyncio
 async def test_a_refresh_mid_choose_band_withdraws_it_too() -> None:
     async with _panel_app(size=(120, 30)) as panel:
         panel.show_reports(_reset_reports(accounts=2, extra=2))
@@ -3976,6 +4013,8 @@ async def test_escaping_busy_keeps_an_in_flight_marker_and_refuses_a_second_spen
         await pilot.press("escape")
         await pilot.pause()
         assert panel._reset_state is None
+        # Still only the band left: a card with band room is not closed by Esc.
+        assert app.dismissals == []
         rows = panel.render_lines_for_test()
         assert "Resetting usage for account0@example.com" in "\n".join(rows), rows
         assert "x reset" not in rows[-1], rows[-1]
@@ -3993,6 +4032,35 @@ async def test_escaping_busy_keeps_an_in_flight_marker_and_refuses_a_second_spen
         rows = panel.render_lines_for_test()
         assert "Resetting usage for" not in "\n".join(rows), rows
         assert panel._reset_inflight is None
+
+
+@pytest.mark.asyncio
+async def test_escaping_a_band_that_cannot_paint_closes_the_card(monkeypatch) -> None:
+    """R13: with no band room, `busy` swallows every other key while nothing is
+    painted. Esc already left the band (R3) -- but on a card that shows no band,
+    leaving a thing nobody can see is indistinguishable from a dead key, so it
+    closes the card instead. (With room, Esc still only leaves the band: see
+    ``test_escaping_busy_keeps_an_in_flight_marker_and_refuses_a_second_spend``.)
+    """
+    app = _PanelHost()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        panel = app.query_one(UsagePanel)
+        panel.show_reports(_reset_reports(accounts=1, extra=2))
+        panel.action_reset()
+        panel.action_confirm_reset()
+        await pilot.pause()
+        assert panel._reset_state == "busy"
+        monkeypatch.setattr(panel, "_band_room", lambda: 0)
+        panel._repaint()
+        await pilot.pause()
+        # The state a resize leaves behind: still `busy`, nothing painted.
+        assert panel._reset_state == "busy"
+        assert panel._reset_band_rows() == []
+        await pilot.press("escape")
+        await pilot.pause()
+    assert len(app.dismissals) == 1
+    assert panel._reset_state is None
 
 
 @pytest.mark.asyncio

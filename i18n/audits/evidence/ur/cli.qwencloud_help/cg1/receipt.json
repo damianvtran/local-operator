@@ -8,7 +8,7 @@
   "hashes": {
     "audit.log": "342d9999af13a39a2304532f1b529e2639eebe7a67e298ee188d078eb865f48d",
     "findings.json": "b84306515d2dc611da548c6520843c0a2d021040d859fe651e04b4dec0ee859d",
-    "record.json": "bf5a279fb9a761d0c4a8e042e2c895eefe8d680369826c0753ea65519951de5a",
+    "record.json": "1cf86a1fb4b04e95a9c80bb3ce374dc53f562941fa3e89b4be069b9bb6c664aa",
     "report.md": "63b090281655270c08bcfe9883e48c17ebe33bc773ee99270059ab66d43d5235"
   }
 }

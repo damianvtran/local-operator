@@ -41,7 +41,7 @@
     "target": "47427ab49eda55a3442335b73bf436e8d62c793caecae5dcb244fd670b321e3f",
     "style_guide": "c0eecf7f7b5e89956b7de9ab7a9eb647ff1a7ef701ccf2a7f0264d5eea15ca60",
     "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
-    "audited_input_manifest": "9b1511095140baf5e197e2a9d194bf43366eb951edd67a4fcd69e7fb409359fc"
+    "audited_input_manifest": "1c7f5ad9125ba57c432d8966001a91769a3fb96a06479975a24a01439cb91210"
   },
   "input_paths": {
     "en": "local_operator/i18n/catalogues/en/wire.errors.agents.json",

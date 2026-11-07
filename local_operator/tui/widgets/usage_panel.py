@@ -50,8 +50,10 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.tool_card import truncate_cells
 
-# The refusal receipt lives in its own (en-only) namespace: see the key module's
-# context note. `tr` resolves one namespace per resolver, so it needs its own.
+# The refusal receipt lives in its own namespace: it ships audited in all seven
+# locales, but as a namespace of its own it keeps `tui.usage`'s audited ledger
+# row out of the wave (the i18n gate audits one namespace per wave). `tr`
+# resolves one namespace per resolver, so it needs its own regardless.
 _t = tr("tui.usage")
 _tx = tr("tui.usage_refusal")
 
@@ -1673,9 +1675,18 @@ class UsagePanel(Static):
         wire and leaving the band changes nothing about the spend, while
         refusing left a card whose every key was inert and only quitting the app
         recovered it (R3).
+
+        A card with no band room is the one case where "leave the band" is
+        invisible: ``busy`` and an unknown-outcome receipt swallow every other
+        key while nothing paints (R13), so Esc there has to close the CARD --
+        the alternative is a card that answers no key at all.
         """
         if self._reset_state is not None:
+            invisible = self._reset_state in ("busy", "result") and not self._band_paints()
             self.cancel_reset()
+            if invisible:
+                self.close()
+                self.post_message(UsageDismissed())
             return
         self.close()
         self.post_message(UsageDismissed())
@@ -2018,6 +2029,25 @@ class UsagePanel(Static):
             if candidate is None:
                 return
             fresh = candidates.get(candidate.key)
+            if fresh is None:
+                # A refresh can RE-KEY the same row without changing a single
+                # credit: a report decoded from a cache row written before
+                # ``credential_ref`` existed resolves by its LABEL, and the
+                # refetch stamps a ref. Withdrawing the band there would say
+                # "credits changed" about credits that did not (R10). So when
+                # the old key misses, adopt the re-keyed candidate if it is the
+                # ONLY one for the armed label -- the same "adopt the surviving
+                # count" rule a key hit already follows. Two same-label
+                # candidates are exactly the ambiguity that must not be
+                # resolved by guessing, and a row that is gone (or down to
+                # zero, which is no candidate at all) still drops the band.
+                same_label = [
+                    other
+                    for key, other in candidates.items()
+                    if key != candidate.key and other.identity == candidate.identity
+                ]
+                if len(same_label) == 1:
+                    fresh = same_label[0]
             if fresh is None:
                 self._band_changed(candidate.identity)
                 return

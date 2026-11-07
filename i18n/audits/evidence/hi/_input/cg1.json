@@ -284,6 +284,63 @@
   "tui.small.wake_panel.monitors_need_attention": [
    "core-argorder/hi/changes.jsonl"
   ],
+  "tui.usage.resets.accept": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.already": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.badge": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.busy": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.cancel": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.changed": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.choose": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.choose_title": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_detail": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title_account": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.dismiss": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.done": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.failed": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.hint": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.more": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.no_credit": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.nothing": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
+  "tui.usage.resets.recheck": [
+   "i18n/audit-history/hi/tui.usage.json"
+  ],
   "wire.errors.agents.team_pull_local_failure": [
    "core-fix/hi/changes.jsonl"
   ],
@@ -1749,5 +1806,5 @@
    "wire.tunnel_setup.unavailable": "f9f5721ce4a371745ab80dd7648aa4c5cb862b290d231e7890c4b601ea9d0bf9"
   }
  },
- "manifest_sha256": "282b96746160e500f823700ec85a51103589d5ea56e90786eb11ce9b3c4132d1"
+ "manifest_sha256": "929fb407175c724ba122fa504559cb7f6979da1137ab126dd7bb9712da337947"
 }

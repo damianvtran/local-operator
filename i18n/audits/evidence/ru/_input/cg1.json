@@ -151,6 +151,63 @@
   "tui.small.spend.unpriced_cancelled_shortest": [
    "core-fix/ru/changes.jsonl"
   ],
+  "tui.usage.resets.accept": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.already": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.badge": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.busy": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.cancel": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.changed": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.choose": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.choose_title": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_detail": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.confirm_title_account": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.dismiss": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.done": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.failed": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.hint": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.more": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.no_credit": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.nothing": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
+  "tui.usage.resets.recheck": [
+   "i18n/audit-history/ru/tui.usage.json"
+  ],
   "wire.errors.agents.team_pull_local_failure": [
    "core-fix/ru/changes.jsonl"
   ],
@@ -1617,5 +1674,5 @@
    "wire.tunnel_setup.unavailable": "68cdab878f6d7a6d8c550e453a70027f7615beb56430a25e42ae7d91bf359267"
   }
  },
- "manifest_sha256": "0dc28403db7c97cac5b3c73641f47c88c9ccacf97d080a3df11873a00b116db1"
+ "manifest_sha256": "bf42971b2fd2d3d7f0c778b7db7ec358243f67f24824db833f975ca8834ae343"
 }
