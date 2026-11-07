@@ -172,7 +172,10 @@ def configure_cli_logging() -> None:
     # provider printed ``- INFO - HTTP Request: GET .../v1/models`` among its
     # answer (2026-11-06: interleaved into a `lop network sessions --slash`
     # result). The pin belongs to the clients, not the destination; our own INFO
-    # records still print exactly as before.
+    # records still print exactly as before. NOT CLI-ONLY: the session host
+    # (``session/runtime/host_service.py``), ``exec_worker`` and the wakes
+    # supervisor call this too, so their stderr job logs also stop carrying one
+    # INFO line per HTTP request; WARNING and above from those clients remain.
     quiet_wire_clients()
 
 

@@ -898,7 +898,9 @@ async def test_a_session_scoped_switch_names_the_owner_remedy_then_succeeds_afte
         shared_catalogue.prepare_selection_sync("openai", mesh.b.root)
     assert direct.value.code == "catalogue_unsupported"
     assert str(direct.value).startswith("catalogue needs a device-scoped share")
-    assert str(direct.value).endswith(command)
+    # D1/D2: the command on its own line, delimited, and both devices named.
+    assert str(direct.value).endswith(f"run on device-a:\n`{command}`")
+    assert "it lends openai to every session on device-b" in str(direct.value)
     with pytest.raises(ModelSelectionRefused) as refused:
         await asyncio.to_thread(validate_peer_selection, "openai", "gpt-fixture-sol")
     assert refused.value.code == "catalogue_unsupported"
@@ -916,3 +918,28 @@ async def test_a_session_scoped_switch_names_the_owner_remedy_then_succeeds_afte
     assert (spec.provider, spec.model_id) == ("openai", "gpt-fixture-sol")
     assert state["gets"] == 1
     print(f"AFTER: {spec.provider}/{spec.model_id}")
+
+
+@pytest.mark.asyncio
+async def test_the_readiness_fact_is_the_gates_own_first_rungs(borrower, monkeypatch):
+    """MINOR-1 / Q1: ``catalogue_authority`` answers from the rungs ``_share`` uses.
+
+    A borrow-only holder reports ``borrows``; the same device with its own openai
+    key reports ``local`` — whatever its default provider — and the gate then
+    refuses nothing, which is exactly when readiness must stay silent.
+    """
+    from local_operator.providers import shared_catalogue
+
+    mesh, plain, controller, state = borrower
+    with placement.mutate(mesh.network_id, self_device=mesh.owner, root=mesh.a.root) as doc:
+        doc.revoke("openai", mesh.borrower, by=mesh.owner)
+        doc.grant("openai", mesh.borrower, by=mesh.owner, scope="session")
+    transport.helpers._pull(mesh)
+    assert shared_catalogue.catalogue_authority(mesh.b.root) == "borrows"
+    monkeypatch.setattr(
+        "local_operator.providers.registry.resolve_env_key",
+        lambda provider: ("fixture-own-key" if provider == "openai" else None),
+    )
+    assert shared_catalogue.catalogue_authority(mesh.b.root) == "local"
+    shared_catalogue.prepare_selection_sync("openai", mesh.b.root)  # no refusal
+    assert state["gets"] == 0

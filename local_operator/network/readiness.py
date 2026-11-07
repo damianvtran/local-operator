@@ -1394,7 +1394,7 @@ def has_local_provider_credential(
 
 
 def placement_fact(
-    *, provider: str = "", mcp_url: str = "", secret: str = "", root: Path
+    *, provider: str = "", mcp_url: str = "", secret: str = "", root: Path, network_id: str = ""
 ) -> dict[str, Any]:
     """The placement entry for a key (owner + holders) and this device's observation.
 
@@ -1409,7 +1409,7 @@ def placement_fact(
     from local_operator.network.credentials.state import PlacementState
 
     found = placement_mod.placement_entries_for(
-        provider=provider, mcp_url=mcp_url, secret=secret, root=root
+        provider=provider, mcp_url=mcp_url, secret=secret, root=root, network_id=network_id
     )
     if found is None:
         return {}
@@ -1595,6 +1595,40 @@ def selected_model_row(
     return row
 
 
+def _openai_catalogue_fact(root: Path) -> str | None:
+    """``shared_catalogue.catalogue_authority`` read through THIS report's no-write store.
+
+    Only the native-login rung's reader is swapped; every other rung is the
+    gate's. An ABSENT ``auth.db`` reads unknown here, not "no login", because
+    that is what the gate does (``native_oauth_inventory`` answers ``None`` and
+    ``_share`` then refuses nothing): the row predicts the gate, not a better one.
+    """
+    from local_operator.providers.shared_catalogue import catalogue_authority
+
+    def native_local() -> bool | None:
+        try:
+            store = _open_store(root, read_only=True)
+        except Exception:  # noqa: BLE001 — an unopenable store is "could not be read"
+            return None
+        if store is None:
+            return None
+        try:
+            if _read_only_store_unavailable(store):
+                return None
+            return any(
+                not (row.data or {}).get("mesh_origin") for row in store.list_credentials("openai")
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        finally:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return catalogue_authority(root, native_local=native_local)
+
+
 def collect_peer_facts(
     root: Path,
     *,
@@ -1629,6 +1663,13 @@ def collect_peer_facts(
         # (True / False / None = the store could not be read).
         "has_local": has_local_provider_credential(root, provider, read_only=True),
         "credential_placement": placement_fact(provider=provider, root=root),
+        # ADDITIVE ON THE WIRE: which rung answers openai's model catalogue here
+        # (``local``/``none``/``borrows``; None = unreadable), from the GATE's own
+        # first rungs (``shared_catalogue.catalogue_authority``). The viewer's
+        # ``model_switch`` row needs it because a local openai login or key on
+        # this device skips the share entirely, whatever the default provider is
+        # (review round 1, MINOR-1 / QA Q1). An older peer omits it: no row.
+        "openai_catalogue": _openai_catalogue_fact(root),
         "mcp": mcp_servers_fact(root, read_only=True),
         "git": git_identity_fact(home),
         "repository": repository_fact(home, repository=repository),
@@ -2354,7 +2395,9 @@ class Viewer(Protocol):
 
     def holds_mcp_login(self, url: str) -> bool | None: ...
 
-    def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]: ...
+    def placement(
+        self, *, provider: str = "", mcp_url: str = "", network_id: str = ""
+    ) -> dict[str, Any]: ...
 
 
 class ViewerFacts:
@@ -2422,8 +2465,12 @@ class ViewerFacts:
 
         return server_has_stored_grant(url, store)
 
-    def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
-        return placement_fact(provider=provider, mcp_url=mcp_url, root=self.root)
+    def placement(
+        self, *, provider: str = "", mcp_url: str = "", network_id: str = ""
+    ) -> dict[str, Any]:
+        return placement_fact(
+            provider=provider, mcp_url=mcp_url, root=self.root, network_id=network_id
+        )
 
     def secret_placement(self, name: str) -> dict[str, Any]:
         """The class-2 placement entry for one store secret, if the network has one.
@@ -3697,20 +3744,23 @@ def model_switch_row(
 ) -> dict[str, Any] | None:
     """(j) Would a ``/model`` switch to openai on this peer be refused for scope?
 
-    Predicts ``shared_catalogue._share``'s strict refusal: the peer holds this
-    device's openai share at SESSION scope, so its turns borrow fine while the
-    catalogue a switch must read is refused. Only the OWNER can widen a share,
-    so the row is emitted only when the viewer owns the placement and is the
-    device that would run the remedy — read from this device's own document,
-    which a peer that has not pulled yet cannot contradict. ``None`` (no row)
-    everywhere else: no share, a device-scoped one, or a peer whose default
-    openai login is its own (a local login outranks the share, so nothing is
-    refused). It never offers a share the operator has not made; it names the
-    widening of one that exists, as a decision, and writes nothing.
+    Predicts ``shared_catalogue._share``'s strict refusal, and only it: the peer
+    reports that its openai catalogue is answered by a borrow
+    (``openai_catalogue == "borrows"`` — the gate's own first rungs, so a local
+    login, env/stored key or local-only mark yields no row), and THIS device's
+    document for the peer's network holds it at SESSION scope. Only the OWNER can
+    widen a share, so the row is emitted only when the viewer owns the entry in
+    that network — the network the printed command names (MINOR-3: an owner in
+    several networks must not read another network's entry). ``None`` (no row)
+    everywhere else, including an older peer that does not report the fact. It
+    never offers a share the operator has not made; it names the widening of one
+    that exists, as a decision, and writes nothing.
     """
     if not network_id or not getattr(viewer, "device_id", ""):
         return None
-    own = viewer.placement(provider="openai")
+    if facts.get("openai_catalogue") != "borrows":
+        return None
+    own = viewer.placement(provider="openai", network_id=network_id)
     if str(own.get("owner_device") or "") != viewer.device_id:
         return None
     holder = next(
@@ -3723,12 +3773,9 @@ def model_switch_row(
     )
     if holder is None or holder.get("scope") == "device":
         return None
-    model = facts.get("default_model")
-    hosting = str(model.get("hosting") or "") if isinstance(model, Mapping) else ""
-    if hosting.lower() == "openai" and facts.get("has_local") is True:
-        return None
     from local_operator.providers.shared_catalogue import device_scope_share_command
 
+    command = device_scope_share_command(member.device_id, network_id)
     return _capability_row(
         device_id=member.device_id,
         device_name=peer_label,
@@ -3742,7 +3789,7 @@ def model_switch_row(
         ),
         remedies=[
             f"to allow it (your decision: it lends openai to every session on "
-            f"{peer_label}), run here: " + device_scope_share_command(member.device_id, network_id)
+            f"{peer_label}), run on this device: `{command}`"
         ],
         source=SOURCE_LOCAL,
     )

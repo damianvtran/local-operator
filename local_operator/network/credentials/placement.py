@@ -892,8 +892,14 @@ def placement_entries_for(
     mcp_url: str = "",
     secret: str = "",
     root: Path | None = None,
+    network_id: str = "",
 ) -> tuple[str, CredentialPlacementEntry] | None:
     """The placement entry for a provider, an MCP server URL or a store secret.
+
+    ``network_id`` narrows the search to ONE network. Without it the first
+    network carrying the key wins, which is wrong for a question about a
+    specific peer when this device belongs to several networks (readiness's
+    ``model_switch`` row, review round 1 MINOR-3).
 
     The MCP path's lookup: ``mcp/manager.py`` knows a server URL and nothing else,
     so the key is built here rather than at the call site — one spelling of
@@ -910,6 +916,8 @@ def placement_entries_for(
     from local_operator.network import store
 
     for record in store.list_networks(root):
+        if network_id and record.network_id != network_id:
+            continue
         document = PlacementDocument.load(record.network_id, root)
         entry = document.entry(key)
         if entry is not None:

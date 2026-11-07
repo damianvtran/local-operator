@@ -66,7 +66,9 @@ class _FakeViewer:
     def holds_mcp_login(self, url: str) -> bool | None:
         return self._holds_mcp
 
-    def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
+    def placement(
+        self, *, provider: str = "", mcp_url: str = "", network_id: str = ""
+    ) -> dict[str, Any]:
         return dict(self._placement)
 
     def close(self) -> None:  # pragma: no cover — duck-typed parity
@@ -4510,11 +4512,17 @@ def test_peer_strings_are_terminal_safe_and_the_row_is_bounded() -> None:
 
 # --- (j) model switching on a borrow-only peer -------------------------------
 
+#: A peer whose openai catalogue is answered by the borrow (the gate's own rungs).
+_BORROWS = {
+    "default_model": {"hosting": "anthropic", "resolved": True},
+    "openai_catalogue": "borrows",
+}
+
 
 def _switch_rows(viewer: Any, facts: dict[str, Any] | None = None) -> dict[str, Any] | None:
     return readiness.model_switch_row(
         _member(),
-        facts or {"default_model": {"hosting": "anthropic", "resolved": True}},
+        _BORROWS if facts is None else facts,
         viewer=viewer,
         peer_label="cloud-node-1",
         network_id="n_fixture",
@@ -4525,8 +4533,9 @@ def test_model_switch_row_names_the_owner_decision_for_a_session_scoped_share() 
     """A session-scoped openai share runs turns but refuses ``/model`` switches.
 
     The row predicts ``shared_catalogue._share``'s strict refusal BEFORE the
-    operator meets it, spells the exact owner-side command, reads ``warn`` (it
-    never gates onboarding: turns work) and writes nothing.
+    operator meets it, spells the exact owner-side command the way the other
+    rows do (``run on this device: `<command>```), reads ``warn`` (it never
+    gates onboarding: turns work) and writes nothing.
     """
     viewer = _FakeViewer(
         placement={"owner_device": VIEWER, "holders": [{"device": PEER, "scope": "session"}]}
@@ -4538,11 +4547,15 @@ def test_model_switch_row_names_the_owner_decision_for_a_session_scoped_share() 
         "model switching on cloud-node-1 needs a device-scoped share of openai"
     )
     assert row["remedies"][0].endswith(
-        f"lop network credential share openai --with {PEER} --network n_fixture --scope device"
+        "run on this device: "
+        f"`lop network credential share openai --with {PEER} --network n_fixture --scope device`"
     )
     assert readiness.row_state(row) == readiness.ROW_STATE_WARN
     assert readiness.onboarding_failures([row]) == []
     print("\n".join(readiness.render_check_lines([row])))
+
+
+_SESSION_HELD = {"owner_device": VIEWER, "holders": [{"device": PEER, "scope": "session"}]}
 
 
 @pytest.mark.parametrize(
@@ -4554,14 +4567,70 @@ def test_model_switch_row_names_the_owner_decision_for_a_session_scoped_share() 
         ({"owner_device": VIEWER, "holders": []}, None),
         # Another device owns it: only its owner can widen it, so not from here.
         ({"owner_device": THIRD, "holders": [{"device": PEER, "scope": "session"}]}, None),
-        # The peer's own openai login outranks the share: nothing is refused.
+        # QA Q1: the peer has its OWN openai login while its default is another
+        # provider. The gate skips the share entirely, so nothing is refused.
         (
-            {"owner_device": VIEWER, "holders": [{"device": PEER, "scope": "session"}]},
-            {"default_model": {"hosting": "openai", "resolved": True}, "has_local": True},
+            _SESSION_HELD,
+            {
+                "default_model": {"hosting": "anthropic", "resolved": True},
+                "has_local": True,
+                "openai_catalogue": "local",
+            },
         ),
+        # The peer does not borrow openai at all (not pulled / not a holder there).
+        (_SESSION_HELD, {**_BORROWS, "openai_catalogue": "none"}),
+        # Its store could not be read: no accusation.
+        (_SESSION_HELD, {**_BORROWS, "openai_catalogue": None}),
+        # An older peer that does not report the fact: no row, nothing inferred.
+        (_SESSION_HELD, {"default_model": {"hosting": "anthropic", "resolved": True}}),
     ],
 )
 def test_model_switch_row_is_silent_where_no_switch_is_refused(
     placement: dict[str, Any], facts: dict[str, Any] | None
 ) -> None:
     assert _switch_rows(_FakeViewer(placement=placement), facts) is None
+
+
+def test_model_switch_row_reads_the_peers_network_not_the_first_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR-3: an owner in two networks must read the PEER's network's entry.
+
+    Network ``n_first`` (listed first) holds the peer device-scoped; the peer's
+    own network ``n_second`` holds it per session. The row must come from
+    ``n_second`` and its command must name ``n_second``; asked about
+    ``n_first`` there is nothing to report. Real documents, real ``ViewerFacts``.
+    """
+    from local_operator.network import store
+    from local_operator.network.credentials import placement
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    root = tmp_path / "owner"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    for network_id, scope in (("n_first", "device"), ("n_second", "session")):
+        record = NetworkRecord(network_id=network_id, name=network_id, self_device_id=VIEWER)
+        record.members.append(MemberRecord(device_id=PEER, name="cloud-node-1"))
+        store.save(record, root)
+        with placement.mutate(network_id, root, self_device=VIEWER) as doc:
+            doc.declare("openai", owner_device=VIEWER, provider="openai", by=VIEWER)
+            doc.grant("openai", PEER, scope=scope, by=VIEWER)
+    assert [r.network_id for r in store.list_networks(root)][0] == "n_first"
+    viewer = readiness.ViewerFacts(root, device_id=VIEWER)
+    try:
+        row = readiness.model_switch_row(
+            _member(), _BORROWS, viewer=viewer, peer_label="cloud-node-1", network_id="n_second"
+        )
+        assert row is not None
+        assert row["remedies"][0].endswith(
+            f"`lop network credential share openai --with {PEER} --network n_second "
+            "--scope device`"
+        )
+        assert (
+            readiness.model_switch_row(
+                _member(), _BORROWS, viewer=viewer, peer_label="cloud-node-1", network_id="n_first"
+            )
+            is None
+        )
+    finally:
+        viewer.close()

@@ -1378,6 +1378,20 @@ def test_ready_names_the_owner_decision_a_remote_model_switch_needs(
     with placement_mod.mutate(record.network_id, server_a.root, self_device=owner) as doc:
         doc.declare("openai", owner_device=owner, provider="openai", by=owner)
         doc.grant("openai", peer, scope="session", by=owner)
+    # The PEER's side of the fact (MINOR-1): a readable native store with no
+    # openai login of its own, holding the owner's document as a pull would leave
+    # it, so its gate's first rungs answer ``borrows`` exactly as a real
+    # borrower's would. (The credential pull itself is exercised end to end in
+    # ``test_shared_catalogue_consumer``; this rig's peers carry no broker
+    # capability, which is not what this row is about.)
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.shared_catalogue import catalogue_authority
+
+    AuthStore(server_b.root / "auth.db", config_dir=server_b.root).close()
+    peer_copy = placement_mod.PlacementDocument.load(record.network_id, server_a.root)
+    peer_copy.root = server_b.root
+    peer_copy.save()
+    assert catalogue_authority(server_b.root) == "borrows"
 
     def switch_rows() -> list[dict[str, Any]]:
         _rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
@@ -1391,8 +1405,8 @@ def test_ready_names_the_owner_decision_a_remote_model_switch_needs(
     assert len(before) == 1, before
     assert before[0]["state"] == readiness.ROW_STATE_WARN
     assert before[0]["remedies"][0].endswith(
-        f"lop network credential share openai --with {peer} --network {record.network_id} "
-        "--scope device"
+        f"run on this device: `lop network credential share openai --with {peer} "
+        f"--network {record.network_id} --scope device`"
     )
     rendered = readiness.render_check_lines(before)
 
