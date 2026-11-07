@@ -107,10 +107,14 @@ ROLES = ("agent", "provider", "delegation")
 #: model that could read this seed could sign agent proofs from anywhere for as
 #: long as the grant lives. So EVERY agent-class and provider-class verb refuses
 #: the prefix, and a delegation-class verb refuses every name outside it.
-#: ``lop secret get`` and the ``secret`` tool are agent-class, so neither the
-#: model nor its shell can print the seed. That is the boundary this rule draws;
-#: it is not a hardware boundary (a process willing to speak the broker protocol
-#: as the operator is inside the store's stated trust boundary, design §9).
+#:
+#: WHAT THIS STOPS, AND WHAT IT DOES NOT. It stops the well-behaved verbs:
+#: ``lop secret get`` and the ``secret`` tool are agent-class, and the list,
+#: mesh-offer and MCP-adoption surfaces filter the prefix. It is NOT isolation.
+#: The role is a caller CLAIM made inside the operator's own user boundary: a
+#: same-uid process (the model's shell included) can read ``master.key`` in
+#: keyfile mode or claim ``role="delegation"`` to the broker. The response to a
+#: suspected compromise is revoking the grant in the console (Agent access).
 DELEGATION_SECRET_PREFIX = "LOP_VAULT_DELEGATION_"
 
 #: Descriptions are operator-written labels shown by ``list``; the ceiling only

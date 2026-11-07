@@ -5,5 +5,5 @@
   "cli.vault_help.timeout": "Thời gian chờ bạn phê duyệt, tính bằng giây (mặc định 600)",
   "cli.vault_help.status": "Cho biết quyền truy cập của tác nhân có khả dụng không, dấu vân tay khóa của tác nhân này và phê duyệt của nó",
   "cli.vault_help.json": "In trạng thái dưới dạng JSON",
-  "cli.vault_help.disconnect": "Xóa khóa của tác nhân này; phê duyệt được thu hồi trong bảng điều khiển"
+  "cli.vault_help.disconnect": "Xóa các khóa tác nhân của máy này (thu hồi quyền truy cập riêng trong bảng điều khiển)"
 }

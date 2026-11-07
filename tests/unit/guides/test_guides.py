@@ -1077,7 +1077,9 @@ def test_credentials_guide_keeps_local_first_and_names_vault_only_for_teammates(
     assert "https://console.radienthq.com/dashboard/vaults" in prose
     # Reading is conditional on the gated verb; creating stays the user's.
     assert "You cannot create Vault items" in prose
-    assert "only when the `secret` tool offers `vault_resolve`" in prose
+    # Ungated guide: the gated verb is not named to sessions without access.
+    assert "Vault reads are only possible when your tools offer them" in prose
+    assert "vault_resolve" not in prose
     assert "Team Bridge message" in prose
     assert "shared or committed file" in prose
     # Concise by requirement: a few lines, not a second guide.

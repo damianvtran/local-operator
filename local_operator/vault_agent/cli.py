@@ -35,9 +35,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlencode
@@ -123,13 +123,18 @@ def delegate_url(*, tenant_id: str, endpoint_id: str, public_key_b64url: str) ->
 
 
 def _local_time(stamp: str) -> str:
-    """An RFC 3339 instant in the person's local time zone, unambiguous."""
+    """An RFC 3339 instant in the person's local time zone, unambiguous.
 
-    try:
-        when = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone()
-    except ValueError:
+    A stamp without an offset is UTC per the contract (``parse_instant``), never
+    this machine's local time.
+    """
+
+    from local_operator.vault_agent.eligibility import parse_instant
+
+    when = parse_instant(stamp)
+    if when is None:
         return stamp
-    return when.strftime("%Y-%m-%d %H:%M %Z").strip()
+    return when.astimezone().strftime("%Y-%m-%d %H:%M %Z").strip()
 
 
 def _closed_reason(observation: Any) -> str:
@@ -156,11 +161,73 @@ def _refresh(root: Path) -> Any:
     return eligibility.refresh(root, boundary="explicit", force=True)
 
 
-def _print_fingerprint(fingerprint: str, *, out: Any) -> None:
+def _link(url: str, out: Any) -> str:
+    """``url`` on its own line, as one OSC 8 hyperlink when that is safe.
+
+    Unindented and alone on its line so the terminal's own URL detection sees
+    the whole link however many rows it wraps to (an indent split the click
+    target at the first row). OSC 8 only on a TTY whose emulator is known to
+    render it (``terminals.is_hyperlinked``): piped into a file or a script,
+    the escape would be noise, so the plain URL is the fallback.
+    """
+
+    from local_operator.terminals import is_hyperlinked
+
+    isatty = getattr(out, "isatty", None)
+    try:
+        linked = bool(callable(isatty) and isatty()) and is_hyperlinked()
+    except Exception:  # noqa: BLE001 - the plain URL is always correct
+        linked = False
+    return f"\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\" if linked else url
+
+
+def _print_key_block(
+    *,
+    org: str | None,
+    endpoint_id: str,
+    fingerprint: str,
+    out: Any,
+    held: bool = False,
+    compare: bool = True,
+) -> None:
+    """The title, the endpoint row and the fingerprint, set apart for comparing.
+
+    The two labels are the console's own ("Agent endpoint", "Key fingerprint")
+    so the person matches the two screens at a glance. The instruction comes
+    BEFORE the grid (people read what to do, then compare), and blank lines set
+    the grid apart. Every row stays short of 60 cells, so nothing wraps
+    mid-identifier.
+    """
+
     from local_operator.vault_agent.wire import fingerprint_grid
 
+    if org:
+        print(_t(_v.title(org=org)), file=out)
+    print(_t(_v.endpoint_row(endpoint=endpoint_id)), file=out)
+    # ``held``: the gate is closed, so the key exists but is not usable now.
+    # ``compare``: only ``connect`` asks for the comparison; ``status`` reports.
+    print(_t(_v.fingerprint_held() if held else _v.fingerprint_label()), file=out)
+    if compare and not held:
+        print(_t(_v.compare()), file=out)
+        print(_t(_v.compare_stop()), file=out)
+    print(file=out)
     for line in fingerprint_grid(fingerprint):
         print(f"  {line}", file=out)
+    print(file=out)
+
+
+def _print_connected(expires_at: str, *, out: Any) -> None:
+    # The state and the one fact that matters later lead the line.
+    print(_t(_v.connected_until(until=_local_time(expires_at))), file=out)
+    print(_t(_v.connected_scope()), file=out)
+
+
+def _waiting(timeout: int) -> str:
+    # Rounded UP: "up to 1 minute" for a 90 s wait would be a promise the wait
+    # does not keep.
+    if timeout < 60:
+        return _t(_v.waiting_seconds(seconds=max(1, timeout)))
+    return _t(_v.waiting(minutes=math.ceil(timeout / 60)))
 
 
 # -- verbs -------------------------------------------------------------------------
@@ -172,27 +239,39 @@ def connect(
     open_browser: bool = True,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     out: Any = None,
+    err: Any = None,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     opener: Callable[[str], Any] | None = None,
     client_factory: Callable[[Path], Any] | None = None,
 ) -> int:
+    """Refusals, timeouts and errors go to ``err`` (stderr), as ``hub_org`` and
+    the tunnel CLI do; the key block, the link and success go to ``out``."""
+
     from local_operator.vault_agent import eligibility, keys, wire
     from local_operator.vault_agent.resolve import default_client_factory, pick_up
 
     out = out or sys.stdout
+    err = err or sys.stderr
     observation = _refresh(root)
     gate = eligibility.gate(root)
     if gate is None:
-        print(_closed_reason(observation), file=out)
+        print(_closed_reason(observation), file=err)
         return EXIT_NOT_CONNECTED
 
-    seed, _created = keys.load_or_create_seed(gate.endpoint_id, root)
+    try:
+        seed, _created = keys.load_or_create_seed(gate.endpoint_id, root)
+    except Exception:  # noqa: BLE001 - a damaged row or store failure: a remedy, not a traceback
+        print(_t(_v.key_unreadable()), file=err)
+        return EXIT_NOT_CONNECTED
     public_key = keys.public_key_from_seed(seed)
     fingerprint = wire.key_fingerprint(public_key)
-    print(_t(_v.key_heading(endpoint=gate.endpoint_id, org=gate.tenant_name)), file=out)
-    _print_fingerprint(fingerprint, out=out)
-    print(_t(_v.compare()), file=out)
+    _print_key_block(
+        org=gate.tenant_name or gate.tenant_id,
+        endpoint_id=gate.endpoint_id,
+        fingerprint=fingerprint,
+        out=out,
+    )
     url = delegate_url(
         tenant_id=gate.tenant_id,
         endpoint_id=gate.endpoint_id,
@@ -209,13 +288,16 @@ def connect(
         except Exception:  # noqa: BLE001 - the printed link is the fallback
             opened = False
     print(_t(_v.opening() if opened else _v.open_manually()), file=out)
-    print(f"  {url}", file=out)
+    print(_link(url, out), file=out)
 
-    client = (client_factory or default_client_factory)(root)
+    try:
+        client = (client_factory or default_client_factory)(root)
+    except Exception:  # noqa: BLE001 - an unreadable sign-in reads as signed out
+        client = None
     if client is None:
-        print(_t(_v.signed_out()), file=out)
+        print(_t(_v.signed_out()), file=err)
         return EXIT_NOT_CONNECTED
-    print(_t(_v.waiting(minutes=max(1, round(timeout / 60)))), file=out, flush=True)
+    print(_waiting(timeout), file=out, flush=True)
     deadline = clock() + max(0, timeout)
     errors = 0
     try:
@@ -233,38 +315,60 @@ def connect(
                 code = getattr(exc, "code", None)
                 if status == 503 or code == "vault_unavailable":
                     # The dark gate or an outage: one sentence, no loop.
-                    print(_t(_v.unavailable()), file=out)
+                    print(_t(_v.unavailable()), file=err)
                     return EXIT_NOT_CONNECTED
-                if code == "vault_no_access" or status in (401, 403):
-                    print(_t(_v.no_access(org=gate.tenant_name)), file=out)
+                if status == 401:
+                    # A refused sign-in, not a membership problem: naming the
+                    # membership would send the person to an admin for nothing.
+                    print(_t(_v.signed_out()), file=err)
+                    return EXIT_NOT_CONNECTED
+                if code == "vault_no_access" or status == 403:
+                    org = gate.tenant_name or gate.tenant_id
+                    print(_t(_v.no_access(org=org)), file=err)
                     return EXIT_NOT_CONNECTED
                 errors += 1
                 if errors >= MAX_POLL_ERRORS:
-                    print(_t(_v.error()), file=out)
+                    print(_t(_v.error()), file=err)
                     return EXIT_NOT_CONNECTED
                 grant = None
             if grant is not None:
                 eligibility.write_grant(root, grant)
-                print(_t(_v.connected_until(until=_local_time(grant.expires_at))), file=out)
+                _print_connected(grant.expires_at, out=out)
                 return EXIT_OK
             if clock() >= deadline:
-                print(_t(_v.timed_out()), file=out)
+                print(_t(_v.timed_out()), file=err)
                 return EXIT_NOT_CONNECTED
             sleep(POLL_SECONDS)
     except KeyboardInterrupt:
-        print(_t(_v.interrupted()), file=out)
+        print(_t(_v.interrupted()), file=err)
         return EXIT_INTERRUPTED
 
 
-def status(root: Path, *, as_json: bool = False, out: Any = None) -> int:
+def status(root: Path, *, as_json: bool = False, out: Any = None, err: Any = None) -> int:
+    """Report, never act: exit 0 in every state, as ``lop tunnel status`` does.
+
+    A script reads ``connected`` from ``--json`` instead of an exit code: it is
+    true only when the gate is open AND a matching unexpired grant is cached,
+    the same test the human "Connected until" line uses. A CLOSED gate never
+    says "Connected" (a cached grant the closed gate will not let
+    ``vault_resolve`` use is not access) and never advises ``connect``, which
+    would only refuse on the reason printed; that reason is the LAST line, the
+    one people act on.
+    """
+
     from local_operator.team_bridge.store import Store
     from local_operator.vault_agent import eligibility, keys
 
     out = out or sys.stdout
+    err = err or sys.stderr
     observation = _refresh(root)
     gate = eligibility.gate(root)
     owner = gate or Store(root).active_owner_readonly()
-    seed = keys.load_seed(owner.endpoint_id, root) if owner is not None else None
+    unreadable = False
+    try:
+        seed = keys.load_seed(owner.endpoint_id, root) if owner is not None else None
+    except Exception:  # noqa: BLE001 - a damaged row or store failure: a remedy, not a traceback
+        seed, unreadable = None, True
     fingerprint = keys.fingerprint_for_seed(seed) if seed is not None else None
     grant = (
         eligibility.read_grant(
@@ -273,14 +377,20 @@ def status(root: Path, *, as_json: bool = False, out: Any = None) -> int:
             endpoint_id=owner.endpoint_id,
             fingerprint=fingerprint,
         )
-        if owner is not None and fingerprint is not None
+        if gate is not None and owner is not None and fingerprint is not None
         else None
+    )
+    org = (
+        getattr(gate, "tenant_name", None)
+        or observation.tenant_name
+        or getattr(owner, "tenant_id", None)
     )
     if as_json:
         print(
             json.dumps(
                 {
                     "available": gate is not None,
+                    "connected": grant is not None,
                     "state": "open" if gate is not None else observation.state,
                     "tenant_id": getattr(owner, "tenant_id", None),
                     "endpoint_id": getattr(owner, "endpoint_id", None),
@@ -293,37 +403,51 @@ def status(root: Path, *, as_json: bool = False, out: Any = None) -> int:
             file=out,
         )
         return EXIT_OK
+    if unreadable:
+        print(_t(_v.key_unreadable()), file=err)
+        return EXIT_OK
     if gate is None:
+        if owner is not None and fingerprint is not None:
+            _print_key_block(
+                org=org, endpoint_id=owner.endpoint_id, fingerprint=fingerprint, out=out, held=True
+            )
         print(_closed_reason(observation), file=out)
-        if fingerprint is None:
-            # Nothing to show, and "run lop vault connect" would only fail on
-            # the reason just printed.
-            return EXIT_OK
-    else:
-        print(_t(_v.status_open(org=gate.tenant_name)), file=out)
-    if fingerprint is None or owner is None:
+        return EXIT_OK
+    if fingerprint is None:
+        print(_t(_v.title(org=org or gate.tenant_id)), file=out)
         print(_t(_v.status_no_key()), file=out)
         return EXIT_OK
-    org = getattr(owner, "tenant_name", None) or owner.tenant_id
-    print(_t(_v.key_heading(endpoint=owner.endpoint_id, org=org)), file=out)
-    _print_fingerprint(fingerprint, out=out)
+    _print_key_block(
+        org=org, endpoint_id=gate.endpoint_id, fingerprint=fingerprint, out=out, compare=False
+    )
     if grant is not None:
-        print(_t(_v.connected_until(until=_local_time(grant.expires_at))), file=out)
+        _print_connected(grant.expires_at, out=out)
     else:
         print(_t(_v.status_not_connected()), file=out)
     return EXIT_OK
 
 
-def disconnect(root: Path, *, out: Any = None) -> int:
-    from local_operator.team_bridge.store import Store
+def disconnect(root: Path, *, out: Any = None, err: Any = None) -> int:
+    """Delete EVERY delegation key on this machine and forget the cached grant.
+
+    Every key, not the current endpoint's: an earlier enrolment's key is
+    otherwise unremovable (``keys.delete_all_seeds``). The count is reported
+    truthfully, including zero.
+    """
+
     from local_operator.vault_agent import eligibility, keys
 
     out = out or sys.stdout
-    owner = Store(root).active_owner_readonly()
-    removed = keys.delete_seed(owner.endpoint_id, root) if owner is not None else False
+    err = err or sys.stderr
+    try:
+        removed = keys.delete_all_seeds(root)
+    except Exception:  # noqa: BLE001 - a store or broker failure: say so, no traceback
+        print(_t(_v.store_error()), file=err)
+        return EXIT_NOT_CONNECTED
     eligibility.clear_grant(root)
-    print(_t(_v.disconnected() if removed else _v.nothing_to_remove()), file=out)
-    print(_t(_v.revoke_hint(url=f"{CONSOLE_ORIGIN}{AGENTS_PATH}")), file=out)
+    print(_t(_v.disconnected(count=removed) if removed else _v.nothing_to_remove()), file=out)
+    print(_t(_v.revoke_hint()), file=out)
+    print(_link(f"{CONSOLE_ORIGIN}{AGENTS_PATH}", out), file=out)
     return EXIT_OK
 
 

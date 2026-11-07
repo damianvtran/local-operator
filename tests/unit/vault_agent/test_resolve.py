@@ -288,6 +288,56 @@ def test_a_closed_gate_refuses_before_any_call(config_dir, monkeypatch) -> None:
     assert transport.calls == []
 
 
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://evil.example/dashboard/vaults/vlt_abc/items/vit_def",
+        "http://console.radienthq.com/dashboard/vaults/vlt_abc/items/vit_def",
+        "https://console.radienthq.com:8443/dashboard/vaults/vlt_abc/items/vit_def",
+        "https://u@console.radienthq.com/dashboard/vaults/vlt_abc/items/vit_def",
+        "https://console.radienthq.com.evil/dashboard/vaults/vlt_abc/items/vit_def",
+    ],
+)
+def test_parse_reference_refuses_a_link_from_any_other_origin(link) -> None:
+    """Security S-5: the console's exact origin, nothing else."""
+    with pytest.raises(VaultAgentRefusal) as info:
+        parse_reference(None, link)
+    assert info.value.code == "invalid_reference"
+
+
+def test_a_damaged_key_is_a_refusal_with_a_remedy(config_dir, open_gate, monkeypatch) -> None:
+    from local_operator.secrets.errors import SecretCorrupt
+
+    def damaged(endpoint, base=None):
+        raise SecretCorrupt("damaged")
+
+    monkeypatch.setattr(keys, "load_seed", damaged)
+    transport = Transport()
+    with pytest.raises(VaultAgentRefusal) as info:
+        _resolve(config_dir, transport)
+    assert info.value.code == "key_unreadable"
+    assert "lop vault disconnect" in str(info.value) and transport.calls == []
+
+
+def test_a_non_nfc_id_is_refused_before_route_15(config_dir, open_gate, monkeypatch) -> None:
+    """Security S-6: the authority signs NFC bytes; a non-NFC endpoint id could
+    never verify, so it is refused locally rather than normalised."""
+    decomposed = "bep_cafe\u0301"
+    gate = eligibility.Gate(tenant_id=TENANT, endpoint_id=decomposed, tenant_name="Acme")
+    monkeypatch.setattr(eligibility, "gate", lambda _root: gate)
+    monkeypatch.setattr(keys, "load_seed", lambda endpoint, base=None: SEED)
+    fingerprint = keys.fingerprint_for_seed(SEED)
+    eligibility.write_grant(
+        config_dir,
+        eligibility.Grant("vdl_a", "2999-01-01T00:00:00Z", TENANT, decomposed, fingerprint),
+    )
+    transport = Transport(answers=[(200, mint_answer())])
+    with pytest.raises(VaultAgentRefusal) as info:
+        _resolve(config_dir, transport)
+    assert info.value.code == "invalid_id"
+    assert [c["url"].rsplit("/", 1)[-1] for c in transport.calls] == ["challenges"]
+
+
 def test_parse_reference_accepts_a_console_item_link() -> None:
     url = "https://console.radienthq.com/dashboard/vaults/vlt_abc/items/vit_def"
     assert parse_reference(None, url) == ("vlt_abc", "vit_def")

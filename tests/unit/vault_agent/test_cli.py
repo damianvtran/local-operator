@@ -56,19 +56,23 @@ def _row(**overrides):
 
 
 def _connect(root, transport, **kwargs):
+    """``text`` is stdout then stderr: the order a person sees them in a terminal."""
     out = io.StringIO()
+    err = io.StringIO()
     clock = Clock()
     opened: list[str] = []
     rc = cli.connect(
         root,
         out=out,
+        err=err,
         sleep=clock.sleep,
         clock=clock,
         opener=lambda url: opened.append(url) or True,
         client_factory=lambda _root: make_client(transport),
         **kwargs,
     )
-    return rc, out.getvalue(), opened, clock
+    _connect.err = err.getvalue()  # type: ignore[attr-defined]
+    return rc, out.getvalue() + err.getvalue(), opened, clock
 
 
 def test_connect_prints_the_4x4_grid_opens_the_link_and_caches_the_pickup(
@@ -83,9 +87,19 @@ def test_connect_prints_the_4x4_grid_opens_the_link_and_caches_the_pickup(
     rc, text, opened, clock = _connect(config_dir, transport)
     assert rc == cli.EXIT_OK
     fingerprint = keys.fingerprint_for_seed(SEED)
-    for line in wire.fingerprint_grid(fingerprint):
-        assert f"\n  {line}\n" in text
-    assert "exactly these 16 groups" in text
+    lines = text.splitlines()
+    grid = [f"  {line}" for line in wire.fingerprint_grid(fingerprint)]
+    first = lines.index(grid[0])
+    assert lines[first : first + 4] == grid
+    # Set apart by blank lines, the instruction BEFORE the grid, console labels.
+    assert lines[first - 1] == "" and lines[first + 4] == ""
+    assert lines[first - 2] == "If they differ, stop."
+    assert "exactly these 16 groups" in lines[first - 3]
+    assert lines[first - 4] == "Key fingerprint:"
+    assert lines[first - 5] == f"Agent endpoint: {ENDPOINT}"
+    assert lines[first - 6] == "Radient Vault agent access · Acme"
+    # The URL alone on its line, unindented, plain (stdout is not a TTY here).
+    assert lines[lines.index("Opening the approval page in your browser:") + 1] == opened[0]
     # The link: console origin, the delegate route, and identifiers + public key only.
     (url,) = opened
     parts = urlsplit(url)
@@ -98,7 +112,9 @@ def test_connect_prints_the_4x4_grid_opens_the_link_and_caches_the_pickup(
         "pk": [wire.b64url(keys.public_key_from_seed(SEED))],
     }
     assert SEED.hex() not in url
-    assert "Connected." in text
+    assert any(line.startswith("Connected until ") for line in lines)
+    assert lines[-1] == "This agent can read the vaults you shared with it."
+    assert _connect.err == ""  # type: ignore[attr-defined]
     assert clock.now == cli.POLL_SECONDS  # one wait between the two reads
     grant = eligibility.read_grant(
         config_dir, tenant_id=TENANT, endpoint_id=ENDPOINT, fingerprint=fingerprint
@@ -111,7 +127,52 @@ def test_connect_stops_at_once_on_the_dark_503(config_dir, wired) -> None:
     rc, text, _opened, clock = _connect(config_dir, transport)
     assert rc == cli.EXIT_NOT_CONNECTED
     assert text.rstrip().endswith("Agent access isn't available yet.")
+    assert _connect.err == "Agent access isn't available yet.\n"  # type: ignore[attr-defined]
     assert len(transport.calls) == 1 and clock.now == 0.0
+
+
+def test_connect_maps_401_to_sign_in_and_403_to_membership(config_dir, wired) -> None:
+    rc, text, _o, _c = _connect(config_dir, Transport(answers=[(401, {"code": "unauthorized"})]))
+    assert rc == cli.EXIT_NOT_CONNECTED
+    assert text.splitlines()[-1] == "Sign in to Radient first: run `lop login radient`."
+    rc, text, _o, _c = _connect(config_dir, Transport(answers=[(403, {"code": "vault_no_access"})]))
+    assert rc == cli.EXIT_NOT_CONNECTED
+    assert "Ask an organization owner or admin" in text.splitlines()[-1]
+
+
+@pytest.mark.parametrize(
+    ("timeout", "phrase"),
+    [
+        (30, "up to 30 seconds"),
+        (60, "up to 1 minute;"),
+        (90, "up to 2 minutes"),
+        (600, "10 minutes"),
+    ],
+)
+def test_the_wait_is_rounded_up_never_down(timeout, phrase) -> None:
+    assert phrase in cli._waiting(timeout)
+
+
+def test_a_naive_expiry_is_read_as_utc() -> None:
+    naive = eligibility.parse_instant("2026-11-14T00:00:00")
+    aware = eligibility.parse_instant("2026-11-14T00:00:00Z")
+    assert naive is not None and naive == aware
+    assert eligibility.parse_instant("not a time") is None
+
+
+def test_the_link_is_hyperlinked_only_on_a_capable_tty(monkeypatch) -> None:
+    import local_operator.terminals as terminals
+
+    class Tty(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    url = "https://console.radienthq.com/dashboard/vaults/agents"
+    monkeypatch.setattr(terminals, "is_hyperlinked", lambda env=None: True)
+    assert cli._link(url, io.StringIO()) == url
+    assert cli._link(url, Tty()) == f"\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\"
+    monkeypatch.setattr(terminals, "is_hyperlinked", lambda env=None: False)
+    assert cli._link(url, Tty()) == url
 
 
 def test_connect_times_out_with_a_next_step(config_dir, wired) -> None:
@@ -147,38 +208,115 @@ def test_a_closed_gate_prints_one_reason_and_touches_nothing(
     assert created == [] and opened == [] and transport.calls == []
 
 
-def test_status_shows_the_grid_and_the_grant(config_dir, wired, monkeypatch) -> None:
-    monkeypatch.setattr(keys, "load_seed", lambda endpoint, base=None: SEED)
-    fingerprint = keys.fingerprint_for_seed(SEED)
+def _grant(config_dir) -> None:
     eligibility.write_grant(
         config_dir,
-        eligibility.Grant("vdl_x", "2999-01-01T00:00:00Z", TENANT, ENDPOINT, fingerprint),
+        eligibility.Grant(
+            "vdl_x", "2999-01-01T00:00:00Z", TENANT, ENDPOINT, keys.fingerprint_for_seed(SEED)
+        ),
     )
-    out = io.StringIO()
-    assert cli.status(config_dir, out=out) == cli.EXIT_OK
-    text = out.getvalue()
-    assert "available in Acme" in text
-    assert wire.fingerprint_grid(fingerprint)[3] in text
-    assert "Connected." in text
 
 
-def test_disconnect_deletes_the_key_and_points_at_the_console(config_dir, monkeypatch) -> None:
-    deleted: list[str] = []
-    monkeypatch.setattr(
-        keys, "delete_seed", lambda endpoint, base=None: deleted.append(endpoint) or True
-    )
+def _status(config_dir, **kwargs) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    rc = cli.status(config_dir, out=out, err=err, **kwargs)
+    return rc, out.getvalue(), err.getvalue()
+
+
+def test_status_shows_the_grid_and_the_grant(config_dir, wired, monkeypatch) -> None:
+    monkeypatch.setattr(keys, "load_seed", lambda endpoint, base=None: SEED)
+    _grant(config_dir)
+    rc, text, _err = _status(config_dir)
+    assert rc == cli.EXIT_OK
+    lines = text.splitlines()
+    assert lines[0] == "Radient Vault agent access · Acme"
+    assert text.count("Acme") == 1  # the org is printed once
+    assert f"  {wire.fingerprint_grid(keys.fingerprint_for_seed(SEED))[3]}" in lines
+    assert lines[-2].startswith("Connected until ")
+
+
+@pytest.mark.parametrize(
+    ("state", "last"),
+    [
+        ("unavailable", "Agent access isn't available yet."),
+        ("signed_out", "Sign in to Radient first: run `lop login radient`."),
+    ],
+)
+def test_status_with_a_closed_gate_never_says_connected_nor_advises_connect(
+    config_dir, wired, monkeypatch, state, last
+) -> None:
+    """A key and an unexpired cached grant, but the gate closed (design D2)."""
+    wired["observation"] = Observation(state=state, tenant_name="Acme")
+    wired["gate"] = None
+    monkeypatch.setattr(keys, "load_seed", lambda endpoint, base=None: SEED)
     monkeypatch.setattr(
         "local_operator.team_bridge.store.Store.active_owner_readonly",
         lambda self: SimpleNamespace(tenant_id=TENANT, endpoint_id=ENDPOINT),
     )
-    eligibility.write_grant(
-        config_dir, eligibility.Grant("vdl_x", "2999-01-01T00:00:00Z", TENANT, ENDPOINT, "f" * 64)
-    )
+    _grant(config_dir)
+    rc, text, _err = _status(config_dir)
+    assert rc == cli.EXIT_OK
+    assert text.splitlines()[-1] == last  # the reason is the line people act on
+    assert "Connected" not in text and "lop vault connect" not in text
+    assert "this machine still holds this key" in text and "Acme" in text
+    _rc, payload, _err = _status(config_dir, as_json=True)
+    assert '"connected": false' in payload and '"available": false' in payload
+
+
+def test_status_json_reports_connected(config_dir, wired, monkeypatch) -> None:
+    monkeypatch.setattr(keys, "load_seed", lambda endpoint, base=None: SEED)
+    _grant(config_dir)
+    import json
+
+    _rc, payload, _err = _status(config_dir, as_json=True)
+    data = json.loads(payload)
+    assert data["connected"] is True and data["delegation_id"] == "vdl_x"
+
+
+def test_status_with_a_damaged_key_gives_a_remedy_not_a_traceback(
+    config_dir, wired, monkeypatch
+) -> None:
+    from local_operator.secrets.errors import SecretCorrupt
+
+    def damaged(endpoint, base=None):
+        raise SecretCorrupt("damaged")
+
+    monkeypatch.setattr(keys, "load_seed", damaged)
+    rc, text, err = _status(config_dir)
+    assert rc == cli.EXIT_OK and text == ""
+    assert "lop vault disconnect" in err and "lop vault connect" in err
+
+
+def test_disconnect_deletes_every_key_and_points_at_the_console(config_dir) -> None:
+    """Every LOP_VAULT_DELEGATION_* row, with NO Team Bridge owner (security S-2):
+    the current endpoint's and a stale endpoint's alike, in a real store."""
+    keys.load_or_create_seed(ENDPOINT, config_dir)
+    keys.load_or_create_seed("bep_old", config_dir)
+    _grant(config_dir)
     out = io.StringIO()
     assert cli.disconnect(config_dir, out=out) == cli.EXIT_OK
-    assert deleted == [ENDPOINT]
+    assert keys.load_seed(ENDPOINT, config_dir) is None
+    assert keys.load_seed("bep_old", config_dir) is None
     assert not (eligibility.vault_dir(config_dir) / eligibility.GRANT_NAME).exists()
-    assert "https://console.radienthq.com/dashboard/vaults/agents" in out.getvalue()
+    lines = out.getvalue().splitlines()
+    assert lines[0].startswith("Removed 2 agent keys from this machine.")
+    assert lines[-1] == "https://console.radienthq.com/dashboard/vaults/agents"
+    # Nothing left: the truthful zero.
+    out = io.StringIO()
+    assert cli.disconnect(config_dir, out=out) == cli.EXIT_OK
+    assert out.getvalue().splitlines()[0] == "This machine has no agent key to remove."
+
+
+def test_disconnect_reports_a_store_failure_without_a_traceback(config_dir, monkeypatch) -> None:
+    from local_operator.secrets.errors import SecretStoreError
+
+    def broken(base=None):
+        raise SecretStoreError("broker down")
+
+    monkeypatch.setattr(keys, "delete_all_seeds", broken)
+    out, err = io.StringIO(), io.StringIO()
+    assert cli.disconnect(config_dir, out=out, err=err) == cli.EXIT_NOT_CONNECTED
+    assert "no agent key was removed" in err.getvalue() and out.getvalue() == ""
 
 
 def test_english_is_pinned_for_these_assertions() -> None:

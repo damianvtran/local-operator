@@ -5,9 +5,12 @@ WHY THE ENCRYPTED STORE AND NOT THE OS KEYCHAIN. VAULT.md §4 (amendment
 in a namespace no agent-class read can reach, never in an OS keychain": the
 background processes that resolve (a daemon, the connector) cannot rely on an
 unlocked keychain, and a keychain prompt lands on the operator's screen. The
-reserved name prefix (``secrets.store.DELEGATION_SECRET_PREFIX``) is what keeps
-the model and its shell from reading it: ``lop secret get`` and the ``secret``
-tool are agent-class, and the store refuses that class on this prefix.
+reserved name prefix (``secrets.store.DELEGATION_SECRET_PREFIX``) keeps the seed
+away from the agent-class verbs (``lop secret get``, the ``secret`` tool) and
+the listing surfaces. It is not isolation: the ``delegation`` role is a caller
+claim inside the operator's own user boundary, so a same-uid process willing to
+speak the store or broker as the operator can read it. A suspected compromise
+is answered by revoking the grant in the console (Agent access).
 
 ONE KEY PER ENDPOINT. A grant binds a public key to one Team Bridge endpoint, so
 the row is keyed by the endpoint id (exact bytes; never normalised). A new
@@ -136,22 +139,37 @@ def load_or_create_seed(endpoint_id: str, base: Path | None = None) -> tuple[byt
     return seed, True
 
 
-def delete_seed(endpoint_id: str, base: Path | None = None) -> bool:
-    """Remove ``endpoint_id``'s seed. Returns whether one existed."""
+def delete_all_seeds(base: Path | None = None) -> int:
+    """Delete EVERY delegation seed on this machine; return how many were removed.
+
+    Not just the current endpoint's: a re-enrolment (a new ``bep_``) or a torn
+    down Team Bridge leaves the earlier seeds behind, and ``lop secret rm`` is
+    agent-class, so the store refuses it on this prefix by design. That makes
+    ``lop vault disconnect`` the only cleanup, so it must remove all of them, or
+    it would report success while a private key that can still sign remains.
+    Names come from ``list`` (no value is read).
+    """
 
     from local_operator.secrets.access import open_store
     from local_operator.secrets.errors import SecretNotFound
     from local_operator.secrets.keys import store_path
+    from local_operator.secrets.store import DELEGATION_SECRET_PREFIX
 
     if not store_path(base).exists():
-        return False
+        return 0
     store = open_store(base)
+    removed = 0
     try:
-        store.delete(delegation_secret_name(endpoint_id), role=_ROLE)
-    except SecretNotFound:
-        return False
+        for record in store.list():
+            if not record.name.startswith(DELEGATION_SECRET_PREFIX):
+                continue
+            try:
+                store.delete(record.name, role=_ROLE)
+            except SecretNotFound:
+                continue
+            removed += 1
     finally:
         close = getattr(store, "close", None)
         if callable(close):
             close()
-    return True
+    return removed

@@ -5,5 +5,5 @@
   "cli.vault_help.timeout": "How long to wait for your approval, in seconds (default 600)",
   "cli.vault_help.status": "Show whether agent access is available, this agent's key fingerprint and its approval",
   "cli.vault_help.json": "Print the status as JSON",
-  "cli.vault_help.disconnect": "Delete this agent's key; approvals are revoked in the console"
+  "cli.vault_help.disconnect": "Delete this machine's agent keys (revoke their access separately in the console)"
 }

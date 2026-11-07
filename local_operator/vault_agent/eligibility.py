@@ -47,7 +47,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -350,15 +350,32 @@ def read_grant(
     return grant
 
 
+def parse_instant(stamp: str) -> datetime | None:
+    """An RFC 3339 instant as an aware datetime, or ``None`` when unparseable.
+
+    VAULT.md stamps every instant in UTC. A stamp WITHOUT an offset is therefore
+    read as UTC, never as this machine's local time: ``datetime.timestamp()`` on
+    a naive value would silently shift an expiry by the local UTC offset, which
+    both mis-ranks the route-29 pickup and mis-reports when access ends.
+    """
+
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when
+
+
 def grant_expired(grant: Grant, now: float | None = None) -> bool:
     """Whether the cached expiry has passed. A display aid only: the authority's
     clock decides, and an unparseable value reads as expired (fail closed)."""
 
-    try:
-        when = datetime.fromisoformat(grant.expires_at.replace("Z", "+00:00")).timestamp()
-    except ValueError:
+    when = parse_instant(grant.expires_at)
+    if when is None:
         return True
-    return (time.time() if now is None else now) >= when
+    return (time.time() if now is None else now) >= when.timestamp()
 
 
 def write_grant(config_dir: Path, grant: Grant) -> None:
@@ -396,10 +413,10 @@ def select_grant(
         expires_at = row.get("expires_at")
         if not isinstance(delegation_id, str) or not isinstance(expires_at, str):
             continue
-        try:
-            stamp = datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()
-        except ValueError:
+        when = parse_instant(expires_at)
+        if when is None:
             continue
+        stamp = when.timestamp()
         grant = Grant(
             delegation_id=delegation_id,
             expires_at=expires_at,

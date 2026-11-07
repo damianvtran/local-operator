@@ -14,12 +14,15 @@ machine.
 ## Read one
 
 `secret(op='vault_resolve', vault_id='vlt_…', item_id='vit_…', name='DEPLOY_KEY')`
-— or pass the console item link (`…/dashboard/vaults/<vlt_>/items/<vit_>`) as
-`item_id`. Take both ids from the user or their link; never guess one.
 
-The value lands as a **session credential**: use `$DEPLOY_KEY` in `bash`. It is
-never shown to you, lasts for this session only and is not saved locally. Never
-echo it, write it to a file, or paste it into a message, a commit or a memory.
+You can also pass the console item link (`…/dashboard/vaults/<vlt_>/items/<vit_>`)
+as `item_id`. Take both ids from the user or their link; never guess one.
+
+The value lands as a **session credential** named with a `VAULT_` prefix
+(`$VAULT_DEPLOY_KEY` in `bash`). A command that needs a well-known name maps it
+in its own command line: `GH_TOKEN="$VAULT_GH_TOKEN" gh …`. The value is never
+shown to you, lasts for this session only and is not saved locally. Never echo
+it, write it to a file, or paste it into a message, a commit or a memory.
 
 ## When it refuses
 
@@ -29,3 +32,6 @@ echo it, write it to a file, or paste it into a message, a commit or a memory.
 - Clock, membership, plan or sign-in refusals name their fix; relay it.
 
 You cannot create or upload Vault items: the user adds values in the console.
+
+If the user thinks this machine is compromised, they revoke this agent's
+access in the console under **Agent access**.

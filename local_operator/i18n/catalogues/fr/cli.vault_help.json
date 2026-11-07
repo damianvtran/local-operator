@@ -5,5 +5,5 @@
   "cli.vault_help.timeout": "Durée d’attente de votre approbation, en secondes (600 par défaut)",
   "cli.vault_help.status": "Indiquer si l’accès des agents est disponible, ainsi que l’empreinte de la clé de cet agent et son approbation",
   "cli.vault_help.json": "Afficher l’état au format JSON",
-  "cli.vault_help.disconnect": "Supprimer la clé de cet agent ; les approbations se révoquent dans la console"
+  "cli.vault_help.disconnect": "Supprimer les clés d’agent de cette machine (révoquez leur accès séparément dans la console)"
 }

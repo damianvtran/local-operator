@@ -28,6 +28,7 @@ import base64
 import hashlib
 import re
 import struct
+import unicodedata
 
 #: Outer domain of the operation commitment (VAULT.md §4.1, "radient-vault-op-v2").
 OP_DOMAIN = "radient-vault-op-v2"
@@ -48,8 +49,18 @@ _EMPTY_PARAMS_HASH = hashlib.sha256(b"").digest()
 
 
 def s(text: str) -> bytes:
-    """Tagged UTF-8 string field."""
+    """Tagged UTF-8 string field. Refuses a string that is not already NFC.
 
+    VAULT.md's canonical encoding is UTF-8 NFC, and the authority's
+    ``protocol.String`` normalises before it counts bytes. Normalising HERE
+    would silently sign different bytes than the id the server stores (the
+    endpoint id in particular must stay byte-exact), so a non-NFC input is
+    refused instead: a clear local error rather than a confusing
+    ``delegation_required`` from a proof that can never verify.
+    """
+
+    if unicodedata.normalize("NFC", text) != text:
+        raise ValueError("s() takes NFC text only")
     raw = text.encode("utf-8")
     return b"\x01" + struct.pack(">I", len(raw)) + raw
 

@@ -201,3 +201,11 @@ def test_ledger_version_parsing_refuses_non_canonical_input(bad) -> None:
 
 def test_ledger_version_accepts_u64_max() -> None:
     assert wire.parse_ledger_version("18446744073709551615") == (1 << 64) - 1
+
+
+def test_s_refuses_non_nfc_text_instead_of_normalising_it() -> None:
+    """VAULT.md's encoding is NFC and the authority normalises; signing other bytes
+    than the server's would never verify, so non-NFC input is refused (S-6)."""
+    assert wire.s("caf\u00e9") == b"\x01\x00\x00\x00\x05caf\xc3\xa9"
+    with pytest.raises(ValueError):
+        wire.s("cafe\u0301")

@@ -92,8 +92,10 @@ _VAULT_PROPERTIES = ("vault_id", "item_id")
 #: TEAMMATE shared, so the local store stays visibly the default for the agent's
 #: own credentials (operator constraint: recommended only for sharing).
 _VAULT_CLAUSE = (
-    " vault_resolve reads a credential a teammate shared in Radient Vault into a "
-    "session credential ($NAME in bash), never shown; for your own use store/retrieve."
+    " vault_resolve: only for a credential a teammate shared in Radient Vault, or one "
+    "the user keeps there for other machines; the value becomes session credential "
+    "$VAULT_<NAME> for bash (map a well-known name in the command, e.g. "
+    'GH_TOKEN="$VAULT_GH_TOKEN"), never shown. Everything else: store/retrieve.'
 )
 
 
@@ -421,6 +423,41 @@ async def execute_secret(
         return _error(tool_call_id, "secret", str(exc))
 
 
+#: Every Vault-sourced session credential lives under this prefix, whatever name
+#: the model asks for. Injections override the inherited environment of every
+#: later ``bash`` child, and the value is teammate-controlled bytes the model is
+#: never allowed to read, so a free choice of name would let a shared item land
+#: as ``GIT_SSH_COMMAND``, ``PATH`` or ``BASH_ENV`` and run on this machine. A
+#: forced namespace is an allowlist by shape; a denylist of exec-affecting names
+#: would always be one variable short. A command needing a well-known name maps
+#: it visibly in its own command line (``GH_TOKEN="$VAULT_GH" gh ...``).
+VAULT_CREDENTIAL_PREFIX = "VAULT_"
+
+
+def vault_credential_key(name: str | None, item_id: str) -> str | None:
+    """The session-credential name for a resolved item: always ``VAULT_``-prefixed."""
+
+    from local_operator.variables import normalize_credential_key
+
+    requested = normalize_credential_key(name or "")
+    if requested is None:
+        requested = item_id.removeprefix("vit_")[-8:]
+    if not requested.startswith(VAULT_CREDENTIAL_PREFIX):
+        requested = VAULT_CREDENTIAL_PREFIX + requested
+    return normalize_credential_key(requested)
+
+
+def _list_credentials(store: Any) -> list[Any]:
+    lister: Any = getattr(store, "list_credentials", None)
+    if not callable(lister):
+        return []
+    try:
+        rows: Any = lister()
+        return list(rows)
+    except Exception:  # noqa: BLE001 - an unreadable listing replaces nothing
+        return []
+
+
 async def _op_vault_resolve(
     tool_call_id: str, params: SecretParams, context: ToolContext | None
 ) -> ToolResult:
@@ -458,13 +495,20 @@ async def _op_vault_resolve(
     except VaultAgentRefusal as exc:
         return _error(tool_call_id, "secret", str(exc))
 
-    from local_operator.variables import normalize_credential_key
-
-    key = normalize_credential_key(params.name or "") or normalize_credential_key(
-        "VAULT_" + item_id.removeprefix("vit_")[-8:]
-    )
+    key = vault_credential_key(params.name, item_id)
     if key is None:  # pragma: no cover - the default always normalizes
         return _error(tool_call_id, "secret", "Could not derive a credential name.")
+    previous = next((c for c in _list_credentials(store) if c.key == key), None)
+    if previous is not None and previous.source != "vault":
+        # Never displace what the operator typed or stored: a teammate-chosen
+        # value silently replacing the operator's own credential is a token swap
+        # nobody would notice. Checked before the mint, so nothing is spent.
+        return _error(
+            tool_call_id,
+            "secret",
+            f"Session credential {key} already holds a value the user provided; it was "
+            "not replaced. Pass a different name.",
+        )
 
     from local_operator.paths import config_dir
     from local_operator.vault_agent.resolve import resolve_item
@@ -481,8 +525,10 @@ async def _op_vault_resolve(
     result = store.store_credential(key, resolved.value, "vault", trim=False)
     if not getattr(result, "ok", False):
         return _error(tool_call_id, "secret", "Radient Vault returned an empty value.")
+    verb = "replacing the earlier Vault value" if getattr(result, "replaced", False) else ""
     lines = [
-        f"Resolved {item_id} from Radient Vault into session credential {key}.",
+        f"Resolved {item_id} from Radient Vault into session credential {key}"
+        + (f", {verb}." if verb else "."),
         "The value is NOT shown here and never will be. Use it without reading it:",
         f'  bash:  interpolate ${key}, e.g. curl -H "Authorization: Bearer ${key}" ...',
         "It lasts for this session only and is not saved to the local store.",

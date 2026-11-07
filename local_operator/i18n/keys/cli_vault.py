@@ -14,6 +14,14 @@ def compare() -> Msg:
     return Msg("cli.vault.compare", {})
 
 
+def compare_stop() -> Msg:
+    return Msg("cli.vault.compare_stop", {})
+
+
+def connected_scope() -> Msg:
+    return Msg("cli.vault.connected_scope", {})
+
+
 def connected_until(*, until: str) -> Msg:
     return Msg("cli.vault.connected_until", {"until": until})
 
@@ -22,12 +30,24 @@ def disabled(*, org: str) -> Msg:
     return Msg("cli.vault.disabled", {"org": org})
 
 
-def disconnected() -> Msg:
-    return Msg("cli.vault.disconnected", {})
+def disconnected(*, count: int | float) -> Msg:
+    return Msg("cli.vault.disconnected", {"count": count})
+
+
+def endpoint_row(*, endpoint: str) -> Msg:
+    return Msg("cli.vault.endpoint_row", {"endpoint": endpoint})
 
 
 def error() -> Msg:
     return Msg("cli.vault.error", {})
+
+
+def fingerprint_held() -> Msg:
+    return Msg("cli.vault.fingerprint_held", {})
+
+
+def fingerprint_label() -> Msg:
+    return Msg("cli.vault.fingerprint_label", {})
 
 
 def frozen(*, org: str) -> Msg:
@@ -38,8 +58,8 @@ def interrupted() -> Msg:
     return Msg("cli.vault.interrupted", {})
 
 
-def key_heading(*, endpoint: str, org: str) -> Msg:
-    return Msg("cli.vault.key_heading", {"endpoint": endpoint, "org": org})
+def key_unreadable() -> Msg:
+    return Msg("cli.vault.key_unreadable", {})
 
 
 def no_access(*, org: str) -> Msg:
@@ -74,8 +94,8 @@ def opening() -> Msg:
     return Msg("cli.vault.opening", {})
 
 
-def revoke_hint(*, url: str) -> Msg:
-    return Msg("cli.vault.revoke_hint", {"url": url})
+def revoke_hint() -> Msg:
+    return Msg("cli.vault.revoke_hint", {})
 
 
 def signed_out() -> Msg:
@@ -90,12 +110,16 @@ def status_not_connected() -> Msg:
     return Msg("cli.vault.status_not_connected", {})
 
 
-def status_open(*, org: str) -> Msg:
-    return Msg("cli.vault.status_open", {"org": org})
+def store_error() -> Msg:
+    return Msg("cli.vault.store_error", {})
 
 
 def timed_out() -> Msg:
     return Msg("cli.vault.timed_out", {})
+
+
+def title(*, org: str) -> Msg:
+    return Msg("cli.vault.title", {"org": org})
 
 
 def unavailable() -> Msg:
@@ -104,3 +128,7 @@ def unavailable() -> Msg:
 
 def waiting(*, minutes: int | float) -> Msg:
     return Msg("cli.vault.waiting", {"minutes": minutes})
+
+
+def waiting_seconds(*, seconds: int | float) -> Msg:
+    return Msg("cli.vault.waiting_seconds", {"seconds": seconds})

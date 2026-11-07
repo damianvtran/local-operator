@@ -53,6 +53,11 @@ NOT_CONNECTED = (
     "`lop vault connect` in a terminal and approve it in the console, then try again."
 )
 
+KEY_UNREADABLE = (
+    "This machine's Radient Vault agent key could not be read. Ask the user to run "
+    "`lop vault disconnect` and then `lop vault connect` to create a new one."
+)
+
 _CONSOLE_ITEM_PATH = re.compile(
     r"/dashboard/vaults/(vlt_[0-9A-Za-z_-]+)/items/(vit_[0-9A-Za-z_-]+)/?$"
 )
@@ -81,12 +86,25 @@ def parse_reference(vault_id: str | None, item_id: str | None) -> tuple[str, str
     them through and never invents either (VAULT.md §4).
     """
 
+    from local_operator.vault_agent.cli import CONSOLE_ORIGIN
+
     for candidate in (item_id, vault_id):
         text = (candidate or "").strip()
-        if text.startswith(("http://", "https://")):
-            match = _CONSOLE_ITEM_PATH.search(urlsplit(text).path)
-            if match:
-                return match.group(1), match.group(2)
+        if "://" in text:
+            # THE console link, from the console's exact origin only. The ids
+            # alone would be harmless from any host (the request always goes to
+            # the configured API and the authority enforces the grant's scope),
+            # but a foreign host is a provenance signal: the link did not come
+            # from the console, so the model should ask rather than follow it.
+            parts = urlsplit(text)
+            match = _CONSOLE_ITEM_PATH.search(parts.path)
+            if f"{parts.scheme}://{parts.netloc}" != CONSOLE_ORIGIN or not match:
+                raise VaultAgentRefusal(
+                    "invalid_reference",
+                    f"Only a console item link from {CONSOLE_ORIGIN} is accepted. Ask the "
+                    "user for the link or for both ids (vlt_... and vit_...).",
+                )
+            return match.group(1), match.group(2)
     vault = (vault_id or "").strip()
     item = (item_id or "").strip()
     if not VAULT_ID_RE.fullmatch(vault) or not ITEM_ID_RE.fullmatch(item):
@@ -229,7 +247,12 @@ def resolve_item(
             "Radient Vault agent access is not available on this machine (it needs a "
             "signed-in Radient Team plan and Team Bridge). Use the local secret store.",
         )
-    seed = keys.load_seed(gate.endpoint_id, config_dir)
+    try:
+        seed = keys.load_seed(gate.endpoint_id, config_dir)
+    except Exception:  # noqa: BLE001 - a damaged row or a store/broker failure
+        # Fail closed with a remedy rather than a traceback: no value is
+        # produced either way, and the person can mint a fresh key.
+        raise VaultAgentRefusal("key_unreadable", KEY_UNREADABLE) from None
     if seed is None:
         raise VaultAgentRefusal("not_connected", NOT_CONNECTED)
     fingerprint = keys.fingerprint_for_seed(seed)
@@ -238,7 +261,10 @@ def resolve_item(
     )
     if grant is None:
         raise VaultAgentRefusal("not_connected", NOT_CONNECTED)
-    client = client_factory(config_dir)
+    try:
+        client = client_factory(config_dir)
+    except Exception:  # noqa: BLE001 - an unreadable sign-in record reads as signed out
+        client = None
     if client is None:
         raise VaultAgentRefusal(
             "identity_required",
@@ -254,20 +280,29 @@ def resolve_item(
         raise refusal_for(config_dir, exc) from None
     challenge_id, authority_id, ledger = _validated_mint(answer, tenant_id=gate.tenant_id)
 
-    commitment = wire.resolve_commitment(
-        tenant_id=gate.tenant_id,
-        vault_id=vault_id,
-        item_id=item_id,
-        authority_challenge_id=authority_id,
-        ledger_version=ledger,
-    )
     timestamp = int(clock())
-    message = wire.agent_proof_message(
-        commitment=commitment,
-        delegation_id=grant.delegation_id,
-        endpoint_id=gate.endpoint_id,
-        timestamp=timestamp,
-    )
+    try:
+        commitment = wire.resolve_commitment(
+            tenant_id=gate.tenant_id,
+            vault_id=vault_id,
+            item_id=item_id,
+            authority_challenge_id=authority_id,
+            ledger_version=ledger,
+        )
+        message = wire.agent_proof_message(
+            commitment=commitment,
+            delegation_id=grant.delegation_id,
+            endpoint_id=gate.endpoint_id,
+            timestamp=timestamp,
+        )
+    except ValueError:
+        # A non-NFC id (wire.s): the authority would sign other bytes, so the
+        # proof could never verify. Refused locally, before route 15.
+        raise VaultAgentRefusal(
+            "invalid_id",
+            "An id for this request is not in the canonical form Radient Vault "
+            "signs. Ask the user to run `lop vault connect` again.",
+        ) from None
     proof = keys.sign_proof(seed, message)
     try:
         body = client.resolve_as_agent(

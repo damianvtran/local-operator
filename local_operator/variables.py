@@ -228,13 +228,24 @@ def parse_credential_command(args: str) -> CredentialCommand:
     return CredentialCommand("store", key=key)
 
 
+#: Provenance is the one thing the listing reports, so every source is mapped
+#: explicitly with no catch-all: a Vault value once fell into an ``else`` arm and
+#: was shown as something the operator had pasted. A new source added to
+#: :data:`CredentialSource` without a label fails loudly here, not silently.
+_CREDENTIAL_SOURCE_LABEL: dict[str, str] = {
+    "command": "/credential",
+    "ask": "ask",
+    "vault": "Radient Vault",
+}
+
+
 def format_credential_list(credentials: list[SessionCredential]) -> str:
     """Operator-facing listing. Names and sources only — never values."""
     if not credentials:
         return f"No credentials stored for this session. {CREDENTIAL_USAGE}"
     width = max(len(item.key) for item in credentials)
     rows = [
-        f"  {item.key.ljust(width)}  from {'/credential' if item.source == 'command' else 'ask'}"
+        f"  {item.key.ljust(width)}  from {_CREDENTIAL_SOURCE_LABEL[item.source]}"
         for item in credentials
     ]
     return "\n".join(

@@ -16,7 +16,8 @@ THE MODULES, and why they are split this way:
   fingerprint). Pure and dependency-light so the authority's cross-repo vectors
   pin it exactly.
 * :mod:`.keys` — the delegation seed, kept in the local encrypted store under a
-  reserved namespace no agent-class read can reach (``LOP_VAULT_DELEGATION_*``).
+  reserved namespace the agent-class verbs refuse (``LOP_VAULT_DELEGATION_*``);
+  a refusal of well-behaved callers, not isolation from a same-uid process.
 * :mod:`.client` — routes 1, 15, 27 and 29 with the signed-in PERSON's bearer.
 * :mod:`.eligibility` — the cached, network-free gate that decides whether the
   ``secret`` tool offers ``vault_resolve`` at all, plus the cached grant.
