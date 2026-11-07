@@ -689,6 +689,10 @@ def test_five_deterministic_refusals_wait_for_input_instead_of_dead_lettering(
     record = _stored(out, "op1")
     assert record.attempts == 0 and record.waiting_input is True
 
+    # The input really moves: a local edit over a readable remote. (Merely
+    # making the remote readable again would be a no-op now that an identical
+    # document no longer projects to a normalized respelling worth a publish.)
+    edited = {**skill, "files": [{"path": "SKILL.md", "content": skill_md + "\nmore\n"}]}
     good, _o2, server2 = asyncio.run(
         _run(
             tmp_path,
@@ -696,7 +700,7 @@ def test_five_deterministic_refusals_wait_for_input_instead_of_dead_lettering(
             kind="skill",
             captured_local=skill,
             accepted=skill,
-            current_local=skill,
+            current_local=edited,
             remote_latest=skill,
         )
     )

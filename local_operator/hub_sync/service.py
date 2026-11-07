@@ -1412,7 +1412,10 @@ def _apply_skill(
     any unresolved file -> a conflict report with NOTHING written and the
     baseline NOT advanced.
     """
-    from local_operator.hub_sync.outbound import merge_skill_document
+    from local_operator.hub_sync.outbound import (
+        merge_skill_document,
+        skill_merge_refusal_message,
+    )
     from local_operator.hub_sync.skill_document import (
         SkillDocument,
         SkillValidationError,
@@ -1531,8 +1534,15 @@ def _apply_skill(
         if merged_json is not None:
             merged = SkillDocument.from_json(dict(merged_json))
     if merged is None:
+        # The per-file results say WHICH files blocked and how; a blanket
+        # "edit against a removal" misdescribed plain edit/edit conflicts.
         message = (
-            "the merge left files neither side can keep (an edit against a removal)"
+            skill_merge_refusal_message(
+                base_doc.to_json() if base_doc is not None else None,
+                local_doc.to_json() if local_doc is not None else {},
+                remote_doc.to_json() if remote_doc is not None else {},
+                results,
+            )
             if results
             else "the merged skill document is not valid"
         )
@@ -3118,9 +3128,16 @@ def verify_skill_push(ctx: HubSyncContext, check: Any, outcome: Any) -> PushVeri
     hub document back revealed it. So the push now verifies on its own:
     unconditionally (no If-None-Match -- a 304 would answer from the local
     baseline, which is exactly the copy that was wrong), through the same
-    per-tenant client the check uses, comparing with the one skill-content
-    comparator (``_same_content``: tolerant of the hub's canonical respelling,
-    exact for a bundle tree).
+    per-tenant client the check uses.
+
+    The comparison is BYTE-EXACT (``fingerprint_snapshot``: every file's exact
+    content, a bundle's tree hash), because the CLI then tells the operator the
+    head "holds exactly the document this push sent". It used the tolerant
+    ``_same_content`` comparator until 2026-11-07, which certified a hub copy
+    that had lost its trailing newline (the projection, not the hub, had
+    normalized it away) as exact. The hub stores document bytes verbatim
+    (agent-server request validation rewrites no file content), so a byte
+    difference here is a real difference worth the warning.
 
     The comparison target is ``outcome.document`` -- the body the commit SENT --
     never the server's ``accepted_document``: an idempotent replay answers with
@@ -3147,7 +3164,13 @@ def verify_skill_push(ctx: HubSyncContext, check: Any, outcome: Any) -> PushVeri
         logger.debug("post-push verification read failed for %s", check.name, exc_info=True)
         return PushVerification(None, reason=type(error).__name__)
     head_revision = str(document.get("revision") or "") or None
-    if _same_content(head, intended):
+    try:
+        exact = prov.fingerprint_snapshot("skill", dict(head)) == prov.fingerprint_snapshot(
+            "skill", dict(intended)
+        )
+    except Exception:  # noqa: BLE001 - an unfingerprintable side proves no equality
+        exact = False
+    if exact:
         return PushVerification(True, head_revision=head_revision)
     return PushVerification(False, head_revision=head_revision, reason="head-differs")
 

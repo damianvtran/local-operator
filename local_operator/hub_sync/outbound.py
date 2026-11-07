@@ -87,8 +87,19 @@ def merge_skill_file(
     if base_present is False and local is not None and remote is not None and local != remote:
         # Both sides ADDED this path with different content: a conflict at the
         # FILE level, decided before the text merge can union them (QN4).
-        from local_operator.hub_sync.merge import file_add_conflict
+        from local_operator.hub_sync.merge import file_add_conflict, replace_field
 
+        if opts.prefer in ("local", "remote"):
+            # An explicit side choice (``lop skills sync --prefer``, the UI's
+            # resolve) settles an add/add the same way it settles any other
+            # unresolved file: take that side's file whole. Without this the
+            # one conflict shape a text merge cannot see stayed unresolvable
+            # from the CLI, and agents cannot hand-edit the managed copy.
+            inp = FieldInput(
+                field=path, kind="text", base=None, local=local, remote=remote, base_present=False
+            )
+            taken = replace_field(inp, take=opts.prefer)
+            return _preserve_side_bytes(taken.merged, local=local, remote=remote), taken
         return None, file_add_conflict(path, local, remote)
     result = merge_field(
         FieldInput(
@@ -103,7 +114,38 @@ def merge_skill_file(
     )
     if not skill_file_present(local, remote, result.merged):
         return None, result
-    return str(result.merged), result
+    return _preserve_side_bytes(result.merged, local=local, remote=remote), result
+
+
+def _preserve_side_bytes(merged: Any, *, local: str | None, remote: str | None) -> str:
+    """The file BYTES to keep for a merged value the engine produced normalized.
+
+    WHY (trailing-newline push incident, 2026-11-07): the text engine works on
+    A2.4-normalized text (``segment.norm``: trailing spaces stripped, blank-line
+    runs collapsed, edges trimmed), so its ``merged`` value is a normalized
+    spelling. Publishing that spelling rewrote every pushed file -- a SKILL.md
+    ending in ``\\n`` reached the hub without it, and blank lines inside code
+    fences collapsed -- while the push reported the hub held "exactly" what it
+    sent. A file's bytes are the operator's (or the hub's) document, not a
+    merge artifact, so:
+
+    * when the merge result IS one side's content (unchanged, a fast-forward,
+      a whole-file ``prefer``), keep that side's exact bytes -- local first, so
+      an agreement never rewrites the local copy;
+    * only a genuinely COMBINED text (both sides' edits woven together) keeps
+      the engine's normalized spelling, and it inherits the terminal newline of
+      the side it was built on so a combined file does not lose its last LF.
+    """
+
+    text = str(merged)
+    normalized = norm(text)
+    for side in (local, remote):
+        if side is not None and norm(side) == normalized:
+            return side
+    anchor = local if local is not None else remote
+    if anchor is not None and anchor.endswith("\n") and text and not text.endswith("\n"):
+        return text + "\n"
+    return text
 
 
 @dataclass(frozen=True)
@@ -215,6 +257,73 @@ def merge_skill_document(
     return merged.to_json(), results
 
 
+def skill_merge_refusal_message(
+    base: Mapping[str, Any] | None,
+    local: Mapping[str, Any],
+    remote: Mapping[str, Any],
+    results: list[MergeResult],
+) -> str:
+    """Name every file that blocked a skill merge, with its REAL conflict kind.
+
+    WHY (merge-refusal incident, 2026-11-07): the apply labelled every refused
+    merge "an edit against a removal", so a plain edit/edit conflict in one
+    reference file sent the operator looking for a deletion that never
+    happened. The kind is derived here from the per-file results AND the three
+    sides' presence (the result alone cannot tell an edit/removal from an
+    edit/edit), in the order the merge visited them. Paths are the remote
+    spelling, the same keys ``merge_skill_document`` merged.
+
+    When no file is blocked the merge produced every file but the result is not
+    a valid document (for instance SKILL.md removed on one side): that is named
+    as such rather than as a conflict.
+    """
+
+    def files_of(doc: Mapping[str, Any] | None) -> dict[str, str]:
+        if doc is None:
+            return {}
+        return {
+            str(row.get("path")): str(row.get("content") or "")
+            for row in doc.get("files") or []
+            if isinstance(row, Mapping)
+        }
+
+    base_files, local_files, remote_files = files_of(base), files_of(local), files_of(remote)
+    blocked: list[str] = []
+    for result in results:
+        if result.outcome not in ("needs-review", "refused"):
+            continue
+        # ``merge_skill_document`` puts the manifest description first, under
+        # the field name ``description``; every other result is a file path.
+        is_description = result is results[0] and result.field == "description"
+        label = "the description" if is_description else result.field
+        if result.outcome == "refused":
+            kind = f"refused: {result.refusal}" if result.refusal else "refused: invalid content"
+        elif any(region.note == "add-vs-add" for region in result.regions):
+            kind = "add/add conflict: both sides added this file with different content"
+        elif is_description:
+            kind = (
+                "edit/edit text conflict"
+                if result.unresolved
+                else "no common baseline to merge against"
+            )
+        elif result.field in base_files and (result.field in local_files) != (
+            result.field in remote_files
+        ):
+            kind = (
+                "edit/removal conflict: removed on the hub, edited in this copy"
+                if result.field not in remote_files
+                else "edit/removal conflict: removed in this copy, edited on the hub"
+            )
+        elif result.unresolved:
+            kind = "edit/edit text conflict: both sides changed the same text"
+        else:
+            kind = "no common baseline to merge against"
+        blocked.append(f"{label} ({kind})")
+    if not blocked:
+        return "the merged skill document is not valid"
+    return "the merge could not combine " + "; ".join(blocked)
+
+
 def _project_skill_bundle(
     *,
     captured_local: Mapping[str, Any],
@@ -312,9 +421,14 @@ def _project_skill(
         remote_canonical = SkillDocument.from_json(dict(remote_latest)).to_json()
     except SkillValidationError:
         remote_canonical = None
-    no_op = remote_canonical is not None and fingerprint_snapshot(
-        "skill", stage_two
-    ) == fingerprint_snapshot("skill", remote_canonical)
+    # No-op is judged on CONTENT (the module contract: whitespace-only
+    # respellings never buy a publication). Now that the merge keeps each side's
+    # exact bytes, an exact compare would bill a republish of every hub copy an
+    # older client stored without its trailing newline; the one skill-content
+    # comparator keeps that a no-op while a real edit still publishes exact bytes.
+    from local_operator.hub_sync.service import _same_content
+
+    no_op = remote_canonical is not None and _same_content(stage_two, remote_canonical)
     warnings = tuple(dict.fromkeys(w for r in results for w in r.warnings))
     unresolved = tuple(r.field for r in results if r.outcome == "needs-review")
     return ProjectionResult(
