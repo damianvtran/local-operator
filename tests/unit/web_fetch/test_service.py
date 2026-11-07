@@ -8,6 +8,7 @@ rather than depending on live DNS.
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import httpx
 import pytest
@@ -239,7 +240,16 @@ async def test_an_idn_host_is_pinned_with_an_ascii_host_header_and_sni(
 #: so the pin would connect to the default port instead), an A-label httpx
 #: cannot decode (``xn--zz`` failed at request time, after a real lookup), and a
 #: name longer than DNS can hold. Every one is a refusal BEFORE the lookup.
+#: Port 0 (and its ``:00`` spelling) is no port at all: nothing listens there, so
+#: the connect fails as a retryable error whose Retry can never work (S-9).
 _UNREQUESTABLE_SPELLINGS = [
+    "https://public.test:0/x",
+    "https://public.test:00/x",
+    # An empty label is no DNS name; the lookup used to raise from IDNA (m1 moved
+    # this rule here from the preview's own copy).
+    "https://./x",
+    "https://a..public.test/x",
+    "https://.public.test/x",
     "https://public.test:65536/x",
     "https://public.test:99999/x",
     "https://public.test:-1/x",
@@ -270,8 +280,9 @@ def test_an_unrequestable_spelling_is_refused_before_any_lookup(
     "url",
     [
         "https://public.test:65535/x",
-        "https://public.test:0/x",
         "https://public.test:443/x",
+        # A single trailing dot is the DNS root, not an empty label.
+        "https://public.test./x",
         "https://XN--CAF-DMA.test/x",
         "https://" + ".".join(["a" * 63] * 3) + "." + "b" * 61 + "/x",
     ],
@@ -281,6 +292,52 @@ def test_the_spelling_checks_leave_real_urls_alone(
 ) -> None:
     monkeypatch.setattr(service, "_resolve_host_ips", lambda host: ["93.184.216.34"])
     assert validate_public_url(url, allow_private=False) == "93.184.216.34"
+
+
+def test_the_spelling_verdict_is_memoised_by_the_exact_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The string-only verdict is computed once per exact spelling (security S-10).
+
+    A refused spelling is never cached by the preview, so every render re-paid the
+    parse — measured at ~15 ms for a 200-character IDN host, on the event loop.
+    The memo is keyed by the RAW string, so a verdict can never answer for a
+    different spelling: one character more is a fresh decision.
+    """
+    calls: list[str] = []
+    real_parse = service._parse_request_url
+
+    def _counting(url: str) -> httpx.URL:
+        calls.append(url)
+        return real_parse(url)
+
+    monkeypatch.setattr(service, "_parse_request_url", _counting)
+
+    def _verdict(candidate: str) -> tuple[str, str]:
+        try:
+            return ("pass", service.vet_url_spelling(candidate))
+        except service.PolicyRefusal as refusal:
+            return ("refused", refusal.reason)
+
+    # Unique per run, so a verdict memoised by an earlier test cannot answer it.
+    # Both a passing and a refused spelling: the refused one is the expensive
+    # case, because the preview never caches it.
+    run = uuid.uuid4().hex
+    label = "\u00fc" * 20 + "a" * 10
+    for url in (
+        f"https://{label}.{run}.test/p",
+        "https://" + ".".join([label] * 6) + f".{run}.test/p",
+    ):
+        calls.clear()
+        first = _verdict(url)
+        assert _verdict(url) == first
+        assert len(calls) == 1, "the same exact spelling was parsed twice"
+
+        # One character more is a different spelling with its own verdict, and
+        # the refusal it earns does not leak back onto the first spelling.
+        assert _verdict(url + "#\x01") == ("refused", "host")
+        assert _verdict(url) == first
+        assert len(calls) == 2
 
 
 def test_the_pin_carries_the_port_the_guard_judged() -> None:

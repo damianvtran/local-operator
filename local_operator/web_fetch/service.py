@@ -21,6 +21,7 @@ disk fills (the incident that shaped :mod:`local_operator.tools.spill`).
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import ipaddress
 import json
@@ -598,16 +599,38 @@ def _parse_request_url(url: str) -> httpx.URL:
             f"refusing {url!r}: no request can be built from this URL ({exc})", reason="host"
         ) from None
     default_port = _DEFAULT_PORTS.get(origin.scheme)
-    if (origin.port or default_port) != (written_port or default_port):
+    # ``is None``, never ``or``: port 0 is falsy, so ``or`` mapped a written ``:0``
+    # to the default port on BOTH sides and the check passed while the pin went on
+    # to target port 0 (security S-9).
+    effective_port = default_port if origin.port is None else origin.port
+    if effective_port != (default_port if written_port is None else written_port):
         raise PolicyRefusal(
             f"refusing {url!r}: no request can be built from this URL "
             "(its port is not the one a request would use)",
+            reason="host",
+        )
+    if effective_port == 0:
+        # Nothing listens on port 0 — a connect there fails as a RETRYABLE error,
+        # so the card offered a Retry that could never succeed. Refused from the
+        # string like every other port no request can use.
+        raise PolicyRefusal(
+            f"refusing {url!r}: no request can be built from this URL (port 0)",
             reason="host",
         )
     if round_trip != origin.raw_host:
         raise PolicyRefusal(
             f"refusing {url!r}: no request can be built from this URL "
             "(its host does not survive an IDNA round trip)",
+            reason="host",
+        )
+    # An EMPTY LABEL (``.``, ``a..b``, ``.a``) is no DNS name, yet httpx accepts it
+    # and the lookup then raised from IDNA. Only the link preview's private copy of
+    # these rules caught it (via the 2003 codec); with that copy gone (review m1),
+    # the one shared rule has to. A single trailing dot is the root, not a label.
+    if any(not label for label in origin.raw_host.removesuffix(b".").split(b".")):
+        raise PolicyRefusal(
+            f"refusing {url!r}: no request can be built from this URL "
+            "(its host has an empty label)",
             reason="host",
         )
     if len(origin.raw_host.rstrip(b".")) > _MAX_HOST_OCTETS:
@@ -643,7 +666,50 @@ def vet_url_spelling(url: str) -> str:
     (security S-5); the preview therefore calls this on the raw target before the
     key exists and caches nothing. One function, so the three places cannot
     disagree about what is refusable.
+
+    MEMOISED BY THE EXACT RAW STRING (security S-10). Because the preview caches
+    no refusal, a refused spelling re-paid this parse on every render — measured
+    at ~15 ms for a 200-character IDN host, on the event loop, up to three links
+    per message. The verdict is a pure function of the string, so it is kept in
+    a bounded LRU keyed by that string and nothing derived from it: a key that
+    normalised anything (case, the fragment, the query) would let one spelling's
+    verdict answer for another, the poisoning shape S-5 and S-8 closed.
     """
+    if len(url) > _SPELLING_MEMO_MAX_CHARS:
+        # Bounds the memo's memory by entries x this length; a URL this long is
+        # rare enough that paying the parse again costs nothing that matters.
+        return _vet_url_spelling_uncached(url)
+    host, refusal = _memoised_spelling_verdict(url)
+    if refusal is not None:
+        message, reason = refusal
+        # A fresh exception per call: a raised one carries a traceback and must
+        # never be shared between callers.
+        raise PolicyRefusal(message, reason=reason)
+    return host
+
+
+#: How many exact spellings the verdict memo holds, and the longest it will hold.
+#: A rendered screen carries a few dozen links; 512 x 4,096 characters keeps the
+#: worst case to a few megabytes however hostile the strings are.
+_SPELLING_MEMO_SIZE = 512
+_SPELLING_MEMO_MAX_CHARS = 4096
+
+
+@functools.lru_cache(maxsize=_SPELLING_MEMO_SIZE)
+def _memoised_spelling_verdict(url: str) -> tuple[str, tuple[str, str] | None]:
+    """``(host, None)`` or ``("", (message, reason))`` for one exact spelling.
+
+    Only :class:`PolicyRefusal` is part of the verdict; anything else raised is
+    a bug and propagates uncached.
+    """
+    try:
+        return _vet_url_spelling_uncached(url), None
+    except PolicyRefusal as refusal:
+        return "", (str(refusal), refusal.reason)
+
+
+def _vet_url_spelling_uncached(url: str) -> str:
+    """The verdict :func:`vet_url_spelling` memoises; see its docstring."""
     try:
         # ``urlsplit`` itself raises on some netlocs (an unterminated ``[``, or
         # brackets inside the userinfo); that is the same "no request" verdict.

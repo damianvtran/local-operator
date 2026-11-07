@@ -62,9 +62,19 @@ def _error() -> LinkPreviewResolution:
         ("https://example.com:8443/x", "https://example.com:8443/x"),
         # An empty path names the same resource as "/".
         ("https://example.com", "https://example.com/"),
-        # The query SELECTS the page, so it is preserved — in a stable order.
-        ("https://example.com/p?b=2&a=1", "https://example.com/p?a=1&b=2"),
+        # The query SELECTS the page, so it is preserved EXACTLY as it is sent:
+        # two keys may only meet when their bytes on the wire do (security S-8).
+        ("https://example.com/p?b=2&a=1", "https://example.com/p?b=2&a=1"),
         ("https://example.com/p?a=1&b=2", "https://example.com/p?a=1&b=2"),
+        ("https://example.com/r?to=\\\\evil.test/x", "https://example.com/r?to=\\\\evil.test/x"),
+        (
+            "https://example.com/r?to=%5C%5Cevil.test%2Fx",
+            "https://example.com/r?to=%5C%5Cevil.test%2Fx",
+        ),
+        ("https://example.com/p?flag", "https://example.com/p?flag"),
+        # httpx percent-encodes what it must, so these ARE the same request.
+        ("https://example.com/p?a=\u00e9", "https://example.com/p?a=%C3%A9"),
+        ("https://example.com/p?a b", "https://example.com/p?a%20b"),
         # Credentials are not part of what the page is, and must not become key
         # material that outlives the request they arrived with.
         ("https://user:sekret@example.com/x", "https://example.com/x"),
