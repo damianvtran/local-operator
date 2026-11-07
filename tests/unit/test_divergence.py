@@ -21,6 +21,7 @@ import pytest
 from local_operator.divergence import (
     MAX_NOTICED_ROOTS,
     MAX_ROWS_PER_ROOT,
+    MODEL_AUTHORED_CARRIERS,
     DivergenceJudge,
     _skip_roots,
     asserted_paths,
@@ -954,12 +955,19 @@ async def test_a_live_loop_with_a_string_cwd_writes_the_row(home: Path, tmp_path
 # ---------------------------------------------------------------------------
 
 
-def test_a_wake_prompt_naming_the_root_explains_it(home: Path, tmp_path: Path) -> None:
-    """The round-1 reproducer: the sender named the root, so it is not novel.
+def test_a_wake_prompt_is_the_models_own_text_and_does_not_explain_the_root(
+    home: Path,
+    tmp_path: Path,
+) -> None:
+    """Round-3 MAJOR: a wake message is scheduled BY the model, so it cannot explain.
 
-    ``CustomMessage`` carries no ``role``, so folding only ``role == "user"``
-    missed every delivered instruction and then asserted the root "appears in
-    no … user message" — false absence, the class this guard must never commit.
+    ``details["text"]`` ends with the scheduling model's own ``WakeParams.message``,
+    verbatim (``harness/wake.py`` -> ``tools/builtin.py``). Round 1 read this
+    carrier as the operator's words and asserted it silenced the notice; under
+    the rule the module now states — text the model can author is never an
+    instruction source — the notice must FIRE here. It is a missed notice if it
+    does not: the reviewer reproduced ``events: 0`` on this exact shape, and a
+    session can wake itself into a project it invented.
     """
     from local_operator.harness.types import CustomMessage
 
@@ -978,7 +986,117 @@ def test_a_wake_prompt_naming_the_root_explains_it(home: Path, tmp_path: Path) -
         ],
         system_blocks=["You are a personal assistant."],
     )
-    assert events == []
+    assert len(events) == 1, "the model's own wake message must not silence the notice"
+    assert "user_messages" in events[0].sources
+    text, _kind = divergence_notice(events[0].as_notice_payload())
+    assert "Not in the system prompt, custom instructions or user messages" in text
+
+
+def test_a_todo_reminder_is_the_models_own_plan_and_does_not_explain_the_root(
+    home: Path,
+    tmp_path: Path,
+) -> None:
+    """Round-3 MAJOR, second carrier: the todo list is the model's own plan.
+
+    ``_todo_reminder_text`` lists ``TodoParams.items`` verbatim, so folding it
+    would disable the guard for every root the session planned in todos — turn N
+    writes the item, the reminder lands at the yield boundary, and turn N+1's
+    write reads as already explained. Reviewer's reproducer: ``events: 0``.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("review the tunnels MR"),
+            CustomMessage(
+                custom_type="todo_reminder",
+                attribution="system",
+                details={
+                    "text": (
+                        "<system-reminder>\nInjected by the harness at the turn "
+                        "boundary.\n- write the app at ~/squeeze\n</system-reminder>"
+                    )
+                },
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert len(events) == 1, "the model's own plan must not silence the notice"
+    text, _kind = divergence_notice(events[0].as_notice_payload())
+    assert "Not in the system prompt, custom instructions or user messages" in text
+
+
+@pytest.mark.parametrize("custom_type", sorted(MODEL_AUTHORED_CARRIERS))
+def test_no_model_authored_carrier_explains_a_root(
+    custom_type: str, home: Path, tmp_path: Path
+) -> None:
+    """The set's contract, member by member — including ones no other test names.
+
+    The two reproducers above cover the carriers the reviewer measured; this one
+    holds the RULE for the whole set, so a future member added to
+    :data:`MODEL_AUTHORED_CARRIERS` without its own reproducer cannot be a name
+    that is excluded on paper and folded in practice. Every member names the root
+    in the fields its renderer arm reads, and the notice must still fire: text the
+    model can author is never an instruction source.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("review the tunnels MR"),
+            CustomMessage(
+                custom_type=custom_type,
+                attribution="system",
+                details={
+                    "text": "carry on inside ~/squeeze",
+                    "summary": "the operator asked for ~/squeeze",
+                    "tool": "write",
+                    "description": "write to ~/squeeze/app.py",
+                },
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert len(events) == 1, f"{custom_type} named ~/squeeze and silenced the notice"
+
+
+def test_the_operator_naming_the_root_still_explains_it_beside_a_wake_prompt(
+    home: Path,
+    tmp_path: Path,
+) -> None:
+    """The bound on the exclusion: an operator turn naming the root still folds.
+
+    Excluding model-authored carriers costs at most a redundant notice, and this
+    is the row that proves the cost stays bounded — the wake prompt beside the
+    operator's own words changes nothing, because the operator's turn is the
+    source, and the wake echo is simply not one.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("build it under ~/squeeze for me"),
+            CustomMessage(
+                custom_type="wake_prompt",
+                attribution="system",
+                details={"text": "wake delivery\n\nkeep going in ~/squeeze"},
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert events == [], "the operator's own turn named the root, so it is not novel"
 
 
 def test_a_session_state_delta_naming_the_root_explains_it(home: Path, tmp_path: Path) -> None:
@@ -1055,42 +1173,94 @@ def _declared_custom_types() -> dict[str, str]:
     return found
 
 
-def _renderer_compared_types() -> set[str]:
+def _renderer_compared_types(source: str | None = None) -> set[str]:
     """Every custom-type value ``harness/render.py`` compares ``custom_type`` to.
 
     The renderer's OWN source is the authority for what it can inject: each
     ``message.custom_type == X`` / ``in (…)`` comparator is read out of the AST
     and resolved through the module namespace, so an imported constant, an
     inline literal and a family frozenset all arrive as the strings it matches.
+
+    FAILS CLOSED (round-3 MINOR). A sweep that understands only the arm shape
+    someone happened to write certifies rather than checks: hoisting
+    ``custom_type`` into a local, interpolating it into an f-string, keying a
+    dispatch table with it, or spelling a comparator as ``PREFIX + "_x"`` each
+    leave this function returning a SMALLER set without failing — and the twin
+    test below then reports a shorter universe as agreement while a carrier
+    really is delivered unfolded. So nothing is skipped silently:
+
+    * every ``.custom_type`` attribute use in the module must be the direct left
+      of a ``Compare``, else this raises (that covers the hoist, the f-string,
+      the dispatch key and any other use the value could escape through);
+    * every comparator must resolve statically to strings — a literal, a module
+      name bound to a ``str``/collection, or a tuple/set/list of those — else
+      this raises (that covers ``PREFIX + "_x"`` and ``f"x_{suffix}"``);
+    * an empty result raises, because a resolver that yields nothing is the
+      renderer arm being invisible rather than absent.
+
+    Residual, documented rather than silent: an arm that never spells the
+    attribute at all (``getattr(message, "custom_type")``, or a table keyed by
+    the instance) is outside both halves. That shape is not a refactor of an
+    existing arm — it is a new arm — and the convention this sweep relies on is
+    that a carrier arm compares ``message.custom_type`` directly.
+
+    ``source`` exists so ``test_the_sweep_fails_closed_on_every_evasion`` can
+    drive adversarial variants through this same code; production calls pass
+    nothing and read the real module.
     """
     import ast
 
     from local_operator.harness import render
 
-    tree = ast.parse(Path(render.__file__).read_text(encoding="utf-8"))
+    if source is None:
+        source = Path(render.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     found: set[str] = set()
 
-    def resolve(node: ast.AST) -> None:
+    def resolve(node: ast.AST) -> list[str]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            found.add(node.value)
-        elif isinstance(node, ast.Name):
+            return [node.value]
+        if isinstance(node, ast.Name):
             value = getattr(render, node.id, None)
             if isinstance(value, str):
-                found.add(value)
-            elif isinstance(value, (frozenset, set, tuple, list)):
-                found.update(item for item in value if isinstance(item, str))
+                return [value]
+            if isinstance(value, (frozenset, set, tuple, list)):
+                members = [item for item in value if isinstance(item, str)]
+                if members:
+                    return members
         elif isinstance(node, (ast.Tuple, ast.Set, ast.List)):
+            resolved: list[str] = []
             for element in node.elts:
-                resolve(element)
+                resolved.extend(resolve(element))
+            return resolved
+        raise AssertionError(
+            f"render.py compares custom_type against a value this sweep cannot resolve "
+            f"statically ({ast.dump(node)[:120]}, line {getattr(node, 'lineno', '?')}). "
+            "Spell the arm as `message.custom_type == <module-level constant>` or teach "
+            "this sweep the new shape — a pass here would certify a carrier it never saw."
+        )
 
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Compare):
+        if not (isinstance(node, ast.Attribute) and node.attr == "custom_type"):
             continue
-        left = node.left
-        if not (isinstance(left, ast.Attribute) and left.attr == "custom_type"):
-            continue
-        for comparator in node.comparators:
-            resolve(comparator)
+        parent = parents.get(node)
+        if not (isinstance(parent, ast.Compare) and parent.left is node):
+            raise AssertionError(
+                f"render.py uses `.custom_type` at line {node.lineno} in a shape this "
+                "sweep cannot follow (only the direct left of a Compare is understood). "
+                "Keep each carrier arm as `message.custom_type == <constant>`: a hoisted "
+                "local, an f-string or a dispatch-table key would empty the renderer half "
+                "of this sweep while it still reports success."
+            )
+        for comparator in parent.comparators:
+            found.update(resolve(comparator))
+
+    if not found:
+        raise AssertionError(
+            "no custom_type comparisons resolved in render.py — the renderer's arms are "
+            "invisible to this sweep, so an empty unfolded set would mean nothing"
+        )
     return found
 
 
@@ -1135,6 +1305,131 @@ def test_the_folded_set_is_exactly_what_the_renderer_delivers() -> None:
     assert carried == set(MODEL_VISIBLE_INJECTED_TYPES)
 
 
+#: Sources standing in for the four ordinary refactors of a carrier arm that round
+#: 3 showed the sweep silently missing, plus the literal arm it must still read.
+#: Each is a whole module: the sweep parses it exactly as it parses ``render.py``.
+_SWEEP_VARIANTS: dict[str, str] = {
+    "literal arm (control)": 'def f(message):\n    return message.custom_type == "sweep_probe"\n',
+    "concatenated comparator": (
+        "def f(message):\n" '    return message.custom_type == "sweep" + "_probe"\n'
+    ),
+    "f-string comparator": (
+        'def f(message):\n    return message.custom_type == f"sweep_{suffix}"\n'
+    ),
+    "dispatch table": "def f(message):\n    return _ROUTES[message.custom_type](message)\n",
+    "hoisted custom_type local": (
+        "def f(message):\n"
+        "    custom_type = message.custom_type\n"
+        '    return custom_type == "sweep_probe"\n'
+    ),
+}
+
+
+def test_the_sweep_fails_closed_on_every_evasion_shape() -> None:
+    """Round-3 MINOR: a sweep that only reads the shapes it knows CERTIFIES.
+
+    The reviewer inserted each shape into a copy of ``render.py`` and ran the
+    sweep: the literal arm failed by name (the demonstration was real), and a
+    concatenated comparator, an f-string comparator, a dispatch table and a
+    hoisted ``custom_type`` local were all MISSED while the variant really did
+    deliver the missed type to the model as a user turn. The failure mode is the
+    worst one for a gate: silence that reads as agreement.
+
+    So the control must still resolve, and each evasion must RAISE rather than
+    return a smaller set. Fail-closed is the only behaviour that cannot be
+    satisfied by writing the arm differently.
+    """
+    assert _renderer_compared_types(_SWEEP_VARIANTS["literal arm (control)"]) == {
+        "sweep_probe"
+    }, "the control must resolve, or the rest of this test proves nothing"
+
+    for name in (
+        "concatenated comparator",
+        "f-string comparator",
+        "dispatch table",
+        "hoisted custom_type local",
+    ):
+        with pytest.raises(AssertionError):
+            _renderer_compared_types(_SWEEP_VARIANTS[name])
+
+    # The real module goes through the same fail-closed path, so a shape it
+    # cannot follow fails the folded-set test above instead of shrinking it.
+    assert _renderer_compared_types()
+
+
+def _rendered_user_text(message: AgentMessage) -> str:
+    """The user-turn text the REAL renderer delivers for one message."""
+    from local_operator.harness.render import _default_convert_to_llm
+
+    chunks: list[str] = []
+    for rendered in _default_convert_to_llm([message]):
+        if rendered.role != "user":
+            continue
+        content = rendered.content
+        if isinstance(content, str):
+            chunks.append(content)
+            continue
+        for block in content or []:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                chunks.append(text)
+    return "\n".join(chunks)
+
+
+def test_every_folded_carrier_contributes_text_to_the_corpus() -> None:
+    """Round-3 MINOR: folding a type obliges extraction to know its shape.
+
+    The sibling test above pins MEMBERSHIP — that the folded set is exactly what
+    the renderer delivers — and nothing pinned EXTRACTION, so the reviewer's next
+    structured carrier repeated round-2 MAJOR-1: folded, arm composing its text
+    from ``tool`` + ``description`` (the gate arm's shape), ``_custom_text``
+    returned ``''``, and the row again claimed the root was "new to this session …
+    Not in … user messages" while a green sweep stood beside it.
+
+    A probe that simply carries ``text`` would pass vacuously for exactly that
+    carrier, so each folded type is driven twice: with the full probe (a carrier
+    that ships ``details["text"]``, which the judge must read back) and with the
+    probe minus ``text`` (a carrier that COMPOSES from its payload — if the
+    renderer still delivers words with no ``text`` key, the judge must find text
+    there too, and the words it folds must be the ones the model read).
+    """
+    from local_operator.divergence import MODEL_AUTHORED_CARRIERS, _custom_text
+    from local_operator.harness.message_types import MODEL_VISIBLE_INJECTED_TYPES
+    from local_operator.harness.types import CustomMessage
+
+    folded = sorted(MODEL_VISIBLE_INJECTED_TYPES - MODEL_AUTHORED_CARRIERS)
+    assert folded, "the folded set must have members, or this probe checks nothing"
+    assert MODEL_AUTHORED_CARRIERS <= MODEL_VISIBLE_INJECTED_TYPES, (
+        "an excluded name that is not a carrier excludes nothing — a typo here folds "
+        "the type it meant to leave out"
+    )
+    structured = {key: value for key, value in _PROBE_DETAILS.items() if key != "text"}
+
+    for name in folded:
+        for details, shape in (
+            (dict(_PROBE_DETAILS), "ships a text field"),
+            (dict(structured), "composes from its payload"),
+        ):
+            message = CustomMessage(custom_type=name, attribution="system", details=details)
+            delivered = _rendered_user_text(message)
+            if not delivered:
+                # Not this type's shape: the renderer read nothing from these
+                # details, so there is no delivery to compare against. The other
+                # probe is the one that covers this type.
+                continue
+            extracted = _custom_text(message)
+            assert extracted, (
+                f"{name} ({shape}): the renderer delivers {delivered[:60]!r} to the "
+                "model but _custom_text reads nothing — the corpus holds an empty "
+                "source while the notice claims the carrier was checked"
+            )
+            assert extracted in delivered, (
+                f"{name} ({shape}): _custom_text reads {extracted!r} but the renderer "
+                f"delivers {delivered[:60]!r} — the judge is folding words the model "
+                "never read"
+            )
+
+
 def test_a_gate_expiry_that_names_the_root_explains_it(home: Path, tmp_path: Path) -> None:
     """Round-2 MAJOR: this carrier's path is COMPOSED, and it still explains.
 
@@ -1170,9 +1465,7 @@ def test_a_gate_expiry_that_names_the_root_explains_it(home: Path, tmp_path: Pat
     assert events == [], "a gate row the model was told about must explain the root"
 
 
-def test_a_gate_row_about_another_root_leaves_the_claim_true(
-    home: Path, tmp_path: Path
-) -> None:
+def test_a_gate_row_about_another_root_leaves_the_claim_true(home: Path, tmp_path: Path) -> None:
     """The same carrier, NOT naming the root: the notice must still be honest.
 
     Folding the type must not become a blanket excuse. When the gate row is
@@ -1337,9 +1630,7 @@ def test_a_repeated_miss_is_bounded_by_the_announced_root_short_circuit(
     """
     judge = _judge(home, tmp_path)
     history: list[AgentMessage] = [Message.user("hello")]
-    judge.observe_turn(
-        turn_index=1, tool="read", arguments={"path": "~/novel/a"}, messages=history
-    )
+    judge.observe_turn(turn_index=1, tool="read", arguments={"path": "~/novel/a"}, messages=history)
     calls = 0
     original = judge._is_explained
 
@@ -1383,6 +1674,7 @@ def test_an_announced_root_is_not_rescanned_on_every_mention(home: Path, tmp_pat
     # because a root already in ``_roots`` never reaches ``_is_explained``.
     assert len(judge._events) - seen == 1
     assert judge._roots["~/squeeze"].rows == MAX_ROWS_PER_ROOT
+
 
 # ---------------------------------------------------------------------------
 # The turn index under compaction (code review NIT-1)

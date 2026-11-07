@@ -1013,6 +1013,16 @@ def _custom_text(message: Any) -> str:
     only ``text`` was what let that carrier contribute nothing while an event
     still fired claiming ``unseen: ()`` — code review round 2, MAJOR-1.
 
+    A FOLDED TYPE MUST CONTRIBUTE TEXT HERE. Folding a carrier is the claim that
+    the judge can read what it told the model, and that claim is not automatic:
+    the gate arm above exists because a structured payload reaches the model
+    while a ``text``-only reader returned ``''`` and the row still reported the
+    carrier as checked (round-2 MAJOR-1). Any member of
+    :data:`MODEL_VISIBLE_INJECTED_TYPES` whose shape is not a stored ``text``
+    obliges an arm here, and ``test_every_folded_carrier_contributes_text``
+    drives every member through the real renderer and fails when the extraction
+    comes back empty — including for a type the test does not name.
+
     ``details["summary"]`` is deliberately NOT read: it belongs to the
     compaction marker, whose author is the MODEL, and model-authored text may
     not be an instruction source (see :data:`MODEL_AUTHORED_CARRIERS`).
@@ -1044,15 +1054,49 @@ def _has_image(message: Any) -> bool:
 
 #: Carriers in :data:`MODEL_VISIBLE_INJECTED_TYPES` whose bytes the MODEL wrote.
 #:
-#: ``compaction_summary`` is a model's own prose — ``compaction/marker.py`` says
-#: so in as many words. After a cut it stands in for the operator's earlier
-#: turns, so folding it would let a model that invented a project explain its
-#: next assertion with its own explanation and silence the notice: model text
-#: authorising the path the model invented is exactly the laundering this
-#: module's rule forbids. It stays a carrier (the model DID receive it) and is
-#: not folded; the session flags ``unseen=compacted_history`` instead, so the
-#: row says the turns could not be checked rather than going quiet.
-MODEL_AUTHORED_CARRIERS = frozenset({"compaction_summary"})
+#: THE RULE, in one sentence: text the model can author is NEVER an instruction
+#: source, because it cannot authorise the path the model itself invented.
+#:
+#: Every member reaches the model as a user turn, and every member carries the
+#: model's own words inside that turn — so folding one would let a model that
+#: invented a project explain its next assertion with its own explanation and
+#: silence the notice: model text authorising the path the model invented is
+#: exactly the laundering this module's rule forbids. Each stays a carrier (the
+#: model DID receive it); it is simply not evidence that anybody else named the
+#: root:
+#:
+#: * ``compaction_summary`` — a model's own prose (``compaction/marker.py``),
+#:   standing in for the operator's earlier turns after a cut. The session flags
+#:   ``unseen=compacted_history`` instead, so the row says the turns could not
+#:   be checked rather than going quiet.
+#: * ``wake_prompt`` — ``details["text"]`` ends with the scheduling model's own
+#:   ``WakeParams.message``, verbatim (``harness/wake.py``).
+#: * ``todo_reminder`` — lists the model's own ``TodoParams.items`` verbatim
+#:   (:func:`local_operator.session.session._todo_reminder_text`). Left out, a
+#:   session that plans in todos would disable the guard for every root in its
+#:   own plan: turn N writes the todo, the reminder lands at the yield boundary,
+#:   and turn N+1's write reads as already explained.
+#: * ``project_reminder`` — quotes the model's own project names and progress
+#:   lines (:func:`local_operator.session.session._project_reminder_text`).
+#: * ``monitor_prompt`` — its body is real tool output, but the ``name`` and
+#:   ``description`` opening it are the model's choice; the weakest member of the
+#:   set and still the same authoring channel.
+#:
+#: The cost of excluding them is bounded by construction: when the OPERATOR's
+#: words named the root, ``user_messages`` still carries that turn, so what an
+#: exclusion can add is at most one redundant notice on a root the model talked
+#: itself into. Folding them instead buys a guard that goes silent in the
+#: incident's own shape — a visible extra row is the cheaper error, so the rule
+#: is applied by author, not by how operator-like the prose reads.
+MODEL_AUTHORED_CARRIERS = frozenset(
+    {
+        "compaction_summary",
+        "wake_prompt",
+        "todo_reminder",
+        "project_reminder",
+        "monitor_prompt",
+    }
+)
 
 
 def _corpus_entry(message: Any) -> tuple[str, str] | None:
