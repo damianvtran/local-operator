@@ -284,6 +284,24 @@ ASK_ATTACHMENTS_UNSUPPORTED = (
 #: dedupe on it, and a sender that believed otherwise would duplicate.
 PEER_MESSAGE_ID_CAPABILITY = "peer-message-id-v1"
 
+#: The owner DRAINS ITS INBOX WHILE LIVE, not only at boot and once at its first
+#: turn (``process._watch_live_inbox``). This string is a sender's licence to
+#: answer "queued" for a message it could not hand over the socket: a row
+#: appended to ``inbox.jsonl`` reaches a runtime that advertises it as soon as
+#: that runtime's loop next runs, and is de-duplicated against the socket copy by
+#: its ``command_id``/``message_id`` (``process._run_owner_prompt``,
+#: ``Session.receive_peer_message``).
+#:
+#: WHY IT IS ADVERTISED RATHER THAN ASSUMED: an owner from before the live drain
+#: reads its spool only at boot and at its first turn, so a row queued to it sits
+#: until it restarts. Senders that see no capability fall back to their older
+#: honest answers (a retryable refusal on the desktop route, the successor
+#: receipt on a peer send) rather than promising a delivery nothing will make.
+#: Advertised only by the detached runtime child (``process.amain`` installs the
+#: watcher and sets ``live_inbox_drain`` on the handle); a TUI-hosted owner has
+#: no watcher and does not advertise it.
+LIVE_INBOX_CAPABILITY = "live-inbox-v1"
+
 
 class PeerReceiveDetail(str):
     """A peer delivery's receipt sentence PLUS what the receiver now owns.
