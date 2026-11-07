@@ -9138,7 +9138,14 @@ class ServingSessionHandle(SessionHandle):
                 return self._wake_failure(
                     SlashResult, "The wake request was not a valid create.", "wake_invalid"
                 )
-            result = await _wake_create(tool_call_id, params, scheduler, int(time.time() * 1000))
+            # ``origin="desktop"``: this is the desktop's "new scheduled task"
+            # form reaching the runtime that owns the session, so the message is
+            # the person's — not the model's. Without the stamp the fired
+            # delivery would read as model-authored and the divergence guard
+            # would tell the operator their own instruction never existed.
+            result = await _wake_create(
+                tool_call_id, params, scheduler, int(time.time() * 1000), origin="desktop"
+            )
         elif op == "edit":
             result = await _wake_edit(
                 tool_call_id, wake_id, dict(request), scheduler, int(time.time() * 1000)

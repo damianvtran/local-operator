@@ -59,6 +59,21 @@ MAX_WAKE_MESSAGE_CHARS = 2_000
 MAX_WAKE_SCHEDULES = 16
 
 
+#: ``WakeSchedule.origin`` values whose ``message`` a PERSON wrote.
+#:
+#: The rest (``tool``) means the scheduling MODEL wrote it — the agent's own
+#: ``wake`` tool, Aida's cadence, the librarian's, a patience wait, the video
+#: check-wake. That is the fail-toward-silence-for-suppression default: an
+#: unattributed row must not be able to explain a root to the divergence guard.
+OPERATOR_WAKE_ORIGINS = frozenset({"cli", "desktop", "tui"})
+
+#: The writers a wake row can name as the author of its message. Typed rather
+#: than ``str`` so a caller cannot pass a value that ``model_copy`` (which does
+#: not re-validate) would store unvalidated and the next ``load()`` would then
+#: DROP as an invalid row — a typo would silently lose the wake, not fail loudly.
+WakeOrigin = Literal["tool", "cli", "desktop", "tui"]
+
+
 class WakeSchedule(BaseModel):
     """One scheduled wake. ``id`` is a stable per-session handle (``w1``…)."""
 
@@ -158,6 +173,44 @@ class WakeSchedule(BaseModel):
     #: the mechanism supplies defaults and bounds).
     note: str = ""
 
+    # ---- who WROTE ``message`` --------------------------------------------
+    # ``message`` has two possible authors, and nothing else on this row says
+    # which one it is. A row built by the agent's ``wake`` tool, by Aida's or
+    # the librarian's engines, by a patience wait or by the video check-wake
+    # carries MODEL text; a row the operator created through ``lop wake
+    # create``, the desktop wake route or the TUI schedule page carries THE
+    # OPERATOR's own words. ``format_wake_delivery_text`` renders that message
+    # verbatim and no user turn is ever synthesised for a wake
+    # (``server/routes/desktop_wakes.py`` explains why), so for an
+    # operator-created row the delivery is the ONLY copy of the instruction —
+    # a reader that treats the two authors alike either silences the
+    # divergence guard on model text or claims the operator's own instruction
+    # is absent from the session. Both are wrong; this field is how a reader
+    # tells them apart.
+    #
+    # SKEW: additive with the usual rule for this model (``extra="forbid"`` +
+    # ``load()``'s drop-with-warning). A build that predates the field drops a
+    # row carrying it; a row written by such a build reads back as ``tool``
+    # here — model-authored — which is the direction that keeps an
+    # unattributed row from silencing anything (see
+    # :func:`local_operator.divergence._wake_author`, which hedges instead of
+    # claiming the check happened). Every writer in this tree stamps it
+    # explicitly except the model-created ones, for which ``tool`` IS the
+    # answer.
+    origin: WakeOrigin = "tool"
+
+    @property
+    def message_author(self) -> str:
+        """``"operator"`` or ``"model"`` — who wrote ``message``.
+
+        Two-valued on purpose: consumers ask ONE question (could anybody but
+        this session's model have said these words?), while ``origin`` keeps
+        the exact writer for the surfaces that want it. Keep the predicate here
+        so a new ``origin`` literal cannot be added in one place and forgotten
+        in another.
+        """
+        return "operator" if self.origin in OPERATOR_WAKE_ORIGINS else "model"
+
 
 class DueWake(BaseModel):
     """A wake that is due right now, handed to the ``deliver`` callback."""
@@ -174,6 +227,8 @@ __all__ = [
     "MAX_WAKE_MESSAGE_CHARS",
     "MAX_WAKE_SCHEDULES",
     "MIN_WAKE_INTERVAL_MS",
+    "OPERATOR_WAKE_ORIGINS",
+    "WakeOrigin",
     "DueWake",
     "WakeSchedule",
 ]

@@ -307,7 +307,16 @@ async def create_wake(body: WakeCreate, request: Request):
         session_id, cwd = await _create_session(request, body)
         try:
             outcome = await arm_wake(
-                root, session_id, _wake_request(body), cwd=cwd, request_id=body.request_id
+                root,
+                session_id,
+                _wake_request(body),
+                cwd=cwd,
+                request_id=body.request_id,
+                # The person at the desktop is the author of this message, and
+                # this route never synthesises a user turn to carry it — so the
+                # fired ``wake_prompt`` is the only copy in the session. See
+                # ``WakeSchedule.origin``.
+                origin="desktop",
             )
         except WakeWriteError as error:
             # THIS SHAPE TRANSLATES ITS REFUSALS TOO. It used to call the writer
@@ -739,7 +748,17 @@ async def _via_files(
             # edit and cancel ops deliberately do not stamp: a row's origin is the
             # arm that created it, and their own identity is the row's absence (or
             # value), which is exact already.
-            return await arm_wake(root, session_id, wake_request, cwd=cwd, request_id=request_id)
+            return await arm_wake(
+                root,
+                session_id,
+                wake_request,
+                cwd=cwd,
+                request_id=request_id,
+                # Same author, same reason as the named-session shape above: the
+                # cold path is the SAME route with nobody owning the session
+                # (``_via_files``), not a different writer.
+                origin="desktop",
+            )
         if op == "edit":
             return await edit_wake(root, session_id, wake_id, wake_request, cwd=cwd)
         if op == "cancel":

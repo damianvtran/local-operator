@@ -184,11 +184,20 @@ def _request(values: FormValues) -> dict[str, Any]:
 
 
 def create(values: FormValues, existing: Sequence[WakeSchedule], now_ms: int) -> SaveResult:
-    """Validate a create through ``build_wake_schedule`` and name the result."""
+    """Validate a create through ``build_wake_schedule`` and name the result.
+
+    The row is stamped ``origin="tui"`` HERE rather than at the widget: this is
+    the one seam every schedule created on this page passes through, and the
+    person typing it is the author of the message (``WakeSchedule.origin``).
+    The scheduler persists it, the wake fires, and the divergence guard folds
+    the delivery as the operator's own instruction instead of telling them it
+    never said so. An EDIT deliberately does not pass through here —
+    ``build_wake_edit`` carries the existing origin forward.
+    """
     outcome = build_wake_schedule(_request(values), list(existing), now_ms)
     if "error" in outcome:
         return SaveResult(error=outcome["error"], sentence=outcome["error"])
-    schedule = outcome["schedule"]
+    schedule = outcome["schedule"].model_copy(update={"origin": "tui"})
     return SaveResult(
         schedule=schedule,
         sentence=notice_created(schedule.id, schedule.next_due_at),

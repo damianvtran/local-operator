@@ -67,7 +67,7 @@ view; never compare against displayed text.
 WHAT IT CANNOT SEE — NAMED, NEVER ASSUMED AWAY
 ----------------------------------------------
 A detector that says "nothing in this session named that root" is making a
-claim about every carrier the model received. Three of them are genuinely
+claim about every carrier the model received. Four of them are genuinely
 unreadable from here, and each is recorded per event in
 :attr:`DivergenceEvent.unseen` so the record and the notice can say so instead
 of asserting absence over them:
@@ -82,8 +82,14 @@ of asserting absence over them:
 * ``compacted_history`` — compaction replaces ``context.messages`` with a
   summary, so a root named before the cut may be absent from the list this
   judge is handed.
+* ``unattributed_wake`` — a delivered wake whose author was never recorded
+  (history written before ``WakeSchedule.origin`` existed, or a writer outside
+  this tree). A wake's text has two possible authors; when the author cannot be
+  read, the delivery is not used as a source AND the row says so, because "the
+  model did not write it" and "the operator did write it" are different claims
+  and only one of them is knowable.
 
-A fourth carrier is out of reach for a structural reason worth stating: the
+A fifth carrier is out of reach for a structural reason worth stating: the
 **request-assembly service** composes the provider request outside this
 process, so a root injected there is invisible here. That is the incident's own
 residual uncertainty, and the notice's wording is scoped to the sources this
@@ -131,6 +137,7 @@ from typing import Any, Callable, Mapping, Sequence
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.message_types import MODEL_VISIBLE_INJECTED_TYPES
 from local_operator.harness.rows import gate_timeout_subject
+from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.paths import config_dir
 
 logger = logging.getLogger(__name__)
@@ -179,7 +186,12 @@ _SOURCE_ORDER = (
 #: Carriers the model received that this module CANNOT read, in record order.
 #: They are named on the row so absence is scoped rather than total — see
 #: "WHAT IT CANNOT SEE" in the module docstring.
-_UNSEEN_ORDER = ("masked_text", "image_attachments", "compacted_history")
+_UNSEEN_ORDER = (
+    "masked_text",
+    "image_attachments",
+    "compacted_history",
+    "unattributed_wake",
+)
 
 #: Same flags, same reasoning as ``public_copy._AUDIT_OPEN_FLAGS``:
 #: ``O_NONBLOCK`` turns a FIFO planted at the log path into a refusal (``ENXIO``)
@@ -977,6 +989,17 @@ def _message_role(message: Any) -> str:
     return str(getattr(message, "role", "") or "")
 
 
+def _tool_name(message: Any) -> str:
+    """The ``tool_name`` of a stored tool result, or ``""``.
+
+    Same two shapes :func:`_custom_type` handles: the live loop's ``Message``
+    carries the attribute, the transcript's JSON row carries the key.
+    """
+    if isinstance(message, Mapping):
+        return str(message.get("tool_name") or "")
+    return str(getattr(message, "tool_name", "") or "")
+
+
 def _custom_type(message: Any) -> str:
     """The ``custom_type`` of a stored ``CustomMessage``, or ``""``.
 
@@ -1019,7 +1042,8 @@ def _custom_text(message: Any) -> str:
     while a ``text``-only reader returned ``''`` and the row still reported the
     carrier as checked (round-2 MAJOR-1). Any member of
     :data:`MODEL_VISIBLE_INJECTED_TYPES` whose shape is not a stored ``text``
-    obliges an arm here, and ``test_every_folded_carrier_contributes_text``
+    obliges an arm here, and
+    ``test_every_folded_carrier_contributes_text_to_the_corpus``
     drives every member through the real renderer and fails when the extraction
     comes back empty — including for a type the test does not name.
 
@@ -1052,10 +1076,22 @@ def _has_image(message: Any) -> bool:
     return False
 
 
-#: Carriers in :data:`MODEL_VISIBLE_INJECTED_TYPES` whose bytes the MODEL wrote.
+#: Carriers in :data:`MODEL_VISIBLE_INJECTED_TYPES` whose bytes ONLY THIS
+#: SESSION'S model wrote.
 #:
-#: THE RULE, in one sentence: text the model can author is NEVER an instruction
-#: source, because it cannot authorise the path the model itself invented.
+#: THE RULE, in one sentence: text the asserting session's own model can author
+#: is NEVER an instruction source, because it cannot authorise the path it
+#: invented itself.
+#:
+#: The scope is the ASSERTING session, and that half of the sentence is
+#: load-bearing (round-4 MINOR): ``job_result`` is a child agent's model output,
+#: ``peer_message`` and ``hub_message`` can be another session's model, and
+#: ``ask_response`` can be an agent's answer. Those are other models' words
+#: arriving as external context — which is exactly what an instruction source is
+#: — so they stay folded. Applied literally to "text the model can author", the
+#: rule would exclude them and reintroduce false absence in the other direction.
+#: What is excluded is the closed loop this module exists to catch: one model
+#: inventing a root and then citing itself to explain it.
 #:
 #: Every member reaches the model as a user turn, and every member carries the
 #: model's own words inside that turn — so folding one would let a model that
@@ -1069,8 +1105,6 @@ def _has_image(message: Any) -> bool:
 #:   standing in for the operator's earlier turns after a cut. The session flags
 #:   ``unseen=compacted_history`` instead, so the row says the turns could not
 #:   be checked rather than going quiet.
-#: * ``wake_prompt`` — ``details["text"]`` ends with the scheduling model's own
-#:   ``WakeParams.message``, verbatim (``harness/wake.py``).
 #: * ``todo_reminder`` — lists the model's own ``TodoParams.items`` verbatim
 #:   (:func:`local_operator.session.session._todo_reminder_text`). Left out, a
 #:   session that plans in todos would disable the guard for every root in its
@@ -1082,21 +1116,76 @@ def _has_image(message: Any) -> bool:
 #:   ``description`` opening it are the model's choice; the weakest member of the
 #:   set and still the same authoring channel.
 #:
-#: The cost of excluding them is bounded by construction: when the OPERATOR's
-#: words named the root, ``user_messages`` still carries that turn, so what an
-#: exclusion can add is at most one redundant notice on a root the model talked
-#: itself into. Folding them instead buys a guard that goes silent in the
-#: incident's own shape — a visible extra row is the cheaper error, so the rule
-#: is applied by author, not by how operator-like the prose reads.
+#: ``wake_prompt`` IS NOT A MEMBER, and the reason matters: it is the one carrier
+#: with TWO possible authors. ``format_wake_delivery_text`` renders the schedule's
+#: message verbatim, the tool's receipt does not authorise it, and no user turn is
+#: ever synthesised for a wake (``server/routes/desktop_wakes.py``: a fake turn
+#: would be replayed as something the user said) — so for a wake the OPERATOR
+#: scheduled, the delivery is the only copy of their own instruction. Excluding it
+#: by name said that instruction was absent from the session (review round 4);
+#: folding it by name let a model wake itself into a project it invented (review
+#: round 3). It is therefore split by AUTHOR (:func:`_wake_author`), never by
+#: carrier name.
+#:
+#: The cost of excluding the four above is bounded by construction: when the
+#: OPERATOR's words named the root, ``user_messages`` still carries that turn, so
+#: what an exclusion can add is at most one redundant notice on a root the model
+#: talked itself into. Folding them instead buys a guard that goes silent in the
+#: incident's own shape — a visible extra row is the cheaper error, so the rule is
+#: applied by author, not by how operator-like the prose reads.
 MODEL_AUTHORED_CARRIERS = frozenset(
     {
         "compaction_summary",
-        "wake_prompt",
         "todo_reminder",
         "project_reminder",
         "monitor_prompt",
     }
 )
+
+#: Tools whose result text is the model's OWN arguments rendered back to it.
+#:
+#: QA round 4 (QA4-1) measured that excluding the carriers above changed nothing
+#: for a wake or todo the MODEL created: the root never reached ``_is_explained``
+#: through the carrier, because the CREATING TOOL'S receipt had already put it in
+#: the corpus as ``earlier_tool_output`` — ``Scheduled wake 'w1' at …: "continue
+#: the build in ~/x"``, ``Added 1 item(s): write ~/x``. A receipt is not a second
+#: author. These four tools render the arguments the model itself supplied, so a
+#: model that invents a root and then schedules a wake (or writes a todo, names a
+#: project, arms a monitor) with it is still citing only itself.
+#:
+#: THE DECISION, stated: a receipt that merely echoes the model's own arguments is
+#: NOT an instruction source, so it is not folded. The alternative — stripping the
+#: echoed text out of the receipts — was rejected: it degrades what the operator
+#: reads on four shipped surfaces and fixes nothing the attribution below does not
+#: fix better, since the receipt would still be the model's own words.
+#:
+#: Every OTHER tool result stays a source, and that is checked rather than
+#: assumed: they carry what the environment returned (``bash`` stdout, ``read``
+#: contents, a listing), which is the 48% of the baseline this arm exists for. The
+#: list is names, so a new self-echoing tool is a one-line addition here — the
+#: guard's failure mode without it is a missed notice, never a false one.
+SELF_ECHO_RECEIPT_TOOLS = frozenset({"wake", "todo", "project", "monitor"})
+
+
+def _wake_author(message: Any) -> str:
+    """Who wrote a delivered wake's text: ``"operator"``, ``"model"``, or ``""``.
+
+    Stamped by the delivery (``Session._deliver_wake`` from the row's
+    ``WakeSchedule.message_author``; the resume catch-up stamps ``operator`` only
+    when EVERY row it folds is the operator's, because the guard searches the
+    aggregate as one blob and one model-written line inside it would launder a
+    root the model invented).
+
+    ``""`` means the delivery carries no author at all — history written before
+    the field existed, or a writer outside this tree that did not stamp it. That
+    is genuinely unknowable from here, so it is NOT read as an operator source,
+    and :meth:`DivergenceJudge._sync_corpus` records ``unattributed_wake`` in
+    ``unseen`` so the notice hedges ("is not named in what this session could
+    check") instead of asserting the carrier was checked. A hedged notice is
+    acceptable; a false one is not.
+    """
+    author = _custom_details(message).get("wake_author")
+    return author if author in ("operator", "model") else ""
 
 
 def _corpus_entry(message: Any) -> tuple[str, str] | None:
@@ -1118,16 +1207,32 @@ def _corpus_entry(message: Any) -> tuple[str, str] | None:
     guard exists to see) — and for the same reason
     :data:`MODEL_AUTHORED_CARRIERS`, which are carriers the model received but
     did not receive as an instruction.
+
+    Two arms are narrower than their shape and say so here:
+
+    * a ``wake_prompt`` folds ONLY when it is attributed to the operator
+      (:func:`_wake_author`). It is the one carrier with two possible authors,
+      and both answers by name were wrong: folding it let a model wake itself
+      into a project it invented, excluding it told the operator their own
+      scheduled instruction was absent from the session.
+    * a tool result folds unless the tool merely echoes the model's arguments
+      back (:data:`SELF_ECHO_RECEIPT_TOOLS`). ``wake``/``todo``/``project``/
+      ``monitor`` receipts are the model quoting itself; every other tool
+      carries the environment's answer, which is a source.
     """
     custom = _custom_type(message)
     if custom and custom in MODEL_VISIBLE_INJECTED_TYPES:
         if custom in MODEL_AUTHORED_CARRIERS:
+            return None
+        if custom == WAKE_PROMPT_MESSAGE_TYPE and _wake_author(message) != "operator":
             return None
         return _custom_text(message), "user_messages"
     role = _message_role(message)
     if role == "user":
         return _message_text(message), "user_messages"
     if role == "tool":
+        if _tool_name(message) in SELF_ECHO_RECEIPT_TOOLS:
+            return None
         return _message_text(message), "earlier_tool_output"
     return None
 
@@ -1254,6 +1359,16 @@ class DivergenceJudge:
             self._consumed = 0
             self._reset_corpus()
         for message in messages[self._consumed :]:
+            if _custom_type(message) == WAKE_PROMPT_MESSAGE_TYPE and not _wake_author(message):
+                # A wake delivery with no recorded author: the row predates the
+                # attribution field, or some writer outside this tree did not
+                # stamp it. Not read as an instruction source (the safe half —
+                # a model must never explain a root with its own wake text), but
+                # NOT claimed as checked either: the notice says the text could
+                # not be read rather than that it named nothing. The hedged
+                # sentence is in ``harness/rows.py``; this is the fact it hedges
+                # over.
+                self._unseen.add("unattributed_wake")
             entry = _corpus_entry(message)
             if entry is not None:
                 text, source = entry

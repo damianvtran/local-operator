@@ -648,6 +648,14 @@ def build_wake_edit(
                 # R10 — the one strip site in the tree; advance/load/update/re-arm
                 # all preserve it).
                 "request_id": target.request_id,
+                # THE AUTHOR SURVIVES AN EDIT for a sharper reason than the three
+                # above: ``build_wake_schedule`` builds a FRESH row, so without this
+                # every edit turned an operator's own scheduled instruction into
+                # model-authored text — and the divergence guard then told the
+                # operator their own words were absent from the session. An edit
+                # changes WHAT the wake says, not who wrote it: the desk and the
+                # TUI are the same person who armed it.
+                "origin": target.origin,
             }
         )
     }

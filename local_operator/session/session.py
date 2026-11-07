@@ -5250,6 +5250,14 @@ class Session:
         #: (a whole day's check-in lost, silently). Empty when there is no
         #: catch-up pending.
         self._resume_catchup_ids: set[str] = set()
+        #: Whether EVERY schedule the catch-up text folds carries operator words
+        #: (``WakeSchedule.message_author``). The aggregate is attributable only
+        #: if all of its members are: one model-authored message inside the fold
+        #: makes the whole delivery unattributable, because the divergence guard
+        #: cannot see WHICH line of the aggregated text the root came from — so
+        #: the honest answer for the fold is the strict one. False until a
+        #: catch-up is prepared; cleared with the fold ids at take.
+        self._resume_catchup_all_operator = False
         #: The load-time fires the catch-up still owes a swallow. Seeded with
         #: the fold ids at prepare; each fire that matches consumes its id
         #: ONCE (see :meth:`_deliver_wake_catchup`). Kept SEPARATE from the
@@ -29060,6 +29068,9 @@ class Session:
         # into the message (review round 2, R7); the leftover load-time fires
         # are tracked separately as phantoms.
         self._resume_catchup_ids = {m["schedule"].id for m in missed}
+        self._resume_catchup_all_operator = all(
+            m["schedule"].message_author == "operator" for m in missed
+        )
         if getattr(self, "_aida_duty", False):
             # Keep the original row, not the scheduler's grace-shifted copy.
             # This is spent only when the existing catch-up take accepts it.
@@ -29165,6 +29176,13 @@ class Session:
                 # set is spent below — this is the only reader of the fold set
                 # once the take has run.
                 "wake_ids": sorted(self._resume_catchup_ids),
+                # WHO WROTE the folded messages, for the divergence guard. An
+                # aggregate is attributable only when EVERY row in it is the
+                # operator's: the guard searches the delivered text as one
+                # blob, so a single model-authored message inside it would
+                # launder a root the model invented. "operator" here is
+                # therefore the strict all-of answer, not any-of.
+                "wake_author": ("operator" if self._resume_catchup_all_operator else "model"),
             },
         )
         # THE FOLD IS SPENT HERE, and only here (review round 2, R7) — AFTER
@@ -29181,6 +29199,7 @@ class Session:
             self._aida_cadence_delivered = getattr(self, "_aida_cadence_catchup", None)
             self._aida_cadence_catchup = None
         self._resume_catchup_ids = set()
+        self._resume_catchup_all_operator = False
         return message
 
     def _deliver_resume_catchup(self, catchup: CustomMessage) -> None:
@@ -30666,6 +30685,14 @@ class Session:
             "wake_id": due.schedule.id,
             "occurrence": due.occurrence,
             "text": text,
+            # WHO AUTHORED the message inside this text — ``operator`` for a wake
+            # the person scheduled through the CLI, the desktop route or the TUI
+            # page, ``model`` for one the agent (or an engine) scheduled. The
+            # divergence guard reads it (``divergence._wake_author``); a wake is
+            # the one carrier whose text has two possible authors, and the
+            # message here is rendered verbatim, so this bit is the only thing
+            # that can tell them apart.
+            "wake_author": due.schedule.message_author,
             # §14.4: the delivery's control parameter, read by the trigger
             # record at fold-in; never re-derived later.
             "notify": bool(due.schedule.notify),
@@ -31285,6 +31312,13 @@ class Session:
             "wake_id": due.schedule.id,
             "occurrence": due.occurrence,
             "text": text,
+            # A patience wait is armed by the AGENT that sent the message, so its
+            # fire note is model text (``patience.fire_note`` composes it from the
+            # row's note and bounds). Stamped rather than left absent so the
+            # divergence guard reads a known author instead of an unattributed
+            # carrier — the absent case is reserved for history written before
+            # the field existed.
+            "wake_author": due.schedule.message_author,
             **patience.fire_details(due.schedule),
         }
         wake_message = CustomMessage(

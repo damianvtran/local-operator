@@ -2571,6 +2571,10 @@ _UNSEEN_PHRASES: dict[str, str] = {
     "masked_text": "text masked before storage",
     "image_attachments": "image attachments",
     "compacted_history": "turns compacted away",
+    # A wake's text has two possible authors (``WakeSchedule.origin``). When the
+    # delivery does not say which, the judge neither folds it nor claims it was
+    # checked — this phrase is how the operator reads that distinction.
+    "unattributed_wake": "a wake delivery with no recorded author",
 }
 
 

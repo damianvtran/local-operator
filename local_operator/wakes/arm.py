@@ -71,6 +71,7 @@ from local_operator.harness.wake import (
     build_wake_edit,
     build_wake_schedule,
 )
+from local_operator.harness.wake_types import WakeOrigin
 from local_operator.session.transcript import read_latest_custom_entry
 from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable, WakeWriteLock
 
@@ -206,6 +207,7 @@ async def arm_wake(
     request_id: str = "",
     wake_id: str = "",
     hidden: bool = False,
+    origin: WakeOrigin = "tool",
 ) -> WakeWriteOutcome:
     """Add one schedule to ``session_id``'s wakes. ``request`` is the same
     ``message``/``in``/``at``/``every``/``until``/``limit`` mapping the agent's
@@ -234,6 +236,15 @@ async def arm_wake(
     whose text is a trigger, not a reminder a person set (Aida's first-run
     greeting is the one caller). The row's ``kind`` stays ``scheduled``, so it
     still counts and lists like any other wake for the operator.
+
+    ``origin`` is WHO WROTE the message (``WakeSchedule.origin``): it defaults
+    to ``"tool"`` — the model, which is every engine caller of this function —
+    and the two operator-facing callers pass their own name (``"cli"`` from
+    ``lop wake create``, ``"desktop"`` from the desktop arm route, which
+    routes through the same function). The divergence guard reads it back to
+    decide whether a wake's message may explain a project root; a caller that
+    forgets it gets the safe answer (model text explains nothing), never the
+    false one.
     """
 
     def mutate(
@@ -255,6 +266,8 @@ async def arm_wake(
             schedule = schedule.model_copy(update={"request_id": request_id})
         if hidden:
             schedule = schedule.model_copy(update={"hidden": True})
+        if origin:
+            schedule = schedule.model_copy(update={"origin": origin})
         return schedule.id, [*existing, schedule], schedule.next_due_at
 
     return await _apply(config_dir, session_id, mutate, cwd=cwd, now_ms=now_ms, intent=request_id)

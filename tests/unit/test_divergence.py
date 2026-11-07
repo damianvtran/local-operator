@@ -22,6 +22,7 @@ from local_operator.divergence import (
     MAX_NOTICED_ROOTS,
     MAX_ROWS_PER_ROOT,
     MODEL_AUTHORED_CARRIERS,
+    SELF_ECHO_RECEIPT_TOOLS,
     DivergenceJudge,
     _skip_roots,
     asserted_paths,
@@ -959,15 +960,19 @@ def test_a_wake_prompt_is_the_models_own_text_and_does_not_explain_the_root(
     home: Path,
     tmp_path: Path,
 ) -> None:
-    """Round-3 MAJOR: a wake message is scheduled BY the model, so it cannot explain.
+    """Round-3 MAJOR: a wake message the MODEL scheduled cannot explain a root.
 
     ``details["text"]`` ends with the scheduling model's own ``WakeParams.message``,
     verbatim (``harness/wake.py`` -> ``tools/builtin.py``). Round 1 read this
     carrier as the operator's words and asserted it silenced the notice; under
-    the rule the module now states — text the model can author is never an
-    instruction source — the notice must FIRE here. It is a missed notice if it
-    does not: the reviewer reproduced ``events: 0`` on this exact shape, and a
-    session can wake itself into a project it invented.
+    the rule the module now states — text THIS session's model can author is
+    never an instruction source — the notice must FIRE here. It is a missed
+    notice if it does not: the reviewer reproduced ``events: 0`` on this exact
+    shape, and a session can wake itself into a project it invented.
+
+    ROUND 4: the carrier is split by AUTHOR, so this is the ``model`` arm —
+    stamped, not inferred, exactly as the delivery stamps it. The
+    operator-authored arm is the test below, and it must fold.
     """
     from local_operator.harness.types import CustomMessage
 
@@ -980,8 +985,11 @@ def test_a_wake_prompt_is_the_models_own_text_and_does_not_explain_the_root(
             Message.user("review the tunnels MR"),
             CustomMessage(
                 custom_type="wake_prompt",
-                attribution="system",
-                details={"text": "pick this up and keep the work inside ~/squeeze"},
+                attribution="user",
+                details={
+                    "text": "pick this up and keep the work inside ~/squeeze",
+                    "wake_author": "model",
+                },
             ),
         ],
         system_blocks=["You are a personal assistant."],
@@ -990,6 +998,137 @@ def test_a_wake_prompt_is_the_models_own_text_and_does_not_explain_the_root(
     assert "user_messages" in events[0].sources
     text, _kind = divergence_notice(events[0].as_notice_payload())
     assert "Not in the system prompt, custom instructions or user messages" in text
+
+
+def test_the_operators_own_scheduled_wake_explains_the_root(
+    home: Path,
+    tmp_path: Path,
+) -> None:
+    """Round-4 MAJOR: the ONE carrier with two authors is split by author.
+
+    ``format_wake_delivery_text`` renders the schedule's message verbatim and no
+    user turn is ever synthesised for a wake (``desktop_wakes.py``: a fake turn
+    would be replayed as something the user said), so for a wake the OPERATOR
+    scheduled the delivery is the only copy of their instruction. Excluding the
+    carrier by name told them that instruction was absent from the session —
+    QA round 4 reproduced it twice on the CLI and desktop writers. Stamped
+    ``operator``, it folds.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("review the tunnels MR"),
+            CustomMessage(
+                custom_type="wake_prompt",
+                attribution="user",
+                details={
+                    "text": "(alarm) Scheduled wake w1 (1/1).\n\nwork on the app under ~/squeeze",
+                    "wake_author": "operator",
+                },
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert events == [], "the operator's own scheduled instruction named the root"
+
+
+def test_an_unattributed_wake_is_not_folded_and_not_claimed_as_checked(
+    home: Path,
+    tmp_path: Path,
+) -> None:
+    """The honesty arm: attribution genuinely unavailable must say so.
+
+    A stored delivery from before ``WakeSchedule.origin`` existed cannot be
+    attributed from here. It is not folded (a model must never explain a root
+    with its own wake text) but the row must not claim the carrier was read
+    either — ``unseen`` names it, and ``harness/rows.py`` renders the hedged
+    sentence for exactly that. A hedged notice is acceptable; a false one is not.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("review the tunnels MR"),
+            CustomMessage(
+                custom_type="wake_prompt",
+                attribution="user",
+                details={"text": "legacy delivery\n\nwork in ~/squeeze"},
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert len(events) == 1
+    assert "unattributed_wake" in events[0].unseen
+    text, _kind = divergence_notice(events[0].as_notice_payload())
+    assert "is not named in what this session could check" in text
+    assert "a wake delivery with no recorded author" in text
+
+
+@pytest.mark.parametrize("tool_name", sorted(SELF_ECHO_RECEIPT_TOOLS))
+def test_a_tool_receipt_that_echoes_the_models_own_arguments_is_not_a_source(
+    tool_name: str, home: Path, tmp_path: Path
+) -> None:
+    """QA4-1: the creating tool's receipt is not a second author.
+
+    Measured on the real path in QA round 4: the exclusion of the carrier
+    changed nothing for a model-created wake or todo because the receipt had
+    already put the root in the corpus as ``earlier_tool_output``. These four
+    tools render the model's own arguments back to it, so folding them would let
+    a session wake itself into a project it invented. The control below pins the
+    other half: a tool result that carries the ENVIRONMENT's answer still folds.
+    """
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("review the tunnels MR"),
+            Message(
+                role="tool",
+                tool_name=tool_name,
+                content=[TextContent(text=f"{tool_name} receipt: write ~/squeeze/app.py")],
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert len(events) == 1, f"the {tool_name} receipt only echoes the model's own arguments"
+
+
+def test_a_tool_result_that_carries_the_environments_answer_still_explains(
+    home: Path, tmp_path: Path
+) -> None:
+    """The control for QA4-1: only the SELF-ECHOING tools lose their voice.
+
+    A ``bash`` result is the environment's answer — the 48% of the baseline this
+    arm exists for — and still explains a root. Excluding tool results wholesale
+    would be false absence in the other direction.
+    """
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("review the tunnels MR"),
+            Message(
+                role="tool",
+                tool_name="bash",
+                content=[TextContent(text="total 8\ndrwxr-xr-x  squeeze/")],
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert events == []
 
 
 def test_a_todo_reminder_is_the_models_own_plan_and_does_not_explain_the_root(
@@ -1040,8 +1179,13 @@ def test_no_model_authored_carrier_explains_a_root(
     holds the RULE for the whole set, so a future member added to
     :data:`MODEL_AUTHORED_CARRIERS` without its own reproducer cannot be a name
     that is excluded on paper and folded in practice. Every member names the root
-    in the fields its renderer arm reads, and the notice must still fire: text the
-    model can author is never an instruction source.
+    in the fields its renderer arm reads, and the notice must still fire: text
+    THIS session's model can author is never an instruction source.
+
+    The rule is scoped to the asserting session (round-4 MINOR): ``job_result``,
+    ``peer_message``, ``hub_message`` and ``ask_response`` stay folded, because
+    they are OTHER models' words arriving as external context. This set is only
+    the self-citation channel.
     """
     from local_operator.harness.types import CustomMessage
 
@@ -1199,10 +1343,16 @@ def _renderer_compared_types(source: str | None = None) -> set[str]:
       renderer arm being invisible rather than absent.
 
     Residual, documented rather than silent: an arm that never spells the
-    attribute at all (``getattr(message, "custom_type")``, or a table keyed by
-    the instance) is outside both halves. That shape is not a refactor of an
-    existing arm — it is a new arm — and the convention this sweep relies on is
-    that a carrier arm compares ``message.custom_type`` directly.
+    attribute at all is outside both halves — ``getattr(message,
+    "custom_type")``, a table keyed by the instance, ``match message: case
+    CustomMessage(custom_type="…")``, and a helper that lives in ANOTHER module
+    and compares the value there. The ``match`` case is the one that misleads:
+    the SUBJECT form ``match message.custom_type:`` hits the direct-left rule
+    above and raises, which invites the conclusion that ``match`` is covered —
+    the capture-pattern form spells no attribute here and is not seen at all.
+    That shape is not a refactor of an existing arm — it is a new arm — and the
+    convention this sweep relies on is that a carrier arm compares
+    ``message.custom_type`` directly, in this module.
 
     ``source`` exists so ``test_the_sweep_fails_closed_on_every_evasion`` can
     drive adversarial variants through this same code; production calls pass
@@ -1899,3 +2049,311 @@ async def test_a_real_session_writes_the_row_and_the_call_still_runs(
     assert rows[0]["root"] == "/opt/acme"
     assert rows[0]["tool"] == "write"
     assert rows[0]["recorded"] is True
+
+
+# ---------------------------------------------------------------------------
+# The live paths: a real wake, a real delivery, a real judge
+# ---------------------------------------------------------------------------
+#
+# QA round 4's finding about the round before it: the unit pin that bounded the
+# wake exclusion built a history the LIVE path cannot produce (it put the root in
+# a typed user turn beside the carrier), so it stayed green while the operator
+# path regressed. These two tests therefore drive the PRODUCERS — ``arm_wake``,
+# the session's own scheduler, the real ``wake`` tool, ``format_wake_delivery_text``
+# and ``Session._deliver_wake`` — and assert on the audit rows and the transcript,
+# never on a hand-built message list.
+
+
+class _WakePathStream:
+    """A request-driven model: each decision is about what the request carries.
+
+    A positional script drifts the moment the runtime issues a call of its own,
+    and for these tests the whole point is WHICH request the woken turn is
+    handed — so the decision is read off the real request.
+    """
+
+    def __init__(
+        self, *, root: str, create_wake: dict[str, Any] | None, unnamed: str | None = None
+    ) -> None:
+        self.root = root
+        self.create_wake = create_wake
+        #: A SECOND root in the same command that NOTHING named — the operator
+        #: case's non-vacuity control: one turn, one tool, one judge, and the
+        #: row that fires must be this one while the operator's root stays quiet.
+        self.unnamed = unnamed
+        self.calls = 0
+
+    @staticmethod
+    def _text(request: Any) -> str:
+        parts: list[str] = []
+        for message in getattr(request, "messages", []) or []:
+            for block in getattr(message, "content", []) or []:
+                text = getattr(block, "text", None)
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+
+    @staticmethod
+    def _tool_names(request: Any) -> list[str]:
+        return [
+            str(getattr(message, "tool_name", "") or "")
+            for message in getattr(request, "messages", []) or []
+            if getattr(message, "role", None) == "tool"
+        ]
+
+    def __call__(self, request: Any, signal: Any):
+        from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+
+        self.calls += 1
+        blob = self._text(request)
+        tools = self._tool_names(request)
+        events: list[StreamEvent] = []
+        if "(alarm) Scheduled wake" in blob:
+            # THE WOKEN TURN: the carrier is in this request. Write to the root
+            # the test is watching, then finish.
+            if "bash" in tools:
+                events = [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]
+            else:
+                targets = [self.root, self.unnamed] if self.unnamed else [self.root]
+                command = " && ".join(
+                    [f"mkdir -p {target}/src" for target in targets]
+                    + [f"printf 'WRITTEN' > {target}/src/app.py" for target in targets]
+                )
+                events = [
+                    StreamToolCallDelta(
+                        index=0,
+                        id=f"call_wake_{self.calls}",
+                        name="bash",
+                        argument_delta=json.dumps({"command": command}),
+                    ),
+                    StreamEndEvent(stop_reason="tool_use"),
+                ]
+        elif self.create_wake is not None and "wake" not in tools:
+            events = [
+                StreamToolCallDelta(
+                    index=0,
+                    id=f"call_wake_{self.calls}",
+                    name="wake",
+                    argument_delta=json.dumps(self.create_wake),
+                ),
+                StreamEndEvent(stop_reason="tool_use"),
+            ]
+        else:
+            events = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+
+        async def gen():
+            for event in events:
+                yield event
+
+        return gen()
+
+
+async def _wait_until(predicate: Any, timeout: float = 30.0) -> bool:
+    """Poll a condition the scheduler fires asynchronously (bounded, never a sleep)."""
+    import asyncio
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+def _wake_carriers(session: Any) -> list[Any]:
+    return [
+        message
+        for message in list(session._divergence_judge._messages_ref or [])
+        if getattr(message, "custom_type", "") == "wake_prompt"
+    ]
+
+
+def _divergence_rows(config_dir: Path) -> list[dict[str, Any]]:
+    path = config_dir / "audit" / "divergence.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+@pytest.mark.asyncio
+async def test_an_operator_scheduled_wake_explains_its_root_end_to_end(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-4 MAJOR, driven through the CLI's own writer.
+
+    ``arm_wake(..., origin="cli")`` is what ``lop wake create`` calls; the fired
+    delivery is the ONLY copy of the operator's words (no user turn is
+    synthesised for a wake), so the woken turn's write to the root they named
+    must not produce a row. QA round 4 failed this twice on the real path while
+    the unit pin stayed green — this is that regression, driven by the producer.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.registry import create_tools
+    from local_operator.wakes.arm import arm_wake
+
+    scratch = home.parent
+    config_dir = scratch / "config"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    recorder = reset_recorder_for_test(AnalyticsStore(scratch / "analytics.db"))
+    # THE SKIP LIST WOULD MAKE THESE TESTS VACUOUS: a pytest home lives under
+    # ``$TMPDIR``, which the shipped skip list suppresses WHOLESALE, so every
+    # root under the fixture home would be skipped before the carrier rule was
+    # ever consulted — a green "no row" that proves nothing (and a "row" test
+    # that can never fire). Skipping is not what these tests measure; it has its
+    # own tests. Neutralised through the one seam the real derivation reads, the
+    # same way ``_judge(skip_roots=())`` neutralises it for the rest of this file.
+    monkeypatch.setattr("local_operator.session.spec.volatile_roots", lambda: ())
+    root = "~/wake-operator-root"
+    message = f"when you wake, check {root}/src and report"
+
+    def build(stream_fn: Any) -> Any:
+        return Session(
+            model=MODEL,
+            stream_fn=stream_fn,
+            tools=create_tools(ToolContext(), enabled=["bash"]),
+            # THE SHIPPED LOCATION: ``arm_wake`` resolves a session id under
+            # ``<config>/sessions/`` and refuses an id with no transcript there.
+            transcript=Transcript(config_dir / "sessions" / "sess"),
+            session_id="sess",
+            system_blocks_provider=lambda: ["You are a personal assistant."],
+            yolo=True,
+            compaction_settings=CompactionSettings(enabled=False),
+        )
+
+    # The conversation exists before the operator schedules anything (the CLI
+    # refuses a session id with no transcript).
+    first = build(_WakePathStream(root=root, create_wake=None))
+    try:
+        await first.prompt("hello there")
+    finally:
+        await first.dispose()
+
+    outcome = await arm_wake(config_dir, "sess", {"message": message, "in": "2s"}, origin="cli")
+    assert outcome.schedules[0].origin == "cli", "the CLI's writer must stamp its own origin"
+
+    unnamed = f"{root}-unnamed"
+    session = build(_WakePathStream(root=root, create_wake=None, unnamed=unnamed))
+    try:
+        # WAIT ON THE JUDGE, not on the file: the carrier enters the judged
+        # history before the woken turn's call runs, while the tool's side effect
+        # lands first — polling the file alone races the post-execution hook.
+        assert await _wait_until(
+            lambda: _wake_carriers(session)
+        ), "the wake never fired through the real scheduler"
+        carriers = _wake_carriers(session)
+        target = home / "wake-operator-root" / "src" / "app.py"
+        assert await _wait_until(
+            target.exists
+        ), "the woken turn never wrote to the root the operator named"
+    finally:
+        await session.dispose()
+        recorder.close()
+        reset_recorder_for_test(AnalyticsStore(scratch / "analytics-2.db")).close()
+
+    # The delivery carried the attribution, from the row the writer stamped.
+    assert carriers, "the woken turn must have received the wake_prompt carrier"
+    assert carriers[0].details["wake_author"] == "operator"
+    assert (home / "wake-operator-root" / "src" / "app.py").read_text() == "WRITTEN"
+    # NON-VACUITY, on the same turn and the same judge: the root NOTHING named
+    # fires, so an empty result for the operator's root is the carrier being
+    # folded and not the observation being blind.
+    rows = _divergence_rows(config_dir)
+    assert [row["root"] for row in rows] == [unnamed], rows
+    # THE REGRESSION: the operator's own instruction named the root.
+    assert root not in {
+        row["root"] for row in rows
+    }, "the operator named ~/wake-operator-root in the wake they scheduled"
+
+
+@pytest.mark.asyncio
+async def test_a_model_scheduled_wake_does_not_explain_its_root_end_to_end(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mirror image, through the real ``wake`` tool and scheduler.
+
+    The message is the MODEL's own ``WakeParams.message``. The notice must fire
+    once the woken turn writes to that root (round-3 MAJOR: a session can wake
+    itself into a project it invented), and the row must not hedge — the author
+    was recorded, so nothing here was unreadable. The creating tool's receipt
+    echoes the same text and is not a second author (QA4-1).
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.registry import create_tools
+
+    scratch = home.parent
+    config_dir = scratch / "config"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    recorder = reset_recorder_for_test(AnalyticsStore(scratch / "analytics.db"))
+    # THE SKIP LIST WOULD MAKE THESE TESTS VACUOUS: a pytest home lives under
+    # ``$TMPDIR``, which the shipped skip list suppresses WHOLESALE, so every
+    # root under the fixture home would be skipped before the carrier rule was
+    # ever consulted — a green "no row" that proves nothing (and a "row" test
+    # that can never fire). Skipping is not what these tests measure; it has its
+    # own tests. Neutralised through the one seam the real derivation reads, the
+    # same way ``_judge(skip_roots=())`` neutralises it for the rest of this file.
+    monkeypatch.setattr("local_operator.session.spec.volatile_roots", lambda: ())
+    root = "~/wake-model-root"
+    create = {
+        "op": "create",
+        "message": f"continue the build in {root}/src/app.py",
+        "in": "2s",
+    }
+
+    session = Session(
+        model=MODEL,
+        stream_fn=_WakePathStream(root=root, create_wake=create),
+        tools=create_tools(ToolContext(), enabled=["bash"]),
+        transcript=Transcript(scratch / "sess"),
+        session_id="sess",
+        system_blocks_provider=lambda: ["You are a personal assistant."],
+        yolo=True,
+        compaction_settings=CompactionSettings(enabled=False),
+    )
+    # The wake tool's builder is a createIf: it returns nothing unless the
+    # context already carries a scheduler, so it is built from the session's own
+    # per-turn context — the same list the loop reads at dispatch.
+    session._tools = [
+        *session._tools,
+        *create_tools(session._build_tool_context(), enabled=["wake"]),
+    ]
+    session._context.tools = session._tools
+    try:
+        await session.prompt("start the job")
+        assert await _wait_until(
+            lambda: (home / "wake-model-root" / "src" / "app.py").exists()
+        ), "the wake the model scheduled never fired"
+        # The ROW is written by the judge at the write call, so waiting on it (not
+        # on the file) is what makes the carrier read below non-racy.
+        assert await _wait_until(
+            lambda: _divergence_rows(config_dir)
+        ), "the woken turn's write produced no audit row"
+        carriers = _wake_carriers(session)
+        events = list(session._divergence_judge._events)
+    finally:
+        await session.dispose()
+        recorder.close()
+        reset_recorder_for_test(AnalyticsStore(scratch / "analytics-2.db")).close()
+    rows = _divergence_rows(config_dir)
+
+    assert carriers and carriers[0].details["wake_author"] == "model"
+    assert len(rows) == 1, "the model's own wake text must not silence the notice"
+    assert rows[0]["root"] == root
+    assert rows[0]["unseen"] == [], "the author was recorded, so nothing was unreadable"
+    assert events, "the row must surface as a notice on the real path"
+    text, _kind = divergence_notice(events[0].as_notice_payload())
+    # No hedge: the delivery recorded its author, so nothing about it was
+    # unreadable. The claim it does make is true — the operator's only turn is
+    # "start the job", and the model's own wake text is not an instruction.
+    assert "could not be checked" not in text
+    assert "wake-model-root" in text

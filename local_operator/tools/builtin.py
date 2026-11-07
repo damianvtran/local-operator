@@ -136,6 +136,7 @@ from local_operator.harness.wake import (
     build_wake_schedule,
     format_duration,
 )
+from local_operator.harness.wake_types import WakeOrigin
 from local_operator.i18n.keys import wire_sessions as _ws
 from local_operator.i18n.text import tr
 from local_operator.imaging import (
@@ -14751,8 +14752,23 @@ async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> Too
 
 
 async def _wake_create(
-    tool_call_id: str, params: WakeParams, scheduler: WakeSchedulerProtocol, now_ms: int
+    tool_call_id: str,
+    params: WakeParams,
+    scheduler: WakeSchedulerProtocol,
+    now_ms: int,
+    *,
+    origin: WakeOrigin = "tool",
 ) -> ToolResult:
+    """Create one schedule. ``origin`` says WHO WROTE the message.
+
+    It defaults to ``"tool"`` — the agent scheduling itself, which is the only
+    caller that does not name a person — and the desktop's owner command (the
+    "new scheduled task" form when a runtime holds the session) passes
+    ``"desktop"``. This helper is the writer for BOTH, so the stamp has to be a
+    parameter here rather than a property of the caller's sentence; the
+    divergence guard reads it back to decide whether the fired delivery may
+    explain a project root (``WakeSchedule.origin``).
+    """
     existing = list(scheduler.schedules)
     request: dict[str, Any] = {
         "message": params.message or "",
@@ -14772,7 +14788,7 @@ async def _wake_create(
         if outcome["malformed"]:
             return _invalid_arguments(tool_call_id, "wake", outcome["error"])
         return _error(tool_call_id, "wake", outcome["error"])
-    schedule = outcome["schedule"]
+    schedule = outcome["schedule"].model_copy(update={"origin": origin})
     updated = [s for s in existing if s.id != schedule.id] + [schedule]
     await scheduler.update(updated)
     from local_operator.wakes.display import format_wake_at_echo, format_wake_time
