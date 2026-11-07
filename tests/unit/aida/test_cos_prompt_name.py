@@ -199,7 +199,9 @@ async def test_renaming_back_ships_a_removal(isolated_root: Path, as_cos: None) 
 def test_builder_is_byte_identical_without_a_name() -> None:
     """Every non-CoS caller passes nothing; its bytes must not move."""
     base = build_system_blocks([], "<skills/>", "", "2026-11-07")
-    explicit = build_system_blocks([], "<skills/>", "", "2026-11-07", identity_name="", renamed_to="")
+    explicit = build_system_blocks(
+        [], "<skills/>", "", "2026-11-07", identity_name="", renamed_to=""
+    )
     assert base == explicit
     assert HEAD_MARKER not in base[0]
 
