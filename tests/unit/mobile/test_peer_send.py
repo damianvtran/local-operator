@@ -2369,3 +2369,79 @@ async def test_cold_peer_send_preserves_cwd_intent_until_the_spawn_boundary(
         cwd=requested,
     )
     assert seen == [requested]
+
+
+# --- a wedged-but-alive target that drains its inbox live is QUEUED, not refused ---
+#
+# THE INCIDENT (2026-11-04): ``send`` to a session that was live and mid-turn
+# refused with "target session has not reported for 1m, so a plain send will not
+# dial it". ``wedged`` is a quiet heartbeat on a LIVE pid (``registry.classify``),
+# so an owner that reads its inbox while it runs (``live-inbox-v1``) gets the
+# message spooled with an honest "queued" receipt instead.
+
+
+def _queueable(pid: int, **kwargs: Any) -> "_Record":
+    from local_operator.session.runtime.types import LIVE_INBOX_CAPABILITY
+
+    record = _Record(pid, **kwargs)
+    record.capabilities = [LIVE_INBOX_CAPABILITY]
+    return record
+
+
+@pytest.mark.parametrize(
+    "address",
+    [{"pid": 4242}, {"session": "busy-sid"}, {"target": "busybody"}],
+    ids=["pid", "session", "substring"],
+)
+def test_a_wedged_live_inbox_target_resolves_for_a_plain_send(fake_scan, address) -> None:
+    record = _queueable(4242, session_id="busy-sid", conversation_name="busybody")
+    fake_scan([(record, "wedged")])
+    resolved, candidates, error = peer_send.resolve_peer_target(**address)
+    assert resolved is record and candidates == [] and error == ""
+
+
+def test_a_wedged_target_without_the_live_inbox_keeps_the_refusal(fake_scan) -> None:
+    """An owner from before the live drain would leave a queued row unread."""
+    record = _Record(4242, session_id="busy-sid", conversation_name="busybody")
+    fake_scan([(record, "wedged")])
+    resolved, _c, error = peer_send.resolve_peer_target(session="busy-sid")
+    assert resolved is None and "has not reported for 4m" in error
+
+
+def test_a_stale_live_inbox_target_is_still_refused(fake_scan) -> None:
+    """``stale`` is a dead pid: nothing would read the row. Unchanged."""
+    record = _queueable(4242, session_id="busy-sid")
+    fake_scan([(record, "stale")])
+    resolved, _c, error = peer_send.resolve_peer_target(session="busy-sid")
+    assert resolved is None and "stale" in error
+
+
+@pytest.mark.asyncio
+async def test_a_send_to_a_wedged_live_inbox_owner_is_queued_durably(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The outcome is a durable inbox row and a receipt that says QUEUED."""
+    from local_operator.session.runtime.inbox import peek_inbox
+
+    monkeypatch.setattr(peer_send, "config_dir", lambda: tmp_path)
+    record = _queueable(os.getpid(), session_id="busy-sid", conversation_name="busybody")
+
+    async def no_dial(*_a: Any, **_k: Any) -> Any:  # a dial here would be the bug
+        raise AssertionError("a wedged live-inbox owner must be queued to, not dialled")
+
+    monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", no_dial)
+    outcome = await peer_send.deliver_peer_message_outcome(
+        record,
+        session_id="busy-sid",
+        text="ping while you work",
+        mode="mailbox",
+        wake=True,
+        sender={"session_id": "synthetic-sender", "pid": 1},
+    )
+    assert outcome.state == peer_send.DELIVERY_DELIVERED
+    assert outcome.cause == "queued_busy" and outcome.route == "spool"
+    assert "queued" in outcome.text and "do not send it again" in outcome.text
+    rows = peek_inbox(tmp_path / "sessions" / "busy-sid")
+    assert [(r.text, r.message_id, r.wake) for r in rows] == [
+        ("ping while you work", outcome.message_id, True)
+    ]

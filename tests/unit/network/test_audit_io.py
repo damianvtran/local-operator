@@ -248,8 +248,18 @@ def test_an_idle_network_writes_no_rows_for_a_member_that_cannot_hold_the_op(
 
     assert {outcome for _device, outcome in outcomes} == {"skipped:no_admin"}, outcomes[:5]
     server_a.audit.flush()
-    delta = len(_records(path)) - before
-    assert delta == 0, f"an idle hour wrote {delta} rows on the peer: {_records(path)[before:][:3]}"
+    new = _records(path)[before:]
+    # THE ONE BOUNDED EXCEPTION IS THE CREDENTIAL PLACEMENT PULL (share-arrives fix).
+    # B's own row cannot tell whether the peer granted it ``broker_credential`` — a
+    # ``credential share`` grants it on the PEER's row only — so B asks once and the
+    # peer's refusal parks B for ``REFUSED_MIN_INTERVAL_S`` (30 min of real time;
+    # the injected clock here moves only the definitions floors). So the hour may hold
+    # exactly ONE refused ``net_broker`` plus the dial's link rows, and nothing else:
+    # every other op is still never asked, which is this cell's property.
+    refused = [row for row in new if row.get("event") == "authorisation_refused"]
+    assert [(row.get("detail") or {}).get("op") for row in refused] == ["net_broker"], new[:3]
+    others = [row for row in new if row.get("event") not in {"link_opened", "link_replaced"}]
+    assert others == refused, f"an idle hour wrote unexpected rows on the peer: {others[:3]}"
     server_a.stop()
 
 

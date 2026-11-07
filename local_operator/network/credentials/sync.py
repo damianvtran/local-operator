@@ -2388,7 +2388,7 @@ def credentials_sync_step(step_server: "RelayServer", device_id: str) -> str | N
 
     blocked = definitions.unholdable_capability(server, device_id, "net_broker")
     if blocked:
-        return f"skipped:no_{blocked}"
+        return _pull_past_stale_self_view(server, document_engine, device_id, blocked)
     exchange = document_engine.enqueue_owner_exchange(device_id)
     # THE MEMBER HALF RIDES THE SAME TICK (design §4). The owner exchange is about
     # what THIS device lends; a member also needs the copies the peer OWNS and has
@@ -2416,6 +2416,107 @@ def credentials_sync_step(step_server: "RelayServer", device_id: str) -> str | N
     # have already been scheduled by here. The pull reports itself only when the
     # owner exchange had nothing to do, which is the member-only device's shape.
     return pulled if exchange == "in_sync" else exchange
+
+
+#: ``server`` attribute holding ``{owner_device: monotonic deadline}``: owners whose
+#: last answer to this device's placement pull was a refusal. Per relay, in memory:
+#: a restart re-asks once, which is the same bound as the deadline itself.
+_OWNER_REFUSED_ATTR = "_credential_owner_refused_until"
+
+
+def _live_owner_instance(server: Any, device_id: str) -> str:
+    """The relay INSTANCE behind a live link to ``device_id`` now, or ``""`` (never dials).
+
+    The instance id is minted once per relay process and carried in the handshake
+    (``PeerLink.instance_id``), so it changes when the owner's relay restarts and NOT
+    when the same process is simply re-linked — which is the distinction the park needs.
+    """
+    for link in list((getattr(server, "links", None) or {}).values()):
+        if getattr(link, "device_id", "") == device_id and getattr(link, "alive", False):
+            return str(getattr(link, "instance_id", "") or "")
+    return ""
+
+
+def _owner_refusals(server: Any) -> dict[str, tuple[float, str]]:
+    parked = getattr(server, _OWNER_REFUSED_ATTR, None)
+    if not isinstance(parked, dict):
+        parked = {}
+        setattr(server, _OWNER_REFUSED_ATTR, parked)
+    return parked
+
+
+def forget_owner_refusal(server: Any, owner: str) -> None:
+    """Drop a parked refusal for ``owner``: it pushed a share or served its document."""
+    if owner and server is not None:
+        _owner_refusals(server).pop(owner, None)
+
+
+def _pull_past_stale_self_view(server: Any, engine: Any, device_id: str, blocked: str) -> str:
+    """The member half of the step for a device whose OWN record says it lacks ``blocked``.
+
+    WHY THE SELF-VIEW IS NOT THE ANSWER HERE (mesh perf matrix: a ``--role drive``
+    device never received a share, 5/5, >120 s). ``self_capabilities`` is fixed at
+    admission (``cli`` join: ``self_row.capabilities``) and no wire op updates it — a
+    device cannot change its own capabilities (``relay.set_member_capabilities``).
+    But ``credential share`` (and onboarding's provision step) grant
+    ``broker_credential`` on the OWNER's row for this device, and that row is what the
+    owner's authoriser reads when this device's pull arrives. So the local view is
+    stale by construction for exactly the devices a share targets, and skipping on it
+    meant the pull that would have succeeded was never sent.
+
+    SO THE OWNER DECIDES. The placement pull is attempted; the owner answers with its
+    document or refuses at its chokepoint, as it always did for the manual pull. No
+    authority is added here: the pull carries no credential, and every borrow is still
+    authorised by the owner against its own row and its own placement document.
+
+    THE COST STAYS BOUNDED (the Q-R1-3 lesson behind the original skip: a timer that
+    asks a question the peer always refuses wrote 240 refusal rows an hour). An owner
+    that REFUSED is parked for ``definitions.REFUSED_MIN_INTERVAL_S`` (30 min), so an
+    unshared member costs one audited refusal per owner per half hour. The fast path
+    for a new share is the owner's push (``share_push``), which clears the park; the
+    parked re-ask is only the backstop for a push this device missed while offline.
+
+    The owner EXCHANGE (what this device lends) keeps the self-view skip: it is not
+    what the share defect is about, and its answer is reported unchanged.
+    """
+    from local_operator.network import definitions
+
+    skip = f"skipped:no_{blocked}"
+    parked = _owner_refusals(server)
+    now = time.monotonic()
+    held = parked.get(device_id)
+    # THE PARK BELONGS TO ONE OWNER RELAY INSTANCE (QA round 1 Q1, round 2 Q3). A
+    # restarted owner relay has forgotten the share pushes it still owed this device
+    # (``share_push`` keeps them in memory), so its earlier refusal is no evidence any
+    # more and the park ends on the first sync that sees the new instance — that is the
+    # owner-restart case, measured at ~1814 s before Q1. A merely REPLACED link to the
+    # same instance is not evidence of anything: ending the park on it cost one audited
+    # owner refusal per link drop (16 in 300 s on a flapping link, Q3), and a share that
+    # instance owed is re-sent by the owner itself (``share_push.retry_step``). A
+    # missing link is not evidence either: re-asking would dial an undisturbed owner.
+    if held is not None and held[0] > now:
+        current = _live_owner_instance(server, device_id)
+        if not current or current == held[1]:
+            return skip
+        parked.pop(device_id, None)
+    try:
+        from local_operator.network.credentials.client import MeshCredentialClient
+
+        client = MeshCredentialClient.for_relay(server)
+        result = client.pull_placement(only_device=device_id) if client is not None else None
+    except Exception:  # noqa: BLE001 — a cadence reports; it never raises into the tick
+        logger.debug("credentials sync: placement pull for %s failed", device_id, exc_info=True)
+        return skip
+    if not isinstance(result, dict):
+        return skip
+    if device_id in (result.get("refused_by") or ()):
+        parked[device_id] = (
+            now + definitions.REFUSED_MIN_INTERVAL_S,
+            _live_owner_instance(server, device_id),
+        )
+        return skip
+    parked.pop(device_id, None)
+    return engine.enqueue_placement_pull(device_id)
 
 
 def install() -> None:

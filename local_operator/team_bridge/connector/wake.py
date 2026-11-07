@@ -244,6 +244,10 @@ def build_wake_payload(
         # spelling here is a hop that silently un-marks the next time the copy
         # is edited.
         BRIDGE_UNTRUSTED_CLAUSE,
+        # B5: NO receiver rule here. Every consumer of this payload reaches the
+        # model through ``Session._peer_custom_message``'s team-bridge wrap,
+        # which already carries BRIDGE_CONFIG_REQUEST_RULE; a copy here would
+        # bill the rule (~44 tokens) twice on every legacy wake.
         f"message_id: {message_id}",
         f"sender: {resolved_name}" + (f" ({organization})" if organization else ""),
         f"thread: {thread.get('id') or message.get('thread_id') or 'unknown'}",

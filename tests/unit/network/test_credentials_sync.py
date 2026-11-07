@@ -626,8 +626,13 @@ def sync_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -
     auth_a.upsert_credential(KEY, _payload(VALUE_1))
 
     assert _lop_network("credential", "share", KEY, "--with", server_b.identity.name) == 0
+    # The share verb now PUSHES the row to B (``share_push``), so B usually holds it
+    # before this pull runs and the pull reports nothing changed; either way B must
+    # hold the key once the explicit pull has run.
     pulled = _pull(SimpleNamespace(b=server_b, borrower=server_b.identity.device_id))
-    assert KEY in pulled.get("changed", []), pulled
+    assert KEY in pulled.get("changed", []) or placement_mod.PlacementDocument.load(
+        record.network_id, server_b.root, self_device=server_b.identity.device_id
+    ).is_holder(KEY, server_b.identity.device_id), pulled
 
     engine_b = sync.SyncEngine(
         server_b,
@@ -1187,14 +1192,30 @@ def test_credentials_cadence_is_independent_of_net_definitions(
     # AND THE DEFINITIONS HALF IS STILL GATED: credentials do not grant it.
     assert (peer, "skipped:no_admin") in outcomes
 
-    # The step's OWN gate stays: a device without broker_credential is skipped by
-    # name. It is THIS device's row the check reads (the op is held HERE), which
-    # is why the capability comes off SELF for this half.
-    # ``unholdable_capability`` reads the RECORD's self_capabilities (what this
-    # device may hold toward a peer), not the member row.
+    # A device WITHOUT broker_credential on its own row (the default ``drive``
+    # invite) still skips the owner EXCHANGE, but its own row is stale evidence
+    # for the PULL: a share grants the capability on the OWNER's row only, which is
+    # what the owner's authoriser reads (mesh perf matrix). So the pull is asked
+    # and the OWNER decides; a refusal parks the peer instead of re-asking per tick.
     record.self_capabilities = sorted(types.capabilities_for_role("drive"))
     store.save(record, root)
+    del engine.exchanges[:]
+    del placement_pulls[:]
     # The fake server is deliberately duck-typed (a SimpleNamespace); the cast is
     # the same deliberate `Any` the mcp suite's fake stores use, and it keeps the
     # whole-tree type check green without a real RelayServer.
+    assert sync.credentials_sync_step(cast(Any, server), peer) == "in_sync"
+    assert placement_pulls == [peer], "a stale self-view must not stop the placement pull"
+    assert engine.exchanges == [], "the owner exchange keeps its self-view skip"
+
+    refusing: dict[str, object] = {"refused_by": [peer]}
+    monkeypatch.setattr(StubClient, "pull_placement", lambda self, only_device="": refusing)
     assert sync.credentials_sync_step(cast(Any, server), peer) == "skipped:no_broker_credential"
+    calls: list[str] = []
+    monkeypatch.setattr(
+        StubClient,
+        "pull_placement",
+        lambda self, only_device="": calls.append(only_device) or refusing,
+    )
+    assert sync.credentials_sync_step(cast(Any, server), peer) == "skipped:no_broker_credential"
+    assert calls == [], "a peer that refused was asked again before its park expired"

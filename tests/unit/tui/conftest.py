@@ -154,6 +154,24 @@ async def await_session_boot(app: App[None]) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _restore_theme() -> Iterator[None]:
+    """Put the process-global theme back after every TUI test (#3409).
+
+    ``theme.current_theme()`` is a module singleton, and several tests switch it
+    on purpose (``app._apply_theme("light")`` and friends) without undoing it.
+    Under xdist the next test on the same worker inherits that choice, so any
+    expectation computed from ``semantic_color(...)`` before the app applies its
+    own theme silently resolves against the neighbour's ramp — an order-
+    dependent failure that no single-test rerun reproduces. Restoring here
+    closes the leak for the whole suite instead of at each switching call site;
+    same pattern as ``test_bindings.py``'s file-local fixture.
+    """
+    original = theme_mod.current_theme()
+    yield
+    theme_mod.set_theme(original)
+
+
 #: Opt-in chaos knob for :func:`_slow_boot_warmup`: seconds the boot's import
 #: warm-up thread is made to take. Unset (the default) changes nothing.
 SLOW_BOOT_WARM_ENV = "LOP_TEST_SLOW_BOOT_WARM_S"

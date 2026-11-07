@@ -1211,12 +1211,19 @@ class MessageAdmission(BaseModel):
     ``reportIncompatibleVariableOverride`` says so, and it is right), so the
     inheritance would advertise ``pending``/``failed`` on a route that awaits its
     acknowledgement to completion and can therefore answer neither — it returns
-    ``admitted`` or raises the 503 ladder in ``errors()``. A field type here is
+    ``admitted``, ``queued`` (a busy owner's inbox) or raises the 503 ladder in
+    ``errors()``. A field type here is
     the API contract for the Electron implementers, so it states what this route
     can actually produce.
     """
 
-    status: Literal["admitted"]
+    #: ``queued`` is the busy owner's answer (``routes.desktop_sessions.
+    #: _queue_or_refuse``): the owner is alive but did not acknowledge inside
+    #: the control envelope, so the message was written to its inbox, which it
+    #: drains while running. Not in the transcript yet -- the renderer paints it
+    #: pending, never failed -- and a retry of the same request id replays this
+    #: receipt rather than queueing twice.
+    status: Literal["admitted", "queued"]
     duplicate: bool
     detail: str
     command_id: str

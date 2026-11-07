@@ -143,6 +143,22 @@ def _pull(mesh: Any) -> dict[str, Any]:
     return detail if isinstance(detail, dict) else reply
 
 
+def _pulled_or_held(mesh: Any, key: str) -> bool:
+    """Pull on B, then: did the pull merge ``key``, or did B already hold it?
+
+    ``credential share`` PUSHES the new row to B when it can (``share_push``), so a pull
+    right after a share may find nothing left to merge. The invariant these cells need
+    is that B holds the row once the pull has run, whichever path delivered it.
+    """
+    pulled = _pull(mesh)
+    if key in pulled.get("changed", []):
+        return True
+    document = placement_mod.PlacementDocument.load(
+        mesh.network_id, mesh.b.root, self_device=mesh.b.identity.device_id
+    )
+    return document.is_holder(key, mesh.b.identity.device_id)
+
+
 def _borrower_client(mesh: Any) -> MeshCredentialClient:
     client = MeshCredentialClient.for_this_device(mesh.b.root)
     assert client is not None, "the borrower cannot borrow: the share never reached it"
@@ -183,7 +199,7 @@ def test_an_mcp_borrow_follows_an_owner_rotation_over_both_relay_legs(mesh: Any)
             )
         )
         assert _lop_network("credential", "share", key, "--with", mesh.b.identity.name) == 0
-        assert key in _pull(mesh).get("changed", [])
+        assert _pulled_or_held(mesh, key)
         client = _borrower_client(mesh)
 
         first = client.request_grant_sync(key, provider="mcp-oauth")
@@ -218,8 +234,7 @@ def test_a_share_reaches_the_borrower_and_a_borrow_is_served_over_the_link(
     owner's IdP logged a POST.
     """
     _share(mesh)
-    pulled = _pull(mesh)
-    assert STUB_PROVIDER in pulled.get("changed", []), pulled
+    assert _pulled_or_held(mesh, STUB_PROVIDER)
     document = placement_mod.PlacementDocument.load(
         mesh.network_id, mesh.b.root, self_device=mesh.borrower
     )
@@ -449,7 +464,15 @@ def test_a_pull_of_a_document_with_a_401_digit_field_still_merges(
     floor, and answer; before the helper was total the merge raised ``OverflowError``.
     """
     from local_operator.network.credentials import owner as owner_mod
+    from local_operator.network.credentials import share_push
 
+    # THIS CELL IS ABOUT THE PULL: the share's push would otherwise deliver the row
+    # whenever B happens to hold a link to A, leaving the widened pull nothing to merge.
+    monkeypatch.setattr(
+        share_push,
+        "push_share",
+        lambda *a, **k: {"delivered": False, "outcome": "skipped:test_disabled"},
+    )
     _share(mesh)
     original = owner_mod.MeshCredentialBroker.placement_frame
 

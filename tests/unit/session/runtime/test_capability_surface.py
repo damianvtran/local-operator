@@ -162,6 +162,23 @@ def test_the_owned_handle_answers_every_capability_the_server_asks_for() -> None
     )
 
 
+def test_live_inbox_drain_is_disabled_until_the_process_installs_it() -> None:
+    """The declared capability must not opt in an exec/in-process host.
+
+    ``process.amain`` opts in its own instance before record construction;
+    class-level visibility is for the audit, not permission for other handles
+    to advertise a watcher they do not run.
+    """
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    assert ServingSessionHandle.live_inbox_drain is False
+    child = object.__new__(ServingSessionHandle)
+    other_host = object.__new__(ServingSessionHandle)
+    child.live_inbox_drain = True
+    assert child.live_inbox_drain is True
+    assert other_host.live_inbox_drain is False
+
+
 def test_every_optional_capability_is_actually_optional() -> None:
     """The escape hatch must not become a place to hide real gaps.
 

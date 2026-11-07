@@ -121,6 +121,7 @@ from local_operator.session.runtime.types import (
     EXCLUSIVE_MOVE_CAPABILITY,
     HEARTBEAT_INTERVAL_S,
     INPUT_MODE_CAPABILITY,
+    LIVE_INBOX_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
     PEER_MESSAGE_ID_CAPABILITY,
     QUEUED_MOVE_CAPABILITY,
@@ -2785,6 +2786,13 @@ class RuntimeServer:
                 # drop the id cannot dedupe that retry -- so an owner that does
                 # not take the keyword must not advertise it.
                 + ([PEER_MESSAGE_ID_CAPABILITY] if receives_message_id(handle) else [])
+                # THE LIVE INBOX DRAIN, gated on the flag the runtime child sets
+                # when it starts the watcher (``process._watch_live_inbox``): a
+                # sender that sees it may queue a message to ``inbox.jsonl``
+                # instead of refusing a busy owner, because this owner reads its
+                # spool while it runs. Read at record construction, which is
+                # after ``amain`` set the flag; a TUI host never sets it.
+                + ([LIVE_INBOX_CAPABILITY] if getattr(handle, "live_inbox_drain", False) else [])
                 # ADVERTISED UNCONDITIONALLY (revision 2, §2.3). The runtime can
                 # always VERIFY an operator or device signature: the anchor is a
                 # file it reads, and the public half is all verification needs.
@@ -8436,6 +8444,15 @@ class RuntimeServer:
             honours_wait = "wait_complete" in parameters and bool(frame.get("wait_complete"))
             if honours_wait:
                 fields["wait_complete"] = True
+            # THE OPPOSITE OPT-IN: refuse a busy session NOW instead of parking the
+            # ack behind the turn in flight. Only a literal ``false`` asks for it,
+            # and only the phone relay sends it (``mobile/daemon.py``), because it
+            # answers the ``TurnInFlight`` refusal by steering the same command
+            # id; every other producer omits the key and keeps the wait. Probed
+            # like the rest: a handle without the keyword (the TUI's) already
+            # refuses a busy session outright, which is the answer asked for.
+            if "wait_for_turn" in parameters and frame.get("wait_for_turn") is False:
+                fields["wait_for_turn"] = False
             if "command_id" in parameters:
                 fields["command_id"] = frame.get("command_id")
             # Silent input metadata (see ``Message.input_mode``), probed exactly

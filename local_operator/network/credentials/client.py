@@ -1468,6 +1468,8 @@ class MeshCredentialClient:
         #: ``{device, reason}`` for every member whose document was NOT merged, so a
         #: skipped member is named in the reply rather than silently missing.
         skipped: list[dict[str, str]] = []
+        #: Members that answered the pull with a refusal (see the loop below).
+        refused_by: list[str] = []
         asked = 0
         members = self._other_active_members()
         if only_device:
@@ -1505,7 +1507,30 @@ class MeshCredentialClient:
             )
             detail = (reply or {}).get("detail")
             document = detail.get("document") if isinstance(detail, dict) else None
+            if (
+                isinstance(reply, dict)
+                and not isinstance(document, dict)
+                and (
+                    reply.get("op") == "error"
+                    or (isinstance(detail, dict) and detail.get("kind") == "error")
+                )
+            ):
+                # THE OWNER ANSWERED AND SAID NO (its authoriser's codeless
+                # ``op: error``, or its by-name broker refusal) — a statement by the
+                # peer, unlike ``None`` (no answer). Reported apart from ``skipped``
+                # because it is not a merge failure: the listing must not warn about
+                # an unreadable document, but the cadence must know to back off
+                # (``sync._pull_past_stale_self_view``).
+                refused_by.append(device)
+                continue
             if isinstance(document, dict):
+                # AN ANSWERED PULL ENDS A PARKED REFUSAL (review round 1, n1), whoever
+                # asked: the explicit listing and onboarding's in-run refresh run this
+                # too, and a park left standing after the owner served its document
+                # would only delay the cadence's copies for no reason.
+                from local_operator.network.credentials import sync as sync_mod
+
+                sync_mod.forget_owner_refusal(self._relay, device)
                 # ``device`` is the member this device DIALLED, whose key the
                 # handshake verified — the transport's identity, not a frame field.
                 # Merged into the FILE under its lock: saving an in-memory copy is
@@ -1558,6 +1583,8 @@ class MeshCredentialClient:
         }
         if skipped:
             result["skipped"] = skipped
+        if refused_by:
+            result["refused_by"] = refused_by
         return result
 
     def _borrowable_now(self) -> dict[str, Any]:

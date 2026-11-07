@@ -125,6 +125,13 @@ _UNWORDED_CODES = frozenset(
         "interactive_required",
         "internal",
         "not_authorised",
+        # The share push's receiver (``share_push``): a peer's frame that was not
+        # negotiated, was malformed, or reached a device without an identity. Wire
+        # details answered to the pushing owner, never stored on an approval card.
+        "malformed_frame",
+        "placement_conflict",
+        "unavailable",
+        "unsupported",
         "consent_action_refused",
         "consent_execution_missing",
         "consent_identity_invalid",

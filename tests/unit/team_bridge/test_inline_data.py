@@ -23,7 +23,10 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+from local_operator.harness.message_types import (
+    BRIDGE_BODY_READ_HEAD,
+    BRIDGE_UNTRUSTED_CLAUSE,
+)
 from local_operator.harness.types import ToolContext
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import host as host_mod
@@ -241,7 +244,7 @@ async def test_channel_history_withholds_and_leaves_details_and_the_wire_alone()
     assert _RUN.findall(visible) == []
     assert _BIG_PAYLOAD[:64] not in visible
     # The page the model receives is still valid JSON.
-    json.loads(visible[len(BRIDGE_UNTRUSTED_CLAUSE) + 2 :])
+    json.loads(visible[len(BRIDGE_BODY_READ_HEAD) + 2 :])
 
     # ``details`` is never serialized to providers: the raw row a human's
     # renderer reads is byte-for-byte unchanged by this filter.
