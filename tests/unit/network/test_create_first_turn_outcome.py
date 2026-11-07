@@ -266,6 +266,9 @@ def test_a_turn_that_outlives_the_budget_is_running_not_refused(root: Path) -> N
     _dialed(server, None)
     outcome = server._prompt_on("sess00000001", "hello", None)  # noqa: SLF001
     assert (outcome["admitted"], outcome["state"]) == (True, "running"), outcome
+    # THIS SIDE STOPPED WAITING, and says for how long: the marker that keeps it
+    # apart from an owner that cannot settle (test_create_first_turn_budget.py).
+    assert outcome["waited_s"] == relay.FIRST_TURN_WAIT_S, outcome
 
 
 def test_a_dead_owner_socket_is_unreported_not_admitted_running(root: Path) -> None:

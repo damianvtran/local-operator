@@ -4137,6 +4137,43 @@ def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any
     return {**bounded, "entries": entries[-low:]}
 
 
+#: How long the OWNING relay waits for a created session's first turn to settle
+#: before it answers the create with ``state: running`` and ``waited_s``.
+#:
+#: WHY IT IS NOT ``op_wait_s`` (2026-11-06/07, two same-build pairs): the first
+#: turn was waited for ``op_wait_s`` (10 s), but a ``wait_complete`` reply lands
+#: only AFTER the whole turn — a freshly spawned runtime's first model call on a
+#: loaded machine routinely takes 10-30 s — so turns that went on to complete
+#: (``assistant: BASE_OK``) were reported as unseeable. 45 s covers that range.
+#:
+#: WHY IT IS STILL BOUNDED, and clipped by :func:`first_turn_wait_s`: the
+#: requester waits for this create's reply only ``engage_hop_bound_s()`` (60 s at
+#: the default ``op_wait_s``, a constant both builds share — this side cannot read
+#: the requester's own setting), and that bound also has to cover the engage that
+#: precedes the turn. A wait that outlived the hop would turn a slow turn into
+#: "stopped answering before it replied" — no receipt at all, which is worse than
+#: an honest "still running".
+FIRST_TURN_WAIT_S = 45.0
+
+#: Reserved under the requester's hop bound for the reply's own trip back (and
+#: clock skew between the two relays' views of when the create began).
+FIRST_TURN_REPLY_MARGIN_S = 5.0
+
+
+def first_turn_wait_s(started: float, op_wait_s: float, now: float) -> float:
+    """The wait budget for a create's first turn, given when the create began.
+
+    At most :data:`FIRST_TURN_WAIT_S`, and never past the requester's hop bound
+    minus :data:`FIRST_TURN_REPLY_MARGIN_S` measured from ``started`` (the
+    create's arrival, so a slow engage eats into the turn's share rather than
+    pushing the reply past the hop). FLOORED at ``op_wait_s``, the budget this
+    hop had before the first-turn wait existed: below it the runtime may not even
+    have answered the append, and that floor is what every earlier build paid.
+    """
+    remaining = started + engage_hop_bound_s(op_wait_s) - FIRST_TURN_REPLY_MARGIN_S - now
+    return max(min(FIRST_TURN_WAIT_S, remaining), min(op_wait_s, FIRST_TURN_WAIT_S))
+
+
 def engage_hop_bound_s(op_wait_s: float = wire.OP_WAIT_S) -> float:
     """How long THIS relay waits for a peer to answer an engage (``_local_peer_call``).
 
@@ -8874,6 +8911,10 @@ class RelayServer:
         idle sweep could reap), stamp `mesh.json` with `home_device = self`,
         engage a runtime, then admit the optional first prompt.
         """
+        # THE CREATE'S ARRIVAL, the origin of the requester's hop bound: the first
+        # turn's wait is clipped against it (``first_turn_wait_s``) so the engage
+        # below and the turn share one budget the requester is still waiting on.
+        started = time.monotonic()
         if frame.get("session_id"):
             raise MeshRefusal(
                 "protocol_error",
@@ -9256,11 +9297,16 @@ class RelayServer:
         admitted = False
         prompt_state = ""
         prompt_detail = ""
+        waited: dict[str, float] = {}
         if prompt:
-            outcome = self._prompt_on(session_id, prompt, frame.get("images"))
+            outcome = self._prompt_on(session_id, prompt, frame.get("images"), started=started)
             admitted = bool(outcome["admitted"])
             prompt_state = str(outcome["state"])
             prompt_detail = str(outcome["detail"])
+            # Carried only when this side STOPPED WAITING (see ``_prompt_on``):
+            # its absence on a ``running`` turn is the old-owner signal.
+            if "waited_s" in outcome:
+                waited = {"waited_s": float(outcome["waited_s"])}
         first_turn = (
             # WHAT BECAME OF THE FIRST TURN, for the ONE case the requester cannot
             # see for itself: the turn ran on THIS device, and `--send`'s own
@@ -9279,7 +9325,11 @@ class RelayServer:
             # both into "no turn block at all", which left a `--json` consumer and the
             # desktop route unable to tell a certain refusal from an absence of
             # knowledge. Every state is reported; its name is what carries the fact.
-            {"state": prompt_state, "detail": prompt_detail if prompt_state == "failed" else ""}
+            {
+                "state": prompt_state,
+                "detail": prompt_detail if prompt_state == "failed" else "",
+                **waited,
+            }
             if prompt
             else None
         )
@@ -10734,10 +10784,16 @@ class RelayServer:
             return {"applied": False, "detail": str(reply.get("message") or "refused")}
         return {"applied": True, "detail": ""}
 
-    def _prompt_on(self, session_id: str, text: str, images: Any) -> dict[str, Any]:
+    def _prompt_on(
+        self, session_id: str, text: str, images: Any, *, started: float | None = None
+    ) -> dict[str, Any]:
         """Admit the first prompt of a freshly created session, and say what became of it.
 
-        Returns ``{"admitted": bool, "state": str, "detail": str}``, where
+        ``started`` is when the create arrived (``time.monotonic()``); the wait
+        for the turn is :func:`first_turn_wait_s` from it. ``None`` means now.
+
+        Returns ``{"admitted": bool, "state": str, "detail": str}``, plus
+        ``waited_s`` when the turn outlived that wait, where
         ``state`` is one of ``refused`` / ``unreported`` / ``running`` /
         ``failed`` / ``settled``:
 
@@ -10748,9 +10804,11 @@ class RelayServer:
           whether the message landed is UNKNOWN. Not a refusal: a refusal is a
           fact, and this is the absence of one (``dial.eof`` is what tells the
           two apart — a bare timeout is ``running``).
-        * ``running`` — admitted, and the turn had not settled within this
-          device's op budget, or the owner is one that answers at the append and
-          cannot settle at all. Not a failure and not a completion.
+        * ``running`` — admitted, and not settled. TWO causes, told apart by
+          ``waited_s``: present, a settling owner's turn outlived the wait (this
+          side STOPPED WAITING, the owner can still finish it); absent, the owner
+          answers at the append and cannot settle at all (the receipt genuinely
+          cannot see the end). Not a failure and not a completion.
         * ``failed`` — the message IS in the transcript and the turn it opened
           ended in failure; ``detail`` is the provider's/runtime's own cause.
         * ``settled`` — the OWNER reported that the turn finished. This is read
@@ -10781,6 +10839,10 @@ class RelayServer:
         runtime's own durable-admission path, so a retry of this create cannot run
         the turn twice.
         """
+        now = time.monotonic()
+        wait_s = first_turn_wait_s(
+            now if started is None else started, self.settings.op_wait_s, now
+        )
         try:
             dial = self._dial_owned(session_id, capabilities=("prompt",))
         except session_dial.OwnerUnreachable as exc:
@@ -10795,7 +10857,7 @@ class RelayServer:
                     "images": list(images or []),
                     "wait_complete": True,
                 },
-                timeout_s=self.settings.op_wait_s,
+                timeout_s=wait_s,
             )
             # READ BEFORE THE CLOSE, and it is what separates the two silences:
             # ``exchange`` answers ``None`` both for "quiet past the budget" and
@@ -10819,7 +10881,14 @@ class RelayServer:
             # A ``wait_complete`` reply arrives only AFTER the turn, so silence
             # here means the turn outlived the budget: the message is durable and
             # its turn is still going (the append precedes the settle).
-            return {"admitted": True, "state": "running", "detail": ""}
+            #
+            # ``waited_s`` IS WHAT SEPARATES THIS FROM AN OWNER THAT CANNOT SETTLE
+            # (2026-11-06/07): both used to be a bare ``running``, and the receipt
+            # told a same-build user it "cannot see how it ends" when it had only
+            # stopped waiting. A new FIELD rather than a new state, so an older
+            # requester (which renders only the states it knows) still prints its
+            # running line instead of nothing.
+            return {"admitted": True, "state": "running", "detail": "", "waited_s": wait_s}
         if reply.get("op") == "error":
             message = str(reply.get("message") or "the runtime refused the prompt")
             if reply.get("error_code") == "turn_failed":
