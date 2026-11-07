@@ -185,9 +185,16 @@ export type PhoneUsageReport = {
 	state?: "available" | "partial" | "unavailable" | "reauth_required";
 	credential_invalid?: boolean;
 	/* Spendable reset credits: a non-negative count, or null/absent when the
-	   vendor reported nothing trustworthy. Only a count crosses the tunnel --
-	   never the login it would be spent on. */
+	   vendor reported nothing trustworthy; only the count crosses the tunnel for
+	   a row with nothing to spend. */
 	resets_available?: number | null;
+	/* An OPAQUE pointer at the one stored login this row describes, published by
+	   the daemon ONLY on a row with a credit to spend. It names no person (it is
+	   the store's identity key or `cred:<row id>`), and its whole job is to
+	   survive a login churn: an index is a position, so a login removed and
+	   replaced elsewhere would move a spend onto a sibling. Echo it back with
+	   the reset; null/absent means the daemon published none. */
+	credential_ref?: string | null;
 };
 export type PhoneUsageRefreshStatus = "ok" | "throttled" | "failed" | "timeout";
 export type PhoneUsageEnvelope = {
@@ -220,19 +227,29 @@ export function refreshUsage(force: boolean): Promise<PhoneUsageEnvelope> {
 
 /** The outcomes a reset credit's spend can report. `failed` is the honest
     "could not confirm" state: the attempt reached the vendor, so the credit may
-    or may not be spent, and a retry MUST reuse the same `redeemRequestId`. */
+    or may not be spent, and a retry MUST reuse the same `redeemRequestId`.
+    `refused` is its opposite: the daemon decided before anything was sent, so
+    nothing was spent and a retry is a NEW attempt. */
 export type PhoneUsageResetOutcome =
-	| "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed" | "failed";
+	| "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed" | "failed" | "refused";
 
 /** The refusal codes `POST /api/usage/reset` answers with, as a value so a
     caller decides on the code and never on prose. */
 export const USAGE_RESET_REFUSAL_CODES = ["accounts_changed", "in_flight", "not_supported"] as const;
 export type UsageResetRefusalCode = (typeof USAGE_RESET_REFUSAL_CODES)[number];
 
-/** Whether an error is a typed refusal of a reset attempt. */
+/** Whether an error is a refusal of a reset attempt: a typed code, or any 4xx
+    at all.
+
+    The daemon answers 4xx only BEFORE it reaches a vendor -- a malformed body,
+    the pairing gate, an account list that moved, a provider with no reset
+    product -- so nothing was spent and the caller may drop the idempotency id.
+    408 is the one exception: a request timeout can hide a 200, so it keeps the
+    unknown-outcome treatment along with 5xx and transport errors. */
 export function isUsageResetRefusal(reason: unknown): reason is HttpError {
-	return reason instanceof HttpError
-		&& (USAGE_RESET_REFUSAL_CODES as readonly string[]).includes(reason.code);
+	if (!(reason instanceof HttpError)) return false;
+	if ((USAGE_RESET_REFUSAL_CODES as readonly string[]).includes(reason.code)) return true;
+	return reason.status >= 400 && reason.status < 500 && reason.status !== 408;
 }
 
 /** One reset's answer: the outcome, plus the usage envelope the daemon could
@@ -244,15 +261,17 @@ export type PhoneUsageResetEnvelope = Partial<PhoneUsageEnvelope> & {
 
 /** Spend ONE reset credit on the account the phone named by index.
 
-    The phone never names a person: `accountIndex`/`accountCount` are the pair
-    the card displayed, and the daemon resolves them against its own login order.
-    A mismatch is a 409 `accounts_changed` refusal rather than a reset on a
-    sibling, so the caller refreshes and lets the operator confirm again. */
+    `accountIndex`/`accountCount` are the pair the card displayed, and the daemon
+    resolves them against its own login order. `credentialRef` is the opaque
+    pointer the daemon published beside that row's count: when it is present the
+    daemon resolves by ROW instead, so a login removed and replaced (count
+    unchanged) is a 409 `accounts_changed` instead of a sibling's credit. */
 export function resetUsage(input: {
 	provider: string;
 	accountIndex: number;
 	accountCount: number;
 	redeemRequestId: string;
+	credentialRef?: string | null;
 	signal?: AbortSignal;
 }): Promise<PhoneUsageResetEnvelope> {
 	return request("/api/usage/reset", {
@@ -263,6 +282,7 @@ export function resetUsage(input: {
 			account_index: input.accountIndex,
 			account_count: input.accountCount,
 			redeem_request_id: input.redeemRequestId,
+			...(input.credentialRef ? { credential_ref: input.credentialRef } : {}),
 		}),
 		signal: input.signal,
 	});

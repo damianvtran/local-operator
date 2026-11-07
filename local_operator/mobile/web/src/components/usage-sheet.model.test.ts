@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { PhoneUsageLimit, PhoneUsageReport } from "../api";
 import {
 	accountKey, bindingRow, buildUsageModel, countdown, limitTone, orderRows, refreshPhase,
-	remainingFraction, resetFlowCancel, resetFlowConfirm, resetFlowRefused, resetFlowSettle,
-	resetFlowStart, resetOutcomeKey, resetRequestId, resetTarget, resetsAvailable,
+	remainingFraction, resetAttemptBusy, resetAttemptDone, resetAttemptSettled,
+	resetAttemptStart, resetFlowCancel, resetFlowConfirm, resetFlowRefused, resetFlowSettle,
+	resetFlowStart, resetOutcomeKey, resetRefreshPhase, resetTarget, resetsAvailable,
+	RESET_ATTEMPTS_EMPTY,
 } from "./usage-sheet.model";
 
 const limit = (over: Partial<PhoneUsageLimit> = {}): PhoneUsageLimit => ({
@@ -126,6 +128,7 @@ describe("reset credits", () => {
 		const model = buildUsageModel([report(over)], collator);
 		return model[0].accounts[0];
 	};
+	const target = { provider: "openai", index: 1, count: 2, available: 3, ref: "oauth:7" };
 
 	it("offers only a plain positive integer, never a boolean or a float", () => {
 		expect(resetsAvailable(report({ resets_available: 2 }))).toBe(2);
@@ -138,13 +141,19 @@ describe("reset credits", () => {
 		expect(resetsAvailable(report({ resets_available: true as unknown as number }))).toBe(0);
 	});
 
-	it("carries the DAEMON's numbering, not the card's position", () => {
-		const second = account({ account_index: 1, account_count: 2, resets_available: 3 });
-		expect(resetTarget(second)).toEqual({ provider: "openai", index: 1, count: 2, available: 3 });
-		// No account_index (an older daemon) falls back to the rendered number.
-		const fallback = account({ resets_available: 1 });
-		expect(resetTarget(fallback)).toEqual({ provider: "openai", index: 0, count: 1, available: 1 });
-		expect(resetTarget(account({ resets_available: 0 }))).toBeNull();
+	it("carries the DAEMON's numbering and its ref, and nothing invented", () => {
+		const second = account({ account_index: 1, account_count: 2, resets_available: 3, credential_ref: "oauth:7" });
+		expect(resetTarget(second)).toEqual({ provider: "openai", index: 1, count: 2, available: 3, ref: "oauth:7" });
+		// A row the daemon could not attribute carries no ref; it can still be
+		// spent by index, exactly as before the ref existed.
+		expect(resetTarget(account({ account_index: 0, account_count: 1, resets_available: 1 })))
+			.toEqual({ provider: "openai", index: 0, count: 1, available: 1, ref: null });
+		// R6: NO card-position fallback. An account without the daemon's own
+		// numbering is not offered at all, whatever the rendered position says.
+		expect(resetTarget(account({ resets_available: 1 }))).toBeNull();
+		expect(resetTarget(account({ account_index: 0, resets_available: 1 }))).toBeNull();
+		expect(resetTarget(account({ account_index: 0, account_count: 0, resets_available: 1 }))).toBeNull();
+		expect(resetTarget(account({ account_index: 0, account_count: 1, resets_available: 0 }))).toBeNull();
 	});
 
 	it("names a card stably and opens one confirmation at a time", () => {
@@ -154,40 +163,69 @@ describe("reset credits", () => {
 		], collator)[0].accounts;
 		const [first, second] = two;
 		expect(accountKey(first)).not.toBe(accountKey(second));
-		const opened = resetFlowConfirm(accountKey(first));
-		expect(opened).toEqual({ kind: "confirm", key: accountKey(first) });
+		const opened = resetFlowConfirm(accountKey(first), target);
+		expect(opened).toEqual({ kind: "confirm", key: accountKey(first), target });
 		// Opening the second card's confirmation replaces the first: the state is
 		// one object, so two irreversible prompts cannot stack.
-		expect(resetFlowConfirm(accountKey(second))).toEqual({ kind: "confirm", key: accountKey(second) });
+		expect(resetFlowConfirm(accountKey(second), target)).toMatchObject({ kind: "confirm", key: accountKey(second) });
 		expect(resetFlowCancel()).toEqual({ kind: "idle" });
 	});
 
-	it("settles only a busy flow and clears the id on a definitive outcome", () => {
-		const busy = resetFlowStart("k", "id-1");
-		expect(resetFlowSettle(busy, "reset", 2)).toEqual({
-			kind: "result", key: "k", outcome: "reset", windowsReset: 2, redeemRequestId: null,
+	it("settles only a busy flow, keeping the target so a 0-credit result still renders", () => {
+		const busy = resetFlowStart("k", "id-1", target);
+		// The snapshot is what the panel renders after the card repaints at 0.
+		expect(resetFlowSettle(busy, "reset", 2)).toMatchObject({
+			kind: "result", key: "k", outcome: "reset", windowsReset: 2, redeemRequestId: null, target,
 		});
 		// `failed` keeps the id so the retry is idempotent.
-		expect(resetFlowSettle(busy, "failed", 0)).toEqual({
-			kind: "result", key: "k", outcome: "failed", windowsReset: 0, redeemRequestId: "id-1",
-		});
+		expect(resetFlowSettle(busy, "failed", 0)).toMatchObject({ outcome: "failed", redeemRequestId: "id-1" });
+		// A refusal is definitive AND marked refused, so no retry is offered.
+		expect(resetFlowSettle(busy, "refused", 0)).toMatchObject({ outcome: "refused", refused: true, redeemRequestId: null });
 		// A negative/garbled window count is not a count.
-		expect(resetFlowSettle(resetFlowStart("k", "i"), "reset", -3)).toMatchObject({ windowsReset: 0 });
+		expect(resetFlowSettle(busy, "reset", -3)).toMatchObject({ windowsReset: 0 });
+		// R5: the spend's own re-fetch decides whether the numbers are current.
+		expect(resetFlowSettle(busy, "reset", 1, true)).toMatchObject({ numbersStale: true });
+		expect(resetFlowSettle(busy, "reset", 1, false)).not.toHaveProperty("numbersStale");
 		// A late answer for a flow the operator already left is ignored.
 		expect(resetFlowSettle({ kind: "idle" }, "reset", 1)).toEqual({ kind: "idle" });
-		expect(resetFlowSettle(resetFlowConfirm("k"), "reset", 1)).toEqual({ kind: "confirm", key: "k" });
+		expect(resetFlowSettle(resetFlowConfirm("k", target), "reset", 1)).toMatchObject({ kind: "confirm" });
+		// The HTTP-refusal door lands in the same result state.
+		expect(resetFlowRefused(busy)).toMatchObject({ kind: "result", outcome: "refused", refused: true });
 	});
 
-	it("reuses the id after an unconfirmed outcome only", () => {
+	it("reuses the id across cancel, close and another card, until a definitive outcome", () => {
 		const mint = () => "fresh";
-		const failed = resetFlowSettle(resetFlowStart("k", "id-1"), "failed", 0);
-		expect(resetRequestId(failed, "k", mint)).toBe("id-1");
-		// A REFUSAL spent nothing, so the next attempt gets a new id.
-		expect(resetRequestId(resetFlowRefused(resetFlowStart("k", "id-1")), "k", mint)).toBe("fresh");
-		// So does a definitive outcome, and another card's result.
-		expect(resetRequestId(resetFlowSettle(resetFlowStart("k", "id-1"), "reset", 1), "k", mint)).toBe("fresh");
-		expect(resetRequestId(failed, "other", mint)).toBe("fresh");
-		expect(resetRequestId({ kind: "idle" }, "k", mint)).toBe("fresh");
+		const first = resetAttemptStart(RESET_ATTEMPTS_EMPTY, "k", () => "id-1");
+		expect(first.redeemRequestId).toBe("id-1");
+		expect(resetAttemptBusy(first.attempts)).toBe(true);
+		// U1/R2: a retry after an UNCONFIRMED outcome -- with the flow long gone
+		// -- must send the SAME id, or the vendor can spend a second credit.
+		const unknown = resetAttemptSettled(first.attempts, "k", "failed");
+		expect(resetAttemptBusy(unknown)).toBe(false);
+		expect(resetAttemptStart(unknown, "k", mint).redeemRequestId).toBe("id-1");
+		// A definitive outcome and a refusal both spent nothing that a retry
+		// could duplicate, so the next attempt mints a new id.
+		for (const outcome of ["reset", "already_redeemed", "no_credit", "nothing_to_reset", "refused"] as const) {
+			expect(resetAttemptStart(resetAttemptSettled(first.attempts, "k", outcome), "k", mint).redeemRequestId).toBe("fresh");
+		}
+		// One account's pending id never leaks onto another card.
+		expect(resetAttemptStart(first.attempts, "other", mint).redeemRequestId).toBe("fresh");
+		// The request finishing clears `busy` but keeps the id for an unconfirmed
+		// outcome; a definitive one is already gone.
+		const done = resetAttemptDone(unknown, "k");
+		expect(done).toEqual(unknown);
+		expect(resetAttemptDone(first.attempts, "k")).toEqual({
+			k: { redeemRequestId: "id-1", busy: false },
+		});
+	});
+
+	it("collapses a reset's own re-fetch to the neutral line, and says so", () => {
+		expect(resetRefreshPhase({ status: "ok" }, 7)).toEqual({ phase: { kind: "ok", at: 7 }, numbersStale: false });
+		// R5/Q6: no cooldown note, no "couldn't refresh" banner beside the outcome.
+		for (const status of ["throttled", "failed", "timeout"] as const) {
+			expect(resetRefreshPhase({ status }, null)).toEqual({ phase: { kind: "idle" }, numbersStale: true });
+		}
+		expect(resetRefreshPhase(undefined, null)).toEqual({ phase: { kind: "idle" }, numbersStale: false });
 	});
 
 	it("maps every outcome to its own copy key, unknown outcomes to failed", () => {
@@ -196,10 +234,11 @@ describe("reset credits", () => {
 		expect(resetOutcomeKey("no_credit")).toBe("relay.usage_reset.outcome_no_credit");
 		expect(resetOutcomeKey("nothing_to_reset")).toBe("relay.usage_reset.outcome_nothing_to_reset");
 		expect(resetOutcomeKey("failed")).toBe("relay.usage_reset.outcome_failed");
+		expect(resetOutcomeKey("refused")).toBe("relay.usage_reset.refused");
 		const keys = new Set(
-			(["reset", "already_redeemed", "no_credit", "nothing_to_reset", "failed"] as const)
+			(["reset", "already_redeemed", "no_credit", "nothing_to_reset", "failed", "refused"] as const)
 				.map((outcome) => resetOutcomeKey(outcome)),
 		);
-		expect(keys.size).toBe(5);
+		expect(keys.size).toBe(6);
 	});
 });

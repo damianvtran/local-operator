@@ -45,7 +45,16 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Protocol
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Iterable,
+    Literal,
+    NamedTuple,
+    Protocol,
+)
 
 if TYPE_CHECKING:
     from starlette.requests import Request
@@ -9544,7 +9553,9 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": "Cached usage unavailable"}, status_code=503)
         return JSONResponse(body)
 
-    async def _answer_phone_refresh(want_force: bool) -> dict[str, Any] | None:
+    async def _answer_phone_refresh(
+        want_force: bool, *, after_spend: bool = False
+    ) -> dict[str, Any] | None:
         """Run (or JOIN) ONE bounded phone refresh; ``None`` = no cache either.
 
         Returns the usage envelope with its ``refresh`` status block. ``None``
@@ -9552,6 +9563,15 @@ def build_app(daemon: MobileDaemon):
         as a fallback: the refresh route refuses with 503, while the reset
         route answers the reset alone (the spend is the fact it must report;
         the numbers are the part it could not re-read).
+
+        ``after_spend`` is the reset route's own call. A spend drops the shared
+        cache row, so this answer must describe the account AFTER it: an
+        in-flight refresh that started before the spend read the vendor before
+        it and would write those pre-spend numbers back after the row was
+        dropped (R3/Q4). Such a task is awaited and then replaced by a forced
+        fetch of our own, which the spend itself justifies -- the 15 s floor
+        exists to stop taps from skipping the cache, not to keep a stale row
+        beside a spent credit (Q6).
         """
         from local_operator.server.routes.desktop_quota import REFRESH_FLOOR_MS
 
@@ -9560,6 +9580,17 @@ def build_app(daemon: MobileDaemon):
         throttled = False
         in_flight: asyncio.Task[dict[str, Any]] | None = usage_refresh["task"]
         joined = in_flight is not None and not in_flight.done()
+        if in_flight is not None and joined and after_spend:
+            # Its numbers predate the spend. Await it only so its cache write
+            # lands BEFORE the fetch below (reporting it would be the bug), and
+            # then take the not-joined path: the floor is bypassed because the
+            # cache row was invalidated by a spend, not by a tap.
+            try:
+                await asyncio.wait_for(asyncio.shield(in_flight), PHONE_REFRESH_BOUND_S)
+            except Exception:  # noqa: BLE001 - its answer is discarded either way
+                pass
+            joined = False
+            in_flight = None
         if in_flight is not None and joined:
             task = in_flight
             # JOIN the in-flight refresh: no second vendor fan-out, and no
@@ -9570,12 +9601,12 @@ def build_app(daemon: MobileDaemon):
             # tell it was not honoured (review round 1, R3).
             forced = bool(usage_refresh["task_forced"])
         else:
-            if want_force:
+            if want_force and not after_spend:
                 elapsed = now_ms - int(usage_refresh["last_forced_ms"])
                 if elapsed < REFRESH_FLOOR_MS:
                     throttled = True
                     retry_after_ms = REFRESH_FLOOR_MS - elapsed
-            forced = want_force and not throttled
+            forced = (want_force or after_spend) and not throttled
             if forced:
                 usage_refresh["last_forced_ms"] = now_ms
             task = asyncio.create_task(_refresh_phone_usage(forced))
@@ -9620,22 +9651,35 @@ def build_app(daemon: MobileDaemon):
 
     async def api_usage_reset(request: Request) -> Response:
         """``POST /api/usage/reset`` -- spend ONE usage-reset credit, body
-        ``{provider, account_index, account_count, redeem_request_id}``.
+        ``{provider, account_index, account_count, redeem_request_id,
+        credential_ref?}``.
 
-        IDENTITY-FREE. The phone never names a person: ``account_index`` is the
-        0-based number its own card showed and ``account_count`` the total it
-        displayed, both from the projection this daemon sent. The daemon turns
-        that index back into a stored login itself
-        (:func:`_phone_reset_identity`) so no email, hash or credential id ever
-        crosses the tunnel -- in either direction.
+        NO PERSON NAMES CROSS THE TUNNEL. ``account_index`` is the 0-based
+        number the phone's own card showed, ``account_count`` the total it
+        displayed, and ``credential_ref`` the opaque pointer the projection
+        published beside a spendable count. The daemon turns those back into a
+        stored login itself (:func:`_phone_reset_identity`): no email and no
+        hash ever crosses, and the ref is a pointer the daemon minted for a row
+        it had already offered -- never a name the phone made up.
 
-        WHY AN INDEX MISMATCH REFUSES (409 ``accounts_changed``) instead of
-        resolving anyway: an index is a position in a list that can change
-        (a login added or removed since the sheet painted). Resolving the same
-        index against a shorter list silently SPENDS the credit on the sibling
-        that moved into that position -- an irreversible action on an account
-        the operator did not confirm. The refusal asks the phone to refresh,
-        which re-numbers the cards and lets the operator confirm again.
+        WHY THE REF, ON TOP OF THE INDEX. An index is a position in a list that
+        can change (a login added or removed since the sheet painted), so the
+        same index can name a different login on the next read -- and resolving
+        it anyway would SPEND a credit on an account the operator never
+        confirmed. A ref names the ROW, so a login removed and replaced by
+        another (count unchanged, which the index/count check cannot see) is a
+        409 ``accounts_changed`` instead of a sibling's credit. A phone that
+        predates the ref still works: the index/count pair is checked exactly
+        as before.
+
+        WHY A CONTROLLER REFUSAL IS AN OUTCOME, NOT A 500. ``consume_usage_reset``
+        sets ``refused`` when it decided BEFORE anything reached the vendor (no
+        stored login, an unmintable token, the provider guard). Nothing was
+        spent, so answering ``failed`` -- whose copy says the credit's fate is
+        unknown -- would send the operator to retry a spend that never happened
+        and, worse, hide that the account set moved (R1/Q1). It answers
+        ``outcome="refused"`` instead: definitive, so the phone drops the
+        idempotency id and shows refusal copy.
 
         POST, not GET, for the reason the refresh route gives: this reaches a
         vendor and writes (a spent credit, dropped cache row, rotated tokens),
@@ -9646,8 +9690,7 @@ def build_app(daemon: MobileDaemon):
         reset product (422) -- see the codes in the body. ``outcome=failed``
         stays a 200 because the attempt DID reach the vendor: the credit's fate
         is unknown, and the phone must show "couldn't confirm" with a retry
-        that reuses ``redeem_request_id`` rather than a refusal that implies
-        nothing was spent.
+        that reuses ``redeem_request_id``.
         """
         denied = gate(request)
         if denied is not None:
@@ -9664,6 +9707,7 @@ def build_app(daemon: MobileDaemon):
         account_index = payload.get("account_index")
         account_count = payload.get("account_count")
         redeem_request_id = payload.get("redeem_request_id")
+        credential_ref = payload.get("credential_ref")
         # EXACT types, never ``isinstance``: ``bool`` is an ``int`` in Python, so
         # a ``true`` index would otherwise resolve to account 1, and a float or
         # numeric string is a wire bug rather than a number the daemon may
@@ -9679,7 +9723,29 @@ def build_app(daemon: MobileDaemon):
             or not isinstance(redeem_request_id, str)
             or not redeem_request_id
             or len(redeem_request_id) > 200
+            or (
+                credential_ref is not None
+                and (
+                    not isinstance(credential_ref, str)
+                    or not credential_ref
+                    or len(credential_ref) > 200
+                )
+            )
         ):
+            return JSONResponse(
+                {"error": "Invalid reset request", "code": "bad_request"}, status_code=400
+            )
+        # UNKNOWN KEYS ARE A 400 (QA round 1, Q5). Only these five address a
+        # spend; an ignored extra key is how a future client comes to believe
+        # something it sent was honoured (``email`` in particular reads like an
+        # account pin, and nothing here would apply it).
+        if set(payload) - {
+            "provider",
+            "account_index",
+            "account_count",
+            "redeem_request_id",
+            "credential_ref",
+        }:
             return JSONResponse(
                 {"error": "Invalid reset request", "code": "bad_request"}, status_code=400
             )
@@ -9703,29 +9769,41 @@ def build_app(daemon: MobileDaemon):
         # and a double tap must lose here rather than spend two credits.
         usage_resets[claim] = True
         try:
-            identity = await asyncio.to_thread(
-                _phone_reset_identity, provider, account_index, account_count
+            login = await asyncio.to_thread(
+                _phone_reset_identity, provider, account_index, account_count, credential_ref
             )
-            if identity is None:
+            if login is None:
                 logger.info("phone usage reset: refused, the account list moved")
                 return JSONResponse(
                     {"error": "The account list changed", "code": "accounts_changed"},
                     status_code=409,
                 )
-            result = await _consume_phone_usage_reset(provider, identity, redeem_request_id)
+            result = await _consume_phone_usage_reset(
+                provider, login.identity, redeem_request_id, login.credential_ref
+            )
         finally:
             usage_resets.pop(claim, None)
         outcome = result.outcome if result.outcome in _PHONE_RESET_OUTCOMES else "failed"
-        windows_reset = result.windows_reset
+        if getattr(result, "refused", False):
+            # Pre-send refusal: nothing was spent, so this must not read as an
+            # unknown outcome. The detail stays in the log, never on the wire:
+            # it can name the login the daemon refused to spend on.
+            logger.info("phone usage reset: refused before any vendor call")
+            outcome = "refused"
+            windows_reset = 0
+        else:
+            windows_reset = result.windows_reset
         if type(windows_reset) is not int or windows_reset < 0:
             windows_reset = 0
         body: dict[str, Any] = {}
         if outcome in _PHONE_RESET_REFRESH_OUTCOMES:
             # The credit is spent and the shared cache row was dropped: the
             # numbers on the phone are stale by construction, so the answer
-            # re-fetches through the refresh route's own bounded path. A
-            # timeout still answers this route's envelope-less reset.
-            refreshed = await _answer_phone_refresh(True)
+            # re-fetches through the refresh route's own bounded path -- a
+            # fetch of its own even when another refresh is already running,
+            # because that one may have read the vendor before this spend
+            # (R3/Q4). A timeout still answers this route's envelope-less reset.
+            refreshed = await _answer_phone_refresh(True, after_spend=True)
             if refreshed is not None:
                 body = refreshed
         else:
@@ -11194,11 +11272,24 @@ def _default_start_cwd() -> str:
     return str(Path.home())
 
 
-#: The five answers a phone's reset card may show. Anything else the controller
+class _PhoneResetLogin(NamedTuple):
+    """The stored login a phone reset resolved to, and the ref that names it.
+
+    ``identity`` is the label :meth:`ProviderController.consume_usage_reset`
+    matches on; ``credential_ref`` is the one-row pointer that keeps a shared
+    label from being refused as ambiguous. Neither leaves the daemon.
+    """
+
+    identity: str
+    credential_ref: str
+
+
+#: The six answers a phone's reset card may show. Anything else the controller
 #: cannot name reads as ``failed``: an unknown outcome is an UNKNOWN spend, and
-#: that is the one outcome whose copy says so.
+#: that is the one outcome whose copy says so. ``refused`` is its opposite --
+#: decided before anything was sent, so nothing was spent.
 _PHONE_RESET_OUTCOMES = frozenset(
-    {"reset", "nothing_to_reset", "no_credit", "already_redeemed", "failed"}
+    {"reset", "nothing_to_reset", "no_credit", "already_redeemed", "failed", "refused"}
 )
 
 #: Outcomes after which the shared usage-cache row is GONE (see
@@ -11207,13 +11298,20 @@ _PHONE_RESET_OUTCOMES = frozenset(
 _PHONE_RESET_REFRESH_OUTCOMES = frozenset({"reset", "already_redeemed"})
 
 
-def _phone_reset_identity(provider: str, account_index: int, account_count: int) -> str | None:
+def _phone_reset_identity(
+    provider: str,
+    account_index: int,
+    account_count: int,
+    credential_ref: str | None = None,
+) -> _PhoneResetLogin | None:
     """The stored login the phone's "Account N" numbers, or ``None`` when it cannot be proven.
 
-    The phone sends an INDEX, never a name (no email, hash or credential id may
-    cross the tunnel in either direction), so the daemon turns that index back
-    into the identity :meth:`ProviderController.consume_usage_reset` selects a
-    credential by -- here, and only in this process.
+    The phone sends an INDEX and, when the projection published one, the REF of
+    the row it displayed. The daemon turns them back into the identity and ref
+    :meth:`ProviderController.consume_usage_reset` selects a credential by --
+    here, and only in this process. No email and no hash ever crosses the
+    tunnel; the ref is a pointer this daemon minted for a row it had already
+    offered, so echoing it back names nothing the phone was not shown.
 
     Resolution mirrors the projection exactly, and checks BOTH halves before
     naming anyone:
@@ -11225,6 +11323,14 @@ def _phone_reset_identity(provider: str, account_index: int, account_count: int)
       credential row id: that is the ranking key
       :meth:`ProviderController.order_persisted_usage_reports` sorts by, and
       the reason "Account N" stays stable across reads.
+
+    A ``credential_ref`` is resolved FIRST and by ROW, not by position: that is
+    what makes a removed-and-replaced login (count unchanged, so the checks
+    above cannot see it) a refusal instead of a sibling's credit (Q3). The ref
+    must also still be one the projection published for this provider, so a
+    phone cannot aim a spend at a login it was never offered. A ref that no
+    longer exists, or that the cached envelope does not carry, is ``None`` --
+    the same ``accounts_changed`` refusal an index mismatch earns.
 
     Any disagreement is ``None`` -- a refusal, never a guess. A reset cannot be
     refunded on the wrong login, so an unresolvable index must ask the phone to
@@ -11241,7 +11347,9 @@ def _phone_reset_identity(provider: str, account_index: int, account_count: int)
         return None
     try:
         try:
-            snapshot = controller.cached_persisted_usage_reports_read_only(provider)
+            # The ref is read off the same snapshot the projection published, so
+            # "the phone echoed a ref we sent" is checked, not assumed.
+            snapshot = controller.cached_persisted_usage_reports_read_only(provider, keep_refs=True)
         except Exception:  # noqa: BLE001 -- unreadable is not "no accounts"
             return None
         if snapshot.unavailable or len(snapshot.reports) != account_count:
@@ -11255,6 +11363,11 @@ def _phone_reset_identity(provider: str, account_index: int, account_count: int)
             return None
         if account_index >= account_count:
             return None
+        published = {
+            ref
+            for ref in (getattr(report, "credential_ref", None) for report in snapshot.reports)
+            if isinstance(ref, str) and ref
+        }
         rows = controller.auth_store.list_credentials(provider)
     finally:
         try:
@@ -11269,13 +11382,38 @@ def _phone_reset_identity(provider: str, account_index: int, account_count: int)
     )
     if len(oauth) != account_count:
         return None
+    if credential_ref:
+        if credential_ref not in published:
+            return None
+        row = next(
+            (
+                candidate
+                for candidate in oauth
+                if ProviderController._credential_ref(candidate) == credential_ref
+            ),
+            None,
+        )
+        if row is None:
+            return None
+    else:
+        row = oauth[account_index]
     try:
-        return credential_identity(oauth[account_index])
+        identity = credential_identity(row)
     except Exception:  # noqa: BLE001 -- an unlabelled row cannot be named, so no reset
         return None
+    if not identity:
+        return None
+    # The row's OWN ref always goes on to the controller, even when the phone
+    # sent none: a label two logins share is refused as ambiguous without one,
+    # which is the whole reason a workspace login could never spend (R1/Q1).
+    return _PhoneResetLogin(
+        identity=identity, credential_ref=ProviderController._credential_ref(row)
+    )
 
 
-async def _consume_phone_usage_reset(provider: str, identity: str, redeem_request_id: str) -> Any:
+async def _consume_phone_usage_reset(
+    provider: str, identity: str, redeem_request_id: str, credential_ref: str | None = None
+) -> Any:
     """Spend one credit through a WRITING persisted-only controller.
 
     A different factory from the read-only seam on purpose: the spend rotates the
@@ -11284,8 +11422,8 @@ async def _consume_phone_usage_reset(provider: str, identity: str, redeem_reques
     (the SQLite handles are thread-affine, as the refresh path notes) and closed
     in the same call, so no handle outlives the request.
 
-    ``identity`` is resolved by the caller from the phone's index and is used
-    ONLY here -- it never reaches the response.
+    ``identity`` and ``credential_ref`` are resolved by the caller from the
+    phone's index/ref and are used ONLY here -- never in the response.
     """
     from typing import cast
 
@@ -11298,7 +11436,9 @@ async def _consume_phone_usage_reset(provider: str, identity: str, redeem_reques
     except Exception:  # noqa: BLE001 -- an unopenable store is an UNCONFIRMED attempt
         return ResetConsumeResult(outcome="failed", detail="store unavailable")
     try:
-        return await controller.consume_usage_reset(provider, identity, redeem_request_id)
+        return await controller.consume_usage_reset(
+            provider, identity, redeem_request_id, credential_ref
+        )
     finally:
         try:
             controller.close()
@@ -11322,7 +11462,12 @@ def _cached_phone_usage() -> dict[str, Any]:
     # persisted-only inventory, never environment/runtime/config accounts.
     controller = ProviderController.read_only_for_persisted_usage()
     try:
-        snapshot = controller.cached_persisted_usage_reports_read_only(None)
+        # The ref is kept on purpose: the projection publishes it for rows whose
+        # reset credits it offers, so a spend can name the login the operator
+        # confirmed even after a login churn (R1/Q1/Q3). Every other row -- and
+        # every row with nothing spendable -- still crosses ref-free; see
+        # ``_phone_usage_projection``.
+        snapshot = controller.cached_persisted_usage_reports_read_only(None, keep_refs=True)
     finally:
         try:
             controller.close()
@@ -11357,11 +11502,19 @@ def _phone_usage_projection(
     (an early Muse-only answer, a test double) each report is numbered by its
     order within its provider, which is the best the payload can say.
 
+    ``credential_ref`` is published ONLY on a row that reports a positive
+    ``resets_available``. It is an opaque pointer at ONE stored login (the
+    ``identity_key`` or ``cred:<row id>`` the store already ranks by), never a
+    label: it exists so a spend can name the row the operator confirmed after
+    the login list moves, and a row with no credit to spend has no use for it.
+    Withholding it everywhere else keeps the tunnel's rule intact -- the phone
+    is told about a login only when it is being offered a spend on that login.
+
     Every key added after the first release (``account_index``,
     ``account_count``, ``state``, ``credential_invalid``, ``provider_name``,
-    ``resets_available``, and per limit ``remaining_fraction``/``tone``) is
-    ADDITIVE: older phone builds read only the original keys and must keep
-    working.
+    ``resets_available``, ``credential_ref``, and per limit
+    ``remaining_fraction``/``tone``) is ADDITIVE: older phone builds read only
+    the original keys and must keep working.
     """
     import math
 
@@ -11465,13 +11618,21 @@ def _phone_usage_projection(
         # Spendable reset credits, or None when the vendor reported no
         # trustworthy count. The SAME exact-int rule the fetcher and the panel
         # apply: ``bool`` is an ``int`` in Python, and a count that reaches a
-        # button which SPENDS something must be a plain non-negative int. The
-        # count travels; the identity it would be spent on never does -- the
-        # phone addresses an account by index and the daemon resolves it
-        # (``_phone_reset_identity``).
+        # button which SPENDS something must be a plain non-negative int.
         resets_available = getattr(report, "resets_available", None)
         if type(resets_available) is not int or resets_available < 0:
             resets_available = None
+        # The pointer travels ONLY with a credit to spend on it (see the
+        # docstring): every other row states its numbers and nothing about who
+        # they belong to.
+        credential_ref = getattr(report, "credential_ref", None)
+        if (
+            not isinstance(resets_available, int)
+            or resets_available <= 0
+            or not isinstance(credential_ref, str)
+            or not credential_ref
+        ):
+            credential_ref = None
         result.append(
             {
                 "provider": provider,
@@ -11488,6 +11649,11 @@ def _phone_usage_projection(
                 "state": usage_report_state(report),
                 "credential_invalid": report.credential_invalid,
                 "resets_available": resets_available,
+                # The pointer at ONE stored login, offered only where there is a
+                # credit to spend on it: it is what lets the spend survive a
+                # login churn (Q3), and it names no person. An older phone build
+                # ignores it.
+                "credential_ref": credential_ref,
             }
         )
     return result
@@ -11524,7 +11690,9 @@ async def _refresh_phone_usage(force: bool) -> dict[str, Any]:
         finally:
             # The factory always builds a concrete AuthStore (see the GET's note).
             cast(AuthStore, controller.auth_store).close()
-    stripped = [ProviderController._without_identity(report) for report, _, _ in ordered]
+    stripped = [
+        ProviderController._without_identity(report, keep_ref=True) for report, _, _ in ordered
+    ]
     fetched = [r.fetched_at for r in stripped if r.fetched_at > 0]
     # Only a report fetched after this refresh started proves a vendor was
     # reached. The rest are last-good rows kept for accounts whose probe failed

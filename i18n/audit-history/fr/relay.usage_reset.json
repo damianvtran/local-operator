@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "relay.usage_reset",
-  "history_sha256": "595275a7afc032db9cf3e63e8e7ac1ab6d0c7885d3130cc0b17109b2eceddd3b",
+  "history_sha256": "64dfd840836f095c4fab7e34e9ddaf93d079fa41fb17cb45fa3acb58c987ca47",
   "entries": [
     {
       "locale": "fr",
@@ -24,6 +24,27 @@
       },
       "status": "passed",
       "note": "12-key phone usage-reset sheet, all keys audited against the English source and its context sidecar: the failed outcome reads as UNKNOWN with the no-second-credit reassurance, refused is distinct, nothing-to-reset is distinct from no-credit, placeholders and plural arms match, widths fit maxCells. Deferred minors: glossary consistency for 'window'/'reset credit' with each locale's relay.shell wording, and fr' outcome_failed phrasing."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.usage_reset",
+      "source_sha256": "4c18df36457dfb787443036688aa4d37d41bf00511a64ca3e56805b1b73efab0",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; phone slice) - lop subagent 26125c9e4b09",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent c24f69db93bb)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "12-key phone usage-reset sheet, all keys audited against the English source and its context sidecar: the failed outcome reads as UNKNOWN with the no-second-credit reassurance, refused is distinct, nothing-to-reset is distinct from no-credit, placeholders and plural arms match, widths fit maxCells. Deferred minor (fr's own): the badge abbreviates 'Réinitialisation' to 'Réinit.', the only abbreviation in either namespace -- relay.shell spells the same event out ('Réinitialisation : {when}') -- so revisit it if the badge is ever given room."
     }
   ]
 }

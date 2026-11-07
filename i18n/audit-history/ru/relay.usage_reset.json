@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "relay.usage_reset",
-  "history_sha256": "d21182a592b02660845782f676cde7fabf43a4c69650bb833d1fcc5c73e73f4b",
+  "history_sha256": "b3421c49383a5a37be540a4dd45f37b838790b319911bf07489cdfb82549cf13",
   "entries": [
     {
       "locale": "ru",
@@ -24,6 +24,27 @@
       },
       "status": "passed",
       "note": "12-key phone usage-reset sheet, all keys audited against the English source and its context sidecar: the failed outcome reads as UNKNOWN with the no-second-credit reassurance, refused is distinct, nothing-to-reset is distinct from no-credit, placeholders and plural arms match, widths fit maxCells. Deferred minors: glossary consistency for 'window'/'reset credit' with each locale's relay.shell wording, and fr' outcome_failed phrasing."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.usage_reset",
+      "source_sha256": "4c18df36457dfb787443036688aa4d37d41bf00511a64ca3e56805b1b73efab0",
+      "translator": {
+        "agent": "translator (lopdev i18n wave; phone slice) - lop subagent dc89f611738e",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor (independent; lop subagent c24f69db93bb)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "12-key phone usage-reset sheet, all keys audited against the English source and its context sidecar: the failed outcome reads as UNKNOWN with the no-second-credit reassurance, refused is distinct, nothing-to-reset is distinct from no-credit, placeholders and plural arms match, widths fit maxCells. Deferred minor (ru's own): the badge 'Сброс · {count}' is the bare noun the shell's own countdown also uses ('сброс через {countdown}'), so on the card only the accessible name separates 'a reset you can spend' from 'a reset that is due'."
     }
   ]
 }

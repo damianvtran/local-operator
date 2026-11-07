@@ -1143,7 +1143,7 @@ class ProviderController:
         return fingerprint_accounts(parts) if parts else "none"
 
     def cached_persisted_usage_reports_read_only(
-        self, provider: str | None = None
+        self, provider: str | None = None, *, keep_refs: bool = False
     ) -> "ReadOnlyUsageSnapshot":
         """Cached usage for the CURRENT PERSISTED account, read-only.
 
@@ -1158,6 +1158,12 @@ class ProviderController:
         (``unavailable=True``, never rendered as zero credits), a genuine empty
         result (``reports == []``, ``unavailable=False``), and freshness
         (``may_be_stale``/``cached_at``).
+
+        ``keep_refs`` keeps each report's ``credential_ref``. The default strips
+        it, because it names ONE stored login; the phone's usage projection is
+        the one caller that needs it, and only to publish it for the rows whose
+        credits it offers to spend (``_phone_usage_projection`` decides that
+        per row -- a row with no spendable credit gets no ref).
 
         Freshness is load-bearing, not decorative: an ``immutable=1`` snapshot
         (taken where a WAL read would create a file) cannot see an uncheckpointed
@@ -1204,7 +1210,9 @@ class ProviderController:
                 except Exception:  # noqa: BLE001 — unreadable metadata is unavailable
                     return ReadOnlyUsageSnapshot(unavailable=True)
                 return ReadOnlyUsageSnapshot(
-                    reports=[self._without_identity(report) for report in reports],
+                    reports=[
+                        self._without_identity(report, keep_ref=keep_refs) for report in reports
+                    ],
                     may_be_stale=bool(getattr(store, "read_only_sidecar_present", lambda: False)()),
                     cached_at=max((report.fetched_at for report in reports), default=None),
                 )
@@ -1246,7 +1254,9 @@ class ProviderController:
         # "Account N" labels could not be tied to a stable login.
         ordered = self.order_persisted_usage_reports(out, store)
         return ReadOnlyUsageSnapshot(
-            reports=[self._without_identity(report) for report, _, _ in ordered],
+            reports=[
+                self._without_identity(report, keep_ref=keep_refs) for report, _, _ in ordered
+            ],
             may_be_stale=may_be_stale,
             cached_at=cached_at,
             account_positions=[(index, count) for _, index, count in ordered],
@@ -1274,8 +1284,15 @@ class ProviderController:
         )
 
     @staticmethod
-    def _without_identity(report: UsageReport) -> UsageReport:
-        """A copy of ``report`` with the account identity removed for the wire."""
+    def _without_identity(report: UsageReport, *, keep_ref: bool = False) -> UsageReport:
+        """A copy of ``report`` with the account identity removed for the wire.
+
+        ``keep_ref`` is opt-in and used ONLY by the phone's usage projection: it
+        publishes the ref for the rows whose reset credits it offers, so the
+        phone can name the login it confirmed after a login churn (an index
+        alone names a position, not an account). Everything else -- and every
+        row with nothing spendable -- still crosses the tunnel ref-free.
+        """
         from local_operator.providers.usage import META_MUSE_USAGE_NOTES
 
         # Fixed Muse provenance is safe and distinguishes unknown quota from
@@ -1286,10 +1303,14 @@ class ProviderController:
             else None
         )
         # ``credential_ref`` is an identity by another name -- a stable pointer at
-        # ONE stored login -- so it is stripped with the label it stands in for.
-        # Leaving it would hand the phone a way to name (and, through any future
-        # write path, address) an account it is deliberately not told about.
-        return dataclasses.replace(report, identity=None, notes=notes, credential_ref=None)
+        # ONE stored login -- so it is stripped with the label it stands in for,
+        # unless the caller is the phone projection (see ``keep_ref``).
+        return dataclasses.replace(
+            report,
+            identity=None,
+            notes=notes,
+            credential_ref=report.credential_ref if keep_ref else None,
+        )
 
     @staticmethod
     def _stored_row_label(row: Any) -> str | None:
