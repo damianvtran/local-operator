@@ -667,12 +667,12 @@ def test_remote_uses_and_bare_directory_word_do_not_reach(tmp_path: Path) -> Non
     _exempt(_reach(tmp_path, {".github/workflows/release.yml": wf}))
 
 
-# --- round-3 minor M1: a harness workflow that gains release powers ------------------
-# A harness workflow joins the shipping pipeline through its trigger, secrets,
-# permissions and publishing steps, not by being named. A changed harness
-# workflow whose HEAD version has a trigger other than pull_request /
-# workflow_dispatch, a secret other than GITHUB_TOKEN, a write permission, or an
-# upload/publish/sign step the reviewed head lacked is a round.
+# --- workflow/action files never take the carve-out (#3540 round 3) -----------------
+# Rounds 1-3 tried to exempt a changed harness workflow unless it could ship
+# (trigger, secret, write permission, publishing step), read by three successive
+# YAML readers; reviewers broke each one. A changed workflow/action is now ALWAYS
+# a round. Every attack those rounds found is kept below as a regression: each
+# changes a harness workflow, so each must exit 1 — now by the structural rule.
 
 _SAFE_NATIVE = (
     "on:\n  pull_request:\n  workflow_dispatch:\n"
@@ -691,22 +691,58 @@ def _native_delta(tmp_path: Path, head_text: str) -> subprocess.CompletedProcess
     return _run(repo, reviewed, head)
 
 
-def test_harness_workflow_edit_without_new_powers_is_harness_only(tmp_path: Path) -> None:
-    """Negative: same triggers, GITHUB_TOKEN only, read permission, and an upload
-    step the reviewed head already had — a harness edit, no round."""
+def _workflow_round(result: subprocess.CompletedProcess[str]) -> None:
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "workflow/action file changed: `.github/workflows/native.yml`" in result.stdout
+    assert "never take the carve-out" in result.stdout
+
+
+def test_harness_workflow_edit_without_new_powers_opens_a_round(tmp_path: Path) -> None:
+    """Same triggers, GITHUB_TOKEN only, read permission, an upload step the
+    reviewed head already had: exempt in rounds 1-2, a round now — whether a
+    workflow edit is harmless is not decidable without parsing YAML as GitHub."""
     edited = _SAFE_NATIVE.replace("bun scripts/ci/check.ts", "bun scripts/ci/check.ts --fast")
-    _exempt(_native_delta(tmp_path, edited))
+    _workflow_round(_native_delta(tmp_path, edited))
 
 
 def test_harness_workflow_comment_naming_powers_opens_a_round(tmp_path: Path) -> None:
-    """INTENDED over-report (#3540 round 1): powers are read from the RAW text,
-    comments included. Stripping comments hid real shell (`N="a #"; gh release
-    create`, review R1) and `${{ }}` inside block scalars, which GitHub still
-    interpolates (QA Q1); a comment that only names a power costs one round."""
+    """QA case (g): a comment that only names powers — a round."""
     edited = "# was on: push with secrets.NPM_TOKEN and contents: write\n" + _SAFE_NATIVE
-    result = _native_delta(tmp_path, edited)
+    _workflow_round(_native_delta(tmp_path, edited))
+
+
+def test_harness_action_and_uses_named_yaml_open_a_round(tmp_path: Path) -> None:
+    """Outside `.github/`: an `action.yml` anywhere, and any YAML a `uses: ./…`
+    names (here a reusable workflow under scripts/ci), are workflow files too."""
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(
+        repo,
+        {
+            "scripts/ci/action.yml": "runs:\n  using: composite\n  steps: []\n",
+            "scripts/ci/reuse.yaml": "on: workflow_call\njobs: {}\n",
+            ".github/workflows/native.yml": "jobs:\n  r:\n    uses: './scripts/ci/reuse.yaml'\n",
+        },
+        "ci: local action and reusable workflow",
+    )
+    head = _commit(
+        repo,
+        {
+            "scripts/ci/action.yml": "runs:\n  using: composite\n  steps: [{run: x}]\n",
+            "scripts/ci/reuse.yaml": "on: workflow_call\njobs: {a: {}}\n",
+        },
+        "ci: edit both",
+    )
+    result = _run(repo, reviewed, head)
     assert result.returncode == 1, result.stdout + result.stderr
-    assert "secret `NPM_TOKEN`" in result.stdout
+    assert "workflow/action file changed: `scripts/ci/action.yml`" in result.stdout
+    assert "workflow/action file changed: `scripts/ci/reuse.yaml`" in result.stdout
+
+
+def test_plain_harness_yaml_not_named_by_uses_stays_harness_only(tmp_path: Path) -> None:
+    """Negative: a harness YAML data file no `uses:` names is not a workflow file."""
+    repo, reviewed = _setup(tmp_path)
+    head = _commit(repo, {"e2e/fixture.yml": "cells: [a, b]\n"}, "test(e2e): fixture")
+    _exempt(_run(repo, reviewed, head))
 
 
 _ATTACK_TAIL = (
@@ -774,10 +810,10 @@ def test_harness_workflow_power_attacks_open_a_round(
     tmp_path: Path, head_text: str, reason: str
 ) -> None:
     """Every round-1 reviewer/QA attack on #3540 that exited 0, as a regression."""
-    result = _native_delta(tmp_path, head_text)
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "harness workflow `.github/workflows/native.yml` can ship:" in result.stdout
-    assert reason in result.stdout
+    # `reason` names the power the attack aimed at; the structural rule catches
+    # it without reading the power at all.
+    del reason
+    _workflow_round(_native_delta(tmp_path, head_text))
 
 
 @pytest.mark.parametrize(
@@ -817,18 +853,16 @@ def test_harness_workflow_gaining_release_powers_opens_a_round(
 ) -> None:
     old, new = change
     assert old in _SAFE_NATIVE
-    result = _native_delta(tmp_path, _SAFE_NATIVE.replace(old, new, 1))
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "harness workflow `.github/workflows/native.yml` can ship:" in result.stdout
-    assert reason in result.stdout
+    del reason  # the power aimed at; the structural rule needs no reading of it
+    _workflow_round(_native_delta(tmp_path, _SAFE_NATIVE.replace(old, new, 1)))
 
 
-# --- #3540 round 2: comments after events, CRLF, YAML indirection ----------------------
-# Raw-text matching sees bytes before YAML decodes them. Every construct by which
-# YAML makes the parsed value differ from the raw spelling — a backslash escape
-# or line join inside a double-quoted scalar, an anchor/alias, an explicit tag,
-# a complex key — now opens a round on a changed harness workflow (fail closed);
-# ship files are scanned raw AND with double-quoted escapes decoded.
+# --- #3540 rounds 2-3: attacks on the YAML scanners, kept as regressions -----------
+# Comments after events, CRLF, double-quoted escapes and line joins, anchors,
+# tags, complex keys (round 2), and plain scalars that desynced the scanner's
+# quote or block-scalar tracking (round 3: review R3-M1, QA Q9). All change a
+# harness workflow, so all exit 1 by the structural rule. Ship files are still
+# scanned raw AND with double-quoted escapes decoded (last test).
 
 _S = _SAFE_NATIVE
 _BS = "\\"
@@ -894,6 +928,31 @@ _BS = "\\"
             _S.replace("  workflow_dispatch:\n", '  workflow_dispatch:\n  "unterminated\n'),
             "unterminated",
         ),
+        # Review R3-M1: ` - '` in a plain scalar desynced quote tracking.
+        (
+            "name: native - 'evidence\n"
+            + _S.replace("contents: read", f'contents: "wr{_BS}x69te"')
+            + "      - run: echo 'done'\n",
+            "escape",
+        ),
+        (
+            'name: native - "evidence\n'
+            + _S.replace("contents: read", f'contents: "wr{_BS}x69te"'),
+            "escape",
+        ),
+        # QA Q9: ` - |` inside a flow collection read as a block-scalar header.
+        (
+            "on: [pull_request, workflow_dispatch]\n"
+            "jobs: {e2e: {name: x - |\n  , runs-on: ubuntu-latest, permissions: "
+            f'{{contents: "{_BS}x77rite"}}, '
+            f'steps: [{{run: "echo ${{{{ {_BS}x73ecrets.NPM_TOKEN }}}}"}}]}}}}\n',
+            "escape",
+        ),
+        (
+            "on: {pull_request: {branches: [x - |\n  ]}, workflow_dispatch: null, "
+            f'"{_BS}x70ush": null}}\n' + _ATTACK_TAIL,
+            "escape",
+        ),
     ],
     ids=[
         "scalar-event-comment",
@@ -911,31 +970,19 @@ _BS = "\\"
         "tag",
         "complex-key",
         "unterminated-dq",
+        "r3-name-single-quote",
+        "r3-name-double-quote",
+        "q9-fj-flow-block-header",
+        "q9-fo-flow-escaped-event",
     ],
 )
-def test_harness_workflow_yaml_indirection_opens_a_round(
+def test_harness_workflow_scanner_attacks_open_a_round(
     tmp_path: Path, head_text: str, reason: str
 ) -> None:
-    result = _native_delta(tmp_path, head_text)
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "harness workflow `.github/workflows/native.yml` can ship:" in result.stdout
-    assert reason in result.stdout
-
-
-def test_shell_backslashes_and_plain_scalar_quotes_are_not_indirection(tmp_path: Path) -> None:
-    """Negative: backslashes in a `run: |` block scalar (shell line joins,
-    `printf "a\\n"`) and a plain scalar holding quotes are literal text to YAML —
-    only a DOUBLE-QUOTED scalar decodes escapes, so these stay harness-only."""
-    edited = _S.replace(
-        "      - run: bun scripts/ci/check.ts\n",
-        "      - run: |\n"
-        f"          bun scripts/ci/check.ts {_BS}\n"
-        "            --fast\n"
-        f'          printf "a{_BS}n" | grep -E "x{_BS}.y"\n'
-        "        shell: bash\n"
-        f'      - run: echo "plain {_BS}t scalar"\n',
-    )
-    _exempt(_native_delta(tmp_path, edited))
+    # `reason` names the power the attack aimed at; the structural rule catches
+    # it without reading the power at all.
+    del reason
+    _workflow_round(_native_delta(tmp_path, head_text))
 
 
 @pytest.mark.parametrize(

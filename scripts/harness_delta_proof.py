@@ -60,10 +60,10 @@ each has a regression test):
   hence new — workflow is product.
 - a harness test file (``test_*.py``, ``*_test.py``, ``*.test.*``, ``*.spec.*``)
   that names or imports a ship-closure file is product: it guards shipped code.
-- a changed harness workflow/action whose head version has a trigger other than
-  ``pull_request``/``workflow_dispatch``, a secret other than ``GITHUB_TOKEN``, a
-  ``write`` permission, or an upload/publish/sign step the reviewed version
-  lacked is a round: a workflow ships through its powers, not its name.
+- any changed file under ``.github/``, any ``action.yml``/``action.yaml``, and any
+  YAML file a ``uses: ./…`` step names is a round, harness-declared or not:
+  whether a workflow can ship is not decidable without parsing YAML the way
+  GitHub does, so workflow/action files never take the carve-out.
 - ``uses: ./<dir>`` names every file under ``<dir>`` (a local action is a
   directory, spelled without the trailing slash the directory rule looks for).
 - an unparsable tsconfig/alias file at head is exit 2 rather than a silent
@@ -616,148 +616,18 @@ def ship_closure(repo: Path, head: str, manifest: Manifest) -> Closure:
     return Closure(origin, problems, index)
 
 
-# --- harness workflow powers (round-3 M1) -----------------------------------------
+# --- workflow/action files never take the carve-out -------------------------------
 #
-# A harness workflow is exempt-able only while it CANNOT ship: it joins the
-# shipping pipeline through its trigger, secrets, permissions and publishing
-# steps, not by being named. So a changed harness workflow/action whose HEAD
-# version holds any of these is a round, whatever the closure says.
-#
-# Everything here reads the RAW text, comments included, and never parses YAML
-# structure. #3540 round 1 broke a line-based structural reader eight ways (a
-# `#` inside shell quotes or a block scalar is not a comment, and GitHub still
-# interpolates `${{ }}` there; quoted keys and values; event sequences at the
-# key's own indent; multi-line flow sequences; `toJSON(secrets)`). A raw-text
-# match over-reports instead: a comment that only NAMES a power costs one round,
-# which is the failure direction the invariant allows.
-
-#: GitHub's documented workflow trigger events ("Events that trigger
-#: workflows"), plus `workflow_call`, `tags` (a push/create filter) and
-#: `image_version`. `pull_request` and `workflow_dispatch` are deliberately
-#: absent: they are the two a harness workflow may keep.
-_TRIGGER_EVENTS = (
-    "branch_protection_rule check_run check_suite create delete deployment "
-    "deployment_status discussion discussion_comment fork gollum image_version "
-    "issue_comment issues label merge_group milestone page_build project "
-    "project_card project_column public pull_request_review "
-    "pull_request_review_comment pull_request_target push registry_package release "
-    "repository_dispatch schedule status tags watch workflow_call workflow_run"
-).split()
-#: An event as a YAML key (`push:`, `"push":`), a sequence item (`- push`), a
-#: flow item (`[pull_request, push]`, `{push: …}`) or a scalar (`on: push`),
-#: quoted or not, with or without a trailing comment (`- push  # nightly`) or CR
-#: (#3540 round 2). Bounded: the event is a literal, the gaps are `[ \t]*`.
-_EVENT = re.compile(
-    r"""(?m)(?:^|[-\[{,:])[ \t]*["']?("""
-    + "|".join(_TRIGGER_EVENTS)
-    + r""")["']?[ \t]*(?=[:,\]}#\r]|$)"""
-)
-#: Any `secrets` other than the exact `secrets.GITHUB_TOKEN`: `secrets.X`,
-#: `secrets['X']`, `toJSON(secrets)`, `secrets: inherit` quoted or not. GitHub
-#: context names are case-insensitive, so the match is too.
-_SECRETS = re.compile(r"(?i)\bsecrets\b")
-_GITHUB_TOKEN = re.compile(r"\bsecrets\.GITHUB_TOKEN\b")
-_WRITE = re.compile(r"""\bwrite(?:-all)?\b""")
-#: A `uses:` value, any YAML shape — line start, `- `, flow `{uses: …}`, quoted key.
-_USES_VALUE = re.compile(r"""["']?\buses["']?[ \t]*:[ \t]*["']?([^\s'",}\]#]+)""")
-_PUBLISH_USES = re.compile(
-    r"(?i)(upload|publish|release|deploy|sign|attest|cosign|sigstore|push|pages)"
-)
-_PUBLISH_RUN = re.compile(
-    r"\b(gh release|gh api[^\n]*releases|(?:npm|pnpm|yarn|bun) publish|twine upload|"
-    r"uv publish|poetry publish|eas (?:submit|build|update)|fastlane|codesign|cosign|"
-    r"gpg [^\n]*--sign|notarytool|altool|docker push|aws s3 (?:cp|sync)|gsutil|"
-    r"wrangler (?:deploy|publish)|vercel|netlify deploy)\b"
-)
-
-
-#: Value indicators after which (plus a space) a YAML node may start; a node may
-#: also start at the line's indent and inside a flow collection. A quote, `&`,
-#: `*`, `!` or `?` there is YAML syntax; the same character inside a plain
-#: scalar (`run: echo "x"`, `if: ${{ !cancelled() }}`) is literal text.
-_NODE_START = frozenset(":-?")
-#: A block scalar header (`key: |`, `- >-`, `run: |2 # x`) ends its line.
-_BLOCK_HEADER = re.compile(r"""[:-][ \t]+[|>][-+0-9]*$""")
-
-
-def yaml_indirection(text: str) -> list[str]:
-    """Constructs by which YAML makes a parsed value differ from its raw bytes.
-
-    The power checks read raw text, so anything YAML DECODES defeats them: a
-    backslash escape or line join inside a double-quoted scalar (`"wr\\x69te"`,
-    `"se\\⏎crets"`), an anchor/alias (`&ev push` … `*ev`), an explicit tag
-    (`!!str`), a complex key (`? push`) — #3540 round 2 (review R2-M1, QA Q7/Q8).
-    Each one opens a round instead of being decoded here: the checker must not
-    become a YAML implementation to be trusted. Block scalars (`run: |`) are
-    skipped, because their backslashes and `&`/`*` are literal shell; a quote
-    that never closes is reported too (fail closed, not guessed).
-    """
-    found: set[str] = set()
-    lines = text.split("\n")
-    block_col: int | None = None
-    quote: str | None = None  # an open quoted scalar spanning lines
-    flow = 0  # open flow collections ([ / {), which may span lines
-    for line in lines:
-        indent = len(line) - len(line.lstrip(" \t"))
-        if quote is None and block_col is not None:
-            if not line.strip() or indent > block_col:
-                continue
-            block_col = None
-        i, at_start = (0, True) if quote else (indent, True)
-        comment_at = len(line)
-        while i < len(line):
-            c = line[i]
-            if quote == '"':
-                if c == "\\":
-                    found.add("double-quoted escape or line join")
-                    i += 2
-                    continue
-                if c == '"':
-                    quote, at_start = None, False
-                i += 1
-                continue
-            if quote == "'":
-                if c == "'" and line[i + 1 : i + 2] == "'":
-                    i += 2
-                    continue
-                if c == "'":
-                    quote, at_start = None, False
-                i += 1
-                continue
-            if c == "#" and (i == 0 or line[i - 1] in " \t"):
-                comment_at = i
-                break
-            if at_start and c in "\"'":
-                quote = c
-                i += 1
-                continue
-            if at_start and c in "&*" and re.match(r"[&*][^\s,\[\]{}]", line[i:]):
-                found.add("anchor/alias")
-            elif at_start and c == "!":
-                found.add("tag")
-            elif at_start and c == "?" and line[i + 1 : i + 2] in ("", " ", "\t"):
-                found.add("complex key")
-            if c in " \t":
-                at_start = at_start or line[i - 1 : i] in _NODE_START
-            elif c in "[{" and (at_start or flow):
-                # A flow collection opens only where a node may start: inside a
-                # plain scalar (`if: ${{ !cancelled() }}`) a brace is literal.
-                flow, at_start = flow + 1, True
-            elif c in "]}" and flow:
-                flow, at_start = flow - 1, False
-            else:
-                at_start = c == "," and flow > 0
-            i += 1
-        if quote == '"' and line.endswith("\\"):
-            found.add("double-quoted escape or line join")
-        if quote is None and _BLOCK_HEADER.search(line[:comment_at].rstrip()):
-            # Content must be indented past the KEY, not past the line's `- `:
-            # the wider skip would swallow a sibling key such as `shell:`.
-            block_col = len(line) - len(re.sub(r"^[ \t]*(?:-[ \t]+)*", "", line))
-    if quote:
-        found.add("unterminated quoted scalar")
-    return sorted(found)
-
+# #3540 tried to let a changed harness workflow stay exempt unless it could ship
+# — a trigger, a secret, a write permission or a publishing step — read first
+# from YAML structure by a line reader, then from raw text, then with a scanner
+# for YAML indirection (escapes, anchors, tags, complex keys). Reviewers broke
+# every version (rounds 1-3), because each one stood on an invariant that cannot
+# be checked cheaply: "reads YAML the way GitHub does". So the shortcut is not
+# taken: a changed workflow or action is ALWAYS a round. That covers every file
+# under `.github/` and any `*.yml`/`*.yaml` a `uses: ./…` step names (a local
+# action's `action.yml`, a reusable workflow). The probes such workflows RUN can
+# still be exempt-able; the files that decide how they run cannot.
 
 #: YAML double-quoted escapes that spell a different character than their bytes.
 _YAML_ESCAPE = re.compile(
@@ -793,43 +663,35 @@ def reference_text(text: str) -> str:
     return text if not decoded else text + "\n" + decoded
 
 
-def _is_workflow(path: str) -> bool:
-    return bool(re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", path)) or posixpath.basename(
-        path
-    ) in ("action.yml", "action.yaml")
+_YAML_SUFFIXES = (".yml", ".yaml")
 
 
-def _publish_markers(text: str) -> set[str]:
-    markers = {
-        f"publishing step `{action.split('@')[0]}`"
-        for action in _USES_VALUE.findall(text)
-        if _PUBLISH_USES.search(action.split("@")[0])
+def _uses_targets(repo: Path, tree: dict[str, tuple[str, str]]) -> set[str]:
+    """Every YAML file a ``uses: ./…`` step in any head YAML file can load: the
+    named file itself, or ``action.yml``/``action.yaml`` in the named directory.
+    Escapes are decoded first (``"\\x2e/x"``), CRLF normalised."""
+    yamls = {
+        p: oid
+        for p, (mode, oid) in tree.items()
+        if p.endswith(_YAML_SUFFIXES) and mode not in (SYMLINK_MODE, GITLINK_MODE)
     }
-    markers.update(f"publishing step `{m}`" for m in _PUBLISH_RUN.findall(text))
-    return markers
+    texts = _blobs(repo, set(yamls.values()))
+    targets: set[str] = set()
+    for oid in yamls.values():
+        for spec in _LOCAL_USES.findall(reference_text(texts.get(oid, ""))):
+            local = posixpath.normpath(spec.rstrip("/"))
+            targets.update({local, f"{local}/action.yml", f"{local}/action.yaml"})
+    return targets
 
 
-def workflow_powers(head_text: str, reviewed_text: str | None) -> list[str]:
-    """What a changed harness workflow can do at HEAD that it must not.
-
-    Triggers, secrets and write permissions are judged on the head text alone;
-    publishing steps only when new against the reviewed text (an evidence upload
-    the clean round already saw is not new power).
-    """
-    head_text = head_text.replace("\r\n", "\n").replace("\r", "\n")
-    found = [f"trigger `{event}`" for event in sorted(set(_EVENT.findall(head_text)))]
-    found += [f"YAML indirection `{kind}`" for kind in yaml_indirection(head_text)]
-    others = _SECRETS.findall(_GITHUB_TOKEN.sub("", head_text))
-    if others:
-        named = sorted(set(re.findall(r"(?i)\bsecrets\.(\w+)", head_text)) - {"GITHUB_TOKEN"})
-        found.append(
-            "secret " + (", ".join(f"`{n}`" for n in named) if named else "`secrets` context")
-        )
-    if "permissions" in head_text and _WRITE.search(head_text):
-        found.append("write permission")
-    before = _publish_markers(reviewed_text) if reviewed_text is not None else set()
-    found += [f"new {m}" for m in sorted(_publish_markers(head_text) - before)]
-    return found
+def _workflow_file(path: str, used: set[str]) -> bool:
+    """A file that decides how a workflow runs: anything under ``.github/``, an
+    ``action.yml``/``action.yaml`` anywhere, or a YAML file a ``uses:`` names."""
+    return (
+        path.startswith(_GITHUB_PREFIX)
+        or posixpath.basename(path) in ("action.yml", "action.yaml")
+        or (path.endswith(_YAML_SUFFIXES) and path in used)
+    )
 
 
 # --- proof ----------------------------------------------------------------------
@@ -909,6 +771,7 @@ def prove(
 
     changes = _changed(repo, reviewed_sha, head_sha)
     closure = ship_closure(repo, head_sha, manifest)
+    used = _uses_targets(repo, _tree(repo, head_sha))
     # DOTALL makes the globs match a path that contains a newline; the batch
     # protocol now speaks ids. The remaining risk is a consumer built on those
     # paths (a shell step, a `git show rev:path`), so a newline or CR anywhere the
@@ -952,14 +815,13 @@ def prove(
                 reasons.append(f"product path changed: `{path}` ({kind})")
             rows.append(f"  - `{path}` — {kind}")
             continue
-        # A deleted harness workflow has no head version and so no powers.
-        if _is_workflow(path) and _new_oid.strip("0"):
-            texts = _blobs(repo, {o for o in (_old_oid, _new_oid) if o.strip("0")})
-            powers = workflow_powers(texts[_new_oid], texts.get(_old_oid))
-            if powers:
-                reasons.append(f"harness workflow `{path}` can ship: {', '.join(powers)}")
-                rows.append(f"  - `{path}` — harness workflow with release powers, product")
-                continue
+        if _workflow_file(path, used):
+            reasons.append(
+                f"workflow/action file changed: `{path}` — workflow/action files never take "
+                "the carve-out"
+            )
+            rows.append(f"  - `{path}` — harness workflow/action file, round")
+            continue
         if path in closure.origin:
             reasons.append(f"ship-reachable: `{path}` named by `{closure.origin[path]}`")
             rows.append(f"  - `{path}` — harness, SHIP-REACHABLE via `{closure.origin[path]}`")
@@ -993,9 +855,8 @@ def prove(
         "- Fail-closed rules applied: gitlink/.gitmodules → product; symlink change → product; "
         "ship symlink leaving the repo → round; unreadable object → exit 2; "
         "`.github/` harness globs must be exact filenames; harness test guarding ship code → "
-        "product; added workflow unmatched by the manifest → product; changed harness workflow "
-        "with a non-PR trigger, a non-GITHUB_TOKEN secret, a write permission or a new "
-        "publish/upload/sign step → round; `uses: ./<dir>` → everything under it",
+        "product; added workflow unmatched by the manifest → product; any changed `.github/` "
+        "file, action.yml or `uses:`-named YAML → round; `uses: ./<dir>` → everything under it",
         f"- Changed paths ({len(changes)}):",
         *(rows or ["  - (none)"]),
     ]
