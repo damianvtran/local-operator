@@ -87,6 +87,13 @@ CAPABILITY_RESILIENCE = "resilience"
 #: this report named only the RELAY's build — the relay is not the process that
 #: runs the sessions. ``lop services status`` knew; ``ready`` did not.
 CAPABILITY_SERVE_DAEMON = "serve_daemon"
+#: (j) model switching on a borrow-only peer. A session-scoped share runs turns,
+#: but the model catalogue a ``/model`` switch reads is only shared with a
+#: DEVICE-scoped holder (``docs/design/mesh-catalogue-metadata.md``, "Normal
+#: consumers"), so the switch is refused there. Added 2026-11-06 after an
+#: operator met that refusal on lop-remote-node-2 with ``ready`` reporting the
+#: peer fine: the report names the owner's decision before anyone hits it.
+CAPABILITY_MODEL_SWITCH = "model_switch"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -130,6 +137,9 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # will run work — on the wrong build, or until the next reboot. Warn with
         # the remedy; the update/restart path is its point of use.
         CAPABILITY_SERVE_DAEMON,
+        # Turns on the borrowed model still run; only switching is refused, and
+        # widening the share is the owner's access decision, never a gate here.
+        CAPABILITY_MODEL_SWITCH,
     }
 )
 
@@ -1384,7 +1394,7 @@ def has_local_provider_credential(
 
 
 def placement_fact(
-    *, provider: str = "", mcp_url: str = "", secret: str = "", root: Path
+    *, provider: str = "", mcp_url: str = "", secret: str = "", root: Path, network_id: str = ""
 ) -> dict[str, Any]:
     """The placement entry for a key (owner + holders) and this device's observation.
 
@@ -1399,7 +1409,7 @@ def placement_fact(
     from local_operator.network.credentials.state import PlacementState
 
     found = placement_mod.placement_entries_for(
-        provider=provider, mcp_url=mcp_url, secret=secret, root=root
+        provider=provider, mcp_url=mcp_url, secret=secret, root=root, network_id=network_id
     )
     if found is None:
         return {}
@@ -1585,6 +1595,40 @@ def selected_model_row(
     return row
 
 
+def _openai_catalogue_fact(root: Path) -> str | None:
+    """``shared_catalogue.catalogue_authority`` read through THIS report's no-write store.
+
+    Only the native-login rung's reader is swapped; every other rung is the
+    gate's. An ABSENT ``auth.db`` reads unknown here, not "no login", because
+    that is what the gate does (``native_oauth_inventory`` answers ``None`` and
+    ``_share`` then refuses nothing): the row predicts the gate, not a better one.
+    """
+    from local_operator.providers.shared_catalogue import catalogue_authority
+
+    def native_local() -> bool | None:
+        try:
+            store = _open_store(root, read_only=True)
+        except Exception:  # noqa: BLE001 — an unopenable store is "could not be read"
+            return None
+        if store is None:
+            return None
+        try:
+            if _read_only_store_unavailable(store):
+                return None
+            return any(
+                not (row.data or {}).get("mesh_origin") for row in store.list_credentials("openai")
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        finally:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    return catalogue_authority(root, native_local=native_local)
+
+
 def collect_peer_facts(
     root: Path,
     *,
@@ -1619,6 +1663,13 @@ def collect_peer_facts(
         # (True / False / None = the store could not be read).
         "has_local": has_local_provider_credential(root, provider, read_only=True),
         "credential_placement": placement_fact(provider=provider, root=root),
+        # ADDITIVE ON THE WIRE: which rung answers openai's model catalogue here
+        # (``local``/``none``/``borrows``; None = unreadable), from the GATE's own
+        # first rungs (``shared_catalogue.catalogue_authority``). The viewer's
+        # ``model_switch`` row needs it because a local openai login or key on
+        # this device skips the share entirely, whatever the default provider is
+        # (review round 1, MINOR-1 / QA Q1). An older peer omits it: no row.
+        "openai_catalogue": _openai_catalogue_fact(root),
         "mcp": mcp_servers_fact(root, read_only=True),
         "git": git_identity_fact(home),
         "repository": repository_fact(home, repository=repository),
@@ -2344,7 +2395,9 @@ class Viewer(Protocol):
 
     def holds_mcp_login(self, url: str) -> bool | None: ...
 
-    def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]: ...
+    def placement(
+        self, *, provider: str = "", mcp_url: str = "", network_id: str = ""
+    ) -> dict[str, Any]: ...
 
 
 class ViewerFacts:
@@ -2412,8 +2465,12 @@ class ViewerFacts:
 
         return server_has_stored_grant(url, store)
 
-    def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
-        return placement_fact(provider=provider, mcp_url=mcp_url, root=self.root)
+    def placement(
+        self, *, provider: str = "", mcp_url: str = "", network_id: str = ""
+    ) -> dict[str, Any]:
+        return placement_fact(
+            provider=provider, mcp_url=mcp_url, root=self.root, network_id=network_id
+        )
 
     def secret_placement(self, name: str) -> dict[str, Any]:
         """The class-2 placement entry for one store secret, if the network has one.
@@ -3675,6 +3732,67 @@ def model_credential_row(
             "window), or " + str(row["remedies"][0])
         ]
     return row
+
+
+def model_switch_row(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    viewer: Viewer,
+    peer_label: str,
+    network_id: str,
+) -> dict[str, Any] | None:
+    """(j) Would a ``/model`` switch to openai on this peer be refused for scope?
+
+    Predicts ``shared_catalogue._share``'s strict refusal, and only it: the peer
+    reports that its openai catalogue is answered by a borrow
+    (``openai_catalogue == "borrows"`` — the gate's own first rungs, so a local
+    login, env/stored key or local-only mark yields no row), and THIS device's
+    document for the peer's network holds it at SESSION scope. Only the OWNER can
+    widen a share, so the row is emitted only when the viewer owns the entry in
+    that network — the network the printed command names (MINOR-3: an owner in
+    several networks must not read another network's entry). ``None`` (no row)
+    everywhere else, including an older peer that does not report the fact. It
+    never offers a share the operator has not made; it names the widening of one
+    that exists, as a decision, and writes nothing.
+    """
+    if not network_id or not getattr(viewer, "device_id", ""):
+        return None
+    if facts.get("openai_catalogue") != "borrows":
+        return None
+    own = viewer.placement(provider="openai", network_id=network_id)
+    if str(own.get("owner_device") or "") != viewer.device_id:
+        return None
+    holder = next(
+        (
+            row
+            for row in own.get("holders") or []
+            if isinstance(row, Mapping) and row.get("device") == member.device_id
+        ),
+        None,
+    )
+    if holder is None or holder.get("scope") == "device":
+        return None
+    from local_operator.providers.shared_catalogue import device_scope_share_command
+
+    command = device_scope_share_command(member.device_id, network_id)
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_MODEL_SWITCH,
+        ok=False,
+        code="session_scoped_share",
+        detail=(
+            f"model switching on {peer_label} needs a device-scoped share of openai: "
+            f"it borrows openai from this device per session, so turns run but a "
+            f"`/model openai/...` switch there is refused"
+        ),
+        remedies=[
+            f"to allow it (your decision: it lends openai to every session on "
+            f"{peer_label}), run on this device: `{command}`"
+        ],
+        source=SOURCE_LOCAL,
+    )
 
 
 def _default_pair(model: Mapping[str, Any]) -> str:
@@ -5484,6 +5602,15 @@ def _peer_checks(
     rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
+    switch_row = model_switch_row(
+        member,
+        facts,
+        viewer=viewer,
+        peer_label=peer_label,
+        network_id=str(getattr(record, "network_id", "") or ""),
+    )
+    if switch_row is not None:
+        rows.append(switch_row)
     selected = facts.get("selected_model_access")
     if selected_row is not None:
         selected = (

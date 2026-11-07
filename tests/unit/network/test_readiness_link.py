@@ -1349,3 +1349,70 @@ def test_a_hostile_serve_fact_over_a_real_link_costs_only_its_own_row(
     assert git["source"] == readiness.SOURCE_PEER and git["code"] != readiness.CODE_NOT_ASKED
     assert _capability(payload, readiness.CAPABILITY_BUILD)["ok"] is True
     server_b.stop()
+
+
+def test_ready_names_the_owner_decision_a_remote_model_switch_needs(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """2026-11-06: ``/model openai/...`` on a peer was refused while ``ready`` said ok.
+
+    The peer borrowed this device's openai login at SESSION scope: turns ran,
+    but the model catalogue a switch reads is shared only with a device-scoped
+    holder. Over a real link, the owner's report now carries a non-gating
+    ``model_switch`` row naming the exact command; once the share is
+    device-scoped the row is gone. The report writes nothing.
+    """
+    from local_operator.network.credentials import placement as placement_mod
+
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
+    owner, peer = server_a.identity.device_id, server_b.identity.device_id
+    with placement_mod.mutate(record.network_id, server_a.root, self_device=owner) as doc:
+        doc.declare("openai", owner_device=owner, provider="openai", by=owner)
+        doc.grant("openai", peer, scope="session", by=owner)
+    # The PEER's side of the fact (MINOR-1): a readable native store with no
+    # openai login of its own, holding the owner's document as a pull would leave
+    # it, so its gate's first rungs answer ``borrows`` exactly as a real
+    # borrower's would. (The credential pull itself is exercised end to end in
+    # ``test_shared_catalogue_consumer``; this rig's peers carry no broker
+    # capability, which is not what this row is about.)
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.shared_catalogue import catalogue_authority
+
+    AuthStore(server_b.root / "auth.db", config_dir=server_b.root).close()
+    peer_copy = placement_mod.PlacementDocument.load(record.network_id, server_a.root)
+    peer_copy.root = server_b.root
+    peer_copy.save()
+    assert catalogue_authority(server_b.root) == "borrows"
+
+    def switch_rows() -> list[dict[str, Any]]:
+        _rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+        return [
+            row
+            for row in payload["checks"]
+            if row.get("capability") == readiness.CAPABILITY_MODEL_SWITCH
+        ]
+
+    before = switch_rows()
+    assert len(before) == 1, before
+    assert before[0]["state"] == readiness.ROW_STATE_WARN
+    assert before[0]["remedies"][0].endswith(
+        f"run on this device: `lop network credential share openai --with {peer} "
+        f"--network {record.network_id} --scope device`"
+    )
+    rendered = readiness.render_check_lines(before)
+
+    with placement_mod.mutate(record.network_id, server_a.root, self_device=owner) as doc:
+        doc.grant("openai", peer, scope="device", by=owner)
+    assert switch_rows() == []
+    with capsys.disabled():
+        print("\nREADY BEFORE:\n" + "\n".join(rendered) + "\nREADY AFTER: no model_switch row")
+    server_b.stop()

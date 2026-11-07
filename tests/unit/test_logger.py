@@ -697,3 +697,33 @@ def test_the_previous_tests_handler_filters_did_not_survive_it() -> None:
     assert not any(_LEAK_PROBE_FILTER in handler.filters for handler in root.handlers), [
         handler.filters for handler in root.handlers
     ]
+
+
+def test_cli_logging_keeps_per_request_wire_records_out_of_command_output(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """2026-11-06: ``lop network sessions --slash`` printed an httpx INFO line.
+
+    ``configure_cli_logging`` puts the root at INFO for the CLI's own records,
+    and the console configurator set the wire clients to that same level, so
+    every provider request a command made printed ``- INFO - HTTP Request: …``
+    into its answer. Our own INFO records must still print.
+    """
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    saved_clients = {name: logging.getLogger(name).level for name in _CHATTY_WIRE_CLIENTS}
+    try:
+        configure_cli_logging()
+        logging.getLogger("httpx").info('HTTP Request: GET https://x.invalid/v1/models "200"')
+        logging.getLogger("local_operator.test.cli").info("own record kept")
+        err = capsys.readouterr().err
+        assert "HTTP Request" not in err
+        assert "own record kept" in err
+    finally:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)
+        for name, level in saved_clients.items():
+            logging.getLogger(name).setLevel(level)

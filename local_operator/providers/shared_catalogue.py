@@ -12,7 +12,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from local_operator.network import store
 from local_operator.network.credentials import lifecycle, reconcile
@@ -26,6 +26,127 @@ from local_operator.network.types import MeshRefusal
 
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.Lock] = {}
+
+
+def device_scope_share_command(device: str, network_id: str, key: str = "openai") -> str:
+    """The ONE spelling of the remedy for a catalogue a session-scoped share cannot feed.
+
+    WHY IT EXISTS. A model switch on a borrow-only device refused with "catalogue
+    needs a device-scoped share" and nothing else, while readiness said the peer
+    was fine (a turn there borrows per session and works). The gate itself is the
+    design (``docs/design/mesh-catalogue-metadata.md``, "Normal consumers"): a
+    receipt here is machine-wide, so only an explicit device-scoped holder may
+    populate it. Widening a share is the OWNER's access decision, never this
+    device's, so the product names the exact command and changes nothing.
+
+    Shared by the refusal below and ``network.readiness`` so the sentence a
+    switch prints and the one ``lop network ready`` predicts cannot drift. It
+    names the device by ID (``--with`` accepts a name or an id; an id cannot be
+    ambiguous) and the network explicitly, because the share verb refuses to
+    guess one on an owner that belongs to several.
+    """
+    return (
+        f"lop network credential share {key} --with {device} --network {network_id} "
+        "--scope device"
+    )
+
+
+def _device_scope_refusal(
+    client: MeshCredentialClient, entry: Any, root: Path | None
+) -> MeshRefusal:
+    """The strict refusal, carrying who must decide and what they would run.
+
+    Keeps the historical leading clause (``catalogue needs a device-scoped
+    share``) so existing readers keyed on it still match. Names only device and
+    network identifiers already on this device's placement copy; reads no
+    credential.
+    """
+    owner = str(getattr(entry, "owner_device_name", "") or "") or str(entry.owner_device)
+    try:
+        member = store.load(client.network_id, root).member(client.self_device)
+        here = (member.name if member is not None else "") or client.self_device
+    except (OSError, ValueError):
+        here = client.self_device
+    command = device_scope_share_command(client.self_device, client.network_id)
+    # THE COMMAND SITS ON ITS OWN LINE, IN BACKTICKS (design round 1, D1). Every
+    # reader of this sentence was checked for a newline: the peer wire and
+    # ``--json`` carry it JSON-escaped; ``network.cli._pilot_slash`` prints the
+    # receipt text verbatim; the TUI notice wraps per line; approval copy's
+    # ``_raw_reason`` folds it to a space and the audit writer drops it — neither
+    # of which receives this sentence on the /model path. The backticks matter
+    # for ``peer_model.refusal_detail``, which appends ``; still on <model>``
+    # straight after the last character: without a delimiter that suffix would
+    # read as part of a command a person copies. Both devices are NAMED (D2):
+    # the receipt is often read on the owner, where "here" meant the wrong one.
+    return MeshRefusal(
+        "catalogue_unsupported",
+        "catalogue needs a device-scoped share: "
+        f"{here} borrows openai from {owner} per session, which runs turns but does not "
+        f"share the model list a switch reads. Allowing model switching on {here} is "
+        f"{owner}'s decision: it lends openai to every session on {here}. To allow it, "
+        f"run on {owner}:\n`{command}`",
+    )
+
+
+def _authority(
+    root: Path | None = None, *, native_local: Callable[[], bool | None] | None = None
+) -> tuple[str, MeshCredentialClient | None]:
+    """Which rung answers openai's catalogue here, BEFORE any share is consulted.
+
+    ``local``: a native login, an environment/stored key or the local-only mark
+    outranks every share, so no switch is ever refused for share scope.
+    ``none``: this device does not borrow openai (no client, not a holder, or it
+    owns the entry). ``borrows``: the share decides. ``unknown``: the native
+    store could not be read. Split out of :func:`_share` so the readiness fact
+    a viewer predicts from (:func:`catalogue_authority`) IS the gate's own
+    first rungs, not a second spelling of them (review round 1, MINOR-1).
+    Metadata only: never resolves or refreshes a bearer.
+
+    ``native_local`` replaces ONLY the native-login rung's reader ("is there an
+    enabled openai row here that did not arrive over the mesh"; ``None`` =
+    unreadable). Readiness passes its own no-write store, because a report must
+    not open ``auth.db`` through a reader that can touch a WAL sidecar (its
+    ``test_reads_create_nothing`` family); the gate keeps its own reader.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.registry import (
+        resolve_env_key,
+        stored_provider_env_keys,
+    )
+
+    if native_local is not None:
+        own = native_local()
+    else:
+        native = AuthStore.native_oauth_inventory((root or config_dir()) / "auth.db")
+        own = (
+            None if native is None else any(row[0] == "openai" and row[6] is None for row in native)
+        )
+    if own is None:
+        return "unknown", None
+    if own:
+        return "local", None
+    if resolve_env_key("openai") or "openai" in stored_provider_env_keys(root):
+        return "local", None
+    client = MeshCredentialClient.for_this_device(root)
+    if client is None or not client.should_borrow("openai"):
+        return "none", None
+    from local_operator.network.credentials.sync import MARK_LOCAL_ONLY, SyncState
+
+    if SyncState.load(client.network_id, root).mark_for("openai") == MARK_LOCAL_ONLY:
+        return "local", None
+    return "borrows", client
+
+
+def catalogue_authority(
+    root: Path | None = None, *, native_local: Callable[[], bool | None] | None = None
+) -> str | None:
+    """The readiness fact: ``local``/``none``/``borrows``, or ``None`` if unreadable."""
+    try:
+        state, _client = _authority(root, native_local=native_local)
+    except (OSError, ValueError):
+        return None
+    return None if state == "unknown" else state
 
 
 def _share(
@@ -42,26 +163,10 @@ def _share(
     receipt question while a reader offering model ids must.
     """
     try:
-        # Machine-wide discovery must not outrank a native login, legacy key or
-        # environment key. Read metadata only; never resolve/refresh a bearer.
-        from local_operator.paths import config_dir
-        from local_operator.providers.auth_store import AuthStore
-        from local_operator.providers.registry import (
-            resolve_env_key,
-            stored_provider_env_keys,
-        )
-
-        native = AuthStore.native_oauth_inventory((root or config_dir()) / "auth.db")
-        if native is None or any(row[0] == "openai" and row[6] is None for row in native):
-            return None
-        if resolve_env_key("openai") or "openai" in stored_provider_env_keys(root):
-            return None
-        client = MeshCredentialClient.for_this_device(root)
-        if client is None or not client.should_borrow("openai"):
-            return None
-        from local_operator.network.credentials.sync import MARK_LOCAL_ONLY, SyncState
-
-        if SyncState.load(client.network_id, root).mark_for("openai") == MARK_LOCAL_ONLY:
+        # Machine-wide discovery must not outrank a native login, legacy key,
+        # environment key or local-only mark (:func:`_authority`).
+        state, client = _authority(root)
+        if state != "borrows" or client is None:
             return None
         entry = client.entry("openai")
         holder = entry.holder(client.self_device) if entry is not None else None
@@ -69,7 +174,7 @@ def _share(
             return None
         if holder.scope != "device" or reconcile.is_derived(holder):
             if strict:
-                raise MeshRefusal("catalogue_unsupported", "catalogue needs a device-scoped share")
+                raise _device_scope_refusal(client, entry, root)
             return None
         network = store.load(client.network_id, root)
         owner = network.member(entry.owner_device)
