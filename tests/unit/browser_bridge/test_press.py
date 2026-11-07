@@ -188,9 +188,10 @@ async def test_old_desktop_refusal_is_typed_actionable_and_never_sent(
     assert result.is_error
     assert (result.details or {})["error_code"] == "capability_unsupported"
     assert result.text == (
-        "the Local Operator desktop app's browser host does not provide 'press' — "
-        "the app that answered was built before this action existed. Please "
-        "update the desktop app, then retry; every other browser action still works."
+        "the Local Operator desktop app's browser host does not provide 'press', and "
+        "only that host serves it — the app that answered was built before this action "
+        "existed, and no desktop-app version floor is recorded for it. Please update "
+        "the desktop app, then retry; every other browser action still works."
     )
     assert app.sent == []
 

@@ -759,7 +759,7 @@ store without it passing through the conversation:
 
 ```text
 browser open  https://app.example.test/settings/keys
-snapshot                    # find the field or code block's ref, e.g. e9
+snapshot                    # take the ref BEFORE a value is in the field, e.g. e9
 copy selector=e9            # writes the element's text to the clipboard
 ```
 
@@ -778,6 +778,20 @@ the text. So a one-time key can go from a page into the encrypted store while no
 tool result, log line or error message ever holds it. Never `echo` the value,
 never print it to check it, never paste it into a message to the user or to
 another tool.
+- **Take the ref before the value is in the field.** A snapshot reports a
+control's value on its line, so a one-time key already sitting in a field rides
+that line into the transcript and into every later result that quotes it. Snapshot
+before the page shows the key, or reach the element with a CSS `selector` instead
+of a ref when the value is already on the page. Find that selector from markup you
+saw before the key appeared. Once the key is showing, run no `snapshot`,
+`screenshot` or `query` at all, not just at that element: an unscoped `snapshot`
+covers the whole page and prints the input's value, a full-page `screenshot`
+shows the key, and `query` returns an input's value. `read` returns the element's
+text (`textContent`, or `innerText` on cmux), which leaves out an `<input>`'s
+value but not a key shown as text: a server-filled `<textarea>`, `<pre>` or
+`<code>` holds it as child text, and every host's `read` prints it. So never run
+an unscoped `read` then either; scope it only to a container you saw before the
+key appeared, and only when the key sits in an `<input>`.
 - **Use `printf '%s' "$(pbpaste)"`, not bare `pbpaste`.** Command substitution
 strips the trailing newline a page may have written, and that newline would
 become part of the stored secret — every later use of it then fails in a way
@@ -797,6 +811,28 @@ button is broken.
 - **`copy` is served by the desktop app's browser host only.** The Chrome
 extension has no main process to write the clipboard from and cmux has no
 page-script read, so both refuse it with a typed message naming the desktop app.
+- **A value inside an iframe is out of reach of both clipboard routes.** On a
+desktop app that serves the page's clipboard write, the page's own Copy button
+works in the TOP-LEVEL document only: a button inside a same-process child frame
+is refused. The host serves that write itself rather than granting the page a
+permission, and it decides the click was a real gesture by reading
+`navigator.userActivation.isActive` in an isolated world the page cannot patch —
+but a child frame's isolated activation reading mirrors the TOP frame's, so
+admitting children would let any frame borrow the top frame's activation. The
+`copy` action cannot reach it either: it resolves its selector in the top
+document, and selectors cannot cross frames. The way out is the frame's own
+document — if the iframe's `src` is a page this session can `goto`, open it
+top-level and copy there; otherwise use the API or download route below.
+- **If the desktop app refuses `copy`, the page's own Copy button is dead on that
+build too**, in every frame. The app half ships separately from this runtime, so a machine can hold
+one without the other: an app build that predates the action advertises no
+`copy`, and the capability gate refuses it before a command is sent — the
+refusal names the method, the host that serves it and the version story. Do not
+create a one-time key you have no way to capture: prefer an API or a download
+route to the same credential. If the key must be created, treat it as a
+compromise — rotate or deactivate it once the real route exists — and never
+treat a screenshot read with OCR as the routine fallback; the value then exists
+on the screen, in an image, and wherever that image goes.
 - **Hygiene, once the value is confirmed stored: clear the clipboard.**
 `printf '' | pbcopy` — after `lop secret describe … --fingerprint` has shown the
 value landed, not before. Not a requirement of the recipe (the store is what

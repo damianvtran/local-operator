@@ -173,6 +173,78 @@ def test_pre_copy_desktop_app_refuses_copy_and_names_the_update() -> None:
     result = _run(client)
     assert result.details["error_code"] == "capability_unsupported"
     assert "built before this action existed" in result.text
+    # The measured 2026-11-06 incident: this copy read as a dead end, so its
+    # reader photographed a tenant-wide admin API key off the screen. Pin what
+    # it has to carry now — the METHOD, the HOST, and the fact that only that
+    # host serves it — because dropping any of the three brings the dead end
+    # back. `copy` deliberately has no recorded app-version floor, so the copy
+    # must SAY that rather than invent one from the harness release.
+    assert "does not provide 'copy'" in result.text
+    assert "desktop app's browser host" in result.text
+    assert "only that host serves it" in result.text
+    assert "no desktop-app version floor is recorded for it" in result.text
+    assert "update the desktop app, then retry" in result.text
+    # The exit that breaks the update-retry loop (review R1-2): while no released
+    # app serves `copy`, "update" alone sends the reader round in a circle, and
+    # the circle ended at a screenshot. Conditional, so it stays true later.
+    assert "if the latest desktop app still refuses it" in result.text
+    assert "the service's API or a download instead, never from the screen" in result.text
+    assert client.calls == []
+
+
+def test_the_desktop_only_scope_and_copy_exit_stay_off_shared_methods() -> None:
+    # `download` is served by BOTH hosts, so "only that host serves it" would
+    # send a caller away from an extension that works (review R1-3), and the
+    # copy-specific API/download exit means nothing for a download.
+    from local_operator.browser_bridge.backend import capability_refusal, format_error
+
+    capabilities = HostCapabilities(methods=("open",), version="0.101.3", capabilities_known=True)
+    error = capability_refusal("download", host=HOST_UI, capabilities=capabilities)
+    message = format_error(error, action="download", host=HOST_UI)
+    assert "does not provide 'download'" in message
+    assert "only that host serves it" not in message
+    assert "never from the screen" not in message
+    assert message.endswith("every other browser action still works.")
+
+
+def test_a_recorded_app_floor_is_named_in_the_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor, when one IS recorded, is named without a second edit.
+
+    No released desktop build's floor is measured today, so the table is empty
+    and the refusal says so. This drives the other arm: a floor recorded here
+    reaches the copy as a concrete version, which is what makes "record it when
+    you measure it" a data change rather than a copy rewrite.
+    """
+    from local_operator.browser_bridge import backend as bridge_backend
+
+    monkeypatch.setattr(bridge_backend, "_CAPABILITY_MIN_APP_VERSION", {"copy": "0.102.0"})
+    client = _Host(host=HOST_UI, methods=("open", "read"), reply={})
+    result = _run(client)
+    assert result.details["error_code"] == "capability_unsupported"
+    # `_Host` reports 0.101.3, which IS older than the floor: name both.
+    assert "this app (0.101.3) predates 0.102.0" in result.text
+    assert "update the desktop app, then retry" in result.text
+    assert "no desktop-app version floor is recorded" not in result.text
+    assert client.calls == []
+
+
+def test_an_app_at_the_recorded_floor_is_not_told_to_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Review R1-4: the extension arm says "update" only when `extension_older`
+    # proves the peer is older; an app already past the floor that still does
+    # not advertise the method would loop on an update that cannot help.
+    from local_operator.browser_bridge import backend as bridge_backend
+
+    monkeypatch.setattr(bridge_backend, "_CAPABILITY_MIN_APP_VERSION", {"copy": "0.101.0"})
+    client = _Host(host=HOST_UI, methods=("open", "read"), reply={})
+    result = _run(client)
+    assert result.details["error_code"] == "capability_unsupported"
+    assert "updating is not the fix" in result.text
+    assert "update the desktop app" not in result.text
+    assert "never from the screen" in result.text
     assert client.calls == []
 
 
@@ -402,6 +474,28 @@ def test_guide_carries_the_secret_store_recipe() -> None:
     # desktop-host-only.
     assert "`copy` is the fallback" in flat
     assert "desktop app's browser host only" in flat
+    # The two limits the recipe has to carry, because both were learned the hard
+    # way (2026-11-06): the main-frame restriction on the page's own Copy button
+    # with its measured reason, and the interim policy for a host that predates
+    # `copy` — prefer an API or a download route, never screenshot/OCR as the
+    # routine fallback.
+    assert "out of reach of both clipboard routes" in flat
+    assert "navigator.userActivation.isActive" in flat
+    assert "isolated world the page cannot patch" in flat
+    assert "borrow the top frame's activation" in flat
+    # Review R1-1 / QA Q-1: `copy` resolves its selector in the top document, so
+    # the guide must never offer it as the iframe workaround again.
+    assert "selectors cannot cross frames" in flat
+    assert "open it top-level and copy there" in flat
+    assert "`copy` ACTION against that element" not in flat
+    # R1-5: conditional on an app that serves the page write at all.
+    assert "On a desktop app that serves the page's clipboard write" in flat
+    # The interim paragraph is worded to stay true AFTER the fix ships: it is
+    # conditional on the host refusing, never on the feature being absent.
+    assert "If the desktop app refuses `copy`, the page's own Copy button is dead" in flat
+    assert "prefer an API or a download route" in flat
+    assert "compromise" in flat
+    assert "screenshot read with OCR as the routine fallback" in flat
 
 
 # ---------------------------------------------------------------------------

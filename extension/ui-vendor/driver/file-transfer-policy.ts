@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: driver/file-transfer-policy.ts (host-free shared policy (chrome.*-free by construction)).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (13 modules: access-flow.ts, access-queue.ts, ax-compact.ts, ax-locator.ts, deadline.ts, element-query.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: cedeb91c5a25a0fbe627d74a1e624d85f71ddcede6ecf6766328dcbc596942cf
+// Inputs sha256: f73d53042a10bc164542caee3b7d97c6e325f9e896e23fadb380b7258bea124b
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
