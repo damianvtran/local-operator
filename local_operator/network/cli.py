@@ -3279,18 +3279,25 @@ def _push_share_to_holder(network_id: str, device: str, key: str) -> dict[str, A
             credential_key=key,
         )
     except MeshRefusal as refusal:
-        # An older relay process that does not know the op answers by name.
-        return {"delivered": False, "outcome": f"refused:{refusal.code or 'relay'}"}
+        # THIS DEVICE'S OWN RELAY REFUSED, so the holder was never asked (design round 2,
+        # D5): a relay process older than this command answers the op by name — the
+        # state right after an upgrade, before the service restarts.
+        if refusal.code in ("unknown_local_op", "not_implemented"):
+            return {"delivered": False, "outcome": "local_relay_outdated"}
+        return {"delivered": False, "outcome": f"local_refused:{refusal.code or 'relay'}"}
     if answer is None:
         # No relay running, or no answer within the budget: the row stands either way.
         return {"delivered": False, "outcome": "no_relay_answer"}
-    return {
+    result = {
         "delivered": bool(answer.get("delivered")),
         "outcome": str(answer.get("outcome") or "unknown"),
     }
+    if isinstance(answer.get("other_owner"), str):
+        result["other_owner"] = answer["other_owner"]
+    return result
 
 
-def _delivery_lines(delivery: dict[str, Any], name: str) -> list[str]:
+def _delivery_lines(delivery: dict[str, Any], name: str, *, other_owner: str = "") -> list[str]:
     """The receipt's answer to "can that device use it yet, and if not, what now?".
 
     WHY A MAP AND NOT THE CODE (design review round 1, D1/D2): the first version read
@@ -3316,9 +3323,33 @@ def _delivery_lines(delivery: dict[str, Any], name: str) -> list[str]:
     if outcome == "failed":
         return ["usable there: not yet — that device did not answer; retried shortly", fetch_now]
     if outcome == "refused:placement_conflict":
+        # The owner is named (design round 2, D6): "revoke it on that owner" sent the
+        # operator to a device it had no way to identify.
+        if other_owner:
+            return [
+                "usable there: no — that device borrows this from another device",
+                f"  to switch: revoke it on {other_owner}, then share again",
+            ]
         return [
-            "usable there: no — that device borrows this from another owner",
-            "  to switch: revoke it on that owner, then share again",
+            "usable there: no — that device borrows this from another device",
+            "  see which, run there: lop network credentials",
+        ]
+    if outcome in ("skipped:not_a_holder", "refused:not_a_holder"):
+        # Either side can find the share gone: this device before sending, or the
+        # holder holding a newer revision without it (design round 2, D7).
+        return [
+            "usable there: no — the share was removed before it was sent",
+            "  run the share again to send it",
+        ]
+    if outcome == "local_relay_outdated":
+        return [
+            "usable there: not yet — this device's network service is older than lop",
+            "  restart it: lop network restart",
+        ]
+    if outcome.startswith("local_refused:"):
+        return [
+            "usable there: not yet — this device's network service refused to send it",
+            "  check: lop network status, then share again",
         ]
     if outcome.startswith("refused:"):
         return ["usable there: not yet — that device turned the update down", fetch_now]
@@ -3334,11 +3365,6 @@ def _delivery_lines(delivery: dict[str, Any], name: str) -> list[str]:
             "usable there: not yet — that device runs an older lop",
             f"  update it: lop network update {name}",
             "  or run there: lop network credentials",
-        ]
-    if outcome == "skipped:not_a_holder":
-        return [
-            "usable there: no — the share was removed before it was sent",
-            "  run the share again to send it",
         ]
     return ["usable there: not yet — it arrives on that device's next sync"]
 
@@ -3542,6 +3568,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     if delivery:
         payload["delivery"] = delivery
     name = _member_name(record, device) or device
+    other_owner = str(delivery.get("other_owner") or "") if delivery else ""
     # PROSE NAMES A STORE SECRET BY THE NAME THE OPERATOR TYPES (design review round 1, D5).
     # ``mark`` says ``CRM_API_KEY`` and ``share|revoke`` accept it, so a receipt that read
     # back ``secret:CRM_API_KEY`` made the person recognise one spelling as the other.
@@ -3558,7 +3585,19 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         f"broker_credential there: {capability or 'unchanged'}",
     ]
     if delivery:
-        lines.extend(_delivery_lines(delivery, name))
+        lines.extend(
+            _delivery_lines(
+                delivery,
+                name,
+                # The other owner's id came from the HOLDER, so it is shown by the name
+                # this device knows it by, or sanitised for one terminal line.
+                other_owner=(
+                    (_member_name(record, other_owner) or _peer_label(other_owner))
+                    if other_owner
+                    else ""
+                ),
+            )
+        )
     from local_operator.network.credentials.types import is_mcp_key
 
     if verb == "share" and is_mcp_key(key):

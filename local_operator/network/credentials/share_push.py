@@ -150,12 +150,33 @@ def push_share(server: Any, network_id: str, device_id: str, key: str) -> dict[s
     except Exception:  # noqa: BLE001 — one holder's link is that holder's problem
         logger.debug("share push: request to %s failed", device_id, exc_info=True)
         reply = None
+    if not isinstance(reply, dict):
+        # NO ANSWER (timeout, dead link) is the only ``failed``: it is the one outcome a
+        # later attempt can change without anybody deciding anything.
+        return {"delivered": False, "outcome": "failed"}
     verdict, code = reconcile_mod._classify_reply(reply)  # noqa: SLF001 — one classifier
     if verdict == "ok":
         return {"delivered": True, "outcome": "pushed"}
+    if reply.get("op") == "error" and not code:
+        # THE HOLDER'S AUTHORISER ANSWERED, without a reason (review round 2, R2-M1).
+        # ``_classify_reply`` files a codeless refusal as transient for the consent
+        # reconciler's sake, but here it is a policy answer — typically this device's
+        # row on the holder lacks ``broker_credential`` (a non-admin lender) — and
+        # retrying it wrote one audited refusal on the holder per tick for 24 h.
+        return {"delivered": False, "outcome": "refused:not_authorised"}
+    detail = reply.get("detail")
+    result: dict[str, Any] = {"delivered": False, "outcome": "failed"}
     if verdict in ("peer_refused", "rejected"):
-        return {"delivered": False, "outcome": f"refused:{code or 'refused'}"}
-    return {"delivered": False, "outcome": "failed"}
+        result["outcome"] = f"refused:{code or 'refused'}"
+    elif code:
+        # A typed "not now" from the holder's handler (``busy``/``unavailable``):
+        # retryable, and it writes no refusal row there.
+        result["outcome"] = "failed"
+    if isinstance(detail, dict) and isinstance(detail.get("owner_device"), str):
+        # Who the holder borrows this key from instead (``placement_conflict``), so the
+        # receipt can name the device to revoke on (design round 2, D6).
+        result["other_owner"] = detail["owner_device"][:256]
+    return result
 
 
 def push_and_remember(server: Any, network_id: str, device_id: str, key: str) -> dict[str, Any]:
@@ -208,9 +229,15 @@ def retry_step(server: Any, device_id: str) -> str | None:
             pending.pop(ident, None)
             continue
         try:
-            outcomes.append(str(push_and_remember(server, network_id, device, key)["outcome"]))
+            outcome = str(push_and_remember(server, network_id, device, key)["outcome"])
         except Exception:  # noqa: BLE001 — a cadence reports; it never raises into the tick
             logger.debug("share push: retry to %s failed", device, exc_info=True)
+            break
+        outcomes.append(outcome)
+        if outcome in RETRYABLE_OUTCOMES:
+            # ONE DIAL PER HOLDER PER TICK (review round 2, m3): an unreachable holder
+            # is unreachable for every key, so the rest wait for the next tick.
+            break
     return ",".join(outcomes) or None
 
 
@@ -301,10 +328,19 @@ def _accept(
             return _refuse("not_a_holder", "a pushed row does not name this device as a holder")
     if not _member_is_active(root, network_id, sender):
         return _refuse("not_owner", "the sender is not an active member of this network")
+    # VALIDATED BEFORE ANY WRITE (review round 2, m5): the merge saves as it goes, so a
+    # refusal found only afterwards could follow a partial write of a multi-row frame.
+    before = placement_mod.PlacementDocument.load(network_id, root, self_device=self_device)
+    for row in rows:
+        refusal = _would_not_land(before, row, sender, self_device)
+        if refusal is not None:
+            return refusal
     changed = placement_mod.merge_from_peer(
         network_id, document, from_device=sender, self_device=self_device, root=root
     )
-    # THE ACK MUST MEAN "USABLE FROM THE SENDER" (review round 1, m2). Placement keys
+    # THE ACK MUST MEAN "USABLE FROM THE SENDER" (review round 1, m2). Checked above
+    # before the write; read back again here because a concurrent writer can land
+    # between the check and the merge's lock, and the ack must describe the result. Placement keys
     # are global, and the merge silently keeps a row this device already holds from a
     # DIFFERENT owner for the same key — an ``ack`` then made the owner's receipt say
     # "usable now" while every borrow of that key still went elsewhere. So the stored
@@ -313,16 +349,35 @@ def _accept(
     stored = placement_mod.PlacementDocument.load(network_id, root, self_device=self_device)
     for row in rows:
         entry = stored.entry(str(row.get("key") or ""))
-        if entry is None or entry.owner_device != sender:
-            return _refuse(
-                "placement_conflict",
-                "this device already borrows that key from another device; nothing changed",
-            )
-        if not entry.is_holder(self_device):
-            # This device holds a NEWER revision of the sender's row that no longer
-            # names it (a revoke overtook the push): the push is stale, not usable.
-            return _refuse("not_a_holder", "a newer revision here no longer names this device")
+        if entry is None:
+            return _refuse("placement_conflict", "the pushed row did not land here")
+        refusal = _would_not_land(stored, {**row, "doc_rev": -1}, sender, self_device)
+        if refusal is not None:
+            return refusal
     return changed
+
+
+def _would_not_land(
+    document: Any, row: Mapping[str, Any], sender: str, self_device: str
+) -> dict[str, Any] | None:
+    """Why ``row`` would not be usable from ``sender`` here, or ``None`` when it would."""
+    entry = document.entry(str(row.get("key") or ""))
+    if entry is None:
+        return None
+    if entry.owner_device != sender:
+        refusal = _refuse(
+            "placement_conflict",
+            "this device already borrows that key from another device; nothing changed",
+        )
+        refusal["owner_device"] = str(entry.owner_device)
+        return refusal
+    pushed_rev = row.get("doc_rev")
+    newer_here = type(pushed_rev) is int and int(getattr(entry, "doc_rev", 0) or 0) >= pushed_rev
+    if newer_here and not entry.is_holder(self_device):
+        # This device holds a same-or-newer revision of the sender's row that no longer
+        # names it (a revoke overtook the push): the push is stale, not usable.
+        return _refuse("not_a_holder", "a newer revision here no longer names this device")
+    return None
 
 
 def install() -> None:

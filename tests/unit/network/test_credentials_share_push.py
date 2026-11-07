@@ -97,6 +97,7 @@ def drive_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
             "borrower": server_b.identity.device_id,
             "idp": stub_idp,
             "b_endpoint": f"{host_b}:{port_b}",
+            "a_endpoint": f"{host}:{port}",
         },
     )
     server_b.stop()
@@ -391,7 +392,10 @@ LONG_NAME = "studio-macbook-pro-m4-max-upstairs-office-2026"
         ("offline", "not yet — offline; it arrives when that device reconnects", None),
         ("failed", "not yet — that device did not answer", "lop network credentials"),
         ("refused:malformed_frame", "turned the update down", "lop network credentials"),
-        ("refused:placement_conflict", "no — that device borrows this", "revoke it on"),
+        ("refused:placement_conflict", "no — that device borrows this", "lop network credentials"),
+        ("refused:not_a_holder", "no — the share was removed", "run the share again"),
+        ("local_relay_outdated", "this device's network service is older", "lop network restart"),
+        ("local_refused:busy", "this device's network service refused", "lop network status"),
         ("no_relay_answer", "this device's network service", "lop network status"),
         ("skipped:peer_lacks_share_push", "runs an older lop", "lop network update"),
         ("skipped:not_a_holder", "no — the share was removed", "run the share again"),
@@ -419,12 +423,16 @@ def test_every_delivery_outcome_reads_as_what_is_true(
 
 
 def _partition(mesh: Any) -> None:
-    """A cannot reach B: B's address on A is dead and every live link is dropped."""
-    with store.mutate(mesh.network_id, mesh.a.root) as copy:
-        row = copy.member(mesh.borrower)
-        assert row is not None
-        row.endpoints = ["127.0.0.1:9"]
-        store.save(copy, mesh.a.root)
+    """Neither side can reach the other: both addresses dead, every live link dropped.
+
+    BOTH directions: B's own cadences redial A, and a link B opened is one A's push
+    would reuse — so a one-way partition delivered the push under load."""
+    for server, other in ((mesh.a, mesh.borrower), (mesh.b, mesh.owner)):
+        with store.mutate(mesh.network_id, server.root) as copy:
+            row = copy.member(other)
+            assert row is not None
+            row.endpoints = ["127.0.0.1:9"]
+            store.save(copy, server.root)
     for server in (mesh.a, mesh.b):
         for link in list(server.links.values()):
             link.close()
@@ -434,11 +442,15 @@ def _partition(mesh: Any) -> None:
 
 
 def _heal(mesh: Any) -> None:
-    with store.mutate(mesh.network_id, mesh.a.root) as copy:
-        row = copy.member(mesh.borrower)
-        assert row is not None
-        row.endpoints = [mesh.b_endpoint]
-        store.save(copy, mesh.a.root)
+    for server, other, endpoint in (
+        (mesh.a, mesh.borrower, mesh.b_endpoint),
+        (mesh.b, mesh.owner, mesh.a_endpoint),
+    ):
+        with store.mutate(mesh.network_id, server.root) as copy:
+            row = copy.member(other)
+            assert row is not None
+            row.endpoints = [endpoint]
+            store.save(copy, server.root)
 
 
 def test_a_missed_push_is_resent_on_the_owners_first_sync_after_reconnect(
@@ -465,12 +477,25 @@ def test_a_missed_push_is_resent_on_the_owners_first_sync_after_reconnect(
     assert share_push.retry_step(drive_mesh.a, drive_mesh.borrower) is None, "not forgotten"
 
 
-def test_a_new_link_ends_the_borrowers_parked_refusal(
+def _relink(mesh: Any) -> Any:
+    """Drop every link between A and B, then let B dial A again."""
+    for server in (mesh.a, mesh.b):
+        for link in list(server.links.values()):
+            link.close()
+    assert net_fixtures.wait_for(
+        lambda: not any(x.alive for x in [*mesh.a.links.values(), *mesh.b.links.values()])
+    )
+    link, why = mesh.b._ensure_link_with_reason(mesh.owner)  # noqa: SLF001
+    assert link is not None, why
+    return link
+
+
+def test_an_owner_relay_restart_ends_the_borrowers_parked_refusal(
     drive_mesh: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """QA Q1, borrower half: with no push at all (an old owner, or an owner relay that
-    restarted and forgot its retry), B's own next sync after the link is replaced
-    pulls the share instead of waiting out the 30-min park."""
+    """QA Q1b: the owner's relay restarted after a missed push and forgot its retry. B's
+    first sync that sees the NEW relay instance pulls the share (was ~1814 s)."""
+    from local_operator.network import relay as relay_mod
     from local_operator.network.credentials import share_push
 
     monkeypatch.setattr(
@@ -482,18 +507,72 @@ def test_a_new_link_ends_the_borrowers_parked_refusal(
     cred_sync.credentials_sync_step(drive_mesh.b, drive_mesh.owner)
     assert drive_mesh.owner in cred_sync._owner_refusals(drive_mesh.b)  # noqa: SLF001
     _share_json(drive_mesh, capsys)
-    # Same link: the park holds (the owner's answer has not been disturbed).
     cred_sync.credentials_sync_step(drive_mesh.b, drive_mesh.owner)
+    assert not _b_holds(drive_mesh), "the park did not hold on an undisturbed owner"
+
+    # A restarted relay process: a fresh instance id in its handshake, no retry memory.
+    drive_mesh.a.instance_id = relay_mod.mint_instance_id()
+    started = time.monotonic()
+    link = _relink(drive_mesh)
+    assert link.instance_id == drive_mesh.a.instance_id
+
+    cred_sync.credentials_sync_step(drive_mesh.b, drive_mesh.owner)
+    assert _b_holds(drive_mesh), "a new owner instance did not end the park"
+    assert time.monotonic() - started < 60.0
+
+
+def test_a_flapping_link_to_the_same_owner_does_not_multiply_refusals(
+    drive_mesh: Any,
+) -> None:
+    """QA Q3: an UNSHARED B on a link dropped 15 times must not cost the owner one
+    audited refusal per new link (measured 16 in 300 s); the park holds per instance."""
+    _start_b(drive_mesh)
+    before = _refusals_on_owner(drive_mesh)
+    cred_sync.credentials_sync_step(drive_mesh.b, drive_mesh.owner)
+    assert net_fixtures.wait_for(lambda: _refusals_on_owner(drive_mesh) == before + 1)
+    for _ in range(15):
+        _relink(drive_mesh)
+        cred_sync.credentials_sync_step(drive_mesh.b, drive_mesh.owner)
+    time.sleep(0.5)
+    assert _refusals_on_owner(drive_mesh) - before <= 2, "a re-link re-asked a parked owner"
     assert not _b_holds(drive_mesh)
 
-    for link in list(drive_mesh.b.links.values()):
-        link.close()
-    assert net_fixtures.wait_for(lambda: not any(x.alive for x in drive_mesh.b.links.values()))
-    link, why = drive_mesh.b._ensure_link_with_reason(drive_mesh.owner)  # noqa: SLF001
-    assert link is not None, why
 
-    cred_sync.credentials_sync_step(drive_mesh.b, drive_mesh.owner)
-    assert _b_holds(drive_mesh), "a replaced link did not end the park"
+def _refusals_on_borrower(mesh: Any) -> int:
+    mesh.b.audit.flush()
+    return sum(
+        1
+        for row in mesh.b.audit.tail(2_000)
+        if row.get("event") == "authorisation_refused" and row.get("actor") == mesh.owner
+    )
+
+
+def test_an_authoriser_refusal_on_the_holder_is_not_retried(
+    drive_mesh: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review R2-M1: B's row for A lacks ``broker_credential`` (a non-admin lender). B's
+    authoriser refuses the push without a code; that is an answer, never ``failed``, so
+    the owner's tick must not re-send it (was one refusal row on B per tick for 24 h)."""
+    from local_operator.network.credentials import share_push
+
+    _start_b(drive_mesh)
+    with store.mutate(drive_mesh.network_id, drive_mesh.b.root) as copy:
+        row = copy.member(drive_mesh.owner)
+        assert row is not None
+        row.capabilities = [c for c in row.capabilities if c != "broker_credential"]
+        store.save(copy, drive_mesh.b.root)
+    _relink(drive_mesh)
+    before = _refusals_on_borrower(drive_mesh)
+
+    payload = _share_json(drive_mesh, capsys)
+    assert payload["delivery"] == {
+        "delivered": False,
+        "outcome": "refused:not_authorised",
+    }, payload
+    for _ in range(5):
+        assert share_push.retry_step(drive_mesh.a, drive_mesh.borrower) is None
+    time.sleep(0.5)
+    assert _refusals_on_borrower(drive_mesh) - before == 1
 
 
 def test_a_push_that_loses_to_another_owners_row_is_not_reported_usable(
@@ -530,8 +609,16 @@ def test_a_push_that_loses_to_another_owners_row_is_not_reported_usable(
     assert payload["delivery"] == {
         "delivered": False,
         "outcome": "refused:placement_conflict",
+        "other_owner": third,
     }, payload
     stored = placement_mod.PlacementDocument.load(
         drive_mesh.network_id, drive_mesh.b.root, self_device=drive_mesh.borrower
     )
     assert stored.owner_of(STUB_PROVIDER) == third
+    capsys.readouterr()
+    assert (
+        _lop_network("credential", "share", STUB_PROVIDER, "--with", drive_mesh.b.identity.name)
+        == 0
+    )
+    # The receipt names the device to revoke on (design round 2, D6).
+    assert f"revoke it on {third}" in capsys.readouterr().out

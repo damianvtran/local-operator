@@ -2424,11 +2424,16 @@ def credentials_sync_step(step_server: "RelayServer", device_id: str) -> str | N
 _OWNER_REFUSED_ATTR = "_credential_owner_refused_until"
 
 
-def _live_link_id(server: Any, device_id: str) -> str:
-    """The id of a live link to ``device_id`` right now, or ``""`` (never dials)."""
+def _live_owner_instance(server: Any, device_id: str) -> str:
+    """The relay INSTANCE behind a live link to ``device_id`` now, or ``""`` (never dials).
+
+    The instance id is minted once per relay process and carried in the handshake
+    (``PeerLink.instance_id``), so it changes when the owner's relay restarts and NOT
+    when the same process is simply re-linked — which is the distinction the park needs.
+    """
     for link in list((getattr(server, "links", None) or {}).values()):
         if getattr(link, "device_id", "") == device_id and getattr(link, "alive", False):
-            return str(getattr(link, "link_id", "") or "")
+            return str(getattr(link, "instance_id", "") or "")
     return ""
 
 
@@ -2480,15 +2485,17 @@ def _pull_past_stale_self_view(server: Any, engine: Any, device_id: str, blocked
     parked = _owner_refusals(server)
     now = time.monotonic()
     held = parked.get(device_id)
-    # THE PARK BELONGS TO ONE LINK INCARNATION (QA round 1, Q1). A refusal is the
-    # owner's answer over the link it was asked on; once that link has been replaced
-    # (the owner's relay restarted, a sleep or a Wi-Fi drop ended, the owner dialled us
-    # to retry a share it could not deliver), the answer may have changed, and holding
-    # the park would leave a missed share waiting out the full 30 min (measured
-    # 1814-1843 s). A missing link is NOT a new incarnation: re-asking then would dial
-    # an owner whose answer nothing has disturbed.
+    # THE PARK BELONGS TO ONE OWNER RELAY INSTANCE (QA round 1 Q1, round 2 Q3). A
+    # restarted owner relay has forgotten the share pushes it still owed this device
+    # (``share_push`` keeps them in memory), so its earlier refusal is no evidence any
+    # more and the park ends on the first sync that sees the new instance — that is the
+    # owner-restart case, measured at ~1814 s before Q1. A merely REPLACED link to the
+    # same instance is not evidence of anything: ending the park on it cost one audited
+    # owner refusal per link drop (16 in 300 s on a flapping link, Q3), and a share that
+    # instance owed is re-sent by the owner itself (``share_push.retry_step``). A
+    # missing link is not evidence either: re-asking would dial an undisturbed owner.
     if held is not None and held[0] > now:
-        current = _live_link_id(server, device_id)
+        current = _live_owner_instance(server, device_id)
         if not current or current == held[1]:
             return skip
         parked.pop(device_id, None)
@@ -2505,7 +2512,7 @@ def _pull_past_stale_self_view(server: Any, engine: Any, device_id: str, blocked
     if device_id in (result.get("refused_by") or ()):
         parked[device_id] = (
             now + definitions.REFUSED_MIN_INTERVAL_S,
-            _live_link_id(server, device_id),
+            _live_owner_instance(server, device_id),
         )
         return skip
     parked.pop(device_id, None)
