@@ -41,10 +41,21 @@ def _radient_team(config_dir: Path | None) -> bool:
     return is_eligible(config_dir)
 
 
+def _radient_vault(config_dir: Path | None) -> bool:
+    # Radient Vault agent access: advertised only to a signed-in Team-plan
+    # account whose Vault access and Team Bridge endpoint are in place (operator
+    # constraint). The same cached, network-free gate that adds `vault_resolve`
+    # to the `secret` tool, so the guide and the verb appear together or not at all.
+    from local_operator.vault_agent.eligibility import is_open  # lazy
+
+    return is_open(config_dir)
+
+
 #: ``requires:`` value -> predicate over the session's config root. An UNKNOWN
 #: value fails closed: a typo must hide a gated guide, never publish it.
 GUIDE_PREDICATES: dict[str, Callable[[Path | None], bool]] = {
     "radient-team": _radient_team,
+    "radient-vault": _radient_vault,
 }
 
 

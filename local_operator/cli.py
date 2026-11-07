@@ -1134,6 +1134,13 @@ def build_cli_parser() -> LocalizedArgumentParser:
 
     add_secret_parser(subparsers, help_locale=help_locale)
 
+    # Radient Vault agent access (`lop vault`). Same stdlib-only registration;
+    # LISTED only when the cached, network-free Vault gate is open (operator
+    # constraint: advertised only to a signed-in Team-plan account with access).
+    from local_operator.vault_agent.cli import add_parser as add_vault_parser
+
+    add_vault_parser(subparsers, parent_parser=parent_parser, help_locale=help_locale)
+
     # Mesh networks (design: docs/design/mesh-network.md). Same stdlib-only
     # registration rule as tunnels/secrets: the peer listener, the crypto and the
     # config store are imported by the verb that needs them, so `lop --version` and
@@ -2526,6 +2533,17 @@ def build_cli_parser() -> LocalizedArgumentParser:
     # argparse re-default quirk that already applies to the legacy parent
     # flags must not swallow this one — ``--yolo exec "task"`` is documented).
     _propagate_global_flags(parser, help_locale=help_locale)
+
+    # A subparser registered without ``help=`` drops its row but argparse still
+    # spells it in the ``{a,b,...}`` choices metavar. `vault` must not be
+    # advertised to an account without Vault access (operator constraint), so
+    # when its gate is closed the metavar is pinned to the rest. Done here, after
+    # the last registration, because only now is the full set known; the hidden
+    # command stays callable and prints why it is unavailable.
+    if "vault" in subparsers.choices and not any(
+        action.dest == "vault" for action in subparsers._choices_actions
+    ):
+        subparsers.metavar = "{" + ",".join(n for n in subparsers.choices if n != "vault") + "}"
 
     return parser
 
@@ -18216,6 +18234,10 @@ def main() -> int:
             from local_operator.secrets.cli import main as secret_main
 
             return secret_main(args)
+        elif args.subcommand == "vault":
+            from local_operator.vault_agent.cli import main as vault_main
+
+            return vault_main(args)
         elif args.subcommand == "network":
             from local_operator.network.cli import main as network_main
 

@@ -1665,7 +1665,12 @@ class VariableStoreProtocol(Protocol):
         ...
 
     def store_credential(
-        self, raw_key: str, value: str, source: Literal["command", "ask"] = "command"
+        self,
+        raw_key: str,
+        value: str,
+        source: Literal["command", "ask", "vault"] = "command",
+        *,
+        trim: bool = True,
     ) -> Any:
         """Capture a session-only secret. See :class:`local_operator.variables.VariableStore`."""
         ...

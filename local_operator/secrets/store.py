@@ -95,7 +95,27 @@ PROVIDER_SECRET_PREFIX = "LOP_PROVIDER_"
 #: verbs. Not stored: the name prefix IS the provenance (see above), so this
 #: carries a caller's CLAIM about which namespace it is writing into and is
 #: checked against the name before anything is sealed.
-ROLES = ("agent", "provider")
+ROLES = ("agent", "provider", "delegation")
+
+#: Reserved name prefix for the Radient Vault DELEGATION SEED: the Ed25519 private
+#: key that lets this machine's agent prove a person granted it access to vaults
+#: (``local_operator/vault_agent``; agent-server ``docs/VAULT.md`` §4, "keeps the
+#: private key ... in the harness's local encrypted secret store, in a namespace
+#: no agent-class read can reach").
+#:
+#: Same mechanism as :data:`PROVIDER_SECRET_PREFIX`, and for a sharper reason: a
+#: model that could read this seed could sign agent proofs from anywhere for as
+#: long as the grant lives. So EVERY agent-class and provider-class verb refuses
+#: the prefix, and a delegation-class verb refuses every name outside it.
+#:
+#: WHAT THIS STOPS, AND WHAT IT DOES NOT. It stops the well-behaved verbs:
+#: ``lop secret get`` and the ``secret`` tool are agent-class, and the list,
+#: mesh-offer and MCP-adoption surfaces filter the prefix. It is NOT isolation.
+#: The role is a caller CLAIM made inside the operator's own user boundary: a
+#: same-uid process (the model's shell included) can read ``master.key`` in
+#: keyfile mode or claim ``role="delegation"`` to the broker. The response to a
+#: suspected compromise is revoking the grant in the console (Agent access).
+DELEGATION_SECRET_PREFIX = "LOP_VAULT_DELEGATION_"
 
 #: Descriptions are operator-written labels shown by ``list``; the ceiling only
 #: has to keep a pathological paste from bloating every record.
@@ -165,6 +185,25 @@ def is_provider_secret_name(name: str) -> bool:
     return name.strip().startswith(PROVIDER_SECRET_PREFIX)
 
 
+def is_delegation_secret_name(name: str) -> bool:
+    """Whether ``name`` is in the Vault delegation-seed namespace.
+
+    The ONE predicate for :data:`DELEGATION_SECRET_PREFIX`, for the reason
+    :func:`is_provider_secret_name` is the one predicate for its prefix.
+    """
+    return name.strip().startswith(DELEGATION_SECRET_PREFIX)
+
+
+def is_reserved_secret_name(name: str) -> bool:
+    """Whether ``name`` is any harness-owned row an agent surface must not see.
+
+    For FILTERS (the ``secret`` tool's list, mesh credential offers, MCP env
+    adoption): a name an agent or a peer is never shown is a name it cannot name
+    back into a verb. The verbs themselves are guarded by :func:`_validate_role`.
+    """
+    return is_provider_secret_name(name) or is_delegation_secret_name(name)
+
+
 def secret_class(name: str) -> str:
     """A human-facing class for ``name``, for DISPLAY only — never stored.
 
@@ -173,7 +212,11 @@ def secret_class(name: str) -> str:
     (``string``/``file``) and is authenticated data that predates this rule,
     so provenance lives in the name alone (design §3).
     """
-    return "provider" if is_provider_secret_name(name) else "secret"
+    if is_provider_secret_name(name):
+        return "provider"
+    if is_delegation_secret_name(name):
+        return "delegation"
+    return "secret"
 
 
 def _validate_role(name: str, role: str) -> None:
@@ -189,6 +232,18 @@ def _validate_role(name: str, role: str) -> None:
     """
     if role not in ROLES:
         raise InvalidSecretName(f"role must be one of {', '.join(ROLES)}; got {role!r}.")
+    if role == "delegation" or is_delegation_secret_name(name):
+        # THE DELEGATION NAMESPACE IS CLOSED IN BOTH DIRECTIONS: only a
+        # delegation-class caller may touch it, and that caller may touch
+        # nothing else (so a bug in the vault code cannot read a provider key or
+        # an agent secret through its elevated role either).
+        if role != "delegation" or not is_delegation_secret_name(name):
+            raise InvalidSecretName(
+                f"The {DELEGATION_SECRET_PREFIX} prefix is reserved for the Radient Vault "
+                f"delegation key, which only `lop vault` may create, read, describe or "
+                f"delete; name {name!r} is not allowed here."
+            )
+        return
     reserved = is_provider_secret_name(name)
     if role == "provider" and not reserved:
         raise InvalidSecretName(

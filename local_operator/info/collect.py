@@ -1342,7 +1342,10 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
     from local_operator.secrets.access import open_store
     from local_operator.secrets.errors import SecretStoreError
     from local_operator.secrets.keys import store_path
-    from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
+    from local_operator.secrets.store import (
+        PROVIDER_SECRET_PREFIX,
+        is_delegation_secret_name,
+    )
 
     # An errno comparison rather than ``is_file()``/``exists()``, for a reason
     # worth keeping in view: a path probe answers
@@ -1359,6 +1362,9 @@ def _credential_key_names(root: Path) -> tuple[str, ...]:
     try:
         for record in open_store(resolved).list():
             name = record.name
+            if is_delegation_secret_name(name):
+                # `lop vault`'s signing key, not a credential (see secrets.store).
+                continue
             if name.startswith(PROVIDER_SECRET_PREFIX):
                 name = name[len(PROVIDER_SECRET_PREFIX) :]
             names.add(name)

@@ -286,6 +286,22 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/vault_agent/eligibility.py": (
+        2,
+        "``ELIGIBILITY_NAME`` ('eligibility.json') and ``GRANT_NAME`` "
+        "('agent_access.json') live in the per-MACHINE <config>/vault/ directory, never "
+        "inside a session directory -- and must NOT travel with one: the gate record is "
+        "this machine's cached route-1 answer, and the grant is a delegation bound to THIS "
+        "machine's Team Bridge endpoint and its delegation key. A copy on another device "
+        "names an endpoint and key it does not hold, so it could only mislead.",
+    ),
+    "local_operator/tools/secret_tool.py": (
+        1,
+        "``RADIENT_VAULT_CREDENTIAL_PREFIX`` ('RADIENT_VAULT_') is an environment-variable "
+        "name prefix for Vault-sourced session credentials, not a path. Those credentials "
+        "are in-memory only and deliberately never persisted or copied (a teammate's "
+        "rotation and revocation must hold), so nothing under it is a session entry.",
+    ),
     "local_operator/tunnels/install.py": (
         1,
         "``HEAL_RECEIPT_NAME`` ('login-heal.json'): the audit receipt a same-account "
@@ -1300,8 +1316,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "entry, so there is nothing for the copy to carry",
     ),
     "local_operator/secrets/store.py": (
-        1,
-        "``LOP_PROVIDER_`` prefixes an environment variable name, not a path",
+        2,
+        "``LOP_PROVIDER_`` and ``LOP_VAULT_DELEGATION_`` prefix secret-store record "
+        "names, not paths. The delegation row in particular must never travel: it is "
+        "this machine's private signing key for one Team Bridge endpoint",
     ),
     "local_operator/session/attention.py": (
         1,

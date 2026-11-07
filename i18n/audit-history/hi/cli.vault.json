@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.vault",
+  "history_sha256": "006bb13955cbcbbfdc8f8fe852d757af30ae7ba6a8926ab4aae20c1c0dccdaf1",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "cli.vault",
+      "source_sha256": "88cd0862f4e2f1b0cb095098730eaa942fc66ebc6efa31aba4a9975a3f588ea9",
+      "translator": {
+        "agent": "i18n-translator (coder subagent, job 65ed0781eb77)",
+        "session": "cbcaa1d210f3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (translation-auditor, radientdev team subagent)",
+        "session": "45670e86d2b4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.vault at source hash 88cd0862f4e2: 24/24 keys present in en order; ICU placeholder names/kinds parity with en ({endpoint}, {org}, {minutes}, {until}, {url}); every backticked command (`lop vault connect`, `lop login radient`, `lop team-bridge setup`) byte-identical; Ctrl+C, Radient Vault, Radient Team, Local Operator, JSON and 600 kept verbatim; {url} stays last in revoke_hint; NFC, no bidi/zero-width controls; repo check.py --catalogues-only 0 problems. Safety meaning checked against en .context.json: compare tells the person to check the 16 groups on the approval page BEFORE approving and never claims the harness verified anything; unavailable/not_team carry no up-sell or retry advice; connected_until bounds READ access at {until}; disconnected/revoke_hint keep local-key removal distinct from console revocation. Glossary: agent, approvals, credentials, team plan and 'agent messages' (matches cli.team_bridge / cli.team_bridge_hold) checked against this locale's catalogues and style guide; 'vault' and 'fingerprint' have no prior catalogue rendering, so this namespace sets them. Register आप, polite imperative; full stop ।; 'कुंजी' matches 43 existing uses. Findings 0 blocker / 0 major / 1 minor. Minor deferred: endpoint is rendered 'एंडपॉइंट' in key_heading while wire.settings keeps the Latin 'endpoint'; not a glossary row and the bep_ id beside it disambiguates, so left for a glossary decision. Unresolved blocker/major: 0. Plural one/other rendered at 1/2/5/21/1000000 (10,00,000). Single independent audit pass by a different agent on the SAME model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.vault",
+      "source_sha256": "0da8f67568d315a26b9cb76068d0391f1960bbfb89e601f502e7dd2fea4047de",
+      "translator": {
+        "agent": "i18n-translator (coder subagent, job 65ed0781eb77, round-1 remediation hand-update)",
+        "session": "cbcaa1d210f3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (translation-auditor, radientdev team subagent, round 2)",
+        "session": "45670e86d2b4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent round-2 delta audit (not the translator) of cli.vault at source hash 0da8f67568d3 after remediation 4be71bb4 (supersedes the 0753443 row at the old hash). Scope is CHANGED/NEW keys only — 16 keys: new title, endpoint_row, fingerprint_label, fingerprint_held, compare_stop, connected_scope, waiting_seconds, key_unreadable, store_error; changed compare, connected_until, no_access, frozen, status_not_connected, disconnected, revoke_hint; unchanged keys carry the round-1 audit at 0753443 (transitive coverage, no full re-audit claimed); removed keys key_heading/status_open need no row. Checks: key set/order parity with en; ICU argument parity per repo check.py --catalogues-only (0 problems); backticked commands (`lop vault connect`, `lop vault disconnect`) byte-identical; Ctrl+C, Radient Vault and the '·' separator kept; NFC, no bidi/zero-width controls; plurals rendered with the repo formatter (disconnected at 1/2/5/21, waiting_seconds at 1/5/22). Safety meaning against en .context.json: compare/compare_stop keep compare-BEFORE-approving and stop-on-mismatch with no harness-verified claim; disconnected says the AGENT can no longer read; store_error says nothing was removed. Findings: 0 blocker / 0 major / 1 minor. Register आप; one/other. (m, fixed) revoke_hint translated the console page title 'Agent access', but user-console is English-only (no i18n; page title 'Agent access' in src/lib/vault-agent-access.ts at user-console main cd7d559), so a translated name cannot be found on the page — now names the page verbatim in this locale's quotes, per the context note 'keep the console's term'. Note: endpoint_row/fingerprint_label/fingerprint_held translate the console field labels; acceptable for CLI labels (the person compares the 16 groups, not the label), recorded, not a finding. Unresolved blocker/major: 0. Single independent audit pass by a different agent on the same model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification. Corrections applied by the auditor at the manager's instruction; those corrected strings have no second independent audit."
+    }
+  ]
+}

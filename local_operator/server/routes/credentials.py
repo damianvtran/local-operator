@@ -71,7 +71,10 @@ async def list_credentials(
         from local_operator.secrets.access import open_store
         from local_operator.secrets.errors import SecretStoreError
         from local_operator.secrets.keys import store_path
-        from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
+        from local_operator.secrets.store import (
+            PROVIDER_SECRET_PREFIX,
+            is_delegation_secret_name,
+        )
 
         if store_path(config_manager.config_dir).exists():
             try:
@@ -90,6 +93,9 @@ async def list_credentials(
                         else record.name
                     )
                     for record in open_store(config_manager.config_dir).list()
+                    # The Vault delegation seed is `lop vault`'s, not a credential
+                    # Settings can configure; listing it would be a phantom row.
+                    if not is_delegation_secret_name(record.name)
                 )
             except (SecretStoreError, OSError):
                 logger.warning("credential store unavailable", exc_info=True)

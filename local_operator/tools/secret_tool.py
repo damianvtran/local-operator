@@ -61,8 +61,8 @@ class SecretParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["store", "retrieve", "list", "describe", "update", "delete"] = Field(
-        description="retrieve makes a secret usable without returning its value."
+    op: Literal["store", "retrieve", "list", "describe", "update", "delete", "vault_resolve"] = (
+        Field(description="retrieve makes a secret usable without returning its value.")
     )
     name: str | None = Field(default=None, description="Secret name; required except for list.")
     value: str | None = Field(
@@ -71,6 +71,58 @@ class SecretParams(BaseModel):
     description: str | None = Field(
         default=None, description="What it is for; shown in list. Not secret."
     )
+    vault_id: str | None = Field(
+        default=None, description="vault_resolve: the vlt_ id the user gave (or a console link)."
+    )
+    item_id: str | None = Field(
+        default=None, description="vault_resolve: the vit_ id the user gave (or a console link)."
+    )
+
+
+#: The Radient Vault surface on this tool's schema: removed whole when the gate
+#: (``vault_agent.eligibility.gate``) is closed, so a session without a signed-in
+#: Team plan, Vault access and a Team Bridge endpoint pays zero tokens for it and
+#: is never shown it (operator constraint: advertised only with access). The
+#: precedent is ``agent_tool._org_schema``; this is the same convention, not a
+#: second one.
+_VAULT_OPS = ("vault_resolve",)
+_VAULT_PROPERTIES = ("vault_id", "item_id")
+
+#: The one description clause the open gate adds. It scopes Vault to what a
+#: TEAMMATE shared, so the local store stays visibly the default for the agent's
+#: own credentials (operator constraint: recommended only for sharing).
+_VAULT_CLAUSE = (
+    " vault_resolve: only for a credential a teammate shared in Radient Vault, or one "
+    "the user keeps there for other machines; the value becomes session credential "
+    "$RADIENT_VAULT_<NAME> for bash (map a well-known name in the command, e.g. "
+    'GH_TOKEN="$RADIENT_VAULT_GH_TOKEN"), never shown. Everything else: store/retrieve.'
+)
+
+
+def _vault_schema(parameters: dict[str, Any], open_: bool) -> dict[str, Any]:
+    """Drop the Vault op and its two properties from a closed-gate schema."""
+
+    if open_:
+        return parameters
+    props = parameters.get("properties") or {}
+    op = props.get("op") or {}
+    if isinstance(op.get("enum"), list):
+        op["enum"] = [value for value in op["enum"] if value not in _VAULT_OPS]
+    for name in _VAULT_PROPERTIES:
+        props.pop(name, None)
+    return parameters
+
+
+def _vault_gate_open() -> bool:
+    """The cached, network-free Vault gate for this machine; failure is closed."""
+
+    try:
+        from local_operator.paths import config_dir
+        from local_operator.vault_agent.eligibility import is_open
+
+        return is_open(config_dir())
+    except Exception:  # noqa: BLE001 - fail closed; a schema build never raises
+        return False
 
 
 #: The tool description IS the interface — the only guidance a model reliably
@@ -112,11 +164,13 @@ def build_secret_tool(context: ToolContext) -> AgentTool | None:
         # it will not import must not carry a tool that can only fail.
         logger.debug("secret tool unavailable: store modules will not import", exc_info=True)
         return None
+    # One gate read per build; zero network.
+    vault_open = _vault_gate_open()
     return AgentTool(
         name="secret",
         label="Secret",
-        description=_DESCRIPTION,
-        parameters=SecretParams.model_json_schema(),
+        description=_DESCRIPTION + (_VAULT_CLAUSE if vault_open else ""),
+        parameters=_vault_schema(SecretParams.model_json_schema(), vault_open),
         # write tier: store/update/delete mutate a durable, encrypted store the
         # operator owns, and `delete` is irreversible — the value is kept
         # nowhere else. `retrieve` is a read, but the approval tier is per tool
@@ -171,9 +225,12 @@ async def execute_secret(
 
         return _validation_error(tool_call_id, "secret", exc)
 
+    if params.op == "vault_resolve":
+        return await _op_vault_resolve(tool_call_id, params, context)
+
     from local_operator.secrets.access import open_store, session_id
     from local_operator.secrets.errors import SecretStoreError
-    from local_operator.secrets.store import is_provider_secret_name
+    from local_operator.secrets.store import is_reserved_secret_name
 
     if params.op != "list" and not (params.name or "").strip():
         return _error(tool_call_id, "secret", f"'{params.op}' requires a secret name.")
@@ -291,7 +348,9 @@ async def execute_secret(
         # one a model drives, so it is filtered here rather than at the store:
         # a model that cannot see the row cannot ask for it, and a name it
         # never learns is not one it can name back into the destructive verbs.
-        records = [r for r in records if not is_provider_secret_name(r.name)]
+        # The Vault delegation seed (LOP_VAULT_DELEGATION_*) is filtered for the
+        # same reason, with a sharper one: it signs agent proofs.
+        records = [r for r in records if not is_reserved_secret_name(r.name)]
         if not records:
             # Distinguish "you have stored nothing" from "everything stored is
             # a provider row you cannot see": the first asks the agent to store
@@ -362,3 +421,143 @@ async def execute_secret(
         # it (missing secret, damaged record, store written by a newer runtime,
         # broker down) instead of retrying blindly.
         return _error(tool_call_id, "secret", str(exc))
+
+
+#: Every Vault-sourced session credential lives under this prefix, whatever name
+#: the model asks for. Injections override the inherited environment of every
+#: later ``bash`` child, and the value is teammate-controlled bytes the model is
+#: never allowed to read, so a free choice of name would let a shared item land
+#: as ``GIT_SSH_COMMAND``, ``PATH`` or ``BASH_ENV`` and run on this machine. A
+#: forced namespace is an allowlist by shape; a denylist of exec-affecting names
+#: would always be one variable short. A command needing a well-known name maps
+#: it visibly in its own command line (``GH_TOKEN="$RADIENT_VAULT_GH" gh ...``).
+#:
+#: ``RADIENT_VAULT_`` and not ``VAULT_``: the bare prefix is HashiCorp Vault's own
+#: namespace, so ``addr`` would have become ``VAULT_ADDR`` (pointing the ``vault``
+#: CLI or Terraform's provider at a teammate-chosen server, which then receives
+#: the operator's own ``VAULT_TOKEN``) and ``token`` would replace that token.
+RADIENT_VAULT_CREDENTIAL_PREFIX = "RADIENT_VAULT_"
+
+
+def vault_credential_key(name: str | None, item_id: str) -> str | None:
+    """The session-credential name for a resolved item: always ``RADIENT_VAULT_``-prefixed."""
+
+    from local_operator.variables import normalize_credential_key
+
+    requested = normalize_credential_key(name or "")
+    if requested is None:
+        requested = item_id.removeprefix("vit_")[-8:]
+    if not requested.startswith(RADIENT_VAULT_CREDENTIAL_PREFIX):
+        requested = RADIENT_VAULT_CREDENTIAL_PREFIX + requested
+    return normalize_credential_key(requested)
+
+
+def _list_credentials(store: Any) -> list[Any]:
+    lister: Any = getattr(store, "list_credentials", None)
+    if not callable(lister):
+        return []
+    try:
+        rows: Any = lister()
+        return list(rows)
+    except Exception:  # noqa: BLE001 - an unreadable listing replaces nothing
+        return []
+
+
+async def _op_vault_resolve(
+    tool_call_id: str, params: SecretParams, context: ToolContext | None
+) -> ToolResult:
+    """Resolve a teammate-shared Vault item into a SESSION credential.
+
+    The inversion ``retrieve`` keeps, kept here too: the value goes into the
+    session credential store (``VariableStore.store_credential``, the path
+    ``/credential`` uses) and is injected into ``bash`` as ``$NAME``; the model
+    gets a receipt naming the key and never the bytes. It is not written to the
+    long-term store: a teammate's credential is theirs to rotate and revoke, and
+    a copy kept on this disk would outlive both (VAULT.md §4: never in a
+    message, log, transcript summary or memory store).
+
+    The gate is re-checked inside ``resolve_item`` before any network call, as
+    ``agent_tool._op_org`` does, and the whole flow runs on a worker thread: it
+    resolves the person's bearer on a private event loop and makes blocking
+    HTTP calls, neither of which may run on the session's loop.
+    """
+    import asyncio
+
+    from local_operator.tools.builtin import _error, _text
+    from local_operator.vault_agent.resolve import VaultAgentRefusal, parse_reference
+
+    store = getattr(context, "variables", None) if context is not None else None
+    if not callable(getattr(store, "store_credential", None)):
+        # Checked BEFORE the mint: a host with nowhere safe to put the value must
+        # not burn a single-use challenge and a rate-limit slot on it.
+        return _error(
+            tool_call_id,
+            "secret",
+            "vault_resolve needs a session credential store, which this host does not have.",
+        )
+    try:
+        vault_id, item_id = parse_reference(params.vault_id, params.item_id)
+    except VaultAgentRefusal as exc:
+        return _error(tool_call_id, "secret", str(exc))
+
+    key = vault_credential_key(params.name, item_id)
+    if key is None:  # pragma: no cover - the default always normalizes
+        return _error(tool_call_id, "secret", "Could not derive a credential name.")
+    import os
+
+    if key in os.environ:
+        # The prefix makes this rare, not impossible (the operator may export a
+        # RADIENT_VAULT_* name themselves). Injections override what bash
+        # children inherit, so a resolved value under an inherited name would
+        # silently replace the operator's own. Refused before the mint.
+        return _error(
+            tool_call_id,
+            "secret",
+            f"{key} is already set in this machine's environment; it was not replaced. "
+            "Pass a different name.",
+        )
+    previous = next((c for c in _list_credentials(store) if c.key == key), None)
+    if previous is not None and previous.source != "vault":
+        # Never displace what the operator typed or stored: a teammate-chosen
+        # value silently replacing the operator's own credential is a token swap
+        # nobody would notice. Checked before the mint, so nothing is spent.
+        return _error(
+            tool_call_id,
+            "secret",
+            f"Session credential {key} already holds a value the user provided; it was "
+            "not replaced. Pass a different name.",
+        )
+
+    from local_operator.paths import config_dir
+    from local_operator.vault_agent.resolve import resolve_item
+
+    try:
+        resolved = await asyncio.to_thread(
+            resolve_item, config_dir(), vault_id=vault_id, item_id=item_id
+        )
+    except VaultAgentRefusal as exc:
+        return _error(
+            tool_call_id, "secret", str(exc), details={"op": "vault_resolve", "code": exc.code}
+        )
+    assert store is not None  # checked callable above, before the mint
+    result = store.store_credential(key, resolved.value, "vault", trim=False)
+    if not getattr(result, "ok", False):
+        return _error(tool_call_id, "secret", "Radient Vault returned an empty value.")
+    verb = "replacing the earlier Vault value" if getattr(result, "replaced", False) else ""
+    lines = [
+        f"Resolved {item_id} from Radient Vault into session credential {key}"
+        + (f", {verb}." if verb else "."),
+        "The value is NOT shown here and never will be. Use it without reading it:",
+        f'  bash:  interpolate ${key}, e.g. curl -H "Authorization: Bearer ${key}" ...',
+        "It lasts for this session only and is not saved to the local store.",
+    ]
+    if resolved.username:
+        lines.append("The item also carries a username; ask the user for it if you need it.")
+    if resolved.expires_at:
+        lines.append(f"The shared item expires at {resolved.expires_at}.")
+    return _text(
+        tool_call_id,
+        "secret",
+        "\n".join(lines),
+        details={"op": "vault_resolve", "name": key, "vault_id": vault_id, "item_id": item_id},
+    )

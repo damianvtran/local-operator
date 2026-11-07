@@ -1,0 +1,9 @@
+{
+  "cli.vault_help.vault": "Let this machine's agent read credentials teammates shared in Radient Vault (Radient Team)",
+  "cli.vault_help.connect": "Create this agent's key, show its fingerprint and open the approval page",
+  "cli.vault_help.no_open": "Print the approval link instead of opening a browser",
+  "cli.vault_help.timeout": "How long to wait for your approval, in seconds (default 600)",
+  "cli.vault_help.status": "Show whether agent access is available, this agent's key fingerprint and its approval",
+  "cli.vault_help.json": "Print the status as JSON",
+  "cli.vault_help.disconnect": "Delete this machine's agent keys (revoke their access separately in the console)"
+}

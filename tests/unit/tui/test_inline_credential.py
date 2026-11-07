@@ -56,6 +56,7 @@ from local_operator.tui.widgets.editor import (
     substitute_credentials,
 )
 from local_operator.variables import (
+    CredentialSource,
     CredentialStoreResult,
     VariableStore,
     normalize_credential_key,
@@ -1041,10 +1042,12 @@ class _RefusingStore(VariableStore):
         super().__init__(*args, **kwargs)
         self.refuse = refuse or set()
 
-    def store_credential(self, raw_key, value, source="command"):  # type: ignore[override]
+    def store_credential(  # type: ignore[override]
+        self, raw_key, value, source: CredentialSource = "command", *, trim: bool = True
+    ):
         if raw_key in self.refuse:
             return CredentialStoreResult(ok=False, reason="empty-value")
-        return super().store_credential(raw_key, value, source)
+        return super().store_credential(raw_key, value, source, trim=trim)
 
 
 @pytest.mark.asyncio

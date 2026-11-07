@@ -91,7 +91,9 @@ _SECRET_RE = re.compile(
 
 
 #: Where a stored session credential came from. Operator-facing only.
-CredentialSource = Literal["command", "ask"]
+#: ``vault`` is a value the agent resolved from Radient Vault (``secret`` tool,
+#: ``vault_resolve``): the operator did not paste it, a teammate shared it.
+CredentialSource = Literal["command", "ask", "vault"]
 
 #: Why :meth:`VariableStore.store_credential` refused to store anything.
 CredentialStoreFailure = Literal["empty-key", "empty-value"]
@@ -226,13 +228,39 @@ def parse_credential_command(args: str) -> CredentialCommand:
     return CredentialCommand("store", key=key)
 
 
+#: Provenance is the one thing the listing reports, so every source is mapped
+#: explicitly with no catch-all: a Vault value once fell into an ``else`` arm and
+#: was shown as something the operator had pasted. A new source added to
+#: :data:`CredentialSource` without a label fails loudly here, not silently.
+_CREDENTIAL_SOURCE_LABEL: dict[str, str] = {
+    "command": "/credential",
+    "ask": "ask",
+    "vault": "Radient Vault",
+}
+
+
+def credential_source_from_wire(raw: object) -> CredentialSource:
+    """A source string read off the remote-viewer wire, as the typed Literal.
+
+    Every source with a label is carried as itself; only an unrecognised value
+    falls back to ``"command"`` (the row exists either way).
+    """
+
+    text = str(raw or "")
+    if text == "ask":
+        return "ask"
+    if text == "vault":
+        return "vault"
+    return "command"
+
+
 def format_credential_list(credentials: list[SessionCredential]) -> str:
     """Operator-facing listing. Names and sources only — never values."""
     if not credentials:
         return f"No credentials stored for this session. {CREDENTIAL_USAGE}"
     width = max(len(item.key) for item in credentials)
     rows = [
-        f"  {item.key.ljust(width)}  from {'/credential' if item.source == 'command' else 'ask'}"
+        f"  {item.key.ljust(width)}  from {_CREDENTIAL_SOURCE_LABEL[item.source]}"
         for item in credentials
     ]
     return "\n".join(
@@ -477,7 +505,12 @@ class VariableStore:
 
     # -- session credentials -----------------------------------------------
     def store_credential(
-        self, raw_key: str, value: str, source: CredentialSource = "command"
+        self,
+        raw_key: str,
+        value: str,
+        source: CredentialSource = "command",
+        *,
+        trim: bool = True,
     ) -> CredentialStoreResult:
         """Capture a secret under ``raw_key`` for this session only.
 
@@ -486,6 +519,14 @@ class VariableStore:
         in a way that is invisible to everyone involved. Empty after trim is
         a refusal, not a stored blank: a blank env var is how a tool silently
         falls back to some other credential the operator did not intend.
+
+        ``trim=False`` is for a value that did NOT come from a paste: a Radient
+        Vault item is stored byte for byte by whoever shared it, and its leading
+        or trailing bytes can be meaningful (a PEM's final newline), so silently
+        stripping one would hand the agent a different credential than the one
+        shared. A whitespace-only value is still refused. The stripped core is
+        also registered for scrubbing, so output that prints the value without
+        its trailing newline is masked too.
         """
         key = normalize_credential_key(raw_key)
         if key is None:
@@ -494,7 +535,9 @@ class VariableStore:
         if not trimmed:
             return CredentialStoreResult(ok=False, reason="empty-value")
         replaced = key in self._credentials
-        self._credentials[key] = trimmed
+        if not trim and trimmed != value:
+            self.register_redaction(trimmed)
+        self._credentials[key] = trimmed if trim else value
         meta = SessionCredential(key=key, source=source)
         self._credential_meta[key] = meta
         return CredentialStoreResult(ok=True, credential=meta, replaced=replaced)

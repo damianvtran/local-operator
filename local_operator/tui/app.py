@@ -14363,7 +14363,12 @@ class OperatorApp(App[None]):
             from local_operator.hub_org import eligibility
             from local_operator.paths import config_dir
 
-            eligibility.refresh(config_dir(), boundary="tui-start")
+            if eligibility.refresh(config_dir(), boundary="tui-start"):
+                # The Radient Vault agent gate is meaningful only for a
+                # team-plan account; its own 6 h TTL bounds the network.
+                from local_operator.vault_agent import eligibility as vault_gate
+
+                vault_gate.refresh(config_dir(), boundary="tui-start")
         except Exception:  # noqa: BLE001 — a surface start never fails for this
             pass
 
@@ -56029,6 +56034,7 @@ class OperatorApp(App[None]):
         """
         from local_operator.variables import (
             SessionCredential,
+            credential_source_from_wire,
             describe_store_failure,
             format_credential_forget,
             format_credential_forget_all,
@@ -56104,12 +56110,14 @@ class OperatorApp(App[None]):
                 format_credential_list(
                     [
                         # The wire carries a plain string; the model's field is
-                        # a Literal. Anything unrecognised is reported as the
-                        # command source rather than dropped, since the row
-                        # exists either way and the SOURCE is a detail.
+                        # a Literal. Every KNOWN source is carried as itself (a
+                        # Vault value shown as "/credential" would claim the
+                        # operator pasted a teammate's secret); only an
+                        # unrecognised one falls back to the command source
+                        # rather than being dropped, since the row exists either way.
                         SessionCredential(
                             key=str(row.get("key", "")),
-                            source=("ask" if str(row.get("source", "")) == "ask" else "command"),
+                            source=credential_source_from_wire(row.get("source")),
                         )
                         for row in answer.get("credentials") or []
                     ]

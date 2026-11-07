@@ -121,16 +121,17 @@ def _usable_store_name(name: str) -> bool:
 
     Also refused: a control character (the store's rule, which would abort
     adoption for every other server in the file) and the provider-owned
-    namespace, which an ordinary ``mcp.json`` env key could otherwise shadow.
+    namespace and the Vault delegation-seed namespace, which an ordinary
+    ``mcp.json`` env key could otherwise shadow.
     """
     from types import SimpleNamespace
 
     from local_operator.mcp.secret_refs import public_secret_refs
-    from local_operator.secrets.store import is_provider_secret_name
+    from local_operator.secrets.store import is_reserved_secret_name
 
     if not name or any(ord(character) < 0x20 or ord(character) == 0x7F for character in name):
         return False
-    if is_provider_secret_name(name):
+    if is_reserved_secret_name(name):
         return False
     published = public_secret_refs(SimpleNamespace(env={name: "${" + name + "}"}, headers={}))
     # EXACTLY this name, not merely "something": ``${A}}`` publishes ``A``, so a
