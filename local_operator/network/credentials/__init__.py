@@ -273,6 +273,23 @@ class _LocalOps:
             return {"kind": "ack", "key": key, "revoked": 0}
         return {"kind": "ack", "key": key, "revoked": broker.revoke_outstanding(key, holder)}
 
+    def share_push(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Push one just-shared placement row to its holder now (``share_push``).
+
+        Asked by ``lop network credential share`` AFTER it wrote the row, so the
+        holder sees the share in one round trip instead of on its next pull. The
+        answer is value-free (``{delivered, outcome}``); anything but ``pushed``
+        leaves delivery to the holder's own pull, which the CLI says.
+        """
+        from local_operator.network.credentials import share_push as share_push_mod
+
+        return share_push_mod.push_share(
+            self._server,
+            str(frame.get("network") or ""),
+            str(frame.get("device") or ""),
+            str(frame.get("credential_key") or ""),
+        )
+
     def sync_pull(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Pull ONE copy from its owner now, and report a value-free outcome.
 
@@ -374,6 +391,7 @@ def install(server: RelayServer) -> None:
             "credential_report": ops.report,
             "credential_placement": ops.placement,
             "credential_revoke": ops.revoke,
+            "credential_share_push": ops.share_push,
             "credential_sync_pull": ops.sync_pull,
         },
         slow={"net_broker": BROKER_OP_DEADLINE_S},

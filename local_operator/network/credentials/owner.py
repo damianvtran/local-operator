@@ -430,6 +430,7 @@ class MeshCredentialBroker:
         time the answer is yes, and kept.
         """
         from local_operator.network.credentials import reconcile as reconcile_mod
+        from local_operator.network.credentials import share_push as share_push_mod
         from local_operator.network.relay import not_implemented_peer_op
 
         refuse = not_implemented_peer_op("net_broker")
@@ -475,6 +476,19 @@ class MeshCredentialBroker:
                         "op": "ack",
                         "req": (frame or {}).get("req"),
                         "detail": reconcile_mod.member_placement_push(server, link, frame),
+                    }
+                # THE SHARE PUSH, same reason: ``credential share`` pushes the new row
+                # to its holder, and a borrower-only holder has no broker. Routed only
+                # by its own origin marker; its receiver admits only rows naming this
+                # device as a holder (``share_push.member_share_push``).
+                if (
+                    str((frame or {}).get("kind") or "") == "placement"
+                    and (frame or {}).get("origin") == share_push_mod.SHARE_PUSH_ORIGIN
+                ):
+                    return {
+                        "op": "ack",
+                        "req": (frame or {}).get("req"),
+                        "detail": share_push_mod.member_share_push(server, link, frame),
                     }
                 return refuse(link, frame)
             return broker.on_broker(link, frame)
@@ -541,6 +555,7 @@ class MeshCredentialBroker:
             )
         kind = str(frame.get("kind") or "")
         from local_operator.network.credentials import reconcile as reconcile_mod
+        from local_operator.network.credentials import share_push as share_push_mod
         from local_operator.network.credentials.lifecycle import negotiated
 
         if kind.startswith("lifecycle_") and not negotiated(link):
@@ -566,6 +581,10 @@ class MeshCredentialBroker:
             detail = self.report(link, frame)
         elif kind == "placement" and frame.get("origin") == reconcile_mod.PUSH_ORIGIN:
             detail = reconcile_mod.member_placement_push(self._server, link, frame)
+        elif kind == "placement" and frame.get("origin") == share_push_mod.SHARE_PUSH_ORIGIN:
+            # Never the legacy ``placement_frame`` merge: that path would accept the
+            # frame without the holder narrowing the share push's receiver applies.
+            detail = share_push_mod.member_share_push(self._server, link, frame)
         elif kind == "placement":
             detail = self.placement_frame(link, frame)
         elif kind == "lifecycle_read":

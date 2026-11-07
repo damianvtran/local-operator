@@ -481,6 +481,8 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "credential_report",
         "credential_placement",
         "credential_revoke",
+        # The share push: ``credential share`` hands the new row to its holder now.
+        "credential_share_push",
         # The member-side repair pull (mesh-mcp-credentials.md §4): the CLI asks
         # THIS device's relay to pull one copy from its owner NOW. Local for the
         # same reason the rest of the family is: the pull needs a link, and the
@@ -14662,6 +14664,7 @@ def _owning_document(op: str) -> str:
         "credential_report": "mesh-credentials.md",
         "credential_placement": "mesh-credentials.md",
         "credential_revoke": "mesh-credentials.md",
+        "credential_share_push": "mesh-credentials.md",
     }
     return owners.get(op, "the design documents")
 

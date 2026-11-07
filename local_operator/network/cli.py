@@ -3253,6 +3253,43 @@ def _cmd_credential_refresh(args: argparse.Namespace) -> int:
     return _emit(args, {"ok": True, "credential_name": key}, [key])
 
 
+#: The CLI's wait for the share push: one dial plus the holder's 10 s answer budget
+#: (``sync.ANNOUNCE_TIMEOUT_S``). Past it the share is still written and the holder's
+#: own pull delivers it; the receipt says so.
+SHARE_PUSH_TIMEOUT_S = 15.0
+
+
+def _push_share_to_holder(network_id: str, device: str, key: str) -> dict[str, Any]:
+    """Ask this device's relay to hand the just-written row to ``device`` now.
+
+    WHY (mesh perf matrix): without it the holder learned of a share only on its
+    own pull — 0-15 s of tick phase at best. The row is already on disk when this
+    runs, so every failure is reported, never raised: the share stands and the
+    holder's own pull still delivers it.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        answer = _relay_call(
+            "credential_share_push",
+            timeout=SHARE_PUSH_TIMEOUT_S,
+            allow_no_answer=True,
+            network=network_id,
+            device=device,
+            credential_key=key,
+        )
+    except MeshRefusal as refusal:
+        # An older relay process that does not know the op answers by name.
+        return {"delivered": False, "outcome": f"refused:{refusal.code or 'relay'}"}
+    if answer is None:
+        # No relay running, or no answer within the budget: the row stands either way.
+        return {"delivered": False, "outcome": "no_relay_answer"}
+    return {
+        "delivered": bool(answer.get("delivered")),
+        "outcome": str(answer.get("outcome") or "unknown"),
+    }
+
+
 def _cmd_credential(args: argparse.Namespace) -> int:
     """``credential share|revoke <key> --with/--from <dev>``: the owner's own verb.
 
@@ -3434,6 +3471,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
                 record, device, revoke=["broker_credential"]
             )
     _audit_placement(record, identity.device_id, device, key, entry=entry_json, action=action)
+    delivery = _push_share_to_holder(record.network_id, device, key) if verb == "share" else {}
     holders = [row["device"] for row in entry_json.get("holders") or []]
     payload = {
         "ok": True,
@@ -3448,6 +3486,8 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         "capability_applied": capability,
         "owner_device": entry_json.get("owner_device", ""),
     }
+    if delivery:
+        payload["delivery"] = delivery
     name = _member_name(record, device) or device
     # PROSE NAMES A STORE SECRET BY THE NAME THE OPERATOR TYPES (design review round 1, D5).
     # ``mark`` says ``CRM_API_KEY`` and ``share|revoke`` accept it, so a receipt that read
@@ -3462,6 +3502,12 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         f"borrowers now: {', '.join(holders) or 'none'}",
         f"broker_credential on {name}: {capability or 'unchanged'}",
     ]
+    if delivery:
+        lines.append(
+            f"delivered to {name}: now"
+            if delivery.get("delivered")
+            else f"delivered to {name}: on its next sync ({delivery.get('outcome') or 'not sent'})"
+        )
     from local_operator.network.credentials.types import is_mcp_key
 
     if verb == "share" and is_mcp_key(key):
