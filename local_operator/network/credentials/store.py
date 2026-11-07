@@ -580,27 +580,28 @@ class MeshAwareAuthStore:
         THE FUTURE IS THE COALESCER: the first caller creates it, and callers that
         arrive while it is still pending await the same one. The event loop is this
         session's own, so the future belongs to it. A finished borrow is not reused
-        here, so sequential provider calls each dial: that per-request round trip is
-        the accepted cost, not a missing optimisation.
+        here: sequential provider calls each reach the CLIENT, which decides whether
+        to dial. Keeping this future past its borrow would be a second, unfenced
+        cache that none of the client's checks govern.
 
-        A PROVIDER KEY DIALS THE OWNER ON EVERY RESOLVE. The CLIENT caches the grant
-        a dial returns (expiry capped at ``now + grant_ttl_s``), but
-        ``MeshCredentialClient.request_grant_sync`` reads that cache ahead of the
-        dial only for the ``github`` key (``is_github_key``); MCP bearers read it in
-        ``mcp_bearer``. A grant TTL is not an upstream credential generation, and an
-        owner logout does not rewrite THIS device's placement document, so a
-        provider bearer served from the cache would outlive the login it represents
-        (0385927ab9 removed the unconditional short-circuit; 458a1474a4 restored it
-        for the ``github`` key only). The one provider exception is
-        ``MeshCredentialClient._held_or``: when the owner is unreachable, a
-        still-live cached grant is served marked ``held_offline``, which is why
-        ``grant_ttl_s`` still bounds what this device can serve unasked.
+        WHEN THE CLIENT DIALS. The CLIENT caches the grant a dial returns (expiry
+        capped at ``now + grant_ttl_s``). ``MeshCredentialClient.request_grant_sync``
+        serves the ``github`` key from that cache on its own rule, MCP bearers read
+        it in ``mcp_bearer``, and since 2026-11-07 a *covered* provider key is reused
+        by ``_serve_cached`` while the owner's announced lifecycle generation for it
+        is unchanged since before the fetching dial, for at most ``grant_ttl_s/2``
+        (operator-approved C5 window). A grant TTL alone is not an upstream
+        credential generation (0385927ab9), so an uncovered provider key (no
+        lifecycle stamps, or no ``credential-lifecycle-v1`` on the link) still dials
+        the owner on every resolve. ``MeshCredentialClient._held_or`` serves a
+        still-live cached grant marked ``held_offline`` when the owner is
+        unreachable, which is why ``grant_ttl_s`` still bounds what this device can
+        serve unasked.
 
         ``test_native_hot_access.test_live_grant_and_old_login_refusal_do_not_short_circuit_owner``
-        fails if the client's cache read is widened to providers. It drives the
-        client directly and never reaches this method, so keeping this future past
-        its borrow would be a turn-level cache that test cannot see. Design §3.5's
-        as-built note has the detail.
+        pins the uncovered dial-per-call and ``test_borrower_grant_reuse`` the
+        covered reuse and its fences. Both drive the client directly and never reach
+        this method. Design §3.5's as-built notes have the detail.
         """
         from local_operator.network.credentials.effective import (
             effective_access,

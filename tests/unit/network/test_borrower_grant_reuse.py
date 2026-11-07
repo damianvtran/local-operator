@@ -313,6 +313,29 @@ def test_a_grant_older_than_half_the_ttl_dials_and_holds_if_the_owner_is_gone(
     client.close()
 
 
+def test_a_lifecycle_bump_while_the_owner_is_unreachable_still_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fence makes the next resolve DIAL; it does not shrink the offline hold.
+
+    Measured on the two-relay rig: the owner's own token refresh after the first
+    lend bumps ``material_generation``, and that announce can land while the owner
+    is frozen. Dropping the slot there turned a ``held_offline`` serve (today's
+    contract) into a refusal; the dial must reach ``_held_or`` with the slot intact.
+    """
+    client = _client(tmp_path)
+    _observe(tmp_path)
+    owner = _Owner(monkeypatch)
+    first = _warm(client, owner)
+    _observe(tmp_path, generation=2)
+    owner.offline = True
+    held = _resolve(client)
+    assert len(owner.grants) == 2
+    assert isinstance(held, Grant) and held.held_offline
+    assert held.access_token == first.access_token
+    client.close()
+
+
 # 9 -------------------------------------------------------------------------
 
 

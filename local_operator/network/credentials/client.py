@@ -1050,7 +1050,10 @@ class MeshCredentialClient:
                 if self.grants.invalidate_policy(key, session_id, stamp):
                     return None
                 if self._lifecycle_fence(key) != fence:
-                    self.grants.drop(key, session_id)
+                    # Dial, but KEEP the slot: if the owner is unreachable the
+                    # dial ends in ``_held_or``, whose ``held_offline`` contract
+                    # predates this read and must not shrink because of it. A
+                    # successful dial replaces the slot (and its fence).
                     return None
                 if self.grants.peek(key, session_id) is not held:
                     return None  # replaced or dropped by a concurrent resolve
