@@ -508,6 +508,36 @@ def test_a_generic_file_is_served_as_a_download_never_inline(proxy):
     assert calls == [("GET", f"{HUB}/{CID}/messages/{MID}/attachments/{AID}?tenant_id=org-a")]
 
 
+def test_an_empty_generic_file_is_served_with_the_fixed_download_headers(proxy):
+    """UI #1735 QA Q1: the hub serves a zero-byte generic file, so the audit view
+    must hand it on as an (empty) download, exactly as the member lane does (#3521),
+    instead of a 502."""
+
+    client, calls, state, _ = proxy
+    state["serve"] = b""
+    response = client.get(f"{BASE}/{CID}/messages/{MID}/attachments/{AID}" + _q())
+    assert response.status_code == 200, response.text
+    assert response.content == b""
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["content-disposition"] == 'attachment; filename="attachment.bin"'
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-security-policy"] == "default-src 'none'; sandbox"
+    assert response.headers["cache-control"] == _SERVED_CACHE_CONTROL
+    assert calls == [("GET", f"{HUB}/{CID}/messages/{MID}/attachments/{AID}?tenant_id=org-a")]
+
+
+@pytest.mark.parametrize("served", ["image/png", "image/jpeg"])
+def test_an_empty_image_is_still_refused(proxy, served):
+    """Zero bytes are never a decodable image: the image lane keeps its refusal."""
+
+    client, _calls, state, _ = proxy
+    state["serve"], state["serve_type"] = b"", served
+    response = client.get(f"{BASE}/{CID}/messages/{MID}/attachments/{AID}" + _q())
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "bridge_invalid_response"
+    assert response.headers["cache-control"] == _SERVED_CACHE_CONTROL
+
+
 def test_the_attachment_read_accepts_the_generic_file_type(proxy):
     """#3022 R1-2: the byte read must ACCEPT what it expects, or a negotiating
     hop 406s every file. The member image read keeps its image-only Accept."""
