@@ -1331,7 +1331,7 @@ class ProviderController:
 
     @staticmethod
     def _credential_ref(row: Any) -> str:
-        """The stable ref naming ONE stored credential row.
+        """The stable ref naming ONE stored credential row, DAEMON-SIDE ONLY.
 
         ``identity_key`` when the store has one, else ``cred:<row id>`` -- the
         same spelling :meth:`_account_fingerprint` and
@@ -1340,6 +1340,11 @@ class ProviderController:
         UNIQUE per row: ``credential_identity`` is a display label and two
         stored logins may share one, while a reset credit can only be spent on
         one row.
+
+        IT IS NEVER PUBLISHED. ``identity_key`` is the vendor account id, and
+        for a legacy row with none it is the EMAIL -- which is why the phone
+        only ever receives an HMAC alias of this value
+        (:func:`local_operator.mobile.daemon._phone_reset_alias`, Q7).
         """
         identity_key = getattr(row, "identity_key", None)
         if isinstance(identity_key, str) and identity_key.strip():

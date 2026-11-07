@@ -30,11 +30,11 @@
  * Only one card can confirm at a time (one flow object for the sheet), the
  * default focus is Cancel rather than the button that spends, and the phone
  * sends the ACCOUNT INDEX plus the opaque REF the daemon published: it never
- * learns a login name, and the ref keeps the spend on the login it confirmed
- * even if the login list moves underneath it.
+ * learns a login name, and the alias the daemon publishes keeps the spend on the
+ * login it confirmed even if the login list moves underneath it.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getUsage, HttpError, isUsageResetRefusal, refreshUsage, resetUsage, type PhoneUsageEnvelope, type PhoneUsageLimit, type PhoneUsageResetOutcome, type PhoneUsageTone } from "../api";
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { getUsage, HttpError, isUsageResetInFlight, isUsageResetRefusal, refreshUsage, resetUsage, type PhoneUsageEnvelope, type PhoneUsageLimit, type PhoneUsageResetOutcome, type PhoneUsageTone } from "../api";
 import { Sheet } from "./ui/sheet";
 import { Button } from "./ui/button";
 import { ChromeIcon } from "./ui/chrome-icon";
@@ -43,8 +43,8 @@ import { messageRuntime, useLocaleSnapshot } from "../store";
 import { cn } from "../lib/cn";
 import {
 	accountKey, buildUsageModel, countdown, refreshPhase, resetAttemptBusy, resetAttemptDone,
-	resetAttemptSettled, resetAttemptStart, resetFlowCancel, resetFlowConfirm, resetFlowRefused,
-	resetFlowSettle, resetFlowStart, resetOutcomeKey, resetRefreshPhase, resetTarget,
+	resetAttemptSettled, resetAttemptStart, resetFlowCancel, resetFlowConfirm,
+	resetFlowSettle, resetFlowStart, resetFlowLate, resetOutcomeKey, resetRefreshPhase, resetTarget,
 	RESET_ATTEMPTS_EMPTY, RESET_FLOW_IDLE,
 	type RefreshPhase, type ResetAttempts, type ResetFlow, type ResetTarget, type UsageAccount, type UsageRow,
 } from "./usage-sheet.model";
@@ -215,6 +215,27 @@ function outcomeText(outcome: PhoneUsageResetOutcome, windowsReset: number): str
 		: t(key);
 }
 
+/** Settle one card's flow with an answer that names it.
+ *
+ * A BUSY flow settles normally. An IDLE one means the sheet was closed and
+ * reopened while the spend was running: the reopen threw the flow away, so the
+ * outcome is rebuilt from the attempt's own key and target instead of being
+ * dropped (U10). Any other flow -- another card's confirmation -- is left
+ * alone, which is what `resetFlowSettle` already does. */
+function settleResetFlow(
+	current: ResetFlow,
+	key: string,
+	target: ResetTarget,
+	redeemRequestId: string,
+	outcome: PhoneUsageResetOutcome,
+	windowsReset: number,
+	numbersStale: boolean,
+): ResetFlow {
+	return current.kind === "idle"
+		? resetFlowLate(key, target, redeemRequestId, outcome, windowsReset, numbersStale)
+		: resetFlowSettle(current, outcome, windowsReset, numbersStale);
+}
+
 /** ONE account's reset interaction, in place of the badge it was opened from.
  *
  * INLINE, NOT A NESTED MODAL: the confirmation has to name the account it will
@@ -261,7 +282,11 @@ function ResetPanel({ flow, name, busy, onCancel, onConfirm }: {
 	}, [flow.kind]);
 	return <div role="group" aria-label={heading} aria-busy={busy || undefined}
 		className="flex flex-col gap-2 rounded-sm bg-sunken px-2.5 py-2">
-		<p className="min-w-0 text-meta font-medium text-ink">{heading}</p>
+		{/* D11: with ONE account the title repeated the provider heading 40px
+		    above it and named nothing new, so the group's accessible name keeps
+		    the provider and the line goes. Balanced wrapping stops a long provider
+		    name from leaving the total ("из 3") alone on line two (D12). */}
+		{target.count > 1 && <p className="min-w-0 text-meta font-medium text-ink [text-wrap:balance]">{heading}</p>}
 		<div aria-live="polite" className="flex flex-col gap-1">
 			{flow.kind === "result"
 				? <p ref={resultRef} tabIndex={-1} className={cn("min-w-0 text-meta outline-none",
@@ -280,13 +305,16 @@ function ResetPanel({ flow, name, busy, onCancel, onConfirm }: {
 		</div>
 		{flow.kind === "result"
 			? <div className="flex flex-wrap items-center justify-end gap-2">
-				{/* No "try again" here: a refusal and a definitive answer both
-				    cannot be improved by repeating the request as it stands, and an
-				    UNKNOWN outcome's retry is the only one that is idempotent. */}
+				{/* The primary action keeps the RIGHT edge it has in the confirmation
+				    row (D9): the thumb had learned that the action is last, and the
+				    dismissive control was suddenly sitting there instead. */}
+				<Button variant="ghost" onClick={onCancel}>{t("relay.chrome.snackbar.dismiss")}</Button>
+				{/* No "try again" on a refusal or a definitive answer: neither can be
+				    improved by repeating the request as it stands, and an UNKNOWN
+				    outcome's retry is the only one that is idempotent. */}
 				{flow.outcome === "failed" && !flow.refused && <Button variant="primary" onClick={onConfirm}>
 					{t("relay.shell.usage.retry")}
 				</Button>}
-				<Button variant="ghost" onClick={onCancel}>{t("relay.chrome.snackbar.dismiss")}</Button>
 			</div>
 			: <div className="flex flex-wrap items-center justify-end gap-2">
 				<Button variant="ghost" autoFocus aria-disabled={inert || undefined}
@@ -296,8 +324,12 @@ function ResetPanel({ flow, name, busy, onCancel, onConfirm }: {
 				</Button>
 				{/* PRIMARY, not tonal: `tonal`'s fill barely separates from the
 				    panel behind it, which left colour alone to tell the button
-				    that SPENDS from the one that does not (D4). */}
-				<Button variant="primary" aria-disabled={inert || undefined} aria-busy={busy || undefined}
+				    that SPENDS from the one that does not (D4). WHILE INERT it goes
+				    BACK to the neutral tonal fill: keeping the accent made a control
+				    that takes no clicks read as the brightest thing on the panel,
+				    with a 2.02:1 label on it (D10). "Resetting…" beside it already
+				    says what is happening. */}
+				<Button variant={inert ? "tonal" : "primary"} aria-disabled={inert || undefined} aria-busy={busy || undefined}
 					className={cn(inert && "!text-ink-disabled")}
 					onClick={() => { if (!inert) onConfirm(); }}>
 					{t("relay.usage_reset.confirm")}
@@ -306,7 +338,7 @@ function ResetPanel({ flow, name, busy, onCancel, onConfirm }: {
 	</div>;
 }
 
-function AccountCard({ account, name, now, locale, flow, attempts, busy, exhausted, onResetOpen, onResetCancel, onResetConfirm }: {
+function AccountCard({ account, name, now, locale, flow, attempts, busy, exhausted, escapeDismiss, onResetOpen, onResetCancel, onResetConfirm }: {
 	account: UsageAccount;
 	name: string;
 	now: number;
@@ -318,6 +350,10 @@ function AccountCard({ account, name, now, locale, flow, attempts, busy, exhaust
 	 *  count since (U6): the card stops offering, rather than inviting a tap
 	 *  that can only come back `no_credit` again. */
 	exhausted: boolean;
+	/** Where this card publishes "how to dismiss the panel I am showing". The
+	 *  sheet's Escape handler calls it, because only the card knows which badge
+	 *  to put focus back on (U12). */
+	escapeDismiss: MutableRefObject<(() => void) | null>;
 	onResetOpen: (key: string, target: ResetTarget) => void;
 	onResetCancel: () => void;
 	onResetConfirm: (key: string, target: ResetTarget) => void;
@@ -344,48 +380,61 @@ function AccountCard({ account, name, now, locale, flow, attempts, busy, exhaust
 	const mine = live ?? reentered;
 	// Cancel/dismiss returns focus to the badge it came from; with the badge
 	// gone (the last credit was just spent) the card itself takes it, so a
-	// keyboard user is never dropped to <body> (U2).
+	// keyboard user is never dropped to <body> (U2). The focus call is DEFERRED
+	// one frame: the panel replaced the badge in the tree, so the badge does not
+	// exist until this state update has painted -- focusing synchronously landed
+	// on the card and left a keyboard user one stop short of where they were
+	// (U12).
 	const dismiss = () => {
 		onResetCancel();
-		(badgeRef.current ?? cardRef.current)?.focus();
+		requestAnimationFrame(() => (badgeRef.current ?? cardRef.current)?.focus());
 	};
+	// Escape asks the card, not the sheet: the panel is the card's, and only it
+	// holds the badge focus must return to. A BUSY panel is not dismissible --
+	// a request is running and there is nothing to cancel -- so Escape keeps its
+	// old meaning there and closes the sheet (U8/U11/U12).
+	escapeDismiss.current = mine !== null && mine.kind !== "busy" ? dismiss : null;
 	return <div ref={cardRef} tabIndex={-1} className="flex flex-col gap-3 rounded-sm bg-surface px-3 py-2.5 outline-none">
-		{/* THE HEADER LINE WRAPS (D2/U5). The badge, the tone word and the
-		    percent cannot shrink, and at 320px in fr/es/ru they overflowed the
-		    card and made the sheet scroll sideways. Wrapping the right-hand group
-		    costs a line only when it does not fit; the ACCOUNT LABEL keeps its
-		    own line and its number, because it is the only thing telling two
-		    cards apart. */}
-		<div className="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-1">
-			<span className="min-w-0 truncate text-meta text-ink-muted">
-				{account.count > 1 ? t("relay.shell.usage.account", { index: account.number }) : null}
-			</span>
-			<div className="ms-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+		{/* THE HEADER LINE WRAPS, IN TWO ATOMIC UNITS (D2/U5/D8). The right unit
+		    -- the tone word plus the percent -- never splits, so a wrap can only
+		    move it whole to its own line. The label and the badge share the other
+		    unit and stay on one line: at 320px in ru the badge used to wrap AWAY
+		    from the account it belongs to and sit alone at the right edge, which
+		    read as detached. The label is still the only thing telling two cards
+		    apart, so it keeps its number and truncates rather than the badge. */}
+		<div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+			<div className="flex min-w-0 items-center gap-2">
+				<span className="min-w-0 truncate text-meta text-ink-muted">
+					{account.count > 1 ? t("relay.shell.usage.account", { index: account.number }) : null}
+				</span>
 				{/* The ONE reset affordance: the same header line the card already
 				    draws, so no row is added when absent and no limit row is pushed
-				    down when present. `-my-3` keeps the 44px tap target from growing
-				    that row; `min-w-11` keeps the target 44px wide in hi/zh-CN,
-				    whose badge text is ~42px. A solid underline: dotted reads as a
-				    definition or a tooltip, not a button (D5/D7). */}
+				    down when present. `-my-[13.3px]` cancels exactly half the 44px tap
+				    target beyond the 17.4px line, so the header does not grow by the
+				    2.6px `-my-3` left over (D6); `min-w-11` keeps the target 44px wide
+				    in hi/zh-CN, whose badge text is ~42px. A solid underline: dotted
+				    reads as a definition or a tooltip, not a button (D5/D7). */}
 				{offer !== null && (mine === null || mine.kind === "result") && <button type="button" ref={badgeRef}
 					aria-label={`${t("relay.usage_reset.badge", { count: String(offer.available) })} — ${offer.count > 1
 						? t("relay.usage_reset.confirm_title", { provider: name, index: String(account.number), count: String(offer.count) })
 						: name}`}
 					aria-disabled={busy || undefined}
-					className={cn("-my-3 inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center whitespace-nowrap text-meta font-medium text-accent underline decoration-accent underline-offset-4",
+					className={cn("-my-[13.3px] inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center whitespace-nowrap text-meta font-medium text-accent underline decoration-accent underline-offset-4",
 						busy && "!text-ink-disabled")}
 					onClick={() => { if (!busy) onResetOpen(key, offer); }}>
 					{t("relay.usage_reset.badge", { count: String(offer.available) })}
 				</button>}
+			</div>
+			<div className="ms-auto flex shrink-0 items-center justify-end gap-x-1.5 whitespace-nowrap">
 				{account.reauth
-					? <span className="shrink-0 text-meta font-medium text-warning">{t("relay.shell.usage.reauth_short")}</span>
-					: binding && <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-1.5 gap-y-0.5">
+					? <span className="text-meta font-medium text-warning">{t("relay.shell.usage.reauth_short")}</span>
+					: binding && <>
 						<span className={cn("text-meta font-medium", dim ? "text-ink-dim" : TONE_TEXT[binding.tone])}>
 							{binding.tone === "exhausted" && <span aria-hidden>✕ </span>}
 							{toneWord(binding.tone)}
 						</span>
 						{percent !== null && <span className="shrink-0 font-mono text-mono-sm tabular-nums text-ink-muted">{t("relay.shell.usage.remaining_percent", { value: percent / 100 })}</span>}
-					</div>}
+					</>}
 			</div>
 		</div>
 		{mine !== null && <ResetPanel flow={mine} name={name}
@@ -453,6 +502,10 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 	const [now, setNow] = useState(() => Date.now());
 	// A late answer from a closed/reopened sheet must not paint over a newer one.
 	const generation = useRef(0);
+	// The inline panel registers its own dismiss here (see AccountCard): Escape
+	// has to run the CARD's dismissal, not a sheet-level one, or focus lands on
+	// <body> instead of the badge the panel came from (U12).
+	const escapeDismiss = useRef<(() => void) | null>(null);
 	// ONE reset interaction for the whole sheet: opening a second card's
 	// confirmation replaces the first, so two irreversible prompts can never be
 	// open at once.
@@ -554,10 +607,19 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 	 * UNCONFIRMED outcome the retry reuses the same id, and the vendor then
 	 * answers `already_redeemed` instead of spending a second credit -- even if
 	 * the sheet was closed and reopened, or another card's badge was tapped,
-	 * in between. The sheet's generation guards the late answer, so a closed and
-	 * reopened sheet never paints an outcome into a surface the operator left. */
+	 * in between.
+	 *
+	 * THE ANSWER IS SETTLED BY ACCOUNT, NOT BY SHEET GENERATION (U10). The
+	 * attempt outlives a close and reopen -- that is the whole point of it -- so
+	 * gating the answer on the sheet's generation meant a spend that landed
+	 * afterwards showed NOTHING: the busy panel vanished, the old count came
+	 * back, and the id was kept even after a definitive `reset`, so the next
+	 * deliberate tap replayed it into "already applied". The attempt, the id and
+	 * the outcome are therefore settled whatever is on screen, and the returned
+	 * numbers are adopted because they are the newest the daemon has. `load()`
+	 * keeps its own generation guard: a late GET must still not repaint a sheet
+	 * the operator left. */
 	const confirmReset = useCallback((key: string, target: ResetTarget) => {
-		const mine = generation.current;
 		const started = resetAttemptStart(attempts, key, () => crypto.randomUUID());
 		setAttempts(started.attempts);
 		setFlow(resetFlowStart(key, started.redeemRequestId, target));
@@ -568,7 +630,6 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 			redeemRequestId: started.redeemRequestId,
 			credentialRef: target.ref,
 		}).then((answer) => {
-			if (generation.current !== mine) return;
 			setNow(Date.now());
 			// A reset's own re-fetch is not a refresh the operator asked for: a
 			// throttle or a failure collapses to the neutral freshness line and
@@ -590,10 +651,22 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 			if (answer.reset.outcome === "no_credit") {
 				setExhausted((current) => new Set(current).add(key));
 			}
-			setFlow((current) => resetFlowSettle(current, answer.reset.outcome, answer.reset.windows_reset, numbersStale));
+			setFlow((current) => settleResetFlow(current, key, target, started.redeemRequestId,
+				answer.reset.outcome, answer.reset.windows_reset, numbersStale));
 		}).catch((reason: unknown) => {
-			if (generation.current !== mine) return;
 			setNow(Date.now());
+			// `in_flight` IS NOT A REFUSAL (R7). The daemon's single-flight claim
+			// is keyed by account, not by redeem id, so this 409 can mean an
+			// EARLIER request for the same account is still spending. Nothing here
+			// may claim "nothing was spent", and the id must survive: dropping it
+			// mints a fresh id on the next tap, which the vendor treats as a second
+			// credit. So it settles as the UNKNOWN outcome (id kept, retry
+			// idempotent) and the copy says the spend could not be confirmed.
+			if (isUsageResetInFlight(reason)) {
+				setAttempts((current) => resetAttemptSettled(current, key, "failed"));
+				setFlow((current) => settleResetFlow(current, key, target, started.redeemRequestId, "failed", 0, false));
+				return;
+			}
 			// A typed refusal spent NOTHING (the daemon answered before reaching
 			// the vendor), so its id is dropped and the list is re-read -- the
 			// count it refused on is the thing that moved (U3). Anything else may
@@ -601,30 +674,30 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 			// unconfirmed copy, whose retry is idempotent.
 			if (isUsageResetRefusal(reason)) {
 				setAttempts((current) => resetAttemptSettled(current, key, "refused"));
-				setFlow((current) => resetFlowRefused(current));
+				setFlow((current) => settleResetFlow(current, key, target, started.redeemRequestId, "refused", 0, false));
 				quietRefresh();
 			} else {
-				setFlow((current) => resetFlowSettle(current, "failed", 0));
+				setFlow((current) => settleResetFlow(current, key, target, started.redeemRequestId, "failed", 0, false));
 			}
 		}).finally(() => {
 			// The request is over, whatever it answered: a card must not stay
-			// "in flight" because its answer was for a sheet generation that is
-			// no longer painted.
+			// "in flight" because its answer arrived after the sheet moved on.
 			setAttempts((current) => resetAttemptDone(current, key));
 		});
 	}, [attempts, quietRefresh]);
 
-	/** Escape (and the sheet's own ✕) dismiss the inline panel first, the sheet
-	 *  second (U8). Dismissing spends nothing: the flow carries no id, and a
-	 *  pending attempt keeps it for the next confirm. A BUSY flow is left to the
-	 *  sheet close -- the request is running and there is nothing to cancel. */
-	const dismissOrClose = useCallback(() => {
-		if (flow.kind === "confirm" || flow.kind === "result") {
-			setFlow(resetFlowCancel());
-			return;
-		}
-		onClose();
-	}, [flow, onClose]);
+	/** Escape dismisses the inline panel before the sheet (U8), through the CARD's
+	 *  own dismiss so focus returns to the badge it came from (U12). False when no
+	 *  dismissible panel is open, which lets the modal layer close the sheet --
+	 *  the same answer a busy panel gives (a request is running, nothing to
+	 *  cancel). The ✕, a backdrop tap and the drag go straight to `onClose`: a
+	 *  visible close control must close the sheet in one gesture (U11). */
+	const dismissPanelOnEscape = useCallback((): boolean => {
+		const dismiss = escapeDismiss.current;
+		if (dismiss === null) return false;
+		dismiss();
+		return true;
+	}, []);
 	const refreshing = phase.kind === "refreshing";
 	const unsupported = phase.kind === "unsupported";
 	// The freshness sentence the status line returns to. A refresh's
@@ -663,7 +736,7 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 			: status?.text ?? loadingText}
 	</div>;
 
-	return <Sheet open={open} onClose={dismissOrClose} title={t("relay.shell.usage.title")} headerAction={action} headerDetail={detail}>
+	return <Sheet open={open} onClose={onClose} onEscape={dismissPanelOnEscape} title={t("relay.shell.usage.title")} headerAction={action} headerDetail={detail}>
 		<div className="flex flex-col gap-4 px-3 pt-2 pb-4">
 			{data === null && error ? <div className="flex flex-col items-center gap-3 py-6 text-center">
 				<p role="alert" className="text-body-sm text-danger">{t("relay.shell.usage.unavailable")}</p>
@@ -675,6 +748,7 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 					{provider.accounts.map((account) => <AccountCard key={account.number} account={account}
 						name={provider.name} now={now} locale={locale.uiLocale} flow={flow}
 						attempts={attempts} busy={attemptsBusy} exhausted={exhausted.has(accountKey(account))}
+						escapeDismiss={escapeDismiss}
 						onResetOpen={(key, target) => setFlow(resetFlowConfirm(key, target))}
 						onResetCancel={() => setFlow(resetFlowCancel())}
 						onResetConfirm={confirmReset} />)}

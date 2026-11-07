@@ -128,7 +128,7 @@ describe("reset credits", () => {
 		const model = buildUsageModel([report(over)], collator);
 		return model[0].accounts[0];
 	};
-	const target = { provider: "openai", index: 1, count: 2, available: 3, ref: "oauth:7" };
+	const target = { provider: "openai", index: 1, count: 2, available: 3, ref: "r1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
 
 	it("offers only a plain positive integer, never a boolean or a float", () => {
 		expect(resetsAvailable(report({ resets_available: 2 }))).toBe(2);
@@ -141,13 +141,14 @@ describe("reset credits", () => {
 		expect(resetsAvailable(report({ resets_available: true as unknown as number }))).toBe(0);
 	});
 
-	it("carries the DAEMON's numbering and its ref, and nothing invented", () => {
-		const second = account({ account_index: 1, account_count: 2, resets_available: 3, credential_ref: "oauth:7" });
-		expect(resetTarget(second)).toEqual({ provider: "openai", index: 1, count: 2, available: 3, ref: "oauth:7" });
-		// A row the daemon could not attribute carries no ref; it can still be
-		// spent by index, exactly as before the ref existed.
-		expect(resetTarget(account({ account_index: 0, account_count: 1, resets_available: 1 })))
-			.toEqual({ provider: "openai", index: 0, count: 1, available: 1, ref: null });
+	it("carries the DAEMON's numbering and its alias, and nothing invented", () => {
+		const second = account({ account_index: 1, account_count: 2, resets_available: 3, credential_ref: "r1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
+		expect(resetTarget(second)).toEqual({ provider: "openai", index: 1, count: 2, available: 3, ref: "r1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
+		// Q1: a row the daemon could not attribute to ONE login publishes no
+		// alias, and the card offers NO spend rather than resolving by position --
+		// which is exactly how a card showing one login's numbers spent another's credit.
+		expect(resetTarget(account({ account_index: 0, account_count: 1, resets_available: 1 }))).toBeNull();
+		expect(resetTarget(account({ account_index: 0, account_count: 1, resets_available: 1, credential_ref: "" }))).toBeNull();
 		// R6: NO card-position fallback. An account without the daemon's own
 		// numbering is not offered at all, whatever the rendered position says.
 		expect(resetTarget(account({ resets_available: 1 }))).toBeNull();

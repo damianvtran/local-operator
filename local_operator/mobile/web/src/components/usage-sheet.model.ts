@@ -234,11 +234,11 @@ export function refreshPhase(
  * WHAT THE PHONE MAY SPEND AND HOW IT NAMES IT. A reset spends something that
  * cannot be refunded, on ONE login the operator confirms. The phone still never
  * sees that login's name: it sends back the `account_index`/`account_count`
- * pair the daemon itself displayed plus, when the daemon published one, the
- * opaque `credential_ref` of the row it showed. So the target here carries the
- * DAEMON's numbering, never the card's rendered position -- those diverge the
- * moment an older daemon omits `account_index`, and a request built from the
- * wrong one could spend on a sibling.
+ * pair the daemon itself displayed plus the ALIAS the daemon published for the
+ * row it showed. So the target here carries the DAEMON's numbering, never the
+ * card's rendered position -- those diverge the moment an older daemon omits
+ * `account_index`, and a request built from the wrong one could spend on a
+ * sibling.
  */
 
 /** One spendable reset: what the card offers and what a request must carry. */
@@ -250,10 +250,10 @@ export type ResetTarget = {
 	count: number;
 	/** Spendable credits, always >= 1 (the badge's number). */
 	available: number;
-	/** The daemon's pointer at the one login this card showed, or null when it
-	 *  published none (an older daemon, or a row it could not attribute). Sent
-	 *  with the spend so a login churn cannot move the credit. */
-	ref: string | null;
+	/** The alias of the one login this card showed (`r1:<hex>`). REQUIRED: the
+	 *  daemon refuses a spend it cannot attribute to a row, so a card without
+	 *  one is not offered at all (Q1). */
+	ref: string;
 };
 
 /** Spendable reset credits on a report, mirroring Python's exact-int rule.
@@ -273,7 +273,13 @@ export function resetsAvailable(report: PhoneUsageReport): number {
  * NO FALLBACK NUMBERING (R6). A target built from the card's rendered position
  * is a different address from the one the daemon displayed, and one that
  * silently spends on whichever login sits there -- so a report without the
- * daemon's own `account_index`/`account_count` offers nothing at all. */
+ * daemon's own `account_index`/`account_count` offers nothing at all.
+ *
+ * NO UNATTRIBUTED SPEND (Q1). The alias is required too: the daemon refuses a
+ * request that cannot name a row (resolving by position is exactly how a card
+ * showing one login's numbers spent another's credit), so a count published
+ * without an alias offers no badge. The daemon withholds the count in that case
+ * as well -- this is the second half of the same rule, for an older bundle. */
 export function resetTarget(account: UsageAccount): ResetTarget | null {
 	const available = resetsAvailable(account.report);
 	if (available === 0) return null;
@@ -282,12 +288,13 @@ export function resetTarget(account: UsageAccount): ResetTarget | null {
 	if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return null;
 	if (typeof count !== "number" || !Number.isInteger(count) || count < 1) return null;
 	const ref = account.report.credential_ref;
+	if (typeof ref !== "string" || ref === "") return null;
 	return {
 		provider: account.report.provider,
 		index,
 		count,
 		available,
-		ref: typeof ref === "string" && ref !== "" ? ref : null,
+		ref,
 	};
 }
 
@@ -366,11 +373,37 @@ export function resetFlowSettle(
 	};
 }
 
-/** A refusal the daemon answered with an HTTP status (accounts changed, already
- *  in flight, no reset product): nothing was spent, so the id is dropped and a
- *  retry mints a new one. */
+/** A refusal the daemon answered with an HTTP status (accounts changed, no
+ *  reset product): nothing was spent, so the id is dropped and a retry mints a
+ *  new one. NOT for `in_flight` (R7): that answers about an EARLIER request
+ *  which may still spend. */
 export function resetFlowRefused(flow: ResetFlow): ResetFlow {
 	return resetFlowSettle(flow, "refused", 0);
+}
+
+/** Settle a spend whose answer arrived after the sheet was closed and reopened.
+ *
+ * The reopen resets the flow to idle, so there is nothing for
+ * `resetFlowSettle` to settle -- but the ATTEMPT outlives the flow (that is
+ * the whole point of it, see below), and this answer is that attempt's. Painting
+ * it onto the card it belongs to is what U10 asks for: the re-entered card was
+ * showing "Resetting…" and must say how it ended rather than quietly repaint
+ * the old count. The settle rules are the same ones, including "only a
+ * definitive outcome drops the id". */
+export function resetFlowLate(
+	key: string,
+	target: ResetTarget,
+	redeemRequestId: string,
+	outcome: PhoneUsageResetOutcome,
+	windowsReset: number,
+	numbersStale = false,
+): ResetFlow {
+	return resetFlowSettle(
+		{ kind: "busy", key, target, redeemRequestId },
+		outcome,
+		windowsReset,
+		numbersStale,
+	);
 }
 
 /* -- the pending attempt ----------------------------------------------------

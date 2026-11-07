@@ -17,12 +17,13 @@ import { messageRuntime } from "../store";
 import { BUNDLED_OWNED } from "../i18n/bundled.gen";
 
 vi.mock("../api", async () => {
-	// The real HttpError and refusal predicate, so the sheet's own checks see
+	// The real HttpError and refusal predicates, so the sheet's own checks see
 	// the same classes they would in the bundle.
 	const actual = await vi.importActual<typeof import("../api")>("../api");
 	return {
 		HttpError: actual.HttpError,
 		isUsageResetRefusal: actual.isUsageResetRefusal,
+		isUsageResetInFlight: actual.isUsageResetInFlight,
 		getUsage: vi.fn(),
 		refreshUsage: vi.fn(),
 		resetUsage: vi.fn(),
@@ -48,15 +49,19 @@ const limit = (over: Partial<PhoneUsageLimit> = {}): PhoneUsageLimit => ({
 });
 const report = (over: Partial<PhoneUsageReport> = {}): PhoneUsageReport => ({
 	provider: "openai", provider_name: "ChatGPT", unavailable: false, fetched_at: 1,
-	limits: [limit()], resets_available: 2, ...over,
+	limits: [limit()], resets_available: 2,
+	// The daemon publishes an `r1:` ALIAS for the row a credit may be spent on;
+	// a report without one offers no badge at all (Q1).
+	credential_ref: "r1:00000000000000000000000000000000",
+	...over,
 });
 const envelope = (reports: PhoneUsageReport[], over: Partial<PhoneUsageEnvelope> = {}): PhoneUsageEnvelope =>
 	({ source: "cached", reports, ...over });
 
 /** Two ChatGPT logins with resets on both — the numbering case the copy names. */
 const twoAccounts = (resets = 2) => [
-	report({ account_index: 0, account_count: 2, resets_available: resets }),
-	report({ account_index: 1, account_count: 2, resets_available: resets }),
+	report({ account_index: 0, account_count: 2, resets_available: resets, credential_ref: "r1:11111111111111111111111111111111" }),
+	report({ account_index: 1, account_count: 2, resets_available: resets, credential_ref: "r1:22222222222222222222222222222222" }),
 ];
 
 /** The badge's accessible name is the visible count PLUS the account it spends
@@ -64,6 +69,9 @@ const twoAccounts = (resets = 2) => [
  *  where it matters. */
 const badgeName = (count: number) => new RegExp(`^Reset · ${count} — `);
 const badges = (count: number) => screen.queryAllByRole("button", { name: badgeName(count) });
+/** The refusal sentence, read from the catalogue rather than repeated here: the
+ *  copy moved once already and the duplicated literal kept the suite red (R8). */
+const REFUSED = BUNDLED_OWNED["relay.usage_reset"].en["relay.usage_reset.refused"];
 
 const paint = async (reports: PhoneUsageReport[]) => {
 	vi.mocked(getUsage).mockResolvedValue(envelope(reports));
@@ -83,7 +91,8 @@ it("offers a badge only for an account with spendable credits", async () => {
 it("names the account and the count, and wraps the header instead of scrolling", async () => {
 	// A long tone word is what overflowed in ru/fr/es at 320px (D2/U5). happy-dom
 	// has no layout engine, so the assertions that bite are the class contract:
-	// the row wraps, the label keeps its own line, and the badge never shrinks.
+	// the header wraps, and the label + badge share ONE line while the tone unit
+	// stays whole (D8) -- so a wrap can never strand the badge on its own line.
 	messageRuntime.registerBundle("relay.shell", "en", {
 		...BUNDLED_OWNED["relay.shell"].en,
 		"relay.shell.usage.tone_warning": "Proche de la limite avec une marge",
@@ -99,6 +108,19 @@ it("names the account and the count, and wraps the header instead of scrolling",
 	expect(badge.className).toContain("shrink-0");
 	// D5: a 44px-wide target even where the text is ~42px (hi/zh-CN).
 	expect(badge.className).toContain("min-w-11");
+	// D6: the tap target's negative margin cancels exactly the overflow, so the
+	// header does not grow by the 2.6px `-my-3` left behind.
+	expect(badge.className).toContain("-my-[13.3px]");
+	// D8: the badge shares the LABEL's unit, so only the tone unit can wrap.
+	const labelUnit = badge.parentElement as HTMLElement;
+	expect(labelUnit).toBe(row.firstElementChild);
+	expect(within(labelUnit).getByText("Account 2")).toBeTruthy();
+	// The tone unit is the sibling, and it never splits internally.
+	const toneUnit = labelUnit.nextElementSibling as HTMLElement;
+	expect(toneUnit.className).toContain("shrink-0");
+	expect(toneUnit.className).toContain("whitespace-nowrap");
+	expect(toneUnit.className).not.toContain("flex-wrap");
+	expect(badge.closest("div.whitespace-nowrap")).toBeNull();
 	const label = within(row).getByText("Account 2");
 	expect(label.className).toContain("truncate");
 	// The rendered frame is design QA's; this keeps the invariant cheap to check.
@@ -293,7 +315,7 @@ it("calls a refusal a refusal, spends nothing, and mints a new id next time", as
 	const refreshesBefore = vi.mocked(refreshUsage).mock.calls.length;
 	fireEvent.click(badges(1)[0]);
 	fireEvent.click(screen.getByRole("button", { name: "Reset" }));
-	await waitFor(() => expect(screen.getByText("That reset was refused. Refresh the list and try again.")).toBeTruthy());
+	await waitFor(() => expect(screen.getByText(REFUSED)).toBeTruthy());
 	// A refusal is not an unconfirmed outcome: no retry button, and the next
 	// attempt starts over with a fresh id.
 	expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
@@ -315,30 +337,27 @@ it("shows a daemon-decided refusal as a refusal, not as an unknown spend", async
 	await paint([report({ account_index: 0, account_count: 1, resets_available: 1 })]);
 	fireEvent.click(badges(1)[0]);
 	fireEvent.click(screen.getByRole("button", { name: "Reset" }));
-	await waitFor(() => expect(screen.getByText("That reset was refused. Refresh the list and try again.")).toBeTruthy());
+	await waitFor(() => expect(screen.getByText(REFUSED)).toBeTruthy());
 	expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
 	expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();
 });
 
-it("sends the daemon's ref with the spend, and nothing when it published none", async () => {
+it("sends the daemon's alias with the spend, and offers nothing without one", async () => {
 	vi.mocked(resetUsage).mockResolvedValue({ reports: [], reset: { outcome: "reset", windows_reset: 1 } });
 	await paint([
-		report({ account_index: 0, account_count: 2, resets_available: 2, credential_ref: "oauth:7" }),
-		report({ account_index: 1, account_count: 2, resets_available: 2 }),
+		report({ account_index: 0, account_count: 2, resets_available: 2, credential_ref: "r1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+		// Q1: the daemon could not attribute this row to ONE login, so it
+		// published no alias -- and the card offers no spend it cannot name
+		// rather than spending by position.
+		report({ account_index: 1, account_count: 2, resets_available: 2, credential_ref: null }),
 	]);
+	expect(badges(2)).toHaveLength(1);
 	fireEvent.click(badges(2)[0]);
 	fireEvent.click(screen.getByRole("button", { name: "Reset" }));
 	await waitFor(() => expect(resetUsage).toHaveBeenCalledTimes(1));
-	expect(vi.mocked(resetUsage).mock.calls[0][0].credentialRef).toBe("oauth:7");
-	// The second row has no ref (the daemon could not attribute it); the spend
-	// still goes by index, and `credentialRef` is simply absent from the call.
-	fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
-	fireEvent.click(badges(2)[1]);
-	fireEvent.click(screen.getByRole("button", { name: "Reset" }));
-	await waitFor(() => expect(resetUsage).toHaveBeenCalledTimes(2));
-	expect(vi.mocked(resetUsage).mock.calls[1][0].credentialRef).toBeNull();
-	// The daemon's own numbering travels with it either way.
-	expect(vi.mocked(resetUsage).mock.calls[1][0]).toMatchObject({ accountIndex: 1, accountCount: 2 });
+	expect(vi.mocked(resetUsage).mock.calls[0][0].credentialRef).toBe("r1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+	// The daemon's own numbering travels beside it.
+	expect(vi.mocked(resetUsage).mock.calls[0][0]).toMatchObject({ accountIndex: 0, accountCount: 2 });
 });
 
 it("Esc dismisses the confirmation first and the sheet second", async () => {
@@ -370,4 +389,122 @@ it("stops offering when the daemon says no credit is left", async () => {
 it("offers nothing on a dead grant", async () => {
 	await paint([report({ account_index: 0, account_count: 1, resets_available: 2, credential_invalid: true })]);
 	expect(screen.queryByRole("button", { name: /^Reset · / })).toBeNull();
+});
+
+it("shows the outcome of a spend that lands after a close and reopen", async () => {
+	// U10: the attempt outlives the sheet, so the ANSWER must too. Before, the
+	// generation guard skipped the settle: the busy panel vanished, the old
+	// count came back, and the id survived even a definitive `reset`.
+	let settle: ((value: unknown) => void) | undefined;
+	vi.mocked(resetUsage).mockReturnValue(new Promise((resolve) => { settle = resolve; }) as never);
+	vi.mocked(getUsage).mockResolvedValue(envelope(twoAccounts(2)));
+	const view = render(<UsageSheet open onClose={() => undefined} />);
+	await screen.findByText("ChatGPT");
+	fireEvent.click(badges(2)[1]);
+	fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+	await waitFor(() => expect(screen.getByText("Resetting…")).toBeTruthy());
+	const id = vi.mocked(resetUsage).mock.calls[0][0].redeemRequestId;
+	// Close and reopen while the spend is still running.
+	view.rerender(<UsageSheet open={false} onClose={() => undefined} />);
+	view.rerender(<UsageSheet open onClose={() => undefined} />);
+	await screen.findByText("ChatGPT");
+	await waitFor(() => expect(screen.getByText("Resetting…")).toBeTruthy());
+	// Now the answer lands, into a sheet that was never the one that asked.
+	await act(async () => {
+		settle?.({ reports: twoAccounts(1), source: "live", reset: { outcome: "reset", windows_reset: 1 } });
+	});
+	await waitFor(() => expect(screen.getByText("Reset applied — 1 window cleared.")).toBeTruthy());
+	// The numbers it carried were adopted, not dropped.
+	expect(badges(1)).toHaveLength(2);
+	// A DEFINITIVE outcome forgets the id: the next deliberate spend mints one.
+	fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+	fireEvent.click(badges(1)[1]);
+	fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+	await waitFor(() => expect(resetUsage).toHaveBeenCalledTimes(2));
+	expect(vi.mocked(resetUsage).mock.calls[1][0].redeemRequestId).not.toBe(id);
+});
+
+it("treats a 409 in_flight as an unknown spend and keeps the id", async () => {
+	// R7: the daemon's claim is per account, so this 409 can mean an EARLIER
+	// request for that account is still spending. Saying "nothing was spent"
+	// and dropping the id there is how the next tap becomes a second credit.
+	vi.mocked(resetUsage)
+		.mockRejectedValueOnce(new HttpError(409, "A reset is already in flight", "in_flight"))
+		.mockResolvedValue({ reset: { outcome: "already_redeemed", windows_reset: 0 } });
+	await paint([report({ account_index: 0, account_count: 1, resets_available: 2 })]);
+	const refreshesBefore = vi.mocked(refreshUsage).mock.calls.length;
+	fireEvent.click(badges(2)[0]);
+	fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+	await waitFor(() => expect(screen.getByText(/Couldn’t confirm the reset/)).toBeTruthy());
+	// No "nothing was spent" claim, and no quiet re-fetch (that is the refusal path).
+	expect(screen.queryByText(REFUSED)).toBeNull();
+	expect(vi.mocked(refreshUsage).mock.calls.length).toBe(refreshesBefore);
+	const first = vi.mocked(resetUsage).mock.calls[0][0].redeemRequestId;
+	fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+	await waitFor(() => expect(screen.getByText("This reset had already been applied.")).toBeTruthy());
+	expect(vi.mocked(resetUsage).mock.calls[1][0].redeemRequestId).toBe(first);
+});
+
+it("closes the sheet in one gesture from the ✕, even with a panel open", async () => {
+	// U11: only Escape dismisses the panel first. A visible close control (and
+	// the drag that shares its handler) closes the sheet in one go.
+	const onClose = vi.fn();
+	vi.mocked(getUsage).mockResolvedValue(envelope([report({ account_index: 0, account_count: 1, resets_available: 2 })]));
+	render(<UsageSheet open onClose={onClose} />);
+	await screen.findByText("ChatGPT");
+	fireEvent.click(badges(2)[0]);
+	expect(screen.getAllByRole("group")).toHaveLength(1);
+	fireEvent.click(screen.getByRole("button", { name: "close sheet" }));
+	await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+});
+
+it("leaves focus on the badge when Escape dismisses the panel", async () => {
+	// U12: the Esc path used to drop focus on <body>. It now runs the card's own
+	// dismissal, which returns focus to the badge the panel was opened from.
+	vi.mocked(getUsage).mockResolvedValue(envelope([report({ account_index: 0, account_count: 1, resets_available: 2 })]));
+	render(<UsageSheet open onClose={() => undefined} />);
+	await screen.findByText("ChatGPT");
+	fireEvent.click(badges(2)[0]);
+	expect(screen.getAllByRole("group")).toHaveLength(1);
+	fireEvent.keyDown(window, { key: "Escape" });
+	await waitFor(() => expect(screen.queryAllByRole("group")).toHaveLength(0));
+	await waitFor(() => expect(document.activeElement).toBe(badges(2)[0]));
+});
+
+it("puts Dismiss before the retry, so the action keeps the right edge", async () => {
+	// D9: the confirmation is [Cancel][Reset] -- action on the right. The result
+	// row must not flip that around under the same thumb.
+	vi.mocked(resetUsage).mockResolvedValue({ reset: { outcome: "failed", windows_reset: 0 } });
+	await paint([report({ account_index: 0, account_count: 1, resets_available: 2 })]);
+	fireEvent.click(badges(2)[0]);
+	fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+	await waitFor(() => expect(screen.getByText(/Couldn’t confirm the reset/)).toBeTruthy());
+	const panel = screen.getByRole("group", { name: "ChatGPT" });
+	expect(within(panel).getAllByRole("button").map((node) => node.textContent)).toEqual(["Dismiss", "Try again"]);
+});
+
+it("makes the busy control read as inactive, not as the action", async () => {
+	// D10: keeping the accent fill made an inert button the brightest thing on
+	// the panel, with a 2.02:1 label on it. The neutral tonal fill says "nothing
+	// to press here"; "Resetting…" above already carries the state.
+	vi.mocked(resetUsage).mockReturnValue(new Promise(() => undefined) as never);
+	await paint([report({ account_index: 0, account_count: 1, resets_available: 2 })]);
+	fireEvent.click(badges(2)[0]);
+	const live = screen.getByRole("button", { name: "Reset" });
+	expect(live.className).toContain("bg-accent");
+	fireEvent.click(live);
+	await waitFor(() => expect(screen.getByText("Resetting…")).toBeTruthy());
+	const inert = screen.getByRole("button", { name: "Reset" });
+	expect(inert.className).not.toContain("bg-accent");
+	expect(inert.className).toContain("bg-surface");
+});
+
+it("drops the repeated title when the provider has one account", async () => {
+	// D11: the panel title repeated the section heading ~40px above it. The
+	// group keeps the provider name for assistive tech; the visible line goes.
+	await paint([report({ account_index: 0, account_count: 1, resets_available: 2 })]);
+	fireEvent.click(badges(2)[0]);
+	const panel = screen.getByRole("group", { name: "ChatGPT" });
+	expect(within(panel).queryByText("ChatGPT")).toBeNull();
+	expect(within(panel).getByText(/Uses/)).toBeTruthy();
 });

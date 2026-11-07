@@ -22,6 +22,7 @@ import { columnBox, columnCap } from "../../lib/column";
 export function Sheet({
 	open,
 	onClose,
+	onEscape,
 	title,
 	children,
 	returnFocusRef,
@@ -31,6 +32,10 @@ export function Sheet({
 }: {
 	open: boolean;
 	onClose: () => void;
+	/** Consulted on Escape before `onClose`; true means "handled, stay open".
+	    Only the usage sheet passes it, to dismiss its inline panel first. The ✕,
+	    the scrim and the drag never consult it (U11). */
+	onEscape?: () => boolean;
 	title?: string;
 	/** One control rendered immediately before ✕ (the usage sheet's refresh).
 	    Lives in the header, outside the scroller, so it stays reachable while
@@ -77,7 +82,7 @@ export function Sheet({
 		},
 		onPointerCancel: () => { drag.current = null; setDragY(0); },
 	};
-	const { dialogRef, closeRef, focusEdge } = useModalLayer({ open, onClose, returnFocusRef, initialFocusRef });
+	const { dialogRef, closeRef, focusEdge } = useModalLayer({ open, onClose, onEscape, returnFocusRef, initialFocusRef });
 
 	if (!open) return null;
 	/* VIEWPORT-ANCHORED, AND THAT IS THE WHOLE POINT OF THIS ELEMENT.

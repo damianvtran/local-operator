@@ -31,6 +31,8 @@ import asyncio
 import contextlib
 import copy
 import gzip
+import hashlib
+import hmac
 import html
 import inspect
 import json
@@ -9656,21 +9658,24 @@ def build_app(daemon: MobileDaemon):
 
         NO PERSON NAMES CROSS THE TUNNEL. ``account_index`` is the 0-based
         number the phone's own card showed, ``account_count`` the total it
-        displayed, and ``credential_ref`` the opaque pointer the projection
-        published beside a spendable count. The daemon turns those back into a
-        stored login itself (:func:`_phone_reset_identity`): no email and no
-        hash ever crosses, and the ref is a pointer the daemon minted for a row
-        it had already offered -- never a name the phone made up.
+        displayed, and ``credential_ref`` the ALIAS the projection published
+        beside a spendable count. The daemon turns those back into a stored
+        login itself (:func:`_phone_reset_identity`): the alias is an HMAC of
+        the row's raw ref under a secret this process never publishes, so the
+        wire carries neither an email nor a vendor account id nor a hash any
+        reader could reverse (Q7).
 
-        WHY THE REF, ON TOP OF THE INDEX. An index is a position in a list that
-        can change (a login added or removed since the sheet painted), so the
-        same index can name a different login on the next read -- and resolving
-        it anyway would SPEND a credit on an account the operator never
-        confirmed. A ref names the ROW, so a login removed and replaced by
-        another (count unchanged, which the index/count check cannot see) is a
-        409 ``accounts_changed`` instead of a sibling's credit. A phone that
-        predates the ref still works: the index/count pair is checked exactly
-        as before.
+        WHY THE ALIAS, ON TOP OF THE INDEX. An index is a position in a list
+        that can change (a login added or removed since the sheet painted), so
+        the same index can name a different login on the next read -- and
+        resolving it anyway would SPEND a credit on an account the operator
+        never confirmed. The alias names the ROW, so a login removed and
+        replaced by another (count unchanged, which the index/count check
+        cannot see) is a 409 ``accounts_changed`` instead of a sibling's credit.
+        It is REQUIRED: a request without one is refused the same way rather
+        than resolved by position, because a card published without an alias is
+        a label two logins answer to, and spending there is the wrong-login
+        defect this route exists to prevent (Q1).
 
         WHY A CONTROLLER REFUSAL IS AN OUTCOME, NOT A 500. ``consume_usage_reset``
         sets ``refused`` when it decided BEFORE anything reached the vendor (no
@@ -11276,8 +11281,9 @@ class _PhoneResetLogin(NamedTuple):
     """The stored login a phone reset resolved to, and the ref that names it.
 
     ``identity`` is the label :meth:`ProviderController.consume_usage_reset`
-    matches on; ``credential_ref`` is the one-row pointer that keeps a shared
-    label from being refused as ambiguous. Neither leaves the daemon.
+    matches on; ``credential_ref`` is the store's RAW one-row ref, which keeps a
+    shared label from being refused as ambiguous. Neither leaves the daemon:
+    the phone sent an alias, and the alias is all it ever saw.
     """
 
     identity: str
@@ -11297,6 +11303,85 @@ _PHONE_RESET_OUTCOMES = frozenset(
 #: instead of serving numbers the spend invalidated.
 _PHONE_RESET_REFRESH_OUTCOMES = frozenset({"reset", "already_redeemed"})
 
+#: Prefix of every reset-credential ALIAS on the wire. A versioned, obviously
+#: non-identity spelling on purpose: nothing that reads like an email or an
+#: account id can be mistaken for one, and a future handle format can move to
+#: ``r2:`` without a client guessing which vintage it is holding.
+_PHONE_RESET_ALIAS_PREFIX = "r1:"
+
+#: Hex characters of the HMAC an alias keeps. 128 bits: an alias is a NAME for
+#: a row this daemon already offered, not a bearer token -- forging one buys a
+#: spend on a login the phone was already shown, so the cost is collisions, and
+#: 128 bits makes one unobservable.
+_PHONE_RESET_ALIAS_HEX = 32
+
+#: The per-process key aliases are HMACed with; minted on first use.
+_PHONE_RESET_ALIAS_KEY: bytes | None = None
+
+
+def _phone_reset_alias_key() -> bytes:
+    """The key every published alias is HMACed with, minted once per process.
+
+    WHY AN ALIAS AT ALL. The store's raw ``credential_ref`` is ``identity_key``:
+    the vendor account id for a ChatGPT login, and -- for a legacy row with no
+    account id -- **the email** (Q7). It was published verbatim, which put an
+    address on the tunnel. An alias is a one-way HMAC of that key, so the wire
+    carries a value that names a row to THIS daemon and nothing at all to
+    anyone else: it is not reversible without a key that never leaves the
+    process, and it is not searchable against a list of emails.
+
+    WHY NOT PERSISTED. Nothing else in this daemon owns a stable install
+    secret, and the alias does not need one: the projection computes it and the
+    reset route recomputes it from the same rows, both inside one process. A
+    restart re-keys every alias, which costs exactly one refusal -- a phone
+    holding a pre-restart alias is answered ``accounts_changed`` and re-reads
+    the list, the same answer any other moved account list earns, and it never
+    spends on a stale row.
+    """
+    global _PHONE_RESET_ALIAS_KEY
+    if _PHONE_RESET_ALIAS_KEY is None:
+        # 32 bytes from the OS CSPRNG; never written down, never logged.
+        _PHONE_RESET_ALIAS_KEY = secrets.token_bytes(32)
+    return _PHONE_RESET_ALIAS_KEY
+
+
+def _phone_reset_alias(credential_ref: str) -> str:
+    """The tunnel-safe handle for ONE stored login: ``r1:<32 hex>``.
+
+    DETERMINISTIC inside this daemon (a publish and a resolve compute the same
+    string from the same row) and OPAQUE outside it. Not a token either: it
+    grants nothing on its own -- :func:`_phone_reset_identity` still re-checks
+    the account count, the row list and the label, and only resolves an alias
+    that one of the CURRENT rows publishes.
+    """
+    digest = hmac.new(
+        _phone_reset_alias_key(), credential_ref.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return _PHONE_RESET_ALIAS_PREFIX + digest[:_PHONE_RESET_ALIAS_HEX]
+
+
+def _phone_spendable_ref(report: Any) -> str | None:
+    """The RAW ref a report may publish a reset for, or ``None`` when it may not.
+
+    ONE definition for the projection and for the reset route, because the two
+    must agree on what a phone was offered: a row is spendable only when it
+    reports a plain non-negative int above zero AND carries the ref of the row
+    behind it. A row with credits but no ref cannot be attributed to one login
+    (two logins sharing a label, which is what the controller withholds the ref
+    for, Q1), so it publishes neither -- and a phone that could not be told
+    WHICH login gets the credit is not offered the spend at all.
+
+    ``type(...) is not int`` rather than ``isinstance``: ``bool`` is an ``int``
+    in Python, and ``True`` would otherwise read as "1 credit".
+    """
+    resets = getattr(report, "resets_available", None)
+    if type(resets) is not int or resets <= 0:
+        return None
+    ref = getattr(report, "credential_ref", None)
+    if not isinstance(ref, str) or not ref:
+        return None
+    return ref
+
 
 def _phone_reset_identity(
     provider: str,
@@ -11306,12 +11391,20 @@ def _phone_reset_identity(
 ) -> _PhoneResetLogin | None:
     """The stored login the phone's "Account N" numbers, or ``None`` when it cannot be proven.
 
-    The phone sends an INDEX and, when the projection published one, the REF of
-    the row it displayed. The daemon turns them back into the identity and ref
-    :meth:`ProviderController.consume_usage_reset` selects a credential by --
-    here, and only in this process. No email and no hash ever crosses the
-    tunnel; the ref is a pointer this daemon minted for a row it had already
-    offered, so echoing it back names nothing the phone was not shown.
+    The phone sends an INDEX, the COUNT it displayed, and the ALIAS of the row
+    it showed. The daemon turns the alias back into the store's own ref and the
+    ref into one login, here and only in this process. **The alias is what the
+    projection minted** (:func:`_phone_reset_alias`): an HMAC of the row's raw
+    ref, which never crosses the tunnel -- so what the phone echoes names
+    nothing an eavesdropper could read, and an email or a vendor account id
+    cannot be recovered from it (Q7).
+
+    AN ALIAS IS REQUIRED (Q1). There is no index-only fallback: a row whose ref
+    the controller withheld is a label TWO logins answer to, so resolving by
+    position would spend on a login whose numbers the card never showed. A
+    phone that sends none -- an older bundle, or a row that reached it without
+    one -- is refused with the ``accounts_changed`` copy and re-reads the list
+    instead.
 
     Resolution mirrors the projection exactly, and checks BOTH halves before
     naming anyone:
@@ -11324,12 +11417,12 @@ def _phone_reset_identity(
       :meth:`ProviderController.order_persisted_usage_reports` sorts by, and
       the reason "Account N" stays stable across reads.
 
-    A ``credential_ref`` is resolved FIRST and by ROW, not by position: that is
-    what makes a removed-and-replaced login (count unchanged, so the checks
-    above cannot see it) a refusal instead of a sibling's credit (Q3). The ref
-    must also still be one the projection published for this provider, so a
-    phone cannot aim a spend at a login it was never offered. A ref that no
-    longer exists, or that the cached envelope does not carry, is ``None`` --
+    The ALIAS is resolved FIRST and by ROW, not by position: that is what makes
+    a removed-and-replaced login (count unchanged, so the checks above cannot
+    see it) a refusal instead of a sibling's credit (Q3). It must also still be
+    one that a CURRENT row publishes a reset for (:func:`_phone_spendable_ref`),
+    so a phone cannot aim a spend at a login it was never offered. An alias that
+    no longer exists, or that the cached envelope does not offer, is ``None`` --
     the same ``accounts_changed`` refusal an index mismatch earns.
 
     Any disagreement is ``None`` -- a refusal, never a guess. A reset cannot be
@@ -11363,10 +11456,12 @@ def _phone_reset_identity(
             return None
         if account_index >= account_count:
             return None
+        # Only rows the projection OFFERED can be named, and only the raw ref
+        # `_phone_spendable_ref` publishes is an address at all (R10/Q1).
         published = {
-            ref
-            for ref in (getattr(report, "credential_ref", None) for report in snapshot.reports)
-            if isinstance(ref, str) and ref
+            _phone_reset_alias(ref): ref
+            for ref in (_phone_spendable_ref(report) for report in snapshot.reports)
+            if ref is not None
         }
         rows = controller.auth_store.list_credentials(provider)
     finally:
@@ -11382,21 +11477,26 @@ def _phone_reset_identity(
     )
     if len(oauth) != account_count:
         return None
-    if credential_ref:
-        if credential_ref not in published:
-            return None
-        row = next(
-            (
-                candidate
-                for candidate in oauth
-                if ProviderController._credential_ref(candidate) == credential_ref
-            ),
-            None,
-        )
-        if row is None:
-            return None
-    else:
-        row = oauth[account_index]
+    # NO INDEX FALLBACK (Q1). An absent alias means the card was published
+    # without one -- a label two logins answer to, or a bundle older than the
+    # alias -- and resolving it by position here is exactly how a card showing
+    # one login's numbers spent another login's credit. Refuse, and let the
+    # phone re-read the list.
+    if not credential_ref:
+        return None
+    raw_ref = published.get(credential_ref)
+    if raw_ref is None:
+        return None
+    row = next(
+        (
+            candidate
+            for candidate in oauth
+            if ProviderController._credential_ref(candidate) == raw_ref
+        ),
+        None,
+    )
+    if row is None:
+        return None
     try:
         identity = credential_identity(row)
     except Exception:  # noqa: BLE001 -- an unlabelled row cannot be named, so no reset
@@ -11423,7 +11523,10 @@ async def _consume_phone_usage_reset(
     in the same call, so no handle outlives the request.
 
     ``identity`` and ``credential_ref`` are resolved by the caller from the
-    phone's index/ref and are used ONLY here -- never in the response.
+    phone's index and ALIAS and are used ONLY here -- never in the response.
+    ``credential_ref`` here is the store's RAW ref (the row's ``identity_key``),
+    the value :meth:`ProviderController.consume_usage_reset` matches on; the
+    alias the phone sent never reaches this call.
     """
     from typing import cast
 
@@ -11462,11 +11565,12 @@ def _cached_phone_usage() -> dict[str, Any]:
     # persisted-only inventory, never environment/runtime/config accounts.
     controller = ProviderController.read_only_for_persisted_usage()
     try:
-        # The ref is kept on purpose: the projection publishes it for rows whose
-        # reset credits it offers, so a spend can name the login the operator
-        # confirmed even after a login churn (R1/Q1/Q3). Every other row -- and
-        # every row with nothing spendable -- still crosses ref-free; see
-        # ``_phone_usage_projection``.
+        # The raw ref is kept on purpose: the projection turns it into the
+        # ALIAS it publishes for rows whose reset credits it offers, so a spend
+        # can name the login the operator confirmed even after a login churn
+        # (R1/Q1/Q3). Every other row -- and every row with nothing spendable --
+        # still crosses ref-free; see ``_phone_usage_projection``. The raw value
+        # itself never leaves this process (Q7).
         snapshot = controller.cached_persisted_usage_reports_read_only(None, keep_refs=True)
     finally:
         try:
@@ -11503,12 +11607,15 @@ def _phone_usage_projection(
     order within its provider, which is the best the payload can say.
 
     ``credential_ref`` is published ONLY on a row that reports a positive
-    ``resets_available``. It is an opaque pointer at ONE stored login (the
-    ``identity_key`` or ``cred:<row id>`` the store already ranks by), never a
-    label: it exists so a spend can name the row the operator confirmed after
-    the login list moves, and a row with no credit to spend has no use for it.
-    Withholding it everywhere else keeps the tunnel's rule intact -- the phone
-    is told about a login only when it is being offered a spend on that login.
+    ``resets_available``, and it is an ALIAS (``r1:<hex>``), never the store's
+    raw key: an HMAC of the row's own ref under a per-process secret
+    (:func:`_phone_reset_alias`), so the tunnel carries nothing that could be
+    read as an email or a vendor account id (Q7). An alias names exactly one
+    stored login for this daemon -- it exists so a spend can name the row the
+    operator confirmed after the login list moves -- and a row with no credit
+    to spend has no use for it. Where the daemon cannot name the login behind a
+    credit (no raw ref), BOTH the count and the alias are withheld: a phone may
+    not be offered a spend it could only resolve by position (Q1).
 
     Every key added after the first release (``account_index``,
     ``account_count``, ``state``, ``credential_invalid``, ``provider_name``,
@@ -11622,17 +11729,19 @@ def _phone_usage_projection(
         resets_available = getattr(report, "resets_available", None)
         if type(resets_available) is not int or resets_available < 0:
             resets_available = None
-        # The pointer travels ONLY with a credit to spend on it (see the
+        # The ALIAS travels ONLY with a credit to spend on it (see the
         # docstring): every other row states its numbers and nothing about who
-        # they belong to.
-        credential_ref = getattr(report, "credential_ref", None)
-        if (
-            not isinstance(resets_available, int)
-            or resets_available <= 0
-            or not isinstance(credential_ref, str)
-            or not credential_ref
-        ):
-            credential_ref = None
+        # they belong to. A row with credits but no ref is withdrawn entirely --
+        # count included -- because the phone must not offer a spend it cannot
+        # attribute to one login (Q1): an older bundle would otherwise paint the
+        # badge and spend by position.
+        raw_ref = _phone_spendable_ref(report)
+        credential_ref = _phone_reset_alias(raw_ref) if raw_ref is not None else None
+        if credential_ref is None and isinstance(resets_available, int) and resets_available > 0:
+            # A CREDIT the daemon cannot attribute withdraws its own count. A
+            # reported 0 stays 0: nothing was withheld, there is simply nothing
+            # to spend.
+            resets_available = None
         result.append(
             {
                 "provider": provider,
