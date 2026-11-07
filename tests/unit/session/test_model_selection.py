@@ -278,9 +278,9 @@ def test_the_fallback_fold_still_answers_a_journal_with_no_v2_row(tmp_path, monk
     calls: list[Path] = []
     real = module._forward_payloads
 
-    def counting(path):
+    def counting(path, **kwargs):
         calls.append(path)
-        return real(path)
+        return real(path, **kwargs)
 
     monkeypatch.setattr(module, "_forward_payloads", counting)
     saved = read_model_selection(directory)
@@ -328,9 +328,9 @@ def test_an_unchanged_journal_is_not_re_walked_for_the_settle_path(tmp_path, mon
     calls: list[Path] = []
     real = module._settled_selection
 
-    def counting(path):
+    def counting(path, **kwargs):
         calls.append(path)
-        return real(path)
+        return real(path, **kwargs)
 
     monkeypatch.setattr(module, "_settled_selection", counting)
     first = read_model_selection(directory)
@@ -354,9 +354,9 @@ def test_the_fold_fallback_is_memoised_even_when_it_answers_none(tmp_path, monke
     calls: list[Path] = []
     real = module._forward_payloads
 
-    def counting(path):
+    def counting(path, **kwargs):
         calls.append(path)
-        return real(path)
+        return real(path, **kwargs)
 
     monkeypatch.setattr(module, "_forward_payloads", counting)
     first = read_model_selection(directory)
@@ -379,9 +379,9 @@ def test_an_append_recomputes_once_then_memoises_again(tmp_path, monkeypatch):
     calls: list[Path] = []
     real = module._settled_selection
 
-    def counting(path):
+    def counting(path, **kwargs):
         calls.append(path)
-        return real(path)
+        return real(path, **kwargs)
 
     monkeypatch.setattr(module, "_settled_selection", counting)
     before = read_model_selection(directory)
