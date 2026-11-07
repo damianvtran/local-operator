@@ -87,6 +87,19 @@ class CommandReservations:
                 "wait for a queued steer to be delivered"
             )
 
+    def holds(self, command_id: str) -> bool:
+        """Whether ``command_id`` is reserved here and NOT yet durable.
+
+        The live inbox drain's guard (``process._run_owner_prompt``, PR #3447
+        review B1): an owner row whose id is still held is either a steer that
+        ``_admit_steer`` spooled as its crash insurance (the row is the ONLY
+        durable copy until ``Session._drain_steering`` writes the transcript row)
+        or a prompt the socket admitted and the queue has not appended yet. A
+        drain that "delivered" such a row would get "already admitted" back and
+        then commit the row away, deleting the insurance. A read, never a claim.
+        """
+        return bool(command_id) and command_id in self._commands
+
     def accept(self, command_id: str) -> None:
         # Prompt ACK runs after the append callback, so it must not recreate an
         # entry already handed to the durable ledger. Steers remain until drain.

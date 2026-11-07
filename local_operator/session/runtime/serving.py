@@ -962,6 +962,14 @@ class ServingSessionHandle(SessionHandle):
     #: practice — the class still has to state it for the probe to resolve.
     _retire_refusal: str = ""
 
+    #: False until ``process.amain`` installs the live inbox watcher. Declare
+    #: the default on the handle, like the other server-probed capabilities:
+    #: in-process/exec hosts do not run that watcher and must not advertise it.
+    #: A runtime child sets its instance to True before constructing the server.
+    #: Keeping this explicit also lets the capability-surface audit distinguish
+    #: an intentional disabled capability from a handle that forgot to answer.
+    live_inbox_drain: bool = False
+
     def __init__(
         self,
         session: Any,
