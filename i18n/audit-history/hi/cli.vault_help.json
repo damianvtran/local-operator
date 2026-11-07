@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.vault_help",
+  "history_sha256": "09f82e9619956277516e9256f9949f7d1427e1e9bee73cddae86d9bfa20b46f2",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "cli.vault_help",
+      "source_sha256": "2b1ee0e09cb9d69dd74828468303ddc3a9bd7e5bd14a70196441808962cd430a",
+      "translator": {
+        "agent": "i18n-translator (coder subagent, job 65ed0781eb77)",
+        "session": "cbcaa1d210f3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (translation-auditor, radientdev team subagent)",
+        "session": "45670e86d2b4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.vault_help at source hash 2b1ee0e09cb9: 7/7 keys present in en order; no placeholders in source or translation; Radient Vault, Radient Team, JSON and 600 kept verbatim; NFC, no bidi/zero-width controls; repo check.py --catalogues-only 0 problems. Help mood and default-value wording checked against this locale's other cli.*_help catalogues; credentials, agent and approvals against the glossary; fingerprint/key/console consistent with cli.vault in this locale. Polite imperative matches the hi style guide. Findings 0 blocker / 0 major / 1 minor, fixed: vault used singular 'क्रेडेंशियल' for plural credentials where glossary note 6 records 'क्रेडेंशियल्स' — now 'वे क्रेडेंशियल्स पढ़ने दें'. Unresolved blocker/major: 0. Single independent audit pass by a different agent on the SAME model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification. Corrections were applied by the auditor at the manager's instruction (team radientdev); the corrected strings have no second independent audit, and a separate re-audit of them is recommended."
+    }
+  ]
+}

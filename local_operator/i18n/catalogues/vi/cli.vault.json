@@ -4,7 +4,7 @@
   "cli.vault.opening": "Đang mở trang phê duyệt trong trình duyệt:",
   "cli.vault.open_manually": "Mở liên kết này để phê duyệt:",
   "cli.vault.waiting": "Đang chờ bạn phê duyệt (tối đa {minutes, plural, other {# phút}}; nhấn Ctrl+C để dừng)…",
-  "cli.vault.connected_until": "Đã kết nối. Tác nhân này có thể đọc các kho bạn đã chia sẻ với nó đến {until}.",
+  "cli.vault.connected_until": "Đã kết nối. Cho đến {until}, tác nhân này có thể đọc các kho bạn đã chia sẻ với nó.",
   "cli.vault.timed_out": "Chưa có phê duyệt nào. Hãy phê duyệt trong bảng điều khiển, rồi chạy lại `lop vault connect`.",
   "cli.vault.interrupted": "Đã dừng chờ. Sau khi phê duyệt, hãy chạy lại `lop vault connect` để hoàn tất.",
   "cli.vault.unavailable": "Quyền truy cập của tác nhân chưa khả dụng.",

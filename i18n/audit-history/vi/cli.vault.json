@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.vault",
+  "history_sha256": "3ed9811d79eb4e096398d3eaef294fa476ea9ac316defa4950e07b79020ded63",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "cli.vault",
+      "source_sha256": "88cd0862f4e2f1b0cb095098730eaa942fc66ebc6efa31aba4a9975a3f588ea9",
+      "translator": {
+        "agent": "i18n-translator (coder subagent, job 65ed0781eb77)",
+        "session": "cbcaa1d210f3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (translation-auditor, radientdev team subagent)",
+        "session": "45670e86d2b4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.vault at source hash 88cd0862f4e2: 24/24 keys present in en order; ICU placeholder names/kinds parity with en ({endpoint}, {org}, {minutes}, {until}, {url}); every backticked command (`lop vault connect`, `lop login radient`, `lop team-bridge setup`) byte-identical; Ctrl+C, Radient Vault, Radient Team, Local Operator, JSON and 600 kept verbatim; {url} stays last in revoke_hint; NFC, no bidi/zero-width controls; repo check.py --catalogues-only 0 problems. Safety meaning checked against en .context.json: compare tells the person to check the 16 groups on the approval page BEFORE approving and never claims the harness verified anything; unavailable/not_team carry no up-sell or retry advice; connected_until bounds READ access at {until}; disconnected/revoke_hint keep local-key removal distinct from console revocation. Glossary: agent, approvals, credentials, team plan and 'agent messages' (matches cli.team_bridge / cli.team_bridge_hold) checked against this locale's catalogues and style guide; 'vault' and 'fingerprint' have no prior catalogue rendering, so this namespace sets them. Pronoun-dropping bạn register; 'bảng điều khiển' matches the existing Radient-console rendering. Findings 0 blocker / 0 major / 2 minor: (m, fixed) connected_until '…đã chia sẻ với nó đến {until}' let the date attach to 'shared' — now 'Cho đến {until}, tác nhân này có thể đọc các kho bạn đã chia sẻ với nó.'. Minor deferred: endpoint is rendered 'điểm cuối' in key_heading while wire.settings keeps the Latin 'endpoint'; not a glossary row and the bep_ id beside it disambiguates, so left for a glossary decision. Unresolved blocker/major: 0. Plural other-only rendered at 1/2/5/21/1000000. Single independent audit pass by a different agent on the SAME model family as the translator (anthropic/claude-opus-5-5); no cross-model second audit; no native-speaker or rendered-frame certification. Corrections were applied by the auditor at the manager's instruction (team radientdev); the corrected strings have no second independent audit, and a separate re-audit of them is recommended."
+    }
+  ]
+}
