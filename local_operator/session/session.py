@@ -80,6 +80,7 @@ from local_operator.compaction.cutpoint import (
     PRESERVED_TURN_ELISION_ID,
     PRESERVED_TURN_ELISION_ID_PREFIX,
     RENDERED_INJECTION_KEY,
+    is_resume_card,
 )
 from local_operator.compaction.marker import (
     COMPACTION_MARKER_TYPE,
@@ -2070,6 +2071,19 @@ def _payload_count(payload: dict[str, Any], key: str) -> int:
     """
     value = payload.get(key)
     return value if isinstance(value, int) and value > 0 else 0
+
+
+def _is_summarizable(message: AgentMessage) -> bool:
+    """Whether a pre-cut row feeds the summary.
+
+    The carried tier is a LIVE-STATE projection re-read every pass, so it is
+    excluded. The resume card (#3448) shares its lifecycle but NOT this rule:
+    after a card-mode resume it is the only trace of the kept-window middle
+    that replay omitted, so dropping it here would erase that middle from every
+    later summary. Its ``harness_injected`` stamp still keeps
+    ``extract_preserved_user_turns`` from harvesting it as an operator turn.
+    """
+    return is_resume_card(message) or not is_carried_tier(message)
 
 
 def _is_persistable_message(message: AgentMessage) -> bool:
@@ -25686,7 +25700,7 @@ class Session:
         self._begin_memory_capture(plan)
         return await self._produce_summary(
             plan.compaction_api,
-            [m for m in plan.llm_history[: plan.cut] if not is_carried_tier(m)],
+            [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)],
             plan.strategy,
         )
 
@@ -25750,7 +25764,7 @@ class Session:
         compaction_api = plan.compaction_api
         try:
             self._begin_memory_capture(plan)
-            to_summarize = [m for m in plan.llm_history[: plan.cut] if not is_carried_tier(m)]
+            to_summarize = [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)]
             # The KEPT window is rebuilt from the UNSTRIPPED render. The plan's
             # ``llm_history`` went through the capability strip (the summary
             # request must not carry images a text-only model cannot take),
@@ -25920,6 +25934,25 @@ class Session:
             kept = [message for message in kept if not is_carried_tier(message)]
             carried_message = render_carried_tier(carried_asks, carried_decisions)
             first_kept_entry_id = kept[0].id
+            # THE RESUME CARD (#3448), opt-in. Built HERE, from what this pass
+            # saw, because replay cannot rebuild it: the kept-window middle it
+            # summarizes is exactly what a card replay omits. Stored on the
+            # marker and rendered ONLY by replay — the live context below is
+            # the same in both modes. Text strategy only: a snapcompact archive
+            # replays image frames the card has no equivalent for, so a pass
+            # that produced one keeps the full replay.
+            resume_card: dict[str, Any] | None = None
+            replay_settings = self._compaction_settings or compaction_api.CompactionSettings()
+            snap_archive = isinstance(preserve_data, dict) and bool(
+                preserve_data.get("snapcompact")
+            )
+            if getattr(replay_settings, "resume_replay", "full") == "card" and not snap_archive:
+                from local_operator.compaction.resume_card import build_resume_card
+
+                try:
+                    resume_card = build_resume_card([*to_summarize, *kept])
+                except Exception:  # noqa: BLE001 - a card is an enhancement, never a precondition
+                    logger.warning("resume card: build failed; replaying in full", exc_info=True)
             memory_marker = await self._transcript.append_compaction(
                 summary,
                 first_kept_entry_id,
@@ -25936,6 +25969,7 @@ class Session:
                 preserved_turns_shed=preserved_turns_shed,
                 carried_asks=carried_asks,
                 carried_decisions=carried_decisions,
+                resume_card=resume_card,
             )
             # Never await speculative capture on the compaction critical path.
             # Binding it to this *committed* marker prevents cancelled/stale

@@ -2875,6 +2875,7 @@ class Transcript:
         preserved_turns_shed: int = 0,
         carried_asks: list[dict[str, Any]] | None = None,
         carried_decisions: list[dict[str, Any]] | None = None,
+        resume_card: dict[str, Any] | None = None,
     ) -> TranscriptEntry:
         """Record a compaction marker. Replay treats the LATEST one as the
         boundary: summary marker + entries from ``first_kept_entry_id`` on.
@@ -2921,6 +2922,10 @@ class Transcript:
         without them (every record written before this existed) replays with no
         carried tier, which is the old behaviour. Re-reading live state on every
         pass is the writer's job — this method only stores what it was handed.
+
+        ``resume_card`` is the stored card a ``compaction.resume_replay =
+        "card"`` pass built (:mod:`local_operator.compaction.resume_card`). Its
+        presence is what switches THIS record's context replay to card mode.
         """
         payload: dict[str, Any] = {
             "summary": summary,
@@ -2946,6 +2951,10 @@ class Transcript:
             payload["carried_asks"] = carried_asks
         if carried_decisions:
             payload["carried_decisions"] = carried_decisions
+        # Written only by a card-mode pass, so a default-mode record is
+        # byte-identical to one written before the card existed (#3448).
+        if resume_card is not None:
+            payload["resume_card"] = resume_card
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(
@@ -4880,6 +4889,19 @@ def replay_entries(
 
     start = 0
     prefix: list[AgentMessage] = []
+    # The record's stored resume card, when its pass ran in card mode (#3448).
+    # Read off the RECORD, not the current settings: replay has no settings,
+    # and the record is what knows whether a card exists to replay. Defensively
+    # ignored beside a snapcompact archive — the writer never pairs them, and
+    # the card has no equivalent for the archive's image frames.
+    resume_card: Mapping[str, Any] | None = None
+    if compaction is not None:
+        stored_card = compaction.payload.get("resume_card")
+        preserve = compaction.payload.get("preserve_data")
+        if isinstance(stored_card, Mapping) and not (
+            isinstance(preserve, Mapping) and preserve.get("snapcompact")
+        ):
+            resume_card = stored_card
     if compaction is not None:
         prefix.append(_compaction_marker(compaction))
         # User-authored turns that fell into the summarized partition are
@@ -4893,8 +4915,13 @@ def replay_entries(
         # replayed, so there is no duplicate, and the guard that expires
         # stale asides keys on ``CustomMessage`` (a real ``user`` Message is
         # never mistaken for one).
+        #
+        # EXCEPT in card mode, deliberately: a card-mode record replays the
+        # card INSTEAD of this block, so the verbatim-survival guarantee above
+        # does not hold for it. That is the documented price of
+        # ``compaction.resume_replay = "card"``, not a defect to repair here.
         preserved_turns = compaction.payload.get("preserved_user_turns") or ()
-        if preserved_turns:
+        if preserved_turns and resume_card is None:
             # Lazy import keeps this low-level store free of a hard compaction
             # dependency (the session imports compaction lazily for the same
             # reason). The flag marks these as already-compacted content so a
@@ -4944,6 +4971,22 @@ def replay_entries(
         # is rebuilt from live state on every pass. It is synthesized here from
         # the marker payload by the SAME renderer the live commit used, so a
         # resumed context matches the one it resumed from message for message.
+        #
+        # THE ONE DOCUMENTED EXCEPTION to that parity: a card-mode record
+        # (``resume_card`` set, #3448). Its resumed context is
+        # ``[marker, card, carried, *tail]`` while the live context after the
+        # same pass is ``[marker, *preserved, carried, *kept]`` — the operator
+        # opted into replaying a short card instead of the verbatim preserved
+        # turns and the full kept window, so preserved user turns STOP surviving
+        # a resume in that mode. Do not "restore" the reprint here as a parity
+        # fix; the default ("full") record carries no card and stays
+        # byte-identical to the live context.
+        if resume_card is not None:
+            from local_operator.compaction.resume_card import render_resume_card
+
+            card_message = render_resume_card(resume_card, compaction.payload.get("carried_asks"))
+            if card_message is not None:
+                prefix.append(card_message)
         from local_operator.compaction.carry import (
             CARRIED_ASKS_KEY,
             CARRIED_DECISIONS_KEY,
@@ -5018,6 +5061,14 @@ def replay_entries(
                 next(projected_iter) if isinstance(message, Message) else message
                 for message in kept
             ]
+    if resume_card is not None:
+        # Card mode keeps only the in-flight tail of the kept window; the card
+        # stands in for the rest. Applied LAST so prunes and capture elisions
+        # above see the same window the live session did.
+        from local_operator.compaction.cutpoint import resume_tail_start
+        from local_operator.compaction.resume_card import RESUME_CARD_TAIL_TOKENS
+
+        kept = kept[resume_tail_start(kept, RESUME_CARD_TAIL_TOKENS) :]
     return list(prefix) + kept
 
 
