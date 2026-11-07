@@ -1000,7 +1000,10 @@ def build_cli_parser() -> LocalizedArgumentParser:
         # managed skills directory to settle a conflict themselves.
         choices=("local", "remote"),
         default=None,
-        help="Settle the conflicting parts of --name's merge with this side (remote = hub)",
+        help=(
+            "For --name: every file the merge could not settle takes this side's whole "
+            "file (remote = hub); cleanly merged files still merge"
+        ),
     )
     skills_sync.add_argument(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
@@ -13349,10 +13352,12 @@ def _reason_error(code: str) -> Any:
 
 #: Item outcomes after which `lop skills sync` exits 1: the named skill was NOT
 #: brought up to date (a conflict left for a decision, a refusal, a failure).
+#: ``unavailable`` (the hub could not be read for that item) is in the set
+#: everywhere, not only under ``--prefer``: nothing was brought up to date.
 #: The same contract `lop skills push` keeps -- 0 only when the asked-for state
 #: holds -- so a script or agent cannot read a held merge as done (2026-11-07:
 #: a needs-review merge printed JSON and exited 0).
-_SKILL_SYNC_FAILED_OUTCOMES = frozenset({"needs-review", "refused", "failed"})
+_SKILL_SYNC_FAILED_OUTCOMES = frozenset({"needs-review", "refused", "failed", "unavailable"})
 
 
 def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
@@ -13431,8 +13436,11 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
     if held:
         # The machine-readable twin of the text hint below: an agent reading
         # --json gets the CLI way out of a held merge, not just its diagnosis.
+        # Two runnable commands, never ``local|remote``: pasted, that is a pipe.
         payload["next_steps"] = [
-            f"lop skills sync --name {_safe(name)} --prefer local|remote" for name in held
+            f"lop skills sync --name {_safe(name)} --prefer {side}"
+            for name in held
+            for side in ("local", "remote")
         ]
     if getattr(args, "json", False):
         print(_json.dumps(payload, indent=2))
@@ -13450,9 +13458,11 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
         if code == "merge-refused" and item.get("outcome") == "needs-review":
             print(
                 # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
-                f"  Settle it by choosing a side: lop skills sync --name "
-                f"{_safe(item.get('name'))} --prefer local|remote"
+                "  Settle it by choosing a side for each conflicted file (that side's whole file):"
             )
+            for side in ("local", "remote"):
+                # i18n: ignore a runnable command line, a technical identifier
+                print(f"    lop skills sync --name {_safe(item.get('name'))} --prefer {side}")
     return exit_code
 
 

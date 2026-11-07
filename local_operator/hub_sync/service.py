@@ -1552,7 +1552,23 @@ def _apply_skill(
     # local document exactly (the remote and local already agree on content).
     # ``local_doc`` is None exactly for an absent row, which has nothing to
     # reproduce.
-    if local_doc is not None and merged.to_json() == local_doc.to_json() and replace is None:
+    # An explicit ``prefer`` is a RESOLUTION, not an agreement: when it keeps the
+    # local copy byte for byte there is still a decision to record, so it takes
+    # the write path below (same bytes, baseline B := the hub head it settled
+    # against) instead of this shortcut. Here ``_mark_integrated(agreement=True)``
+    # rightly refuses a pair that is not genuinely equal, which left the link on
+    # the old baseline: the next sync re-raised the same conflict and a push was
+    # refused as hub-moved (QA round 1, Q1 on PR #3574).
+    if (
+        local_doc is not None
+        and merged.to_json() == local_doc.to_json()
+        and replace is None
+        and (
+            prefer == "none"
+            # Nothing to settle when the hub has not moved off the baseline.
+            or (base_doc is not None and base_doc.to_json() == remote_doc.to_json())
+        )
+    ):
         if not dry_run:
             # This site compared the FULL documents (stronger than the check's
             # fingerprints), but the mark still goes through the agreement gate:
@@ -3120,6 +3136,79 @@ class PushVerification:
     reason: str = ""
 
 
+def _without_hub_name_line(content: str) -> str:
+    """SKILL.md minus the one line the hub rewrites: its top-level ``name:`` line.
+
+    A port of agent-server ``requests.SplitSkillName``'s byte surgery
+    (``internal/requests/skill_name_split.go`` @ 88e91053): the frontmatter block
+    runs from the line after an opening ``---`` (optionally BOM-prefixed,
+    trailing whitespace allowed) to the next ``\\n---``; the first block line
+    that starts ``name:`` at column 1 is removed with its ``\\n``. The hub then
+    re-inserts ``name: <scalar>\\n`` straight after the opening line, so the
+    same removal applied to the head and to what was sent leaves exactly the
+    bytes the hub kept verbatim. Content without that shape is returned as is,
+    and is then compared whole.
+    """
+
+    text = content[1:] if content.startswith("\ufeff") else content
+    if not text.startswith("---"):
+        return content
+    rest = text[3:]
+    newline = rest.find("\n")
+    if newline < 0 or rest[:newline].strip() != "":
+        return content
+    start = len(content) - len(text) + 3 + newline + 1
+    tail = content[start:]
+    end = tail.find("\n---")
+    if end < 0:
+        return content
+    offset = 0
+    # ``\n`` only, as Go's ``strings.SplitAfter``: ``splitlines`` would also split
+    # on ``\r`` and the other separators and shift the offset on a CRLF file.
+    for line in tail[:end].split("\n"):
+        line += "\n"
+        if line.startswith("name:"):
+            line_end = tail.find("\n", offset)
+            cut = len(tail) if line_end < 0 else line_end + 1
+            return content[:start] + tail[:offset] + tail[cut:]
+        offset += len(line)
+    return content
+
+
+def _same_bytes_as_hub_stores(head: Mapping[str, Any], intended: Mapping[str, Any]) -> bool:
+    """Byte equality of a pushed skill and the hub head, modulo the hub's name line.
+
+    A bundle compares by its exact tree hash. A document compares its name and
+    description fields and every file's exact bytes, with SKILL.md taken through
+    ``_without_hub_name_line`` on BOTH sides (the name itself is still compared,
+    as the document's ``name``). Anything unreadable proves no equality.
+    """
+
+    try:
+        if "bundle" in head or "bundle" in intended:
+            return prov.fingerprint_snapshot("skill", dict(head)) == prov.fingerprint_snapshot(
+                "skill", dict(intended)
+            )
+
+        def key(doc: Mapping[str, Any]) -> tuple[Any, ...]:
+            files = sorted(
+                (
+                    str(row["path"]),
+                    (
+                        _without_hub_name_line(str(row["content"]))
+                        if str(row["path"]) == "SKILL.md"
+                        else str(row["content"])
+                    ),
+                )
+                for row in doc.get("files") or []
+            )
+            return (str(doc.get("name") or ""), str(doc.get("description") or ""), files)
+
+        return key(head) == key(intended)
+    except Exception:  # noqa: BLE001 - an unreadable side proves no equality
+        return False
+
+
 def verify_skill_push(ctx: HubSyncContext, check: Any, outcome: Any) -> PushVerification:
     """Re-read the hub head after a ``pushed`` outcome and compare it with the intent.
 
@@ -3130,14 +3219,16 @@ def verify_skill_push(ctx: HubSyncContext, check: Any, outcome: Any) -> PushVeri
     baseline, which is exactly the copy that was wrong), through the same
     per-tenant client the check uses.
 
-    The comparison is BYTE-EXACT (``fingerprint_snapshot``: every file's exact
-    content, a bundle's tree hash), because the CLI then tells the operator the
-    head "holds exactly the document this push sent". It used the tolerant
-    ``_same_content`` comparator until 2026-11-07, which certified a hub copy
-    that had lost its trailing newline (the projection, not the hub, had
-    normalized it away) as exact. The hub stores document bytes verbatim
-    (agent-server request validation rewrites no file content), so a byte
-    difference here is a real difference worth the warning.
+    The comparison is BYTE-EXACT (``_same_bytes_as_hub_stores``), because the CLI
+    then tells the operator the head "holds exactly the document this push
+    sent". It used the tolerant ``_same_content`` comparator until 2026-11-07,
+    which certified a hub copy that had lost its trailing newline (the
+    projection, not the hub, had normalized it away) as exact. The hub stores
+    every file's bytes verbatim EXCEPT one line: it lifts SKILL.md's top-level
+    ``name:`` line out and re-inserts a re-rendered one right after the opening
+    ``---`` (agent-server ``SplitSkillName``/``JoinSkillName``). That line is
+    compared through the document's ``name`` field instead; every other byte of
+    every file must match, so a difference here is real.
 
     The comparison target is ``outcome.document`` -- the body the commit SENT --
     never the server's ``accepted_document``: an idempotent replay answers with
@@ -3164,13 +3255,7 @@ def verify_skill_push(ctx: HubSyncContext, check: Any, outcome: Any) -> PushVeri
         logger.debug("post-push verification read failed for %s", check.name, exc_info=True)
         return PushVerification(None, reason=type(error).__name__)
     head_revision = str(document.get("revision") or "") or None
-    try:
-        exact = prov.fingerprint_snapshot("skill", dict(head)) == prov.fingerprint_snapshot(
-            "skill", dict(intended)
-        )
-    except Exception:  # noqa: BLE001 - an unfingerprintable side proves no equality
-        exact = False
-    if exact:
+    if _same_bytes_as_hub_stores(head, intended):
         return PushVerification(True, head_revision=head_revision)
     return PushVerification(False, head_revision=head_revision, reason="head-differs")
 

@@ -23,6 +23,7 @@ would normalize do not trigger a billed publication.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -84,23 +85,21 @@ def merge_skill_file(
     None when the file is gone, result)``; callers treat ``unresolved`` as a
     refusal rather than writing either side.
     """
+    from local_operator.hub_sync.merge import file_add_conflict, take_file_side
+
+    side = opts.prefer if opts.prefer in ("local", "remote") else None
     if base_present is False and local is not None and remote is not None and local != remote:
         # Both sides ADDED this path with different content: a conflict at the
         # FILE level, decided before the text merge can union them (QN4).
-        from local_operator.hub_sync.merge import file_add_conflict, replace_field
-
-        if opts.prefer in ("local", "remote"):
-            # An explicit side choice (``lop skills sync --prefer``, the UI's
-            # resolve) settles an add/add the same way it settles any other
-            # unresolved file: take that side's file whole. Without this the
-            # one conflict shape a text merge cannot see stayed unresolvable
-            # from the CLI, and agents cannot hand-edit the managed copy.
-            inp = FieldInput(
-                field=path, kind="text", base=None, local=local, remote=remote, base_present=False
+        if side is not None:
+            return local if side == "local" else remote, take_file_side(
+                path, base=base, local=local, remote=remote, take=side  # type: ignore[arg-type]
             )
-            taken = replace_field(inp, take=opts.prefer)
-            return _preserve_side_bytes(taken.merged, local=local, remote=remote), taken
         return None, file_add_conflict(path, local, remote)
+    # The engine runs WITHOUT ``prefer``: an explicit side choice applies to a
+    # file the merge could not settle, as that side's WHOLE file (see
+    # ``take_file_side``), never as passage-level precedence that can keep the
+    # other side's contradicting sentence. Clean files still merge both ways.
     result = merge_field(
         FieldInput(
             field=path,
@@ -110,8 +109,13 @@ def merge_skill_file(
             remote=remote,
             base_present=base_present,
         ),
-        opts,
+        dataclasses.replace(opts, prefer="none"),
     )
+    if side is not None and result.outcome == "needs-review":
+        taken = take_file_side(
+            path, base=base, local=local, remote=remote, take=side  # type: ignore[arg-type]
+        )
+        return local if side == "local" else remote, taken
     if not skill_file_present(local, remote, result.merged):
         return None, result
     return _preserve_side_bytes(result.merged, local=local, remote=remote), result
@@ -194,6 +198,8 @@ def merge_skill_document(
     except SkillValidationError:
         return None, []
 
+    # ``results[0]`` is ALWAYS the manifest description: ``skill_merge_refusal_message``
+    # tells it from a file result by that position (a file may be named anything).
     results: list[MergeResult] = []
     description = merge_field(
         FieldInput(
@@ -294,6 +300,7 @@ def skill_merge_refusal_message(
             continue
         # ``merge_skill_document`` puts the manifest description first, under
         # the field name ``description``; every other result is a file path.
+        # Position, not name, marks the description (see ``merge_skill_document``).
         is_description = result is results[0] and result.field == "description"
         label = "the description" if is_description else result.field
         if result.outcome == "refused":

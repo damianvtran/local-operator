@@ -93,8 +93,10 @@ def test_an_edit_edit_conflict_is_named_as_one_and_exits_non_zero(
         "(edit/edit text conflict: both sides changed the same text)"
     )
     assert "removal" not in item["message"]
+    # Two runnable commands: a pasted ``local|remote`` would be a shell pipe.
     assert payload["next_steps"] == [
-        f"lop skills sync --name {document.name} --prefer local|remote"
+        f"lop skills sync --name {document.name} --prefer local",
+        f"lop skills sync --name {document.name} --prefer remote",
     ]
     assert code == 1
     assert LOCAL_RULE in _local_skill_md(root, document.name)  # nothing written
@@ -109,39 +111,125 @@ def test_the_human_output_names_the_file_and_the_way_out(
 
     assert code == 1
     assert "SKILL.md (edit/edit text conflict" in out
-    assert f"lop skills sync --name {document.name} --prefer local|remote" in out
+    assert f"lop skills sync --name {document.name} --prefer local\n" in out
+    assert f"lop skills sync --name {document.name} --prefer remote\n" in out
+    assert "local|remote" not in out
 
 
-@pytest.mark.parametrize(("side", "kept"), [("remote", HUB_RULE), ("local", LOCAL_RULE)])
-def test_prefer_settles_the_conflict_with_the_chosen_side(
+@pytest.mark.parametrize("side", ["remote", "local"])
+def test_prefer_takes_the_chosen_sides_whole_file_and_settles_the_link(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     side: str,
-    kept: str,
 ) -> None:
+    """Q1 + Q2 (PR #3574 round 1): a whole-file choice that stays settled.
+
+    The engine reads the hub's rewrite as "remove the old sentence + add a new
+    one"; passage-level precedence kept the hub's added sentence under
+    ``--prefer local`` (two contradictory rules). And when the result equalled
+    the local copy, nothing recorded the decision: the next sync re-raised the
+    conflict and a push was refused as hub-moved.
+    """
+
     root, document, hub = _conflicted(tmp_path, monkeypatch)
+    # Non-conflicting files on each side must survive either choice.
+    (root / "skills" / document.name / "references").mkdir(exist_ok=True)
+    (root / "skills" / document.name / "references" / "local.md").write_text("mine\n")
+    hub.document["files"].append({"path": "references/hub.md", "content": "theirs\n"})
+    local_md = _local_skill_md(root, document.name)
+    hub_md = hub.skill_md()
     assert _sync(root, document.name, capsys)[0] == 1
 
     code, out, _err = _sync(root, document.name, capsys, prefer=side)
 
     (item,) = json.loads(out)["reports"]
     assert code == 0, item
-    assert item["outcome"] in ("merged", "unchanged"), item
+    assert item["outcome"] == "merged" and item["applied"] is True, item
     on_disk = _local_skill_md(root, document.name)
-    assert kept in on_disk
-    # ``prefer`` settles only the UNRESOLVED passage (A4.3): the engine read the
-    # hub's rewrite as "remove the old sentence, add a new one", so the hub's
-    # addition is a non-conflicting edit that merges under either choice, while
-    # the contested sentence follows the chosen side.
-    assert HUB_RULE in on_disk
-    if side == "remote":
-        assert LOCAL_RULE not in on_disk
-        # Taking the hub's side lands the hub's exact bytes, newline included.
-        hub_md = next(f["content"] for f in hub.document["files"] if f["path"] == "SKILL.md")
-        assert on_disk == hub_md
-    # Settled: the next plain sync has nothing left to decide.
+    assert on_disk == (local_md if side == "local" else hub_md)  # exact bytes, whole file
+    assert (HUB_RULE in on_disk) is (side == "remote")
+    assert (LOCAL_RULE in on_disk) is (side == "local")
+    references = root / "skills" / document.name / "references"
+    assert (references / "local.md").read_text() == "mine\n"
+    assert (references / "hub.md").read_text() == "theirs\n"
+    # Settled: the next plain sync has nothing left to decide ...
     assert _sync(root, document.name, capsys)[0] == 0
+    # ... and a push is no longer refused as hub-moved.
+    payload = _push(root, document.name, capsys)
+    # Either way the local-only ``references/local.md`` is still unpublished, so
+    # the push publishes; SKILL.md lands as the chosen side's exact bytes.
+    assert payload["exit_code"] == 0, payload
+    assert payload["state"] == "pushed" and payload["verified"] is True
+    assert hub.skill_md() == (local_md if side == "local" else hub_md)
+    assert {"references/local.md", "references/hub.md"} <= {
+        r["path"] for r in hub.document["files"]
+    }
+
+
+@pytest.mark.parametrize("removed_on", ["hub", "local"])
+@pytest.mark.parametrize("side", ["remote", "local"])
+def test_prefer_settles_an_edit_against_a_removal_both_ways(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    removed_on: str,
+    side: str,
+) -> None:
+    root, _storage, _identity, document, hub = _rig(tmp_path, monkeypatch)
+    inert = root / "skills" / document.name / "scripts" / "inert.py"
+    original = inert.read_text()
+    if removed_on == "hub":
+        inert.write_text(original.replace("never run", "never load"))
+        hub.document["files"] = [
+            r for r in hub.document["files"] if r["path"] != "scripts/inert.py"
+        ]
+    else:
+        inert.unlink()
+        for row in hub.document["files"]:
+            if row["path"] == "scripts/inert.py":
+                row["content"] = original.replace("never run", "never load")
+    hub.revision = '"revision-hub-edit"'
+    code, out, _err = _sync(root, document.name, capsys)
+    assert code == 1 and "edit/removal conflict" in json.loads(out)["reports"][0]["message"]
+
+    code, out, _err = _sync(root, document.name, capsys, prefer=side)
+
+    assert code == 0, out
+    # The chosen side's state of the file wins: present-and-edited or absent.
+    keeps_file = (side == "local") == (removed_on == "hub")
+    assert inert.exists() is keeps_file
+    if keeps_file:
+        assert "never load" in inert.read_text()
+    assert _sync(root, document.name, capsys)[0] == 0
+
+
+def test_an_unreachable_hub_under_prefer_exits_non_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R3: ``unavailable`` settled nothing, so it is not exit 0."""
+
+    from local_operator.hub_sync import service as svc
+
+    root, document, _hub = _conflicted(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        svc,
+        "apply_items",
+        lambda *_a, **_k: svc.ApplyReport(
+            (
+                svc.ItemMergeReport(
+                    "skill",
+                    "immutable-local",
+                    document.name,
+                    "remote",
+                    "unavailable",
+                    error_class="network",
+                ),
+            )
+        ),
+    )
+
+    assert _sync(root, document.name, capsys, prefer="local")[0] == 1
 
 
 @pytest.mark.parametrize("flags", [{"prefer": "remote"}, {"prefer": "local", "check": True}])
@@ -287,3 +375,89 @@ def test_a_whitespace_only_difference_from_the_hub_is_still_a_no_op() -> None:
     )
 
     assert result.no_op is True
+
+
+def _hub_rejoin_name(content: str, name: str) -> str:
+    """The agent-server SKILL.md rewrite (SplitSkillName + JoinSkillName), test-side.
+
+    Written independently of the product's ``_without_hub_name_line`` so the test
+    cannot share its bug: the top-level ``name:`` line is lifted out of the
+    frontmatter and ``name: <name>\\n`` (bare LF) is inserted right after the
+    opening ``---`` line.
+    """
+
+    first = content.index("\n") + 1
+    head, rest = content[:first], content[first:]
+    lines = rest.split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("---"):
+            break
+        if line.startswith("name:"):
+            del lines[i]
+            break
+    return head + f"name: {name}\n" + "\n".join(lines)
+
+
+@pytest.mark.parametrize("variant", ["crlf", "name-trailing-spaces", "name-not-first"])
+def test_verification_tolerates_only_the_hubs_name_line_rewrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    variant: str,
+) -> None:
+    """R1 (PR #3574 round 1): the hub re-renders SKILL.md's name line; nothing else."""
+
+    root, _storage, _identity, document, hub = _rig(tmp_path, monkeypatch)
+    path = root / "skills" / document.name / "SKILL.md"
+    text = path.read_text(encoding="utf-8") + "\nMore.\n"
+    if variant == "crlf":
+        text = text.replace("\n", "\r\n")
+    elif variant == "name-trailing-spaces":
+        text = text.replace(f"name: {document.name}\n", f"name: {document.name}   \n", 1)
+    else:  # the name line moved to the end of the frontmatter block
+        text = text.replace(f"name: {document.name}\n", "", 1)
+        lines = text.split("\n")
+        close = lines.index("---", 1)
+        lines.insert(close, f"name: {document.name}")
+        text = "\n".join(lines)
+    path.write_bytes(text.encode("utf-8"))
+    original = hub.commit
+
+    async def rejoining_commit(**kw: Any) -> dict[str, Any]:
+        result = await original(**kw)
+        for row in hub.document["files"]:
+            if row["path"] == "SKILL.md":
+                row["content"] = _hub_rejoin_name(row["content"], document.name)
+        return result
+
+    monkeypatch.setattr(hub, "commit", rejoining_commit)
+
+    payload = _push(root, document.name, capsys)
+
+    assert payload["state"] == "pushed"
+    assert hub.skill_md() != text  # the hub really rewrote the name line
+    assert payload["verified"] is True and payload["exit_code"] == 0, payload
+
+
+def test_verification_still_reports_real_drift_beside_the_name_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, _storage, _identity, document, hub = _rig(tmp_path, monkeypatch)
+    _edit_skill_md(root, document.name, lambda s: s + "\nMore.\n")
+    original = hub.commit
+
+    async def drifting_commit(**kw: Any) -> dict[str, Any]:
+        result = await original(**kw)
+        for row in hub.document["files"]:
+            if row["path"] == "SKILL.md":
+                row["content"] = _hub_rejoin_name(row["content"], document.name).replace(
+                    "More.", "Less."
+                )
+        return result
+
+    monkeypatch.setattr(hub, "commit", drifting_commit)
+
+    payload = _push(root, document.name, capsys)
+
+    assert payload["verified"] is False and payload["verification_reason"] == "head-differs"
+    assert payload["exit_code"] == 1
