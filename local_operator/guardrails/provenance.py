@@ -88,11 +88,99 @@ _MAX_ASKS = 4
 TRUSTED_ASK_SURFACES = frozenset({"terminal", "tui", "desktop", "mirror"})
 
 #: Words that make an ask answer a refusal ("Leave them", "No, keep it").
-_DECLINE_RE = re.compile(r"(?i)\b(no|keep|cancel|don'?t|do not|stop|leave)\b")
+_DECLINE_RE = re.compile(
+    r"(?i)\b(no|nope|keep|cancel|don'?t|do not|stop|leave|not now|not yet|hold off"
+    r"|skip|later|wait|no thanks)\b"
+)
 _ASK_ID_RE = re.compile(r"(?<![\w-])(a-[0-9a-f]{4,12})(?![\w-])")
 
 
 # -- ledger -------------------------------------------------------------------
+
+
+#: The harness-written lineage registry (review R2-MAJOR-1/2): one JSON line
+#: per session the harness opened on an agent's behalf — ``{"child", "origin",
+#: "parent", "opener", "at"}`` — appended by ``resume.mark_session_origin`` at
+#: the spawn sites, never by a tool. It sits beside the ledger under
+#: ``<state>/guardrails/``, which the shell and the file tools cannot write
+#: (CRITICAL), so "who is whose child" no longer rests on ``origin.json``,
+#: which the session's own shell could once reach with ``ln``/``rsync``.
+LINEAGE_FILENAME = "lineage.jsonl"
+#: Origins that are NOT agent-opened: an operator's fork of their own
+#: conversation is theirs (``resume.USER_ORIGINS`` lists it as a user origin).
+_HUMAN_ORIGINS = frozenset({"fork"})
+
+
+def lineage_path(state_root: str | os.PathLike[str] | None = None) -> Path:
+    from local_operator.paths import config_dir
+
+    root = Path(state_root) if state_root is not None else config_dir()
+    return root / LEDGER_DIRNAME / LINEAGE_FILENAME
+
+
+def record_lineage(
+    child: str,
+    *,
+    origin: str,
+    parent: str | None = None,
+    opener: str | None = None,
+    state_root: str | os.PathLike[str] | None = None,
+) -> None:
+    """Append one registry row. Best-effort: a spawn never fails for it — the
+    cost of a missing row is that the child's creations go unproved (the old
+    ranking), never that a child is adopted it should not be."""
+    if not child or origin in _HUMAN_ORIGINS:
+        return
+    row = {"child": child, "origin": origin, "parent": parent, "opener": opener, "at": time.time()}
+    try:
+        path = lineage_path(state_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, (json.dumps(row) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    except (OSError, TypeError, ValueError):
+        logger.debug("guardrails: lineage row not recorded", exc_info=True)
+
+
+def ensure_lineage_registry(state_root: str | os.PathLike[str] | None = None) -> float | None:
+    """Create the registry if missing; return its birth time (the legacy cutoff).
+
+    Created at the first checkpoint that needs lineage, not only at the first
+    spawn, so the migration window for ``origin.json``-only children closes
+    as early as possible on an upgraded install.
+    """
+    path = lineage_path(state_root)
+    try:
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.close(os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600))
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not os.path.isfile(path) or os.path.islink(path):
+        return None
+    return float(getattr(st, "st_birthtime", st.st_ctime))
+
+
+def read_lineage(state_root: str | os.PathLike[str] | None = None) -> dict[str, dict[str, Any]]:
+    """``child → row``; the FIRST row for a child wins (a later row cannot re-parent it)."""
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        fd = os.open(lineage_path(state_root), os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                child = row.get("child") if isinstance(row, dict) else None
+                if isinstance(child, str) and child and child not in out:
+                    out[child] = row
+    except OSError:
+        pass
+    return out
 
 
 def ledger_path(state_root: str | os.PathLike[str] | None = None) -> Path:
@@ -210,7 +298,88 @@ def owned_record(
             continue
         if best is None or len(rec.path) > len(best.path):
             best = rec
+    if best is not None and _foreign_inside(real, session_id, state_root=state_root):
+        return None
     return best
+
+
+def _holds_git(directory: str) -> bool:
+    """A ``.git`` anywhere in ``directory`` (bounded; over the bound → True)."""
+    if not os.path.isdir(directory) or os.path.islink(directory):
+        return False
+    seen = 0
+    stack: list[tuple[str, int]] = [(directory, 0)]
+    while stack:
+        current, depth = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        seen += len(entries)
+        if seen > _WALK_ENTRIES:
+            return True
+        for entry in entries:
+            if entry.name == ".git":
+                return True
+            if depth < _WALK_DEPTH and entry.is_dir(follow_symlinks=False):
+                stack.append((entry.path, depth + 1))
+    return False
+
+
+#: Bounds on the work-tree walks (``_foreign_inside``, ``_holds_git``). Hitting either fails
+#: closed (not owned → the normal ranking/judge), never open.
+_WALK_DEPTH = 4
+_WALK_ENTRIES = 20_000
+
+
+def _foreign_inside(
+    real: str, session_id: str, *, state_root: str | os.PathLike[str] | None = None
+) -> bool:
+    """Does ``real`` hold something this session's ledger does not vouch for?
+
+    WHY (QA Q7). The ledger records the TOPMOST new directory, so the first
+    ``git worktree add .worktrees/a`` in a fresh repo records ``.worktrees``
+    itself — and "strictly inside a recorded path" then covered every later
+    sibling another session added there. A ledger-owned ancestor therefore
+    does not make a target LOW when (a) another session's ledger row is at or
+    under the target, or (b) the target is, or contains, a git work tree or
+    repository (a ``.git`` file or directory) whose directory this session's
+    ledger does not record itself. Either way the target goes to the normal
+    ranking and the judge.
+    """
+    prefix = real.rstrip("/") + "/"
+    try:
+        conn = _connect(ledger_path(state_root), create=False)
+        if conn is None:
+            return False
+        try:
+            rows = conn.execute("SELECT path, owner FROM created").fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return True
+    own = {p for p, o in rows if o == session_id}
+    if any((p == real or p.startswith(prefix)) and p not in own for p, _ in rows):
+        return True
+    seen = 0
+    stack: list[tuple[str, int]] = [(real, 0)]
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        seen += len(entries)
+        if seen > _WALK_ENTRIES:
+            return True
+        for entry in entries:
+            if entry.name == ".git":
+                if os.path.realpath(directory) not in own:
+                    return True
+                continue
+            if depth < _WALK_DEPTH and entry.is_dir(follow_symlinks=False):
+                stack.append((entry.path, depth + 1))
+    return False
 
 
 @dataclass
@@ -304,6 +473,11 @@ def commit_creations(
             if not os.path.isdir(path) or not os.path.isdir(top):
                 continue
             entries.append((os.path.realpath(top), kind))
+            if kind in ("worktree", "clone") and os.path.realpath(path) != os.path.realpath(top):
+                # The checkout itself too: a ledger-owned CONTAINER does not
+                # vouch for a work tree inside it (``_foreign_inside``), so
+                # the session's own worktree needs its own row (QA Q7).
+                entries.append((os.path.realpath(path), kind))
         for parent, pattern, before in pending.patterned:
             now = _glob.glob(os.path.join(_glob.escape(parent), pattern))
             for match in now:
@@ -413,17 +587,22 @@ def worktree_state(path: str) -> str:
         return "dirty"
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
     # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy
-    # of its history went with it). Only regenerable entries may remain; a
+    # of its history went with it). Only regenerable entries may remain. A
     # nested repository inside an ignored directory surfaces as that
-    # directory, which is not on the list, so it also counts as dirty.
+    # directory: under a name not on the list it is dirty outright, and under
+    # an allowlisted name (``build/keep/.git``) the bounded walk below finds
+    # it (review R2-MINOR-1).
     ignored = _git(["status", "--porcelain", "--ignored"], real)
     if ignored is None:
         return "unknown"
     for line in ignored.splitlines():
         if not line.startswith("!! "):
             continue
-        name = os.path.basename(line[3:].strip().strip('"').rstrip("/"))
+        entry = line[3:].strip().strip('"').rstrip("/")
+        name = os.path.basename(entry)
         if name not in _REGENERABLE and not fnmatch.fnmatchcase(name, "*.pyc"):
+            return "dirty"
+        if _holds_git(os.path.join(real, entry)):
             return "dirty"
     # A detached HEAD whose commit no ref contains is lost with the tree.
     if _git(["symbolic-ref", "-q", "HEAD"], real) is None:
@@ -568,15 +747,28 @@ def _text_of(message: Any) -> str:
     return str(details.get("body") or details.get("text") or "")
 
 
-def _origin(root: Path, session_id: str) -> dict[str, Any] | None:
-    """``origin.json`` of a session; ``{}`` when it has none (operator-opened)."""
-    path = root / "sessions" / session_id / "origin.json"
+def read_origin(root: Path, session_id: str) -> dict[str, Any] | None:
+    """``origin.json`` of a session; ``{}`` when it has none.
+
+    Opened with ``O_NOFOLLOW`` and refused when the session directory itself
+    is a symlink: a dangling ``ln -sf`` raised ``FileNotFoundError`` and so
+    read as "operator-opened" (review R2-MAJOR-2). A symlink is unreadable
+    here — neither human nor a lineage pointer.
+    """
+    directory = root / "sessions" / session_id
+    if os.path.islink(directory):
+        return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        fd = os.open(directory / "origin.json", os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
-        return {}
+        return {} if os.path.isdir(directory) else None
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            value = json.load(fh)
     except (OSError, ValueError):
-        return None  # unreadable: neither human nor a lineage pointer
+        return None
     return value if isinstance(value, dict) else None
 
 
@@ -593,17 +785,21 @@ def session_lineage(
     ``opened_by.session`` for an agent-opened workstream), followed upward.
     Those are the only ask stores a pointer may resolve in (review R1-MINOR-1:
     a bare hex string must not aim the lookup at any session on disk).
-    ``origin.json`` writes rank CRITICAL, so the chain is not shell-forgeable.
+    The harness lineage registry (``read_lineage``) is read first; any shell
+    path into ``sessions/`` ranks CRITICAL, and ``origin.json`` is read
+    without following symlinks.
 
-    ``operator_opened`` is True only for a session with NO ``origin.json``,
-    which is how every session a person opened (terminal, desktop, phone) is
-    stored; ``subagent``, ``agent-workstream``, ``agent-shell`` and the rest
-    were opened by an agent, so their user rows are the delegator's prose.
+    ``operator_opened`` (review R2-MAJOR-2) is True only when the harness
+    knows of NO parent or opener: no in-process ``ancestors``, no registry
+    row, and an ``origin.json`` that is genuinely absent from a real session
+    directory — how every session a person opened (terminal, desktop, phone)
+    is stored. A missing ``origin.json`` alone is never enough.
     """
     from local_operator.paths import config_dir
 
     root = Path(state_root) if state_root is not None else config_dir()
     valid = re.compile(r"[A-Za-z0-9_-]{1,64}")
+    registry = read_lineage(root)
     lineage: list[str] = []
     queue = [session_id, *ancestors]
     operator_opened = False
@@ -612,18 +808,20 @@ def session_lineage(
         if not sid or sid in lineage or not valid.fullmatch(sid):
             continue
         lineage.append(sid)
-        origin = _origin(root, sid)
+        row = registry.get(sid)
+        origin = read_origin(root, sid)
         if sid == session_id:
-            operator_opened = origin == {}
-        if not origin:
-            continue
-        opened_by = origin.get("opened_by")
-        for nxt in (
-            origin.get("parent"),
-            opened_by.get("session") if isinstance(opened_by, Mapping) else None,
-        ):
-            if isinstance(nxt, str):
-                queue.append(nxt)
+            operator_opened = not ancestors and row is None and origin == {}
+        pointers: list[object] = []
+        if row is not None:
+            pointers += [row.get("parent"), row.get("opener")]
+        if origin:
+            opened_by = origin.get("opened_by")
+            pointers += [
+                origin.get("parent"),
+                opened_by.get("session") if isinstance(opened_by, Mapping) else None,
+            ]
+        queue.extend(p for p in pointers if isinstance(p, str))
     return lineage, operator_opened
 
 

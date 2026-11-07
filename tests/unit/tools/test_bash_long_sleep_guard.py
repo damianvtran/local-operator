@@ -135,6 +135,9 @@ BLOCKED = [
     "while true; do tail f; done; sleep 900",  # after the loop closes: top level again
     "sleep 1500\ntail -c 250 log",
     "sleep 900 2>/dev/null; tail log",
+    # `2>&1` is fd duplication, not a background `&`: the shared splitter used
+    # to cut there and wave this through (fixed with guardrail round 2, Q6).
+    "sleep 900 2>&1; tail log",
     "sleep 900 | cat",  # the pipeline waits for its first stage
     # M2: a trailing shell comment must not hide the sleep (it changes nothing
     # about how long the call holds the session).
@@ -174,9 +177,8 @@ NEVER_BLOCKED = [
     'sleep "$N"',
     "sleep $((60*30))",
     "sleep 1m 30x",
-    # a LATER pipeline stage, and a `2>&1` the shared splitter reads as `&`
+    # a LATER pipeline stage
     "yes | sleep 900",
-    "sleep 900 2>&1; tail log",
     # not a sleep command at all
     "timeout 900 sleep 900",
     'echo "sleep 900"',

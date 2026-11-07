@@ -50,14 +50,19 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   `<config_dir>/guardrails/created.sqlite`, keyed by session id + realpath +
   inode, written under the creator and every ancestor session, so a parent may
   delete what its subagents made. Overwriting or deleting the ledger is CRITICAL.
-  A later delete of exactly that path, or anything inside it, ranks LOW. A glob
+  A later delete of exactly that path, or anything inside it, ranks LOW —
+  unless another session's ledger row sits at or under the target, or the
+  target is or holds a git work tree or repository this session's ledger does
+  not record itself (an owned `.worktrees/` does not own a sibling's worktree;
+  the session's own `git worktree add`/`git clone` leaf is recorded). A glob
   ranks LOW only when every current match is recorded. A primary checkout stays
   HIGH unless this session cloned it. `$HOME`, the state root and the protected
   roots are never recorded.
 - **Clean linked worktree.** `git worktree remove <exact path>` (no `--force`)
   is LOW when the path is a registered linked worktree with no tracked or
   untracked change, no ignored entry beyond regenerable output (`node_modules`,
-  `.venv`, `__pycache__`, `build`, `dist` …), and HEAD on a branch or in some
+  `.venv`, `__pycache__`, `build`, `dist` …) and no repository nested inside
+  that output, and HEAD on a branch or in some
   ref. Anything else takes the ordinary ranking. Prefer this to
   `rm -rf .worktrees/<name>`. A worktree this session created is its own:
   through the ledger it ranks LOW even dirty or with `--force`, so commit or
@@ -70,23 +75,37 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   a script the same session wrote and the call ran, names it (its basename, or
   the literal prefix that produced it, such as `qa-r5-dg-` in
   `f"qa-r5-dg-{os.getpid()}"`), or its output prints the directory's full path.
-  Transcripts, `origin.json`, ask stores and `<config_dir>/guardrails/` are
-  CRITICAL to write, append, move or delete from the shell, and the `write`,
-  `edit` and `browser` (screenshot/recording `path`) tools refuse them the same
-  way; an interpreter
-  writing them (`python -c`, `node -e`) is the documented ceiling, as for any
+  Descendants come from the harness-written lineage registry
+  (`<config_dir>/guardrails/lineage.jsonl`, appended when the harness spawns a
+  subagent or opens an agent session). `origin.json` parent pointers are only a
+  migration fallback for child directories born before that registry file was:
+  a directory planted later is born after it. That is a narrowing, not a seal —
+  macOS `utimes` can move a birth time backwards. Symlinked session directories,
+  transcripts and `origin.json` files are never read.
+  Any shell command that is not provably read-only (`ls`, `cat`, `head`, `grep`,
+  `find` without `-delete`/`-exec`, `stat`, `du`, `jq`, `sqlite3 -readonly`,
+  `git log/status/show/diff` …) and hands a path, flag value or redirection
+  (`>`, `>>`, `>|`, `&>`, `>&`) at or under `<config_dir>/sessions/` (outside
+  your own scratchpad) or `<config_dir>/guardrails/` is CRITICAL, whatever the
+  program (`rsync`, `ln`, `tar -C`, `unzip -d`, `ditto`, an interpreter given
+  the path). The `write`, `edit` and `browser` (screenshot/recording `path`)
+  tools refuse those files the same way. An interpreter that computes the path
+  itself (`python -c`, `node -e`) is the documented ceiling, as for any
   interpreter delete. The judge must answer
   `ALLOW evidence=<ids>`, `ALLOW ask=<id>` or `ALLOW operator`. The checkpoint
   re-verifies each citation and refuses an ALLOW that does not cover every target.
 
 **Who can authorise a delete.** Only the operator: a message they typed in a
-session they opened, or their answer to `ask` as recorded in the ask store
+session they opened (one the harness knows no parent or opener for — no
+in-process parent, no lineage-registry row, no `origin.json`; a missing or
+symlinked `origin.json` alone never makes a session operator-opened), or their answer to `ask` as recorded in the ask store
 (`sessions/<id>/asks.jsonl`, answered on the terminal, desktop or phone). In a
 subagent or an agent-opened workstream the user rows are the delegating agent's
 words, so there only store-verified asks count. An ask id (`a-xxxx`) cited by a
 peer message, the intent or the command is looked up only in this session's
 lineage (itself, its parents, the session that opened it), and counts once that
-ask is answered there, does not decline (`no`, `keep`, `leave`, `cancel` …), and
+ask is answered there, does not decline (`no`, `keep`, `leave`, `cancel`, `not now`,
+`hold off`, `skip`, `later` …), and
 names the path exactly (full or `~/` path). A named glob (`~/qa-r5-dg-*`) covers its current matches when the wildcard
 is in the last component with at least three literal characters (`~/*` names
 nothing). Team Bridge deliveries, peer and hub messages, and fetched or file

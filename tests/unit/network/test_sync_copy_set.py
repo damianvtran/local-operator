@@ -303,9 +303,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "and a copy would hand another device a second refresher, which is the one thing "
         "the design's Fence 1 forbids.",
     ),
+    "local_operator/guardrails/provenance.py": (
+        3,
+        "LEDGER_DIRNAME ('guardrails'), LEDGER_FILENAME ('created.sqlite') and "
+        "LINEAGE_FILENAME ('lineage.jsonl') name the delete guard's per-DEVICE records "
+        "under <config>/guardrails/, never an entry of a session directory: the "
+        "creation ledger pins this device's inodes and the lineage registry is written "
+        "by this device's spawn sites, so neither may travel with a session copy.",
+    ),
     "local_operator/guardrails/classify.py": (
-        4,
-        "_CONFIG_FILE, _SECRETS_DIRNAME, _SESSIONS_DIRNAME and _STATE_DIRNAME "
+        6,
+        "_CONFIG_FILE, _SECRETS_DIRNAME, _SESSIONS_DIRNAME, _STATE_DIRNAME, "
+        "_LEDGER_DIRNAME and _LEDGER_FILENAME "
         "name protected state-root paths used for static deletion classification, "
         "not entries to copy within an individual session directory. In particular "
         "sessions names the parent of session directories, not a session child.",

@@ -598,9 +598,11 @@ def test_planting_a_session_dir_is_critical_and_plain_appends_stay_quiet(home: P
     fake = home / "fake"
     fake.mkdir()
     assert _verdict(home, f"mv {fake} ~/.local-operator/sessions/").risk is Risk.CRITICAL
-    # Appending to an ordinary file destroys nothing and is not even a target.
-    plain = _verdict(home, "echo hi >> ~/notes.txt; echo x >> ~/.local-operator/sessions/a/n.md")
+    # Appending to an ordinary file destroys nothing and is not even a target;
+    # under ``sessions/`` any write is CRITICAL (round 2, R2-MAJOR-1).
+    plain = _verdict(home, "echo hi >> ~/notes.txt")
     assert plain.risk is Risk.LOW and plain.targets == []
+    assert _verdict(home, "echo x >> ~/.local-operator/sessions/a/n.md").risk is Risk.CRITICAL
 
 
 def _live_call(cid: str, command: str, at: float) -> list[Any]:
@@ -790,3 +792,118 @@ async def test_file_tools_elsewhere_are_unchanged(home: Path) -> None:
             tool, {"path": path}, ctx, judge=None, settings=GuardSettings()
         )
         assert outcome is None or not outcome.blocked, (tool, path)
+
+
+# -- round 2 ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rsync -a ~/tmpx/fake ~/.local-operator/sessions/",
+        "ln -s ~/tmpx/fake ~/.local-operator/sessions/newid",
+        "tar -xf ~/x.tar -C ~/.local-operator/sessions",
+        "unzip ~/x.zip -d ~/.local-operator/sessions/newid",
+        "ditto ~/tmpx/fake ~/.local-operator/sessions/newid",
+        f"ln -sf /nonexistent ~/.local-operator/sessions/{SID}/origin.json",
+        f"rsync -a --delete ~/empty/ ~/.local-operator/sessions/{SID}/",
+        "echo hi >| ~/.local-operator/guardrails/lineage.jsonl",
+        "echo x &> ~/.local-operator/sessions/newid/origin.json",
+        "python3 rig.py --out=~/.local-operator/sessions/newid",
+        "cd ~/.local-operator/sessions && mkdir newid",
+        "find ~/.local-operator/sessions -name x -delete",
+    ],
+)
+def test_any_writer_into_session_state_is_critical(home: Path, command: str) -> None:
+    """R2-MAJOR-1 / Q6: a structural rule on every path a non-read-only
+    program is handed, so unmodelled writers cannot plant a child."""
+    assert _verdict(home, command).risk is Risk.CRITICAL, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"ls ~/.local-operator/sessions/{CHILD}",
+        f"cat ~/.local-operator/sessions/{CHILD}/transcript.jsonl | head -3",
+        "find ~/.local-operator/sessions -name origin.json",
+        f"git -C ~/.local-operator/sessions/{CHILD} status",
+        "ls 2>&1 | cat",
+        f"echo x > ~/.local-operator/sessions/{SID}/scratchpad/n.md",
+    ],
+)
+def test_read_only_and_own_scratchpad_stay_low(home: Path, command: str) -> None:
+    scratch = str(home / ".local-operator" / "sessions" / SID / "scratchpad")
+    verdict = classify_bash(
+        command, cwd=str(home), env=_env(home), scratchpad=scratch, session_id=SID
+    )
+    assert verdict.risk is Risk.LOW, (command, verdict.reasons)
+
+
+def test_spawn_registry_adopts_children_and_closes_the_legacy_window(home: Path) -> None:
+    from local_operator.resume import mark_session_origin
+
+    sessions = home / ".local-operator" / "sessions"
+    state = home / ".local-operator"
+    # CHILD predates the registry (fixture): the migration fallback adopts it.
+    (sessions / CHILD / "origin.json").write_text(json.dumps({"origin": "subagent", "parent": SID}))
+    assert prov.ensure_lineage_registry(state) is not None
+    time.sleep(0.05)
+    # A child the harness spawns is recorded at its origin stamp.
+    mark_session_origin(sessions / "cccccccccc01", "subagent", parent=SID)
+    assert prov.read_lineage(state)["cccccccccc01"]["parent"] == SID
+    # A dir planted after the registry existed, with a forged origin.json, is not.
+    planted = sessions / "cccccccccc02"
+    planted.mkdir()
+    (planted / "origin.json").write_text(json.dumps({"origin": "subagent", "parent": SID}))
+    # A symlinked session dir is never read.
+    os.symlink(planted, sessions / "cccccccccc03")
+    ev_mod._TREE_CACHE.clear()
+    tree = ev_mod.session_tree(state, SID)
+    assert CHILD in tree and "cccccccccc01" in tree
+    assert "cccccccccc02" not in tree and "cccccccccc03" not in tree
+
+
+def test_operator_opened_needs_no_known_parent(home: Path) -> None:
+    """R2-MAJOR-2: a dangling origin.json symlink, in-process ancestors or a
+    registry row each keep a session from reading as operator-opened."""
+    sessions = home / ".local-operator" / "sessions"
+    state = home / ".local-operator"
+    assert prov.session_lineage(SID, state_root=state)[1] is True
+    assert prov.session_lineage(SID, ["mgr000000000"], state_root=state)[1] is False
+    os.symlink("/nonexistent", sessions / CHILD / "origin.json")
+    assert prov.session_lineage(CHILD, state_root=state)[1] is False
+    prov.record_lineage(OTHER, origin="agent-workstream", opener=ASKER, state_root=state)
+    lineage, opened = prov.session_lineage(OTHER, state_root=state)
+    assert opened is False and ASKER in lineage
+
+
+def test_owned_container_does_not_own_another_sessions_worktree(home: Path, repo: Path) -> None:
+    """Q7: A's ledger row for ``.worktrees`` does not vouch for B's worktree."""
+    _git("worktree", "remove", str(repo / ".worktrees" / "wt"), cwd=repo)
+    (repo / ".worktrees").rmdir()
+    _create(home, f"git -C {repo} worktree add -q -b a {repo}/.worktrees/a", sid=SID)
+    _create(home, f"git -C {repo} worktree add -q -b b {repo}/.worktrees/b", sid=OTHER)
+    (repo / ".worktrees" / "b" / "wip.txt").write_text("work")
+    b = repo / ".worktrees" / "b"
+    assert _verdict(home, f"rm -rf {b}").risk is not Risk.LOW
+    assert _verdict(home, f"git -C {repo} worktree remove --force {b}").risk is not Risk.LOW
+    # A's own worktree (its own leaf row) stays LOW.
+    assert _verdict(home, f"rm -rf {repo}/.worktrees/a").risk is Risk.LOW
+
+
+def test_nested_repo_in_allowlisted_ignored_dir_is_dirty(home: Path, repo: Path) -> None:
+    wt = repo / ".worktrees" / "wt"
+    (wt / ".gitignore").write_text("build/\n")
+    _git("add", ".gitignore", cwd=wt)
+    _git("commit", "-qm", "ignore", cwd=wt)
+    assert prov.worktree_state(str(wt)) == "clean"
+    (wt / "build" / "keep").mkdir(parents=True)
+    _git("init", "-q", cwd=wt / "build" / "keep")
+    assert prov.worktree_state(str(wt)) == "dirty"
+
+
+@pytest.mark.parametrize(
+    "answer", ["Nope", "Not now", "Hold off", "Skip", "Later", "Wait", "No thanks"]
+)
+def test_more_declines_are_never_consent(answer: str) -> None:
+    assert prov._DECLINE_RE.search(answer)

@@ -941,6 +941,14 @@ class Resolution:
     #: Directories the command may create (see :class:`Creation`). Never used
     #: to rank THIS command; the loop records them after it runs.
     created: list[Creation] = field(default_factory=list)
+    #: EVERY path a non-read-only program was handed (operands, flag values,
+    #: ``key=value`` values) and every output redirection, whatever the
+    #: program. Not a list of destroyed paths: ``classify`` checks only whether
+    #: any lands in the guard's own evidence (``<state>/sessions/``,
+    #: ``<state>/guardrails/``) — a structural rule, so a writer this resolver
+    #: does not model (``rsync``, ``ln``, ``tar -C``, ``unzip -d``, ``ditto``…)
+    #: is still caught (review R2-MAJOR-1).
+    touched: list[Target] = field(default_factory=list)
 
 
 def _operands(
@@ -1497,11 +1505,13 @@ class _Walker:
                     self._isolated_walk(body, depth + 1)
         herestrings: list[str] = []
         for op, raw in redirects:
-            if op in (">", ">|", ">>"):
+            if op in (">", ">|", ">>", ">&", "<>"):
                 for exp in expand_all(raw, st.env, st.home):
                     if exp.text.startswith("/dev/"):
                         continue
-                    self._add(exp, "append" if op == ">>" else "overwrite", op)
+                    self.result.touched.append(_target(exp, "append", op, st))
+                    if op in (">", ">|", ">>"):
+                        self._add(exp, "append" if op == ">>" else "overwrite", op)
             elif op == "<<<":
                 herestrings.append(expand(raw, st.env, st.home).text)
         # Leading prefix words and assignments.
@@ -1553,6 +1563,8 @@ class _Walker:
             return
         name = os.path.basename(words[0].text)
         args = words[1:]
+        if not read_only_argv(name, [w.text for w in args]):
+            self._touch(name, args)
         if name in _SHELL_C_WORDS:
             self._shell(
                 args,
@@ -2055,6 +2067,23 @@ class _Walker:
         root = cwd_override or Expanded(text=".")
         self._add(root, "clean", "git clean")
 
+    def _touch(self, name: str, args: list[Expanded]) -> None:
+        """Record every path-shaped argument for the evidence check (``touched``)."""
+        st = self.state
+        for w in args:
+            text = w.text
+            values = [w]
+            if text.startswith("-") and "=" not in text:
+                continue  # a bare flag; its value, if any, is the next word
+            if "=" in text and not w.opaque:
+                value = _tilde_value(text.split("=", 1)[1], st.home)
+                values.append(Expanded(text=value, empty=w.empty))
+                if text.startswith("-"):
+                    values = values[1:]
+            for value in values:
+                if value.text and not value.vanished:
+                    self.result.touched.append(_target(value, "append", name, st))
+
     # -- creation (provenance ledger) ------------------------------------------
     def _literal_dir(self, exp: Expanded, base: str | None = None) -> str | None:
         """The absolute path a LITERAL word names, or ``None`` if not literal."""
@@ -2208,6 +2237,90 @@ class _Walker:
                 unknown_cwd=self.state.cwd is None,
             )
         )
+
+
+#: Programs that only READ the paths they are given (review R2-MAJOR-1): the
+#: one place the evidence check trusts a path operand under the state root.
+#: Interpreters are never here — what ``python x.py <path>`` does with a path
+#: is unknowable. ``echo``/``printf`` write only through a redirection, which
+#: is checked separately for every program.
+READ_ONLY_PROGRAMS = frozenset(
+    {
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "grep",
+        "egrep",
+        "fgrep",
+        "rg",
+        "stat",
+        "du",
+        "df",
+        "wc",
+        "file",
+        "jq",
+        "echo",
+        "printf",
+        "true",
+        "test",
+        "[",
+        "pwd",
+        "which",
+        "readlink",
+        "realpath",
+        "basename",
+        "dirname",
+        "sleep",
+        # Shell words that move, bind or branch without writing a file; their
+        # bodies and later segments are walked on their own.
+        "cd",
+        "pushd",
+        "popd",
+        "export",
+        "declare",
+        "local",
+        "readonly",
+        "typeset",
+        "unset",
+        "set",
+        "for",
+        "if",
+        "while",
+        "until",
+        "case",
+        "do",
+        "then",
+        "else",
+        "elif",
+        "fi",
+        "done",
+        "esac",
+        "!",
+    }
+)
+_READ_ONLY_GIT = frozenset({"log", "status", "show", "diff"})
+_FIND_WRITES = frozenset(
+    {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
+)
+
+
+def read_only_argv(name: str, argv: list[str]) -> bool:
+    """Is ``name argv…`` a provably read-only invocation? Conservative: unknown → no."""
+    if name in READ_ONLY_PROGRAMS:
+        return True
+    if name == "find":
+        return not any(a in _FIND_WRITES for a in argv)
+    if name == "sqlite3":
+        return "-readonly" in argv
+    if name == "git":
+        rest = list(argv)
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
+        return bool(rest) and rest[0] in _READ_ONLY_GIT
+    return False
 
 
 def resolve_command(

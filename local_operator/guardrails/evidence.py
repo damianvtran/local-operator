@@ -51,9 +51,16 @@ and the ask store. An interpreter writing them (``python -c``, ``node -e``)
 is not modelled by the shell resolver: that is the documented ceiling, the
 same one as ``python -c 'shutil.rmtree(...)'``.
 
-DESCENDANTS. A subagent's session directory carries ``origin.json`` with
-``{"origin": "subagent", "parent": "<id>"}``. Descendants are found by those
-pointers, recursively — not from the parent's roster, which is pruned.
+DESCENDANTS. Found, recursively, from the harness-written lineage registry
+(``provenance.read_lineage``, under ``<state>/guardrails/``) — not from the
+parent's roster, which is pruned. ``origin.json`` parent pointers are a
+MIGRATION fallback only, for child directories born before the registry file
+itself was (sessions that predate this change, such as the 2026-11-07 QA
+field case): a directory planted later is born after the registry existed,
+so it cannot use the fallback. That is a narrowing, not a seal — macOS
+``utimes`` can move a birth time backwards, and an interpreter write is the
+same ceiling as above. Symlinked session directories, transcripts and
+``origin.json`` files are never read.
 """
 
 from __future__ import annotations
@@ -144,6 +151,7 @@ class EvidenceSet:
 
 
 def _children_index(sessions: Path) -> dict[str, list[str]]:
+    """LEGACY: ``parent → [child]`` from ``origin.json`` files (see module doc)."""
     key = str(sessions)
     cached = _TREE_CACHE.get(key)
     now = time.monotonic()
@@ -156,7 +164,10 @@ def _children_index(sessions: Path) -> dict[str, list[str]]:
         entries = []
     for entry in entries:
         try:
-            with open(os.path.join(entry.path, ORIGIN_FILENAME), encoding="utf-8") as fh:
+            if entry.is_symlink():
+                continue
+            fd = os.open(os.path.join(entry.path, ORIGIN_FILENAME), os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, encoding="utf-8") as fh:
                 origin = json.load(fh)
         except (OSError, ValueError):
             continue
@@ -180,20 +191,31 @@ def _session_created(sessions: Path, session_id: str) -> float | None:
 
 
 def session_tree(state_root: str | os.PathLike[str], session_id: str) -> list[str]:
-    """``session_id`` followed by every descendant, by ``origin.json`` parent pointers.
+    """``session_id`` followed by every descendant.
 
-    A child is adopted only when its directory was created no earlier than the
-    session it claims as parent (``created_at``, slack allowed): a session
-    planted later under ``sessions/`` with a forged ``origin.json`` is newer
-    than its claimed parent too, so this bounds age, not forgery — writing
-    ``origin.json`` or a transcript is what ``classify`` ranks CRITICAL. A
-    session whose own creation time cannot be read adopts no children (fail
-    closed: no evidence, the old ranking).
+    Registry children are trusted as recorded. A legacy ``origin.json`` child
+    is adopted only when its directory was born BEFORE the lineage registry
+    was (the migration window) AND no earlier than the parent's
+    ``created_at`` (slack allowed). A session whose own creation time cannot
+    be read adopts no legacy children (fail closed: no evidence, the old
+    ranking). Forgery is closed elsewhere: any shell path into ``sessions/``
+    ranks CRITICAL (``classify._touch_reason``).
     """
     if not session_id:
         return []
+    from local_operator.guardrails.provenance import (
+        ensure_lineage_registry,
+        read_lineage,
+    )
+
     sessions = Path(state_root) / "sessions"
-    index = _children_index(sessions)
+    cutoff = ensure_lineage_registry(state_root)
+    registry: dict[str, list[str]] = {}
+    for child, row in read_lineage(state_root).items():
+        for parent in (row.get("parent"), row.get("opener")):
+            if isinstance(parent, str) and parent:
+                registry.setdefault(parent, []).append(child)
+    index = _children_index(sessions) if cutoff is not None else {}
     out = [session_id]
     seen = {session_id}
     created = {session_id: _session_created(sessions, session_id)}
@@ -201,11 +223,17 @@ def session_tree(state_root: str | os.PathLike[str], session_id: str) -> list[st
     while i < len(out) and len(out) < _MAX_DESCENDANTS:
         parent = out[i]
         parent_created = created.get(parent)
+        for child in registry.get(parent, ()):
+            if child in seen or os.path.islink(sessions / child):
+                continue
+            seen.add(child)
+            created[child] = _session_created(sessions, child)
+            out.append(child)
         for child in index.get(parent, ()):
-            if child in seen or parent_created is None:
+            if child in seen or parent_created is None or cutoff is None:
                 continue
             born = _born(str(sessions / child))
-            if born is None or born + _SLACK_S < parent_created:
+            if born is None or born + _SLACK_S < parent_created or born >= cutoff:
                 continue
             seen.add(child)
             created[child] = _session_created(sessions, child)
@@ -245,7 +273,10 @@ def extract(
     try:
         if transcript.stat().st_mtime + _SLACK_S < not_before:
             return []  # last written before the target existed: cannot hold its creation
-        fh = open(transcript, encoding="utf-8")
+        # A symlinked transcript (or session dir) is not this tree's record.
+        if os.path.islink(os.path.dirname(transcript)):
+            return []
+        fh = os.fdopen(os.open(transcript, os.O_RDONLY | os.O_NOFOLLOW), encoding="utf-8")
     except OSError:
         return []
     previous_ts = 0.0
@@ -347,7 +378,10 @@ def extract_live(messages: Sequence[object], session_id: str) -> list[Evidence]:
     provider usage clock: an assistant row's ``usage.at_ms`` is when the model
     call that produced the tool call finished (the call cannot have started
     earlier), and the NEXT assistant row's ``usage.at_ms`` bounds when its
-    results were already in (else "now"). A call without a usage clock is not
+    results were already in (else "now"). That end is deliberately WIDE — it
+    includes the next model call's latency — because rows carry no finer
+    clock; the name/path check, not the window, is what rules out another
+    session's concurrent directory (review R2-NIT-2). A call without a usage clock is not
     evidence. Compacted-away rows are gone from this list, and so is their
     evidence — the ledger still covers what was created through it.
     """

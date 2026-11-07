@@ -298,6 +298,44 @@ def _evidence_reason(path: str, target: Target, prot: _Protected) -> str | None:
     return None
 
 
+def _touch_reason(target: Target, prot: _Protected) -> str | None:
+    """Does a path handed to a non-read-only program land in the guard's evidence?
+
+    The structural rule (review R2-MAJOR-1, QA Q6): anything at or under
+    ``<state>/sessions/`` outside this session's own scratchpad, or under
+    ``<state>/guardrails/``, whatever the program — a deny-list of writers
+    would keep missing ``rsync``/``ln``/``tar -C``/``unzip -d``/``ditto``. An
+    unresolvable part keeps the literal directory above it, so
+    ``sessions/$ID`` lands on ``sessions/`` and still counts.
+    """
+    path = target.path
+    if path is None:
+        return None
+    lexical = {path, target.pattern or path}
+    # Cheap prefilter: realpath/F_GETPATH only for words that could be there.
+    try:
+        lexical.add(os.path.realpath(path))
+    except OSError:
+        pass
+    if not any(
+        _SESSIONS_DIRNAME in p.casefold() or _LEDGER_DIRNAME in p.casefold() for p in lexical
+    ):
+        return None
+    for spelled in {s for p in lexical for s in _spellings(p)}:
+        for state in prot.state_roots:
+            if _under(spelled, os.path.join(state, _LEDGER_DIRNAME)):
+                return "the guardrail's own records"
+            if _under(spelled, os.path.join(state, _SESSIONS_DIRNAME)) and not any(
+                _under(spelled, pad) for pad in prot.own_scratchpad
+            ):
+                return "session state (transcripts, lineage, ask stores)"
+        if target.pattern is not None:
+            for state in prot.state_roots:
+                if _pattern_reaches(target.pattern, os.path.join(state, _SESSIONS_DIRNAME)):
+                    return "session state (transcripts, lineage, ask stores)"
+    return None
+
+
 def _evidence_by_pattern(target: Target, prot: _Protected) -> str | None:
     if target.pattern is None:
         return None
@@ -581,14 +619,26 @@ def classify_targets(
     env: Mapping[str, str],
     scratchpad: str | None,
     session_id: str = "",
+    touched: Sequence[Target] = (),
 ) -> Verdict:
-    if not targets and not opaque_reasons:
+    prot = _protected(env, scratchpad, session_id) if (targets or touched) else None
+    evidence_hits: list[RankedTarget] = []
+    if prot is not None:
+        for t in touched:
+            reason = _touch_reason(t, prot)
+            if reason is not None:
+                evidence_hits.append(RankedTarget(t, Risk.CRITICAL, reason))
+    if not targets and not opaque_reasons and not evidence_hits:
         return Verdict(Risk.LOW)
-    prot = _protected(env, scratchpad, session_id)
+    prot = prot or _protected(env, scratchpad, session_id)
     ranked = [_rank(t, prot, session_id) for t in targets]
     # An append that is not forging evidence is not a destructive target at all:
     # drop it so it adds no "destructive" annotation and no target text.
     ranked = [r for r in ranked if not (r.target.op == "append" and r.risk is Risk.LOW)]
+    # One row per path: a redirection is both a destroyed target and a
+    # touched path, and the refusal should not name it twice.
+    seen = {(r.target.path, r.risk) for r in ranked}
+    ranked.extend(h for h in evidence_hits if (h.target.path, Risk.CRITICAL) not in seen)
     risk = max((r.risk for r in ranked), default=Risk.LOW)
     if opaque_reasons:
         risk = max(risk, Risk.HIGH)
@@ -613,4 +663,5 @@ def classify_bash(
         env=env,
         scratchpad=scratchpad,
         session_id=session_id,
+        touched=resolution.touched,
     )
