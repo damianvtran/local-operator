@@ -621,3 +621,107 @@ def test_bare_directory_word_is_not_a_path(tmp_path: Path) -> None:
     result2 = _run(repo2, reviewed2, head2)
     assert result2.returncode == 1, result2.stdout + result2.stderr
     assert "scripts/ci/probe.ts" in result2.stdout
+
+
+# --- shared helpers for the #3540 cases -----------------------------------------
+
+
+def _reach(tmp_path: Path, ship: dict[str, str], harness_path: str = "scripts/ci/check.ts"):
+    """Commit ``ship`` files on top of the reviewed head, then change one harness
+    file; return the proof run for that harness-only delta."""
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(repo, ship, "feat: ship files")
+    head = _commit(repo, {harness_path: "console.log('changed');\n"}, "ci: harness edit")
+    return _run(repo, reviewed, head)
+
+
+def _exempt(result: subprocess.CompletedProcess[str]) -> None:
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "HARNESS-ONLY" in result.stdout
+
+
+def _reached(result: subprocess.CompletedProcess[str], path: str = "scripts/ci/check.ts") -> None:
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"ship-reachable: `{path}`" in result.stdout
+
+
+# --- `uses: ./<dir>` -----------------------------------------------------------------
+# A local action is a DIRECTORY holding action.yml, and the step names it without a
+# trailing slash (`uses: ./scripts/ci`), so the spelled-directory rule never fired
+# and every file under it — the action.yml it runs and the scripts that runs — was
+# exempt-able while release.yml executed it (found writing #3540's tests first).
+
+
+def test_ship_workflow_local_uses_directory_reaches_its_contents(tmp_path: Path) -> None:
+    wf = "jobs:\n  r:\n    steps:\n      - uses: ./scripts/ci\n"
+    _reached(_reach(tmp_path, {".github/workflows/release.yml": wf}))
+
+
+def test_remote_uses_and_bare_directory_word_do_not_reach(tmp_path: Path) -> None:
+    """Negative: a marketplace action is not a repo directory, and prose naming
+    the directory without `uses: ./` stays a word, as on the base."""
+    wf = (
+        "jobs:\n  r:\n    steps:\n      - uses: scripts/ci@v1\n"
+        "      - name: see scripts/ci for probes\n        run: echo ok\n"
+    )
+    _exempt(_reach(tmp_path, {".github/workflows/release.yml": wf}))
+
+
+# --- round-3 minor M1: a harness workflow that gains release powers ------------------
+# A harness workflow joins the shipping pipeline through its trigger, secrets,
+# permissions and publishing steps, not by being named. A changed harness
+# workflow whose HEAD version has a trigger other than pull_request /
+# workflow_dispatch, a secret other than GITHUB_TOKEN, a write permission, or an
+# upload/publish/sign step the reviewed head lacked is a round.
+
+_SAFE_NATIVE = (
+    "on:\n  pull_request:\n  workflow_dispatch:\n"
+    "permissions:\n  contents: read\n"
+    "jobs:\n  n:\n    runs-on: ubuntu-latest\n    steps:\n"
+    "      - run: bun scripts/ci/check.ts\n"
+    "        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n"
+    "      - uses: actions/upload-artifact@v4\n        with:\n          name: evidence\n"
+)
+
+
+def _native_delta(tmp_path: Path, head_text: str) -> subprocess.CompletedProcess[str]:
+    repo, _ = _setup(tmp_path)
+    reviewed = _commit(repo, {".github/workflows/native.yml": _SAFE_NATIVE}, "ci: native")
+    head = _commit(repo, {".github/workflows/native.yml": head_text}, "ci: native edit")
+    return _run(repo, reviewed, head)
+
+
+def test_harness_workflow_edit_without_new_powers_is_harness_only(tmp_path: Path) -> None:
+    """Negative: same triggers, GITHUB_TOKEN only, read permission, and an upload
+    step the reviewed head already had — a harness edit, no round. Comments
+    naming powers (`# on: push`, `secrets.NPM_TOKEN`) are not powers."""
+    edited = _SAFE_NATIVE.replace("bun scripts/ci/check.ts", "bun scripts/ci/check.ts --fast")
+    edited = "# was on: push with secrets.NPM_TOKEN and contents: write\n" + edited
+    _exempt(_native_delta(tmp_path, edited))
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (("  workflow_dispatch:\n", "  workflow_dispatch:\n  push:\n"), "trigger `push`"),
+        (("on:\n  pull_request:\n", "on: [pull_request, schedule]\nx:\n"), "trigger `schedule`"),
+        (("secrets.GITHUB_TOKEN", "secrets.NPM_TOKEN"), "secret `NPM_TOKEN`"),
+        (("contents: read", "contents: write"), "write permission"),
+        (("contents: read", "id-token: write"), "write permission"),
+        (
+            ("      - run: bun", "      - uses: softprops/action-gh-release@v2\n      - run: bun"),
+            "publishing step `softprops/action-gh-release`",
+        ),
+        (("      - run: bun", "      - run: npm publish\n      - run: bun"), "`npm publish`"),
+    ],
+    ids=["push", "schedule-flow", "secret", "contents-write", "id-token-write", "release", "npm"],
+)
+def test_harness_workflow_gaining_release_powers_opens_a_round(
+    tmp_path: Path, change: tuple[str, str], reason: str
+) -> None:
+    old, new = change
+    assert old in _SAFE_NATIVE
+    result = _native_delta(tmp_path, _SAFE_NATIVE.replace(old, new, 1))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "harness workflow `.github/workflows/native.yml` can ship:" in result.stdout
+    assert reason in result.stdout

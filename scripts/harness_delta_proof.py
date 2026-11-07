@@ -60,6 +60,12 @@ each has a regression test):
   hence new — workflow is product.
 - a harness test file (``test_*.py``, ``*_test.py``, ``*.test.*``, ``*.spec.*``)
   that names or imports a ship-closure file is product: it guards shipped code.
+- a changed harness workflow/action whose head version has a trigger other than
+  ``pull_request``/``workflow_dispatch``, a secret other than ``GITHUB_TOKEN``, a
+  ``write`` permission, or an upload/publish/sign step the reviewed version
+  lacked is a round: a workflow ships through its powers, not its name.
+- ``uses: ./<dir>`` names every file under ``<dir>`` (a local action is a
+  directory, spelled without the trailing slash the directory rule looks for).
 - an unparsable tsconfig/alias file at head is exit 2 rather than a silent
   fallback to weaker matching.
 
@@ -122,6 +128,10 @@ _JS_SPEC = re.compile(r"""['"`](\.\.?/[^'"`\s]*|[@~]/[^'"`\s]*)['"`]""")
 #: every line start, so a greedy multi-line class costs O(n^2) (measured: 36 min
 #: of CPU on one 120 KB module before this shape).
 _SH_SOURCE = re.compile(r"""(?m)(?:^|[;&|(])[ \t]*(?:source|\.)[ \t]+["']?([^\s;|&)'"]+)""")
+#: ``uses: ./<dir>`` — a local action is a DIRECTORY holding action.yml, named
+#: without a trailing slash, so the spelled-directory rule alone never saw it.
+#: Same linearity rule: nothing here crosses a newline.
+_LOCAL_USES = re.compile(r"""(?m)^[ \t]*(?:-[ \t]+)?uses:[ \t]*['"]?\./([^'"\s@#]+)""")
 #: Python relative import: ``from ..pkg.mod import a, b``. Same linearity rule:
 #: the imported-name run stops at end of line, never crossing one.
 _PY_RELATIVE = re.compile(r"""(?m)^[ \t]*from[ \t]+(\.+)([\w.]*)[ \t]+import[ \t]+([^\n]*)""")
@@ -502,6 +512,11 @@ class _Index:
             # (measured round 2), and a word is not a path reference.
             if spelled_dir:
                 take("dir", token, self.by_dir.get(token))
+        for spec in _LOCAL_USES.findall(text):
+            local = posixpath.normpath(spec.rstrip("/"))
+            if local in self.paths:
+                hits.add(local)
+            take("dir", local, self.by_dir.get(local))
         here = posixpath.dirname(path)
         for spec in _JS_SPEC.findall(text):
             if spec.startswith((".", "@", "~")):
@@ -597,6 +612,128 @@ def ship_closure(repo: Path, head: str, manifest: Manifest) -> Closure:
         if not fresh and not added_link:
             break
     return Closure(origin, problems, index)
+
+
+# --- workflow text helpers (line-based; comments stripped, never parsed as YAML) ---
+
+
+def _is_workflow(path: str) -> bool:
+    return bool(re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", path)) or posixpath.basename(
+        path
+    ) in ("action.yml", "action.yaml")
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _yaml_uncomment(line: str) -> str:
+    """Drop a YAML comment: ``#`` at line start or after a space, outside quotes."""
+    quote = ""
+    for index, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"" and (index == 0 or line[index - 1] in " :[{,-"):
+            quote = ch
+        elif ch == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index].rstrip()
+    return line
+
+
+def _yaml_block(lines: list[str], start: int, key_col: int) -> list[str]:
+    """The lines nested under the key on ``lines[start]``."""
+    block = []
+    for line in lines[start + 1 :]:
+        if line.strip() and _indent(line) <= key_col:
+            break
+        block.append(line)
+    return block
+
+
+# --- harness workflow powers (round-3 M1) -----------------------------------------
+#
+# A harness workflow is exempt-able only while it CANNOT ship: it joins the
+# shipping pipeline through its trigger, secrets, permissions and publishing
+# steps, not by being named. So a changed harness workflow/action whose HEAD
+# version holds any of these is a round, whatever the closure says:
+#
+# - a trigger other than `pull_request` / `workflow_dispatch` (push, schedule,
+#   release, workflow_run, pull_request_target… can run with release context);
+# - a `secrets.` reference other than `GITHUB_TOKEN`, `secrets[...]`, or
+#   `secrets: inherit`;
+# - a `write` permission (`<scope>: write`, `write-all`);
+# - an upload/publish/sign step the REVIEWED version lacked (an existing
+#   evidence upload is not new power; a new one is).
+#
+# Read on comment-stripped text; a comment naming a power grants none.
+
+_ALLOWED_TRIGGERS = frozenset({"pull_request", "workflow_dispatch"})
+_PUBLISH_USES = re.compile(
+    r"(?i)(upload|publish|release|deploy|sign|attest|cosign|sigstore|push|pages)"
+)
+_PUBLISH_RUN = re.compile(
+    r"\b(gh release|gh api[^\n]*releases|(?:npm|pnpm|yarn|bun) publish|twine upload|"
+    r"uv publish|poetry publish|eas (?:submit|build|update)|fastlane|codesign|cosign|"
+    r"gpg [^\n]*--sign|notarytool|altool|docker push|aws s3 (?:cp|sync)|gsutil|"
+    r"wrangler (?:deploy|publish)|vercel|netlify deploy)\b"
+)
+
+
+def _workflow_triggers(lines: list[str]) -> set[str]:
+    """Event names under the top-level ``on:`` key (scalar, list or mapping)."""
+    events: set[str] = set()
+    for number, line in enumerate(lines):
+        match = re.match(r"""^(["']?)(on|true)\1[ ]*:[ ]*(.*)$""", line)
+        if not match:
+            continue
+        value = match.group(3).strip()
+        if value:
+            events.update(e for e in re.split(r"[\[\],\s]+", value) if e)
+            continue
+        block = [c for c in _yaml_block(lines, number, 0) if c.strip()]
+        top = min((_indent(c) for c in block), default=0)
+        for child in block:
+            # Only the first nesting level names events (`push:` / `- push`);
+            # deeper keys are their filters (`branches:`, `types:`).
+            event = re.match(r"^[ ]+(?:-[ ]+)?([\w-]+)", child)
+            if event and _indent(child) == top:
+                events.add(event.group(1))
+    return events
+
+
+def _publish_markers(text: str) -> set[str]:
+    markers: set[str] = set()
+    for line in text.splitlines():
+        uses = re.match(r"^[ ]*(?:-[ ]+)?uses:[ ]*['\"]?([^@'\"\s]+)", line)
+        if uses and _PUBLISH_USES.search(uses.group(1)):
+            markers.add(f"publishing step `{uses.group(1)}`")
+    markers.update(f"publishing step `{m}`" for m in _PUBLISH_RUN.findall(text))
+    return markers
+
+
+def workflow_powers(head_text: str, reviewed_text: str | None) -> list[str]:
+    """What a changed harness workflow can do at HEAD that it must not."""
+    lines = [_yaml_uncomment(line) for line in head_text.splitlines()]
+    text = "\n".join(lines)
+    found = [
+        f"trigger `{event}`" for event in sorted(_workflow_triggers(lines) - _ALLOWED_TRIGGERS)
+    ]
+    found += [
+        f"secret `{name}`"
+        for name in sorted(set(re.findall(r"secrets\.(\w+)", text)) - {"GITHUB_TOKEN"})
+    ]
+    if re.search(r"secrets\[|secrets:[ ]*inherit", text):
+        found.append("secret `inherit`/indexed secrets")
+    if re.search(r"(?m)[\w-]+:[ ]*['\"]?write\b|write-all", text):
+        found.append("write permission")
+    before = (
+        _publish_markers("\n".join(_yaml_uncomment(x) for x in reviewed_text.splitlines()))
+        if reviewed_text is not None
+        else set()
+    )
+    found += [f"new {m}" for m in sorted(_publish_markers(text) - before)]
+    return found
 
 
 # --- proof ----------------------------------------------------------------------
@@ -719,6 +856,14 @@ def prove(
                 reasons.append(f"product path changed: `{path}` ({kind})")
             rows.append(f"  - `{path}` — {kind}")
             continue
+        # A deleted harness workflow has no head version and so no powers.
+        if _is_workflow(path) and _new_oid.strip("0"):
+            texts = _blobs(repo, {o for o in (_old_oid, _new_oid) if o.strip("0")})
+            powers = workflow_powers(texts[_new_oid], texts.get(_old_oid))
+            if powers:
+                reasons.append(f"harness workflow `{path}` can ship: {', '.join(powers)}")
+                rows.append(f"  - `{path}` — harness workflow with release powers, product")
+                continue
         if path in closure.origin:
             reasons.append(f"ship-reachable: `{path}` named by `{closure.origin[path]}`")
             rows.append(f"  - `{path}` — harness, SHIP-REACHABLE via `{closure.origin[path]}`")
@@ -752,7 +897,9 @@ def prove(
         "- Fail-closed rules applied: gitlink/.gitmodules → product; symlink change → product; "
         "ship symlink leaving the repo → round; unreadable object → exit 2; "
         "`.github/` harness globs must be exact filenames; harness test guarding ship code → "
-        "product; added workflow unmatched by the manifest → product",
+        "product; added workflow unmatched by the manifest → product; changed harness workflow "
+        "with a non-PR trigger, a non-GITHUB_TOKEN secret, a write permission or a new "
+        "publish/upload/sign step → round; `uses: ./<dir>` → everything under it",
         f"- Changed paths ({len(changes)}):",
         *(rows or ["  - (none)"]),
     ]
