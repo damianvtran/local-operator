@@ -13654,6 +13654,24 @@ class Session:
         self._refresh_tool_roster()
         if republish and hasattr(self, "_frontend_state_store"):
             self.refresh_frontend_state()
+        # A monitor whose MCP tool had not connected yet backed off as
+        # "unavailable" (up to 15 min); the tools it was waiting for may be the
+        # ones that just arrived, so re-check those rows now instead of leaving
+        # the watch dark for the rest of its backoff. Background, because this
+        # hook is synchronous and the scheduler mutates under its own lock;
+        # ``getattr`` because the inventory can be swapped before the scheduler
+        # is constructed, and the loop probe because a synchronous caller with
+        # no loop (a test, an embedder) has no scheduler timer to re-arm
+        # either — its async init pumps once anyway. Healthy monitors are not
+        # touched.
+        monitors = getattr(self, "_monitors", None)
+        if monitors is not None and not monitors.disposed:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                self._spawn_background(monitors.retry_unavailable())
         return self._published_tools is None
 
     def set_knowledge_hooks(self, hooks: _KnowledgeHooks | None) -> None:
@@ -29551,6 +29569,13 @@ class Session:
             },
         )
         self._write_monitor_index_entry(schedules)
+        # The wake supervisor's monitors pass is what re-engages this session
+        # once its runtime has exited, so an armed monitor needs the supervisor
+        # installed exactly as an armed wake does (the `_persist_wake_schedules`
+        # hook). Only when a row can still fire: a list of disabled or expired
+        # rows owes no engagement, and the install is not free (launchd/systemd).
+        if self._monitors.next_monitor_due_at() is not None:
+            self._ensure_wake_supervisor()
 
     def _rebuild_monitor_index_entry(self) -> None:
         """Open-time rewrite of the index from the scheduler's adopted rows.

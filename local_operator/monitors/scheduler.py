@@ -625,6 +625,42 @@ class MonitorScheduler:
         await self.update(remaining)
         return {"cancelled": monitor_id, "spec": entry.spec}
 
+    async def retry_unavailable(self, now_ms: int | None = None) -> int:
+        """Pull every UNAVAILABLE monitor's next check forward; returns how many.
+
+        WHY: an MCP-backed monitor whose server is still connecting at boot
+        fails its first check as "unavailable" and backs off — up to
+        ``RETRY_CAP_MS`` (15 min). Without this, a cold resume that loses the
+        race to its own MCP handshake leaves the watch dark for that whole
+        backoff although the tool arrived seconds later. The session's MCP
+        ``on_tools_changed`` hook (``Session.refresh_tools``) calls this, so the
+        next check runs within ``FIRST_CHECK_MAX_MS`` of the tools appearing.
+
+        CONSTRAINTS: only ACTIVE rows with ``unavailable_since`` set and no
+        check in flight move; healthy rows are untouched, and the episode
+        counters (``unavailable_since``/``unavailable_ticks``) are NOT reset —
+        a check that succeeds clears them itself (``_restored_notice``), and
+        one that fails again must keep counting toward the stall/gone notices.
+        Under ``_write_lock`` like every other entry-table mutation; a no-op
+        moves nothing and does not pump.
+        """
+        if self._disposed:
+            return 0
+        moved = 0
+        async with self._write_lock:
+            now = now_ms if now_ms is not None else self._now()
+            for entry in self._entries.values():
+                if not self._is_active(entry, now) or entry.spec.id in self._inflight:
+                    continue
+                if not entry.counters.get("unavailable_since"):
+                    continue
+                entry.counters["next_due_at"] = now + self._first_check_delay_ms()
+                self._write_counters(entry)
+                moved += 1
+        if moved:
+            await self.pump(now_ms)
+        return moved
+
     # -- the tick -----------------------------------------------------------
 
     async def pump(self, now_ms: int | None = None) -> int:

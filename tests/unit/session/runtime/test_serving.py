@@ -1649,6 +1649,20 @@ def test_a_committed_departure_ignores_the_warm_window() -> None:
     assert handle.may_refresh() == ""
 
 
+def test_an_armed_monitor_keeps_the_runtime_from_an_idle_refresh_until_a_drain() -> None:
+    """The monitor leg of the refresh keep-reason, under the same drain latch."""
+    import time as _time
+
+    handle, _ = make_handle()
+    handle.next_wake_due_at = lambda: None  # type: ignore[method-assign]
+    soon = int(_time.time() * 1000) + 600_000
+    handle.next_monitor_due_at = lambda: soon  # type: ignore[method-assign]
+    handle._draining = False
+    assert handle.may_refresh() == "monitor check due within the warm window"
+    handle._draining = True
+    assert handle.may_refresh() == ""
+
+
 # --- next_wake_due_at: the reaper's warmth signal ----------------------------
 
 

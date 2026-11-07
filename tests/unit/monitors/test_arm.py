@@ -674,3 +674,29 @@ def test_the_two_index_row_composers_agree_on_the_key_set(tmp_path: Path) -> Non
     assert set(from_memory) == set(from_disk)
     for key in ("suppressed", "blind", "blind_reason"):
         assert key in from_memory
+
+
+@pytest.mark.asyncio
+async def test_an_external_arm_installs_the_wake_supervisor(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(i, external half) This writer only arms a COLD session, so nothing
+    ticks the new row until the supervisor's monitors pass engages it: the arm
+    installs the supervisor, and a refused arm does not."""
+    from local_operator.wakes import install as wake_install
+
+    calls: list[Path] = []
+
+    def fake_install(config_dir: Path) -> wake_install.InstallOutcome:
+        calls.append(Path(config_dir))
+        return wake_install.InstallOutcome(installed=False, reason="stub")
+
+    monkeypatch.setattr(wake_install, "ensure_supervisor_installed", fake_install)
+    _session(root, "install01")
+    with pytest.raises(MonitorWriteError):
+        await arm_monitor(root, "install01", {"tool": "bash", "arguments": {}, "every": "1s"})
+    assert calls == []
+    await arm_monitor(
+        root, "install01", {"tool": "glob", "arguments": {"pattern": "*.py"}, "every": "60s"}
+    )
+    assert calls == [root]

@@ -441,3 +441,59 @@ async def test_a_real_disable_from_the_scheduler_reaches_the_session(
         assert monitor_state.read_counters(config_dir, session.session_id, "m1") is not None
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_refresh_tools_rechecks_an_unavailable_monitor_soon(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """(h) The MCP ``on_tools_changed`` hook pulls a backed-off monitor forward.
+
+    A cold resume that loses the race to its own MCP handshake used to leave
+    the watch dark for its whole backoff (up to 15 min); the tools arriving now
+    re-checks it within the first-check window, and healthy rows are untouched.
+    """
+    import asyncio
+    import time
+
+    session = _open(tmp_path)
+    try:
+        await session.set_monitor_schedules([_spec("m1"), _spec("m2")])
+        now = int(time.time() * 1000)
+        sick = session._monitors._entries["m1"].counters
+        sick.update({"unavailable_since": now - 60_000, "next_due_at": now + 900_000})
+        healthy_due = now + 600_000
+        session._monitors._entries["m2"].counters["next_due_at"] = healthy_due
+
+        session.refresh_tools(list(session._tools))
+        await asyncio.gather(*list(session._background_tasks))
+
+        assert sick["next_due_at"] <= int(time.time() * 1000) + 3_000
+        assert session._monitors._entries["m2"].counters["next_due_at"] == healthy_due
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_monitor_persist_installs_the_wake_supervisor(
+    tmp_path: Path, config_dir: Path, monkeypatch
+) -> None:
+    """(i) The supervisor's monitors pass is what re-engages a cold session, so
+    arming a monitor installs it — and a persist with nothing armed does not."""
+    from local_operator.wakes import install as wake_install
+
+    calls: list[Path] = []
+
+    def fake_install(root: Path) -> wake_install.InstallOutcome:
+        calls.append(root)
+        return wake_install.InstallOutcome(installed=False, reason="stub")
+
+    monkeypatch.setattr(wake_install, "ensure_supervisor_installed", fake_install)
+    session = _open(tmp_path)
+    try:
+        await session.set_monitor_schedules([_spec()])
+        assert calls == [config_dir]
+        await session.set_monitor_schedules([])
+        assert calls == [config_dir], "an empty persist must not try to install"
+    finally:
+        await session.dispose()

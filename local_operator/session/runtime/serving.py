@@ -51,6 +51,7 @@ from typing import (
 )
 
 from local_operator.buildwatch import UpdateLock
+from local_operator.buildwatch import monitor_within_window as _monitor_within_window
 from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
@@ -3260,6 +3261,13 @@ class ServingSessionHandle(SessionHandle):
                 # and the fail-open except below turned that into "no wake",
                 # silently disabling the warm-window term (#3028 CI shard 2).
                 return "wake due within the warm window"
+            if _monitor_within_window(self) and not getattr(self, "_draining", False):
+                # The monitor leg of the same term (process._monitor_holds):
+                # an idle refresh that retires this runtime between ticks is
+                # exactly how a watch went dark for 260 minutes. Same latch:
+                # a committed drain still leaves, and its successor resumes
+                # the watch from the counters file.
+                return "monitor check due within the warm window"
         except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
             logger.debug("warm-window probe failed; treating as no wake", exc_info=True)
         return ""

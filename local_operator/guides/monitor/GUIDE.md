@@ -278,8 +278,12 @@ courtesy-style at its next tool boundary, so nothing in flight is interrupted.
 A per-monitor hourly cap (`values.monitor.maxDeliveriesPerHour`) bounds a
 firehose; held hits are counted and named in the next allowed delivery.
 
-Monitors tick only while the session is hosted (a terminal or runtime is open
-on it). If the session goes cold, monitors go dormant and resume with it.
+An armed monitor keeps its own session hosted: the session's runtime stays
+up while a check is due within 15 minutes, and if the runtime does exit (a
+reboot, an update, a monitor due further out), the wake supervisor re-engages
+the session when the next check is due. You do not need a keep-alive wake
+beside a monitor. Stopping the session parks its monitors until it is
+reopened.
 
 A tool that is momentarily **unreachable** (an MCP server reconnecting or
 asking for a re-auth) is not a failed check: the monitor waits on its backoff
