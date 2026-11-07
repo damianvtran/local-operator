@@ -50,10 +50,15 @@ from typing import Any, Literal
 
 #: The severity vocabulary shared by the surfaces. A superset is deliberately
 #: NOT used: these are the tiers a *replayed* row can carry, and the TUI's
-#: wider ``NoticeKind`` (which adds ``note``/``success`` for live receipts)
-#: accepts every one of them, so a value produced here is always renderable
-#: on both sides.
-NoticeSeverity = Literal["info", "warning", "error"]
+#: wider ``NoticeKind`` (which adds ``success`` for live receipts) accepts every
+#: one of them, so a value produced here is always renderable on both sides.
+#:
+#: ``note`` is the middle rung and was added with the divergence row (design
+#: round 1, D1): a first sighting of an unexplained project root is a fact to
+#: know, not an alarm, and painting it in the same ink as an escalation made the
+#: two indistinguishable. ``note``'s ``·`` and ``warning``'s ``!`` keep that
+#: distinction under ``NO_COLOR`` as well as in the palette.
+NoticeSeverity = Literal["info", "note", "warning", "error"]
 
 #: Message heads the harness mints for its own notices, each with the producer
 #: that writes it, and the ONE enumeration a display surface uses to recognise a
@@ -2370,58 +2375,155 @@ def supplement_row_details(row: Any) -> Mapping[str, Any] | None:
     return details if isinstance(details, Mapping) else None
 
 
-def divergence_notice(details: Mapping[str, Any]) -> str:
-    """What a divergence row SAYS, and why it says exactly that.
+def divergence_notice(details: Mapping[str, Any]) -> tuple[str, NoticeSeverity]:
+    """What a divergence row SAYS, and the ink it deserves.
 
     ``local_operator.divergence`` observed a tool call asserting a project root
-    that appeared nowhere in this session's instructions or earlier tool output.
-    The three facts an operator needs, in the order they need them:
+    that nothing in this session's instructions or earlier tool output named.
+    The three facts an operator needs, in the order they need them — which is
+    also the order design round 1 (D2) found them to be in backwards:
 
-    1. **What the root is and what asserted it.** ``~/squeeze`` plus the tool
-       and the path it named — the row has to be actionable ("look at that
-       turn"), not merely alarming.
-    2. **What was checked, named explicitly.** "no system prompt, custom
-       instruction, user message or earlier tool output" is the whole claim;
-       a shorter phrasing ("unexplained path") would read as the harness
-       having no opinion, and a longer one would claim a cause this layer
-       cannot see. The incident's own premise — that the task came from
-       somewhere outside the session — is exactly what this sentence states
-       without asserting *where* it came from.
-    3. **That the call RAN.** This is observation, never enforcement
+    1. **That the call RAN.** This is observation, never enforcement
        (``harness/loop.py``'s ``_observe_divergence`` is wrapped so it cannot
-       break a turn). A notice that leaves the reader unsure whether something
-       was blocked would be read as a new gate, and an operator debugging a
-       turn must not have to guess which one happened.
+       break a turn). It leads the sentence now, in brackets, because a reader
+       who skims stops at the first line: the previous version put "the call
+       ran" in its last 31 cells, which is exactly the "did something get
+       blocked?" worry this row must not create.
+    2. **What the root is and what asserted it.** ``~/squeeze`` plus the tool
+       and the path it named — the row has to be actionable ("look at that
+       turn"), not merely alarming. No capitalised ``WRITE``/``AGAIN``: the tier
+       carries the weight (D2), and shouting made every variant read as a
+       failure.
+    3. **What was checked, named explicitly** — on a FIRST sighting only. A
+       shorter phrasing ("unexplained path") would read as the harness having
+       no opinion, and a longer one would claim a cause this layer cannot see.
+       The clause is scoped to the sources the judge actually read
+       (``details["sources"]``), and where a carrier could not be read the row
+       says so (``details["unseen"]``) rather than asserting absence over it —
+       the false-absence class this guard must never commit. An ESCALATION row
+       omits the clause entirely: the first row said it, and repeating 139
+       characters per row was 62% of a multi-root flood (D6).
 
-    ``warning`` ink on both surfaces, decided HERE rather than in a renderer
-    (this module's own rule: a tier chosen inside one host is a tier the other
-    does not have). Not ``error``: nothing failed, and the incident's cost was
-    a task substitution nobody noticed, which is a state to look at and not a
-    failure to retry.
+    THE TIER is decided here, not in a renderer (this module's own rule: a tier
+    chosen inside one host is a tier the other does not have), and it is the
+    ladder D1 asked for:
+
+    * first sighting → ``note`` (``·``, muted). Nothing failed; this is a fact
+      to know, and it is the tier the compaction row uses for the same reason;
+    * escalation (a repeat on a later turn, or a write) → ``warning`` (``!``),
+      which also keeps the distinction under ``NO_COLOR``;
+    * a failed audit write → ``warning`` even on a first sighting, and the
+      failure LEADS the row: it is the strongest fact on it (D4).
+
+    Neither rung is ``error``: nothing failed and nothing was retried, and the
+    incident's cost was a task substitution nobody noticed.
     """
-    root = str(details.get("root") or "").strip() or "an unnamed root"
-    path = str(details.get("path") or "").strip()
     tool = str(details.get("tool") or "a tool").strip()
-    turn = details.get("turn")
-    asserted = f"`{tool}` named `{path}`" if path else f"`{tool}`"
-    if bool(details.get("escalated")) and str(details.get("reason") or "") == "write":
-        subject = f"unexplained project root {root} — a WRITE asserted it"
-    elif bool(details.get("escalated")):
-        # Escalation on a second TURN, not on a second mention: the incident
-        # repeats its noun 117 times in 134 turns, and the row that matters is
-        # the one saying the model came back to it.
-        where = f"turn {turn}" if isinstance(turn, int) and turn else "a later turn"
-        subject = f"unexplained project root {root} — named AGAIN in {where}"
+    path = str(details.get("path") or "").strip()
+    named = f"{tool} named {path}" if path else tool
+
+    if details.get("collapsed"):
+        # The transcript's cap on distinct roots (``MAX_NOTICED_ROOTS``): one
+        # row says the rest are in the audit log, so a session that names five
+        # foreign trees cannot paint a wall of amber (D6). ``note`` tier: the
+        # record is complete, only the painting stopped.
+        roots = details.get("roots")
+        count = (
+            f"{roots} project roots so far"
+            if isinstance(roots, int) and roots > 1
+            else ("further project roots")
+        )
+        latest = str(details.get("root") or "").strip()
+        tail = f" — latest: {latest}" if latest else ""
+        return (
+            f"{count} this session; further ones are in the audit log only{tail}.",
+            "note",
+        )
+
+    root = str(details.get("root") or "").strip() or "an unnamed root"
+    reason = str(details.get("reason") or "")
+    escalated = bool(details.get("escalated"))
+    # An absent flag on a row written before this field existed: the old rows
+    # set ``escalated`` only on a return or a write, so that is the best read.
+    first = bool(details.get("first", not escalated))
+
+    if first:
+        # "again" would be a lie on a first sighting, which is why the payload
+        # carries ``first`` and a write that ESCALATES is still described as
+        # one fact ("…, a write") rather than as a return.
+        write_note = ", a write" if escalated else ""
+        lead = f"{root} is new to this session — {named}{write_note} (ran; observation only)"
+    elif reason == "write":
+        lead = f"{root} again, now a write — {named} (ran; observation only)"
     else:
-        subject = f"unexplained project root {root}"
-    text = (
-        f"{subject}: {asserted}; it appears in no system prompt, custom "
-        f"instruction, user message or earlier tool output of this session — "
-        f"the call ran (observation only)"
-    )
+        # "in a later turn", never "turn 9": the transcript paints no turn
+        # numbers, so the ordinal pointed at something the reader cannot locate
+        # (design round 1, D5).
+        lead = f"{root} again, in a later turn — {named} (ran; observation only)"
+
+    sentences = [lead]
+    if first:
+        clause = _checked_clause(details.get("sources"))
+        if clause:
+            sentences.append(clause)
+    unseen = _unseen_clause(details.get("unseen"))
+    if unseen:
+        sentences.append(unseen)
     if details.get("recorded") is False:
         # The audit row is the durable half (``config_dir()/audit/divergence.
-        # jsonl``); saying so here is the difference between a lost record and
-        # a record nobody was told was lost.
-        text += " · audit row NOT written"
-    return text
+        # jsonl``); saying so is the difference between a lost record and a
+        # record nobody was told was lost. It leads because it is the only
+        # failure on the row (design round 1, D4).
+        sentences.insert(0, "No audit row was written — this notice is the only record")
+        return ". ".join(sentences) + ".", "warning"
+    return ". ".join(sentences) + ".", "warning" if escalated else "note"
+
+
+#: How each source reads inside the row's provenance clause. The row names what
+#: the judge READ, never a fixed list: a claim the record cannot support is the
+#: same defect as asserting absence over a carrier it never saw.
+_SOURCE_PHRASES: dict[str, str] = {
+    "system_prompt": "the system prompt",
+    "custom_instructions": "custom instructions",
+    "user_messages": "user messages",
+    "earlier_tool_output": "earlier tool output",
+}
+
+#: How each carrier the judge could NOT read reads in the notice. Named, never
+#: omitted: "not in any source" over a source nobody could open is a false claim.
+_UNSEEN_PHRASES: dict[str, str] = {
+    "masked_text": "text masked before storage",
+    "image_attachments": "image attachments",
+    "compacted_history": "turns compacted away",
+}
+
+
+def _checked_clause(sources: Any) -> str:
+    """ "Not in <the sources read>" — omitted when no source was available.
+
+    A payload from a row written before ``sources`` was computed carries the old
+    fixed four, which is what that row claimed; an absent list falls back to the
+    same four rather than silently dropping the sentence.
+    """
+    if sources is None:
+        names = list(_SOURCE_PHRASES)
+    else:
+        names = [str(name) for name in sources if str(name) in _SOURCE_PHRASES]
+    if not names:
+        return ""
+    phrases = [_SOURCE_PHRASES[name] for name in names]
+    if len(phrases) == 1:
+        listed = phrases[0]
+    else:
+        listed = ", ".join(phrases[:-1]) + " or " + phrases[-1]
+    return f"Not in {listed}"
+
+
+def _unseen_clause(unseen: Any) -> str:
+    """ "Could not check: …" for the carriers this session had but hid."""
+    if not unseen:
+        return ""
+    phrases = [_UNSEEN_PHRASES.get(str(name), str(name)) for name in unseen if str(name)]
+    if not phrases:
+        return ""
+    return f"Could not check: {', '.join(phrases)}"

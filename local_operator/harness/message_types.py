@@ -592,7 +592,9 @@ PROJECT_REMINDER_MESSAGE_TYPE = "project_reminder"
 #: instructions, user messages or earlier tool output (``local_operator.
 #: divergence``; the incident it was built for is 2026-11-06's ``~/squeeze``).
 #:
-#: DELIBERATELY NOT IN ``harness/render.py``'s INJECTION TUPLE. This row is for
+#: DELIBERATELY NOT IN ``MODEL_VISIBLE_INJECTED_TYPES`` below (the set the
+#: renderer's injection arms deliver, and the one ``local_operator/divergence.py``
+#: folds its corpus from). This row is for
 #: the OPERATOR, who is the only reader who can decide a derailed turn should
 #: stop; to the model it restates what it just did, and the credential-redaction
 #: marker's history is the argument against telling the model about its own
@@ -606,3 +608,62 @@ PROJECT_REMINDER_MESSAGE_TYPE = "project_reminder"
 #: branch, and an unbranched record paints nowhere. Nothing added to this module
 #: becomes model-visible by being here.
 DIVERGENCE_NOTICE_MESSAGE_TYPE = "divergence_notice"
+
+#: Every ``CustomMessage`` type ``harness/render.py`` delivers to the MODEL as a
+#: user turn — the ONE list of "the model genuinely received this text".
+#:
+#: WHY IT IS A NAMED SET. ``harness/render.py`` decided model-visibility with two
+#: inline tuples plus five single-type arms; each new aside type had to be added
+#: in the right place or it silently dropped as bookkeeping (the trap the peer
+#: message hit). That is bad enough for the renderer. It was worse for
+#: ``local_operator/divergence.py``, which has to answer "did anything in this
+#: session's INSTRUCTIONS name this project root": it folded only ``role ==
+#: "user"`` messages, so a wake prompt, a hub delivery or a ``session_state``
+#: goal delta naming the root was invisible to it — and the notice then asserted
+#: the root "appeared in no user message", which was false. A detector that
+#: cannot see a carrier must never claim the carrier was clean.
+#:
+#: MEMBERSHIP HERE IS NOT ENFORCEMENT. The renderer arms choose the shape of what
+#: they inject (``todo_reminder`` only when it is the newest, an ask answer with
+#: its images); this set says WHICH types reach the model at all, and it is the
+#: union of what ``harness/render.py`` delivers. A type in this set that the
+#: renderer never injects would make the corpus over-inclusive, which costs at
+#: most a missed notice; the reverse — a carrier the renderer injects that is
+#: absent here — is false absence, the one error this list exists to prevent.
+#: ``tests/unit/test_divergence.py`` drives every member through the real
+#: renderer, and every type this module knows that is NOT a member through it
+#: too (it must render nothing), so the two cannot drift silently.
+#:
+#: ``wake_prompt``, ``monitor_prompt`` and ``job_result`` are spelled out rather
+#: than imported: their constants live in ``harness/wake.py``,
+#: ``monitors/spec.py`` and ``harness/jobs.py``, and this module is the
+#: dependency-free leaf those imports would violate (the same reason the module
+#: docstring gives for it existing). The same test pins them.
+MODEL_VISIBLE_INJECTED_TYPES = frozenset(
+    {
+        "session_state",
+        "fork_boundary",
+        "wake_prompt",
+        "monitor_prompt",
+        "job_result",
+        # A compaction MARKER: its summary (``details["summary"]``) is injected
+        # as a user turn and may name a root the model then acts in. Found by
+        # the renderer-agreement test rather than by inspection — the corpus was
+        # missing it, which is exactly the drift that test exists to catch.
+        "compaction_summary",
+        SESSION_INCIDENT_MESSAGE_TYPE,
+        SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+        SESSION_CREDENTIAL_MESSAGE_TYPE,
+        SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+        SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+        SESSION_SEND_NOTICE_MESSAGE_TYPE,
+        HUB_MESSAGE_TYPE,
+        PEER_MESSAGE_MESSAGE_TYPE,
+        TEAM_BRIDGE_MESSAGE_TYPE,
+        ASK_RELAY_MESSAGE_TYPE,
+        ASK_RESPONSE_MESSAGE_TYPE,
+        ASK_TIMEOUT_MESSAGE_TYPE,
+        TODO_REMINDER_MESSAGE_TYPE,
+        PROJECT_REMINDER_MESSAGE_TYPE,
+    }
+)

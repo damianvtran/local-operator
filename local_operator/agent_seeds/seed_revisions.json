@@ -1381,7 +1381,7 @@
         "class": null
       },
       {
-        "sha": "66e3d12542207f948f09c52032fdf2e18b70ac03",
+        "sha": "a9cbc83e5fcd1648f63cc7089449d8a658c4545b",
         "version": "1.6.12",
         "instructions_sha256": "e6f8817f328a8eba5ea8292ff94947bb6f49a0a88ae44eea7e4bed4877c7cc13",
         "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
@@ -2090,7 +2090,7 @@
         "class": null
       },
       {
-        "sha": "66e3d12542207f948f09c52032fdf2e18b70ac03",
+        "sha": "a9cbc83e5fcd1648f63cc7089449d8a658c4545b",
         "version": "1.3.15",
         "instructions_sha256": "07940fd427650af6feec9e36ba9cc3d56690627fd582df450216a81845b775d1",
         "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",

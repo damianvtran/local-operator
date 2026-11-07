@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 
 from local_operator.divergence import (
+    MAX_NOTICED_ROOTS,
+    MAX_ROWS_PER_ROOT,
     DivergenceJudge,
     _skip_roots,
     asserted_paths,
@@ -30,6 +32,7 @@ from local_operator.divergence import (
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.rows import divergence_notice
 from local_operator.harness.types import (
+    AgentMessage,
     AgentTool,
     LoopConfig,
     Message,
@@ -40,6 +43,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     TextContent,
     ToolContext,
+    ToolExecutionEndEvent,
     ToolResult,
 )
 
@@ -391,6 +395,11 @@ def test_the_audit_row_carries_the_operators_fields(home: Path, tmp_path: Path) 
         tool="bash",
         arguments={"command": "mkdir -p ~/squeeze/src"},
         call_id="call_abc",
+        messages=[
+            Message.user("build the software"),
+            Message(role="tool", content=[TextContent(text="exit code: 0")]),
+        ],
+        system_blocks=["You are a personal assistant."],
     )
     rows = _rows(tmp_path)
     assert len(rows) == 1
@@ -411,6 +420,20 @@ def test_the_audit_row_carries_the_operators_fields(home: Path, tmp_path: Path) 
     assert row["recorded"] is True
 
 
+def test_a_row_claims_only_the_sources_the_judge_was_given(home: Path, tmp_path: Path) -> None:
+    """A fixed source list claims a check that may never have happened.
+
+    The shipped version wrote all four on every row, including rows where the
+    caller had passed no history and no system prompt — the same class of false
+    statement as asserting absence over a carrier the judge never read.
+    """
+    judge = _judge(home, tmp_path)
+    judge.observe_turn(turn_index=1, tool="write", arguments={"path": "~/squeeze/x"})
+    rows = _rows(tmp_path)
+    assert rows and rows[0]["sources"] == []
+    assert rows[0]["unseen"] == []
+
+
 def test_a_failed_write_is_not_reported_as_success(home: Path, tmp_path: Path) -> None:
     """The audit row is the control; losing it silently would be the bypass."""
     auditor = tmp_path / "audit" / "divergence.jsonl"
@@ -426,7 +449,7 @@ def test_a_failed_write_is_not_reported_as_success(home: Path, tmp_path: Path) -
     events = judge.observe_turn(turn_index=1, tool="write", arguments={"path": "~/squeeze/x"})
     assert len(events) == 1, "the observation still surfaces; only the record failed"
     assert events[0].recorded is False
-    assert "audit row NOT written" in divergence_notice(events[0].as_notice_payload())
+    assert "No audit row was written" in divergence_notice(events[0].as_notice_payload())[0]
 
 
 def test_origin_parent_session_id_reads_origin_json(tmp_path: Path) -> None:
@@ -518,7 +541,7 @@ async def test_a_flagged_call_still_executes_and_the_event_is_written(
 
     results = []
     async for event in AgentLoop().run([], context, config, None):
-        if getattr(event, "result", None) is not None:
+        if isinstance(event, ToolExecutionEndEvent):
             results.append(event.result)
 
     # 1. OBSERVATION ONLY: the call ran exactly as it would have without a judge.
@@ -528,7 +551,7 @@ async def test_a_flagged_call_still_executes_and_the_event_is_written(
     rows = _rows(tmp_path)
     assert len(rows) == 1 and rows[0]["root"] == "~/squeeze"
     # 3. The visible half is the host callback's payload, and it says it ran.
-    assert notices and "observation only" in divergence_notice(notices[0])
+    assert notices and "observation only" in divergence_notice(notices[0])[0]
 
 
 @pytest.mark.asyncio
@@ -607,7 +630,7 @@ def test_the_notice_is_not_injected_into_the_models_context() -> None:
 
 
 def test_the_notice_names_the_root_the_check_and_that_the_call_ran() -> None:
-    text = divergence_notice(
+    text, kind = divergence_notice(
         {
             "root": "~/squeeze",
             "path": "/Users/damian/squeeze/src/app.py",
@@ -615,26 +638,80 @@ def test_the_notice_names_the_root_the_check_and_that_the_call_ran() -> None:
             "turn": 12,
             "escalated": True,
             "reason": "write",
+            "first": False,
+            "sources": [
+                "system_prompt",
+                "custom_instructions",
+                "user_messages",
+                "earlier_tool_output",
+            ],
             "recorded": True,
         }
     )
     assert "~/squeeze" in text
-    assert "WRITE" in text
-    assert "no system prompt, custom instruction, user message or earlier tool output" in text
-    assert "the call ran (observation only)" in text
-    assert "NOT written" not in text
+    # D2: neutral voice, "ran" early, no shouting. D3: no literal backticks.
+    assert "(ran; observation only)" in text
+    assert text.index("(ran; observation only)") < 90, "the reassurance must not be the tail"
+    assert "WRITE" not in text and "AGAIN" not in text
+    assert "`" not in text
+    # An escalation row omits the provenance clause: the first row said it (D6).
+    assert "Not in " not in text
+    assert kind == "warning"
 
 
-def test_an_escalation_row_says_it_came_back() -> None:
-    text = divergence_notice(
+def test_a_first_sighting_is_a_note_and_says_what_was_checked() -> None:
+    """D1: a first sighting and an escalation must not paint the same row."""
+    text, kind = divergence_notice(
+        {
+            "root": "~/squeeze",
+            "path": "/Users/damian/squeeze/src/app.py",
+            "tool": "read",
+            "first": True,
+            "escalated": False,
+            "sources": ["system_prompt", "user_messages"],
+        }
+    )
+    assert kind == "note"
+    assert text.startswith("~/squeeze is new to this session")
+    assert "Not in the system prompt or user messages" in text
+    assert "earlier tool output" not in text, "the clause names only what was read"
+
+
+def test_an_escalation_row_says_it_came_back_without_a_turn_number() -> None:
+    """D5: "turn 41" pointed at nothing the transcript paints."""
+    text, kind = divergence_notice(
         {"root": "~/squeeze", "tool": "read", "turn": 41, "escalated": True, "reason": "repeat"}
     )
-    assert "named AGAIN in turn 41" in text
+    assert "named again, in a later turn" in text.lower() or "again, in a later turn" in text
+    assert "turn 41" not in text
+    assert kind == "warning"
 
 
-def test_a_lost_audit_row_is_disclosed_in_the_notice() -> None:
-    text = divergence_notice({"root": "~/x", "recorded": False, "escalated": False})
-    assert "audit row NOT written" in text
+def test_an_unreadable_carrier_is_named_and_absence_is_not_claimed_over_it() -> None:
+    text, _kind = divergence_notice(
+        {
+            "root": "~/squeeze",
+            "tool": "write",
+            "first": True,
+            "escalated": False,
+            "sources": ["user_messages"],
+            "unseen": ["image_attachments", "masked_text"],
+        }
+    )
+    assert "Could not check: image attachments, text masked before storage" in text
+
+
+def test_a_lost_audit_row_is_disclosed_first_and_keeps_the_warning_tier() -> None:
+    """D4: the only variant reporting a real failure must not look the same."""
+    text, kind = divergence_notice({"root": "~/x", "recorded": False, "escalated": False})
+    assert text.startswith("No audit row was written")
+    assert kind == "warning", "a lost record is a warning even on a first sighting"
+
+
+def test_the_collapse_row_says_the_rest_is_in_the_audit_log() -> None:
+    text, kind = divergence_notice({"collapsed": True, "roots": 5, "root": "~/z"})
+    assert "audit log only" in text and "~/z" in text
+    assert kind == "note"
 
 
 def test_heredoc_bodies_contribute_no_targets() -> None:
@@ -731,3 +808,501 @@ async def test_the_session_writes_the_notice_row_to_the_transcript() -> None:
     assert isinstance(message, CustomMessage)
     assert message.custom_type == DIVERGENCE_NOTICE_MESSAGE_TYPE
     assert message.details == payload
+
+
+# ---------------------------------------------------------------------------
+# The live boundary: a `str` cwd, no fixture skip list (QA round 1, case 2)
+# ---------------------------------------------------------------------------
+
+
+def test_the_skip_list_accepts_the_string_a_tool_context_carries(home: Path) -> None:
+    """``ToolContext.cwd`` is declared ``str``; ``_skip_roots`` must take it.
+
+    The first shipped version called ``cwd.resolve()`` and raised
+    ``AttributeError`` out of the observer, which the loop swallowed at DEBUG:
+    the guard wrote nothing in any live session while the ``Path``-passing
+    replay evidence stayed green.
+    """
+    assert _skip_roots(str(home), home)
+
+
+@pytest.mark.asyncio
+async def test_a_live_loop_with_a_string_cwd_writes_the_row(home: Path, tmp_path: Path) -> None:
+    """The end-to-end regression: production's judge, production's cwd type.
+
+    No ``skip_roots`` override (production derives the shipped list), a real
+    ``ToolContext(cwd=str(...))``, and the real ``AgentLoop``/tool-result path —
+    the exact combination the round-1 live test missed by passing
+    ``skip_roots=()``. The asserted path is outside every skip root and has to
+    fire, or the guard is inert again.
+    """
+    executed: list[str] = []
+    notices: list[dict[str, Any]] = []
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        executed.append(str(args.get("path")))
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="write",
+            content=[TextContent(text="wrote it")],
+        )
+
+    judge = DivergenceJudge(
+        session_id="sess0001",
+        home=home,
+        audit_path=tmp_path / "audit" / "divergence.jsonl",
+        on_notice=notices.append,
+    )
+    tool = AgentTool(
+        name="write",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        },
+        execute=execute,
+    )
+    context = LoopContext(
+        messages=[Message.user("build the software")],
+        system_blocks=["You are a personal assistant."],
+        tools=[tool],
+        tool_context=ToolContext(cwd=str(home)),
+    )
+    config = LoopConfig(
+        model=MODEL,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=_OneCallStream("write", '{"path":"/opt/acme/index.html","content":"<html>"}'),
+        divergence_judge=judge,
+    )
+
+    results = []
+    async for event in AgentLoop().run([], context, config, None):
+        if isinstance(event, ToolExecutionEndEvent):
+            results.append(event.result)
+
+    assert executed == ["/opt/acme/index.html"], "the flagged call still ran"
+    assert results and not results[0].is_error
+    rows = _rows(tmp_path)
+    assert len(rows) == 1, "a live session must write the audit row"
+    assert rows[0]["root"] == "/opt/acme"
+    assert notices and notices[0]["root"] == "/opt/acme"
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-1: instructions arrive as CustomMessage/user turns, not only as messages
+# ---------------------------------------------------------------------------
+
+
+def test_a_wake_prompt_naming_the_root_explains_it(home: Path, tmp_path: Path) -> None:
+    """The round-1 reproducer: the sender named the root, so it is not novel.
+
+    ``CustomMessage`` carries no ``role``, so folding only ``role == "user"``
+    missed every delivered instruction and then asserted the root "appears in
+    no … user message" — false absence, the class this guard must never commit.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("review the tunnels MR"),
+            CustomMessage(
+                custom_type="wake_prompt",
+                attribution="system",
+                details={"text": "pick this up and keep the work inside ~/squeeze"},
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert events == []
+
+
+def test_a_session_state_delta_naming_the_root_explains_it(home: Path, tmp_path: Path) -> None:
+    """Second carrier: ``append_only_state`` providers ship later state as a delta.
+
+    For every subagent the system blocks are the frozen prefix, so a goal/team
+    section added after turn 1 reaches the model as a ``session_state`` user turn
+    and nowhere else.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=3,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("review the tunnels MR"),
+            CustomMessage(
+                custom_type="session_state",
+                attribution="system",
+                details={"text": "[session-state]\n## Goal\nship ~/squeeze this week"},
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert events == []
+
+
+def test_every_type_the_judge_folds_is_one_the_renderer_delivers() -> None:
+    """The carrier list is the renderer's list, pinned from both directions.
+
+    A type the judge folds but the renderer drops would only cost a missed
+    notice; a type the renderer injects that the judge does not fold is false
+    absence. Both directions are asserted against the REAL renderer, so a new
+    aside type cannot be invisible only to the guard.
+    """
+    from local_operator.harness.message_types import MODEL_VISIBLE_INJECTED_TYPES
+    from local_operator.harness.render import _default_convert_to_llm
+    from local_operator.harness.types import CustomMessage
+
+    for custom_type in sorted(MODEL_VISIBLE_INJECTED_TYPES):
+        history: list[AgentMessage] = [
+            CustomMessage(
+                custom_type=custom_type,
+                attribution="system",
+                details={
+                    "text": f"delivered by {custom_type}",
+                    "summary": f"delivered by {custom_type}",
+                    "status": "answered",
+                },
+            )
+        ]
+        rendered = _default_convert_to_llm(history)
+        assert [message.role for message in rendered] == ["user"], custom_type
+        assert f"delivered by {custom_type}" in json.dumps(
+            [message.model_dump() for message in rendered]
+        ), custom_type
+
+    for bookkeeping in ("divergence_notice", "session_credential_redaction"):
+        rendered = _default_convert_to_llm(
+            [CustomMessage(custom_type=bookkeeping, attribution="system", details={"text": "x"})]
+        )
+        assert rendered == [], bookkeeping
+
+
+def test_unreadable_carriers_are_named_on_the_row(home: Path, tmp_path: Path) -> None:
+    """Masked storage, images and a compaction cut are named, never assumed clean.
+
+    Each is a carrier the model received that this judge cannot read; the record
+    says which were present so the absence claim is scoped (QA round 1, case 6
+    measured the masked-storage one live).
+    """
+    from local_operator.harness.types import CustomMessage, ImageContent
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=4,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("build the thing"),
+            CustomMessage(
+                custom_type="compaction_summary",
+                attribution="system",
+                details={"text": "earlier turns summarised"},
+            ),
+            Message(
+                role="tool",
+                content=[TextContent(text=f"the value was {'[re' + 'dacted]'}")],
+            ),
+            Message(
+                role="user",
+                content=[TextContent(text="see the screenshot"), ImageContent(data="aGk=")],
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert len(events) == 1
+    assert events[0].unseen == ("masked_text", "image_attachments", "compacted_history")
+    text, _kind = divergence_notice(events[0].as_notice_payload())
+    assert (
+        "Could not check: text masked before storage, image attachments, turns compacted away"
+        in text
+    )
+
+
+# ---------------------------------------------------------------------------
+# MAJOR-2: the per-call cost of a repeated mention
+# ---------------------------------------------------------------------------
+
+
+def test_a_repeated_miss_searches_only_the_chunks_appended_since(
+    home: Path, tmp_path: Path
+) -> None:
+    """The corpus is append-only chunks with a per-root cursor, and it is used.
+
+    White-box on purpose: progress in wall-clock time would make this a flaky
+    benchmark, and the property that matters is exact — a root that missed over
+    ``chunks[:n]`` must not read ``chunks[:n]`` again when one tool result is
+    appended.
+    """
+    judge = _judge(home, tmp_path)
+    judge.observe_turn(
+        turn_index=1,
+        tool="read",
+        arguments={"path": "~/novel/a"},
+        messages=[Message.user("hello"), Message(role="tool", content=[TextContent(text="ok")])],
+    )
+    before = len(judge._chunks)
+    assert judge._miss_at["novel"] == before
+
+    # A previously-scanned chunk that WOULD match: re-reading it would flip the
+    # verdict, so the verdict staying False proves it was not re-read.
+    judge._chunks[0] = "novel"
+    assert judge._is_explained("~/novel") is False
+
+    judge._chunks.append("novel")
+    assert judge._is_explained("~/novel") is True
+
+
+def test_an_announced_root_is_not_rescanned_on_every_mention(home: Path, tmp_path: Path) -> None:
+    """117 mentions in one session must cost the corpus scan once, not 117 times."""
+    judge = _judge(home, tmp_path)
+    history = [Message.user("hello")]
+    judge.observe_turn(
+        turn_index=1, tool="read", arguments={"path": "~/squeeze/a"}, messages=history
+    )
+    seen = len(judge._events)
+    assert seen == 1
+    for turn in range(2, 8):
+        history = [*history, Message(role="tool", content=[TextContent(text=f"out {turn}")])]
+        judge.observe_turn(
+            turn_index=turn,
+            tool="write",
+            arguments={"path": f"~/squeeze/f{turn}"},
+            messages=history,
+        )
+    # Announced once, escalated once (the first write), then silent: the
+    # once-per-root decision holds even though every call re-derived candidates
+    # from a growing history — and none of those calls re-scanned the corpus,
+    # because a root already in ``_roots`` never reaches ``_is_explained``.
+    assert len(judge._events) - seen == 1
+    assert judge._roots["~/squeeze"].rows == MAX_ROWS_PER_ROOT
+
+
+# ---------------------------------------------------------------------------
+# The turn index under compaction (code review NIT-1)
+# ---------------------------------------------------------------------------
+
+
+def test_the_turn_index_stays_monotonic_when_compaction_shortens_the_history(
+    home: Path, tmp_path: Path
+) -> None:
+    judge = _judge(home, tmp_path)
+    judge.observe_turn(
+        turn_index=9,
+        tool="read",
+        arguments={"path": "~/rootx/a"},
+        messages=[Message.user("first")],
+    )
+    # Compaction replaced the history the loop counts assistant messages in, so
+    # the loop's next index is LOWER. The escalation must still be an escalation.
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="read",
+        arguments={"path": "~/rootx/b"},
+        messages=[Message.user("summarised")],
+    )
+    assert len(events) == 1
+    assert events[0].escalated is True
+    assert events[0].reason == "repeat"
+    assert events[0].turn_index > 9
+
+
+# ---------------------------------------------------------------------------
+# The transcript's cap on distinct roots (design round 1, D6)
+# ---------------------------------------------------------------------------
+
+
+def test_the_notice_stream_is_capped_and_the_audit_is_not(home: Path, tmp_path: Path) -> None:
+    notices: list[dict[str, Any]] = []
+    judge = _judge(home, tmp_path, on_notice=notices.append)
+    for root in ("r1", "r2", "r3", "r4", "r5"):
+        for write in (False, True):
+            judge.observe_turn(
+                turn_index=1 + write,
+                tool="write" if write else "read",
+                arguments={"path": f"~/{root}/f{int(write)}"},
+                messages=[Message.user("ordinary brief")],
+            )
+    assert len(_rows(tmp_path)) == 10, "every root still gets its audit rows"
+    assert notices[-1].get("collapsed") is True
+    painted_roots = {notice.get("root") for notice in notices if not notice.get("collapsed")}
+    assert len(painted_roots) == MAX_NOTICED_ROOTS, "the transcript stops at the cap"
+    assert painted_roots == {"~/r1", "~/r2", "~/r3"}
+    assert "~/r5" not in json.dumps(notices[:-1])
+
+
+# ---------------------------------------------------------------------------
+# The two acceptance numbers, now asserted (code review MINOR-3)
+# ---------------------------------------------------------------------------
+
+#: The ceiling the module's own docstring states (~4.8 flags per 100 turns on the
+#: 20-session ordinary sample). The rate below is measured against committed
+#: fixtures, so a precision regression fails CI instead of shipping green.
+MAX_ROWS_PER_100_TURNS = 4.8
+
+#: Ordinary work: the operator names the project, tools read inside it, the model
+#: acts inside it. This is the shape 76% of the baseline's literal flags were
+#: made of — the model doing the task, not diverging.
+_ORDINARY_SESSIONS: tuple[tuple[str, list[tuple[str, dict[str, Any]]], list[str]], ...] = (
+    (
+        "Review PR 3533 in ~/local-operator and report what changed.",
+        [("read", {"path": "~/local-operator/local_operator/divergence.py"})],
+        ["diff --git a/local_operator/divergence.py b/local_operator/divergence.py"],
+    ),
+    (
+        "The build is red in ~/oss/oh-my-pi — fix it.",
+        [("bash", {"command": "cd ~/oss/oh-my-pi && make build"})],
+        ["src/mobile/app.ts written"],
+    ),
+    (
+        "Check the deployment record in ~/tools/omp-mobile.",
+        [("read", {"path": "~/tools/omp-mobile/docs/DEPLOYMENT.md"})],
+        ["docs/DEPLOYMENT.md: 12 lines"],
+    ),
+    (
+        "Run the core suite in ~/minervaai.",
+        [("bash", {"command": "cd ~/minervaai/core && pytest -x -q"})],
+        ["412 passed"],
+    ),
+)
+
+
+def test_ordinary_work_stays_under_the_false_positive_budget(home: Path, tmp_path: Path) -> None:
+    judge = _judge(home, tmp_path)
+    turns = 0
+    for prompt, calls, outputs in _ORDINARY_SESSIONS:
+        history: list[Any] = [Message.user(prompt)]
+        for index, (tool, arguments) in enumerate(calls):
+            turns += 1
+            judge.observe_turn(
+                turn_index=turns,
+                tool=tool,
+                arguments=arguments,
+                messages=list(history),
+                system_blocks=["You are a personal assistant."],
+            )
+            history = [
+                *history,
+                Message(role="tool", content=[TextContent(text=outputs[index % len(outputs)])]),
+            ]
+    rows = _rows(tmp_path)
+    rate = len(rows) * 100 / max(turns, 1)
+    assert rate <= MAX_ROWS_PER_100_TURNS, f"{rate:.2f} rows/100 turns over {turns} turns: {rows}"
+
+
+def test_the_incident_control_still_fires(home: Path, tmp_path: Path) -> None:
+    """The positive control: a foreign project root appears from nowhere.
+
+    ``73084269786c``'s shape — one QA brief, tool output about the tunnel work,
+    then a turn that builds ``~/squeeze`` — replayed through the shipped judge.
+    The real transcript is gone from disk, so the control is a committed
+    fixture of that shape rather than the session itself.
+    """
+    judge = _judge(home, tmp_path)
+    history: list[Any] = [
+        Message.user("Run an ordinary QA review of the tunnels MR and report findings."),
+        Message(role="tool", content=[TextContent(text="tests/unit/test_tunnels.py 29 passed")]),
+    ]
+    judge.observe_turn(
+        turn_index=1,
+        tool="read",
+        arguments={"path": "~/local-operator/tests/unit/test_tunnels.py"},
+        messages=history,
+        system_blocks=["You are a personal assistant."],
+    )
+    history = [*history, Message(role="tool", content=[TextContent(text="read 29 lines")])]
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="bash",
+        arguments={"command": "mkdir -p ~/squeeze/src/squeeze/{engine,service}"},
+        messages=history,
+        system_blocks=["You are a personal assistant."],
+    )
+    assert len(events) == 1, "the control stopped firing"
+    assert events[0].root == "~/squeeze"
+    assert events[0].escalated is True
+    assert events[0].reason == "write"
+    assert events[0].turn_index == 2
+    # The claim it makes is about the sources it read, and the notice says it ran.
+    assert "user_messages" in events[0].sources
+    text, kind = divergence_notice(events[0].as_notice_payload())
+    assert "(ran; observation only)" in text and kind == "warning"
+
+
+@pytest.mark.asyncio
+async def test_a_real_session_writes_the_row_and_the_call_still_runs(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1 case 2, on the SHIPPED construction path.
+
+    The unit-level live test above proves the loop boundary; this proves the
+    seam QA actually failed on: a real ``Session`` builds the judge itself
+    (``session/session.py``, no ``skip_roots``), derives the skip list from the
+    ``str`` cwd its own ``ToolContext`` carries, and writes the row to the
+    configured audit path. Before the boundary fix this produced ZERO rows and
+    returned the tool result unchanged — green evidence, dead feature.
+
+    Env isolation is load-bearing: ``HOME`` and the config dir are redirected
+    into the test's own tree so a run can never read or write the operator's
+    ``~/.local-operator``.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    scratch = home.parent
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(scratch / "config"))
+    # The analytics mirror is a process-wide singleton with its own writer
+    # thread. Point it at this test's tree (never the operator's database) and
+    # close it afterwards, so the thread cannot outlive the test.
+    recorder = reset_recorder_for_test(AnalyticsStore(scratch / "analytics.db"))
+
+    executed: list[str] = []
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        executed.append(str(args.get("path")))
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="write",
+            content=[TextContent(text="wrote it")],
+        )
+
+    tool = AgentTool(
+        name="write",
+        description="write a file",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        },
+        execute=execute,
+    )
+    session = Session(
+        model=MODEL,
+        stream_fn=_OneCallStream("write", '{"path":"/opt/acme/index.html","content":"<html>"}'),
+        tools=[tool],
+        transcript=Transcript(scratch / "sess"),
+        system_blocks_provider=lambda: ["You are a personal assistant."],
+    )
+    try:
+        await session.prompt("scaffold a tiny project from scratch")
+    finally:
+        await session.dispose()
+        recorder.close()
+        reset_recorder_for_test(AnalyticsStore(scratch / "analytics-2.db")).close()
+
+    # 1. OBSERVATION ONLY: the call ran, with its side effect, unchanged.
+    assert executed == ["/opt/acme/index.html"]
+    # 2. And the session's own judge wrote the row where the operator finds it.
+    audit = scratch / "config" / "audit" / "divergence.jsonl"
+    rows = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1, "a real Session must write the audit row"
+    assert rows[0]["root"] == "/opt/acme"
+    assert rows[0]["tool"] == "write"
+    assert rows[0]["recorded"] is True

@@ -64,6 +64,43 @@ absent (or worse, a masked span could make an explained root read as novel) and
 the guard becomes decoration. So: read stored message content, never a rendered
 view; never compare against displayed text.
 
+WHAT IT CANNOT SEE — NAMED, NEVER ASSUMED AWAY
+----------------------------------------------
+A detector that says "nothing in this session named that root" is making a
+claim about every carrier the model received. Three of them are genuinely
+unreadable from here, and each is recorded per event in
+:attr:`DivergenceEvent.unseen` so the record and the notice can say so instead
+of asserting absence over them:
+
+* ``masked_text`` — a value the loop masked **in storage** (a ``VariableStore``
+  registration redacts the tool result before it is written) is not in the
+  stored bytes; the root may have been delivered and then erased. Measured by
+  QA round 1: a root printed into a tool result, masked, and then asserted
+  fires here with the pre-mask bytes already gone.
+* ``image_attachments`` — an instruction can arrive as a screenshot. Text
+  extraction reads text; a path painted in an image is invisible.
+* ``compacted_history`` — compaction replaces ``context.messages`` with a
+  summary, so a root named before the cut may be absent from the list this
+  judge is handed.
+
+A fourth carrier is out of reach for a structural reason worth stating: the
+**request-assembly service** composes the provider request outside this
+process, so a root injected there is invisible here. That is the incident's own
+residual uncertainty, and the notice's wording is scoped to the sources this
+module actually read for that reason.
+
+INSTRUCTIONS ARRIVE AS USER TURNS, NOT ONLY AS MESSAGES
+-------------------------------------------------------
+``CustomMessage`` rows carry no ``role``: the renderer turns them into user
+turns when it builds the request (``harness/render.py``), so a wake prompt, a
+hub delivery, a ``session_state`` goal delta or a relayed ask is an
+INSTRUCTION the model genuinely received. Folding only ``role == "user"``
+missed all of them and then claimed the root appeared in no user message —
+false absence, the one error this module may never make. The set of carriers
+is :data:`~local_operator.harness.message_types.MODEL_VISIBLE_INJECTED_TYPES`,
+the same list the renderer uses, so a new aside type cannot be invisible only
+to the guard.
+
 OBSERVATION ONLY — NEVER A GATE
 -------------------------------
 Nothing here denies, approves, delays or re-routes a call. The judge returns
@@ -82,6 +119,7 @@ the incident does not justify. The separation is the contract.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
@@ -90,7 +128,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from local_operator.harness.message_types import MODEL_VISIBLE_INJECTED_TYPES
 from local_operator.paths import config_dir
+
+logger = logging.getLogger(__name__)
 
 #: The audit log this module appends to. A sibling of
 #: ``audit/public-copy-reads.jsonl`` (``tools/public_copy.py``) — the only other
@@ -107,6 +148,36 @@ AUDIT_FILENAME = "divergence.jsonl"
 #: would be 117 rows of the same fact and would drown the transcript notice it
 #: is supposed to support; two rows carry "it appeared" and "it persisted".
 MAX_ROWS_PER_ROOT = 2
+
+#: Distinct roots that may paint a NOTICE in one session.
+#:
+#: ``MAX_ROWS_PER_ROOT`` bounds the record for one root; nothing bounded the
+#: number of roots, and design round 1 measured the consequence: three roots
+#: produced six notices and 20 amber rows, 62% of each row the same repeated
+#: provenance sentence, on a 30-row screen. Past this many roots the audit log
+#: is the record — the operator gets one row saying so, never a wall of rows
+#: (design round 1, D6). The CAP is on notices only: every root still gets its
+#: own audit rows, so nothing observed is lost.
+MAX_NOTICED_ROOTS = 3
+
+#: The mask a ``VariableStore`` value becomes when the loop redacts it before
+#: storage (``local_operator/variables.py``). Its presence in the corpus is how
+#: this module knows part of what the model read is not on disk any more.
+_MASK_MARKER = "[redacted]"
+
+#: The instruction sources this module can read, in the order the operator's own
+#: list names them. A row records only the ones actually available to it.
+_SOURCE_ORDER = (
+    "system_prompt",
+    "custom_instructions",
+    "user_messages",
+    "earlier_tool_output",
+)
+
+#: Carriers the model received that this module CANNOT read, in record order.
+#: They are named on the row so absence is scoped rather than total — see
+#: "WHAT IT CANNOT SEE" in the module docstring.
+_UNSEEN_ORDER = ("masked_text", "image_attachments", "compacted_history")
 
 #: Same flags, same reasoning as ``public_copy._AUDIT_OPEN_FLAGS``:
 #: ``O_NONBLOCK`` turns a FIFO planted at the log path into a refusal (``ENXIO``)
@@ -205,6 +276,16 @@ class DivergenceEvent:
     escalated: bool
     reason: str
     sources: tuple[str, ...]
+    #: True for the row that FIRST announced this root. Escalation and first
+    #: sighting are different facts (design round 1, D1: they used to paint
+    #: identically), and a write on first sighting is BOTH — the copy has to be
+    #: able to say "again" only when it really is a return.
+    first_sighting: bool = True
+    #: Carriers the model received that this judge could NOT read, so the
+    #: absence claim is scoped rather than total. See the module docstring's
+    #: "WHAT IT CANNOT SEE"; empty means every carrier this session had was
+    #: read.
+    unseen: tuple[str, ...] = ()
     recorded: bool = True
 
     def as_record(self) -> dict[str, Any]:
@@ -223,6 +304,8 @@ class DivergenceEvent:
             "escalated": self.escalated,
             "reason": self.reason,
             "sources": list(self.sources),
+            "unseen": list(self.unseen),
+            "first": self.first_sighting,
             "recorded": self.recorded,
         }
 
@@ -236,6 +319,8 @@ class DivergenceEvent:
             "escalated": self.escalated,
             "reason": self.reason,
             "sources": list(self.sources),
+            "unseen": list(self.unseen),
+            "first": self.first_sighting,
             "recorded": self.recorded,
         }
 
@@ -254,6 +339,40 @@ class _RootState:
 # ---------------------------------------------------------------------------
 # Path → project root
 # ---------------------------------------------------------------------------
+
+
+def _as_path(value: Any) -> Path | None:
+    """A host-supplied working directory as a ``Path``, whatever shape it came in.
+
+    ``ToolContext.cwd`` is declared ``str`` (``harness/types.py``), and the loop
+    hands it straight through, while the replay driver and the tests pass a
+    ``Path``. Normalising HERE — at the module's boundary — is what keeps that
+    difference from being load-bearing: the first shipped version called
+    ``cwd.resolve()`` on the string, raised ``AttributeError`` inside the
+    observer's swallow, and the guard wrote zero rows in every live session
+    while the ``Path``-passing replay evidence stayed green (QA round 1, case 2).
+
+    Anything that is not a non-empty ``str``/``os.PathLike`` is ``None`` — a
+    cwd this module cannot place, which :func:`_expand` treats as "relative
+    paths are unknowable" rather than inventing a directory.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return Path(text) if text else None
+    try:
+        return Path(os.fspath(value))
+    except TypeError:  # pragma: no cover - a host that passes neither shape
+        return None
+
+
+def _resolved(path: Path) -> Path:
+    """``path`` with symlinks followed, or ``path`` unchanged if it cannot be."""
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):  # pragma: no cover - nothing can stat it
+        return path
 
 
 def _expand(raw: str, cwd: Path | None, home: Path) -> Path | None:
@@ -305,7 +424,19 @@ def project_root(path: Path, home: Path) -> str:
     (``/Users/damian/squeeze``), because two would make every path on this
     machine share the root ``/Users/damian`` and explain everything; anything
     else yields its first two components.
+
+    BOTH sides are normalised: ``path`` arrives resolved (``_expand``) and a
+    caller's ``home`` may not be (``Path.home()`` is whatever ``$HOME`` holds,
+    which on a host whose home is a symlink is not the canonical form). An
+    unresolved home compared against resolved paths fails the prefix test for
+    every path under it, so each distinct project collapsed onto one root and
+    ordinary work fired — reproduced in code review round 1 with a fixture home
+    under ``/var`` reading ``~/squeeze/a`` as the root ``/private/var``.
     """
+    try:
+        home = home.resolve()
+    except (OSError, RuntimeError):  # pragma: no cover - an unresolvable home
+        pass
     parts = path.parts
     home_parts = home.parts
     if len(parts) > len(home_parts) and parts[: len(home_parts)] == home_parts:
@@ -691,7 +822,29 @@ def asserted_paths(
 # ---------------------------------------------------------------------------
 
 
-def _skip_roots(cwd: Path | None, home: Path | None = None) -> tuple[tuple[Path, str], ...]:
+def _skip_roots(
+    cwd: str | os.PathLike[str] | None, home: str | os.PathLike[str] | None = None
+) -> tuple[tuple[Path, str], ...]:
+    """The skip list for ``cwd``/``home``, whatever shape the caller holds.
+
+    A thin boundary in front of :func:`_derive_skip_roots`: it accepts the
+    ``str`` a ``ToolContext`` carries as readily as a ``Path``, so no caller has
+    to convert before calling, and it cannot raise. If the list cannot be
+    derived at all the answer is EMPTY — no root is skipped — because the only
+    effect of a skip root is to suppress a notice: losing the list over-reports
+    an observation, which is a row an operator can dismiss, while raising here
+    loses the OBSERVATION. (That failure was real: ``cwd.resolve()`` on a string
+    raised out of ``observe_turn``, which the loop swallowed at DEBUG, so the
+    shipped guard recorded nothing at all — QA round 1, case 2.)
+    """
+    try:
+        return _derive_skip_roots(_as_path(cwd), _as_path(home))
+    except Exception:  # noqa: BLE001 - an observer must never break a turn
+        logger.debug("could not derive the divergence skip roots", exc_info=True)
+        return ()
+
+
+def _derive_skip_roots(cwd: Path | None, home: Path | None = None) -> tuple[tuple[Path, str], ...]:
     """Roots a local decision could produce without any foreign context.
 
     Each is a place the harness itself sends the model (its config store, its
@@ -822,6 +975,99 @@ def _message_role(message: Any) -> str:
     return str(getattr(message, "role", "") or "")
 
 
+def _custom_type(message: Any) -> str:
+    """The ``custom_type`` of a stored ``CustomMessage``, or ``""``.
+
+    Two shapes reach this module: ``harness.types.CustomMessage`` objects (the
+    live loop) and the transcript's JSON dicts (the replay driver), where the
+    type sits under ``payload``.
+    """
+    if isinstance(message, Mapping):
+        payload = message.get("payload")
+        if isinstance(payload, Mapping) and payload.get("custom_type"):
+            return str(payload["custom_type"])
+        return str(message.get("custom_type") or "")
+    return str(getattr(message, "custom_type", "") or "")
+
+
+def _custom_details(message: Any) -> Mapping[str, Any]:
+    if isinstance(message, Mapping):
+        payload = message.get("payload")
+        details = payload.get("details") if isinstance(payload, Mapping) else None
+        if not isinstance(details, Mapping):
+            details = message.get("details")
+        return details if isinstance(details, Mapping) else {}
+    details = getattr(message, "details", None)
+    return details if isinstance(details, Mapping) else {}
+
+
+def _custom_text(message: Any) -> str:
+    """The text a delivered ``CustomMessage`` carries to the model.
+
+    ``details["text"]`` is what the sender (or the session) formatted and what
+    ``harness/render.py`` injects as a user turn. A compaction MARKER is the one
+    shape that differs: its summary rides ``details["summary"]`` and is rendered
+    through ``compaction/marker.py``, so that is the second key read here — a
+    summary that names the root is an instruction the model received.
+
+    A type in ``MODEL_VISIBLE_INJECTED_TYPES`` that carries neither key
+    contributes nothing — it is a carrier, not a source of bytes.
+    """
+    details = _custom_details(message)
+    for key in ("text", "summary"):
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _has_image(message: Any) -> bool:
+    """Does this message carry an image the text scan cannot read?"""
+    content = (
+        message.get("content")
+        if isinstance(message, Mapping)
+        else getattr(message, "content", None)
+    )
+    if isinstance(content, str) or not content:
+        return False
+    for block in content:
+        if isinstance(block, Mapping):
+            if str(block.get("type") or "") in ("image", "image_url"):
+                return True
+        elif str(getattr(block, "type", "") or "") in ("image", "image_url"):
+            return True
+    return False
+
+
+def _corpus_entry(message: Any) -> tuple[str, str] | None:
+    """``(text, source)`` for one stored message that is an INSTRUCTION source.
+
+    The three arms are the three shapes an instruction reaches the model in:
+
+    * an ordinary user turn;
+    * a tool result — the model's own earlier output;
+    * a ``CustomMessage`` the renderer delivers as a user turn (a wake prompt, a
+      hub/peer delivery, a ``session_state`` goal delta, a relayed ask …). These
+      carry no ``role`` at all, so folding only ``role == "user"`` missed every
+      one of them and then claimed the root appeared in no user message. The
+      membership test is the renderer's own list, imported rather than retyped.
+
+    ``None`` for everything else: assistant text is deliberately not a source
+    (a model that names a root in its own prose has already started to assert
+    it, and letting that explain the next call would launder the failure this
+    guard exists to see).
+    """
+    custom = _custom_type(message)
+    if custom and custom in MODEL_VISIBLE_INJECTED_TYPES:
+        return _custom_text(message), "user_messages"
+    role = _message_role(message)
+    if role == "user":
+        return _message_text(message), "user_messages"
+    if role == "tool":
+        return _message_text(message), "earlier_tool_output"
+    return None
+
+
 class DivergenceJudge:
     """Per-session observation state; the loop calls :meth:`observe_turn`.
 
@@ -835,7 +1081,9 @@ class DivergenceJudge:
         the replay driver can hold a fixture home rather than the operator's.
     :param on_notice: optional host callback receiving
         :meth:`DivergenceEvent.as_notice_payload`. It paints the transcript row;
-        it is called at most ``MAX_ROWS_PER_ROOT`` times per root.
+        it is called at most ``MAX_ROWS_PER_ROOT`` times per root, and for at
+        most ``MAX_NOTICED_ROOTS`` distinct roots in the session (then once more,
+        with a ``collapsed`` payload, to say the rest are audit-only).
     :param audit_path: override for the JSONL destination (tests).
     """
 
@@ -852,93 +1100,151 @@ class DivergenceJudge:
     ) -> None:
         self.session_id = session_id
         self.parent_session_id = parent_session_id
-        self.home = home or Path.home()
+        #: Resolved once, here. ``Path.home()`` is whatever ``$HOME`` holds — on
+        #: a host whose home is a symlink that is not the canonical form, and
+        #: every asserting path arrives resolved (``_expand``), so comparing the
+        #: two as given made EVERY path under home fail the prefix test and
+        #: collapse onto one root (code review round 1: a fixture home under
+        #: ``/var`` read ``~/squeeze/a`` as the root ``/private/var``).
+        self.home = _resolved(home or Path.home())
         self.on_notice = on_notice
         self._audit_path = audit_path
-        self._cwd = cwd
+        self._cwd = _as_path(cwd)
         #: ``None`` means "derive the shipped list" (``_skip_roots``), which is
         #: what production does. A caller holding a FIXTURE root set overrides
         #: it: a test home lives under the OS temp root, which is itself a skip
         #: root, and using the real list there would prove nothing about the
         #: predicate — every assertion would be skipped for the wrong reason.
         self._skip_roots = skip_roots
+        #: Derived skip lists, memoised per ``(cwd, home)``. ``_skip_roots``
+        #: imports the session spec, reads the environment and stats a dozen
+        #: paths; it is a property of where the session runs, not of the call, so
+        #: re-deriving it per tool call was pure overhead (0.6-22 ms measured).
+        self._skip_cache: dict[tuple[str, str], tuple[tuple[Path, str], ...]] = {}
         self._roots: dict[str, _RootState] = {}
-        # Explained-set cache. ``_corpus`` is built LAZILY — on the first
-        # candidate that survives the skip rules — and then maintained
-        # incrementally, because concatenating a long history on every tool call
-        # is the cost that would make this feature unacceptable on a busy turn.
+        #: Roots that have painted a notice, and whether the overflow row has
+        #: been sent (``MAX_NOTICED_ROOTS``). The audit keeps every root; the
+        #: TRANSCRIPT is what gets a cap.
+        self._noticed: set[str] = set()
+        self._collapsed = False
+        # Corpus state: one lowercased chunk per source message, appended and
+        # never rewritten, plus a per-root cursor of how far it has been searched.
         self._messages_ref: object | None = None
         self._consumed = 0
-        self._users: list[str] = []
-        self._tool_output: list[str] = []
         self._system_text = ""
-        self._corpus: str | None = None
+        self._chunks: list[str] = []
+        self._miss_at: dict[str, int] = {}
+        self._sources: set[str] = set()
+        self._unseen: set[str] = set()
         self._explained: set[str] = set()
         self._events: list[DivergenceEvent] = []
+        #: Turn numbering that survives compaction (see :meth:`_monotonic_turn`).
+        self._turn_peak = 0
+        self._turn_shift = 0
+        #: The first unexpected failure is logged once at WARNING: a silent
+        #: observer is exactly how the shipped guard recorded nothing at all for
+        #: a whole release (QA round 1, case 2), and a swallowed failure that
+        #: nobody can see is indistinguishable from "nothing happened".
+        self._failure_logged = False
 
     # -- context sources ----------------------------------------------------
 
     def _sync_corpus(self, messages: Sequence[Any], system_blocks: Sequence[str]) -> None:
-        """Fold new history into the explained-set, and only new history.
+        """Fold new history into the corpus, and only new history.
 
-        The explained-set is exactly the operator's list: system prompt, custom
+        The corpus is exactly the operator's list: system prompt, custom
         instructions (both arrive in ``system_blocks`` — the harness appends the
-        custom-instruction block there), user messages, and the session's own
-        earlier tool output. **Assistant text is deliberately NOT a source**: a
-        guard that let the model's own prior assertions explain the next one
+        custom-instruction block there), user messages INCLUDING every
+        ``CustomMessage`` the renderer delivers as a user turn, and the session's
+        own earlier tool output. **Assistant text is deliberately NOT a source**:
+        a guard that let the model's own prior assertions explain the next one
         would launder precisely the failure it exists to see.
+
+        WHY CHUNKS. The corpus is held as one lowercased string per source
+        message, appended and never rewritten, plus a per-root cursor saying how
+        far that root has already been searched (:meth:`_is_explained`). A
+        single concatenated string had to be rebuilt whenever one tool result
+        arrived — 531 ms on a 6.3 MB history, on the loop's post-result path —
+        and re-searched in full every turn thereafter. With chunks, a new tool
+        result adds one small chunk and a root that missed before only searches
+        the chunks appended since. The string work is the same either way (one
+        lowercase + one containment test per byte); what it stops doing is
+        repeating it.
         """
         system = "\n".join(block for block in system_blocks if block)
         if system != self._system_text:
+            # A changed system prompt invalidates every chunk and every cursor:
+            # the source of truth was replaced, not extended. Rare (an epoch
+            # change), and it is the ONE case that re-reads the whole history.
             self._system_text = system
-            self._corpus = None
+            self._reset_corpus()
         if messages is not self._messages_ref:
             # A different list object is a different history (a resume, a test
-            # fixture, a replay driver): rebuild from its start.
+            # fixture, a replay driver, a compaction): rebuild from its start.
             self._messages_ref = messages
             self._consumed = 0
-            self._users = []
-            self._tool_output = []
-            self._corpus = None
-        fresh = False
+            self._reset_corpus()
         for message in messages[self._consumed :]:
-            role = _message_role(message)
-            if role == "user":
-                self._users.append(_message_text(message))
-                fresh = True
-            elif role == "tool":
-                # Strictly EARLIER output: a tool result is only visible to the
-                # guard once it is in the stored history, which is what "the
-                # model's own earlier tool output" means.
-                self._tool_output.append(_message_text(message))
-                fresh = True
+            entry = _corpus_entry(message)
+            if entry is not None:
+                text, source = entry
+                if text:
+                    # ONE lowercase per chunk: it is both the searchable form and
+                    # the mask test. Doing it twice doubled the first call's
+                    # string work on a 6.3 MB history for no gain.
+                    lowered = text.lower()
+                    self._chunks.append(lowered)
+                    self._sources.add(source)
+                    if _MASK_MARKER in lowered:
+                        self._unseen.add("masked_text")
+            if _has_image(message):
+                self._unseen.add("image_attachments")
+            if _custom_type(message) == "compaction_summary":
+                # Compaction replaced the messages this session started with by a
+                # summary: a root named before the cut may be absent from the
+                # list this judge is handed, so absence over "earlier turns" is
+                # not established.
+                self._unseen.add("compacted_history")
         self._consumed = len(messages)
-        if fresh:
-            self._corpus = None
+        if self._system_text:
+            self._sources.add("system_prompt")
+            # The operator's first two lists are ONE carrier in practice: the
+            # harness folds the custom-instruction block into the system blocks,
+            # so a guard that read them read both. Claiming them separately
+            # without that sentence would be two claims for one read.
+            self._sources.add("custom_instructions")
 
-    def _corpus_lower(self) -> str:
-        if self._corpus is None:
-            self._corpus = (
-                self._system_text
-                + "\n"
-                + "\n".join(self._users)
-                + "\n"
-                + "\n".join(self._tool_output)
-            ).lower()
-        return self._corpus
+    def _reset_corpus(self) -> None:
+        self._chunks = [self._system_text.lower()] if self._system_text else []
+        self._miss_at.clear()
 
     def _is_explained(self, root: str) -> bool:
+        """Does the corpus name ``root``, searching only what is new since last time?
+
+        Root granularity: the basename token, or the whole root for an absolute
+        path outside home (``/opt/acme`` → ``/opt/acme``).
+
+        ``_miss_at`` remembers, per root, how many chunks had been searched when
+        that root last missed. Chunks are append-only, so chunks ``[:n]`` cannot
+        have changed: a second mention of a still-novel root searches only
+        ``chunks[n:]`` — one tool result, not the whole history. (The incident
+        names its root 117 times in 134 turns; without this, every one of them
+        re-read 6.3 MB.)
+        """
         key = root_key(root)
         if not key:
             return True
         if key in self._explained:
             return True
-        corpus = self._corpus_lower()
-        # Root granularity: the basename token, or the whole root for an
-        # absolute path outside home (``/opt/acme`` → ``/opt/acme``).
-        if key in corpus or root.lower() in corpus:
-            self._explained.add(key)
-            return True
+        lowered_root = root.lower()
+        chunks = self._chunks
+        for index in range(self._miss_at.get(key, 0), len(chunks)):
+            chunk = chunks[index]
+            if key in chunk or lowered_root in chunk:
+                self._explained.add(key)
+                self._miss_at.pop(key, None)
+                return True
+        self._miss_at[key] = len(chunks)
         return False
 
     # -- skip rules ---------------------------------------------------------
@@ -955,51 +1261,114 @@ class DivergenceJudge:
         tool: str,
         arguments: Mapping[str, Any],
         call_id: str = "",
-        cwd: Path | None = None,
+        cwd: str | os.PathLike[str] | None = None,
         messages: Sequence[Any] = (),
         system_blocks: Sequence[str] = (),
     ) -> list[DivergenceEvent]:
         """Judge one tool call, append at most one audit row, return new events.
 
-        Never raises: an observer that can break a turn is a gate with a
-        disguise on, and the operator's constraint is that a flagged call runs
-        exactly as it would have.
+        Never raises, and that is now true of every line rather than of all but
+        one: the skip-root derivation that used to sit outside any ``try`` (and
+        raised ``AttributeError`` on the ``str`` cwd a real ``ToolContext``
+        carries) is inside it, and :func:`_skip_roots` itself cannot raise.
+        An observer that can break a turn is a gate with a disguise on, and the
+        operator's constraint is that a flagged call runs exactly as it would
+        have.
+
+        ``cwd`` accepts the ``str`` that ``ToolContext.cwd`` is declared as well
+        as a ``Path``: the loop passes it through untouched, so normalising at
+        this boundary is what makes the difference between the two impossible to
+        ship as a defect.
         """
+        try:
+            return self._observe_turn(
+                turn_index=turn_index,
+                tool=tool,
+                arguments=arguments,
+                call_id=call_id,
+                cwd=cwd,
+                messages=messages,
+                system_blocks=system_blocks,
+            )
+        except Exception:  # noqa: BLE001 - an observer must never break a turn
+            if not self._failure_logged:
+                self._failure_logged = True
+                logger.warning("divergence observer failed", exc_info=True)
+            else:
+                logger.debug("divergence observer failed again", exc_info=True)
+            return []
+
+    def _observe_turn(
+        self,
+        *,
+        turn_index: int,
+        tool: str,
+        arguments: Mapping[str, Any],
+        call_id: str,
+        cwd: str | os.PathLike[str] | None,
+        messages: Sequence[Any],
+        system_blocks: Sequence[str],
+    ) -> list[DivergenceEvent]:
         if not arguments or not isinstance(arguments, Mapping):
             return []
-        workdir = cwd or self._cwd
-        try:
-            candidates = asserted_paths(tool, arguments, cwd=workdir, home=self.home)
-        except Exception:  # noqa: BLE001 - extraction must never break a turn
-            return []
+        workdir = _as_path(cwd) or self._cwd
+        candidates = asserted_paths(tool, arguments, cwd=workdir, home=self.home)
         if not candidates:
             return []
-        try:
-            self._sync_corpus(messages, system_blocks)
-        except Exception:  # noqa: BLE001 - an unreadable history is a MISS
-            return []
-        skip = self._skip_roots if self._skip_roots is not None else _skip_roots(workdir, self.home)
+        self._sync_corpus(messages, system_blocks)
+        turn = self._monotonic_turn(turn_index)
+        skip = self._skip_for(workdir)
         fresh: list[DivergenceEvent] = []
         for path, is_write in candidates:
-            try:
-                root = project_root(Path(path), self.home)
-            except (OSError, RuntimeError):  # pragma: no cover
-                continue
+            root = project_root(Path(path), self.home)
             if self._skipped(path, skip):
                 continue
-            if self._is_explained(root):
+            if root not in self._roots and self._is_explained(root):
+                # ``root not in self._roots``: a root this session already
+                # announced stays announced. Its escalation decision belongs to
+                # ``_register`` and does not depend on the corpus, so scanning
+                # 6.3 MB again for the 117th mention would change nothing — and
+                # that scan was most of the per-call cost.
                 continue
             event = self._register(
                 root=root,
                 path=path,
                 tool=tool,
                 call_id=call_id,
-                turn_index=turn_index,
+                turn_index=turn,
                 is_write=is_write,
             )
             if event is not None:
                 fresh.append(event)
         return fresh
+
+    def _monotonic_turn(self, turn_index: int) -> int:
+        """``turn_index``, shifted so the sequence never goes backwards.
+
+        The loop derives its index by counting assistant messages in the live
+        history (``harness/loop.py``), and compaction REPLACES that list: the
+        count can drop, and an escalated mention could then compare equal to
+        ``first_turn`` and silently lose its escalation row. The safe direction,
+        but a turned corner is still a lost fact. A shift carried on the judge
+        makes the sequence monotonic across any number of cuts.
+        """
+        effective = turn_index + self._turn_shift
+        if effective <= self._turn_peak:
+            self._turn_shift += self._turn_peak - effective + 1
+            effective = turn_index + self._turn_shift
+        self._turn_peak = effective
+        return effective
+
+    def _skip_for(self, workdir: Path | None) -> tuple[tuple[Path, str], ...]:
+        """The skip list for this session, derived once per ``(cwd, home)``."""
+        if self._skip_roots is not None:
+            return self._skip_roots
+        key = (str(workdir) if workdir is not None else "", str(self.home))
+        cached = self._skip_cache.get(key)
+        if cached is None:
+            cached = _skip_roots(workdir, self.home)
+            self._skip_cache[key] = cached
+        return cached
 
     def _register(
         self,
@@ -1048,12 +1417,14 @@ class DivergenceJudge:
             call_id=call_id,
             escalated=escalated,
             reason=reason,
-            sources=(
-                "system_prompt",
-                "custom_instructions",
-                "user_messages",
-                "earlier_tool_output",
-            ),
+            # What this judge ACTUALLY read, in a stable order. A fixed tuple
+            # claimed all four sources on every row whether or not the caller
+            # gave it a history or a system prompt — a claim the record cannot
+            # support is the same defect as asserting absence over a carrier it
+            # never saw.
+            sources=tuple(name for name in _SOURCE_ORDER if name in self._sources),
+            unseen=tuple(name for name in _UNSEEN_ORDER if name in self._unseen),
+            first_sighting=state.rows == 1,
         )
         try:
             self._append(event.as_record())
@@ -1063,12 +1434,40 @@ class DivergenceJudge:
             # carries the failure rather than pretending to be durable.
             event = replace(event, recorded=False)
         self._events.append(event)
-        if self.on_notice is not None:
-            try:
-                self.on_notice(event.as_notice_payload())
-            except Exception:  # noqa: BLE001 - a notice must never break a turn
-                pass
+        self._notice(event)
         return event
+
+    def _notice(self, event: DivergenceEvent) -> None:
+        """Hand the host a notice payload, within the per-session root cap.
+
+        ``MAX_ROWS_PER_ROOT`` bounds one root; this bounds how many ROOTS may
+        paint. Past ``MAX_NOTICED_ROOTS`` the transcript gets ONE row saying the
+        rest are in the audit log (design round 1, D6: three roots produced six
+        notices and 20 amber rows). Nothing is dropped from the record.
+        """
+        if self.on_notice is None:
+            return
+        payload: dict[str, Any] | None = None
+        if event.root in self._noticed or len(self._noticed) < MAX_NOTICED_ROOTS:
+            self._noticed.add(event.root)
+            payload = event.as_notice_payload()
+        elif not self._collapsed:
+            self._collapsed = True
+            payload = {
+                "collapsed": True,
+                "roots": len(self._roots),
+                "root": event.root,
+                "path": event.path,
+                "tool": event.tool,
+                "recorded": event.recorded,
+                "unseen": list(event.unseen),
+            }
+        if payload is None:
+            return
+        try:
+            self.on_notice(payload)
+        except Exception:  # noqa: BLE001 - a notice must never break a turn
+            pass
 
     # -- the audit writer ---------------------------------------------------
 

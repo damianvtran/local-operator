@@ -1612,14 +1612,14 @@ def project_settled_rows(
             # A DIVERGENCE notice: a turn asserted a project root nothing in
             # this session's context named (``local_operator/divergence.py``).
             # Its own branch for this module's stated rule — an unbranched
-            # custom row paints NOWHERE — and ``warning`` ink because the
-            # operator has to look at it, not because anything failed: the
-            # flagged call ran exactly as it would have.
+            # custom row paints NOWHERE — and the TIER comes back with the text
+            # from ``harness/rows.py``: a first sighting is a ``note`` (a fact to
+            # know), an escalation or a failed audit write is a ``warning``. One
+            # hardcoded kind made those indistinguishable (design round 1, D1).
             if getattr(message, "custom_type", None) == DIVERGENCE_CUSTOM_TYPE:
                 details = getattr(message, "details", None) or {}
-                self._append_block(
-                    NoticeBlock(divergence_notice(details), kind="warning", fold_width=fold_width)
-                )
+                text, kind = divergence_notice(details)
+                self._append_block(NoticeBlock(text, kind=kind, fold_width=fold_width))
                 appended = True
                 continue
             # A compaction that did NOT run. Rendered here for the same
