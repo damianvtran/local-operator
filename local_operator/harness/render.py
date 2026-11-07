@@ -74,7 +74,7 @@ from local_operator.harness.message_types import (
     TEAM_BRIDGE_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
-from local_operator.harness.rows import gate_waited_text
+from local_operator.harness.rows import gate_timeout_subject, gate_waited_text
 from local_operator.harness.types import (
     AgentMessage,
     CustomMessage,
@@ -378,9 +378,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # ONE formatter for it, shared with the human row so the two cannot
             # disagree about the number.
             details = message.details or {}
-            tool = str(details.get("tool") or "a tool")
-            description = str(details.get("description") or "").strip()
-            subject = f"{tool} ({description})" if description else tool
+            subject = gate_timeout_subject(details)
             waited = gate_waited_text(details)
             # An `ask` is a QUESTION, and an unanswered question was not
             # "denied" — the approval gate's vocabulary describes a refusal

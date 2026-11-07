@@ -1028,6 +1028,26 @@ def gate_waited_text(details: Mapping[str, Any] | None) -> str:
     return f"{int(seconds // 86400)}d"
 
 
+def gate_timeout_subject(details: Mapping[str, Any] | None) -> str:
+    """WHAT an expired gate was about — ``tool (description)`` — ONE formatter.
+
+    The gate-timeout row carries a STRUCTURED payload rather than a ``text``
+    field, so every audience composes its own sentence from ``tool`` and
+    ``description``. Two of them must never disagree about the bytes: the model
+    (``harness/render.py``) and the divergence guard
+    (``local_operator.divergence``), because ``description`` is where the
+    RESOLVED path lives (``tools/builtin.py``'s ``_approval_description``).
+    When the guard read only ``text``/``summary`` this carrier contributed
+    nothing, an event fired with ``unseen: ()``, and the notice claimed the path
+    was "in no user message" — the false-absence class this guard exists to
+    never commit (code review round 2, MAJOR-1).
+    """
+    details = details or {}
+    tool = str(details.get("tool") or "a tool")
+    description = str(details.get("description") or "").strip()
+    return f"{tool} ({description})" if description else tool
+
+
 #: The surface words an ``ask_response`` dismissal receipt shows. ``remote`` is what
 #: the relay stamps for the phone's tap (an empty ``by`` on the wire).
 _DISMISS_SURFACE_WORDS = {"remote": "phone", "tui": "terminal"}
@@ -2385,24 +2405,33 @@ def divergence_notice(details: Mapping[str, Any]) -> tuple[str, NoticeSeverity]:
 
     1. **That the call RAN.** This is observation, never enforcement
        (``harness/loop.py``'s ``_observe_divergence`` is wrapped so it cannot
-       break a turn). It leads the sentence now, in brackets, because a reader
-       who skims stops at the first line: the previous version put "the call
-       ran" in its last 31 cells, which is exactly the "did something get
-       blocked?" worry this row must not create.
+       break a turn). It rides the first line, in brackets, immediately after
+       the root and BEFORE the path: a reader who skims stops at the first
+       line, and the previous version put "the call ran" in its last 31 cells —
+       the "did something get blocked?" worry this row must not create.
     2. **What the root is and what asserted it.** ``~/squeeze`` plus the tool
        and the path it named — the row has to be actionable ("look at that
        turn"), not merely alarming. No capitalised ``WRITE``/``AGAIN``: the tier
        carries the weight (D2), and shouting made every variant read as a
-       failure.
-    3. **What was checked, named explicitly** — on a FIRST sighting only. A
-       shorter phrasing ("unexplained path") would read as the harness having
-       no opinion, and a longer one would claim a cause this layer cannot see.
-       The clause is scoped to the sources the judge actually read
-       (``details["sources"]``), and where a carrier could not be read the row
-       says so (``details["unseen"]``) rather than asserting absence over it —
-       the false-absence class this guard must never commit. An ESCALATION row
-       omits the clause entirely: the first row said it, and repeating 139
-       characters per row was 62% of a multi-root flood (D6).
+       failure. The reassurance deliberately precedes the path (D11): after it,
+       it sat in the last cells on long paths, which is the position D2 was
+       graded MAJOR for, and a colon replaced the em dash that wrapped
+       orphaned at the start of a line (D12).
+    3. **What was checked, named explicitly** — on a FIRST sighting only, and
+       never as a separate trailing clause. The sentence names the sources the
+       judge actually read (``details["sources"]``) and then, in the SAME
+       sentence, the carriers it could not read (``details["unseen"]``); a
+       separate "Could not check:" tail was the last thing on the row and read
+       as decoration (D9). An ESCALATION row omits the whole thing: the first
+       row said it, and repeating 139 characters per row was 62% of a multi-root
+       flood (D6), so the hedge is said once per root (D10).
+
+    THE HEADLINE weakens with the evidence (D9). "is new to this session" is
+    exactly the claim that compacted or masked history undermines, and it is
+    identical whether or not a carrier went unread — so when ``unseen`` is set,
+    or when no source was read at all, the lead reads "is not named in what this
+    session could check" instead. An absolute headline backed by zero checked
+    sources is the false-absence class this guard exists to never commit.
 
     THE TIER is decided here, not in a renderer (this module's own rule: a tier
     chosen inside one host is a tier the other does not have), and it is the
@@ -2420,13 +2449,23 @@ def divergence_notice(details: Mapping[str, Any]) -> tuple[str, NoticeSeverity]:
     """
     tool = str(details.get("tool") or "a tool").strip()
     path = str(details.get("path") or "").strip()
-    named = f"{tool} named {path}" if path else tool
+    checked = _checked_clause(details.get("sources"))
+    unseen = _listed(_unseen_phrases(details.get("unseen")))
 
     if details.get("collapsed"):
         # The transcript's cap on distinct roots (``MAX_NOTICED_ROOTS``): one
-        # row says the rest are in the audit log, so a session that names five
-        # foreign trees cannot paint a wall of amber (D6). ``note`` tier: the
-        # record is complete, only the painting stopped.
+        # row says what happened to the rest, so a session that names five
+        # foreign trees cannot paint a wall of amber (D6).
+        #
+        # ``recorded`` and ``unseen`` are CARRIED THROUGH (design round 2, D8).
+        # The cap only stopped PAINTING; the audit row is still the durable
+        # half, so "further ones are in the audit log only" is true exactly
+        # when that write succeeded. Under six rows reading "No audit row was
+        # written", a muted "in the audit log only" directly below them claimed
+        # durability where there was none — D4's false-success defect,
+        # reintroduced by the row that fixed the flood. Every root past the cap
+        # is silent by design, which makes THIS row the only thing that can say
+        # they are recorded nowhere.
         roots = details.get("roots")
         count = (
             f"{roots} project roots so far"
@@ -2434,9 +2473,18 @@ def divergence_notice(details: Mapping[str, Any]) -> tuple[str, NoticeSeverity]:
             else ("further project roots")
         )
         latest = str(details.get("root") or "").strip()
-        tail = f" — latest: {latest}" if latest else ""
+        tail = f" (latest: {latest})" if latest else ""
+        # One sentence, so a folded-in ``unseen`` clause does not start a
+        # sentence in lower case.
+        hedge = f"; {unseen} could not be checked" if unseen else ""
+        if details.get("recorded") is False:
+            return (
+                f"No audit row was written — {count} this session; further ones "
+                f"are not being recorded anywhere{hedge}{tail}.",
+                "warning",
+            )
         return (
-            f"{count} this session; further ones are in the audit log only{tail}.",
+            f"{count} this session; further ones are in the audit log only{hedge}{tail}.",
             "note",
         )
 
@@ -2447,28 +2495,56 @@ def divergence_notice(details: Mapping[str, Any]) -> tuple[str, NoticeSeverity]:
     # set ``escalated`` only on a return or a write, so that is the best read.
     first = bool(details.get("first", not escalated))
 
+    # D12: "now a write … write named" stuttered when the tool IS the reason
+    # word. The tool name is the more specific fact, so the reason phrase yields
+    # to it; on a first sighting the same rule keeps "a write" off a row whose
+    # tool already says it.
+    reason_repeats_tool = reason == "write" and tool.casefold() == "write"
+    named = f"{tool} named {path}" if path else tool
+
+    # D11: the reassurance goes BEFORE the path and before any root detail that
+    # can wrap. After the path it sat in the last cells of a long row — the
+    # position D2 was graded MAJOR for — and it moves with the path's length.
+    # The separator is a colon, not the em dash it used to be: a dash before a
+    # long path was left orphaned at the start of a wrapped line (D12).
+    ran = "(ran; observation only)"
     if first:
-        # "again" would be a lie on a first sighting, which is why the payload
-        # carries ``first`` and a write that ESCALATES is still described as
-        # one fact ("…, a write") rather than as a return.
-        write_note = ", a write" if escalated else ""
-        lead = f"{root} is new to this session — {named}{write_note} (ran; observation only)"
+        # D9: the headline is what a skimming operator actually reads, and "new
+        # to this session" is precisely the claim compacted or masked history
+        # weakens. So the LEAD weakens with it: qualified when a carrier went
+        # unread, and never "new" when nothing was checked at all (an absolute
+        # claim with nothing behind it). The record keeps the same scope in
+        # ``sources``/``unseen`` either way.
+        fully_checked = bool(checked) and not unseen
+        state = (
+            "is new to this session"
+            if fully_checked
+            else "is not named in what this session could check"
+        )
+        write_note = ", a write" if escalated and not reason_repeats_tool else ""
+        lead = f"{root} {state}{write_note} {ran}: {named}"
     elif reason == "write":
-        lead = f"{root} again, now a write — {named} (ran; observation only)"
+        reason_note = "" if reason_repeats_tool else ", now a write"
+        lead = f"{root} again{reason_note} {ran}: {named}"
     else:
         # "in a later turn", never "turn 9": the transcript paints no turn
         # numbers, so the ordinal pointed at something the reader cannot locate
         # (design round 1, D5).
-        lead = f"{root} again, in a later turn — {named} (ran; observation only)"
+        lead = f"{root} again, in a later turn {ran}: {named}"
 
     sentences = [lead]
     if first:
-        clause = _checked_clause(details.get("sources"))
-        if clause:
-            sentences.append(clause)
-    unseen = _unseen_clause(details.get("unseen"))
-    if unseen:
-        sentences.append(unseen)
+        # ONE absence sentence, and the hedge is folded INTO it rather than
+        # trailing as a separate "Could not check:" clause that a reader skims
+        # past (D9): what was read, then what could not be read. D10: the hedge
+        # appears once per root — on the first sighting, where the provenance
+        # clause lives — never repeated in warning ink on every escalation.
+        if checked and unseen:
+            sentences.append(f"{checked}; {unseen} could not be checked")
+        elif checked:
+            sentences.append(checked)
+        elif unseen:
+            sentences.append(f"{unseen} could not be checked")
     if details.get("recorded") is False:
         # The audit row is the durable half (``config_dir()/audit/divergence.
         # jsonl``); saying so is the difference between a lost record and a
@@ -2498,6 +2574,15 @@ _UNSEEN_PHRASES: dict[str, str] = {
 }
 
 
+def _listed(phrases: list[str], conjunction: str = "and") -> str:
+    """``a``, ``a and b``, ``a, b and c`` — one joiner for every row phrase."""
+    if not phrases:
+        return ""
+    if len(phrases) == 1:
+        return phrases[0]
+    return ", ".join(phrases[:-1]) + f" {conjunction} " + phrases[-1]
+
+
 def _checked_clause(sources: Any) -> str:
     """ "Not in <the sources read>" — omitted when no source was available.
 
@@ -2509,21 +2594,12 @@ def _checked_clause(sources: Any) -> str:
         names = list(_SOURCE_PHRASES)
     else:
         names = [str(name) for name in sources if str(name) in _SOURCE_PHRASES]
-    if not names:
-        return ""
     phrases = [_SOURCE_PHRASES[name] for name in names]
-    if len(phrases) == 1:
-        listed = phrases[0]
-    else:
-        listed = ", ".join(phrases[:-1]) + " or " + phrases[-1]
-    return f"Not in {listed}"
+    return f"Not in {_listed(phrases, 'or')}" if phrases else ""
 
 
-def _unseen_clause(unseen: Any) -> str:
-    """ "Could not check: …" for the carriers this session had but hid."""
+def _unseen_phrases(unseen: Any) -> list[str]:
+    """The carriers this session had but could not read, as row phrases."""
     if not unseen:
-        return ""
-    phrases = [_UNSEEN_PHRASES.get(str(name), str(name)) for name in unseen if str(name)]
-    if not phrases:
-        return ""
-    return f"Could not check: {', '.join(phrases)}"
+        return []
+    return [_UNSEEN_PHRASES.get(str(name), str(name)) for name in unseen if str(name)]

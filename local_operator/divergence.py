@@ -128,7 +128,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.message_types import MODEL_VISIBLE_INJECTED_TYPES
+from local_operator.harness.rows import gate_timeout_subject
 from local_operator.paths import config_dir
 
 logger = logging.getLogger(__name__)
@@ -1004,21 +1006,22 @@ def _custom_details(message: Any) -> Mapping[str, Any]:
 def _custom_text(message: Any) -> str:
     """The text a delivered ``CustomMessage`` carries to the model.
 
-    ``details["text"]`` is what the sender (or the session) formatted and what
-    ``harness/render.py`` injects as a user turn. A compaction MARKER is the one
-    shape that differs: its summary rides ``details["summary"]`` and is rendered
-    through ``compaction/marker.py``, so that is the second key read here — a
-    summary that names the root is an instruction the model received.
+    Two shapes: ``details["text"]`` is what the sender (or the session)
+    formatted and what ``harness/render.py`` injects as a user turn, and the
+    gate-expiry row is COMPOSED from its structured payload rather than stored
+    (``gate_timeout_subject``, the same formatter the renderer uses). Reading
+    only ``text`` was what let that carrier contribute nothing while an event
+    still fired claiming ``unseen: ()`` — code review round 2, MAJOR-1.
 
-    A type in ``MODEL_VISIBLE_INJECTED_TYPES`` that carries neither key
-    contributes nothing — it is a carrier, not a source of bytes.
+    ``details["summary"]`` is deliberately NOT read: it belongs to the
+    compaction marker, whose author is the MODEL, and model-authored text may
+    not be an instruction source (see :data:`MODEL_AUTHORED_CARRIERS`).
     """
     details = _custom_details(message)
-    for key in ("text", "summary"):
-        value = details.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return ""
+    if _custom_type(message) == GATE_TIMEOUT_CUSTOM_TYPE:
+        return gate_timeout_subject(details)
+    text = details.get("text")
+    return text if isinstance(text, str) and text else ""
 
 
 def _has_image(message: Any) -> bool:
@@ -1039,6 +1042,19 @@ def _has_image(message: Any) -> bool:
     return False
 
 
+#: Carriers in :data:`MODEL_VISIBLE_INJECTED_TYPES` whose bytes the MODEL wrote.
+#:
+#: ``compaction_summary`` is a model's own prose — ``compaction/marker.py`` says
+#: so in as many words. After a cut it stands in for the operator's earlier
+#: turns, so folding it would let a model that invented a project explain its
+#: next assertion with its own explanation and silence the notice: model text
+#: authorising the path the model invented is exactly the laundering this
+#: module's rule forbids. It stays a carrier (the model DID receive it) and is
+#: not folded; the session flags ``unseen=compacted_history`` instead, so the
+#: row says the turns could not be checked rather than going quiet.
+MODEL_AUTHORED_CARRIERS = frozenset({"compaction_summary"})
+
+
 def _corpus_entry(message: Any) -> tuple[str, str] | None:
     """``(text, source)`` for one stored message that is an INSTRUCTION source.
 
@@ -1055,10 +1071,14 @@ def _corpus_entry(message: Any) -> tuple[str, str] | None:
     ``None`` for everything else: assistant text is deliberately not a source
     (a model that names a root in its own prose has already started to assert
     it, and letting that explain the next call would launder the failure this
-    guard exists to see).
+    guard exists to see) — and for the same reason
+    :data:`MODEL_AUTHORED_CARRIERS`, which are carriers the model received but
+    did not receive as an instruction.
     """
     custom = _custom_type(message)
     if custom and custom in MODEL_VISIBLE_INJECTED_TYPES:
+        if custom in MODEL_AUTHORED_CARRIERS:
+            return None
         return _custom_text(message), "user_messages"
     role = _message_role(message)
     if role == "user":
@@ -1128,12 +1148,15 @@ class DivergenceJudge:
         self._noticed: set[str] = set()
         self._collapsed = False
         # Corpus state: one lowercased chunk per source message, appended and
-        # never rewritten, plus a per-root cursor of how far it has been searched.
+        # never rewritten. There is deliberately NO per-root search cursor: the
+        # live path asks about a root at most once per corpus (an announced root
+        # short-circuits before the search, and an explained one is memoised in
+        # ``_explained``), so a cursor was unreachable state that read as a
+        # load-bearing optimisation (QA round 2, note 2).
         self._messages_ref: object | None = None
         self._consumed = 0
         self._system_text = ""
         self._chunks: list[str] = []
-        self._miss_at: dict[str, int] = {}
         self._sources: set[str] = set()
         self._unseen: set[str] = set()
         self._explained: set[str] = set()
@@ -1161,15 +1184,17 @@ class DivergenceJudge:
         would launder precisely the failure it exists to see.
 
         WHY CHUNKS. The corpus is held as one lowercased string per source
-        message, appended and never rewritten, plus a per-root cursor saying how
-        far that root has already been searched (:meth:`_is_explained`). A
-        single concatenated string had to be rebuilt whenever one tool result
-        arrived — 531 ms on a 6.3 MB history, on the loop's post-result path —
-        and re-searched in full every turn thereafter. With chunks, a new tool
-        result adds one small chunk and a root that missed before only searches
-        the chunks appended since. The string work is the same either way (one
-        lowercase + one containment test per byte); what it stops doing is
-        repeating it.
+        message, appended and never rewritten. A single concatenated string had
+        to be rebuilt whenever one tool result arrived — 531 ms on a 6.3 MB
+        history, on the loop's post-result path — and re-searched in full every
+        turn thereafter. With chunks, a new tool result adds one small chunk and
+        nothing rewrites what came before; the string work is the same either
+        way (one lowercase + one containment test per byte), what it stops doing
+        is repeating it. What bounds the burst is the CALLER, not a cursor here:
+        ``_observe_turn`` never re-searches a root this session has already
+        announced (``root not in self._roots``), and an explained root is
+        memoised in ``_explained``, so each root is searched at most once per
+        corpus.
         """
         system = "\n".join(block for block in system_blocks if block)
         if system != self._system_text:
@@ -1216,20 +1241,28 @@ class DivergenceJudge:
 
     def _reset_corpus(self) -> None:
         self._chunks = [self._system_text.lower()] if self._system_text else []
-        self._miss_at.clear()
+        # ``sources`` describes THIS corpus. Leaving it populated across a
+        # replacement made a row claim ``earlier_tool_output`` was checked while
+        # the replacement held no tool text at all — a claim the record cannot
+        # support, which is the defect this whole field exists to avoid (code
+        # review round 2, MINOR-2). ``_unseen`` survives on purpose: it is a
+        # fact about the session (text was masked, an image arrived, a cut
+        # happened), not about the current chunk list.
+        self._sources.clear()
 
     def _is_explained(self, root: str) -> bool:
-        """Does the corpus name ``root``, searching only what is new since last time?
+        """Does the corpus name ``root``?
 
         Root granularity: the basename token, or the whole root for an absolute
         path outside home (``/opt/acme`` → ``/opt/acme``).
 
-        ``_miss_at`` remembers, per root, how many chunks had been searched when
-        that root last missed. Chunks are append-only, so chunks ``[:n]`` cannot
-        have changed: a second mention of a still-novel root searches only
-        ``chunks[n:]`` — one tool result, not the whole history. (The incident
-        names its root 117 times in 134 turns; without this, every one of them
-        re-read 6.3 MB.)
+        Chunks are append-only, so a hit is memoised in ``_explained`` and a
+        root this session already announced never reaches here at all
+        (``_observe_turn`` short-circuits on ``root in self._roots``). Each root
+        therefore costs at most one full scan per corpus — the incident names
+        its root 117 times in 134 turns, and 116 of those scans were the whole
+        per-call cost the round-2 measurement attributed to a cursor that could
+        never be reached.
         """
         key = root_key(root)
         if not key:
@@ -1237,14 +1270,10 @@ class DivergenceJudge:
         if key in self._explained:
             return True
         lowered_root = root.lower()
-        chunks = self._chunks
-        for index in range(self._miss_at.get(key, 0), len(chunks)):
-            chunk = chunks[index]
+        for chunk in self._chunks:
             if key in chunk or lowered_root in chunk:
                 self._explained.add(key)
-                self._miss_at.pop(key, None)
                 return True
-        self._miss_at[key] = len(chunks)
         return False
 
     # -- skip rules ---------------------------------------------------------

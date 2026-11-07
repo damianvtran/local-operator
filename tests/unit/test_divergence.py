@@ -649,9 +649,13 @@ def test_the_notice_names_the_root_the_check_and_that_the_call_ran() -> None:
         }
     )
     assert "~/squeeze" in text
-    # D2: neutral voice, "ran" early, no shouting. D3: no literal backticks.
+    # D11: the reassurance precedes the path, so a long path cannot push it to
+    # the last cells of the row (D2's position). D12: no em dash before it to
+    # wrap orphaned at the start of a line.
     assert "(ran; observation only)" in text
     assert text.index("(ran; observation only)") < 90, "the reassurance must not be the tail"
+    assert text.index("(ran; observation only)") < text.index("/Users/damian/squeeze")
+    assert "—" not in text
     assert "WRITE" not in text and "AGAIN" not in text
     assert "`" not in text
     # An escalation row omits the provenance clause: the first row said it (D6).
@@ -698,7 +702,41 @@ def test_an_unreadable_carrier_is_named_and_absence_is_not_claimed_over_it() -> 
             "unseen": ["image_attachments", "masked_text"],
         }
     )
-    assert "Could not check: image attachments, text masked before storage" in text
+    # D9: one sentence, and it names both halves — what was read, then what
+    # could not be. The hedge is not a trailing clause of its own any more.
+    assert (
+        "Not in user messages; image attachments and text masked before storage "
+        "could not be checked"
+    ) in text
+    assert "is new to this session" not in text, "the headline must weaken too"
+
+
+def test_the_headline_weakens_when_nothing_could_be_checked() -> None:
+    """D9: an absolute headline backed by zero checked sources is a false claim."""
+    text, _kind = divergence_notice(
+        {"root": "~/squeeze", "tool": "write", "first": True, "escalated": False, "sources": []}
+    )
+    assert "is new to this session" not in text
+    assert "is not named in what this session could check" in text
+
+
+def test_an_escalation_row_does_not_repeat_the_unseen_hedge() -> None:
+    """D10: the hedge is said once per root, in ``note`` ink, not on every row."""
+    text, kind = divergence_notice(
+        {
+            "root": "~/squeeze",
+            "path": "/Users/damian/squeeze/app.py",
+            "tool": "write",
+            "first": False,
+            "escalated": True,
+            "reason": "write",
+            "sources": ["user_messages"],
+            "unseen": ["compacted_history"],
+        }
+    )
+    assert "could not be checked" not in text
+    assert "Could not check" not in text, "the standalone hedge form is gone too"
+    assert kind == "warning"
 
 
 def test_a_lost_audit_row_is_disclosed_first_and_keeps_the_warning_tier() -> None:
@@ -712,6 +750,30 @@ def test_the_collapse_row_says_the_rest_is_in_the_audit_log() -> None:
     text, kind = divergence_notice({"collapsed": True, "roots": 5, "root": "~/z"})
     assert "audit log only" in text and "~/z" in text
     assert kind == "note"
+
+
+def test_the_collapse_row_never_claims_the_audit_log_when_the_write_failed() -> None:
+    """D8: a failed write must not be reported as success — on ANY row.
+
+    The collapse row sits directly beneath the per-root rows that say no audit
+    row was written. Saying "further ones are in the audit log only" there
+    claims durability on the one screen where there is none, and every root past
+    the cap is silent by design, so this row is the only thing that can say so.
+    """
+    text, kind = divergence_notice(
+        {
+            "collapsed": True,
+            "roots": 5,
+            "root": "~/billing-api",
+            "recorded": False,
+            "unseen": ["compacted_history"],
+        }
+    )
+    assert text.startswith("No audit row was written")
+    assert "audit log only" not in text
+    assert "not being recorded anywhere" in text
+    assert "turns compacted away could not be checked" in text
+    assert kind == "warning"
 
 
 def test_heredoc_bodies_contribute_no_targets() -> None:
@@ -946,41 +1008,200 @@ def test_a_session_state_delta_naming_the_root_explains_it(home: Path, tmp_path:
     assert events == []
 
 
-def test_every_type_the_judge_folds_is_one_the_renderer_delivers() -> None:
-    """The carrier list is the renderer's list, pinned from both directions.
+#: Details every arm of the renderer can read. Deliberately a superset of the
+#: shapes it composes from: the point of the sweep below is that NO arm has to
+#: be known to the test for its carrier to be found.
+_PROBE_DETAILS = {
+    "text": "delivered by probe",
+    "summary": "delivered by probe",
+    "tool": "bash",
+    "description": "write to ~/probe/app.py",
+    "waited_s": 60,
+    "kind": "approval",
+    "status": "answered",
+    "answers": {},
+}
 
-    A type the judge folds but the renderer drops would only cost a missed
-    notice; a type the renderer injects that the judge does not fold is false
-    absence. Both directions are asserted against the REAL renderer, so a new
-    aside type cannot be invisible only to the guard.
+
+def _declared_custom_types() -> dict[str, str]:
+    """Every custom type the PACKAGE declares, as ``{value: declaring file}``.
+
+    Derived from source, never from the folded set: a module-level
+    ``*_MESSAGE_TYPE`` / ``*_CUSTOM_TYPE`` assignment with a literal value. That
+    is how ``GATE_TIMEOUT_CUSTOM_TYPE`` and every other producer constant enters
+    the universe without this test keeping a list of modules — the enumeration
+    the folded set provably could not do for itself.
     """
-    from local_operator.harness.message_types import MODEL_VISIBLE_INJECTED_TYPES
+    import ast
+
+    import local_operator
+
+    root = Path(local_operator.__file__).parent
+    found: dict[str, str] = {}
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            value = node.value
+            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                continue
+            for target in node.targets:
+                name = getattr(target, "id", "")
+                if name.endswith(("_MESSAGE_TYPE", "_CUSTOM_TYPE")):
+                    found.setdefault(value.value, str(path.relative_to(root)))
+    return found
+
+
+def _renderer_compared_types() -> set[str]:
+    """Every custom-type value ``harness/render.py`` compares ``custom_type`` to.
+
+    The renderer's OWN source is the authority for what it can inject: each
+    ``message.custom_type == X`` / ``in (…)`` comparator is read out of the AST
+    and resolved through the module namespace, so an imported constant, an
+    inline literal and a family frozenset all arrive as the strings it matches.
+    """
+    import ast
+
+    from local_operator.harness import render
+
+    tree = ast.parse(Path(render.__file__).read_text(encoding="utf-8"))
+    found: set[str] = set()
+
+    def resolve(node: ast.AST) -> None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            found.add(node.value)
+        elif isinstance(node, ast.Name):
+            value = getattr(render, node.id, None)
+            if isinstance(value, str):
+                found.add(value)
+            elif isinstance(value, (frozenset, set, tuple, list)):
+                found.update(item for item in value if isinstance(item, str))
+        elif isinstance(node, (ast.Tuple, ast.Set, ast.List)):
+            for element in node.elts:
+                resolve(element)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        left = node.left
+        if not (isinstance(left, ast.Attribute) and left.attr == "custom_type"):
+            continue
+        for comparator in node.comparators:
+            resolve(comparator)
+    return found
+
+
+def _renders_to_the_model(custom_type: str) -> bool:
+    """Does the REAL renderer emit this carried type as a user turn?"""
     from local_operator.harness.render import _default_convert_to_llm
     from local_operator.harness.types import CustomMessage
 
-    for custom_type in sorted(MODEL_VISIBLE_INJECTED_TYPES):
-        history: list[AgentMessage] = [
+    rendered = _default_convert_to_llm(
+        [CustomMessage(custom_type=custom_type, attribution="system", details=dict(_PROBE_DETAILS))]
+    )
+    return any(message.role == "user" for message in rendered)
+
+
+def test_the_folded_set_is_exactly_what_the_renderer_delivers() -> None:
+    """The carrier set is DERIVED from the renderer, in both directions.
+
+    The round-2 review's systemic half: the previous version of this test
+    iterated ``MODEL_VISIBLE_INJECTED_TYPES`` and asserted each member renders
+    (set → renderer), with two hardcoded names for the negatives. It was
+    therefore blind to a renderer arm the set never learned about — which is
+    exactly how ``gate_timed_out_unattended`` reached the model unfolded while
+    the notice claimed the path was in no user message.
+
+    Here the set is never its own witness. The universe is every custom type
+    the package DECLARES plus every value ``render.py`` compares ``custom_type``
+    against; each is driven through the real ``_default_convert_to_llm``; and
+    the types it emits as a user turn must equal the folded set exactly. Add a
+    carrier to the renderer without folding it and this fails on the name.
+    """
+    from local_operator.harness.message_types import MODEL_VISIBLE_INJECTED_TYPES
+
+    universe = set(_declared_custom_types()) | _renderer_compared_types()
+    carried = {name for name in universe if _renders_to_the_model(name)}
+
+    unfolded = sorted(carried - MODEL_VISIBLE_INJECTED_TYPES)
+    assert not unfolded, f"the renderer delivers these to the model unfolded: {unfolded}"
+    # The other direction: a member nothing declares or compares is a claim the
+    # renderer never backed, and it would make the corpus over-inclusive.
+    unbacked = sorted(MODEL_VISIBLE_INJECTED_TYPES - universe)
+    assert not unbacked, f"folded types no constant or renderer comparison declares: {unbacked}"
+    assert carried == set(MODEL_VISIBLE_INJECTED_TYPES)
+
+
+def test_a_gate_expiry_that_names_the_root_explains_it(home: Path, tmp_path: Path) -> None:
+    """Round-2 MAJOR: this carrier's path is COMPOSED, and it still explains.
+
+    The reviewer's reproducer, end to end: a parked gate expired unattended while
+    the history was being built, its row is in the history the judge is handed,
+    and the row's ``description`` carries the resolved path the model was told.
+    Before the fix this fired an event with ``unseen: ()`` and told the operator
+    the root appeared in no user message — false absence on a carrier sitting in
+    the very list passed in.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("build the thing at ~/desk"),
             CustomMessage(
-                custom_type=custom_type,
+                custom_type="gate_timed_out_unattended",
                 attribution="system",
                 details={
-                    "text": f"delivered by {custom_type}",
-                    "summary": f"delivered by {custom_type}",
-                    "status": "answered",
+                    "tool": "write",
+                    "description": "write to ~/squeeze/app.py",
+                    "kind": "approval",
+                    "waited_s": 86400,
                 },
-            )
-        ]
-        rendered = _default_convert_to_llm(history)
-        assert [message.role for message in rendered] == ["user"], custom_type
-        assert f"delivered by {custom_type}" in json.dumps(
-            [message.model_dump() for message in rendered]
-        ), custom_type
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert events == [], "a gate row the model was told about must explain the root"
 
-    for bookkeeping in ("divergence_notice", "session_credential_redaction"):
-        rendered = _default_convert_to_llm(
-            [CustomMessage(custom_type=bookkeeping, attribution="system", details={"text": "x"})]
-        )
-        assert rendered == [], bookkeeping
+
+def test_a_gate_row_about_another_root_leaves_the_claim_true(
+    home: Path, tmp_path: Path
+) -> None:
+    """The same carrier, NOT naming the root: the notice must still be honest.
+
+    Folding the type must not become a blanket excuse. When the gate row is
+    about somewhere else there is nothing to explain, the row fires, and it may
+    keep claiming the user messages were read — because they were.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=2,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("build the thing at ~/desk"),
+            CustomMessage(
+                custom_type="gate_timed_out_unattended",
+                attribution="system",
+                details={"tool": "write", "description": "write to ~/desk/notes.md"},
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
+    )
+    assert len(events) == 1
+    assert events[0].unseen == ()
+    assert "user_messages" in events[0].sources
+    text, _kind = divergence_notice(events[0].as_notice_payload())
+    assert "Not in the system prompt" in text
+    assert "could not be checked" not in text
 
 
 def test_unreadable_carriers_are_named_on_the_row(home: Path, tmp_path: Path) -> None:
@@ -1018,10 +1239,84 @@ def test_unreadable_carriers_are_named_on_the_row(home: Path, tmp_path: Path) ->
     assert len(events) == 1
     assert events[0].unseen == ("masked_text", "image_attachments", "compacted_history")
     text, _kind = divergence_notice(events[0].as_notice_payload())
+    # D9/D10: one sentence on the first sighting — the sources this judge read,
+    # then the carriers it could not — instead of a trailing "Could not check:"
+    # clause in the row's last cells.
     assert (
-        "Could not check: text masked before storage, image attachments, turns compacted away"
-        in text
+        "earlier tool output; text masked before storage, image attachments and turns "
+        "compacted away could not be checked"
+    ) in text
+
+
+def test_a_compaction_summary_is_a_carrier_the_model_wrote(home: Path, tmp_path: Path) -> None:
+    """MINOR-1: model-authored prose must not authorise the model's own path.
+
+    ``compaction_summary`` is a model's prose (``compaction/marker.py`` says so),
+    and it reaches the model as a user turn, so it is in the carrier set. Folding
+    it as an INSTRUCTION source would let a model that invented a root explain
+    its own next assertion with its own explanation — the laundering this module
+    forbids. It is disclosed as ``compacted_history`` instead, so the operator
+    learns the turns could not be checked rather than hearing nothing.
+    """
+    from local_operator.harness.types import CustomMessage
+
+    judge = _judge(home, tmp_path)
+    events = judge.observe_turn(
+        turn_index=4,
+        tool="write",
+        arguments={"path": "~/squeeze/app.py"},
+        messages=[
+            Message.user("review the tunnels MR"),
+            CustomMessage(
+                custom_type="compaction_summary",
+                attribution="system",
+                details={"summary": "the operator asked for ~/squeeze"},
+            ),
+        ],
+        system_blocks=["You are a personal assistant."],
     )
+    assert len(events) == 1, "the model's own summary must not silence the notice"
+    assert "compacted_history" in events[0].unseen
+    text, _kind = divergence_notice(events[0].as_notice_payload())
+    assert "turns compacted away could not be checked" in text
+
+
+def test_a_replaced_history_does_not_claim_sources_it_no_longer_holds(
+    home: Path, tmp_path: Path
+) -> None:
+    """MINOR-2: ``sources`` describes the CURRENT corpus, not the session's past.
+
+    Compaction hands the judge a different list object. ``_reset_corpus`` used to
+    keep the accumulated ``sources``, so a row claimed ``earlier_tool_output``
+    was checked while the replacement held no tool text at all — a claim the
+    record cannot support.
+    """
+    judge = _judge(home, tmp_path)
+    first_history: list[AgentMessage] = [
+        Message.user("hello"),
+        Message(role="tool", content=[TextContent(text="a listing from ~/other")]),
+    ]
+    judge.observe_turn(
+        turn_index=1,
+        tool="read",
+        arguments={"path": "~/novel/a"},
+        messages=first_history,
+        system_blocks=["You are a personal assistant."],
+    )
+    # A NEW list object is a replaced history (a compaction, a resume).
+    compacted: list[AgentMessage] = [Message.user("hello, compacted")]
+    events = judge.observe_turn(
+        turn_index=9,
+        tool="write",
+        arguments={"path": "~/novel/b"},
+        messages=compacted,
+        system_blocks=["You are a personal assistant."],
+    )
+    assert len(events) == 1
+    assert "earlier_tool_output" not in events[0].sources
+    assert "user_messages" in events[0].sources
+    text, _kind = divergence_notice(events[0].as_notice_payload())
+    assert "earlier tool output" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -1029,33 +1324,40 @@ def test_unreadable_carriers_are_named_on_the_row(home: Path, tmp_path: Path) ->
 # ---------------------------------------------------------------------------
 
 
-def test_a_repeated_miss_searches_only_the_chunks_appended_since(
+def test_a_repeated_miss_is_bounded_by_the_announced_root_short_circuit(
     home: Path, tmp_path: Path
 ) -> None:
-    """The corpus is append-only chunks with a per-root cursor, and it is used.
+    """The burst is bounded by the CALLER, not by a per-root cursor.
 
-    White-box on purpose: progress in wall-clock time would make this a flaky
-    benchmark, and the property that matters is exact — a root that missed over
-    ``chunks[:n]`` must not read ``chunks[:n]`` again when one tool result is
-    appended.
+    Round 2 measured one ``_is_explained`` call across five turns: once a root
+    is registered, ``_observe_turn`` skips the search entirely, and once it is
+    explained it is memoised. A per-root cursor of "how far I searched" was
+    therefore unreachable state that read as load-bearing, so it is gone; this
+    pins what actually bounds the cost.
     """
     judge = _judge(home, tmp_path)
+    history: list[AgentMessage] = [Message.user("hello")]
     judge.observe_turn(
-        turn_index=1,
-        tool="read",
-        arguments={"path": "~/novel/a"},
-        messages=[Message.user("hello"), Message(role="tool", content=[TextContent(text="ok")])],
+        turn_index=1, tool="read", arguments={"path": "~/novel/a"}, messages=history
     )
-    before = len(judge._chunks)
-    assert judge._miss_at["novel"] == before
+    calls = 0
+    original = judge._is_explained
 
-    # A previously-scanned chunk that WOULD match: re-reading it would flip the
-    # verdict, so the verdict staying False proves it was not re-read.
-    judge._chunks[0] = "novel"
-    assert judge._is_explained("~/novel") is False
+    def counted(root: str) -> bool:
+        nonlocal calls
+        calls += 1
+        return original(root)
 
-    judge._chunks.append("novel")
-    assert judge._is_explained("~/novel") is True
+    judge._is_explained = counted  # type: ignore[method-assign]
+    for turn in range(2, 6):
+        history = [*history, Message(role="tool", content=[TextContent(text=f"out {turn}")])]
+        judge.observe_turn(
+            turn_index=turn,
+            tool="read",
+            arguments={"path": f"~/novel/f{turn}"},
+            messages=history,
+        )
+    assert calls == 0, "a root this session announced is never re-searched"
 
 
 def test_an_announced_root_is_not_rescanned_on_every_mention(home: Path, tmp_path: Path) -> None:
@@ -1081,7 +1383,6 @@ def test_an_announced_root_is_not_rescanned_on_every_mention(home: Path, tmp_pat
     # because a root already in ``_roots`` never reaches ``_is_explained``.
     assert len(judge._events) - seen == 1
     assert judge._roots["~/squeeze"].rows == MAX_ROWS_PER_ROOT
-
 
 # ---------------------------------------------------------------------------
 # The turn index under compaction (code review NIT-1)

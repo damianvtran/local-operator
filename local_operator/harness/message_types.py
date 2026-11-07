@@ -630,15 +630,21 @@ DIVERGENCE_NOTICE_MESSAGE_TYPE = "divergence_notice"
 #: renderer never injects would make the corpus over-inclusive, which costs at
 #: most a missed notice; the reverse — a carrier the renderer injects that is
 #: absent here — is false absence, the one error this list exists to prevent.
-#: ``tests/unit/test_divergence.py`` drives every member through the real
-#: renderer, and every type this module knows that is NOT a member through it
-#: too (it must render nothing), so the two cannot drift silently.
+#: ``tests/unit/test_divergence.py`` DERIVES the carrier set from the renderer
+#: instead of asserting this set against itself: every custom type ``render.py``
+#: compares ``custom_type`` against, plus every ``*_MESSAGE_TYPE`` /
+#: ``*_CUSTOM_TYPE`` constant the package declares, is driven through the real
+#: ``_default_convert_to_llm``, and the resulting carriers must equal this set
+#: exactly. A type added to the renderer and forgotten here fails that sweep;
+#: an earlier version asserted the set against itself and could see neither.
 #:
-#: ``wake_prompt``, ``monitor_prompt`` and ``job_result`` are spelled out rather
-#: than imported: their constants live in ``harness/wake.py``,
-#: ``monitors/spec.py`` and ``harness/jobs.py``, and this module is the
+#: ``wake_prompt``, ``monitor_prompt``, ``job_result`` and
+#: ``gate_timed_out_unattended`` are spelled out rather than imported: their
+#: constants live in ``harness/wake.py``, ``monitors/spec.py``,
+#: ``harness/jobs.py`` and ``harness/approval.py``, and this module is the
 #: dependency-free leaf those imports would violate (the same reason the module
-#: docstring gives for it existing). The same test pins them.
+#: docstring gives for it existing). The same sweep pins them through the
+#: renderer, which imports each from its owner.
 MODEL_VISIBLE_INJECTED_TYPES = frozenset(
     {
         "session_state",
@@ -646,6 +652,13 @@ MODEL_VISIBLE_INJECTED_TYPES = frozenset(
         "wake_prompt",
         "monitor_prompt",
         "job_result",
+        # The gate-expiry row the model reads. Composed by the renderer from
+        # ``details["tool"]`` + ``details["description"]`` rather than a ``text``
+        # field, so a folding pass that only knew ``text``/``summary`` read
+        # nothing from it — and then told the operator the path it named was in
+        # no user message. The ONE carrier the derived sweep found still
+        # missing (code review round 2, MAJOR-1).
+        "gate_timed_out_unattended",
         # A compaction MARKER: its summary (``details["summary"]``) is injected
         # as a user turn and may name a root the model then acts in. Found by
         # the renderer-agreement test rather than by inspection — the corpus was
