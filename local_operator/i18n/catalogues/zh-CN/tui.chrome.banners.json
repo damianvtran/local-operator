@@ -1,0 +1,18 @@
+{
+  "tui.chrome.banners.body_approval": "等待审批",
+  "tui.chrome.banners.body_ask": "等待你的回答",
+  "tui.chrome.banners.body_background": "你在另一个会话中",
+  "tui.chrome.banners.body_background_digest": "打开会话侧栏（Ctrl+B）查看",
+  "tui.chrome.banners.body_complete": "任务完成",
+  "tui.chrome.banners.body_error": "因错误而停止",
+  "tui.chrome.banners.body_interrupted": "未完成即停止",
+  "tui.chrome.banners.body_update": "有智能体标记了更新",
+  "tui.chrome.banners.context_attention": "需要关注",
+  "tui.chrome.banners.context_complete": "已完成",
+  "tui.chrome.banners.context_input_required": "需要输入",
+  "tui.chrome.banners.context_interrupted": "已中断",
+  "tui.chrome.banners.context_mixed": "结果不一",
+  "tui.chrome.banners.context_retired": "已退役",
+  "tui.chrome.banners.digest_title": "{total, plural, other {{count}个会话已完成}}",
+  "tui.chrome.banners.fallback_title": "一个会话已完成"
+}

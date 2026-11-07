@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tui.chrome.banners",
+  "history_sha256": "a945e1fdfe24e71e03bcea1b5dfba14beb0e514282f74342e8543fb2234d5fc3",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.chrome.banners",
+      "source_sha256": "5db92af262dac02373b00db67066d78ea5993a0854e99c498bcde33068708766",
+      "context_sha256": "b7c18bc8554380c849b77286190eeb4789ef26e395563f9a55e6e55d578f89ed",
+      "target_sha256": "c494e04a362e8c4458c79c35910023c1f8ea7de6c7f312e305a65bbc31ac68e8",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "session": "fbf71547f35b",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-06",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (the coder inspected no harness route log)"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev task subagent, profile 'translation-auditor'), round 1; independent instance, distinct from every translator",
+        "session": "c555336aa1f0",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-06",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (the coder inspected no harness route log)",
+        "result": "clean-with-findings",
+        "findings": 10,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 5 minor, 5 nit",
+        "independent_from_translator": true,
+        "translator_session": "fbf71547f35b"
+      },
+      "status": "passed",
+      "note": "Single independent audit of the first-pass bytes (target_sha256 re-derived at write time): verdict clean-with-findings (0 blocker, 0 major, 5 minor, 5 nit), no remediation needed. docs/I18N.md step 3 says high-visibility/safety copy needs a SECOND independent audit; the doc does not define whether a keys legend or notification banners are high-visibility. No such classification is claimed and no second-audit approval is manufactured: this locale has ONE independent audit only. Evidence is the translators' and auditors' own reports (their commands and outputs), not coder-invented output. Verdict counts cover the locale's two namespaces together (tui.chrome.bindings and tui.chrome.banners), not this namespace alone. Unresolved minors/nits are deferred, not fixed (counts only; the coder was not given per-finding text). "
+    }
+  ]
+}
