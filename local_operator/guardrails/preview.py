@@ -44,11 +44,15 @@ from local_operator.guardrails.check import (
     BUILTIN_REFUSE_CREDENTIAL,
     BUILTIN_REFUSE_CRITICAL,
     DANGEROUS_DELETE_RULE,
+    FILE_DESTINATION_TOOLS,
     CallContext,
     GuardSettings,
+    _critical_text,
     _safe_text,
     _targets_text,
+    build_delete_case,
     builtin_branch,
+    evidence_write_verdict,
     read_settings,
     review_text,
     rule_block_text,
@@ -129,6 +133,13 @@ class PreviewReport:
     builtin_risk: str = ""
     builtin_targets: str = ""
     builtin_effect: str = ""
+    #: The built-in layer's own refusal text (CRITICAL / credential), byte for
+    #: byte what the checkpoint returns; for a judge branch, its denial shape.
+    builtin_text: str = ""
+    #: For a judge branch: the per-target facts and the evidence list the
+    #: judge would be shown (``check.build_delete_case``), so a preview names
+    #: the creating call the checkpoint would accept, or says there is none.
+    builtin_facts: tuple[str, ...] = ()
     #: The rule directories this preview actually loaded, so the report states its
     #: own basis instead of calling a candidate folder "the current rules".
     rule_dirs: tuple[str, ...] = ()
@@ -141,6 +152,15 @@ class PreviewReport:
                 f"built-in {DANGEROUS_DELETE_RULE}: risk={self.builtin_risk or 'LOW'} "
                 f"targets={self.builtin_targets} → {_EFFECT_WORDS[self.builtin_effect]}"
             )
+            for fact in self.builtin_facts:
+                lines.append(f"  {fact}")
+            if self.builtin_text:
+                prefix = (
+                    "on denial the agent sees: "
+                    if self.builtin_effect == BUILTIN_JUDGE
+                    else "the agent sees: "
+                )
+                lines.append(f"  {prefix}{self.builtin_text}")
         for index, entry in enumerate(self.rules):
             lines.append(f"matches {entry.name} ({entry.action}):")
             if entry.action == "review":
@@ -296,6 +316,8 @@ def preview_tool_call(
 
     verdict: Verdict | None = None
     effect = ""
+    builtin_text = ""
+    builtin_facts: tuple[str, ...] = ()
     if tool_name == "bash":
         command = args.get("command")
         if isinstance(command, str) and command.strip():
@@ -307,6 +329,28 @@ def preview_tool_call(
                 session_id=context.session_id,
             )
             effect = builtin_branch(verdict, critical_override=live.critical_override)
+            if effect == BUILTIN_REFUSE_CRITICAL:
+                builtin_text = _critical_text(verdict)
+            elif effect == BUILTIN_REFUSE_CREDENTIAL:
+                builtin_text = review_text(
+                    DANGEROUS_DELETE_RULE, "an unresolvable target", _targets_text(verdict)
+                )
+            elif effect == BUILTIN_JUDGE:
+                case = build_delete_case(verdict, context)
+                builtin_facts = (*case.facts, *case.evidence.describe())
+                if case.excluded:
+                    builtin_facts += (f"excluded as untrusted: {case.excluded}",)
+                builtin_text = review_text(
+                    DANGEROUS_DELETE_RULE, "<judge reason>", _targets_text(verdict)
+                )
+
+    elif tool_name in FILE_DESTINATION_TOOLS:
+        # The checkpoint refuses a write/edit of the guard's own evidence
+        # before any rule; report that same branch and text.
+        verdict = evidence_write_verdict(tool_name, args, context)
+        if verdict is not None:
+            effect = BUILTIN_REFUSE_CRITICAL
+            builtin_text = _critical_text(verdict)
 
     base: dict[str, Any] = {
         "tool": tool_name,
@@ -314,6 +358,8 @@ def preview_tool_call(
         "builtin_risk": verdict.risk.name if verdict is not None else "",
         "builtin_targets": _ranked_targets(verdict),
         "builtin_effect": effect,
+        "builtin_text": _safe_text(builtin_text),
+        "builtin_facts": tuple(_safe_text(f) for f in builtin_facts),
         "rule_dirs": tuple(str(path) for path in live.rules_dirs) if live.enabled else (),
     }
     if effect in _REFUSING:

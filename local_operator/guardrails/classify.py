@@ -28,18 +28,23 @@ from __future__ import annotations
 
 import enum
 import fnmatch
+import functools
 import os
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from local_operator.guardrails.resolve import Target, resolve_command
+from local_operator.guardrails.resolve import Creation, Target, resolve_command
 
 _STATE_DIRNAME = ".local-operator"
 _CONFIG_FILE = "config.yml"
 _SECRETS_DIRNAME = "secrets"
 _SESSIONS_DIRNAME = "sessions"
 _DESTROYING_OPS = frozenset({"delete", "move", "clean"})
+# Spelled here rather than imported: ``provenance`` imports this module.
+_LEDGER_DIRNAME = "guardrails"
+_LEDGER_FILENAME = "created.sqlite"
 
 
 class Risk(enum.IntEnum):
@@ -53,6 +58,10 @@ class RankedTarget:
     target: Target
     risk: Risk
     reason: str
+    #: What a refusal or preview names instead of ``path``: for a glob whose
+    #: matches were vouched for, the matches — not the directory the glob
+    #: lives in, which read as though ``$HOME`` itself were owned (QA Q5).
+    shown: str = ""
 
     @property
     def path(self) -> str:
@@ -173,6 +182,30 @@ def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
+@functools.lru_cache(maxsize=8)
+def _case_insensitive(probe: str) -> bool:
+    """Is the volume holding ``probe`` case-insensitive? Probed once per path
+    per process: does the case-swapped spelling of the nearest existing
+    ancestor resolve? Unknown → the platform default (APFS/HFS+ on darwin
+    are case-insensitive by default)."""
+    path = probe
+    while path not in ("", "/"):
+        flipped = path.swapcase()
+        if flipped != path and os.path.lexists(path):
+            return os.path.lexists(flipped)
+        path = os.path.dirname(path)
+    return sys.platform == "darwin"
+
+
+def _under_evidence(path: str, root: str) -> bool:
+    """``_under`` for the evidence check: case-folded on a case-insensitive
+    volume, where ``~/.LOCAL-OPERATOR/sessions`` IS the state root
+    (review round 9, MINOR-1)."""
+    if _under(path, root):
+        return True
+    return _case_insensitive(root) and _under(path.casefold(), root.casefold())
+
+
 def _is_ancestor_or_self(path: str, of: str) -> bool:
     return _under(of, path)
 
@@ -186,6 +219,10 @@ class _Protected:
     homes: set[str]
     own_session: set[str]
     own_scratchpad: set[str]
+    #: The provenance ledger(s) (``provenance.ledger_path``): CRITICAL to
+    #: overwrite or delete, because a session that could rewrite it could
+    #: claim any directory as its own creation.
+    ledger_files: set[str] = field(default_factory=set)
 
 
 def _protected(env: Mapping[str, str], scratchpad: str | None, session_id: str) -> _Protected:
@@ -245,6 +282,7 @@ def _build_protected(env: Mapping[str, str], scratchpad: str | None, session_id:
         homes=homes,
         own_session=own_session,
         own_scratchpad=own_pad,
+        ledger_files={os.path.join(s, _LEDGER_DIRNAME, _LEDGER_FILENAME) for s in states},
     )
 
 
@@ -260,11 +298,265 @@ def _pattern_reaches(pattern: str, protected: str) -> bool:
     return all(fnmatch.fnmatchcase(p, q) for p, q in zip(prot, pat, strict=False))
 
 
+#: The files the provenance checks READ as evidence (``guardrails/evidence.py``,
+#: ``provenance.py``): a session's transcript, its lineage and its ask store,
+#: matched per ``<state>/sessions/<id>/``. Any write to them — including an
+#: append — could forge a creating call, a child, or an operator's answer
+#: (review R1-MAJOR-1), so every op on them is CRITICAL.
+_EVIDENCE_FILES = ("transcript.jsonl", "origin.json", "asks.jsonl", "subagent-roster*.json")
+#: Matched case-insensitively (APFS/HFS+ are case-insensitive, so
+#: ``ORIGIN.JSON`` is the same file) and with sqlite's side files (review
+#: round 7, MINOR-2).
+_EVIDENCE_SUFFIXES = ("", "-wal", "-shm", "-journal")
+
+
+def _is_evidence_name(name: str) -> bool:
+    folded = name.casefold()
+    return any(
+        fnmatch.fnmatchcase(folded, f + suffix)
+        for f in _EVIDENCE_FILES
+        for suffix in _EVIDENCE_SUFFIXES
+    )
+
+
+_EVIDENCE_SAMPLES = {"subagent-roster*.json": "subagent-roster.v1.json"}
+
+
+def _evidence_reason(path: str, target: Target, prot: _Protected) -> str | None:
+    for state in prot.state_roots:
+        if _under(path, os.path.join(state, _LEDGER_DIRNAME)):
+            return "the guardrail's own records"
+        sessions = os.path.join(state, _SESSIONS_DIRNAME)
+        if not _under(path, sessions) or path == sessions:
+            continue
+        rel = path[len(sessions) + 1 :].split("/")
+        if len(rel) == 2 and _is_evidence_name(rel[1]):
+            return "a session's transcript, lineage or ask record"
+        if len(rel) == 1 and target.op in ("overwrite", "append"):
+            # Writing a directory INTO ``sessions/`` (``mv /tmp/x sessions/``)
+            # plants a session the lineage walk would read.
+            return "a session directory written in place"
+    return None
+
+
+def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -> str | None:
+    """Does ``target`` land in the guard's evidence?
+
+    Evidence = anything at or under ``<state>/sessions/`` outside this
+    session's own scratchpad, or under ``<state>/guardrails/`` (review
+    R2-MAJOR-1, QA Q6). The CALLER decides the rank by the touch's shape:
+    write-shaped → CRITICAL, an unknown program handed the path → HIGH
+    (R3-MAJOR-2; see ``resolve.Resolution.touched``). An
+    unresolvable part keeps the literal directory above it, so
+    ``sessions/$ID`` lands on ``sessions/`` and still counts.
+    """
+    path = target.path
+    if path is None:
+        return None
+    lexical = {path, target.pattern or path}
+    # Cheap prefilter: realpath/F_GETPATH only for words that could be there.
+    try:
+        lexical.add(os.path.realpath(path))
+    except OSError:
+        pass
+    if target.pattern is None and not any(
+        _SESSIONS_DIRNAME in p.casefold() or _LEDGER_DIRNAME in p.casefold() for p in lexical
+    ):
+        return None
+    for spelled in {s for p in lexical for s in _spellings(p)}:
+        for state in prot.state_roots:
+            if _under_evidence(spelled, os.path.join(state, _LEDGER_DIRNAME)):
+                return "the guardrail's own records"
+            if _under_evidence(spelled, os.path.join(state, _SESSIONS_DIRNAME)) and not any(
+                _under_evidence(spelled, pad) for pad in prot.own_scratchpad
+            ):
+                return "session state (transcripts, lineage, ask stores)"
+        if target.pattern is not None:
+            prefix = target.path or ""
+            # A glob cannot climb out of its literal directory (``*`` never
+            # crosses ``/``), so one rooted in this session's scratchpad stays
+            # there.
+            if prefix and any(_under_evidence(prefix, pad) for pad in prot.own_scratchpad):
+                return None
+            for state in prot.state_roots:
+                if _pattern_hits(
+                    target.pattern,
+                    os.path.join(state, _LEDGER_DIRNAME),
+                    fold=_case_insensitive(state),
+                ):
+                    return "the guardrail's own records"
+                if _pattern_hits(
+                    target.pattern,
+                    os.path.join(state, _SESSIONS_DIRNAME),
+                    fold=_case_insensitive(state),
+                ):
+                    return "session state (transcripts, lineage, ask stores)"
+            # Lexically elsewhere — but a match may be a SYMLINK into session
+            # state (``ln -s ../../<child> $P/m`` then ``$P/m*/origin.json``),
+            # so expand it now and judge each match by its realpath (review
+            # round 7). Over the cap there is no way to know: protected.
+            return _glob_matches_evidence(target.pattern, prot, globstar=globstar)
+    return None
+
+
+#: Bounds on the check-time glob expansion: matches, and directory entries
+#: visited (a ``**`` over ``$HOME`` must not walk the disk inside a tool
+#: call). Past either bound there is no way to know: protected.
+_GLOB_CAP = 2000
+_GLOB_WALK_CAP = 20_000
+
+
+def _expand_glob(pattern: str, *, globstar: bool = False) -> list[tuple[str, bool]] | None:
+    """Matches of ``pattern`` as BASH would expand it, or ``None`` past a bound.
+
+    Bash semantics, because that is what the command will do (review round
+    8, MAJOR-1: an any-depth ``**`` walked whole repositories, cost up to
+    1.7 s per call and ranked ordinary ``**/*.py`` commands HIGH/CRITICAL):
+
+    * ``**`` is ``*`` — one level — unless the command may make it
+      recursive (``resolve._RECURSIVE_GLOB_RE``); then it is any depth, following directory links
+      once per real directory.
+    * Dot entries ALWAYS match (review round 9): bash hides them unless
+      ``dotglob``/``GLOBIGNORE``/``nocaseglob``-style options say otherwise,
+      and tracking every such option is a losing game. One level of dot
+      entries is cheap; the safety walk is a superset of what bash expands.
+
+    Hand-rolled rather than ``glob.glob`` because that bounds only results,
+    not the walk. Each match carries whether ANY component on its way was a
+    symlink: only those need a ``realpath`` (which costs ~8 lstats each and
+    dominated the check on an 800-match ``**/*.py``).
+    """
+    parts = [c for c in pattern.split("/") if c]
+    found: list[tuple[str, bool]] = []
+    visited = 0
+    walked: set[str] = set()
+    stack: list[tuple[str, int, bool]] = [("/", 0, False)]
+    while stack:
+        base, k, linked = stack.pop()
+        if k == len(parts):
+            found.append((base, linked))
+            if len(found) > _GLOB_CAP:
+                return None
+            continue
+        part = parts[k]
+        if not any(ch in part for ch in "*?["):
+            nxt = os.path.join(base, part)
+            if os.path.lexists(nxt):
+                stack.append((nxt, k + 1, linked or os.path.islink(nxt)))
+            continue
+        deep = part == "**" and globstar
+        if deep:
+            real = os.path.realpath(base)
+            if real in walked:
+                continue
+            walked.add(real)
+        try:
+            entries = list(os.scandir(base))
+        except OSError:
+            continue
+        visited += len(entries)
+        if visited > _GLOB_WALK_CAP:
+            return None
+        if deep:
+            # ``**`` = zero or more directories: try the NEXT part against
+            # these same entries (no second scan), and descend into each
+            # directory still inside ``**``.
+            nxt_part = parts[k + 1] if k + 1 < len(parts) else None
+            if nxt_part is None:
+                found.append((base, linked))
+            for e in entries:
+                via = linked or e.is_symlink()
+                if nxt_part is not None and _component_matches(e.name, nxt_part):
+                    stack.append((e.path, k + 2, via))
+                try:
+                    if e.is_dir():
+                        stack.append((e.path, k, via))
+                except OSError:
+                    continue
+            continue
+        match_part = "*" if part == "**" else part
+        for e in entries:
+            if fnmatch.fnmatchcase(e.name, match_part):
+                stack.append((e.path, k + 1, linked or e.is_symlink()))
+    return found
+
+
+def _component_matches(name: str, part: str) -> bool:
+    if not any(ch in part for ch in "*?["):
+        return name == part
+    return fnmatch.fnmatchcase(name, part)
+
+
+#: The reason for a glob past the expansion bounds. Unknowable, not a proven
+#: write into evidence: ranked HIGH even where the target is write-shaped
+#: (review round 8, MAJOR-1).
+GLOB_TOO_WIDE = "a glob too wide to check against session state"
+
+
+def _glob_matches_evidence(pattern: str, prot: _Protected, *, globstar: bool = False) -> str | None:
+    matches = _expand_glob(pattern, globstar=globstar)
+    if matches is None:
+        return GLOB_TOO_WIDE
+    for match, linked in matches:
+        # No link on the way: the lexical path IS the real one, and the
+        # caller already checked it lexically.
+        if not linked:
+            continue
+        real = os.path.realpath(match)
+        for state in prot.state_roots:
+            if _under_evidence(real, os.path.join(state, _LEDGER_DIRNAME)):
+                return "the guardrail's own records (through a link)"
+            if _under_evidence(real, os.path.join(state, _SESSIONS_DIRNAME)) and not any(
+                _under_evidence(real, pad) for pad in prot.own_scratchpad
+            ):
+                return "session state (through a link)"
+    return None
+
+
+def _pattern_hits(pattern: str, root: str, *, fold: bool = False) -> bool:
+    """Could ``pattern`` match ``root``, an ancestor of it, or anything under it?
+
+    Component-wise over the shared length, so ``~/.local-operator/sess*/x/f``
+    reaches ``sessions`` (``_pattern_reaches`` alone stops at patterns no
+    longer than ``root``). Over-matches dotfiles on purpose: fail closed.
+    """
+    if fold:
+        pattern, root = pattern.casefold(), root.casefold()
+    pat = [c for c in pattern.split("/") if c]
+    prot = [c for c in root.split("/") if c]
+    return all(fnmatch.fnmatchcase(p, q) for p, q in zip(prot, pat, strict=False))
+
+
+def _evidence_by_pattern(target: Target, prot: _Protected) -> str | None:
+    if target.pattern is None:
+        return None
+    for state in prot.state_roots:
+        guard_dir = os.path.join(state, _LEDGER_DIRNAME, "x")
+        if _pattern_reaches(target.pattern, guard_dir):
+            return f"glob {target.pattern} reaches the guardrail's own records"
+        for name in _EVIDENCE_FILES:
+            sample = _EVIDENCE_SAMPLES.get(name, name)
+            pat = [c for c in target.pattern.split("/") if c]
+            tmpl = [c for c in os.path.join(state, _SESSIONS_DIRNAME, "*", sample).split("/") if c]
+            if len(pat) == len(tmpl) and all(
+                t == "*" or fnmatch.fnmatchcase(t, p) or p == "*"
+                for p, t in zip(pat, tmpl, strict=True)
+            ):
+                return f"glob {target.pattern} reaches session transcripts or lineage"
+    return None
+
+
 def _critical_reason(path: str, target: Target, prot: _Protected) -> str | None:
     destroying = target.op in _DESTROYING_OPS
+    evidence = _evidence_reason(path, target, prot)
+    if evidence is not None:
+        return evidence
     for cfg in prot.config_files:
         if path == cfg:
             return "the harness config file"
+    for ledger in prot.ledger_files:
+        if path == ledger:
+            return "the guardrail creation ledger"
     for sec in prot.secrets_dirs:
         if _under(path, sec):
             return "the encrypted secret store"
@@ -285,15 +577,24 @@ def _critical_reason(path: str, target: Target, prot: _Protected) -> str | None:
     for home in prot.homes:
         if _is_ancestor_or_self(path, home):
             return "the home directory" if path == home else "an ancestor of the home directory"
+    for ledger in prot.ledger_files:
+        # After the state root: deleting ``<state>/guardrails`` is named for
+        # what it destroys, and the state root itself keeps its own reason.
+        if _is_ancestor_or_self(path, ledger):
+            return "the guardrail creation ledger"
     return None
 
 
 def _critical_by_pattern(target: Target, prot: _Protected) -> str | None:
     if target.pattern is None:
         return None
+    evidence = _evidence_by_pattern(target, prot)
+    if evidence is not None:
+        return evidence
     candidates = [
         *prot.config_files,
         *prot.secrets_dirs,
+        *prot.ledger_files,
         *(prot.state_roots if target.op in _DESTROYING_OPS else ()),
         *(prot.install_roots if target.op in _DESTROYING_OPS else ()),
         *(prot.homes if target.op in _DESTROYING_OPS else ()),
@@ -305,6 +606,10 @@ def _critical_by_pattern(target: Target, prot: _Protected) -> str | None:
 
 
 def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
+    if target.op == "append":
+        # An append destroys nothing; it is ranked only as forged evidence,
+        # which ``_critical_reason`` already decided.
+        return None
     if target.op == "clean" and target.program == "git clean":
         return "git clean removes untracked work"
     if any(_under(path, own) for own in prot.own_session):
@@ -348,7 +653,7 @@ def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
     return None
 
 
-def _rank(target: Target, prot: _Protected) -> RankedTarget:
+def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarget:
     path = target.path
     notes: list[str] = list(target.empty)
     if target.climbs:
@@ -390,6 +695,16 @@ def _rank(target: Target, prot: _Protected) -> RankedTarget:
         return RankedTarget(target, Risk.LOW, "fresh temporary path ($(mktemp))")
     if notes and not in_own_pad:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes))
+    if target.worktree_remove and not target.forced and target.pattern is None:
+        # ``git worktree remove`` without --force: git refuses tracked or
+        # untracked changes itself, but deletes IGNORED files and a detached
+        # HEAD's unreferenced commits. ``worktree_state`` proves those absent
+        # (only regenerable ignored output, HEAD reachable from a ref). Anything
+        # else (dirty, unknown, not linked) takes the ordinary ranking below.
+        from local_operator.guardrails.provenance import worktree_state
+
+        if worktree_state(path) == "clean":
+            return RankedTarget(target, Risk.LOW, "a clean linked git worktree")
     for spelling in _spellings(path):
         reason = _high_reason(spelling, target, prot)
         if reason is not None:
@@ -403,10 +718,68 @@ def _rank(target: Target, prot: _Protected) -> RankedTarget:
                 # HIGH, because their contents are the data a confused
                 # predicate would destroy.
                 return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
+            owned = _owned_by_session(target, path, prot, session_id)
+            if owned is not None:
+                reason, matches = owned
+                shown = ""
+                if target.pattern is not None:
+                    shown = ", ".join(matches[:4]) + (
+                        f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
+                    )
+                return RankedTarget(target, Risk.LOW, reason, shown)
             return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     return RankedTarget(target, Risk.LOW, "ordinary path")
+
+
+def _owned_by_session(
+    target: Target, path: str, prot: _Protected, session_id: str
+) -> tuple[str, list[str]] | None:
+    """A LOW reason when this session created what ``target`` destroys, else ``None``.
+
+    Only reached for a target already ranked HIGH by ``_high_reason`` and
+    already cleared of CRITICAL ancestry, credential derivation and opaque or
+    empty parts (those returned earlier in ``_rank``). The ledger
+    (``provenance.owned_record``) must cover the target by realpath AND inode.
+    Still HIGH: anything in the state root (another session's files), a
+    primary checkout this session did not clone, and a glob with any on-disk
+    match the session does not own (or no match at all — then it destroys
+    nothing the ledger can vouch for).
+    """
+    if not session_id or target.credential_derived or target.opaque or target.unknown_cwd:
+        return None
+    from local_operator.guardrails import provenance
+
+    if target.pattern is not None:
+        import glob as _glob
+
+        try:
+            matches = _glob.glob(target.pattern)
+        except (OSError, ValueError):
+            return None
+        if not matches:
+            return None
+        paths = matches
+    else:
+        paths = [path]
+    first: str | None = None
+    for candidate in paths:
+        real = os.path.realpath(candidate)
+        if any(_under(real, st) for st in prot.state_roots):
+            return None
+        record = provenance.owned_record(real, session_id)
+        if record is None:
+            return None
+        if provenance.is_primary_checkout(real) and not (
+            record.kind == "clone" and record.path == real
+        ):
+            return None
+        first = first or record.describe()
+    if first is None:
+        return None
+    reason = first if len(paths) == 1 else f"{len(paths)} matches, all {first}"
+    return reason, sorted(paths)
 
 
 #: ``*.log``, ``build-*.tmp``: a last component that ends in a literal
@@ -437,11 +810,59 @@ def classify_targets(
     env: Mapping[str, str],
     scratchpad: str | None,
     session_id: str = "",
+    touched: Sequence[Target] = (),
+    created: Sequence[Creation] = (),
+    blind: Sequence[str] = (),
+    globstar: bool = False,
 ) -> Verdict:
-    if not targets and not opaque_reasons:
+    prot = _protected(env, scratchpad, session_id) if (targets or touched or created) else None
+    evidence_hits: list[RankedTarget] = []
+    if prot is not None:
+        # Write-shaped: redirections and known writers' destinations
+        # (``touched`` op ``write``), plus everything the resolver itself
+        # destroys or creates. Those plant or forge evidence → CRITICAL. A
+        # path merely handed to an unknown program (op ``touch``) is HIGH so
+        # the judge or the operator can lift it (review R3-MAJOR-2).
+        writes = (
+            [t for t in touched if t.op != "touch"]
+            + list(targets)
+            + [Target(path=c.path, op="write", program=c.kind) for c in created]
+        )
+        for t in writes:
+            reason = _touch_reason(t, prot, globstar=globstar)
+            if reason is not None:
+                risk = Risk.HIGH if reason == GLOB_TOO_WIDE else Risk.CRITICAL
+                evidence_hits.append(RankedTarget(t, risk, reason))
+        critical = {h.target.path for h in evidence_hits}
+        for t in touched:
+            # A path already refused as a write needs no second, HIGH row.
+            if t.op != "touch" or t.path in critical:
+                continue
+            reason = _touch_reason(t, prot, globstar=globstar)
+            if reason is not None:
+                evidence_hits.append(
+                    RankedTarget(t, Risk.HIGH, f"{reason}, handed to {t.program or 'a program'}")
+                )
+    for name in dict.fromkeys(blind):
+        evidence_hits.append(
+            RankedTarget(
+                Target(path=None, op="touch", program=name, unknown_cwd=True),
+                Risk.HIGH,
+                f"names {name} while the working directory cannot be determined",
+                shown=name,
+            )
+        )
+    if not targets and not opaque_reasons and not evidence_hits:
         return Verdict(Risk.LOW)
-    prot = _protected(env, scratchpad, session_id)
-    ranked = [_rank(t, prot) for t in targets]
+    prot = prot or _protected(env, scratchpad, session_id)
+    ranked = [_rank(t, prot, session_id) for t in targets]
+    # An append that is not forging evidence is not a destructive target at all:
+    # drop it so it adds no "destructive" annotation and no target text.
+    ranked = [r for r in ranked if not (r.target.op == "append" and r.risk is Risk.LOW)]
+    # One row per path: a redirection is both a destroyed target and a
+    # touched path, and the refusal should not name it twice.
+    seen = {(r.target.path, r.risk) for r in ranked}
+    ranked.extend(h for h in evidence_hits if (h.target.path, h.risk) not in seen)
     risk = max((r.risk for r in ranked), default=Risk.LOW)
     if opaque_reasons:
         risk = max(risk, Risk.HIGH)
@@ -466,4 +887,8 @@ def classify_bash(
         env=env,
         scratchpad=scratchpad,
         session_id=session_id,
+        touched=resolution.touched,
+        created=resolution.created,
+        blind=resolution.blind,
+        globstar=resolution.globstar,
     )

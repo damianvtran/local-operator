@@ -14915,6 +14915,25 @@ class Session:
         ref = self._parent_session_ref
         return ref() if ref is not None else None
 
+    def _ancestor_session_ids(self) -> tuple[str, ...]:
+        """Parent, grandparent ... ids, nearest first (guardrail creation ledger).
+
+        Walks the LIVE parent objects; the stored ``_parent_session_id`` still
+        answers the first hop for a resumed child whose parent object is gone.
+        """
+        out: list[str] = []
+        first = str(self._parent_session_id or "")
+        if first:
+            out.append(first)
+        parent = self._parent_session
+        while parent is not None and len(out) < 16:
+            pid = str(getattr(parent, "_parent_session_id", "") or "")
+            if not pid or pid in out:
+                break
+            out.append(pid)
+            parent = getattr(parent, "_parent_session", None)
+        return tuple(out)
+
     def _absorb_child_channel_spend(self, record: ChannelSpendRecord) -> None:
         """Fold a LIVE child's channel record into this session's children block.
 
@@ -19831,6 +19850,7 @@ class Session:
                 # ``_guard_judge``) — deliberately not ``complete_aside``, which
                 # ships the live conversation the judge must not be primed by.
                 guard_judge=self._guard_judge,
+                guard_judge_forked=self._guard_judge_forked,
                 guard_override_authorised=lambda: frozenset(self._guard_authorised_loosenings),
                 # The request render, not the bare one: the stored-location
                 # hints for the turn's images ride the wire from HERE and from
@@ -20961,6 +20981,7 @@ class Session:
             # prompt block itself (children inherit the parent's).
             injected_guidance=getattr(self._system_blocks_provider, "injected_guidance", ()),
             session_id=self._session_id,
+            ancestor_session_ids=self._ancestor_session_ids(),
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
             # On a CHILD this resolves to the parent's title (see
@@ -26862,6 +26883,33 @@ class Session:
             update={"purpose": "guardrail"}
         )
         return await self._drain_errand(request)
+
+    async def _guard_judge_forked(self, system: str, prompt: str) -> str:
+        """The dangerous-delete judge as a fork of this session's prefix.
+
+        WHY A FORK NOW. The context-free judge could not tell an agent's own
+        scratch from the operator's data, so it refused cleanups of rig
+        directories the session had just made. ``complete_aside`` reads the
+        live system blocks and the wire-legal message list (dangling tool calls
+        paired) and writes nothing, so the fork shares the turn's cached prefix
+        and sees the history. That history may contain injected text, so the
+        appended instruction says only the evidence list and the operator
+        blocks count, and the checkpoint VERIFIES every ALLOW's citations
+        (``guardrails/check.py``): a persuaded judge still cannot pass a delete
+        without a real creating call. Any fork failure falls back to the
+        context-free errand.
+        """
+        if not getattr(self._context, "messages", None):
+            return await self._guard_judge(system, prompt)
+        try:
+            return await self.complete_aside(
+                [Message.user(f"{system}\n\n{prompt}")], aside_instruction=False
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the context-free judge is the fallback
+            logger.warning("guardrail forked judge failed; using the context-free judge")
+            return await self._guard_judge(system, prompt)
 
     def _errand_request(self, model: ModelSpec, system: str, prompt: str) -> ChatRequest:
         """The errand's request shape, in ONE place.

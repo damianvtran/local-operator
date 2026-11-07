@@ -2158,6 +2158,10 @@ class ToolContext(BaseModel):
         default=None, exclude=True, repr=False
     )
     session_id: str = ""
+    #: Parent, grandparent ... of a subagent session, nearest first. The
+    #: guardrail creation ledger writes a child's creations under these ids
+    #: too, so a parent may clean up after its subagents.
+    ancestor_session_ids: tuple[str, ...] = ()
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
     session_name: str = ""
@@ -3906,6 +3910,14 @@ class LoopConfig(BaseModel):
     # run. ``None`` (a host without wiring) means every such call is BLOCKED —
     # fail closed; CRITICAL calls are refused without consulting it at all.
     guard_judge: Callable[[str, str], Awaitable[str]] | None = Field(default=None, exclude=True)
+    #: The dangerous-delete judge as a FORK of the session's stable prefix
+    #: (``Session._guard_judge_forked``): it sees the history it judges and
+    #: reuses the prompt cache. ``None`` -> the context-free ``guard_judge``.
+    #: Its ALLOW is only a claim; ``guardrails/check.py`` verifies the cited
+    #: evidence, so injected text in the prefix cannot pass a delete by itself.
+    guard_judge_forked: Callable[[str, str], Awaitable[str]] | None = Field(
+        default=None, exclude=True
+    )
     # Which guardrail LOOSENINGS (``guardrails.check.LOOSENING_KEYS``) an
     # operator — not the model — authorised in this process (``harness.approval.
     # loosening_is_authorised``). Read per call; ``None`` means none. A bare

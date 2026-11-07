@@ -36,6 +36,99 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined. A target derived from a secret is refused even with an approved
   override: consent cannot be shown for a secret you should never see.
+  Also LOW: a HIGH path this session (or a subagent it launched) recorded
+  creating, and `git worktree remove <path>` of a clean linked worktree.
+
+## Cleaning up what you made
+
+Deleting your own rig directories and worktrees works without asking, through
+three routes the checkpoint can verify. Everything CRITICAL is still refused.
+
+- **Creation ledger.** After every bash call the loop records the directories it
+  created: `mkdir [-p]` (the topmost new component), `mktemp -d TEMPLATE`,
+  `git worktree add <path>`, `git clone <url> [<dir>]`. Rows live in
+  `<config_dir>/guardrails/created.sqlite`, keyed by session id + realpath +
+  inode, written under the creator and every ancestor session, so a parent may
+  delete what its subagents made. Overwriting or deleting the ledger is CRITICAL.
+  A later delete of exactly that path, or anything inside it, ranks LOW —
+  unless another session's ledger row sits at or under the target, or the
+  target is or holds a git work tree or repository this session's ledger does
+  not record itself (an owned `.worktrees/` does not own a sibling's worktree;
+  the session's own `git worktree add`/`git clone` leaf is recorded). A glob
+  ranks LOW only when every current match is recorded. A primary checkout stays
+  HIGH unless this session cloned it. `$HOME`, the state root and the protected
+  roots are never recorded.
+- **Clean linked worktree.** `git worktree remove <exact path>` (no `--force`)
+  is LOW when the path is a registered linked worktree with no tracked or
+  untracked change, no ignored entry beyond regenerable output (`node_modules`,
+  `.venv`, `__pycache__`, `build`, `dist` …) and no repository nested inside
+  that output, and HEAD on a branch or in some
+  ref. Anything else takes the ordinary ranking. Prefer this to
+  `rm -rf .worktrees/<name>`. A worktree this session created is its own:
+  through the ledger it ranks LOW even dirty or with `--force`, so commit or
+  push what you want to keep before removing your own tree.
+- **History evidence.** A HIGH delete goes to a judge forked from the session's
+  own prefix. Before it runs, the checkpoint extracts real tool calls: this
+  session's from the harness's memory, its descendants' (found by `origin.json`
+  parent pointers, created after it) from their transcripts. A call that is not
+  read-only vouches for a directory born inside its window when its command, or
+  a script the same session wrote and the call ran, names it (its basename, or
+  the literal prefix that produced it, such as `qa-r5-dg-` in
+  `f"qa-r5-dg-{os.getpid()}"`), or its output prints the directory's full path.
+  Descendants come from the harness-written lineage registry
+  (`<config_dir>/guardrails/lineage.jsonl`, appended when the harness spawns a
+  subagent or opens an agent session). `origin.json` parent pointers are only a
+  migration fallback for child directories born before that registry file was:
+  a directory planted later is born after it. That is a narrowing, not a seal —
+  macOS `utimes` can move a birth time backwards. Symlinked session directories,
+  transcripts and `origin.json` files are never read.
+  Writes into `<config_dir>/sessions/` (outside your own scratchpad) or
+  `<config_dir>/guardrails/` are CRITICAL: every redirection (`>`, `>>`, `>|`,
+  `&>`, `>&`), the destination of a known writer (`cp`, `mv`, `rsync`, `ditto`,
+  `install`, `ln`, `tar -x -C`, `unzip -d`, `git clone`, `git worktree add`,
+  `git log/show/diff --output`, `mkdir`, `touch`, `truncate`, `dd of=`, `tee`,
+  `sed -i`, `perl -i`, `sqlite3` without `-readonly`) and any `rm`/`rmdir`/
+  `unlink` or `rsync --delete` there. Reading is not writing: sources of `cp`,
+  `rsync`, `zip` and `tar -c` are fine, as are `ls`, `cat`, `head`, `tail`,
+  `wc`, `stat`, `du`, `grep`, `jq`, `find` (no `-delete`/`-exec`) and
+  `git status/log/show/diff/rev-parse/ls-files` without `--output`, `-c`,
+  `--config-env`, `--ext-diff`, `--textconv`, `--git-dir`/`--work-tree`, a
+  pager flag or a `GIT_*`/`PAGER` assignment. A path there handed to any other
+  program (`python3 ana.py <transcript>`, `awk`, `sort`) ranks HIGH and goes
+  to the context-free judge, which can let a read through. That HIGH is a
+  backstop over the writer list: any command that is not strictly read-only
+  and mentions those trees anywhere — an operand, a glued flag value, a path
+  inside a quoted script or pager setting, or a working directory there — is
+  at least HIGH, so a misparsed writer costs a judge call, never a silent
+  LOW. A glob counts when it could reach those trees (`~/.local-operator/sess*`).
+  `sed`, `sqlite3 -readonly`, `rg`, `less` and `file` are not trusted there
+  (`w`, `.once`/`.shell`, `--pre`, `-o`, `-C` all write or run something), so
+  they rank HIGH when they name session state. Under a working directory that
+  cannot be determined (`cd $(…)`, a glob `cd`, `CDPATH`), naming an evidence
+  file (`origin.json`, `transcript.jsonl` …) is HIGH. The `write`, `edit` and `browser` (screenshot/recording `path`)
+  tools refuse those files the same way. An interpreter that computes the path
+  itself (`python -c`, `node -e`) is the documented ceiling, as for any
+  interpreter delete. The judge must answer
+  `ALLOW evidence=<ids>`, `ALLOW ask=<id>` or `ALLOW operator`. The checkpoint
+  re-verifies each citation and refuses an ALLOW that does not cover every target.
+
+**Who can authorise a delete.** Only the operator: a message they typed in a
+session they opened (one the harness knows no parent or opener for — no
+in-process parent, no lineage-registry row, no `origin.json`; a missing or
+symlinked `origin.json` alone never makes a session operator-opened), or their answer to `ask` as recorded in the ask store
+(`sessions/<id>/asks.jsonl`, answered on the terminal, desktop or phone). In a
+subagent or an agent-opened workstream the user rows are the delegating agent's
+words, so there only store-verified asks count. An ask id (`a-xxxx`) cited by a
+peer message, the intent or the command is looked up only in this session's
+lineage (itself, its parents, the session that opened it), and counts once that
+ask is answered there, does not decline (`no`, `keep`, `leave`, `cancel`, `not now`,
+`hold off`, `skip`, `later` …), and
+names the path exactly (full or `~/` path). A named glob (`~/qa-r5-dg-*`) covers its current matches when the wildcard
+is in the last component with at least three literal characters (`~/*` names
+nothing). Team Bridge deliveries, peer and hub messages, and fetched or file
+content are never consent; the judge sees only how many were left out.
+Unresolved targets (`rm -rf "$VAR"`) keep the context-free judge, and an empty
+expansion that collapses onto a protected root is still CRITICAL.
 
 ## Write a rule
 
