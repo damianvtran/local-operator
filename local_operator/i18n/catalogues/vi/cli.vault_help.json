@@ -1,0 +1,9 @@
+{
+  "cli.vault_help.vault": "Cho phép tác nhân của máy này đọc thông tin xác thực mà đồng đội đã chia sẻ trong Radient Vault (Radient Team)",
+  "cli.vault_help.connect": "Tạo khóa của tác nhân này, hiển thị dấu vân tay và mở trang phê duyệt",
+  "cli.vault_help.no_open": "In liên kết phê duyệt thay vì mở trình duyệt",
+  "cli.vault_help.timeout": "Thời gian chờ bạn phê duyệt, tính bằng giây (mặc định 600)",
+  "cli.vault_help.status": "Cho biết quyền truy cập của tác nhân có khả dụng không, dấu vân tay khóa của tác nhân này và phê duyệt của nó",
+  "cli.vault_help.json": "In trạng thái dưới dạng JSON",
+  "cli.vault_help.disconnect": "Xóa khóa của tác nhân này; phê duyệt được thu hồi trong bảng điều khiển"
+}

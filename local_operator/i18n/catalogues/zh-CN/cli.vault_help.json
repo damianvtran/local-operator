@@ -1,0 +1,9 @@
+{
+  "cli.vault_help.vault": "让此机器的智能体读取队友在Radient Vault中共享的凭据（Radient Team）",
+  "cli.vault_help.connect": "创建此智能体的密钥，显示其指纹并打开批准页面",
+  "cli.vault_help.no_open": "打印批准链接，不打开浏览器",
+  "cli.vault_help.timeout": "等待你批准的时长，单位为秒（默认600）",
+  "cli.vault_help.status": "显示智能体访问是否可用，以及此智能体的密钥指纹和批准状态",
+  "cli.vault_help.json": "以JSON格式输出状态",
+  "cli.vault_help.disconnect": "删除此智能体的密钥；批准需在控制台中撤销"
+}

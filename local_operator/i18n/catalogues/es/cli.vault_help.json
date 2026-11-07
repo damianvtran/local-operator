@@ -1,0 +1,9 @@
+{
+  "cli.vault_help.vault": "Permite que el agente de esta máquina lea las credenciales que tus compañeros compartieron en Radient Vault (Radient Team)",
+  "cli.vault_help.connect": "Crea la clave de este agente, muestra su huella y abre la página de aprobación",
+  "cli.vault_help.no_open": "Muestra el enlace de aprobación en lugar de abrir un navegador",
+  "cli.vault_help.timeout": "Cuánto esperar tu aprobación, en segundos (600 por defecto)",
+  "cli.vault_help.status": "Muestra si el acceso de agentes está disponible, la huella de la clave de este agente y su aprobación",
+  "cli.vault_help.json": "Muestra el estado en formato JSON",
+  "cli.vault_help.disconnect": "Elimina la clave de este agente; las aprobaciones se revocan en la consola"
+}
