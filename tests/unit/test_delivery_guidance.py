@@ -78,7 +78,16 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
     # (median 6-7 rounds/PR, ~55% no-BLOCKER/MAJOR re-runs after a clean round) costs far more
     # tokens than ~1.7k always-loaded chars. Still a hard cap: detail belongs
     # in AGENTS.md, not here.
-    assert len(policy) < 8500
+    #
+    # Raised again to 12200 for the review-round economy rules (+3,179 chars
+    # measured with `git show HEAD:...GUIDE.md | wc -c` before/after): evidence
+    # budget, measure-before-cap, harness-only delta, split trigger and
+    # converge-once. That is what local-operator-mobile PR #156 cost by their
+    # absence — 40 rounds for a product clean at round 3, 20 failed native
+    # attempts (41.4 h) after the last product commit — against ~800 tokens of
+    # on-demand guide read. Trim prose, not the invariants, before raising it: a
+    # rule that names no measurement is the defect this section exists to stop.
+    assert len(policy) < 12200
 
 
 def test_root_instructions_link_detail_instead_of_duplicating_it():
@@ -396,3 +405,56 @@ def test_attached_stale_registered_role_and_team_manager_get_delivery_pointer(tm
     session.attach_team(team)
     brief = session._goal_state.team_brief
     assert "Old manager rules." in brief and brief.count(DELIVERY_POINTER) == 1
+
+
+def test_delivery_guide_carries_the_review_round_economy_rules():
+    """Rules that stop review machinery generating rounds after product is done.
+
+    Source data: local-operator-mobile PR #156 — 40 numbered rounds for a
+    product clean at round 3, 36 failed native attempts, 20 of them after the
+    last product-code commit. Each figure below is measured there, so the
+    instruction cannot drift into an invented cap (its own rule 2).
+    """
+    policy = " ".join((ROOT / "local_operator/guides/delivery/GUIDE.md").read_text().split())
+    for required in (
+        # rule 1 — evidence budget with an exit
+        "3 failed-or-cancelled attempts OR 6 h",
+        "41.4 h",
+        "extend by a stated amount for a stated reason",
+        # rule 2 — measure before cap, name the invariant
+        "Measure before you cap; name the invariant",
+        "capped hierarchy reads at 20 s over a measured 66–173 s",
+        "no check, no shortcut",
+        # rule 3 — the harness-only carve-out and its proof
+        "scripts/harness_delta_proof.py R H",
+        "no byte the shipping pipeline consumes differs between R and H",
+        "### Harness delta check — R..H",
+        "`.github/harness-paths` present and unchanged",
+        # rule 4 — the measured split trigger
+        "`--split` prints both",
+        "(2,787 vs 2,764 lines)",
+        # rule 5 — converge the base once, at the merge gate
+        "Converge the base once, at the merge gate",
+        "13 times",
+        # the sentence the carve-out must not contradict
+        "`tests/` is product here",
+        "a reachability classifier made safe by failing closed",
+        "secrets, signing or publishing",
+        "3 failed-or-cancelled attempts OR 6 h",
+    ):
+        assert required in policy, required
+
+
+def test_agents_md_admits_exactly_one_more_freshness_exception():
+    """AGENTS.md stays the authority: the harness-only delta is the second
+    exception to SHA freshness, named in one paragraph and pointed at the guide."""
+    policy = " ".join((ROOT / "AGENTS.md").read_text().split())
+    for required in (
+        "The second exception is a **harness-only delta**",
+        "`python scripts/harness_delta_proof.py R H`",
+        "`### Harness delta check — R..H`",
+        "PR #156 (local-operator-mobile)",
+        "`tests/` is product in that manifest",
+        "`guide://delivery`",
+    ):
+        assert required in policy, required
