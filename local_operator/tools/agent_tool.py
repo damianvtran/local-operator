@@ -788,22 +788,6 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     # is deliberately rewritten on install (the routing text), so comparing the
     # whole profile would call every installed role diverged.
     divergence = _divergent_seed(registry, profile)
-    # A packaged text printed IN FULL is a PAYLOAD, not a summary, and it is
-    # delivered OUTSIDE the output budget (see the assembly at the end of this
-    # op). The budget exists to stop a tool result flooding the context with
-    # text the model could summarise; this block is the opposite — the shipped
-    # guidance the closing line tells an unrecorded reader to "apply
-    # yourself", and the one rendering of it reachable from any op (the seed is
-    # not a row on their disk). Eliding it leaves the reader a spill handle and
-    # an instruction they cannot follow. Measured 2026-11-07 on PR #3533: the
-    # ``manager`` seed grew 602 bytes for its citation-triage guidance, the
-    # rendered body went 7466 -> 8662 characters, and the 8 KiB default cut
-    # exactly that block. Any fixed larger cap would only move the cliff to the
-    # next seed edit (``aida`` already renders 16565), so the payload is
-    # appended AFTER the budget is applied instead of being sized to fit inside
-    # it: seed growth scales the delivery, never the elision.
-    payload = ""
-    tail = ""
     if divergence is not None:
         seed, diverged_fields, _provenance = divergence
         body += "\n\nthis role differs from the packaged starter of the same name ("
@@ -829,24 +813,18 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             else:
                 rendered = seed.instructions.strip() or "(none)"
                 label = "packaged instructions in full"
-                is_diff = False
-            if not is_diff:
-                # Deferred: a diff is bounded by the edit that produced it and
-                # rides in the body; a full print is bounded only by the seed.
-                payload = f"\n{label}:\n{rendered}"
-            else:
-                body += f"\n{label}:\n{rendered}"
+            body += f"\n{label}:\n{rendered}"
         for field, mine, packaged in _field_rows(profile, seed):
             if field in diverged_fields:
-                tail += f"\npackaged {field}: {packaged}  (yours: {mine})"
+                body += f"\npackaged {field}: {packaged}  (yours: {mine})"
     # The highest-intent moment in the flow: someone has just read a role's
     # guidance and decided they want it. Every other op ends by naming the next
     # command; this one used to stop at "not installed" and leave them there.
-    tail += f"\n\nlaunch with task(agent={identifier_text(context, repr(profile.name))})"
+    body += f"\n\nlaunch with task(agent={identifier_text(context, repr(profile.name))})"
     if not profile.agent_id:
-        tail += f", or op='install' name={identifier_text(context, repr(profile.name))} to edit it"
+        body += f", or op='install' name={identifier_text(context, repr(profile.name))} to edit it"
     elif divergence is not None and divergence[2] == "installed":
-        tail += (
+        body += (
             f", or op='reset' name={identifier_text(context, repr(profile.name))} "
             "to restore the packaged version"
         )
@@ -855,18 +833,13 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         # cannot prove the harness wrote), so offering the verb here would be
         # the same dead end #141 was filed about. Name the op that DOES work
         # on the values printed above, which is what makes them copy-pasteable.
-        tail += (
+        body += (
             f", or op='update' name={identifier_text(context, repr(profile.name))} "
             "to apply the packaged values yourself"
         )
-    tail += "."
-    # ``tail`` is a handful of lines and the payload is the block the reader is
-    # told to copy, so only the row's own rendering competes for the budget.
-    # When it alone exceeds it, the reader loses part of THEIR text to a spill
-    # handle they can expand — never the packaged text, which they cannot reach
-    # any other way.
+    body += "."
     text, spill = spill_truncate(body, "agent", context)
-    return _text(tool_call_id, "agent", text + payload + tail, details=spill or None)
+    return _text(tool_call_id, "agent", text, details=spill or None)
 
 
 async def _ranked_names(index: Any, query: str) -> tuple[list[str], float]:
