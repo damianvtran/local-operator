@@ -720,6 +720,144 @@ def reasoning_echo_required(provider: str, model_id: str) -> bool:
     return bool(_DEEPSEEK_THINKING_MODELS.match(_served_model_family(model_id.casefold())))
 
 
+class NativeReplayException(NamedTuple):
+    """One recorded exception to the openai-chat replay gate.
+
+    ``families`` matches the family :func:`_served_model_family` resolves (the
+    id with its route namespace already stripped), never the raw route id, so an
+    aggregator reaching the same weights is covered by the same row. ``evidence``
+    is not decoration: an exception exists only because something in this repo
+    MEASURED that omitting the replay costs the route, and a reader who finds the
+    entry surprising has to be able to check that claim where it is written.
+    """
+
+    vendor: str
+    families: re.Pattern[str]
+    evidence: str
+
+
+#: Families whose recorded native reasoning stays on the openai-chat wire even
+#: though no provider REFUSES a request without it.
+#:
+#: The gate below is keyed on a REFUSAL (:func:`reasoning_echo_required` answers "would
+#: this route reject a request carrying no echo"), and a refusal is not the only
+#: measured reason to send reasoning back: where the vendor documents a COST for
+#: omitting it, suppressing the replay is a measured DEGRADATION rather than a
+#: saving. Those families are recorded here, beside the gate that reads them,
+#: instead of the gate defaulting to "replay" everywhere for everyone.
+#:
+#: An entry here is DOCUMENTED CACHE ECONOMICS, never a contract: nothing on the
+#: families below refuses a request that omits the field (the one route that
+#: does is the DeepSeek thinking family, which :func:`reasoning_echo_required` already
+#: answers for). The incident lane's counterfactual -- replay as the carrier of
+#: a derailed turn, measured on ``deepseek-v4.1-flash-1017`` -- does not reach
+#: these families, so it neither weakens nor supports a row here; what supports
+#: a row is the citation beside it.
+#:
+#: **Every entry carries its evidence inline, and there is exactly one.** kimi,
+#: muse, mistral, alibaba, zai and the aggregator routes were checked and hold no
+#: measured replay requirement anywhere in this repo -- an entry without a
+#: citation would be inventing a contract, so none was added for them. Family-
+#: keyed rather than route-keyed for the same reason the echo rule is: the
+#: requirement belongs to the WEIGHTS, so an aggregator route to the same model
+#: resolves identically.
+NATIVE_REPLAY_EXCEPTIONS: tuple[NativeReplayException, ...] = (
+    NativeReplayException(
+        vendor="xai",
+        families=re.compile(r"^grok-"),
+        evidence=(
+            "docs/XAI_CACHING.md:155-165 -- live bench on grok-4.6: replayed chat "
+            "reasoning reaches the wire on every turn (`native_replay_items=1`) "
+            "and xAI documents an omitted previous reasoning_content as the TOP "
+            "documented cause of prompt-cache misses. A measured cache "
+            "degradation, never a refusal. Pinned by "
+            "tests/unit/providers/test_xai_affinity.py::"
+            "test_grok_chat_reasoning_round_trip_survives_for_replay, which "
+            "goes red the moment this row is dropped."
+        ),
+    ),
+)
+
+
+def native_replay_required(
+    provider: str, model_id: str, *, echo_required: bool | None = None
+) -> bool:
+    """Whether recorded native reasoning may be replayed on the openai-chat wire.
+
+    THE single owner of the replay decision, and the reason it lives next to
+    :func:`reasoning_echo_required` rather than in the wire client: it is that
+    rule PLUS the recorded exceptions in :data:`NATIVE_REPLAY_EXCEPTIONS`, so the
+    placeholder echo and the recorded replay answer to one requirement instead of
+    two. They had drifted apart, and the drift was an incident rather than a
+    tidiness problem: the openai-chat body builder copied any recorded native
+    block whose provenance matched, with no gate at all, so on
+    ``radient/auto`` -- where the echo bit is False because the client only ever
+    sees the router's id ``auto`` -- the reasoning of a derailed turn was
+    re-attached to that message on every later request and became durable
+    context. Nothing required it; it happened because nothing forbade it.
+
+    **And the replay was not merely unnecessary there -- it was CAUSAL.** The
+    incident lane rebuilt the request of the call one step AFTER the derailment
+    and sent it to the same weights (``deepseek-v4.1-flash-1017`` on Together),
+    five times each way, identical except for ``reasoning_content`` on the assistant
+    turns. All ten requests answered 200, so nothing on that route requires the
+    field: it is not a contract, it is a choice. WITH it, 5/5 continuations kept
+    going on the stray task the model had invented; WITHOUT it, 5/5 came back to
+    the task the user actually gave, even though the visible history still
+    carried the derailed environment check. Gating this is therefore what ends
+    the propagation of one bad turn, and replaying it is what bought the
+    contamination.
+
+    The bytes are also not free: replay is charged input, and on the 18 turns of
+    that session with more than 400 reasoning tokens the per-call input delta fitted
+    "replayed" (median residual +104 tokens) rather than "not replayed" (+726).
+    So suppressing the replay on a route that does not require it stops paying
+    for context the provider never asked for.
+
+    Deliberately NOT the same as filling: a route whose replay is suppressed
+    gets NO placeholder ``reasoning_content`` either. A placeholder is compliance for
+    a validator that refuses a missing echo, which is what
+    :func:`reasoning_echo_required` answers; on a route that accepts the omission it
+    would add a billed sentence per assistant turn to satisfy nothing.
+
+    Scope, deliberately narrow: this answers for the ``openai-chat`` wire only.
+    The other three protocols are NOT to be "fixed" by analogy, each for its own
+    documented reason -- ``openai-responses`` replays provider-side ENCRYPTED
+    state rather than reasoning content, ``anthropic-messages`` requires thinking
+    blocks to come back complete and unmodified (an API rule, not a preference),
+    and ``google-content`` needs its ``thoughtSignature`` back for the same
+    reason. A gate applied by analogy would break all three.
+
+    ``echo_required`` is the caller's own statement of the echo requirement,
+    defaulting to the family rule above. It exists for the ONE caller that can
+    know better than the rule: the loop's recovery sets
+    ``requires_reasoning_echo`` on the RESOLVED spec when a provider refuses a
+    request for a missing echo (``harness/loop.py``; a family rule cannot know
+    the next generation id, a rebranded host, or a spec that never went through
+    the derivation). That refusal is direct evidence about THIS route, so the
+    fill and the replay must both be permitted after it -- which is exactly what
+    passing the spec's flag in buys, and what makes the gate safe next to that
+    recovery: a route the recovery arms keeps its real reasoning as well as its
+    placeholders, rather than gaining an echo it is then forbidden to feed.
+
+    A LOCAL user-operated server stays off unless the caller states the echo
+    required, mirroring :func:`reasoning_echo_required`: no exception family is
+    a rule about a server the user runs themselves, and a refusal measured there
+    is the loop's business rather than a family's.
+    """
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS
+
+    required = (
+        reasoning_echo_required(provider, model_id) if echo_required is None else echo_required
+    )
+    if required:
+        return True
+    if provider in LOCAL_PROVIDER_IDS:
+        return False
+    family = _served_model_family(model_id.casefold())
+    return any(entry.families.match(family) for entry in NATIVE_REPLAY_EXCEPTIONS)
+
+
 def deepseek_effort_ladder(provider: str, model_id: str) -> tuple[str, ...]:
     """The native ladder for a direct-DeepSeek route, or ``()`` when not one.
 

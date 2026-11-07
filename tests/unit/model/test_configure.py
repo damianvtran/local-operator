@@ -11,6 +11,7 @@ import json
 import time
 import zlib
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -34,6 +35,7 @@ from local_operator.model.configure import (
     configure_model,
     create_stream_fn,
     get_model_info_from_openrouter,
+    native_replay_required,
     validate_model,
 )
 from local_operator.model.registry import ModelInfo
@@ -5516,6 +5518,98 @@ def test_the_legacy_escape_hatch_for_a_hand_built_spec_still_works():
     assert revalidated.requires_reasoning_echo is False
     # ...while omitting it is still filled, which is the half that matters.
     assert ModelSpec(provider="deepseek", model_id="deepseek-flash").requires_reasoning_echo is True
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "expected"),
+    [
+        # The family the echo contract was MEASURED on: unchanged, replay allowed.
+        ("deepseek", "deepseek-flash", True),
+        ("deepseek", "deepseek-v4-flash", True),
+        ("deepseek", "deepseek-v4-pro", True),
+        ("deepseek", "deepseek-v4.1-flash", True),
+        # The legacy rows keep NOTHING, and on ``deepseek-reasoner`` that is the
+        # load-bearing half: its API REJECTED an input ``reasoning_content`` outright
+        # (the field's own comment records it), so a replay there was a 400
+        # waiting for a stored thought rather than a continuity feature.
+        ("deepseek", "deepseek-chat", False),
+        ("deepseek", "deepseek-reasoner", False),
+        # The same weights behind an aggregator resolve identically...
+        ("radient", "deepseek/deepseek-v4.1-flash", True),
+        ("openrouter", "deepseek/deepseek-v4.1-flash", True),
+        ("openrouter", "deepseek-ai/DeepSeek-V4-Flash", True),
+        # ...EXCEPT the ROUTER, whose id is not a model at all: ``auto`` resolves
+        # to no family, so the echo requirement is False and nothing may be
+        # replayed. THIS IS THE INCIDENT CASE (route: ``radient/auto``, served by
+        # Together as ``deepseek-ai/DeepSeek-V4.1-Flash-1017``).
+        ("radient", "auto", False),
+        ("openrouter", "auto", False),
+        # Recorded exceptions: xAI documents the cache COST of omitting a
+        # replayed previous thought (docs/XAI_CACHING.md:155-165) -- a measured
+        # degradation, not a refusal -- so the family keeps its replay.
+        ("xai", "grok-4.6", True),
+        ("xai", "grok-4.7", True),
+        ("xai-oauth", "grok-4.6", True),
+        # No other family has a measured replay requirement anywhere in this
+        # repo, so no other family gets an entry.
+        ("kimi", "k3", False),
+        ("zai", "glm-5.3", False),
+        ("alibaba", "qwen3.8-max", False),
+        ("mistral", "mistral-medium-latest", False),
+        # A LOCAL user-operated server keeps the old answer, even for weights a
+        # hosted route replays for: nobody measured a refusal or a cache cost
+        # there, and the operator owns that server's template.
+        ("ollama", "deepseek-v4-flash", False),
+        ("llamacpp", "deepseek-v4-flash", False),
+        ("llamacpp", "grok-4.6", False),
+    ],
+)
+def test_native_replay_is_gated_per_route_and_family(provider, model_id, expected):
+    assert native_replay_required(provider, model_id) is expected
+
+
+def test_the_fill_recovery_can_re_enable_the_replay_it_arms():
+    """A stated echo requirement OUTRANKS the family rule, and the loop needs it.
+
+    ``harness/loop.py`` sets ``requires_reasoning_echo`` on the RESOLVED spec when a
+    provider refuses a request for a missing echo -- direct evidence about a route
+    a family rule cannot know (a next-generation id, a rebranded or relayed host,
+    a spec built outside the derivation). The gate takes that same flag, so the
+    route the recovery arms keeps the real recorded thoughts as well as the
+    placeholders it just started sending: filling an echo and then refusing to
+    feed the thoughts the same validator asked for would be the worst of both.
+    """
+    # The incident route, armed by the recovery rather than by a family rule.
+    assert native_replay_required("radient", "auto") is False
+    assert native_replay_required("radient", "auto", echo_required=True) is True
+    assert native_replay_required("deepseek", "deepseek-flash", echo_required=True) is True
+    # ...and a caller who STATED the requirement off keeps it off, which is the
+    # escape hatch the field documents (a hand-built spec for a relabelled route).
+    assert native_replay_required("deepseek", "deepseek-flash", echo_required=False) is False
+
+
+def test_every_replay_exception_cites_evidence_that_exists():
+    """The table is small on purpose, and every row must still be checkable.
+
+    An exception is a claim that omitting the replay COSTS a route. A reader who
+    finds one surprising has to be able to look at the evidence, so this pins
+    that each row cites a real file at a real line -- not that the row is right,
+    which only the cited measurement can say.
+    """
+    from local_operator.model.configure import NATIVE_REPLAY_EXCEPTIONS
+
+    root = Path(__file__).resolve().parents[3]
+    assert [entry.vendor for entry in NATIVE_REPLAY_EXCEPTIONS] == ["xai"]
+    for entry in NATIVE_REPLAY_EXCEPTIONS:
+        path, _, span = entry.evidence.partition(":")
+        document = root / path
+        assert document.exists(), f"{entry.vendor} cites a missing document: {path}"
+        lines = document.read_text().splitlines()
+        first = int(span.split("-")[0])
+        assert 1 <= first <= len(lines), f"{entry.vendor} cites a line past the document"
+        # The cited line is the section the claim lives in, so a rewritten
+        # document cannot leave a citation pointing at unrelated text.
+        assert "replay" in lines[first - 1], lines[first - 1]
 
 
 # ---------------------------------------------------------------------------
