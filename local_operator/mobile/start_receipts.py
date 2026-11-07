@@ -50,7 +50,8 @@ CAPABILITY = {
 #: store holding an ``effort`` receipt answers keyed starts with
 #: ``create_receipts_unavailable``. The store never expires or evicts a row, so
 #: that lasts until ``mobile-start-receipts.sqlite3`` is moved aside by hand
-#: (recovery: docs/design/mobile-start-receipts.md, "Downgrade"). Forward is free.
+#: (recovery: docs/design/mobile-start-receipts.md, section "Bounded
+#: limitations (honest)"). Forward is free.
 _INTENT_FIELDS = frozenset({"cwd", "provider", "model_id"})
 _OPTIONAL_INTENT_FIELDS = frozenset({"effort"})
 

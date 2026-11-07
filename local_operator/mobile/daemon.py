@@ -11491,41 +11491,94 @@ def _resolve_start_model(provider: str | None, model_id: str | None) -> tuple[st
 
 def _effort_ladder(
     provider: str, model_id: str, shipped: "dict[str, frozenset[str]] | None" = None
-) -> list[str] | None:
-    """The effort levels ``provider/model_id`` accepts, or ``None`` if unknown.
+) -> tuple[list[str] | None, str | None]:
+    """``(ladder, spec_default)`` for ``provider/model_id``; ladder ``None`` if unknown.
 
     ONE answer for both ``GET /api/models`` surfaces -- each row's ``efforts``
-    and the ``default.effort`` clamp -- so the picker never offers a rung the
-    published default could not have been clamped to, and vice versa. The
-    source is the offline effort table (``model.effort``), the same one
-    ``resolve_effort`` clamps against.
+    and the ``default.effort`` clamp -- and the SAME answer the child session
+    runs on, because it is derived through the child's own constructor:
+    ``model.configure.build_model_spec(...).reasoning_efforts`` (provider
+    listing memo, then the aggregator router ladder, then the direct DeepSeek
+    ladder, then the offline effort table). Reading the table alone published
+    ``[]`` for direct DeepSeek V4 (``deepseek-v4-pro`` & co.), whose ladder
+    ``build_model_spec`` supplies outside the table, while the session ran
+    ``none/low/high/max`` -- a picker that hid a knob the session honoured.
+
+    OFFLINE by construction, because this runs once per catalogue row (~1000)
+    inside a request that already pays the live listing: ``info`` comes from
+    ``resolve_model_info_paint`` (the in-process memo, else the static
+    registry row -- never discovery's HTTP legs), ``build_model_spec``'s own
+    listing ladder is memo-only (``_listing_effort``), and a local provider is
+    built with ``cached_only=True``. For a shipped registry model that is the
+    same ``info`` the child resolves (registry first), which the parity test
+    over every shipped model pins.
 
     Three answers, because the phone needs to tell them apart:
 
-    * the table's ladder, in its order, when the table knows the model;
-    * ``[]`` when the table has no arm for it but the SHIPPED registry lists
-      it for this provider: we describe that model, so the table's silence is
-      a statement -- no effort knob (Claude Haiku 4.5 is the motivating case);
-    * ``None`` when neither knows it: an aggregator's or a listing-only id,
-      whose ladder (if any) only a live provider listing can supply. The
-      child may well run a level there, so "none" would be a guess.
+    * the spec's ladder, in its order, when it has one;
+    * ``[]`` when the spec has none and the SHIPPED registry lists the model
+      for this provider: we describe that model, so the silence is a
+      statement -- no effort knob (Claude Haiku 4.5 is the motivating case);
+    * ``None`` otherwise (an aggregator's or listing-only id whose ladder only a
+      live listing the relay has not read could supply, or a spec that would
+      not build): the child may well run a level there, so "none" would be a
+      guess.
 
     ``shipped`` memoises the registry per credential provider: ``_model_rows``
     asks this for ~1000 rows and ``static_models`` copies its map per call.
     """
-    from local_operator.model.effort import effort_support
+    from local_operator.model.configure import (
+        build_model_spec,
+        resolve_model_info_paint,
+    )
     from local_operator.model.registry import static_models
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS, local_model_spec
     from local_operator.providers.registry import credential_provider_id
 
-    support = effort_support(model_id)
-    if support is not None:
-        return list(support.levels)
+    try:
+        if provider in LOCAL_PROVIDER_IDS:
+            spec = local_model_spec(provider, model_id, cached_only=True)
+        else:
+            info, _memo_hit = resolve_model_info_paint(provider, model_id)
+            spec = build_model_spec(provider, model_id, info=info)
+    except Exception:  # noqa: BLE001 -- an unbuildable row is "unknown", not a failed sheet
+        logger.debug("mobile models: no spec for %s/%s", provider, model_id, exc_info=True)
+        return None, None
+    ladder = list(spec.reasoning_efforts or ())
+    if ladder:
+        return ladder, spec.reasoning_default_effort
     key = credential_provider_id(provider)
     if shipped is None:
         shipped = {}
     if key not in shipped:
         shipped[key] = frozenset(static_models(key))
-    return [] if model_id in shipped[key] else None
+    return ([] if _shipped_describes(key, model_id, shipped[key]) else None), None
+
+
+def _shipped_describes(key: str, model_id: str, shipped_ids: "frozenset[str]") -> bool:
+    """Whether the shipped registry describes ``model_id`` on credential ``key``.
+
+    Exact membership, plus the SAME Claude model under another spelling -- an
+    undated alias of a shipped snapshot (``claude-haiku-4-5`` for
+    ``claude-haiku-4-5-20251001``) or a dated snapshot of a shipped undated id.
+    ``build_model_spec`` already resolves those through the registry's family
+    match (same tier, same version), so the child runs exactly the shipped
+    row's (empty) ladder; answering "unknown" there made ``default.effort``
+    publish the raw configured level for a model the session runs with none
+    (QA round 2, Q1). It reuses ``registry._anthropic_family`` -- the parser
+    that family match uses -- so the two cannot disagree on what "same model"
+    means. Aggregators are excluded: their live listing, which the relay has
+    not read, is what can speak for a ladder there.
+    """
+    if model_id in shipped_ids:
+        return True
+    from local_operator.model.registry import _anthropic_family
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if key in AGGREGATOR_PROVIDERS:
+        return False
+    wanted = _anthropic_family(model_id)
+    return wanted is not None and any(_anthropic_family(row) == wanted for row in shipped_ids)
 
 
 def _configured_default() -> dict[str, Any] | None:
@@ -11541,8 +11594,10 @@ def _configured_default() -> dict[str, Any] | None:
     ``efforts`` publishes:
 
     * a known ladder: the configured ``model_effort`` CLAMPED to it
-      (``model.effort.resolve_effort``), i.e. the level the turn will actually
-      send, or the model's documented default when nothing is configured;
+      (``model.effort.resolve_effort_in`` against the spec's ladder and
+      ``reasoning_default_effort`` -- the call the child's configure path
+      makes), i.e. the level the turn will actually send, or the spec's
+      default when nothing is configured;
     * a known empty ladder: ``None`` -- the model exposes no levels;
     * an unknown model: the RAW configured ``model_effort`` (``None`` when
       unset). The child clamps against the spec's ladder, which a provider
@@ -11555,13 +11610,20 @@ def _configured_default() -> dict[str, Any] | None:
     """
     try:
         from local_operator.config import ConfigManager
-        from local_operator.model.effort import configured_effort, resolve_effort
+        from local_operator.model.effort import configured_effort, resolve_effort_in
         from local_operator.paths import config_dir
 
         provider, model_id = _resolve_start_model(None, None)
         configured = configured_effort(ConfigManager(config_dir()))
-        ladder = _effort_ladder(provider, model_id)
-        effort = configured if ladder is None else resolve_effort(model_id, configured)
+        ladder, spec_default = _effort_ladder(provider, model_id)
+        # ``resolve_effort_in``, not the table-backed ``resolve_effort``: the
+        # ladder is the spec's, and clamping it against the table is the split
+        # brain ``resolve_effort``'s docstring warns about.
+        effort = (
+            configured
+            if ladder is None
+            else resolve_effort_in(tuple(ladder), spec_default, configured)
+        )
     except Exception:  # noqa: BLE001 -- no default is an answer, not a fault
         logger.debug("mobile models: no configured default", exc_info=True)
         return None
@@ -11631,7 +11693,7 @@ def _efforts_field(
     provider: str, model_id: str, shipped: "dict[str, frozenset[str]]"
 ) -> dict[str, list[str]]:
     """``{"efforts": ladder}`` for a known ladder, ``{}`` for an unknown one."""
-    ladder = _effort_ladder(provider, model_id, shipped)
+    ladder, _default = _effort_ladder(provider, model_id, shipped)
     return {} if ladder is None else {"efforts": ladder}
 
 

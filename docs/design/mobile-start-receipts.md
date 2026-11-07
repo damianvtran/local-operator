@@ -87,17 +87,24 @@ The sheet that feeds this body reads `GET /api/models` (authenticated):
 ```
 
 - `efforts` is the ordered ladder (lowest first) the effort picker may offer
-  for that row, from the relay's offline effort table — the same ladder
-  `default.effort` is clamped to. `[]` means the model has **no** effort knob:
-  hide or disable the picker and send no `effort`. An **absent** key means the
-  relay does not know the ladder (an aggregator or listing-only id), exactly
-  what an older relay that never sends the field means: offer the whole
-  vocabulary and let the session clamp. It is never `null`.
+  for that row: `build_model_spec(...).reasoning_efforts` — the spec the child
+  session itself is built from (provider-listing ladder where the relay holds
+  it, then the aggregator router ladder, the direct DeepSeek ladder, then the
+  offline effort table) — built on the offline path (static registry or
+  in-process memo, no network per row), and the same ladder `default.effort` is
+  clamped to. `[]` means the model has **no** effort knob (the spec has no
+  ladder and the shipped registry describes the model, including an undated
+  alias of a shipped snapshot): hide or disable the picker and send no
+  `effort`. An **absent** key means the relay does not know the ladder (an
+  aggregator or listing-only id whose listing it has not read), exactly what an
+  older relay that never sends the field means: offer the whole vocabulary and
+  let the session clamp. It is never `null`.
 - `default` names what a start with no `provider`/`model_id`/`effort` runs.
   `null` means this relay resolved no default (render "unavailable"); an absent
   key means an older relay. `default.effort` is the configured `model_effort`
-  clamped to the model's `efforts`, or the model's own default when nothing is
-  configured, `null` for a model whose `efforts` is `[]`, and the configured
+  clamped to the model's `efforts` (`resolve_effort_in` against the
+  `build_model_spec` ladder and its `reasoning_default_effort`, the clamp the
+  session applies), or that spec default when nothing is configured, `null` for a model whose `efforts` is `[]`, and the configured
   value **unclamped** for a model whose ladder is unknown (the session clamps
   it against the provider's listing at birth).
 
