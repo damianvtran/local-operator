@@ -74,6 +74,11 @@ logger = logging.getLogger("local_operator.network.credentials.client")
 #: be bridged by a grant this process already holds (:meth:`_held_or`).
 _HOLDABLE_REFUSALS: frozenset[str] = frozenset({"owner_offline", "owner_unreachable"})
 
+#: :meth:`MeshCredentialClient._hold_admission`'s verdict for "this device is no
+#: longer a live member". Not a broker code: each caller answers it with the
+#: network-wide ``_invalidate_membership_scope``, never a per-key deny.
+_MEMBERSHIP_LOST = "<membership-lost>"
+
 #: Outcomes that are not an owner answer about permission either, so they neither
 #: serve nor drop a held grant: a local broker fault, a busy owner, a quota rest.
 _TRANSIENT_REFUSALS: frozenset[str] = frozenset(
@@ -115,6 +120,13 @@ class GrantCache:
         self._lock = threading.Lock()
         self._grants: dict[tuple[str, str], Grant] = {}
         self._policy_fences: dict[tuple[str, str], Any] = {}
+        # What a hot provider read (``MeshCredentialClient._serve_cached``) must
+        # find unchanged before it may hand a grant out without dialling the owner:
+        # ``(stored_at monotonic, lifecycle fence, selection inputs)``. Kept beside
+        # the grant and dropped with it at every eviction site, so a slot can never
+        # outlive the evidence that licensed reusing it. Absent = never reusable
+        # (a put without a fence, i.e. an uncovered owner or an older caller).
+        self._reuse: dict[tuple[str, str], tuple[float, Any, Any]] = {}
 
     def get(self, key: str, session_id: str) -> Grant | None:
         """The cached grant when it is still usable, else ``None``.
@@ -138,8 +150,9 @@ class GrantCache:
         a bearer, the grant that carried it may be inside ``REASK_MARGIN_MS`` — the
         window where :meth:`get` reads as absent — and that grant is exactly the one
         a report must name. The reads that serve a bearer without dialling (the
-        ``github`` gate in ``request_grant_sync``, MCP's ``_live_bearer``) use
-        :meth:`get`, so they never hand out a grant inside the margin.
+        ``github`` gate in ``request_grant_sync``, the provider hot read
+        ``_serve_cached``, MCP's ``_live_bearer``) use :meth:`get`, so they never
+        hand out a grant inside the margin.
 
         ONE CALLER DOES SERVE FROM HERE: ``_held_or``, the owner-unreachable path.
         It applies its own ``Grant.usable_at`` check, which has no margin, so it
@@ -148,10 +161,33 @@ class GrantCache:
         with self._lock:
             return self._grants.get((key, session_id))
 
-    def put(self, key: str, session_id: str, grant: Grant, *, policy_fence: Any = "") -> None:
+    def put(
+        self,
+        key: str,
+        session_id: str,
+        grant: Grant,
+        *,
+        policy_fence: Any = "",
+        lifecycle_fence: Any = None,
+        selection: Any = None,
+    ) -> None:
         with self._lock:
             self._grants[(key, session_id)] = grant
             self._policy_fences[(key, session_id)] = policy_fence
+            if lifecycle_fence:
+                self._reuse[(key, session_id)] = (time.monotonic(), lifecycle_fence, selection)
+            else:
+                self._reuse.pop((key, session_id), None)
+
+    def reuse_stamp(self, key: str, session_id: str) -> tuple[float, Any, Any] | None:
+        """``(stored_at, lifecycle_fence, selection)`` recorded with the slot, or ``None``.
+
+        ``stored_at`` is ``time.monotonic()`` on THIS device: the reuse age is a
+        borrower-local bound, so neither the owner's clock nor a wall-clock step
+        can stretch it.
+        """
+        with self._lock:
+            return self._reuse.get((key, session_id))
 
     def policy_stamp(self, key: str, session_id: str) -> Any:
         with self._lock:
@@ -164,6 +200,7 @@ class GrantCache:
                 if grant.credential_ref.owner_device != self_device:
                     del self._grants[pair]
                     self._policy_fences.pop(pair, None)
+                    self._reuse.pop(pair, None)
 
     def invalidate_policy(self, key: str, session_id: str, fence: str) -> bool:
         """Drop ALL old slots, not just the session that first hears the refusal.
@@ -182,6 +219,7 @@ class GrantCache:
             for pair in stale:
                 del self._grants[pair]
                 self._policy_fences.pop(pair, None)
+                self._reuse.pop(pair, None)
             return requested
 
     def drop(self, key: str, session_id: str = "") -> None:
@@ -190,10 +228,12 @@ class GrantCache:
             if session_id:
                 self._grants.pop((key, session_id), None)
                 self._policy_fences.pop((key, session_id), None)
+                self._reuse.pop((key, session_id), None)
                 return
             for pair in [p for p in self._grants if p[0] == key]:
                 del self._grants[pair]
                 self._policy_fences.pop(pair, None)
+                self._reuse.pop(pair, None)
 
     def find_by_token(self, key: str, bearer: str) -> tuple[str, str] | None:
         """The ``(key, session_id)`` a bearer belongs to, for attributing a failure.
@@ -228,6 +268,7 @@ class GrantCache:
         with self._lock:
             self._grants.clear()
             self._policy_fences.clear()
+            self._reuse.clear()
 
 
 class MeshCredentialClient:
@@ -726,12 +767,15 @@ class MeshCredentialClient:
         bearer this process is holding; checking it after the dial would defeat it.
         """
         label = provider or key
-        # A grant TTL is not an upstream credential generation. Re-resolve with
-        # the sole refresh owner on every request so rotation/logout cannot hide
-        # behind a live cache. Concurrent calls still coalesce at facade/owner.
-        # Refusal observations are for diagnosis, not a login-negative cache:
-        # the owner may have signed in since the last request. Forced refresh
-        # therefore also always reaches the sole refresh owner.
+        # A grant TTL is not an upstream credential generation (0385927ab94), so a
+        # live grant alone never licenses skipping the owner: rotation/logout must
+        # not hide behind it. ``_serve_cached`` reuses one only while the OWNER's
+        # announced lifecycle generation for this key is unchanged since before the
+        # dial that fetched it, for at most ``grant_ttl_s/2``; an uncovered owner
+        # (no lifecycle stamps, link without ``credential-lifecycle-v1``) still
+        # re-resolves on every request. Refusal observations are for diagnosis, not
+        # a login-negative cache: the owner may have signed in since the last
+        # request. Forced refresh therefore always reaches the sole refresh owner.
         if not self.should_borrow(key):
             self.grants.drop(key)
             return BrokerError(
@@ -754,6 +798,15 @@ class MeshCredentialClient:
                 cached = self.grants.get(key, session_id)
                 if cached is not None:
                     return cached
+            else:
+                reused = self._serve_cached(
+                    key,
+                    session_id,
+                    model_id=model_id,
+                    selection=_selection_fields(affinity, demote_credential_ids),
+                )
+                if reused is not None:
+                    return reused
             refusal = self.cached_refusal(key)
             if refusal is not None and refusal.code == "quota_blocked":
                 return self._render(refusal, key, label)
@@ -813,7 +866,13 @@ class MeshCredentialClient:
                 message=exc.__class__.__name__,
             )
         outcome = self._from_reply(
-            reply, key, label, session_id, resting=resting, request_stamp=request_stamp
+            reply,
+            key,
+            label,
+            session_id,
+            resting=resting,
+            request_stamp=request_stamp,
+            selection=_selection_fields(affinity, demote_credential_ids),
         )
         if isinstance(outcome, BrokerError):
             return self._held_or(
@@ -860,9 +919,144 @@ class MeshCredentialClient:
                 return (
                     policy.stamp(document, self.owner_of(key), key),
                     self._placement_authority(key),
+                    # Taken BEFORE the dial, like the policy stamp: a logout or
+                    # rotation announced while the owner is answering must leave
+                    # the stored fence older than the next read's, so the grant
+                    # this dial returns is never reused across that change.
+                    self._lifecycle_fence(key),
                 )
         except PolicyUnknown:
             return None
+
+    def _lifecycle_fence(self, key: str) -> frozenset[tuple[str, tuple[int, int], str]]:
+        """The owner's announced lifecycle for ``key``, as a comparable snapshot.
+
+        Every ``(scope, (login_chain_revision, material_generation), state)`` this
+        device has observed for ``(owner_of(key), key)``. ``material_generation``
+        moves on the owner's login, logout and row rotation (``lifecycle.py``), and
+        a withdraw sets a restrictive state, so an unchanged fence is the evidence
+        that the upstream credential a cached grant came from is still the current
+        one — the evidence whose absence made 0385927ab94 stop reusing grants.
+
+        EMPTY MEANS "NOT COVERED" AND DISABLES REUSE: no observation (an owner whose
+        logins carry no lifecycle stamp, a link that never negotiated
+        ``credential-lifecycle-v1``), an unprovable file (``needs_baseline``) or a
+        pending restriction. Those keys keep re-resolving on every request.
+        """
+        from local_operator.network.credentials import lifecycle
+
+        owner = self.owner_of(key)
+        if not owner:
+            return frozenset()
+        try:
+            life = lifecycle.LifecycleStore(self.network_id, self.root)
+            if life.restriction_pending():
+                return frozenset()
+            document = life.load()
+        except Exception:  # noqa: BLE001 — unknown evidence is no evidence
+            return frozenset()
+        if document.needs_baseline:
+            return frozenset()
+        return frozenset(
+            (scope, high_water, document.observation_states.get((owner, row_key, scope), ""))
+            for (row_owner, row_key, scope), high_water in document.high_water.items()
+            if row_owner == owner and row_key == key
+        )
+
+    def _hold_admission(self, policy: Any, document: Any, key: str) -> tuple[str, Any]:
+        """``(verdict, current policy stamp)`` for serving a grant without the owner.
+
+        THE ONE ADMISSIBILITY CHECK both no-dial serves run inside the held-policy
+        transaction: the owner-unreachable hold (:meth:`_held_or`) and the hot read
+        (:meth:`_serve_cached`). Sharing it is what keeps the two from drifting —
+        a fence added to one is a fence on both. ``verdict`` is ``""`` when the
+        grant may be considered, :data:`_MEMBERSHIP_LOST`, or a refusal code.
+        """
+        stamp = policy.stamp(document, self.owner_of(key), key)
+        restriction = self._lifecycle_restriction(key)
+        # The final membership read MUST use the same invalidation helper as the
+        # first, before any successful hold is visible.
+        if not self._self_membership_active():
+            return _MEMBERSHIP_LOST, stamp
+        if not self.should_borrow(key) or restriction:
+            return restriction or "not_a_holder", stamp
+        return "", stamp
+
+    def _serve_cached(
+        self, key: str, session_id: str, *, model_id: str, selection: dict[str, Any]
+    ) -> Grant | BrokerError | None:
+        """A held provider grant reused WITHOUT dialling the owner, or ``None`` to dial.
+
+        WHY: every provider resolve used to dial both relay legs, one owner round
+        trip per model call, and an outage cost each call the full failed dial.
+        Approved by the operator 2026-11-07 (C5): reuse bounds revocation on an
+        honest borrower to about one placement/lifecycle tick (15 s), at most
+        ``grant_ttl_s/2`` when an update is lost — inside the ``grant_ttl_s``
+        that ``mesh-credentials.md`` §3.7 already promises.
+
+        CONSTRAINTS. This serves only an access token the owner already sent: no
+        refresh token, no token POST, no new authority. ``None`` (dial, today's
+        behaviour) unless ALL hold:
+
+        * a provider key — MCP, github and device-bound keys keep their own paths;
+        * the slot is outside the re-ask margin (:meth:`GrantCache.get`), younger
+          than ``grant_ttl_s/2`` (the soft refresh that keeps a later
+          ``held_offline`` window at least that long), and was stored with a
+          non-empty lifecycle fence;
+        * the selection inputs (``affinity``/``demote_credential_ids``) equal the
+          dial's, so a new demotion is never masked;
+        * the lent row is not cooling for ``model_id`` — another process's 429
+          reaches this one only through ``placement.state.json``;
+        * :meth:`_hold_admission` passes and the policy stamp is current;
+        * the lifecycle fence equals the one taken before the fetching dial.
+
+        A lost membership is answered here, exactly as both other paths would;
+        every other failed check falls through to the dial, whose outcome is
+        today's. Revocation needs nothing here: ``placement()`` clears the cache
+        when the document changes, and ``should_borrow`` ran just before.
+        """
+        from local_operator.network.credentials import grant_ttl_s
+        from local_operator.network.credentials.effective import note_resolution
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
+        if is_mcp_key(key) or is_device_bound_provider(key):
+            return None
+        held = self.grants.get(key, session_id)
+        reuse = self.grants.reuse_stamp(key, session_id)
+        if held is None or reuse is None:
+            return None
+        stored_at, fence, stored_selection = reuse
+        if time.monotonic() - stored_at >= grant_ttl_s(self.root) / 2:
+            return None
+        if stored_selection != selection:
+            return None
+        owner = self.owner_of(key)
+        if held.credential_ref.owner_device != owner or any(
+            int(row.get("credential_id") or 0) == held.credential_ref.credential_id
+            for row in self.state.cooldowns(key, model_id, owner_device=owner)
+        ):
+            return None
+        try:
+            policy = self._policy()
+            with policy.transaction() as document:
+                verdict, stamp = self._hold_admission(policy, document, key)
+                if verdict == _MEMBERSHIP_LOST:
+                    lost = self._invalidate_membership_scope(key, document)
+                    note_resolution(self.root, key, lost)
+                    return lost
+                if verdict:
+                    self.grants.drop(key)
+                    return None
+                if self.grants.invalidate_policy(key, session_id, stamp):
+                    return None
+                if self._lifecycle_fence(key) != fence:
+                    self.grants.drop(key, session_id)
+                    return None
+                if self.grants.peek(key, session_id) is not held:
+                    return None  # replaced or dropped by a concurrent resolve
+        except PolicyUnknown:
+            return None
+        return held
 
     def _lifecycle_restriction(self, key: str) -> str:
         from local_operator.network.credentials import lifecycle
@@ -910,7 +1104,14 @@ class MeshCredentialClient:
         return self._policy_error(key, "not_a_holder")
 
     def _adopt_online(
-        self, grant: Grant, key: str, session_id: str, request_stamp: Any, *, cache: bool = True
+        self,
+        grant: Grant,
+        key: str,
+        session_id: str,
+        request_stamp: Any,
+        *,
+        cache: bool = True,
+        selection: Any = None,
     ) -> Grant | BrokerError:
         """CAS before ANY positive cache/status/publication, on BOTH relay legs.
 
@@ -949,7 +1150,20 @@ class MeshCredentialClient:
                     # Fence -> cache lock order. Success changes only the retry
                     # diagnosis; durable deny generations NEVER reset on success.
                     if cache:
-                        self.grants.put(key, session_id, grant, policy_fence=request_stamp[0])
+                        # The pre-dial lifecycle fence and the selection inputs
+                        # are what ``_serve_cached`` must find unchanged later.
+                        self.grants.put(
+                            key,
+                            session_id,
+                            grant,
+                            policy_fence=request_stamp[0],
+                            lifecycle_fence=(
+                                request_stamp[2]
+                                if selection is not None and len(request_stamp) > 2
+                                else None
+                            ),
+                            selection=selection,
+                        )
                     self._remember_grant(key, grant)
                     return grant
         except PolicyUnknown:
@@ -987,14 +1201,11 @@ class MeshCredentialClient:
             else:
                 policy = self._policy()
                 with policy.transaction() as document:
-                    stamp = policy.stamp(document, self.owner_of(key), key)
-                    restriction = self._lifecycle_restriction(key)
-                    # The final membership read MUST use the same invalidation
-                    # helper as the first, before any successful hold is visible.
-                    if not self._self_membership_active():
+                    verdict, stamp = self._hold_admission(policy, document, key)
+                    if verdict == _MEMBERSHIP_LOST:
                         outcome = self._invalidate_membership_scope(key, document)
-                    elif not self.should_borrow(key) or restriction:
-                        code = restriction or "not_a_holder"
+                    elif verdict:
+                        code = verdict
                         policy.deny(document, self.owner_of(key), key, code)
                         self.grants.drop(key)
                         outcome = self._policy_error(key, code)
@@ -2322,6 +2533,7 @@ class MeshCredentialClient:
         *,
         resting: list[dict[str, Any]] | None = None,
         request_stamp: Any = None,
+        selection: Any = None,
     ) -> Grant | BrokerError:
         """Turn a leg-1 control reply into a grant or a refusal.
 
@@ -2356,7 +2568,7 @@ class MeshCredentialClient:
             )
         if detail.get("kind") == "grant":
             grant = self._bounded(Grant.from_detail(detail))
-            return self._adopt_online(grant, key, session_id, request_stamp)
+            return self._adopt_online(grant, key, session_id, request_stamp, selection=selection)
         refused = BrokerError.from_detail(detail)
         if resting and refused.is_holder_exclusion:
             return self._resting_refusal(key, label, resting)
