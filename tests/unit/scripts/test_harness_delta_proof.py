@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts.harness_delta_proof import Manifest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "harness_delta_proof.py"
 
@@ -347,12 +349,7 @@ def test_newline_in_a_ship_path_is_exit_two(tmp_path: Path) -> None:
     glob matches, and a newline/CR path anywhere the proof must classify is exit 2
     rather than a verdict it cannot defend.
     """
-    sys.path.insert(0, str(SCRIPT.parent))
-    try:
-        from harness_delta_proof import Manifest as _Manifest
-    finally:
-        sys.path.pop(0)
-    manifest = _Manifest.parse(MANIFEST, "unit")
+    manifest = Manifest.parse(MANIFEST, "unit")
     assert manifest.classify("src/a\nb.py") == "ship"
 
     repo, reviewed = _setup(tmp_path)
