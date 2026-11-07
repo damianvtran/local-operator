@@ -878,6 +878,17 @@ _WITHHELD_REASONS = {
 }
 
 
+def _observed(receipt: Any) -> dict[str, Any]:
+    """``screening_observation=`` for an admit, or nothing at all.
+
+    Splatted rather than passed as ``None`` so an admit with no provenance is
+    the exact call the connector made before the observe-only block existed.
+    """
+
+    observation = getattr(receipt, "observation", None)
+    return {"screening_observation": observation} if observation is not None else {}
+
+
 def _withheld_note(count: int, reason: str) -> str:
     if reason == "no_vision":
         return withheld_marker(count)
@@ -1727,6 +1738,9 @@ async def handle_conversation_available(
                 endpoint_id=owner.endpoint_id,
                 refusal_class=refusal_class(getattr(receipt, "categories", ())),
                 access=access,
+                # Observe-only screener provenance (agent-server §8.5); the
+                # client attaches it only for a hub that advertised it.
+                **_observed(receipt),
             )
             if isinstance(admitted, Mapping) and admitted.get("probe_suspected") is True:
                 import asyncio
@@ -1799,6 +1813,9 @@ async def handle_conversation_available(
                 # descriptors the hub showed.
                 files_hash=files_hash,
                 access=access,
+                # Telemetry only, identical on the bounded files retry below, so
+                # it never decides which attempt runs (agent-server §8.5).
+                **_observed(receipt),
             )
 
         admit_template = (

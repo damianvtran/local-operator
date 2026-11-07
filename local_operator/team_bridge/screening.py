@@ -66,6 +66,7 @@ from local_operator.team_bridge.types import (
     DELIVERY_STATES,
     SCREENING_CATEGORIES,
     OwnerSnapshot,
+    ScreeningObservation,
     ScreeningReceipt,
 )
 
@@ -2067,6 +2068,7 @@ async def _screen_spend(
         served_provider=_served_provider(runner, actual_model, prepared),
         served_hop=_served_hop(runner, actual_model, prepared),
         screener_preferred=_answered_preferred(runner, actual_model),
+        observation=_answered_observation(runner, actual_model),
     )
 
 
@@ -2087,6 +2089,20 @@ def _answered_preferred(runner: Any, actual_model: str | None) -> bool:
     return bool(hop is not None and hop.model_id == actual_model and hop.preferred)
 
 
+def _answered_observation(runner: Any, actual_model: str | None) -> ScreeningObservation | None:
+    """Which screener ANSWERED, for the hub's observe-only telemetry block.
+
+    Same trusted source as :func:`_answered_preferred` (the chain's answering
+    hop), so the telemetry and the receipt's ``screener_preferred`` cannot
+    disagree. Reporting only: the value rides the receipt after the verdict
+    is parsed and nothing in this module reads it.
+    """
+
+    from local_operator.team_bridge.screening_observation import from_answered_hop
+
+    return from_answered_hop(runner, actual_model)
+
+
 def _conclude_parsed(
     store: Store,
     owner: OwnerSnapshot,
@@ -2105,6 +2121,7 @@ def _conclude_parsed(
     served_provider: str = "",
     served_hop: int | None = None,
     screener_preferred: bool = False,
+    observation: ScreeningObservation | None = None,
 ) -> ScreenResult:
     """Step 14 for ONE message: a parsed verdict -> its write-once outcome.
 
@@ -2237,6 +2254,9 @@ def _conclude_parsed(
         # delivered like any other, but is never reused from the receipt
         # cache and never feeds a B4b release (operator directive 2026-11-04).
         screener_preferred=screener_preferred,
+        # Observe-only telemetry for the hub (agent-server §8.5): not part of
+        # the tuple, never stored, never compared.
+        observation=observation,
     )
     try:
         store.finish_screening(
@@ -2372,6 +2392,10 @@ def _replay_consumed_release(
             template_sha256=str(committed["template_sha256"]),
             body_sha256=str(committed["body_sha256"]),
             categories=tuple(committed["categories"]),
+            # The replayed release still names the screener that answered
+            # (the signed release row), so a re-driven Deliver reports the
+            # same provenance as the first one. Telemetry only.
+            observation=_release_observation(release),
         ),
         screened_bytes=len(envelope.private_body().encode("utf-8")),
     )
@@ -2401,6 +2425,10 @@ def _commit_release_receipt(
         template_sha256=hr.OWNER_RELEASE_SHA256,
         body_sha256=envelope.body_sha256,
         categories=() if deliver else tuple(hr.decoded_categories(release)),
+        # B4b: the receipt's model is the owner-release marker, but the hub's
+        # observe-only block reports the screener whose hold was released.
+        # Not stored by ``commit_owner_release`` and not part of the tuple.
+        observation=_release_observation(release),
     )
     try:
         store.commit_owner_release(
@@ -2424,6 +2452,14 @@ def _commit_release_receipt(
         # release, so none is ever admitted on one.
         attachments_hash=None,
     )
+
+
+def _release_observation(release: Mapping[str, Any]) -> ScreeningObservation | None:
+    """The released hold's screener for the hub telemetry block (§8.5), if known."""
+
+    from local_operator.team_bridge.screening_observation import from_release_row
+
+    return from_release_row(release)
 
 
 def _replay_work_scope_decision(
@@ -3553,6 +3589,7 @@ async def _screen_batch_core(
             served_provider=_served_provider(runner, actual_model, prepared),
             served_hop=_served_hop(runner, actual_model, prepared),
             screener_preferred=_answered_preferred(runner, actual_model),
+            observation=_answered_observation(runner, actual_model),
         )
     return _finish()
 
