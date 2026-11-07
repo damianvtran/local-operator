@@ -77,7 +77,9 @@ def open_gate(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> eligibility.
 
     gate = eligibility.Gate(tenant_id=TENANT, endpoint_id=ENDPOINT, tenant_name="Acme")
     monkeypatch.setattr(eligibility, "gate", lambda _root: gate)
-    monkeypatch.setattr(keys, "load_seed", lambda endpoint, base=None: SEED if endpoint == ENDPOINT else None)
+    monkeypatch.setattr(
+        keys, "load_seed", lambda endpoint, base=None: SEED if endpoint == ENDPOINT else None
+    )
     eligibility.write_grant(
         config_dir,
         eligibility.Grant(

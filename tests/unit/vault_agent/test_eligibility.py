@@ -46,6 +46,7 @@ def world(config_dir, monkeypatch):
 def _rewrite(config_dir, **changes):
     path = eligibility.vault_dir(config_dir) / eligibility.ELIGIBILITY_NAME
     data = eligibility._read_json(path)
+    assert data is not None
     data.update(changes)
     eligibility._write_json(path, data)
 
@@ -117,7 +118,11 @@ def _status_body(**org):
         "vault_principal": {"state": "approved"},
     }
     entry.update(org)
-    return {"api_version": "radient-vault-api-v1", "delegations_available": True, "organizations": [entry]}
+    return {
+        "api_version": "radient-vault-api-v1",
+        "delegations_available": True,
+        "organizations": [entry],
+    }
 
 
 @pytest.fixture
@@ -162,7 +167,9 @@ def test_refresh_reads_an_unregistered_route_as_the_dark_gate(config_dir, refres
     assert eligibility.gate(config_dir) is None
 
 
-def test_refresh_signed_out_writes_closed_without_a_call(config_dir, refreshing, monkeypatch) -> None:
+def test_refresh_signed_out_writes_closed_without_a_call(
+    config_dir, refreshing, monkeypatch
+) -> None:
     monkeypatch.setattr(hub, "person_client", lambda _root, _base=None: None)
     assert eligibility.refresh(config_dir, boundary="explicit", force=True).state == "signed_out"
     assert refreshing.calls == []
@@ -176,8 +183,12 @@ def test_refresh_without_force_honours_the_ttl(config_dir, refreshing) -> None:
     assert len(refreshing.calls) == 1
 
 
-@pytest.mark.parametrize("orgs", [[], [hub.OrgRef(tenant_id=TENANT, tenant_name="Acme", role="member")]])
-def test_hub_boundaries_refresh_the_vault_gate_only_for_a_team_account(config_dir, monkeypatch, orgs) -> None:
+@pytest.mark.parametrize(
+    "orgs", [[], [hub.OrgRef(tenant_id=TENANT, tenant_name="Acme", role="member")]]
+)
+def test_hub_boundaries_refresh_the_vault_gate_only_for_a_team_account(
+    config_dir, monkeypatch, orgs
+) -> None:
     from local_operator.hub_org import enrol
 
     calls: list[tuple[str, bool]] = []

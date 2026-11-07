@@ -64,14 +64,24 @@ def test_pickup_follows_a_dotted_cursor_and_picks_the_exact_match() -> None:
     cursor = "vdl_" + "a" * 32 + "." + "b" * 16
     transport = Transport(
         answers=[
-            (200, {"delegations": [_row(delegation_id="vdl_wrong_ep", endpoint_id="bep_other")], "next_cursor": cursor}),
+            (
+                200,
+                {
+                    "delegations": [_row(delegation_id="vdl_wrong_ep", endpoint_id="bep_other")],
+                    "next_cursor": cursor,
+                },
+            ),
             (
                 200,
                 {
                     "delegations": [
                         _row(delegation_id="vdl_wrong_fp", key_fingerprint="0" * 64),
                         _row(delegation_id="vdl_match"),
-                        _row(delegation_id="vdl_revoked", state="revoked", expires_at="2027-01-01T00:00:00Z"),
+                        _row(
+                            delegation_id="vdl_revoked",
+                            state="revoked",
+                            expires_at="2027-01-01T00:00:00Z",
+                        ),
                     ],
                     "next_cursor": None,
                 },
@@ -107,9 +117,16 @@ def test_pickup_takes_the_latest_expiry_of_several_matches() -> None:
 
 def test_pickup_with_no_match_is_none() -> None:
     fp = keys.fingerprint_for_seed(SEED)
-    transport = Transport(answers=[(200, {"delegations": [_row(endpoint_id="bep_raw-mixed_123")], "next_cursor": None})])
+    transport = Transport(
+        answers=[
+            (200, {"delegations": [_row(endpoint_id="bep_raw-mixed_123")], "next_cursor": None})
+        ]
+    )
     # A case-folded endpoint is NOT ours (H8 at the selection step too).
-    assert pick_up(make_client(transport), tenant_id=TENANT, endpoint_id=ENDPOINT, fingerprint=fp) is None
+    assert (
+        pick_up(make_client(transport), tenant_id=TENANT, endpoint_id=ENDPOINT, fingerprint=fp)
+        is None
+    )
 
 
 # -- the happy path, H8 exact endpoint ------------------------------------------
@@ -173,16 +190,28 @@ def test_a_malformed_mint_is_refused_before_route_15(config_dir, open_gate, bad)
 @pytest.mark.parametrize(
     ("status", "body", "code", "phrase"),
     [
-        (403, {"code": "assertion_invalid", "details": {"reason": "proof_invalid"}}, "proof_invalid", "clock"),
+        (
+            403,
+            {"code": "assertion_invalid", "details": {"reason": "proof_invalid"}},
+            "proof_invalid",
+            "clock",
+        ),
         (403, {"code": "vault_no_access"}, "vault_no_access", "no longer a member"),
         (401, {"code": "identity_required"}, "identity_required", "lop login radient"),
         (410, {"code": "secret_expired"}, "secret_expired", "expired"),
         (404, {"code": "not_found"}, "not_found", "No such Vault item"),
-        (403, {"code": "conversation_vaults_disabled"}, "conversation_vaults_disabled", "aren't available yet"),
+        (
+            403,
+            {"code": "conversation_vaults_disabled"},
+            "conversation_vaults_disabled",
+            "aren't available yet",
+        ),
         (503, {"code": "vault_unavailable"}, "unavailable", "isn't available yet"),
     ],
 )
-def test_route_15_refusals_map_to_a_remedy(config_dir, open_gate, status, body, code, phrase) -> None:
+def test_route_15_refusals_map_to_a_remedy(
+    config_dir, open_gate, status, body, code, phrase
+) -> None:
     transport = Transport(answers=[(200, mint_answer()), (status, body)])
     with pytest.raises(VaultAgentRefusal) as info:
         _resolve(config_dir, transport)
@@ -190,7 +219,10 @@ def test_route_15_refusals_map_to_a_remedy(config_dir, open_gate, status, body, 
     assert phrase in str(info.value)
     # The grant survives every refusal but delegation_required.
     assert eligibility.read_grant(
-        config_dir, tenant_id=TENANT, endpoint_id=ENDPOINT, fingerprint=keys.fingerprint_for_seed(SEED)
+        config_dir,
+        tenant_id=TENANT,
+        endpoint_id=ENDPOINT,
+        fingerprint=keys.fingerprint_for_seed(SEED),
     )
 
 
@@ -209,7 +241,9 @@ def test_a_plan_refusal_closes_the_gate_record(config_dir, open_gate, code) -> N
     with pytest.raises(VaultAgentRefusal) as info:
         _resolve(config_dir, transport)
     assert info.value.code == code
-    record = eligibility._read_json(eligibility.vault_dir(config_dir) / eligibility.ELIGIBILITY_NAME)
+    record = eligibility._read_json(
+        eligibility.vault_dir(config_dir) / eligibility.ELIGIBILITY_NAME
+    )
     assert record is not None and record["eligible"] is False and record["closed_by"] == code
 
 

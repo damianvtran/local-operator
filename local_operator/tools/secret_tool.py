@@ -477,6 +477,7 @@ async def _op_vault_resolve(
         return _error(
             tool_call_id, "secret", str(exc), details={"op": "vault_resolve", "code": exc.code}
         )
+    assert store is not None  # checked callable above, before the mint
     result = store.store_credential(key, resolved.value, "vault", trim=False)
     if not getattr(result, "ok", False):
         return _error(tool_call_id, "secret", "Radient Vault returned an empty value.")

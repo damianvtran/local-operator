@@ -144,13 +144,7 @@ def agent_proof_message(
 
     if len(commitment) != 32:
         raise ValueError("commitment must be 32 bytes")
-    return (
-        s(AGENT_PROOF_DOMAIN)
-        + y(commitment)
-        + s(delegation_id)
-        + s(endpoint_id)
-        + n(timestamp)
-    )
+    return s(AGENT_PROOF_DOMAIN) + y(commitment) + s(delegation_id) + s(endpoint_id) + n(timestamp)
 
 
 def b64url(raw: bytes) -> str:

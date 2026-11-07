@@ -14,6 +14,7 @@ import hashlib
 import json
 import struct
 from pathlib import Path
+from typing import Any
 
 import pytest
 from cryptography.exceptions import InvalidSignature
@@ -25,16 +26,16 @@ FIXTURE = Path(__file__).parent / "fixtures" / "agent-resolve-vector.json"
 FIXTURE_SHA256 = "9a77f2782fb110e99815232169db6733342c14038b04a6b0d445fd59cac722ff"
 
 
-def _vector() -> dict:
+def _vector() -> dict[str, Any]:
     raw = FIXTURE.read_bytes()
     assert hashlib.sha256(raw).hexdigest() == FIXTURE_SHA256
     return json.loads(raw)
 
 
-def _decode_fields(encoding: bytes) -> list:
+def _decode_fields(encoding: bytes) -> list[Any]:
     """Recover the vector's inputs from its own operation encoding, never guess them."""
 
-    fields: list = []
+    fields: list[Any] = []
     i = 0
     while i < len(encoding):
         tag = encoding[i]
@@ -51,7 +52,7 @@ def _decode_fields(encoding: bytes) -> list:
 
 
 @pytest.fixture(scope="module")
-def vector_case() -> dict:
+def vector_case() -> dict[str, Any]:
     v = _vector()
     _, _op, tenant, vault, item, chal, ledger, _params = _decode_fields(
         bytes.fromhex(v["operation_encoding_hex"])
@@ -69,7 +70,7 @@ def vector_case() -> dict:
     }
 
 
-def _commit(c: dict) -> bytes:
+def _commit(c: dict[str, Any]) -> bytes:
     return wire.resolve_commitment(
         tenant_id=c["tenant"],
         vault_id=c["vault"],

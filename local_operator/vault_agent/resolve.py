@@ -53,7 +53,9 @@ NOT_CONNECTED = (
     "`lop vault connect` in a terminal and approve it in the console, then try again."
 )
 
-_CONSOLE_ITEM_PATH = re.compile(r"/dashboard/vaults/(vlt_[0-9A-Za-z_-]+)/items/(vit_[0-9A-Za-z_-]+)/?$")
+_CONSOLE_ITEM_PATH = re.compile(
+    r"/dashboard/vaults/(vlt_[0-9A-Za-z_-]+)/items/(vit_[0-9A-Za-z_-]+)/?$"
+)
 
 
 class VaultAgentRefusal(Exception):
@@ -168,7 +170,9 @@ def refusal_for(config_dir: Path, exc: BaseException) -> VaultAgentRefusal:
             "console link).",
         )
     if code == "rate_limited" or status == 429:
-        return VaultAgentRefusal("rate_limited", "Radient Vault is rate limiting reads; wait a minute.")
+        return VaultAgentRefusal(
+            "rate_limited", "Radient Vault is rate limiting reads; wait a minute."
+        )
     label = code or (f"HTTP {status}" if status else "no response")
     return VaultAgentRefusal(
         code or "error",
@@ -279,9 +283,7 @@ def resolve_item(
         raise refusal_for(config_dir, exc) from None
     value = body.get("value")
     if not isinstance(value, str) or not value.strip():
-        raise VaultAgentRefusal(
-            "protocol_error", "Radient Vault returned no value for that item."
-        )
+        raise VaultAgentRefusal("protocol_error", "Radient Vault returned no value for that item.")
     username = body.get("username")
     expires_at = body.get("expires_at")
     return Resolved(

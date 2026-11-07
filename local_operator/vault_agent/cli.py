@@ -301,10 +301,11 @@ def status(root: Path, *, as_json: bool = False, out: Any = None) -> int:
             return EXIT_OK
     else:
         print(_t(_v.status_open(org=gate.tenant_name)), file=out)
-    if fingerprint is None:
+    if fingerprint is None or owner is None:
         print(_t(_v.status_no_key()), file=out)
         return EXIT_OK
-    print(_t(_v.key_heading(endpoint=owner.endpoint_id, org=getattr(owner, "tenant_name", owner.tenant_id))), file=out)
+    org = getattr(owner, "tenant_name", None) or owner.tenant_id
+    print(_t(_v.key_heading(endpoint=owner.endpoint_id, org=org)), file=out)
     _print_fingerprint(fingerprint, out=out)
     if grant is not None:
         print(_t(_v.connected_until(until=_local_time(grant.expires_at))), file=out)

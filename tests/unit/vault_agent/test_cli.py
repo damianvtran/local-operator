@@ -71,7 +71,9 @@ def _connect(root, transport, **kwargs):
     return rc, out.getvalue(), opened, clock
 
 
-def test_connect_prints_the_4x4_grid_opens_the_link_and_caches_the_pickup(config_dir, wired) -> None:
+def test_connect_prints_the_4x4_grid_opens_the_link_and_caches_the_pickup(
+    config_dir, wired
+) -> None:
     transport = Transport(
         answers=[
             (200, {"delegations": [], "next_cursor": None}),  # not approved yet
@@ -98,7 +100,9 @@ def test_connect_prints_the_4x4_grid_opens_the_link_and_caches_the_pickup(config
     assert SEED.hex() not in url
     assert "Connected." in text
     assert clock.now == cli.POLL_SECONDS  # one wait between the two reads
-    grant = eligibility.read_grant(config_dir, tenant_id=TENANT, endpoint_id=ENDPOINT, fingerprint=fingerprint)
+    grant = eligibility.read_grant(
+        config_dir, tenant_id=TENANT, endpoint_id=ENDPOINT, fingerprint=fingerprint
+    )
     assert grant is not None and grant.delegation_id == "vdl_" + "c" * 32
 
 
@@ -129,7 +133,9 @@ def test_connect_times_out_with_a_next_step(config_dir, wired) -> None:
         ("error", "Try again"),
     ],
 )
-def test_a_closed_gate_prints_one_reason_and_touches_nothing(config_dir, wired, monkeypatch, state, phrase) -> None:
+def test_a_closed_gate_prints_one_reason_and_touches_nothing(
+    config_dir, wired, monkeypatch, state, phrase
+) -> None:
     wired["observation"] = Observation(state=state, tenant_name="Acme")
     wired["gate"] = None
     created: list[str] = []
@@ -158,12 +164,16 @@ def test_status_shows_the_grid_and_the_grant(config_dir, wired, monkeypatch) -> 
 
 def test_disconnect_deletes_the_key_and_points_at_the_console(config_dir, monkeypatch) -> None:
     deleted: list[str] = []
-    monkeypatch.setattr(keys, "delete_seed", lambda endpoint, base=None: deleted.append(endpoint) or True)
+    monkeypatch.setattr(
+        keys, "delete_seed", lambda endpoint, base=None: deleted.append(endpoint) or True
+    )
     monkeypatch.setattr(
         "local_operator.team_bridge.store.Store.active_owner_readonly",
         lambda self: SimpleNamespace(tenant_id=TENANT, endpoint_id=ENDPOINT),
     )
-    eligibility.write_grant(config_dir, eligibility.Grant("vdl_x", "2999-01-01T00:00:00Z", TENANT, ENDPOINT, "f" * 64))
+    eligibility.write_grant(
+        config_dir, eligibility.Grant("vdl_x", "2999-01-01T00:00:00Z", TENANT, ENDPOINT, "f" * 64)
+    )
     out = io.StringIO()
     assert cli.disconnect(config_dir, out=out) == cli.EXIT_OK
     assert deleted == [ENDPOINT]

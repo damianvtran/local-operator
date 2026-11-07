@@ -50,9 +50,7 @@ def public_key_from_seed(seed: bytes) -> bytes:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     key = Ed25519PrivateKey.from_private_bytes(seed)
-    return key.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    )
+    return key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 
 
 def sign_proof(seed: bytes, message: bytes) -> str:

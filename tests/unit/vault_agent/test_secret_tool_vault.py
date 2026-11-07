@@ -46,15 +46,20 @@ def test_a_gate_read_that_raises_reads_closed(monkeypatch) -> None:
 
     monkeypatch.setattr(eligibility, "is_open", boom)
     tool = build_secret_tool(ToolContext())
+    assert tool is not None
     assert "vault_resolve" not in tool.parameters["properties"]["op"]["enum"]
 
 
 async def _call(context: ToolContext, **kwargs):
-    return await execute_secret("call-v", {"op": "vault_resolve", **kwargs}, AbortSignal(), None, context)
+    return await execute_secret(
+        "call-v", {"op": "vault_resolve", **kwargs}, AbortSignal(), None, context
+    )
 
 
 @pytest.mark.asyncio
-async def test_execution_refuses_before_any_http_when_the_gate_is_closed(config_dir, monkeypatch) -> None:
+async def test_execution_refuses_before_any_http_when_the_gate_is_closed(
+    config_dir, monkeypatch
+) -> None:
     monkeypatch.setattr(eligibility, "gate", lambda _root: None)
     transport = Transport()
     monkeypatch.setattr(resolve, "default_client_factory", lambda _root: make_client(transport))
@@ -71,7 +76,10 @@ async def test_a_resolved_value_lands_untrimmed_in_the_session_store_and_nowhere
     config_dir, open_gate, monkeypatch, caplog
 ) -> None:
     transport = Transport(
-        answers=[(200, mint_answer()), (200, {"value": CANARY, "username": "deploy", "expires_at": None})]
+        answers=[
+            (200, mint_answer()),
+            (200, {"value": CANARY, "username": "deploy", "expires_at": None}),
+        ]
     )
     # The tool calls resolve_item with its default factory; swap the default so
     # the REAL flow (gate, seed, grant, mint, sign, route 15) runs on the stub.
@@ -80,7 +88,9 @@ async def test_a_resolved_value_lands_untrimmed_in_the_session_store_and_nowhere
     )
     store = VariableStore()
     caplog.set_level(logging.DEBUG)
-    result = await _call(ToolContext(variables=store), vault_id=VAULT, item_id=ITEM, name="deploy key")
+    result = await _call(
+        ToolContext(variables=store), vault_id=VAULT, item_id=ITEM, name="deploy key"
+    )
 
     assert not result.is_error, result.text
     assert store.credential_env() == {"DEPLOY_KEY": CANARY}  # byte for byte, not trimmed
@@ -117,7 +127,11 @@ async def test_list_hides_the_delegation_seed(config_dir) -> None:
     assert "GH_TOKEN" in listed.text
     assert DELEGATION_SECRET_PREFIX not in listed.text
     refused = await execute_secret(
-        "c", {"op": "retrieve", "name": DELEGATION_SECRET_PREFIX + "bep_x"}, AbortSignal(), None, ToolContext()
+        "c",
+        {"op": "retrieve", "name": DELEGATION_SECRET_PREFIX + "bep_x"},
+        AbortSignal(),
+        None,
+        ToolContext(),
     )
     assert refused.is_error
 

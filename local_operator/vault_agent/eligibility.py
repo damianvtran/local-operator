@@ -49,7 +49,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,9 @@ def _owner(config_dir: Path) -> Any | None:
 # -- the gate -------------------------------------------------------------------
 
 
-def _record_open(data: Mapping[str, Any] | None, *, tenant_id: str, endpoint_id: str, base: str) -> bool:
+def _record_open(
+    data: Mapping[str, Any] | None, *, tenant_id: str, endpoint_id: str, base: str
+) -> bool:
     if data is None:
         return False
     checked = data.get("checked_at")
@@ -189,7 +191,9 @@ def is_open(config_dir: Path | None) -> bool:
 class Observation:
     """What a refresh learned, for ``lop vault status``/``connect`` to explain."""
 
-    state: str  # open | signed_out | not_team | no_endpoint | unavailable | not_eligible | frozen | disabled | not_approved | error
+    #: open | cached | signed_out | not_team | no_endpoint | unavailable |
+    #: not_eligible | frozen | disabled | not_approved | error
+    state: str
     tenant_id: str | None = None
     endpoint_id: str | None = None
     tenant_name: str | None = None
@@ -317,7 +321,9 @@ def _refresh(config_dir: Path, *, boundary: str, force: bool) -> Observation:
 # -- the grant cache ------------------------------------------------------------
 
 
-def read_grant(config_dir: Path, *, tenant_id: str, endpoint_id: str, fingerprint: str) -> Grant | None:
+def read_grant(
+    config_dir: Path, *, tenant_id: str, endpoint_id: str, fingerprint: str
+) -> Grant | None:
     """The cached grant for EXACTLY this (tenant, endpoint, key), else ``None``."""
 
     data = _read_json(vault_dir(config_dir) / GRANT_NAME)
@@ -374,7 +380,7 @@ def clear_grant(config_dir: Path) -> None:
 
 
 def select_grant(
-    rows: list[Mapping[str, Any]], *, tenant_id: str, endpoint_id: str, fingerprint: str
+    rows: Sequence[Mapping[str, Any]], *, tenant_id: str, endpoint_id: str, fingerprint: str
 ) -> Grant | None:
     """VAULT.md §6.20's pickup: the ``live`` row whose ``endpoint_id`` AND
     ``key_fingerprint`` equal ours byte for byte; with several, the latest
