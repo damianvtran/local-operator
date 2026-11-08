@@ -19,10 +19,93 @@ WHY THIS MODULE EXISTS
       ``run_delegated_pass`` machinery (same policy, retention window, force
       semantics and guards as ``lop sessions cleanup --scratchpads-only``);
       nothing is re-implemented or weakened here.
+    * **operator-named project build output** (``--build-output PATH``) — the
+      fourth category and the ONE place this module deletes anything itself, for
+      the reason set out under BUILD OUTPUT below.
 
     There is no ``shutil.rmtree``, ``os.remove`` or ``rm`` anywhere in this
-    file, and none may be added: every removal belongs to a guarded remover that
-    owns its own refusal rules.
+    file, and none may be added. Every removal belongs to a guarded remover that
+    owns its own refusal rules — ``git worktree remove``, ``go clean -cache``,
+    the scratchpad pass — with exactly ONE documented exception: build output is
+    a directory tree that no tool-level remover owns (``cargo clean`` knows only
+    the ``target`` it created, and nothing collects ``.next``/``build``/
+    ``dist``), so :func:`remove_build_output` exists. It owns these guards, and
+    they are its whole justification:
+
+    * it re-validates EVERY predicate at removal time and SKIPS, never removes,
+      an item that stopped qualifying — reporting which predicate failed;
+    * it refuses a symlink and a mount point at removal time as well, because the
+      state that was previewed is not necessarily the state on disk;
+    * it never follows a symlink out of the tree (a post-order walk that unlinks
+      link entries instead of descending them);
+    * it measures allocated bytes immediately before removal and records that
+      measurement, so the receipt's preview figure and the removal figure can be
+      compared;
+    * it is the only place in this module that removes anything, and it is
+      reachable only from :func:`apply`, for items the preview already approved.
+
+BUILD OUTPUT: WHY THE FOURTH CATEGORY IS GATED ON PROVENANCE
+    Build output is the one class of reclaimable space with no tool that owns
+    its removal, so the safety argument cannot be "the tool refused". It has to
+    be "this directory is provably build output of a provably identified
+    project, and provably idle". Everything unusual about this category follows
+    from that. The asymmetry that shapes it is the module's own: a deleted build
+    tree costs a rebuild, while a deleted piece of someone's work — or a
+    directory removed out from under a running compile — is not recoverable.
+
+    PROVENANCE IS THE GATE, AND IT IS DATA. :data:`BUILD_OUTPUT_SHAPES` maps a
+    directory name to the manifests that PROVE a project of that kind owns it:
+    ``target`` beside a ``Cargo.toml``, ``.next`` beside a ``package.json``, and
+    ``build``/``dist`` beside one of the manifests listed there. A directory is
+    only even CONSIDERED as a candidate when its parent — the project root the
+    operator named — holds one of that shape's manifests. That gate is what
+    makes this safe for a non-technical user: someone who happens to keep a
+    folder called ``build`` or ``dist`` under ``~/Documents`` has no manifest
+    there, so it is never a candidate at all — whatever it contains and however
+    large it is. The manifest is what makes the deletion PROVABLE rather than
+    guessed from a name, and it is why adding an ecosystem is one row in that
+    table rather than a new code path, a new module or a new command.
+
+    The operator names project DIRECTORIES (``--build-output PATH``), never
+    shape directories, and nothing is discovered or defaulted — the same rule as
+    ``--repo``. Naming none means this category is not planned at all.
+
+    Every predicate fails toward KEEP, and each refusal is an ``Item`` with
+    ``action=keep``, a stable code and a :data:`KEEP_HINTS` entry:
+
+    * a ``.git`` entry (directory OR the FILE a linked worktree carries) inside
+      the candidate, or the candidate BEING a git directory (``git init --bare
+      <shape>``, ``--separate-git-dir``) — ``git-repository``;
+    * a candidate that is a symlink, or a path that traverses one — ``symlink``;
+    * a candidate that is a mount point — ``mount-point``;
+    * tracked files inside it (``git-tracked``), or a shape git does not ignore
+      (``git-not-ignored``); a git that cannot answer is ``git-unknown`` and
+      keeps, never "nothing is tracked";
+    * a toolchain process attributable to it or to its project root, or an open
+      handle beneath it — ``toolchain-running`` / ``handles-open``; either probe
+      failing is ``probe-failed`` and keeps;
+    * a walk that hit its entry bound — ``idle-unproven``, because a truncated
+      walk cannot prove the tree idle.
+
+    The ``.git`` guards run BEFORE the git probes on purpose: the probes ask from
+    the PARENT, and ``git -C <repo>/.worktrees ls-files`` happily answers about
+    the parent repository, so a confident answer about the WRONG repository is
+    the dangerous case. The ``.git``-inside guard is what closes it.
+
+    THE IDLE WINDOW IS THIS CATEGORY'S OWN: :data:`BUILD_OUTPUT_IDLE_MINUTES`
+    (six hours), not the module's 60-minute floor. ``--min-idle-minutes`` may
+    raise it and can never lower it, so the effective window is
+    ``max(--min-idle-minutes, 360)`` and the value used is stamped into every
+    item's evidence.
+
+    NO SETTINGS, NO i18n, NO NEW NAMESPACE, deliberately: the three things an
+    operator would want configurable are the command's existing verbs. The
+    threshold IS this category's idle window; dry-run IS the command's default
+    (the preview); and "enabled" IS naming ``--build-output`` at all. Adding a
+    config section would create a second place where a scope decision lives,
+    and this module's whole premise is that the operator names the scope. The
+    output is English-only operator CLI text, like the rest of this command and
+    the sessions-cleanup section (docs/I18N.md), so there is nothing to translate.
 
 CONTRACT
     * Preview first. :func:`plan` reads and measures; it removes nothing.
@@ -46,6 +129,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -114,6 +198,111 @@ MEASUREMENT_NOTE = (
 CATEGORY_WORKTREE = "worktree"
 CATEGORY_GO_CACHE = "go-build-cache"
 CATEGORY_SCRATCHPAD = "scratchpad"
+CATEGORY_BUILD_OUTPUT = "build-output"
+
+#: The idle window for build output, in minutes: this category's OWN default,
+#: not the module's 60-minute floor. The floor exists to separate "an agent
+#: between turns" from "abandoned" for a WORKTREE, whose activity is a person or
+#: an agent editing files. A build tree is written in bursts by a toolchain that
+#: a wrapper may be driving from elsewhere, so an hour of quiet is not evidence
+#: that nothing is building into it. ``--min-idle-minutes`` may RAISE this window
+#: and can never lower it (see :func:`build_output_idle_minutes`), which keeps the
+#: floor rule and this default composing instead of competing.
+BUILD_OUTPUT_IDLE_MINUTES = 6 * 60
+
+#: Directory name -> the manifests that PROVE a project of that kind owns it.
+#:
+#: THIS TABLE IS THE GENERALISATION. A candidate directory is never judged by its
+#: NAME: it is only even considered when its parent — the project root the
+#: operator named — holds one of the manifests listed here for that shape. A
+#: folder called ``build`` with no manifest beside it is somebody's data, and no
+#: amount of resemblance changes that. Adding an ecosystem is one row here.
+BUILD_OUTPUT_SHAPES: dict[str, tuple[str, ...]] = {
+    "target": ("Cargo.toml",),
+    ".next": ("package.json",),
+    "build": (
+        "CMakeLists.txt",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "meson.build",
+        "Makefile",
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+    ),
+    "dist": (
+        "pyproject.toml",
+        "setup.py",
+        "package.json",
+        "Cargo.toml",
+        "tsconfig.json",
+    ),
+}
+
+#: The executables whose presence near a candidate means a build MAY be writing
+#: it. Deliberately NOT ``node``, ``npm``, ``pnpm`` or ``yarn``: they are
+#: interpreters and package managers, far too common among a fleet of concurrent
+#: sessions to be evidence of anything, and a measured run had a plain ``node``
+#: process with its cwd at the repository freeze ``<repo>/target`` for as long as
+#: it lived — a guard that fires on an idle machine is a guard that gets switched
+#: off. Nothing is lost, because the producer a build runs IS itself in this set
+#: for as long as the build runs (``next build`` is
+#: ``node .../node_modules/.bin/next``) and :func:`is_producer_process` checks
+#: EVERY argv element, not just ``argv[0]``.
+BUILD_OUTPUT_PRODUCERS: frozenset[str] = frozenset(
+    {
+        # target
+        "cargo",
+        "rustc",
+        "rustdoc",
+        "clippy-driver",
+        "sccache",
+        # .next
+        "next",
+        "vite",
+        "tsc",
+        "webpack",
+        "esbuild",
+        # build
+        "cmake",
+        "make",
+        "ninja",
+        "gradle",
+        "mvn",
+        "maven",
+        "xcodebuild",
+        # dist
+        "python",
+        "pip",
+        "uv",
+        "setuptools",
+    }
+)
+
+#: The subset of :data:`BUILD_OUTPUT_PRODUCERS` that is attributed by CWD ONLY.
+#:
+#: These are the generic interpreter and package-manager names a Python build
+#: runs through, and they are separated for a MEASURED reason: ``lop disk reclaim
+#: --build-output <root>`` is itself a ``python`` process whose argv CONTAINS the
+#: project root, so attributing them by argv blocked every reclaim this command
+#: made — a guard that fires on an idle machine is a guard that gets switched off.
+#: cwd is still evidence for them (``python -m build`` and ``pip install .`` run
+#: IN the project), and a specific toolchain keeps full argv attribution, where a
+#: path in the command line really is a build being pointed at a directory.
+BUILD_OUTPUT_GENERIC_PRODUCERS: frozenset[str] = frozenset(
+    {
+        "python",
+        "pip",
+        "uv",
+        "setuptools",
+    }
+)
+
+#: What :func:`producer_kind` answers for one process.
+PRODUCER_SPECIFIC = "specific"
+PRODUCER_GENERIC = "generic"
 
 ACTION_RECLAIM = "reclaim"
 ACTION_KEEP = "keep"
@@ -167,6 +356,34 @@ KEEP_HINTS: dict[str, str] = {
     "refused": "see the reason; nothing was touched",
     "policy-off": "enable the setting named in the reason, or pass --force for one run",
     "guarded": "kept by the scratchpad guards (see the reason)",
+    "git-repository": (
+        "the directory IS a repository or a linked-worktree root; a branch and any "
+        "uncommitted work would go with it"
+    ),
+    "symlink": "a symlink (or a path through one) is never followed or removed",
+    "mount-point": "it is the root of its own filesystem; another volume's contents are not ours",
+    "git-tracked": "git tracks files inside it, so part of it is committed content",
+    "git-not-ignored": (
+        "git does not ignore it, so it is not provably build output; ignore it in "
+        ".gitignore or delete it deliberately, then rerun"
+    ),
+    "git-unknown": (
+        "git could not answer (missing binary, timeout, unreadable repository); rerun "
+        "where git works"
+    ),
+    "toolchain-running": (
+        "a build toolchain process is working in it; let it finish and rerun (a removed "
+        "build directory corrupts an in-flight build)"
+    ),
+    "handles-open": "a process holds files open inside it; stop that process first",
+    "probe-failed": (
+        "the liveness or provenance probes could not answer (ps/lsof/git unavailable or "
+        "unreadable); rerun where they work"
+    ),
+    "no-manifest": (
+        "the manifest that proved this shape is gone since the preview; re-preview to see "
+        "the new state"
+    ),
 }
 
 
@@ -215,6 +432,10 @@ class Selection:
     repos: tuple[str, ...] = ()
     go_build_cache: bool = False
     scratchpads: bool = False
+    #: Operator-named PROJECT directories whose build output may be reclaimed.
+    #: Never defaulted and never discovered, exactly like ``repos``: naming none
+    #: means the category is not planned at all.
+    build_output: tuple[str, ...] = ()
     min_idle_minutes: int = DEFAULT_MIN_IDLE_MINUTES
     force: bool = False
 
@@ -1236,6 +1457,1057 @@ def apply_scratchpads(root: Path, items: list[Item], *, force: bool, now: float)
 
 
 # --------------------------------------------------------------------------
+# Build output — the fourth category
+# --------------------------------------------------------------------------
+
+
+def build_output_idle_minutes(min_idle_minutes: int) -> int:
+    """The effective idle window for build output, in minutes.
+
+    ``max`` and not the flag alone: the module-wide rule is that
+    ``--min-idle-minutes`` may RAISE a window and can never lower it, and this
+    category's own default is :data:`BUILD_OUTPUT_IDLE_MINUTES`. Composing the
+    two keeps both promises. The value used is stamped into every item's evidence
+    so a receipt reader can see which window judged it instead of inferring it.
+    """
+    return max(int(min_idle_minutes), BUILD_OUTPUT_IDLE_MINUTES)
+
+
+def read_process_table() -> list[tuple[int, tuple[str, ...]]] | None:
+    """``[(pid, argv)]`` for every process ``ps`` reports, or ``None``.
+
+    ``ps -axo pid=,command=`` because it is present on every supported platform
+    and cheap. ``ps`` reports no cwd and does not delimit argv, so argv is
+    approximated by whitespace splitting and the cwd is filled in from
+    :func:`read_open_handles` (one ``lsof`` sweep already has it). Both
+    approximations fail in the SAFE direction: a path containing a space can make
+    a process unattributable by argv, and the cwd rule then covers it.
+
+    FAIL CLOSED: a missing ``ps``, a timeout, a non-zero exit or a parse that
+    yields no rows is ``None`` ("cannot tell"), never "nothing is running" —
+    every supported platform has at least one process, so an empty table means
+    the output was not what we expect.
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=QUICK_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    rows: list[tuple[int, tuple[str, ...]]] = []
+    for line in done.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid_text, _, rest = line.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            return None
+        rows.append((pid, tuple(rest.split())))
+    return rows or None
+
+
+def read_open_handles() -> tuple[str, ...] | None:
+    """Every open path plus every process cwd in ONE ``lsof`` sweep, or ``None``.
+
+    A failed ``lsof`` means "everything may be in use", never "nothing is": a
+    stale disk is recoverable, a build directory deleted under another session's
+    compile is not.
+
+    The exit-status rule is the one already proven in :func:`process_cwds`:
+    ``lsof`` exits non-zero when it could not stat some files — normal on a
+    shared machine — while still listing thousands of handles, so a usable parse
+    is trusted and only an EMPTY parse is ``None``. A row counts only when its
+    PID column is an integer, because the header splits into the same nine
+    columns as a data row and counting it made ``('NAME',)`` — a confident
+    "nothing is open" — out of output that carried no handle at all.
+
+    cwd rows come back as ``pid:<n>:cwd=<path>`` sentinels: attribution needs the
+    cwd, ``ps`` does not carry it, and a second sweep would double the most
+    expensive call in a plan.
+
+    Names are returned as ``lsof`` reports them (normalised, not resolved): the
+    candidate side is already a real path, so the common case matches, and a
+    handle opened through a DIFFERENT symlinked route to the same file is a
+    documented blind spot of the same shape the worktree category documents for
+    its own lsof use. Resolving tens of thousands of names per plan would cost
+    more than the guard is worth on the machine this exists for.
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["lsof", "-n", "-P", "-w"],
+            capture_output=True,
+            text=True,
+            timeout=QUICK_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    paths: list[str] = []
+    for line in done.stdout.splitlines():
+        # NAME may contain spaces, so split the fixed leading columns and keep
+        # the remainder whole: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+        fields = line.split(None, 8)
+        if len(fields) != 9:
+            continue
+        try:
+            int(fields[1])
+        except ValueError:
+            continue
+        name = fields[8].strip()
+        if not name:
+            continue
+        if fields[3] == "cwd":
+            paths.append(f"pid:{fields[1]}:cwd={name}")
+        else:
+            paths.append(os.path.normpath(name))
+    return tuple(paths) or None
+
+
+def cwds_by_pid(handles: Iterable[str]) -> dict[int, str]:
+    """The cwd sentinels from :func:`read_open_handles`, keyed by pid."""
+    out: dict[int, str] = {}
+    for entry in handles:
+        if not entry.startswith("pid:"):
+            continue
+        pid_text, _, tail = entry[len("pid:") :].partition(":cwd=")
+        try:
+            out[int(pid_text)] = tail
+        except ValueError:
+            continue
+    return out
+
+
+#: Characters that may legitimately precede a path inside one argv element (the
+#: flag glue in ``--out-dir=/w/target/debug``), and characters that may follow
+#: it. Used by :func:`path_in_arg`.
+_ARG_SEPARATORS = "=:, \t('\""
+_PATH_FOLLOWERS = "/:, '\")"
+
+
+def path_in_arg(arg: str, targets: Iterable[str]) -> bool:
+    """Whether ``arg`` CONTAINS one of ``targets`` as a whole path.
+
+    Needed because argv elements carry values glued to a flag or an ``=``
+    (``--out-dir=/w/target/debug``), where an exact or prefix test on the element
+    misses. The match is boundary-aware — the target must start the element or
+    follow a separator, and end it or be followed by one — so a sibling checkout
+    whose name merely EXTENDS this one (``repo-old`` against ``repo``) is not
+    attributed to it. That precision matters on a machine running ~25 concurrent
+    sessions: an over-match here blocks a real reclaim every time a neighbour
+    compiles, which is how a reclaimer becomes a no-op nobody trusts.
+
+    Deliberately attribute-only: it decides whether a build MAY be running, so a
+    false positive costs one kept candidate while a false negative corrupts
+    somebody's compile.
+    """
+    for target in targets:
+        if not target:
+            continue
+        start = arg.find(target)
+        while start != -1:
+            end = start + len(target)
+            before_ok = start == 0 or arg[start - 1] in _ARG_SEPARATORS
+            after_ok = end == len(arg) or arg[end] in _PATH_FOLLOWERS
+            if before_ok and after_ok:
+                return True
+            start = arg.find(target, start + 1)
+    return False
+
+
+def producer_kind(argv: Iterable[str]) -> str | None:
+    """Which kind of build producer, if any, this process's argv names.
+
+    Every element is checked, not just ``argv[0]``: ``next build`` runs as
+    ``node .../node_modules/.bin/next`` and a wrapper invocation is common.
+    Checking more elements can only produce more blocks, which is the safe
+    direction — EXCEPT for the generic names, which are attributed by cwd only
+    (see :data:`BUILD_OUTPUT_GENERIC_PRODUCERS`).
+
+    A VERSIONED interpreter counts as its base name: ``python3.12``, ``python3``
+    and ``pip3`` are the producer names with a version glued on, and matching only
+    the bare spelling would silently drop the ``dist`` producers on the machine
+    this runs on.
+    """
+    for arg in argv:
+        base = os.path.basename(arg)
+        if base in BUILD_OUTPUT_PRODUCERS:
+            name: str | None = base
+        else:
+            stem = base.rstrip("0123456789.")
+            name = stem if stem and stem != base and stem in BUILD_OUTPUT_PRODUCERS else None
+        if name is None:
+            continue
+        return PRODUCER_GENERIC if name in BUILD_OUTPUT_GENERIC_PRODUCERS else PRODUCER_SPECIFIC
+    return None
+
+
+def is_producer_process(argv: Iterable[str]) -> bool:
+    """Whether any argv element names a build producer of either kind."""
+    return producer_kind(argv) is not None
+
+
+#: How much of the PROJECT ROOT may count for attribution.
+#:
+#: Only two levels are needed here (the three-level rule the reference reaper
+#: carries exists for scan roots it DISCOVERS; this category's roots are named by
+#: the operator, so the ambiguous case is home itself). See
+#: :func:`build_output_parent_scope`.
+_PARENT_SCOPE_FULL = "full"
+_PARENT_SCOPE_NONE = "none"
+
+
+def build_output_parent_scope(project_root: str) -> str:
+    """Which parent-attribution scope a named project root may use.
+
+    ``NONE`` when the root IS the home directory, ``FULL`` otherwise.
+
+    Home is not a scope at all: it CONTAINS every project its owner has, so a
+    parent-prefix rule there attributes any toolchain process anywhere under it
+    and makes the category a permanent no-op on an idle machine. A directory the
+    operator NAMED as a project root is the opposite claim — this is the
+    repository whose build was named — so the whole of it counts, including the
+    exact ``cwd == project root`` case: a build running in the repository must
+    block its own ``target/``, which is the whole point of the guard.
+    """
+    home = os.path.realpath(os.path.expanduser("~"))
+    return _PARENT_SCOPE_NONE if os.path.realpath(project_root) == home else _PARENT_SCOPE_FULL
+
+
+def process_touches(
+    argv: Iterable[str],
+    cwd: str | None,
+    *,
+    candidate: str,
+    project_root: str,
+    parent_scope: str = _PARENT_SCOPE_FULL,
+    ignore_argv: bool = False,
+) -> bool:
+    """Whether ONE process is attributable to ``candidate``.
+
+    Three ways: an argv element equal to or under the candidate; an argv element
+    equal to or under the candidate's PROJECT ROOT (``cargo`` is invoked with
+    ``--manifest-path <root>/Cargo.toml`` and ``rustc`` with ``--out-dir
+    <root>/target/debug/deps``, both of which name the root rather than the
+    candidate verbatim); or a cwd at/under that root.
+
+    Scoped by ``parent_scope`` so a root that CONTAINS everything (home) cannot
+    swallow the whole tree: see :func:`build_output_parent_scope`. The candidate
+    term is never scoped — a process naming the build directory itself is
+    evidence wherever the directory is.
+
+    Every path is compared in BOTH spellings, as given and resolved. On macOS
+    ``/var`` is a symlink to ``/private/var``, so a candidate the operator named
+    through the one spelling and a cwd ``lsof`` reports through the other would
+    otherwise never match — the guard would fail OPEN, which is the one direction
+    it must not fail.
+    """
+    candidate_forms = {os.path.normpath(candidate), os.path.realpath(candidate)}
+    root_forms = {os.path.normpath(project_root), os.path.realpath(project_root)}
+    for arg in () if ignore_argv else argv:
+        if any(arg == text or arg.startswith(text + os.sep) for text in candidate_forms):
+            return True
+        if path_in_arg(arg, tuple(candidate_forms)):
+            return True
+        if parent_scope == _PARENT_SCOPE_FULL:
+            if any(arg == text or arg.startswith(text + os.sep) for text in root_forms):
+                return True
+            if path_in_arg(arg, tuple(root_forms)):
+                return True
+    if cwd:
+        cwd_text = os.path.normpath(cwd)
+        if cwd_text in candidate_forms:
+            return True
+        if parent_scope == _PARENT_SCOPE_FULL and any(
+            cwd_text == text or cwd_text.startswith(text + os.sep) for text in root_forms
+        ):
+            return True
+    return False
+
+
+@dataclass
+class BuildProbes:
+    """The live-build and provenance probes for build output, injectable.
+
+    Each answers ``True`` / ``False`` / ``None`` for ONE candidate, and ``None`` —
+    "the instrument could not be trusted" — BLOCKS. Tests construct this with
+    lambdas; production uses :func:`default_build_probes`. Mirrors the shape the
+    worktree category gets from :func:`process_cwds`, with the tri-state the
+    build-output predicates need.
+    """
+
+    toolchain_running: Callable[[str, str], bool | None]
+    handles_open: Callable[[str], bool | None]
+    tracked_files: Callable[[str], bool | None]
+    is_git_ignored: Callable[[str], bool | None]
+    refresh: Callable[[], None] = lambda: None
+
+
+class _Tables:
+    """The two process tables a plan reads, loaded once and refreshable."""
+
+    def __init__(self) -> None:
+        self.processes: list[tuple[int, tuple[str, ...]]] | None = None
+        self.handles: tuple[str, ...] | None = None
+        self.loaded = False
+
+    def load(self) -> None:
+        if self.loaded:
+            return
+        self.processes = read_process_table()
+        self.handles = read_open_handles()
+        self.loaded = True
+
+    def refresh(self) -> None:
+        self.processes = None
+        self.handles = None
+        self.loaded = False
+
+
+def toolchain_touches(
+    candidate: str,
+    project_root: str,
+    *,
+    processes: Iterable[tuple[int, tuple[str, ...]]],
+    handles: Iterable[str],
+) -> bool:
+    """Whether any process in ``processes`` is attributable to ``candidate``.
+
+    Split out from :func:`default_build_probes` so the attribution rule — in
+    particular the generic-producer asymmetry — is testable against a synthetic
+    process table instead of whatever happens to be running on the machine.
+    """
+    scope = build_output_parent_scope(project_root)
+    cdws = cwds_by_pid(handles)
+    for pid, argv in processes:
+        kind = producer_kind(argv)
+        if kind is None:
+            continue
+        if process_touches(
+            argv,
+            cdws.get(pid),
+            candidate=candidate,
+            project_root=project_root,
+            parent_scope=scope,
+            ignore_argv=kind == PRODUCER_GENERIC,
+        ):
+            return True
+    return False
+
+
+def default_build_probes() -> BuildProbes:
+    """The production probes, bound to one refreshable snapshot of the tables.
+
+    One ``ps`` and one ``lsof`` per snapshot rather than per candidate: the
+    snapshot is refreshed immediately before a removal (see
+    :func:`revalidate_build_output`), so the answer that decides a delete is read
+    at removal time while a preview of N candidates still costs two probes.
+    """
+    tables = _Tables()
+
+    def toolchain_running(candidate: str, project_root: str) -> bool | None:
+        tables.load()
+        if tables.processes is None:
+            return None
+        return toolchain_touches(
+            candidate, project_root, processes=tables.processes, handles=tables.handles or ()
+        )
+
+    def handles_open(candidate: str) -> bool | None:
+        tables.load()
+        if tables.handles is None:
+            return None
+        exact = os.path.normpath(candidate)
+        # Both spellings, for the reason :func:`process_touches` documents: a
+        # one-spelling comparison against ``lsof`` output fails OPEN on macOS.
+        forms = {exact, os.path.realpath(candidate)}
+        prefixes = {text + os.sep for text in forms}
+        for entry in tables.handles:
+            # A ``pid:<n>:cwd=<path>`` sentinel still names a path in use: a
+            # process sitting IN the directory holds it as much as one with a
+            # file open beneath it.
+            path_text = entry.split(":cwd=", 1)[1] if entry.startswith("pid:") else entry
+            path_text = os.path.normpath(path_text)
+            if path_text in forms or any(path_text.startswith(p) for p in prefixes):
+                return True
+        return False
+
+    return BuildProbes(
+        toolchain_running=toolchain_running,
+        handles_open=handles_open,
+        tracked_files=probe_tracked_files,
+        is_git_ignored=probe_git_ignored,
+        refresh=tables.refresh,
+    )
+
+
+#: git's own words for "there is no repository at or above here". The
+#: discriminator for exit 128 — see :func:`inside_any_repository`.
+_NOT_A_REPOSITORY = "not a git repository"
+
+
+def build_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str] | None:
+    """One git query through this module's hardened helper, or ``None``.
+
+    ``None`` means git could not be trusted to answer at all (missing binary, a
+    timeout, an undecodable stream), and every caller turns it into a KEEP. The
+    helper itself is reused from ``delegated_retention`` rather than copied: a
+    second environment recipe (``XPC_FLAGS`` dropped, repo-redirecting variables
+    scrubbed, prompts and system config off) would be a way for the two to drift.
+    """
+    try:
+        return _git(cwd, *args, timeout=QUICK_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def inside_any_repository(cwd: str) -> bool | None:
+    """Whether git considers ``cwd`` part of a repository: ``True``/``False``/``None``.
+
+    The discriminator for exit 128, which is NEVER evidence by itself: ``git -C
+    <parent> ls-files`` exits 128 both when the parent is genuinely outside every
+    repository AND when it is a repository git refuses to describe from outside —
+    the case where a linked worktree's own ``.git`` sat inside a candidate and a
+    confident "nothing is tracked" answered about the WRONG repository.
+    ``rev-parse --show-toplevel`` is the query because it is read-only, cheap (one
+    extra call on the 128 branch only) and answered for a bare repository or a
+    ``GIT_DIR`` override as well as a worktree.
+    """
+    done = build_git(cwd, "rev-parse", "--show-toplevel")
+    if done is None:
+        return None
+    if done.returncode == 0:
+        return True
+    if done.returncode == 128 and _NOT_A_REPOSITORY in (done.stderr or ""):
+        return False
+    return None
+
+
+def probe_tracked_files(candidate: str) -> bool | None:
+    """Whether any git-TRACKED file lives beneath ``candidate``.
+
+    ``True`` is the dangerous answer: a tracked file there means part of what
+    would be deleted is committed content, so nothing is removed regardless of
+    the shape's name. ``ls-files`` runs from the PARENT with the bare directory
+    name as pathspec (no absolute-pathspec edge cases) and lists recursively,
+    which is the "must be empty" test the contract states.
+
+    Outside any repository the answer is ``False`` — nothing there can be tracked
+    — which is why a ``target/`` in a plain directory stays reclaimable. That
+    ``False`` needs PROOF, though: a 128 becomes ``False`` only when
+    :func:`inside_any_repository` says so, and every other failure (git missing, a
+    timeout, an undecodable stream, a corrupt repo, a permissions wall) is
+    ``None`` — cannot tell, so the candidate is kept.
+    """
+    parent = os.path.dirname(candidate)
+    done = build_git(parent, "ls-files", "--", os.path.basename(candidate))
+    if done is None:
+        return None
+    if done.returncode == 128:
+        return False if inside_any_repository(parent) is False else None
+    if done.returncode != 0:
+        return None
+    return bool(done.stdout.strip())
+
+
+def probe_git_ignored(candidate: str) -> bool | None:
+    """Whether ``candidate`` is git-IGNORED, which is the shape's real claim.
+
+    The guard this buys is narrow but real: an untracked AND not-ignored ``dist/``
+    is a directory ``git status`` shows by hand — build output in a repository
+    that chose not to ignore it is an owner decision, so it is kept rather than
+    assumed. Tracked content is caught by :func:`probe_tracked_files`; this is the
+    neighbouring case.
+
+    Outside any repository the answer is ``True``: no ignore rule exists to
+    violate and nothing can be tracked, so the manifest is the whole safety case
+    (and the tracked probe independently confirms the second half). Same proof
+    requirement as that probe: a 128 becomes ``True`` only when
+    :func:`inside_any_repository` confirms there is genuinely no repository, and
+    is otherwise ``None``.
+    """
+    parent = os.path.dirname(candidate)
+    done = build_git(parent, "check-ignore", "-q", "--", os.path.basename(candidate))
+    if done is None:
+        return None
+    if done.returncode == 0:
+        return True
+    if done.returncode == 1:
+        return False
+    if done.returncode == 128:
+        return True if inside_any_repository(parent) is False else None
+    return None
+
+
+#: The entries every git DIRECTORY carries: the HEAD pointer, the object store
+#: and the ref namespace. Used by :func:`is_git_directory`.
+_GIT_DIR_ENTRIES = ("HEAD", "objects", "refs")
+
+
+def has_git_entry(candidate: str) -> bool | None:
+    """Whether ``candidate`` carries a ``.git`` entry (directory OR file).
+
+    ``True`` means the candidate is a repository or a linked-worktree root, not
+    build output. A linked worktree's ``.git`` is a FILE pointing at the parent
+    repository, so a directory-only check misses exactly the case that would take
+    a worktree's branch and uncommitted work with it — the repro is ``git worktree
+    add .worktrees/target -b feat/wip``, where the worktree's own basename is a
+    shape name and its parent is a real project root. ``None`` (the entry could
+    not be stat-ed) keeps the candidate; only ``FileNotFoundError`` is ``False``.
+    """
+    try:
+        os.lstat(os.path.join(candidate, ".git"))
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    return True
+
+
+def is_git_directory(candidate: str) -> bool | None:
+    """Whether ``candidate`` IS a git directory rather than containing one.
+
+    The residual :func:`has_git_entry` cannot see: ``git init --bare <shape>``
+    creates no ``.git`` entry at all — the directory itself holds ``HEAD``,
+    ``objects/`` and ``refs/`` — so a repository guard that only looks for
+    ``.git`` answers "not a repository" and the objects and refs go with it. The
+    same layout is what ``git init --separate-git-dir`` leaves when the separate
+    store is the candidate.
+
+    A pure filesystem test on purpose: no subprocess, so no locale, timeout or
+    missing-binary answer to distrust, and every layout git creates carries these
+    three entries.
+    """
+    for name in _GIT_DIR_ENTRIES:
+        try:
+            os.lstat(os.path.join(candidate, name))
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return None
+    return True
+
+
+def symlink_in_path(path: str, *, stop_at: str) -> str | None:
+    """The first component of ``path`` (down from ``stop_at``) that is a symlink.
+
+    A candidate is kept when it IS a symlink and when its path TRAVERSES one: the
+    operator named a real project directory, and a symlink in between means the
+    bytes that would be deleted are not provably the ones the manifests were found
+    beside. ``OSError`` propagates — a component that cannot be inspected is
+    "cannot tell", and the caller keeps the candidate.
+    """
+    current = os.path.abspath(stop_at)
+    if stat.S_ISLNK(os.lstat(current).st_mode):
+        return current
+    rest = os.path.relpath(os.path.abspath(path), current)
+    if rest in (".", ""):
+        return None
+    for part in rest.split(os.sep):
+        current = os.path.join(current, part)
+        if stat.S_ISLNK(os.lstat(current).st_mode):
+            return current
+    return None
+
+
+def manifests_present(project_root: str, manifests: Iterable[str]) -> tuple[str, ...]:
+    """Which of one shape's manifests exist as files in ``project_root``.
+
+    An ``OSError`` on the check is not evidence, so that manifest does not count:
+    the provenance gate can only open on a manifest that was SEEN. An empty answer
+    means "this is not that kind of project" and the directory is not a candidate.
+    """
+    found: list[str] = []
+    for name in manifests:
+        try:
+            if os.path.isfile(os.path.join(project_root, name)):
+                found.append(name)
+        except OSError:
+            continue
+    return tuple(found)
+
+
+def _keep_build_output(candidate: str, code: str, reason: str, **evidence: Any) -> Item:
+    """One explained keep for the build-output category.
+
+    ``project_root`` travels in ``evidence`` rather than as an argument: most call
+    sites in :func:`assess_build_output` spread one evidence dict that already
+    carries it, and a named parameter would then be bound twice.
+    """
+    return Item(
+        id=f"{CATEGORY_BUILD_OUTPUT}:{candidate}",
+        category=CATEGORY_BUILD_OUTPUT,
+        group=str(evidence.get("project_root") or os.path.dirname(candidate)),
+        path=candidate,
+        action=ACTION_KEEP,
+        code=code,
+        reason=reason,
+        outcome=OUTCOME_KEPT,
+        evidence=dict(evidence),
+    )
+
+
+def assess_build_output(
+    candidate: str,
+    *,
+    project_root: str,
+    manifests: tuple[str, ...],
+    now: float,
+    min_idle_minutes: int,
+    probes: BuildProbes,
+) -> Item:
+    """Decide ONE candidate build directory: a reclaim Item or an explained keep.
+
+    Every predicate fails toward KEEP. The order is cheap-first and
+    safety-ordered. Symlink and mount point are two ``lstat`` calls and answer a
+    question no name can. The ``.git`` guards come BEFORE the git probes on
+    purpose: those probes ask from the PARENT, and for a worktree whose own
+    basename is a shape (``.worktrees/target``) the parent's answer describes a
+    different repository entirely — a confident answer about the wrong repository
+    is the dangerous case, and the ``.git``-inside guard is what closes it. Age is
+    next, because the bounded walk also stops early the moment a tree is provably
+    too young. git provenance follows, and the live-build probes are last: they
+    are the most expensive, and their "cannot tell" is the one that costs most to
+    get wrong.
+    """
+    window = build_output_idle_minutes(min_idle_minutes)
+    cutoff_ns = int((now - window * 60) * 1e9)
+    evidence: dict[str, Any] = {
+        "project_root": project_root,
+        "manifests": list(manifests),
+        "idle_minutes": window,
+    }
+
+    try:
+        linked = symlink_in_path(candidate, stop_at=project_root)
+    except OSError as exc:
+        return _keep_build_output(
+            candidate,
+            "probe-failed",
+            f"the path could not be inspected ({exc.strerror or exc})",
+            **evidence,
+        )
+    if linked:
+        return _keep_build_output(
+            candidate,
+            "symlink",
+            f"a path component is a symlink ({linked}); nothing is followed or removed",
+            **evidence,
+        )
+
+    try:
+        mounted = os.path.ismount(candidate)
+    except OSError as exc:  # a probe that cannot answer is not a go-ahead
+        return _keep_build_output(
+            candidate,
+            "probe-failed",
+            f"the mount probe could not answer ({type(exc).__name__})",
+            **evidence,
+        )
+    if mounted:
+        return _keep_build_output(
+            candidate,
+            "mount-point",
+            "it is the root of its own filesystem; removing it would walk onto another volume",
+            **evidence,
+        )
+
+    git_entry = has_git_entry(candidate)
+    if git_entry is None:
+        return _keep_build_output(
+            candidate, "probe-failed", "its .git entry could not be stat-ed", **evidence
+        )
+    if git_entry:
+        return _keep_build_output(
+            candidate,
+            "git-repository",
+            "it contains a .git entry, so it is a repository or a linked-worktree root",
+            **evidence,
+        )
+    git_dir = is_git_directory(candidate)
+    if git_dir is None:
+        return _keep_build_output(
+            candidate,
+            "probe-failed",
+            "its git-directory entries could not be stat-ed",
+            **evidence,
+        )
+    if git_dir:
+        return _keep_build_output(
+            candidate,
+            "git-repository",
+            "it IS a git directory (bare or --separate-git-dir layout), not build output",
+            **evidence,
+        )
+
+    walk = walk_allocated(candidate, cutoff_ns=cutoff_ns)
+    evidence["newest_mtime"] = (
+        _iso(walk.newest_mtime_ns / 1e9) if walk.newest_mtime_ns else None
+    )
+    if walk.error:
+        return _keep_build_output(
+            candidate,
+            "idle-unproven",
+            f"the tree could not be read ({walk.error}), so idle cannot be proven",
+            **evidence,
+        )
+    if walk.recent:
+        return _keep_build_output(
+            candidate,
+            "recent",
+            f"an entry was written within the last {window // 60}h; rerun after it is quiet",
+            **evidence,
+        )
+    if walk.truncated:
+        return _keep_build_output(
+            candidate,
+            "idle-unproven",
+            f"the walk hit its {WALK_MAX_ENTRIES}-entry bound, so idle cannot be proven",
+            bytes_lower_bound=walk.allocated_bytes,
+            **evidence,
+        )
+
+    tracked = probes.tracked_files(candidate)
+    if tracked is None:
+        return _keep_build_output(
+            candidate,
+            "git-unknown",
+            "git could not say whether files inside it are tracked",
+            **evidence,
+        )
+    if tracked:
+        return _keep_build_output(
+            candidate,
+            "git-tracked",
+            "git tracks files inside it, so part of it is committed content",
+            **evidence,
+        )
+    ignored = probes.is_git_ignored(candidate)
+    if ignored is None:
+        return _keep_build_output(
+            candidate,
+            "git-unknown",
+            "git could not say whether it is ignored",
+            **evidence,
+        )
+    if not ignored:
+        return _keep_build_output(
+            candidate,
+            "git-not-ignored",
+            "git does not ignore it, so it is not provably build output",
+            **evidence,
+        )
+
+    handles = probes.handles_open(candidate)
+    if handles is None:
+        return _keep_build_output(
+            candidate,
+            "probe-failed",
+            "lsof could not establish which files are open",
+            **evidence,
+        )
+    if handles:
+        return _keep_build_output(
+            candidate,
+            "handles-open",
+            "a process holds files open inside it",
+            **evidence,
+        )
+    running = probes.toolchain_running(candidate, project_root)
+    if running is None:
+        return _keep_build_output(
+            candidate,
+            "probe-failed",
+            "the process table could not be read, so a live build cannot be ruled out",
+            **evidence,
+        )
+    if running:
+        return _keep_build_output(
+            candidate,
+            "toolchain-running",
+            "a build toolchain process is working in it",
+            **evidence,
+        )
+
+    return Item(
+        id=f"{CATEGORY_BUILD_OUTPUT}:{candidate}",
+        category=CATEGORY_BUILD_OUTPUT,
+        group=project_root,
+        path=candidate,
+        action=ACTION_RECLAIM,
+        code="reclaim",
+        reason=(
+            f"{os.path.basename(candidate)}/ proven by {'/'.join(manifests)} and "
+            f"idle for at least {window // 60}h"
+        ),
+        allocated_bytes=walk.allocated_bytes,
+        bytes_truncated=walk.truncated,
+        evidence=evidence,
+    )
+
+
+def plan_build_output(
+    paths: Iterable[str],
+    *,
+    now: float,
+    min_idle_minutes: int,
+    probes: BuildProbes | None = None,
+) -> tuple[list[Item], list[dict[str, str]]]:
+    """Assess every operator-named project directory. Returns ``(items, refusals)``.
+
+    A named path that does not exist, is not a directory, or LOOKS like a build
+    directory itself (its basename is a shape name and it holds no manifest of its
+    own) is a whole-category refusal keyed by that path: the operator asked about
+    something this command cannot answer, and a silent empty preview would read as
+    "nothing to reclaim". That is the difference between a refusal and a keep —
+    a keep is a CANDIDATE this plan decided not to touch, and a directory with no
+    manifest is not a candidate at all, so it is never even listed.
+
+    Nothing is discovered. The candidates are the fixed shape names inside each
+    named directory, one level deep, and no shape becomes a candidate unless the
+    directory holds a manifest that proves the project owns it.
+    """
+    resolved = probes if probes is not None else default_build_probes()
+    items: list[Item] = []
+    refusals: list[dict[str, str]] = []
+    seen: set[str] = set()
+    every_manifest = tuple(
+        dict.fromkeys(name for names in BUILD_OUTPUT_SHAPES.values() for name in names)
+    )
+    for raw in paths:
+        given = os.fspath(raw)
+        # ``abspath``, NOT ``realpath``: resolving a named root would silently
+        # redirect the delete at whatever a symlink points to, so a symlinked
+        # root is kept by the predicate instead of being followed here. The
+        # probes compare both spellings (see :func:`process_touches`), so nothing
+        # is lost by keeping this one.
+        root = os.path.abspath(os.path.expanduser(given))
+        # ONE directory however it is spelled, the same way `--repo P --repo P`
+        # collapses: enumerating it twice would double-count bytes and make apply
+        # report the second copy as a failure.
+        if root in seen:
+            continue
+        seen.add(root)
+        if not os.path.isdir(root):
+            refusals.append(
+                {
+                    "category": CATEGORY_BUILD_OUTPUT,
+                    "path": given,
+                    "reason": f"{given} is not a directory (name a project directory)",
+                }
+            )
+            continue
+        if os.path.basename(root) in BUILD_OUTPUT_SHAPES and not manifests_present(
+            root, every_manifest
+        ):
+            refusals.append(
+                {
+                    "category": CATEGORY_BUILD_OUTPUT,
+                    "path": given,
+                    "reason": (
+                        f"{given} is named like build output and holds no project manifest; "
+                        "name the directory that contains it"
+                    ),
+                }
+            )
+            continue
+        for name, manifests in BUILD_OUTPUT_SHAPES.items():
+            candidate = os.path.join(root, name)
+            try:
+                mode = os.lstat(candidate).st_mode
+            except FileNotFoundError:
+                continue
+            except OSError:
+                items.append(
+                    _keep_build_output(
+                        candidate,
+                        "probe-failed",
+                        "it could not be inspected",
+                        project_root=root,
+                        manifests=list(manifests),
+                    )
+                )
+                continue
+            if not (stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+                # A plain file that happens to carry a shape's name is not a
+                # build directory and there is nothing to reclaim in it.
+                continue
+            found = manifests_present(root, manifests)
+            if not found:
+                # THE PROVENANCE GATE: no manifest, no candidate — not a keep,
+                # not a refusal, simply not this category's business.
+                continue
+            items.append(
+                assess_build_output(
+                    candidate,
+                    project_root=root,
+                    manifests=found,
+                    now=now,
+                    min_idle_minutes=min_idle_minutes,
+                    probes=resolved,
+                )
+            )
+    return items, refusals
+
+
+def revalidate_build_output(
+    item: Item, *, min_idle_minutes: int, probes: BuildProbes | None = None
+) -> Item:
+    """Re-run EVERY predicate for a previewed item, from scratch, right now.
+
+    Called at removal time and nowhere else, so the answer that decides a delete
+    is read then rather than carried over from the preview: the gap between the
+    preview and the delete is the race this closes. The probes are refreshed
+    first for the same reason — one ``ps`` and one ``lsof`` of the moment we are
+    about to delete in.
+    """
+    if probes is not None:
+        probes.refresh()
+    root = item.evidence.get("project_root") or os.path.dirname(item.path)
+    manifests = tuple(
+        item.evidence.get("manifests")
+        or BUILD_OUTPUT_SHAPES.get(os.path.basename(item.path), ())
+    )
+    if not manifests:
+        return _keep_build_output(
+            item.path,
+            "no-manifest",
+            "no manifest in the table proves this shape any more",
+            project_root=root,
+        )
+    found = manifests_present(root, manifests)
+    if not found:
+        return _keep_build_output(
+            item.path,
+            "no-manifest",
+            f"the manifest that proved it is gone ({', '.join(manifests)})",
+            project_root=root,
+        )
+    fresh = assess_build_output(
+        item.path,
+        project_root=root,
+        manifests=found,
+        now=time.time(),
+        min_idle_minutes=min_idle_minutes,
+        probes=probes if probes is not None else default_build_probes(),
+    )
+    fresh.id = item.id
+    fresh.outcome = item.outcome
+    return fresh
+
+
+def _raise_walk_error(exc: OSError) -> None:
+    """``os.walk`` error hook that RAISES: an unreadable directory is a failure."""
+    raise exc
+
+
+def _remove_tree(root: str) -> None:
+    """Delete one tree bottom-up, never following a symlink out of it.
+
+    ``os.walk(topdown=False, followlinks=False)`` visits the deepest directory
+    first, so every directory is already empty when its own ``rmdir`` runs. A
+    link entry — to a file or to a directory — is UNLINKED, never descended:
+    that is the "never follows a symlink out of the tree" guarantee stated as
+    code rather than as intent, and it holds even for a link created between the
+    preview and this call.
+
+    ``onerror`` re-raises instead of being ignored: the default swallows an
+    unreadable subdirectory, which would turn "could not look" into "part of it
+    was removed". An entry that vanished underneath us is fine
+    (``FileNotFoundError`` is a no-op); every other ``OSError`` reaches the
+    caller, which reports a partial removal instead of a receipt claiming space
+    it never got back.
+    """
+    for directory, dirnames, filenames in os.walk(
+        root, topdown=False, followlinks=False, onerror=_raise_walk_error
+    ):
+        for name in dirnames + filenames:
+            entry = os.path.join(directory, name)
+            try:
+                if stat.S_ISLNK(os.lstat(entry).st_mode):
+                    os.unlink(entry)
+                elif os.path.isdir(entry):
+                    os.rmdir(entry)
+                else:
+                    os.unlink(entry)
+            except FileNotFoundError:
+                continue
+    try:
+        os.rmdir(root)
+    except FileNotFoundError:
+        return
+
+
+def remove_build_output(
+    item: Item, *, min_idle_minutes: int, probes: BuildProbes | None = None
+) -> str | None:
+    """Remove ONE previewed build-output tree. ``None`` on success.
+
+    The single tree remover this module documents in its docstring, and it owns
+    every guard that makes that acceptable:
+
+    1. :func:`revalidate_build_output` re-runs EVERY predicate from scratch, and
+       an item that no longer qualifies is SKIPPED with the failing predicate
+       named — never removed "because it was approved earlier";
+    2. the shape of the entry itself is re-checked against ``lstat``: a symlink
+       or a mount point that appeared since the preview is refused, and so is a
+       path that stopped being a directory;
+    3. the tree is measured again immediately before deletion, and that
+       measurement is what the receipt carries for this item — the preview's
+       figure and the removal's figure are different numbers, and the reader can
+       see both;
+    4. :func:`_remove_tree` never follows a symlink out of the tree.
+
+    The return value is a detail string: a prefix of ``no longer qualifies`` or
+    ``refusing`` means the item was skipped (it stopped qualifying), anything else
+    is a failure. Both make the run exit 1, which is the honest code for "this
+    previewed item did not get reclaimed".
+    """
+    fresh = revalidate_build_output(item, min_idle_minutes=min_idle_minutes, probes=probes)
+    if fresh.action != ACTION_RECLAIM:
+        return f"no longer qualifies: [{fresh.code}] {fresh.reason}"
+
+    try:
+        mode = os.lstat(item.path).st_mode
+    except OSError as exc:
+        return f"refusing: it could not be stat-ed at removal time ({exc.strerror or exc})"
+    if stat.S_ISLNK(mode):
+        return "refusing: it is a symlink at removal time"
+    if not stat.S_ISDIR(mode):
+        return "refusing: it is no longer a directory at removal time"
+    try:
+        if os.path.ismount(item.path):
+            return "refusing: it is a mount point at removal time"
+    except OSError as exc:
+        return f"refusing: the mount probe failed ({exc.strerror or exc})"
+
+    walk = walk_allocated(item.path)
+    if walk.error:
+        return f"refusing: the tree could not be measured ({walk.error})"
+    item.allocated_bytes = walk.allocated_bytes
+    item.bytes_truncated = walk.truncated
+    item.evidence["allocated_bytes_at_removal"] = walk.allocated_bytes
+    item.evidence["bytes_truncated_at_removal"] = walk.truncated
+    item.evidence["entries_at_removal"] = walk.entries
+    try:
+        _remove_tree(item.path)
+    except OSError as exc:
+        return f"removal failed part-way ({exc.strerror or exc}); the tree is now partial"
+    if os.path.lexists(item.path):
+        # A remover that cannot prove its own end state reports failure rather
+        # than a receipt claiming space it did not get back.
+        return "removal returned without error but the path still exists"
+    return None
+
+
+# --------------------------------------------------------------------------
 # Plan / apply / receipt
 # --------------------------------------------------------------------------
 
@@ -1320,6 +2592,18 @@ def plan(selection: Selection, config_root: Path, *, now: float | None = None) -
         result.items.extend(items)
         if refusal:
             result.refusals.append(refusal)
+    if selection.build_output:
+        items, refusals = plan_build_output(
+            selection.build_output, now=moment, min_idle_minutes=selection.min_idle_minutes
+        )
+        result.items.extend(items)
+        result.refusals.extend(refusals)
+        # The operator's named directories get the disk reading, not the individual
+        # candidates: the honest "what was freed" figure is about the filesystem
+        # each project lives on, and a candidate is already gone by the time the
+        # AFTER reading is taken.
+        for named in selection.build_output:
+            result.probe_paths.append(os.path.realpath(os.path.expanduser(os.fspath(named))))
     return result
 
 
@@ -1512,8 +2796,9 @@ def apply(
         except OSError as exc:
             receipt_warnings.append(f"receipt checkpoint failed ({exc}); the file may be stale")
 
-    # Worktrees and Go cache are per-item; scratchpads are one batched,
-    # confinement-by-name pass.
+    # Worktrees, Go cache and build output are per-item; scratchpads are one
+    # batched, confinement-by-name pass.
+    build_probes = default_build_probes()
     scratch_items = [
         i for i in plan_.items if i.category == CATEGORY_SCRATCHPAD and i.action == ACTION_RECLAIM
     ]
@@ -1533,6 +2818,19 @@ def apply(
             elif item.category == CATEGORY_GO_CACHE:
                 error = clean_go_cache(item)
                 if error and error.startswith(("no longer qualifies", "GOCACHE changed")):
+                    item.outcome = OUTCOME_SKIPPED
+                else:
+                    item.outcome = OUTCOME_FAILED if error else OUTCOME_REMOVED
+                item.detail = error or ""
+            elif item.category == CATEGORY_BUILD_OUTPUT:
+                # The one remover this module owns; see its docstring for the
+                # guards it re-applies rather than trusting the preview.
+                error = remove_build_output(
+                    item,
+                    min_idle_minutes=plan_.selection.min_idle_minutes,
+                    probes=build_probes,
+                )
+                if error and error.startswith(("no longer qualifies", "refusing")):
                     item.outcome = OUTCOME_SKIPPED
                 else:
                     item.outcome = OUTCOME_FAILED if error else OUTCOME_REMOVED

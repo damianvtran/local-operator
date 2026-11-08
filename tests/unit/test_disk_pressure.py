@@ -578,12 +578,18 @@ def test_git_refusal_is_the_last_word_and_reported(fx: Fx, monkeypatch: Any) -> 
 
 
 def test_removal_uses_no_force_flag_and_no_direct_deleter() -> None:
-    """Structural: no deleter call and no ``--force`` literal outside docstrings.
+    """Structural: no UNGUARDED deleter, and no ``--force`` literal outside docstrings.
 
     Parsed rather than grepped: the module docstring legitimately SAYS "without
-    --force", and a text scan cannot tell prose from an argv element. No direct
-    deleter call may appear at all — the receipt writer delegates its atomic
-    tmp/replace/unlink to the sanctioned session manifest writer.
+    --force", and a text scan cannot tell prose from an argv element.
+
+    THE DOCUMENTED AMENDMENT: build output is a directory tree that no tool-level
+    remover owns, so ``_remove_tree`` unlinks and rmdirs — inside ONE function,
+    reachable only from ``remove_build_output``, which re-validates every
+    predicate and refuses symlinks and mount points at removal time. That is
+    asserted BY NAME here rather than allowed in general: a deleter anywhere else
+    in the module still fails this test, and ``rmtree``/``removedirs``/
+    ``os.remove`` still fail everywhere.
     """
     import ast
 
@@ -602,14 +608,23 @@ def test_removal_uses_no_force_flag_and_no_direct_deleter() -> None:
         if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings
     ]
     assert not any(text == "--force" or text.startswith("--force") for text in literals)
-    banned = {"rmtree", "remove", "removedirs", "rmdir"}
-    unlinks = 0
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            assert name not in banned, f"direct deleter call: {name}"
-    assert unlinks == 0
+    banned = {"rmtree", "remove", "removedirs"}
+    allowed_owners = {"_remove_tree", "remove_build_output"}
+    offenders: list[str] = []
+    for func in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+        for call in ast.walk(func):
+            if not isinstance(call, ast.Call):
+                continue
+            name = (
+                call.func.attr
+                if isinstance(call.func, ast.Attribute)
+                else getattr(call.func, "id", "")
+            )
+            if name in banned:
+                offenders.append(f"{func.name}: {name}")
+            elif name in {"unlink", "rmdir"} and func.name not in allowed_owners:
+                offenders.append(f"{func.name}: {name}")
+    assert not offenders, f"deleter outside the documented remover: {offenders}"
 
 
 # -- remediation round 1 (review R1-1 .. R1-9) --------------------------------
@@ -1110,3 +1125,499 @@ def test_scratchpads_switch_off_is_a_refusal_unless_forced(fx_cfg: Path, capsys:
 
 def test_force_is_rejected_outside_scratchpads(fx: Fx, capsys: Any) -> None:
     assert reclaim_command(_args(str(fx.primary), force=True)) == 2
+
+
+# -- build output — the fourth category --------------------------------------
+#
+# Each case names ONE project directory (never a shape directory) and drives the
+# real planner. The liveness probes are injected (they are the only injectable
+# part) so a case can say "a build is running" without spawning one; the git
+# provenance probes are the REAL ones wherever the case is about provenance.
+# The end-to-end cases use the default probes on purpose: that is the path an
+# operator's `lop disk reclaim --build-output` takes.
+
+
+def _bo_probes(**overrides: Any) -> Any:
+    """Deterministic probes: everything answers "clear" unless a case overrides it."""
+    base: dict[str, Any] = dict(
+        toolchain_running=lambda candidate, project_root: False,
+        handles_open=lambda candidate: False,
+        tracked_files=lambda candidate: False,
+        is_git_ignored=lambda candidate: True,
+        refresh=lambda: None,
+    )
+    base.update(overrides)
+    return dp.BuildProbes(**base)
+
+
+def _project(base: Path, manifests: tuple[str, ...] = ("Cargo.toml",)) -> Path:
+    """A project root holding ``manifests`` (the provenance gate's input)."""
+    root = base / "proj"
+    root.mkdir(parents=True)
+    for manifest in manifests:
+        (root / manifest).write_text("x\n")
+    return root
+
+
+def _shape(root: Path, name: str = "target", *, entries: int = 3) -> Path:
+    shape = root / name
+    (shape / "debug").mkdir(parents=True)
+    for index in range(entries):
+        (shape / "debug" / f"obj{index}.o").write_bytes(b"x" * 2048)
+    return shape
+
+
+def _idle(tree: Path, hours: float = 8.0) -> None:
+    age(tree, time.time() - hours * 3600)
+
+
+def _silent(probe: str) -> Any:
+    """The named probe answering "cannot tell" (``None``), with its real arity."""
+    if probe == "toolchain_running":
+        return lambda candidate, project_root: None
+    return lambda candidate: None
+
+
+def plan_bo(root: Path, **kw: Any) -> tuple[list[Any], list[Any]]:
+    probes = kw.pop("probes", None) or _bo_probes()
+    now = kw.pop("now", None) or time.time()
+    min_idle = kw.pop("min_idle_minutes", dp.DEFAULT_MIN_IDLE_MINUTES)
+    return dp.plan_build_output((str(root),), now=now, min_idle_minutes=min_idle, probes=probes)
+
+
+def test_a_folder_named_build_without_a_manifest_is_never_a_candidate(tmp_path: Path) -> None:
+    """THE non-technical-user safety test: a name is not evidence.
+
+    A chat-only user's ``~/Documents/build`` (or ``dist``) is their data. There is
+    no manifest beside it, so it is not a candidate at all — it does not appear as
+    a reclaim row, and it does not appear as a KEEP row either, because a keep
+    would still mean this planner considered deleting it.
+    """
+    documents = tmp_path / "home" / "Documents"
+    for name in ("build", "dist"):
+        folder = documents / name
+        folder.mkdir(parents=True)
+        for index in range(5):
+            (folder / f"invoice-{index}.pdf").write_bytes(b"x" * 4096)
+        _idle(folder, hours=800)
+    _idle(documents, hours=800)
+
+    items, refusals = plan_bo(documents)
+
+    assert items == [] and refusals == []
+    assert (documents / "build" / "invoice-0.pdf").exists()
+    assert (documents / "dist" / "invoice-0.pdf").exists()
+
+
+@pytest.mark.parametrize("shape", sorted(dp.BUILD_OUTPUT_SHAPES))
+def test_each_shape_is_a_candidate_only_with_its_manifest(tmp_path: Path, shape: str) -> None:
+    """The table is the gate: every listed manifest opens it, removing it closes it."""
+    for index, manifest in enumerate(dp.BUILD_OUTPUT_SHAPES[shape]):
+        root = _project(tmp_path / f"case{index}", manifests=(manifest,))
+        _shape(root, shape)
+        _idle(root)
+
+        items, _ = plan_bo(root)
+        assert [item.action for item in items] == [dp.ACTION_RECLAIM], (shape, manifest)
+        assert items[0].evidence["manifests"] == [manifest]
+
+        (root / manifest).unlink()
+        items, _ = plan_bo(root)
+        assert items == [], (shape, manifest)
+
+
+def test_node_modules_is_not_a_shape_and_nothing_outside_the_table_is(tmp_path: Path) -> None:
+    root = _project(tmp_path, manifests=("package.json",))
+    _shape(root, "node_modules")
+    _shape(root, "out")
+    _idle(root)
+
+    items, _ = plan_bo(root)
+
+    assert "node_modules" not in dp.BUILD_OUTPUT_SHAPES
+    assert items == []
+
+
+def test_a_named_shape_directory_is_refused_not_answered_with_nothing(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    shape = _shape(root)
+    _idle(root)
+
+    items, refusals = plan_bo(shape)
+
+    assert items == []
+    assert [r["category"] for r in refusals] == [dp.CATEGORY_BUILD_OUTPUT]
+    assert "name the directory that contains it" in refusals[0]["reason"]
+
+
+def test_a_missing_directory_is_a_refusal(fx: Fx, capsys: Any) -> None:
+    missing = fx.root / "nope"
+    assert reclaim_command(_args(build_output=(str(missing),), json=True)) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["refusals"][0]["category"] == "build-output"
+    assert "not a directory" in payload["refusals"][0]["reason"]
+
+
+def test_a_worktree_whose_own_name_is_a_shape_is_kept(fx: Fx) -> None:
+    """The round-1 repro: ``git worktree add .worktrees/target -b feat/wip``.
+
+    The candidate is a linked-worktree root, so its ``.git`` is a FILE. A
+    directory-only repository guard answers "not a repository" and the worktree's
+    branch and uncommitted work go with it.
+    """
+    holder = fx.root / ".worktrees"
+    holder.mkdir()
+    (holder / "Cargo.toml").write_text("x\n")
+    wip = holder / "target"
+    git(fx.primary, "worktree", "add", "-q", "-b", "feat/wip", str(wip))
+    (wip / "uncommitted.txt").write_text("work in progress\n")
+    _idle(holder)
+
+    items, refusals = plan_bo(holder)
+
+    assert refusals == []
+    assert [item.code for item in items] == ["git-repository"]
+    assert items[0].action == dp.ACTION_KEEP
+    # ... and the guarded remover refuses it again at removal time.
+    assert dp.remove_build_output(items[0], min_idle_minutes=60, probes=_bo_probes())
+    assert git(wip, "rev-parse", "--abbrev-ref", "HEAD") == "feat/wip"
+    assert (wip / "uncommitted.txt").read_text() == "work in progress\n"
+
+
+def test_bare_and_separate_git_dir_layouts_are_kept(tmp_path: Path) -> None:
+    """No ``.git`` entry exists in either layout, so the ENTRY test cannot see them."""
+    bare_root = _project(tmp_path / "bare")
+    subprocess.run(["git", "init", "-q", "--bare", str(bare_root / "target")], check=True)
+    _idle(bare_root)
+
+    separate_root = _project(tmp_path / "separate")
+    subprocess.run(
+        ["git", "init", "-q", f"--separate-git-dir={separate_root / 'dist'}", str(separate_root)],
+        check=True,
+        capture_output=True,
+    )
+    _idle(separate_root)
+
+    bare_items, _ = plan_bo(bare_root)
+    separate_items, _ = plan_bo(separate_root)
+
+    assert [item.code for item in bare_items] == ["git-repository"]
+    assert [item.code for item in separate_items] == ["git-repository"]
+
+
+def test_tracked_ignored_and_unignored_shapes(tmp_path: Path) -> None:
+    """Three real git states, real probes: tracked beats ignored, unignored keeps."""
+    root = _project(tmp_path)
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    probes = _bo_probes(
+        tracked_files=dp.probe_tracked_files, is_git_ignored=dp.probe_git_ignored
+    )
+
+    # 1. TRACKED: committed build output is content, not cache.
+    _shape(root)
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "commit the output")
+    _idle(root)
+    items, _ = plan_bo(root, probes=probes)
+    assert [item.code for item in items] == ["git-tracked"]
+
+    # 2. UNTRACKED and NOT ignored: the owner's call, not ours.
+    subprocess.run(["git", "-C", str(root), "rm", "-rq", "--cached", "target"], check=True)
+    _idle(root)
+    items, _ = plan_bo(root, probes=probes)
+    assert [item.code for item in items] == ["git-not-ignored"]
+
+    # 3. IGNORED and untracked: reclaimable.
+    (root / ".gitignore").write_text("/target\n")
+    _idle(root)
+    items, _ = plan_bo(root, probes=probes)
+    assert [item.action for item in items] == [dp.ACTION_RECLAIM]
+
+
+def test_a_git_that_cannot_answer_keeps_the_tree(tmp_path: Path) -> None:
+    """cannot-tell is never "nothing is tracked"."""
+    root = _project(tmp_path)
+    _shape(root)
+    _idle(root)
+    items, _ = plan_bo(root, probes=_bo_probes(tracked_files=lambda candidate: None))
+    assert [item.code for item in items] == ["git-unknown"]
+    items, _ = plan_bo(root, probes=_bo_probes(is_git_ignored=lambda candidate: None))
+    assert [item.code for item in items] == ["git-unknown"]
+
+
+def test_a_running_toolchain_and_an_open_handle_both_keep(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    shape = _shape(root)
+    _idle(root)
+
+    items, _ = plan_bo(root, probes=_bo_probes(toolchain_running=lambda c, r: True))
+    assert [item.code for item in items] == ["toolchain-running"]
+
+    items, _ = plan_bo(root, probes=_bo_probes(handles_open=lambda candidate: True))
+    assert [item.code for item in items] == ["handles-open"]
+
+    assert shape.exists()
+
+
+@pytest.mark.parametrize("probe", ["toolchain_running", "handles_open"])
+def test_a_failing_liveness_probe_keeps_and_never_removes(tmp_path: Path, probe: str) -> None:
+    """The probe that cannot answer keeps the tree, at plan AND at removal time."""
+    root = _project(tmp_path)
+    shape = _shape(root)
+    _idle(root)
+
+    items, _ = plan_bo(root, probes=_bo_probes(**{probe: _silent(probe)}))
+    assert [item.code for item in items] == ["probe-failed"]
+
+    # Approved under a working probe, then removed under a blind one: the
+    # at-removal re-check is what has to hold, and it must not delete.
+    previewed = plan_bo(root)[0][0]
+    assert previewed.action == dp.ACTION_RECLAIM
+    detail = dp.remove_build_output(
+        previewed, min_idle_minutes=60, probes=_bo_probes(**{probe: _silent(probe)})
+    )
+
+    assert detail and detail.startswith("no longer qualifies")
+    assert shape.exists() and (shape / "debug" / "obj0.o").exists()
+
+
+def test_attribution_is_per_candidate_not_a_parent_prefix(tmp_path: Path) -> None:
+    """A producer is attributed to THIS project, and a neighbour is not."""
+    root = str(tmp_path / "proj")
+    candidate = os.path.join(root, "target")
+    sibling = str(tmp_path / "proj-old")
+
+    # cwd at the project root: a build in the repository blocks its own target/.
+    assert dp.process_touches(["cargo", "build"], root, candidate=candidate, project_root=root)
+    # The parent repository's checkout is a different tree and is not attributed.
+    assert not dp.process_touches(
+        ["cargo", "build"], sibling, candidate=candidate, project_root=root
+    )
+    # rustc's out-dir names the candidate, whatever the cwd.
+    assert dp.process_touches(
+        ["rustc", "--out-dir", os.path.join(candidate, "debug", "deps"), "lib.rs"],
+        "/",
+        candidate=candidate,
+        project_root=root,
+    )
+    # A sibling whose name merely EXTENDS the root is not attributed by path.
+    assert not dp.path_in_arg(os.path.join(sibling, "x"), (root,))
+    # Bare node/npm are NOT producers; the tool they run is.
+    assert not dp.is_producer_process(["node", "server.js"])
+    assert not dp.is_producer_process(["/usr/local/bin/npm", "run", "dev"])
+    assert dp.is_producer_process(["node", "/w/node_modules/.bin/next", "build"])
+    assert dp.is_producer_process(["python3.12", "-m", "build"])
+
+
+def test_generic_producers_are_attributed_by_cwd_only(tmp_path: Path) -> None:
+    """The measured false positive: this command's OWN argv names the project root.
+
+    ``lop disk reclaim --build-output <root>`` is a ``python`` process whose argv
+    contains the root, so argv attribution on a generic producer name blocked
+    every reclaim the command made — the guard would have been a permanent no-op.
+    """
+    root = str(tmp_path / "proj")
+    candidate = os.path.join(root, "dist")
+    own_argv = (
+        "python3.12",
+        "-c",
+        "from local_operator.cli import main",
+        "disk",
+        "reclaim",
+        "--build-output",
+        root,
+    )
+
+    assert dp.producer_kind(own_argv) == dp.PRODUCER_GENERIC
+    assert not dp.toolchain_touches(candidate, root, processes=[(1, own_argv)], handles=[])
+    # The same python process is evidence when it is WORKING in the project.
+    assert dp.toolchain_touches(
+        candidate, root, processes=[(1, own_argv)], handles=[f"pid:1:cwd={root}"]
+    )
+    # A specific toolchain keeps full argv attribution: there a path in the
+    # command line really is a build being pointed at a directory.
+    assert dp.producer_kind(["rustc", "lib.rs"]) == dp.PRODUCER_SPECIFIC
+    assert dp.toolchain_touches(
+        candidate,
+        root,
+        processes=[(2, ("rustc", "--out-dir", os.path.join(candidate, "x"), "lib.rs"))],
+        handles=[],
+    )
+
+
+def test_freshness_is_the_newest_entry_not_the_directory_mtime(tmp_path: Path) -> None:
+    """An all-ancient tree is judged on its newest entry, even when that is 1970."""
+    root = _project(tmp_path / "ancient")
+    shape = _shape(root)
+    age(root, 0.0)  # every entry stamped at the epoch
+    items, _ = plan_bo(root)
+    assert [item.action for item in items] == [dp.ACTION_RECLAIM], items
+
+    root2 = _project(tmp_path / "fresh")
+    shape2 = _shape(root2)
+    _idle(root2)
+    deep = shape2 / "debug" / "obj1.o"
+    os.utime(deep, None)  # one fresh file deep inside an otherwise ancient tree
+    items, _ = plan_bo(root2)
+    assert [item.code for item in items] == ["recent"]
+
+    assert shape.exists()
+
+
+def test_the_idle_window_is_six_hours_and_never_the_sixty_minute_floor(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    _shape(root)
+    _idle(root, hours=2.0)
+
+    items, _ = plan_bo(root, min_idle_minutes=60)
+    assert [item.code for item in items] == ["recent"]
+    assert items[0].evidence["idle_minutes"] == dp.BUILD_OUTPUT_IDLE_MINUTES
+
+    # --min-idle-minutes may RAISE the window ...
+    _idle(root, hours=8.0)
+    assert [item.action for item in plan_bo(root, min_idle_minutes=60)[0]] == [dp.ACTION_RECLAIM]
+    items, _ = plan_bo(root, min_idle_minutes=600)
+    assert [item.code for item in items] == ["recent"]
+    assert items[0].evidence["idle_minutes"] == 600
+
+
+def test_a_truncated_walk_is_idle_unproven(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = dp.walk_allocated
+    monkeypatch.setattr(
+        dp, "walk_allocated", lambda root, **kw: real(root, max_entries=2, **kw)
+    )
+    root = _project(tmp_path)
+    _shape(root, entries=5)
+    _idle(root)
+
+    items, _ = plan_bo(root)
+
+    assert [item.code for item in items] == ["idle-unproven"]
+    assert "entry bound" in items[0].reason
+
+
+def test_symlinks_and_mount_points_are_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "precious.txt").write_text("keep me")
+
+    # 1. The candidate IS a symlink.
+    root = _project(tmp_path / "linked")
+    (root / "target").symlink_to(elsewhere, target_is_directory=True)
+    _idle(root)
+    items, _ = plan_bo(root)
+    assert [item.code for item in items] == ["symlink"]
+    assert (elsewhere / "precious.txt").exists()
+
+    # 2. The candidate's PATH traverses a symlink: the named root itself is one.
+    real_root = _project(tmp_path / "real")
+    _shape(real_root)
+    _idle(real_root)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real_root, target_is_directory=True)
+    items, _ = plan_bo(alias)
+    assert [item.code for item in items] == ["symlink"]
+
+    # 3. A mount point.
+    monkeypatch.setattr(os.path, "ismount", lambda path: True)
+    items, _ = plan_bo(real_root)
+    assert [item.code for item in items] == ["mount-point"]
+    monkeypatch.undo()
+    assert (real_root / "target" / "debug" / "obj0.o").exists()
+
+
+def test_preview_removes_nothing_and_apply_needs_confirmation(
+    fx: Fx, capsys: Any, monkeypatch: Any
+) -> None:
+    root = _project(fx.root / "bo")
+    shape = _shape(root)
+    _idle(root)
+    before = sorted(p.name for p in shape.rglob("*"))
+
+    assert reclaim_command(_args(build_output=(str(root),), json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["reclaimable"] == 1
+    assert payload["selection"]["build_output"] == [str(root)]
+    assert sorted(p.name for p in shape.rglob("*")) == before
+    assert not (fx.cfg / dp.RECEIPT_DIRNAME).exists()
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert reclaim_command(_args(build_output=(str(root),), apply=True)) == 2
+    assert "not a terminal" in capsys.readouterr().err
+    assert shape.exists()
+
+
+def test_apply_removes_the_tree_and_the_receipt_carries_the_measurements(
+    fx: Fx, capsys: Any
+) -> None:
+    """The real path, with the REAL probes: no injected liveness answer here."""
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    shape = _shape(root)
+    _idle(root)
+
+    assert reclaim_command(_args(build_output=(str(root),), apply=True, yes=True, json=True)) == 0
+    receipt = json.loads(capsys.readouterr().out)
+
+    assert receipt["status"] == "complete"
+    assert not shape.exists()
+    item = receipt["items"][0]
+    assert item["category"] == "build-output" and item["outcome"] == "removed"
+    assert item["evidence"]["manifests"] == ["Cargo.toml"]
+    assert item["evidence"]["allocated_bytes_at_removal"] > 0
+    assert receipt["disk_usage_before"] and receipt["disk_usage_after"]
+    on_disk = json.loads(list((fx.cfg / dp.RECEIPT_DIRNAME).glob("*.json"))[0].read_text())
+    assert on_disk["confirmation"] == "--yes"
+    assert on_disk["items"][0]["outcome"] == "removed"
+
+
+def test_a_tree_that_went_fresh_between_preview_and_apply_is_skipped(fx: Fx, capsys: Any) -> None:
+    root = _project(fx.root / "bo")
+    shape = _shape(root, entries=2)
+    _idle(root)
+    plan = dp.plan(dp.Selection(build_output=(str(root),)), fx.cfg)
+    assert [item.action for item in plan.items] == [dp.ACTION_RECLAIM]
+
+    (shape / "debug" / "obj0.o").write_bytes(b"rebuilt")  # a build just wrote it
+
+    result = dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_YES)
+
+    assert result.exit_code == 1
+    assert plan.items[0].outcome == dp.OUTCOME_SKIPPED
+    assert "no longer qualifies" in plan.items[0].detail and "recent" in plan.items[0].detail
+    assert shape.exists() and (shape / "debug" / "obj0.o").exists()
+
+
+def test_the_real_parser_accepts_build_output(fx: Fx, tmp_path: Path) -> None:
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    _shape(root)
+    _idle(root)
+    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from local_operator.cli import main; sys.exit(main())",
+            "disk",
+            "reclaim",
+            "--build-output",
+            str(root),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    payload = json.loads(done.stdout)
+    assert payload["summary"]["reclaimable"] == 1
+    assert payload["items"][0]["category"] == "build-output"
+    assert (root / "target").exists()
