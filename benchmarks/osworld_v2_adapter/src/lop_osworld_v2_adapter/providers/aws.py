@@ -1527,12 +1527,13 @@ class AwsProvider:
             )
         except requests.HTTPError as error:
             response = error.response
+            if response is None:
+                raise
             answered = None
-            if response is not None:
-                try:
-                    answered = answer_from_error_body(response.content)
-                except Exception:  # noqa: BLE001 - an unreadable body is not an answer
-                    answered = None
+            try:
+                answered = answer_from_error_body(response.content)
+            except Exception:  # noqa: BLE001 - an unreadable body is not an answer
+                answered = None
             if answered is None:
                 raise
             # Logged, not silent: every other guest anomaly in this module is,
