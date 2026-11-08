@@ -708,7 +708,9 @@ async def test_language_slash_writes_through_the_shared_funnel(
     # fallback this test used to pin.
     assert switched.text == "ngôn ngữ: đã lưu vi — đang dùng vi (Tiếng Việt)"
     wide = await handle._slash_result("language", "", SlashResult)
-    assert wide.text == "ngôn ngữ: vi (Tiếng Việt) — auto, en, fr, es, zh-CN, ru, vi, ur, hi"
+    assert wide.text == (
+        "ngôn ngữ: vi (Tiếng Việt) — auto, en, fr, es, zh-CN, ru, vi, ur, hi"
+    )
     assert cell_len(wide.text) <= 70
 
     # Hindi grows every bare receipt's option list. Exercise every accepted
