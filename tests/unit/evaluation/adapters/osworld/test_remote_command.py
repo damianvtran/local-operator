@@ -458,11 +458,15 @@ async def test_an_oversized_payload_is_capped_not_refused() -> None:
 
 @pytest.mark.asyncio
 async def test_a_non_2xx_body_carrying_the_guest_answer_is_decoded() -> None:
-    """An error STATUS with the guest's own body is still the guest answering.
+    """A four-key body on a non-2xx is decoded rather than raised on.
 
-    Upstream answers a command outcome this way (its timeout handler is one).
-    Re-raising the HTTP error turned that outcome into a channel failure, which
-    poisons; only a body that is NOT the guest's answer may still fail the call.
+    DEFENSIVE, not observed: upstream's ``/execute`` answers 200 with this
+    four-key body and 500 with its ``{status, message}`` envelope -- the
+    envelope is what
+    ``test_the_guest_deadline_answer_is_a_result_and_warns_about_the_shell``
+    pins. This arm exists so a guest build that DOES answer a command outcome
+    with an error status still reaches the model; only a body that is not the
+    guest's answer may still fail the call.
     """
 
     import requests
