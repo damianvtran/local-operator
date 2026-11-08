@@ -4245,6 +4245,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Deletes only a marked eval fixture with both owned directories; protected "
         "operator/session roots are refused before removal",
     ),
+    # The build-cache reaper deletes BUILD OUTPUT, and the four rules below are
+    # what keep `sessions/` structurally unreachable from it: the path must be a
+    # directory whose NAME is one of the registered shapes (`target`, `.next`, and
+    # only with an explicit opt-in `build`/`dist`); every pruned tree (the config
+    # dir, every session scratchpad under it, `~/Library`, trash) is cut before the
+    # shape name is even looked for; the directory must be proved idle by the
+    # handle/toolchain probes immediately before this call; and it is never a
+    # symlink, so the call cannot follow a link into another tree. No session id,
+    # transcript or caller-supplied path can reach it.
+    (
+        "local_operator/build_cache_reaper.py::reap",
+        "shutil.rmtree",
+        "Removes one proved-idle build-output shape dir (target/.next[/build/dist]) "
+        "whose parent is never removed",
+    ),
 )
 
 

@@ -1363,6 +1363,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``LOCAL_OPERATOR_`` prefixes an environment variable name",
     ),
     "local_operator/wakes/patience.py": (1, "``patience-`` prefixes a wake id"),
+    "local_operator/build_cache_reaper.py": (
+        1,
+        "``LOG_FILENAME`` ('build-cache-reaper.log') names the reaper's own log file "
+        "under the platform log dir (``paths.log_dir()``, beside the process log), "
+        "never an entry of a session directory: the reaper only appends removal "
+        "records to it and never copies or deletes it.",
+    ),
 }
 
 
