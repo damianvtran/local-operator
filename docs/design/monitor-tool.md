@@ -1055,15 +1055,20 @@ monitors were not one of those reasons.
 
 Two causes, both closed:
 
-1. **Residency.** `process._should_exit` (and `ServingSessionHandle.may_refresh`'s
-   keep-reason) idle-exited without consulting monitors. Term 2 of the
+1. **Residency.** `process._should_exit` idle-exited without consulting
+   monitors. Term 2 of the
    residency predicate now has a monitor leg — `buildwatch.monitor_within_window`,
    reading `handle.next_monitor_due_at()` (armed rows only: disabled and
    expired rows do not count) — with a window of **900 s**, equal to the
    scheduler's `RETRY_CAP_MS`, so every backoff a live monitor can be in
    re-checks inside it. The monitor leg sits under the `_draining` latch: a
    rollover or `lop-update` drain still wins, and the successor resumes the
-   watch from the counters file.
+   watch from the counters file. The leg is deliberately NOT in
+   `ServingSessionHandle.may_refresh`: that predicate gates every planned
+   retirement (`begin_retire` — an idle refresh, a queued cross-device move),
+   and a monitor is always due inside its 900 s window, so a monitor term there
+   refused those handovers forever. A retirement hands the watch to a
+   successor (or to the monitors pass below), so it costs no check.
 2. **Re-engagement.** `wakes/supervisor.py` read only the wakes index. It now
    runs a **monitors pass** after the wakes and before spooled turns and
    triggers (a session owed both ways is engaged once):
