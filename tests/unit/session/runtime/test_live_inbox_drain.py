@@ -354,8 +354,26 @@ async def test_a_live_queued_steer_keeps_its_backup_across_later_ticks(tmp_path:
             # (``ServingSessionHandle._admit_steer``) is its durable copy. The
             # guarantee under test is that the backup is delivered exactly once,
             # not that it lands synchronously, so the count is taken once the
-            # successor is idle.
-            await asyncio.wait_for(_idle(successor_session, successor), 10)
+            # successor has settled.
+            #
+            # SETTLED MEANS ROW AND EMPTY SPOOL, polled, never one ``_idle``
+            # read (PR #3582 R1/Q1). ``_idle`` can return in the gap before the
+            # queued steer opens its own turn, and the boundary's
+            # ``remove_owner_row`` is best-effort (a contended flock is a
+            # documented miss), so the backup's real consumer may be the NEXT
+            # first-turn drain, deduping it by ``has_admitted_command``. That
+            # pass is run here while idle. A lost steer never reaches one row and
+            # times out; a duplicate fails the exact counts below.
+            async def _settled() -> None:
+                while True:
+                    if not (successor.is_busy() or successor_session.is_streaming):
+                        if _rows_produced_by(directory, "queued-steer-1"):
+                            if not peek_inbox(directory):
+                                return
+                            await successor_session._drain_spooled_peer_inbox()
+                    await asyncio.sleep(0.02)
+
+            await asyncio.wait_for(_settled(), 10)
             assert len(_rows_produced_by(directory, "existing-1")) == 1
             assert len(_rows_produced_by(directory, "queued-steer-1")) == 1
             assert peek_inbox(directory) == [], "a delivered backup must be consumed"
@@ -439,3 +457,59 @@ async def test_a_replayed_steer_keeps_its_backup_until_its_boundary(tmp_path: Pa
         parked.release.set()
         await _stop_quietly(successor)
         await _stop_quietly(live)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_spool_commit_does_not_fail_the_owners_turn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """PR #3582 R2: the first-turn drain's commit refusal is contained, then retried.
+
+    ``remove_owner_row`` rewrites under the inode flock only, so it can land
+    under a read batch's snapshot and ``commit_inbox_batch`` refuses with
+    ``OSError("inbox snapshot prefix changed")``. On the unfixed tree that
+    escaped ``_run_turn_pipeline`` and failed the turn. The refusal is forced
+    here once, at the commit the race reaches; the turn must still answer, and
+    the next turn must deliver the spooled row exactly once.
+    """
+    from local_operator.session.runtime import inbox as inbox_mod
+
+    directory = tmp_path / "sess"
+    stream = ScriptedStream([text_turn(f"reply {i}") for i in range(6)])
+    session = build_session(directory, stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle._maybe_name_conversation = lambda text: None
+    message_id = "peer-" + "b" * 32
+    append_inbox(
+        directory,
+        InboxLine(
+            text="note spooled while cold",
+            sender={"session_id": "synthetic-sender", "pid": 1, "name": "synthetic"},
+            mode="mailbox",
+            wake=False,
+            source=SOURCE_PEER,
+            message_id=message_id,
+        ),
+    )
+    real_commit = inbox_mod.commit_inbox_batch
+    refusals: list[int] = []
+
+    def refuse_once(batch) -> None:
+        if not refusals:
+            refusals.append(1)
+            raise OSError("inbox snapshot prefix changed")
+        real_commit(batch)
+
+    monkeypatch.setattr(inbox_mod, "commit_inbox_batch", refuse_once)
+    try:
+        assert await asyncio.wait_for(handle.prompt("first", command_id="r2-1"), 10)
+        await asyncio.wait_for(_idle(session, handle), 10)
+        assert refusals == [1], "premise: the first-turn drain's commit was refused"
+        assert _landed(directory, "r2-1")
+        assert "reply 0" in (directory / "transcript.jsonl").read_text(), "the turn failed"
+        assert await asyncio.wait_for(handle.prompt("second", command_id="r2-2"), 10)
+        await asyncio.wait_for(_idle(session, handle), 10)
+        assert (directory / "transcript.jsonl").read_text().count(message_id) == 1
+        assert peek_inbox(directory) == []
+    finally:
+        await handle.dispose()

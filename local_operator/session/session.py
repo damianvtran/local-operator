@@ -10668,9 +10668,11 @@ class Session:
         a sender on an older binary, or a race that left the record
         unreadable, or a session that has not been engaged yet (whose spool
         ``process._drain_inbox_into`` deliberately preserves) — so the flag is
-        what keeps it off the steady-state turn path: after the first attempt
-        it is never tried again, and the cold-open drain remains the owner of
-        anything written later.
+        what keeps it off the steady-state turn path: once a pass leaves the
+        spool empty it is never tried again, and the cold-open drain remains
+        the owner of anything written later. A pass that leaves rows behind (a
+        live-queued steer's insurance, kept until its boundary, or a commit
+        that refused) leaves the flag False, so the next turn re-reads them.
 
         Best-effort per row, mirroring ``process._drain_inbox_into``: one
         malformed or rejected row must not stop the rest, and none of it may
@@ -19699,7 +19701,16 @@ class Session:
             # row's field as "a turn will be driven for this": a sender's
             # ``--wake`` asks for attention, and it gets the attention of the
             # turn already running.
-            await self._drain_spooled_peer_inbox()
+            try:
+                await self._drain_spooled_peer_inbox()
+            except OSError:
+                # A SPOOL FAULT MUST NOT FAIL THE OWNER'S TURN (PR #3582 R2). The
+                # boundary's ``remove_owner_row`` rewrites under the inode flock
+                # only, so it can land under this batch's snapshot and the commit
+                # refuses ("inbox snapshot prefix changed"). That refusal consumes
+                # nothing and leaves ``_peer_inbox_drained`` False, so the next
+                # turn re-reads the rows; replays dedupe by the durable index.
+                logger.warning("spooled inbox drain deferred to the next turn", exc_info=True)
             # Anything the ask log owes is delivered at the same boundary and for
             # the same reason: a row written while this session was cold (an
             # answer that arrived with no runtime, or a deadline that passed) must
