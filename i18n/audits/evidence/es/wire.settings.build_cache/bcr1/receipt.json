@@ -24,7 +24,7 @@
   "companion_sha256": {
     "audit.log": "5c6d2d896512a6f375c08f20c9e3e3ff4233b3af91da689af3963b1daa7851dc",
     "record.json": "9ff92ca0b3ed5a3e424900d78c9f9e1afa37f404d6c7e95cc0fdd0473abf9865",
-    "report.md": "60647d27314cdcbc6870acd41431992ec7b6f7c2f16a1f29fe4400b7df5b45cb",
+    "report.md": "9cbfe76320c23cb2a18b3f8be8620a439d210fa22bd2399e7a5ec3ffcc82c184",
     "reproduction.py.txt": "0d7b0cfa9ecf3dc1b552569459ba85961c77fb0c6f1ecb30148d3e8b14bc9e39"
   },
   "note": "companion_sha256 hashes this bundle's other three files as written; record.json is hashed here rather than by itself."

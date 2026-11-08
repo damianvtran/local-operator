@@ -56,13 +56,13 @@ drop a subject pronoun the way English does.
 **Candidate finding, considered and rejected — `age_hours.help` opens "Laisse un
 dossier tranquille…".** Bare "Laisse" is also the *tu* imperative, so I tested
 whether this string breaks the recorded vous decision. It does not: it is
-established house style. 23 shipped fr values open with a subjectless
-third-person verb — including the same verb, in
+established house style. 21 values in other, already-shipped fr namespaces open with
+a subjectless third-person verb — including the same verb, in
 `wire.settings.runtime_background_on_resume.help` ("Laisse un tour en cours se
-poursuivre quand vous changez de session.") and in this very namespace's own
-`description` ("Purge les sorties de build régénérables…"). Where the English
-voice is terse and subjectless, the corpus mirrors it; where the copy addresses
-the reader, it switches to vous. No finding, and no edit.
+poursuivre quand vous changez de session."). With this namespace's own `description`
+("Purge les sorties de build régénérables…") and this string, 23 values across fr
+share that shape. Where the English voice is terse and subjectless the corpus mirrors
+it; where the copy addresses the reader it switches to vous. No finding, no edit.
 
 ### Typography
 
@@ -75,13 +75,11 @@ the reader, it switches to vous. No finding, and no edit.
 
 - `cache` stays English (fr kept-English list) — "caches de build", 2 occurrences.
 - `build` stays English — consistent with the guide and with the shipped
-  `Purge les sorties de build` rows.
-- `commit` → "que certains dépôts **versionnent**" (a paraphrase, allowed: the
-  guide keeps `commit` for git operations, not for describing a repository's
-  habit).
-- `checkout` is not on the guide's kept-English list, so I checked the shipped
-  corpus rather than the list: 3 occurrences already ship in fr. Settled
-  vocabulary, not drift.
+  "Purge les sorties de build" rows.
+- `commit` → "que certains dépôts **versionnent**" (a paraphrase, allowed: the guide
+  keeps `commit` for git operations, not for describing a repository's habit).
+- `checkout` is not on the guide's kept-English list, so I checked the shipped corpus
+  rather than the list: 3 occurrences already ship in fr. Settled vocabulary, not drift.
 
 ## Findings
 

@@ -54,26 +54,26 @@ future — grammatical, not a slip.
 
 ### Term decisions checked against the guide and the shipped corpus
 
-- **`caché`, not `cache`.** The es guide's 2026-10-29 amendment removed `cache`
-  from the kept-English list. The copy uses `caché`/`cachés` twice and the
-  unaccented form nowhere — aligned with the 19 shipped keys that already use it.
-- `carpeta` vs `directorio de trabajo`: a build-output directory is a plain
-  folder, not a session cwd, so `carpeta` is the right word per the guide.
+- **`caché`, not `cache`.** The es guide's 2026-10-29 amendment removed `cache` from
+  the kept-English list. The copy uses `caché`/`cachés` twice and the unaccented form
+  nowhere — aligned with the 19 shipped keys that already use it.
+- `carpeta` vs `directorio de trabajo`: a build-output directory is a plain folder,
+  not a session cwd, so `carpeta` is the right word per the guide.
 - `Purgar` / `Purga` carries the destructive sense of "reap" without inventing a
   harvest metaphor; consistent between the label and the section title.
 
-**Candidate finding, considered and rejected — `dry_run.help` reads "Activado
-informa de los mismos candidatos…" with no colon**, where the sibling row has
-"Desactivado: nunca se elimina nada". Checked the shipped es corpus before calling
-it a defect: `wire.settings.…allow_private.help` ships "…Activado permite destinos
-de loopback…" and `wire.guardrails…override.help` ships "Desactivado deja el prompt
-intacto." — bare-participle openings are shipped, audited Spanish in this corpus.
-Style, not error. Not changed.
+**Candidate finding, considered and rejected — `dry_run.help` reads "Activado informa
+de los mismos candidatos…" with no colon**, where the sibling row has "Desactivado:
+nunca se elimina nada". Checked the shipped es corpus before calling it a defect:
+`wire.settings.web_fetch_allow_private.help` ships "…Activado permite destinos de
+loopback, privados y de…" and `wire.settings.classification.description` ships
+"Desactivado deja el prompt intacto." — bare-participle openings without a colon are
+shipped, audited Spanish in this corpus. Style, not error. Not changed.
 
 ### The one nit
 
-`ES-BCR1-N1` — see the findings list: an anaphor in `include_extra_shapes.help`
-that collides with the noun beside it. Non-gating, not fixed.
+`ES-BCR1-N1` — see the findings list: an anaphor in `include_extra_shapes.help` that
+collides with the noun beside it. Non-gating, not fixed.
 
 ## Findings
 
