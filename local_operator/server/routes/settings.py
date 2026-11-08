@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
+from local_operator.i18n.boot import follow_language
 from local_operator.i18n.keys import wire_errors_settings as _we
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.resolve import resolve_language
@@ -229,6 +230,22 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
     )
 
 
+def _follow_language_write(manager: ConfigManager, key: str) -> None:
+    """Move this server's active locale after a ``language`` write, before rendering.
+
+    The server activates its locale once at boot and nothing else moved it, so
+    the registry copy (``settings_io`` label/help/choices, frozen at the boot
+    locale) and every ``tr(...)`` wire resolver kept painting the boot language
+    after the user changed it. Called INSIDE the write lock and BEFORE ``_view``
+    so the PATCH's own response already carries the new language. The value is
+    the one the write just stored, not the process watcher's snapshot (see
+    ``i18n.boot.follow_language``). Writes from another process reach the same
+    mover through the desktop feed's config doorbell.
+    """
+    if key == "language":
+        follow_language(manager.get_config().values.get("language", "auto"))
+
+
 def _setting(key: str) -> settings_io.Setting:
     setting = settings_io.resolve_key(key)
     if setting is None:
@@ -335,6 +352,7 @@ async def edit_setting(
                 ),
             ) from None
         changed_identity = before != _bridge_identity(manager, key)
+        _follow_language_write(manager, key)
         result = _view(manager, setting)
     if changed_identity:
         await _reconcile_bridge_identity(manager)
@@ -375,6 +393,7 @@ async def reset_setting(key: str, manager: ConfigManager = Depends(get_config_ma
                 ),
             ) from None
         changed_identity = before != _bridge_identity(manager, key)
+        _follow_language_write(manager, key)
         result = _view(manager, setting)
     if changed_identity:
         await _reconcile_bridge_identity(manager)

@@ -121,3 +121,32 @@ def activate_resolved_locale(resolve: Callable[[], str] | None = None) -> None:
         set_active_locale(locale)
     except Exception:  # noqa: BLE001 — same reason: the command continues on English
         pass
+
+
+def follow_language(configured: str | None) -> None:
+    """Move a LONG-LIVED process onto the language a change just produced.
+
+    ``activate_resolved_locale`` is the once-at-boot half; this is the half a
+    server owes after boot. ``set_active_locale`` is the repo's one mover (the
+    TUI's ``/language`` and its config listener call it), and it is what runs
+    ``register_refresh`` hooks such as ``settings_io._refresh_registry_copy`` —
+    the settings registry's label/help/description/choices are frozen
+    dataclasses materialised at import under the BOOT locale, so nothing but a
+    locale move re-renders them. Resolvers built by ``tr(...)`` (e.g.
+    ``routes/agents.py``'s ``_t``) read the active locale per call and need no
+    refresher: they follow the same move.
+
+    ``configured`` is the value the caller JUST read from the write or the
+    parsed snapshot — passed through, never re-read via the process watcher
+    (``resolve_language(None)`` prefers a watcher's snapshot, which an
+    unstarted watcher leaves stale). The per-process active locale is the
+    existing contract; a request never moves it, only a language CHANGE does,
+    and an unchanged language is a no-op by ``set_active_locale``'s contract.
+
+    Never raises: the language write already landed and copy must not turn a
+    saved setting into an error.
+    """
+    try:
+        set_active_locale(resolve_language(configured))
+    except Exception:  # noqa: BLE001 — a locale is copy; the write already succeeded
+        pass
