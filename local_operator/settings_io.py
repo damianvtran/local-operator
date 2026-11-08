@@ -1109,6 +1109,12 @@ SECTIONS: tuple[Section, ...] = (
     # projection per publish — and a running session republishes on the
     # change (``Session._apply_config_change``), so an edit lands with no
     # relaunch on the terminal, the desktop app and the phone alike.
+    Section(
+        "asks",
+        _t(_ws.asks_title()),
+        Scope.LIVE,
+        _t(_ws.asks_description()),
+    ),
     # The standing build-cache reaper (``local_operator/build_cache_reaper.py``).
     # LIVE, honestly: the reaper reads all four keys at the start of every tick
     # and has no long-lived process to reload, so an edit lands on the next reap
@@ -1116,18 +1122,15 @@ SECTIONS: tuple[Section, ...] = (
     # right after changing it. Its own section rather than rows under an existing
     # one because this is disk maintenance, a different subject from sessions,
     # tools or agents; a user looking for "why is my disk full" should find it by
-    # name.
+    # name. Kept LAST in the tuple so it does not separate a section from the
+    # comment that explains it (review round 1, R1-NIT-5: it was inserted between
+    # the ``asks`` paragraph and ``Section("asks", ...)``, orphaning the
+    # paragraph at the end of this block).
     Section(
         "maintenance",
         _t(_bc.title()),
         Scope.LIVE,
         _t(_bc.description()),
-    ),
-    Section(
-        "asks",
-        _t(_ws.asks_title()),
-        Scope.LIVE,
-        _t(_ws.asks_description()),
     ),
 )
 

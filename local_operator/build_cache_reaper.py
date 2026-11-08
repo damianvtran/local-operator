@@ -63,13 +63,43 @@ semantics vary by ecosystem and a wrong guess destroys source:
     *untracked-and-unignored* ``dist/`` is an owner decision too, so the shape
     waits for the same opt-in as ``build``.
 
+An opt-in shape is only as safe as the producers the live-build probe knows
+about: ``_is_toolchain_process`` answering ``False`` means "nothing is
+running", not "cannot tell", and the file-handle probe cannot stand in for it
+(a compiler between translation units holds nothing open). So
+``TOOLCHAIN_EXECUTABLES`` carries the producer of **every** shape this module
+can reap, not just the default two — see the constant's own comment for the
+measured asymmetry that made that mandatory.
+
 Never, by construction (not by configuration): ``node_modules`` (its own
 package manager owns the lifecycle, and a re-install is not cheap), ``.git``
 (work lives there), ``.venv`` (recreating is minutes of work and a wrong
 deletion is invisible until the next command fails), the config dir
 (credentials and transcripts — private, and ``~/.local-operator`` also holds
 every session scratchpad), ``~/Library`` (application state),
-``~/Trash``/``.Trash`` (the user's own recoverable copy is not ours to empty).
+``~/Trash``/``.Trash`` (the user's own recoverable copy is not ours to empty),
+and the standard data directories (``~/Documents``, ``~/Desktop``,
+``~/Downloads``, ``~/Movies``, ``~/Music``, ``~/Pictures``): a ``target/``
+under one of those is the user's own tree, and nothing about the name makes
+its contents regenerable.
+
+Two guards are properties of the DIRECTORY rather than of its name, so no
+shape can opt out of them. A candidate that contains a ``.git`` entry — a
+directory, or the ``.git`` FILE a linked worktree carries — is a repository or
+worktree root, not build output, and is skipped as ``git-repository``:
+removing it takes a branch and any uncommitted work with it. A candidate that
+is itself a mount point is skipped as ``mount-point``: ``rmtree`` would walk
+onto another volume and delete what it finds there.
+
+A CONFIG THAT CANNOT BE TRUSTED STOPS THE TICK
+---------------------------------------------
+``read_settings`` never invents a configuration. A *missing* ``config.yml`` is
+the documented defaults, but a config that exists and cannot be read or
+validated raises :class:`ReaperConfigError` and the tick deletes nothing — the
+run is refused with a named error instead. The alternative (fall back to the
+module defaults) fails in the direction that destroys data: the defaults are
+``enabled=True, dry_run=False``, so a corrupt file would turn a switched-OFF
+reaper into a live one.
 
 THE LIVE-BUILD GUARD IS THE PROCESS AND HANDLE PROBE, NOT THE MTIME
 ------------------------------------------------------------------
@@ -150,6 +180,7 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
@@ -195,9 +226,28 @@ PRUNED_DIRNAMES: frozenset[str] = frozenset({".git", "node_modules", ".venv"})
 
 #: Absolute paths (and their subtrees) excluded from the scan. The config dir
 #: also covers every session scratchpad (``sessions/*/scratchpad``) and the
-#: encrypted store; the two Trash spellings are the macOS one and the
-#: conventional one.
-PRUNED_SUBTREES_AT_HOME: tuple[str, ...] = ("Library", "Trash", ".Trash")
+#: encrypted store; ``Trash`` is listed in both spellings (the macOS one and the
+#: conventional one).
+#:
+#: The six data directories are here because a reaper with DEFAULT settings
+#: reaped ``~/Documents/target``, ``~/Documents/thesis/dist``, ``~/Movies/build``
+#: and ``~/Desktop/target`` on a fixture home: rule 1 says never anything under a
+#: data directory, and for these the *shape name* is no evidence at all — a
+#: ``build/`` in ``~/Documents`` is a person's tree, not a compiler's output.
+#: Excluded by path rather than by name, so a checkout inside one of them is
+#: protected too: build output is regenerable anywhere, and "it was in my
+#: Documents" is not a risk worth pricing.
+PRUNED_SUBTREES_AT_HOME: tuple[str, ...] = (
+    "Library",
+    "Trash",
+    ".Trash",
+    "Documents",
+    "Desktop",
+    "Downloads",
+    "Movies",
+    "Music",
+    "Pictures",
+)
 
 #: Scan depth, counted from each root (root = 0). Six reaches
 #: ``~/src/org/repo/crate/target`` with room to spare; a deeper tree is more
@@ -225,12 +275,52 @@ GIT_PROBE_TIMEOUT_S = 10.0
 #: platform log dir or ``$LOCAL_OPERATOR_CONFIG_DIR/logs``.
 LOG_FILENAME = "build-cache-reaper.log"
 
-#: Executable names that mean "a build may be running". ``clippy-driver`` and
-#: ``sccache`` are in the list because they compile and cache on behalf of
-#: cargo; ``next`` because the Next.js build and dev server are the ``.next``
-#: producer.
+#: Executable names that mean "a build may be running".
+#:
+#: The list covers the producer of EVERY shape this module can reap, because a
+#: name that is missing here is not a gap in coverage — it is a confident FALSE
+#: from :func:`_is_toolchain_process` ("nothing is running"), which is the
+#: dangerous answer, and the file-handle probe is no substitute: a compiler
+#: between translation units holds nothing open. Measured on this box with
+#: otherwise identical stand-ins, an in-flight build named ``cargo`` kept its
+#: ``target/`` while one named ``cmake`` or ``gradle`` lost its ``build/``.
+#:
+#: ``clippy-driver`` and ``sccache`` compile and cache on behalf of cargo;
+#: ``next`` and the JS bundlers run through ``node``/``npm``/``pnpm``/``yarn``,
+#: hence the package managers. ``javac`` is in the list because Gradle and Maven
+#: compile through it. Checking more names can only produce more blocks, which is
+#: the safe direction, and attribution stays per-candidate
+#: (:func:`_process_touches`), so a neighbour's build still does not freeze this
+#: one.
 TOOLCHAIN_EXECUTABLES: frozenset[str] = frozenset(
-    {"cargo", "rustc", "rustdoc", "clippy-driver", "sccache", "next"}
+    {
+        # The two DEFAULT shapes (``target``, ``.next``).
+        "cargo",
+        "rustc",
+        "rustdoc",
+        "clippy-driver",
+        "sccache",
+        "next",
+        # ``build`` / ``dist`` producers, reachable behind
+        # ``include_extra_shapes``: CMake/Make/Ninja, the JVM pair (through
+        # javac), Xcode, and the JS bundlers/type-checkers plus their package
+        # managers.
+        "cmake",
+        "make",
+        "ninja",
+        "gradle",
+        "mvn",
+        "maven",
+        "javac",
+        "xcodebuild",
+        "vite",
+        "tsc",
+        "webpack",
+        "node",
+        "npm",
+        "pnpm",
+        "yarn",
+    }
 )
 
 #: Characters that may legitimately precede a path inside one argv element (the
@@ -253,8 +343,25 @@ SKIP_TOOLCHAIN = "toolchain-running"
 SKIP_HANDLES = "handles-open"
 SKIP_GIT_TRACKED = "git-tracked"
 SKIP_GIT_NOT_IGNORED = "git-not-ignored"
+#: The candidate IS a repository or linked-worktree root (it carries a ``.git``
+#: entry). Named separately from ``git-tracked`` because the fix differs: nothing
+#: about the directory's contents is wrong, the directory itself is not output.
+SKIP_GIT_REPOSITORY = "git-repository"
+SKIP_MOUNT_POINT = "mount-point"
 SKIP_CANNOT_TELL = "cannot-tell"
 SKIP_ERROR = "error"
+
+# Exit codes. ``0`` is a completed tick even when it removed nothing; the two
+# non-zero codes are both "the run told you why it could not do its job", which
+# a scheduled job needs in order to be diagnosable at all.
+EXIT_OK = 0
+#: The configuration exists but could not be read or validated. Nothing was
+#: scanned and nothing was deleted.
+EXIT_CONFIG_ERROR = 2
+#: Every scan root was unreadable (missing, or a permission wall). A scheduled
+#: run that reports "0 candidates" for this is indistinguishable from "nothing to
+#: do", so it says so and exits non-zero.
+EXIT_NO_READABLE_ROOT = 3
 
 
 # --------------------------------------------------------------------------
@@ -320,6 +427,20 @@ class Skip:
 
 
 @dataclasses.dataclass(frozen=True)
+class UnreadableRoot:
+    """A scan root the walk could not open, and why.
+
+    Reported rather than swallowed: ``--root`` at a ``chmod 000`` directory (or
+    at a path that does not exist) used to print ``0 candidate(s)``, exit 0 and
+    leave ``incomplete_scan=false`` — a scheduled job hitting a permission wall
+    looked exactly like a machine with nothing to reap.
+    """
+
+    path: Path
+    detail: str
+
+
+@dataclasses.dataclass(frozen=True)
 class ReapReport:
     """One tick's outcome, in the shape both ``--json`` and the log need."""
 
@@ -334,6 +455,18 @@ class ReapReport:
     free_after: int = 0
     incomplete_scan: bool = False
     aborted: str = ""
+    unreadable_roots: tuple[UnreadableRoot, ...] = ()
+    #: Tick-level warnings that are not about one candidate — currently the "a
+    #: real reap with no ``--root`` scans the whole home" notice. Carried in the
+    #: report so the log records it too: a warning that only reached a terminal
+    #: would be invisible for the scheduled run that most needs it.
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def all_roots_unreadable(self) -> bool:
+        """Whether every root failed, i.e. the tick proved nothing at all."""
+        return bool(self.roots) and len(self.unreadable_roots) == len(self.roots)
+
 
     @property
     def reclaimed_bytes(self) -> int:
@@ -389,6 +522,11 @@ class ReapReport:
             "free_after_bytes": self.free_after,
             "incomplete_scan": self.incomplete_scan,
             "aborted": self.aborted,
+            "unreadable_roots": [
+                {"path": path_text(root.path), "detail": root.detail}
+                for root in self.unreadable_roots
+            ],
+            "warnings": list(self.warnings),
         }
 
 
@@ -412,68 +550,136 @@ class ReaperSettings:
     include_extra_shapes: bool = DEFAULT_INCLUDE_EXTRA_SHAPES
 
 
+class ReaperConfigError(RuntimeError):
+    """A ``config.yml`` that EXISTS but could not be trusted.
+
+    Raised rather than falling back to the module defaults, because those defaults
+    are ``enabled=True, dry_run=False``: a fallback turns a corrupt file into a
+    LIVE reaper. :func:`run_cli` turns exactly this into a refusal with a
+    non-zero exit, and the tick deletes nothing.
+    """
+
+
+#: A config key that is not in the file at all — distinct from a stored ``None``.
+_ABSENT = object()
+
+
+def _stored_value(values: object, path: Sequence[str]) -> object:
+    """Walk the stored config along ``path``; ``_ABSENT`` when it is not there.
+
+    The RAW value, which :func:`local_operator.settings_io.read_setting`
+    deliberately does not expose (it normalises a bool and substitutes the row's
+    own default for anything it cannot parse). Type validation needs the raw form:
+    ``enabled: "flase"`` normalises to the DEFAULT switch, i.e. silently ON, which
+    is precisely the direction this module must never fail in.
+    """
+    node = values
+    for part in path:
+        if not isinstance(node, Mapping) or part not in node:
+            return _ABSENT
+        node = node[part]
+    return node
+
+
 def read_settings(config_dir: Path | str | None = None) -> ReaperSettings:
-    """Resolve the four keys from config, falling back to the defaults.
+    """Resolve the four keys from config; a MISSING file means the defaults.
 
     Read at tick time — not import time — which is why the section's ``Scope``
     in the registry is ``LIVE``: editing a key takes effect on the next reap
     with no relaunch, and the reaper has no long-lived process to reload.
 
-    Never raises. A missing or unreadable config, an unregistered key or a
-    malformed value each fall back to the module default: a reaper that cannot
-    read its own settings must not become a reaper that guesses, and it must not
-    fail the launchd job either. ``settings_io.read_setting`` is used rather
-    than a hand-rolled YAML scan so this cannot disagree with the settings page.
+    TWO FAILURE MODES, DELIBERATELY DIFFERENT. No ``config.yml`` at all is the
+    module defaults: an installed reaper with no config yet has to work. A
+    ``config.yml`` that exists and cannot be parsed, read, or type-checked raises
+    :class:`ReaperConfigError` instead, and the caller refuses the tick. The
+    swallow-and-default behaviour this replaces failed toward REAPING (see the
+    module docstring): a corrupt file silently armed a reaper the user had
+    switched off.
+
+    ``settings_io.read_setting`` still supplies every VALUE rather than a
+    hand-rolled YAML scan, so a key can never be read one way here and another way
+    on the settings page; :func:`_stored_value` is only the type gate.
     """
-    enabled = DEFAULT_ENABLED
-    age_hours = DEFAULT_AGE_HOURS
-    dry_run = DEFAULT_DRY_RUN
-    extra_shapes = DEFAULT_INCLUDE_EXTRA_SHAPES
     try:
         # Function-local: the harness's import graph is exactly what this module
         # must not pull in at launchd start (see the module docstring).
+        import yaml
+
         from local_operator import settings_io
         from local_operator.config import ConfigManager
         from local_operator.paths import config_dir as resolve_config_dir
-
-        root = Path(config_dir) if config_dir is not None else resolve_config_dir()
-        # Only read when a config file EXISTS: constructing a ConfigManager on a
-        # directory whose config.yml is absent would create it, and a read path
-        # stays a read path.
-        try:
-            (root / "config.yml").stat()
-            readable = True
-        except OSError:
-            readable = False
-        if readable:
-            manager = ConfigManager(config_dir=root)
-            for key in (KEY_ENABLED, KEY_AGE_HOURS, KEY_DRY_RUN, KEY_INCLUDE_EXTRA_SHAPES):
-                setting = settings_io.resolve_key(key)
-                if setting is None:  # pragma: no cover - registry drift is a test's job
-                    continue
-                value = settings_io.read_setting(manager, setting)
-                if key == KEY_ENABLED and isinstance(value, bool):
-                    enabled = value
-                elif key == KEY_DRY_RUN and isinstance(value, bool):
-                    dry_run = value
-                elif key == KEY_INCLUDE_EXTRA_SHAPES and isinstance(value, bool):
-                    extra_shapes = value
-                elif (
-                    key == KEY_AGE_HOURS
-                    and isinstance(value, int)
-                    and not isinstance(value, bool)
-                    and value > 0
-                ):
-                    age_hours = value
-    except Exception:  # noqa: BLE001 — a read path must never raise on its config
-        logger.warning("build-cache: could not read settings; using defaults", exc_info=True)
+    except Exception:  # noqa: BLE001 — an unusable import graph is not a bad config
+        logger.warning("build-cache: settings registry unavailable; using defaults", exc_info=True)
         return ReaperSettings()
-    return ReaperSettings(
-        enabled=enabled,
-        age_hours=age_hours,
-        dry_run=dry_run,
-        include_extra_shapes=extra_shapes,
-    )
+
+    root = Path(config_dir) if config_dir is not None else resolve_config_dir()
+    config_file = root / "config.yml"
+    try:
+        config_file.stat()
+    except FileNotFoundError:
+        return ReaperSettings()
+    except OSError as exc:
+        raise ReaperConfigError(f"{config_file}: {type(exc).__name__}") from exc
+
+    # Parse it OURSELVES, before ConfigManager sees it. The manager QUARANTINES a
+    # file it cannot parse (renames it to ``config.yml.bad.<stamp>``) and carries
+    # on with the shipped defaults, so asking it afterwards cannot tell "the user
+    # set nothing" from "the user's file was moved aside". A scheduled run that
+    # cannot read its own switch must say so, not rearm itself.
+    try:
+        with open(config_file, "r", encoding="utf-8") as handle:
+            document = yaml.load(handle, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ReaperConfigError(f"{config_file}: {type(exc).__name__}: {exc}") from exc
+    if document is not None and not isinstance(document, dict):
+        raise ReaperConfigError(
+            f"{config_file}: top level is {type(document).__name__}, expected a mapping"
+        )
+    document_values = (document or {}).get("values")
+    if document_values is not None and not isinstance(document_values, dict):
+        raise ReaperConfigError(
+            f"{config_file}: values: is {type(document_values).__name__}, expected a mapping"
+        )
+
+    try:
+        manager = ConfigManager(config_dir=root)
+        stored = manager.get_config().values
+    except Exception as exc:  # noqa: BLE001 — an unreadable config is fatal
+        raise ReaperConfigError(f"{config_file}: {type(exc).__name__}: {exc}") from exc
+
+    resolved = ReaperSettings()
+    for key in (KEY_ENABLED, KEY_AGE_HOURS, KEY_DRY_RUN, KEY_INCLUDE_EXTRA_SHAPES):
+        setting = settings_io.resolve_key(key)
+        if setting is None:  # a renamed registry row must be loud, never a guess
+            raise ReaperConfigError(f"{key}: not in the settings registry")
+        raw = _stored_value(stored, setting.path)
+        if raw is _ABSENT:
+            # Not in the file: the row's own default, which
+            # ``tests/unit/test_settings_io.py::_consumer_defaults()`` pins to the
+            # module constants above.
+            continue
+        try:
+            value = settings_io.read_setting(manager, setting)
+        except Exception as exc:  # noqa: BLE001 — a value the page would reject
+            raise ReaperConfigError(f"{key}: {exc}") from exc
+        if key == KEY_AGE_HOURS:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                raise ReaperConfigError(f"{key}: expected a whole number of hours, got {raw!r}")
+            if not 1 <= raw <= 720:
+                # The registry row's own bound (``minimum=1, maximum=720``). A
+                # hand edit outside it is a config this reaper will not guess at.
+                raise ReaperConfigError(f"{key}: must be between 1 and 720, got {raw!r}")
+            resolved = dataclasses.replace(resolved, age_hours=int(value))
+        else:
+            if not isinstance(raw, bool):
+                raise ReaperConfigError(f"{key}: expected true or false, got {raw!r}")
+            field = {
+                KEY_ENABLED: "enabled",
+                KEY_DRY_RUN: "dry_run",
+                KEY_INCLUDE_EXTRA_SHAPES: "include_extra_shapes",
+            }[key]
+            resolved = dataclasses.replace(resolved, **{field: bool(value)})
+    return resolved
 
 
 def enabled_shapes(include_extra: bool) -> tuple[str, ...]:
@@ -552,6 +758,30 @@ def _is_pruned(path_text: str, pruned: tuple[str, ...]) -> bool:
     return any(path_text == p or path_text.startswith(p + os.sep) for p in pruned)
 
 
+def unreadable_root(root: Path) -> UnreadableRoot | None:
+    """Whether ``root`` can be opened at all, and why not.
+
+    :func:`iter_candidate_dirs` swallows an ``OSError`` per directory on purpose
+    (one permission wall deep in a tree must not abort the scan of everything
+    else), but swallowing it at a ROOT made an unreadable or nonexistent
+    ``--root`` indistinguishable from nothing to do: exit 0, ``0 candidate(s)``,
+    ``incomplete_scan=false``. A scheduled job that hits a permission wall has to
+    be able to say so, so each root is probed once here and reported by name.
+    """
+    try:
+        with os.scandir(root) as iterator:
+            next(iterator, None)
+    except FileNotFoundError:
+        return UnreadableRoot(root, "does not exist")
+    except NotADirectoryError:
+        return UnreadableRoot(root, "not a directory")
+    except PermissionError:
+        return UnreadableRoot(root, "permission denied")
+    except OSError as exc:
+        return UnreadableRoot(root, exc.__class__.__name__)
+    return None
+
+
 def iter_candidate_dirs(
     roots: Sequence[Path],
     *,
@@ -563,7 +793,13 @@ def iter_candidate_dirs(
 ) -> Iterator[tuple[Path, str, bool]]:
     """Yield ``(path, shape, budget_tripped)`` for every candidate directory.
 
-    Breadth-first over each root, never following a symlink (an
+    DEPTH-first over each root through an explicit LIFO stack (``stack.pop()``
+    from the end) — not breadth-first, which an earlier revision of this
+    docstring claimed. Nothing here depends on the order: the scan has a
+    wall-clock budget rather than a depth or breadth priority, and the measured
+    full-home walk finishes inside it (12.7 s, ``incomplete_scan=False``).
+
+    Never follows a symlink (an
     ``os.scandir`` walk with ``follow_symlinks=False``, and a symlinked entry is
     not descended into and never yielded as a candidate): a shared
     ``node_modules``-shaped symlink target is exactly how this class of tool
@@ -575,6 +811,11 @@ def iter_candidate_dirs(
     The generator yields ``budget_tripped=True`` once as its last item when the
     wall-clock ``budget_s`` is spent; the caller turns that into
     ``incomplete_scan`` and still prunes what it already proved idle.
+
+    A directory that cannot be opened is skipped silently HERE — one permission
+    wall inside a tree must not cost the whole scan — which is why a ROOT's
+    readability is checked separately, by :func:`unreadable_root`, before the
+    walk starts.
     """
     deadline = clock() + budget_s
     for root in roots:
@@ -762,6 +1003,36 @@ class _Snapshot:
         object.__setattr__(self, "_loaded", True)
 
 
+def _is_mount_point(path: Path) -> bool:
+    """Whether ``path`` is the root of its own filesystem.
+
+    ``os.path.ismount`` rather than a hand-rolled ``st_dev`` comparison: it is
+    the same check, and it answers ``False`` rather than raising for a path it
+    cannot stat (a candidate that cannot be stat-ed is already ``error``).
+    ``rmtree`` across a mount walks onto another volume and deletes whatever it
+    finds there, so a candidate that IS one is skipped by name.
+    """
+    return os.path.ismount(path)
+
+
+def _has_git_entry(candidate: Path) -> bool | None:
+    """Whether ``candidate`` carries a ``.git`` entry (directory OR file).
+
+    ``True`` means the candidate is a repository or a linked-worktree root, not
+    build output: a worktree's ``.git`` is a FILE pointing at the parent repo, so
+    a directory-only check misses exactly the case that took a worktree's branch
+    and uncommitted work with it. ``None`` (the entry could not be stat-ed) skips
+    the candidate; only ``FileNotFoundError`` answers ``False``.
+    """
+    try:
+        os.lstat(candidate / ".git")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    return True
+
+
 @dataclasses.dataclass(frozen=True)
 class Probes:
     """The four injectable safety probes plus a cache refresh hook.
@@ -776,6 +1047,9 @@ class Probes:
     handles_open: TriState
     is_git_ignored: TriState
     tracked_files: TriState
+    #: Whether the candidate is itself a filesystem root. Injectable like the
+    #: rest: a test cannot mount a volume, and the guard still has to be provable.
+    is_mount_point: Callable[[Path], bool] = _is_mount_point
     refresh: Callable[[], None] = lambda: None
     process_table_readable: Callable[[], "bool | None"] = lambda: True
 
@@ -841,6 +1115,12 @@ def _read_open_handles() -> tuple[str, ...] | None:
     needs the cwd, ``ps`` does not carry it, and a second sweep would double the
     most expensive call in the tick. Sentinels rather than a second structure
     because this is the type the caller already threads around.
+
+    A HEADER-ONLY or unparseable table is ``None``, never a short list. The
+    header row (``COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME``) splits
+    into the same nine columns as a data row, so counting rows without rejecting
+    it made ``('NAME',)`` — a confident "nothing is open" — out of output that
+    carried no handle at all. A row only counts when its PID column is an integer.
     """
     try:
         completed = subprocess.run(
@@ -849,21 +1129,25 @@ def _read_open_handles() -> tuple[str, ...] | None:
     except (OSError, subprocess.SubprocessError):
         return None
     paths: list[str] = []
-    parsed = 0
     for line in completed.stdout.splitlines():
         # NAME may contain spaces, so split the fixed leading columns and keep
         # the remainder whole: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
         fields = line.split(None, 8)
         if len(fields) != 9:
             continue
-        parsed += 1
+        try:
+            int(fields[1])
+        except ValueError:
+            # The header, or a status/count line some builds append. Not a
+            # handle: counting it would make an empty table look usable.
+            continue
         fd = fields[3]
         name = fields[8].strip()
         if fd == "cwd":
             paths.append(f"pid:{fields[1]}:cwd={name}")
         else:
             paths.append(name)
-    if parsed == 0 or not paths:
+    if not paths:
         # Nothing parsed at all. An empty table is unreadable, never "nothing is
         # open": every supported platform has processes with open files, so a
         # zero-length parse means the output was not what we expect.
@@ -901,7 +1185,7 @@ def _is_toolchain_process(argv: Sequence[str]) -> bool:
     return False
 
 
-def _process_touches(touching: ProcessInfo, candidate: Path) -> bool:
+def _process_touches(touching: ProcessInfo, candidate: Path, *, parent_term: bool = True) -> bool:
     """Whether ONE process is attributable to ``candidate``.
 
     Three ways, matching the brief's contract: an argv element equal to or under
@@ -910,9 +1194,18 @@ def _process_touches(touching: ProcessInfo, candidate: Path) -> bool:
     and rustc with ``--out-dir <worktree>/target/debug/deps``, both of which
     mention the worktree rather than the candidate verbatim), or a cwd at/under
     the worktree.
+
+    ``parent_term=False`` drops the parent (and its cwd rule), leaving only what
+    names the candidate itself. That is required when the parent is a SCAN ROOT
+    or the home directory: ``worktree = candidate.parent`` would otherwise
+    attribute every toolchain process anywhere beneath home, and the observed
+    result was ``skipped /Users/damian/.next: toolchain-running`` with no build
+    anywhere near it — twice, on an idle machine. A real project root keeps the
+    term (it is the worktree the compiler was pointed at); a directory that
+    merely CONTAINS many projects is not evidence about any one of them.
     """
     worktree = str(candidate.parent)
-    targets = (str(candidate), worktree)
+    targets = (str(candidate), worktree) if parent_term else (str(candidate),)
     for arg in touching.argv:
         for target in targets:
             if arg == target or arg.startswith(target + os.sep):
@@ -921,9 +1214,24 @@ def _process_touches(touching: ProcessInfo, candidate: Path) -> bool:
             return True
     cwd = touching.cwd
     if cwd:
-        if cwd == worktree or cwd.startswith(worktree + os.sep):
+        if cwd == str(candidate):
+            return True
+        if parent_term and (cwd == worktree or cwd.startswith(worktree + os.sep)):
             return True
     return False
+
+
+def _parent_is_attribution_scope(candidate: Path, roots: Sequence[Path], home: Path) -> bool:
+    """Whether ``candidate``'s parent may be used for process attribution.
+
+    False when the parent is a scan root or the home directory — see
+    :func:`_process_touches` for the measured false positives that made this
+    necessary.
+    """
+    parent = candidate.parent
+    if parent == home:
+        return False
+    return not any(parent == root for root in roots)
 
 
 def target_in_arg(arg: str, targets: Sequence[str]) -> bool:
@@ -957,9 +1265,18 @@ def target_in_arg(arg: str, targets: Sequence[str]) -> bool:
     return False
 
 
-def default_probes() -> Probes:
-    """The production probes, bound to one refreshable snapshot."""
+def default_probes(roots: Sequence[Path] = (), home: Path | None = None) -> Probes:
+    """The production probes, bound to one refreshable snapshot.
+
+    ``roots``/``home`` are what tell process attribution whether a candidate's
+    PARENT is a usable scope: for a candidate sitting directly in a scan root or
+    in the home directory the parent term is dropped (see
+    :func:`_process_touches`), because "somewhere under home" is not evidence
+    that a build is using THIS directory. A caller that omits them (a test
+    exercising one directory) gets the full attribution rule.
+    """
     snapshot = _Snapshot()
+    scope_home = Path(home) if home is not None else Path.home()
 
     def toolchain_running(candidate: Path) -> bool | None:
         snapshot.load()
@@ -967,13 +1284,14 @@ def default_probes() -> Probes:
         if table is None:
             return None
         cdws = _cwd_by_pid(snapshot.handles or ())
+        parent_term = _parent_is_attribution_scope(candidate, roots, scope_home)
         for process in table:
             if not _is_toolchain_process(process.argv):
                 continue
             enriched = ProcessInfo(
                 pid=process.pid, argv=process.argv, cwd=cdws.get(process.pid)
             )
-            if _process_touches(enriched, candidate):
+            if _process_touches(enriched, candidate, parent_term=parent_term):
                 return True
         return False
 
@@ -1008,16 +1326,58 @@ def default_probes() -> Probes:
 
 
 def _run_git(args: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
-    """Run one git query, or ``None`` when git itself could not be trusted."""
+    """Run one git query, or ``None`` when git itself could not be trusted.
+
+    ``LC_ALL=C`` so a diagnostic that this module READS (see
+    :func:`_not_a_repository`) arrives in the one spelling it matches; an
+    undecodable stream is ``None`` ("cannot tell") rather than an exception out
+    of the reaper's only subprocess helper.
+    """
     try:
         return subprocess.run(
             ["git", "-C", str(cwd), *args],
             capture_output=True,
             text=True,
             timeout=GIT_PROBE_TIMEOUT_S,
+            env={**os.environ, "LC_ALL": "C"},
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return None
+
+
+#: git's own words for "there is no repository here", matched below. The check is
+#: the only locale-stable thing about a 128: every other fatal error (a corrupt
+#: repository, an unsupported ``core.repositoryformatversion``, a permissions
+#: wall, a bad ``GIT_DIR``) exits 128 too, and treating all of them as "no
+#: repository" is how a reaper answers "nothing is tracked" about a directory it
+#: could not read at all.
+_NOT_A_REPOSITORY = "not a git repository"
+
+
+def _inside_any_repository(cwd: Path) -> bool | None:
+    """Whether git considers ``cwd`` part of a repository: True/False/None.
+
+    The discriminator for 128. ``git -C <candidate.parent> ls-files`` exits 128
+    both when the parent genuinely is outside every repository AND when the
+    directory is a repository of its own that git refuses to describe from
+    outside — the case that deleted a linked worktree whole. So a 128 is never
+    evidence by itself: this asks the follow-up question ("is there a repository
+    at/above here?") and only a recognised "no" becomes ``False``.
+
+    ``rev-parse --show-toplevel`` is the query because it is: (a) read-only, (b)
+    cheap on git's common path — the fast path below is ONE extra call on the
+    128 branch only, so an in-repository tree costs exactly what it did before —
+    and (c) answered for a bare repository or a ``GIT_DIR`` override as well as
+    a worktree.
+    """
+    completed = _run_git(["rev-parse", "--show-toplevel"], cwd)
+    if completed is None:
+        return None
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 128 and _NOT_A_REPOSITORY in (completed.stderr or ""):
+        return False
+    return None
 
 
 def git_tracked_files_probe(candidate: Path) -> bool | None:
@@ -1031,15 +1391,18 @@ def git_tracked_files_probe(candidate: Path) -> bool | None:
 
     Outside any repository the answer is ``False`` — nothing there can be
     tracked — which is why a ``target/`` in a plain directory (the common case
-    for a scratch build) stays reapable. Anything else (git missing, a
-    corrupt repo, a timeout) is ``None``: cannot tell, so skip.
+    for a scratch build) stays reapable. That ``False`` needs PROOF, though: a
+    128 is only "no repository" when :func:`_inside_any_repository` says so, and
+    every other failure (git missing, a timeout, an undecodable stream, a corrupt
+    repo, a permissions wall) is ``None`` — cannot tell, so the candidate is
+    skipped. Reading ``128`` as ``False`` is what let a git worktree whose own
+    ``.git`` file sat INSIDE the candidate be reported as having nothing tracked.
     """
     completed = _run_git(["ls-files", "--", candidate.name], candidate.parent)
     if completed is None:
         return None
     if completed.returncode == 128:
-        # "not a git repository": no index can list anything here.
-        return False
+        return False if _inside_any_repository(candidate.parent) is False else None
     if completed.returncode != 0:
         return None
     return bool(completed.stdout.strip())
@@ -1056,9 +1419,10 @@ def git_ignored_probe(candidate: Path) -> bool | None:
 
     Outside any repository the answer is ``True``: no ignore rule exists to
     violate and nothing can be tracked, so the shape name is the whole safety
-    case (and the tracked probe independently confirms the second half).
-    ``git check-ignore``'s 128 is exactly that "not a repository" signal, and
-    any other non-zero status is ``None``.
+    case (and the tracked probe independently confirms the second half). Same
+    proof requirement as the tracked probe: a 128 becomes ``True`` only when
+    :func:`_inside_any_repository` confirms there is genuinely no repository, and
+    is otherwise ``None``.
     """
     completed = _run_git(["check-ignore", "-q", "--", candidate.name], candidate.parent)
     if completed is None:
@@ -1068,7 +1432,7 @@ def git_ignored_probe(candidate: Path) -> bool | None:
     if completed.returncode == 1:
         return False
     if completed.returncode == 128:
-        return True
+        return True if _inside_any_repository(candidate.parent) is False else None
     return None
 
 
@@ -1077,19 +1441,36 @@ def git_ignored_probe(candidate: Path) -> bool | None:
 # --------------------------------------------------------------------------
 
 
-def free_bytes(path: Path) -> int:
-    """Free bytes on the filesystem holding ``path``, 0 when unreadable.
+def free_bytes(paths: Sequence[Path]) -> int:
+    """Free bytes across the DISTINCT filesystems holding ``paths``; 0 if none.
 
-    ``shutil.disk_usage`` rather than parsing ``df``: it is the same number
-    without a platform-specific parser. The figure is per FILESYSTEM, so the
-    report measures it on the first scan root and pairs it with per-removal byte
-    counts — a run bounded to one volume by ``--root`` (the manual case) reads
-    it on exactly the right volume.
+    ``shutil.disk_usage`` rather than parsing ``df``: the same number without a
+    platform-specific parser. The figure used to be measured on
+    ``scan_roots[0]`` alone, which is the wrong disk whenever the run covers two
+    volumes — and the ``df`` cross-check in the module docstring then compares
+    against a number from another filesystem. Every root counts here,
+    DE-DUPLICATED by ``st_dev`` so the common one-volume run (several ``--root``s
+    on the same disk, or the home default) reports that disk once rather than a
+    multiple of it, and a two-volume run reports what both have free.
+
+    An unreadable path contributes 0: this is a report figure, never a guard, so
+    a measuring failure must not be able to stop a reap.
     """
-    try:
-        return shutil.disk_usage(str(path)).free
-    except OSError:
-        return 0
+    seen: set[int] = set()
+    total = 0
+    for path in paths:
+        try:
+            device = os.stat(path).st_dev
+        except OSError:
+            continue
+        if device in seen:
+            continue
+        seen.add(device)
+        try:
+            total += shutil.disk_usage(str(path)).free
+        except OSError:
+            continue
+    return total
 
 
 # --------------------------------------------------------------------------
@@ -1121,10 +1502,12 @@ def _evaluate(
     """Decide one candidate. Every uncertainty resolves to "skip".
 
     Order is cheap-first and safety-ordered: a symlink is never considered at
-    all; age is next (the bounded walk can also stop early the moment a tree is
-    provably too young); git next (two ``subprocess`` calls, no tree walk); the
-    live-build probes last because they are the ones worth re-reading at reap
-    time anyway.
+    all; the two PROPERTY guards (mount point, ``.git`` entry) are two ``stat``
+    calls and answer a question no shape name can — whether the directory is
+    build output in the first place; age is next (the bounded walk can also stop
+    early the moment a tree is provably too young); git next (two ``subprocess``
+    calls, no tree walk); the live-build probes last because they are the ones
+    worth re-reading at reap time anyway.
     """
     # 1. Never walk through or delete a symlinked candidate. `target` or `.next`
     # as a symlink is a shared target across worktrees — deleting "it" would
@@ -1137,6 +1520,25 @@ def _evaluate(
             return _Verdict(False, SKIP_ERROR, "not a directory")
     except OSError as exc:
         return _Verdict(False, SKIP_ERROR, exc.__class__.__name__)
+
+    # 1b. A mount point is another volume's contents, not ours to empty.
+    try:
+        mounted = probes.is_mount_point(candidate)
+    except OSError as exc:  # a probe that cannot answer is not a go-ahead
+        return _Verdict(False, SKIP_CANNOT_TELL, f"mount-probe: {exc.__class__.__name__}")
+    if mounted:
+        return _Verdict(False, SKIP_MOUNT_POINT)
+
+    # 1c. A directory carrying a `.git` entry is a repository or a linked-worktree
+    # root. It is not build output whatever it is called, and this is checked
+    # BEFORE the git probes because those run from the PARENT: for a worktree
+    # whose own name is a shape (`.worktrees/target`), the parent answer
+    # describes a different repository entirely.
+    repo_entry = _has_git_entry(candidate)
+    if repo_entry is None:
+        return _Verdict(False, SKIP_CANNOT_TELL, "dot-git-probe")
+    if repo_entry:
+        return _Verdict(False, SKIP_GIT_REPOSITORY, "contains .git")
 
     # 2. Age, from the newest mtime in the tree (see the module docstring).
     tree = scan_tree(candidate, cutoff=cutoff, clock=clock)
@@ -1205,6 +1607,7 @@ def reap(
     home: Path | None = None,
     clock: Callable[[], float] = time.monotonic,
     budget_s: float = DEFAULT_TIME_BUDGET_S,
+    default_roots: bool = False,
 ) -> ReapReport:
     """One reap tick: scan, decide, delete what is proved idle, report.
 
@@ -1221,16 +1624,46 @@ def reap(
     underneath) is recorded as a skip, never as reclaimed space: the report's
     bytes must be space the filesystem actually gave back, and the ``df``
     cross-check in the caller is the second opinion.
+
+    Each root is probed once up front (:func:`unreadable_root`) and reported by
+    name: an unreadable or nonexistent root produces no candidates and no skips,
+    so without this it is indistinguishable from a machine with nothing to reap.
+
+    ``default_roots`` says the caller's ``roots`` were resolved from the HOME
+    default rather than from ``--root`` — the caller is the one that knows, since
+    a CLI resolves ``~`` before calling here. It only drives the live-fire
+    warning (see below); ``roots=None`` implies it.
     """
-    resolved_settings = settings if settings is not None else read_settings()
-    resolved_probes = probes if probes is not None else default_probes()
     scan_roots = tuple(roots) if roots else resolve_roots(None, home)
+    resolved_settings = settings if settings is not None else read_settings()
+    scope_home = Path(home) if home is not None else Path.home()
+    resolved_probes = (
+        probes if probes is not None else default_probes(scan_roots, home=scope_home)
+    )
     moment = time.time() if now is None else now
     cutoff = moment - resolved_settings.age_hours * 3600.0
     shapes = enabled_shapes(resolved_settings.include_extra_shapes)
-    pruned = _pruned_absolute_paths(Path(home) if home is not None else Path.home())
+    pruned = _pruned_absolute_paths(scope_home)
 
-    free_before = free_bytes(scan_roots[0]) if scan_roots else 0
+    unreadable: list[UnreadableRoot] = []
+    for root in scan_roots:
+        problem = unreadable_root(root)
+        if problem is not None:
+            unreadable.append(problem)
+
+    # A real (non-dry) tick over the HOME default reaps everything. That is the
+    # intended scheduled behaviour, and it is also how a hand-run "usage check"
+    # removed 12 directories: the warning is for the human who typed the command.
+    warnings: list[str] = []
+    unbounded = default_roots or not roots
+    if unbounded and not resolved_settings.dry_run:
+        warnings.append(
+            "real reap over the default roots ("
+            + ", ".join(str(root) for root in scan_roots)
+            + ") — pass --root to bound it, or --dry-run to preview"
+        )
+
+    free_before = free_bytes(scan_roots)
 
     aborted = ""
     readable = resolved_probes.process_table_readable()
@@ -1303,7 +1736,7 @@ def reap(
                 )
             )
 
-    free_after = free_bytes(scan_roots[0]) if scan_roots else 0
+    free_after = free_bytes(scan_roots)
 
     return ReapReport(
         dry_run=resolved_settings.dry_run,
@@ -1317,6 +1750,8 @@ def reap(
         free_after=free_after,
         incomplete_scan=incomplete,
         aborted=aborted,
+        unreadable_roots=tuple(unreadable),
+        warnings=tuple(warnings),
     )
 
 
@@ -1382,6 +1817,10 @@ def log_lines(report: ReapReport, *, now: float | None = None) -> list[str]:
     lines: list[str] = []
     if report.aborted:
         lines.append(f"{stamp} {report.aborted}")
+    for warning in report.warnings:
+        lines.append(f"{stamp} warning {warning}")
+    for root in report.unreadable_roots:
+        lines.append(f"{stamp} warning root-unreadable path={root.path} detail={root.detail}")
     for removal in report.removed:
         lines.append(
             f"{stamp} removed shape={removal.shape} path={removal.path} "
@@ -1398,6 +1837,7 @@ def log_lines(report: ReapReport, *, now: float | None = None) -> list[str]:
         f"would_reclaim={human_bytes(report.would_reclaim_bytes)} "
         f"free_before={human_bytes(report.free_before)} "
         f"free_after={human_bytes(report.free_after)} "
+        f"unreadable_roots={len(report.unreadable_roots)} "
         f"incomplete_scan={'true' if report.incomplete_scan else 'false'}"
     )
     return lines
@@ -1456,6 +1896,12 @@ def format_report(report: ReapReport) -> str:
     out: list[str] = []
     if report.aborted:
         out.append(report.aborted)
+    for warning in report.warnings:
+        out.append(f"warning: {warning}")
+    for root in report.unreadable_roots:
+        # Named per root, and counted in the summary line below: a root that
+        # cannot be opened is the ONE failure that otherwise looks like success.
+        out.append(f"warning: root {root.path} is unreadable ({root.detail})")
     mode = "dry run" if report.dry_run else "reaped"
     if report.removed:
         for removal in report.removed:
@@ -1478,6 +1924,11 @@ def format_report(report: ReapReport) -> str:
         f"{human_bytes(report.reclaimed_bytes)} reclaimed, "
         f"free {human_bytes(report.free_before)} -> {human_bytes(report.free_after)}"
         + (" (scan incomplete)" if report.incomplete_scan else "")
+        + (
+            f" ({len(report.unreadable_roots)} unreadable root(s))"
+            if report.unreadable_roots
+            else ""
+        )
     )
     return "\n".join(out)
 
@@ -1502,34 +1953,56 @@ def run_cli(
     setting, and a config value that could silently turn a requested rehearsal
     into a real deletion would be the wrong precedence.
 
-    Always ``0`` on a completed tick, including "nothing to do" and including an
-    aborted tick — the abort is reported in the output and the log, and the
-    invocation itself succeeded. A non-zero code is reserved for a malformed
-    invocation (argparse's own).
+    ``0`` on a completed tick, including "nothing to do" and including an aborted
+    tick — the abort is reported in the output and the log, and the invocation
+    itself succeeded. The two non-zero codes are the failures a SCHEDULED job has
+    to be able to distinguish from success, both of which used to exit 0:
+
+    * ``EXIT_CONFIG_ERROR`` — ``config.yml`` exists but could not be read or
+      validated. Nothing was scanned and nothing was deleted.
+    * ``EXIT_NO_READABLE_ROOT`` — every scan root was missing or unreadable, so
+      the tick proved nothing. Reported per root in the output and the log.
+
+    Argparse's own ``2`` for a malformed invocation is the one remaining code;
+    ``EXIT_CONFIG_ERROR`` shares it deliberately (the same "the run never
+    started" class) and the message on stderr says which.
     """
     from dataclasses import replace
 
-    settings = read_settings()
+    try:
+        settings = read_settings()
+    except ReaperConfigError as exc:
+        # Refuse rather than reap on guessed settings. "Fall back to the defaults"
+        # here would mean "delete with a configuration nobody wrote", because the
+        # defaults are enabled=True and dry_run=False.
+        print(f"build-cache: refusing to run — {exc}", file=sys.stderr)
+        return EXIT_CONFIG_ERROR
     if dry_run and not settings.dry_run:
         settings = replace(settings, dry_run=True)
     if not settings.enabled and not dry_run:
         # A disabled reaper is not a failure: say so and exit clean so the
         # launchd job stays green while the user has it switched off.
         print("build-cache: disabled (maintenance.build_cache.enabled is false)", file=sys.stderr)
-        return 0
+        return EXIT_OK
     scan_roots = resolve_roots(roots, home)
     report = reap(
         roots=scan_roots,
         settings=settings,
         home=home,
         clock=clock,
+        # Resolved HERE (``~`` expansion, ``realpath``), so only this layer knows
+        # the operator gave no ``--root`` — which is what the live-fire warning in
+        # ``reap`` is about.
+        default_roots=not roots,
     )
     write_log(report)
+    for warning in report.warnings:
+        print(f"build-cache: {warning}", file=sys.stderr)
     if json_output:
         print(jsonlib.dumps(report.to_json_dict(), indent=2, sort_keys=True))
     else:
         print(format_report(report))
-    return 0
+    return EXIT_NO_READABLE_ROOT if report.all_roots_unreadable else EXIT_OK
 
 
 def main(argv: Sequence[str] | None = None) -> int:

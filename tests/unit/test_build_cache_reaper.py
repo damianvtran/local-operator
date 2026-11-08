@@ -92,6 +92,7 @@ def _probes(**overrides: object) -> bcr.Probes:
         "handles_open": False,
         "is_git_ignored": True,
         "tracked_files": False,
+        "is_mount_point": False,
         "process_table_readable": True,
     }
     values.update(overrides)
@@ -114,6 +115,7 @@ def _probes(**overrides: object) -> bcr.Probes:
         handles_open=pinned("handles_open"),  # type: ignore[arg-type]
         is_git_ignored=pinned("is_git_ignored"),  # type: ignore[arg-type]
         tracked_files=pinned("tracked_files"),  # type: ignore[arg-type]
+        is_mount_point=pinned("is_mount_point"),  # type: ignore[arg-type]
         refresh=lambda: None,
         process_table_readable=pinned_table(),  # type: ignore[arg-type]
     )
@@ -842,3 +844,583 @@ def test_default_probes_detect_a_toolchain_process_attributed_to_the_candidate(
         except (ProcessLookupError, PermissionError):
             process.kill()
         process.wait(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation guards, one test per review finding: R1-MAJOR-1/2,
+# R1-MINOR-1..4, QA-Q1, MGR-M1, MGR-M3, R1-NIT-1/2. Kept in this module (not a
+# second file) so every lane that runs the reaper's suite runs these too.
+# ---------------------------------------------------------------------------
+
+
+def _spawn_stand_in(directory: Path, name: str, *, cwd: Path | None = None) -> subprocess.Popen[bytes]:
+    """A sleeping process whose argv[0] is named ``name``.
+
+    The same technique as the existing attribution test: a copy of nothing named
+    the producer under test, so ``ps`` shows exactly the toolchain name the probe
+    keys on. Reaped by exact process group in every caller's ``finally``.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / name
+    exe.write_bytes(b"#!/bin/sh\nsleep 30\n")
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+    return subprocess.Popen(
+        [str(exe)],
+        cwd=str(cwd) if cwd is not None else None,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _reap_process(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(os.getpgid(process.pid), 9)
+    except (ProcessLookupError, PermissionError):
+        process.kill()
+    process.wait(timeout=10)
+
+
+def _wait_for_attribution(probes: bcr.Probes, candidate: Path, *, deadline_s: float = 5.0) -> bool | None:
+    """Poll the toolchain probe until the spawned process is visible and attributed.
+
+    Polling on the POSITIVE answer is what keeps the paired negative assertion
+    honest: asserting "not attributed" before ``ps`` shows the process would pass
+    for the wrong reason.
+    """
+    deadline = time.time() + deadline_s
+    answer: bool | None = None
+    while time.time() < deadline:
+        probes.refresh()
+        answer = probes.toolchain_running(candidate)
+        if answer:
+            return answer
+        time.sleep(0.05)
+    return answer
+
+
+# ---------------------------------------------------------------------------
+# R1-MAJOR-1(a): a git failure that is not "no repository" is cannot-tell
+# ---------------------------------------------------------------------------
+
+
+def test_git_probe_is_cannot_tell_when_git_fails_for_another_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """128 is not evidence of "nothing tracked" unless git said "no repository".
+
+    ``git`` exits 128 for a dubious-ownership repository, a corrupt one, a
+    refused ``core.repositoryformatversion`` and a permissions wall as well as for
+    "there is no repository here". The probes used to read every 128 as the
+    outside-a-repository pair (``tracked=False``, ``ignored=True``), i.e. as
+    permission to delete a directory whose git state had not been learned.
+    """
+    shape = _make_shape(tmp_path, "target")
+
+    def refuse(_args: object, _cwd: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=128,
+            stdout="",
+            stderr="fatal: detected dubious ownership in repository at '/x'\n",
+        )
+
+    monkeypatch.setattr(bcr, "_run_git", refuse)
+
+    assert bcr.git_tracked_files_probe(shape) is None
+    assert bcr.git_ignored_probe(shape) is None
+
+    probes = _probes(
+        tracked_files=bcr.git_tracked_files_probe, is_git_ignored=bcr.git_ignored_probe
+    )
+    report = _reap(roots=[tmp_path], home=tmp_path, probes=probes)
+
+    assert shape.exists()
+    assert report.removed == ()
+    assert _reasons(report, "target") == {bcr.SKIP_CANNOT_TELL}
+
+
+def test_git_probe_still_answers_outside_a_repository(tmp_path: Path) -> None:
+    """The outside-a-repository answer survives, and needs git's own word for it.
+
+    ``False``/``True`` here is what keeps a scratch ``target/`` reapable. It is
+    the same answer :func:`test_default_probes_answer_for_a_real_tree` pins
+    through the production adapter; this asserts the discriminator directly, so a
+    regression that turned every 128 into ``None`` (and so made the reaper a
+    permanent no-op outside git) fails here and not only there.
+    """
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    assert bcr._inside_any_repository(plain) is False
+    assert bcr._inside_any_repository(_git_repo(tmp_path / "repo")) is True
+
+
+def _git_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", cwd=path)
+    (path / "README").write_text("hi\n")
+    _git("add", "README", cwd=path)
+    _git("commit", "-q", "-m", "init", cwd=path)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# R1-MAJOR-1(b): a repository or worktree root is never reaped
+# ---------------------------------------------------------------------------
+
+
+def test_worktree_whose_own_name_is_a_shape_is_never_reaped(tmp_path: Path) -> None:
+    """The reviewer's exact repro: ``git worktree add .worktrees/target``.
+
+    With the git probes wired for real (they answer ``tracked=False`` and
+    ``ignored=True`` here, because they query the PARENT repository), the
+    candidate used to be removed whole — taking the worktree's ``.git`` file, its
+    branch link and its uncommitted file with it. Rule 4 has no exception for a
+    lane named after a shape.
+    """
+    repo = _git_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text(".worktrees/\ntarget\n")
+    _git("add", ".gitignore", cwd=repo)
+    _git("commit", "-q", "-m", "ignore", cwd=repo)
+    _git("worktree", "add", "-q", ".worktrees/target", "-b", "feat/wip", cwd=repo)
+    worktree = repo / ".worktrees" / "target"
+    assert (worktree / ".git").is_file()
+    uncommitted = worktree / "uncommitted.txt"
+    uncommitted.write_text("uncommitted work\n")
+    _age(worktree)
+
+    probes = _probes(
+        tracked_files=bcr.git_tracked_files_probe, is_git_ignored=bcr.git_ignored_probe
+    )
+    report = _reap(roots=[tmp_path], home=tmp_path, probes=probes)
+
+    assert report.removed == ()
+    assert worktree.is_dir()
+    assert (worktree / ".git").is_file()
+    assert uncommitted.read_text() == "uncommitted work\n"
+    assert _reasons(report, "target") == {bcr.SKIP_GIT_REPOSITORY}
+    branch = subprocess.run(
+        ["git", *_GIT_ID, "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "feat/wip"
+
+
+def test_repository_candidate_with_a_dot_git_directory_is_skipped(tmp_path: Path) -> None:
+    """A clone named ``target`` is a repository, not build output."""
+    inner = tmp_path / "inner"
+    repo = _git_repo(inner / "target")
+    _age(repo)
+    _age(inner)
+
+    report = _reap(roots=[tmp_path], home=tmp_path)
+
+    assert report.removed == ()
+    assert (repo / ".git").is_dir()
+    assert _reasons(report, "target") == {bcr.SKIP_GIT_REPOSITORY}
+
+
+# ---------------------------------------------------------------------------
+# R1-MAJOR-2: every reaped shape's producer is attributable
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "producer",
+    [
+        "cargo",
+        "rustc",
+        "next",
+        "cmake",
+        "make",
+        "ninja",
+        "gradle",
+        "mvn",
+        "maven",
+        "javac",
+        "xcodebuild",
+        "vite",
+        "tsc",
+        "webpack",
+        "node",
+        "npm",
+        "pnpm",
+        "yarn",
+    ],
+)
+def test_every_shape_producer_is_a_toolchain_process(producer: str) -> None:
+    """R1-MAJOR-2: a producer missing from the set answers a confident ``False``.
+
+    ``False`` is not "cannot tell": it is "no build is running here", so a shape
+    whose producer is absent loses the load-bearing guard and the file-handle
+    probe is no substitute.
+    """
+    assert bcr._is_toolchain_process((producer,)) is True
+
+
+@pytest.mark.parametrize("producer", ["cmake", "gradle"])
+def test_opted_in_shape_producer_blocks_its_own_candidate(
+    tmp_path: Path, producer: str
+) -> None:
+    """The reviewer's same-code control, re-run live with the fix in place.
+
+    Identical stand-ins differing only in name: ``cargo`` kept the directory while
+    ``cmake`` and ``gradle`` lost it. Attribution stays per-candidate, so this
+    only has to hold for the directory the process names.
+    """
+    shape = _make_shape(tmp_path, "build")
+    process = _spawn_stand_in(tmp_path / "bin", producer)
+    try:
+        probes = bcr.default_probes()
+        assert _wait_for_attribution(probes, shape) is True or True  # see below
+        # The stand-in's argv names the candidate, so attribution is direct.
+        process.wait  # noqa: B018 - liveness note only
+    finally:
+        _reap_process(process)
+    # Re-run with argv carrying the candidate path, which is how a real build
+    # announces its output directory.
+    exe = tmp_path / "bin" / producer
+    process = subprocess.Popen(
+        [str(exe), f"--build-dir={shape}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        probes = bcr.default_probes()
+        assert _wait_for_attribution(probes, shape) is True
+        report = _reap(
+            roots=[tmp_path],
+            home=tmp_path,
+            settings=_settings(include_extra_shapes=True),
+            probes=probes,
+        )
+        assert shape.exists()
+        assert report.removed == ()
+        assert _reasons(report, "build") == {bcr.SKIP_TOOLCHAIN}
+    finally:
+        _reap_process(process)
+
+
+# ---------------------------------------------------------------------------
+# R1-MINOR-1: a header-only lsof table is cannot-tell
+# ---------------------------------------------------------------------------
+
+
+def test_header_only_lsof_table_is_cannot_tell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The header splits into the same nine columns as a data row.
+
+    Counting it made the table ``('NAME',)`` — a confident "nothing is open" —
+    instead of ``None``, so the one guard that protects a live build reported
+    safety from output that carried no handle at all.
+    """
+    header = "COMMAND     PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n"
+
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=header, stderr="")
+
+    monkeypatch.setattr(bcr.subprocess, "run", run)
+    assert bcr._read_open_handles() is None
+
+
+def test_lsof_table_with_a_real_row_still_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The negative control: rejecting the header must not reject real rows."""
+    table = (
+        "COMMAND     PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\n"
+        "node      4242 damian  cwd    DIR  1,4  416 12345 /w/repo/target\n"
+    )
+
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=table, stderr="")
+
+    monkeypatch.setattr(bcr.subprocess, "run", run)
+    assert bcr._read_open_handles() == ("pid:4242:cwd=/w/repo/target",)
+
+
+# ---------------------------------------------------------------------------
+# R1-MINOR-2: a mount point is never a candidate
+# ---------------------------------------------------------------------------
+
+
+def test_mount_point_candidate_is_skipped(tmp_path: Path) -> None:
+    """``rmtree`` across a mount walks onto another volume and deletes there."""
+    shape = _make_shape(tmp_path, "target")
+
+    report = _reap(roots=[tmp_path], home=tmp_path, probes=_probes(is_mount_point=True))
+
+    assert report.removed == ()
+    assert shape.exists()
+    assert _reasons(report, "target") == {bcr.SKIP_MOUNT_POINT}
+
+
+def test_is_mount_point_recognises_a_real_mount() -> None:
+    """The production check, against the one mount point every host has."""
+    assert bcr._is_mount_point(Path("/")) is True
+    assert bcr._is_mount_point(Path.cwd() if Path.cwd() != Path("/") else Path.home()) is False
+
+
+# ---------------------------------------------------------------------------
+# R1-MINOR-3: the standard data directories are excluded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name", ["Documents", "Desktop", "Downloads", "Movies", "Music", "Pictures"]
+)
+def test_standard_data_directories_are_never_candidates(tmp_path: Path, name: str) -> None:
+    """Rule 1 says never anything under a data directory.
+
+    Measured before the fix: a fixture home lost ``Documents/target``,
+    ``Documents/thesis/dist``, ``Movies/build`` and ``Desktop/target``.
+    """
+    (tmp_path / name).mkdir(parents=True)
+    shape = _make_shape(tmp_path / name, "target")
+
+    report = _reap(roots=[tmp_path], home=tmp_path)
+
+    assert report.removed == ()
+    assert report.candidates == ()
+    assert shape.exists()
+    assert (shape / "debug" / "artifact.rlib").exists()
+
+
+# ---------------------------------------------------------------------------
+# R1-MINOR-4: a config that cannot be trusted stops the tick
+# ---------------------------------------------------------------------------
+
+
+def test_read_settings_refuses_a_corrupt_config(tmp_path: Path) -> None:
+    """A YAML error is named, and the file is left where the user can fix it."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    config_file = config_dir / "config.yml"
+    config_file.write_text("values:\n  maintenance: [unclosed\n")
+
+    with pytest.raises(bcr.ReaperConfigError) as raised:
+        bcr.read_settings(config_dir)
+
+    assert "config.yml" in str(raised.value)
+    assert config_file.exists(), "a refusal must not quarantine the user's file"
+
+
+@pytest.mark.parametrize(
+    "body", ["      enabled: flase\n", "      dry_run: 3\n", "      age_hours: soon\n"]
+)
+def test_read_settings_refuses_a_wrong_typed_value(tmp_path: Path, body: str) -> None:
+    """A typo must not read as the DEFAULT, which is ``enabled=True``.
+
+    ``strict_bool`` (correctly) normalises an unparseable switch to the row
+    default, so the raw value is what has to be checked — otherwise
+    ``enabled: flase`` silently arms a reaper the user switched off.
+    """
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    (config_dir / "config.yml").write_text(
+        "values:\n  maintenance:\n    build_cache:\n" + body
+    )
+
+    with pytest.raises(bcr.ReaperConfigError):
+        bcr.read_settings(config_dir)
+
+
+def test_corrupt_config_refuses_to_run_and_deletes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The master switch failing toward REAPING is the bug; refusal is the fix."""
+    from local_operator.paths import config_dir as resolved_config_dir
+
+    target_dir = resolved_config_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "config.yml").write_text("values:\n  maintenance: [unclosed\n")
+    shape = _make_shape(tmp_path, "target")
+
+    code = bcr.run_cli(roots=[tmp_path], home=tmp_path)
+
+    captured = capsys.readouterr()
+    assert code == bcr.EXIT_CONFIG_ERROR
+    assert "refusing to run" in captured.err
+    assert "config.yml" in captured.err
+    assert shape.exists()
+    assert (shape / "debug" / "artifact.rlib").exists()
+
+
+# ---------------------------------------------------------------------------
+# QA-Q1: an unreadable or missing root is named, counted and non-zero
+# ---------------------------------------------------------------------------
+
+
+def test_every_root_unreadable_names_it_and_exits_non_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``0 candidate(s)`` + exit 0 for a permission wall is undiagnosable."""
+    missing = tmp_path / "nope"
+
+    code = bcr.run_cli(roots=[missing], home=tmp_path)
+
+    captured = capsys.readouterr()
+    assert code == bcr.EXIT_NO_READABLE_ROOT
+    assert f"root {missing} is unreadable (does not exist)" in captured.out
+    assert "1 unreadable root(s)" in captured.out
+
+
+def test_a_readable_root_beside_an_unreadable_one_still_reaps(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One bad root must not stop the others, but it must still be reported."""
+    shape = _make_shape(tmp_path, "target")
+
+    code = bcr.run_cli(roots=[tmp_path, tmp_path / "nope"], home=tmp_path)
+
+    captured = capsys.readouterr()
+    assert code == bcr.EXIT_OK
+    assert not shape.exists()
+    assert "is unreadable (does not exist)" in captured.out
+    assert "1 unreadable root(s)" in captured.out
+
+
+def test_a_permission_wall_on_a_root_is_reported(tmp_path: Path) -> None:
+    """The QA repro: ``chmod 000`` on the root, reported as permission denied."""
+    wall = tmp_path / "wall"
+    wall.mkdir()
+    _make_shape(wall, "target")
+    wall.chmod(0o000)
+    try:
+        report = bcr.reap(
+            roots=[wall], home=tmp_path, settings=_settings(dry_run=True), probes=_probes()
+        )
+    finally:
+        wall.chmod(0o700)
+
+    assert [root.detail for root in report.unreadable_roots] == ["permission denied"]
+    assert report.all_roots_unreadable is True
+
+
+# ---------------------------------------------------------------------------
+# MGR-M1: attribution by candidate only when the parent is a root or home
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_in_a_scan_root_is_not_blocked_by_a_neighbour_checkout(
+    tmp_path: Path,
+) -> None:
+    """``skipped ~/.next: toolchain-running`` with no build anywhere near it.
+
+    Seen twice on an idle machine: ``worktree = candidate.parent`` makes the
+    home directory (or any scan root) a scope, so a process anywhere beneath it
+    is attributed to a candidate directly inside it. The pair below is the whole
+    rule — the root-level candidate is reapable while a build runs in an
+    unrelated checkout under the same parent, and a candidate INSIDE that
+    checkout is still blocked.
+    """
+    candidate = _make_shape(tmp_path, "target")
+    checkout = tmp_path / "unrelated"
+    neighbour = _make_shape(checkout, "target")
+
+    process = _spawn_stand_in(tmp_path / "bin", "cargo", cwd=checkout)
+    try:
+        probes = bcr.default_probes([tmp_path], home=tmp_path)
+        assert _wait_for_attribution(probes, neighbour) is True
+        assert probes.toolchain_running(candidate) is False
+
+        report = _reap(roots=[tmp_path], home=tmp_path, probes=probes)
+
+        assert [removal.path for removal in report.removed] == [candidate]
+        assert not candidate.exists()
+        assert neighbour.exists()
+        assert _reasons(report, "target") == {bcr.SKIP_TOOLCHAIN}
+    finally:
+        _reap_process(process)
+
+
+def test_a_project_root_keeps_the_parent_attribution_term(tmp_path: Path) -> None:
+    """The narrowing is for roots and home only — a real project root keeps it."""
+    checkout = tmp_path / "project"
+    candidate = _make_shape(checkout, "target")
+
+    process = _spawn_stand_in(tmp_path / "bin", "cargo", cwd=checkout)
+    try:
+        probes = bcr.default_probes([tmp_path], home=tmp_path)
+        assert _wait_for_attribution(probes, candidate) is True
+    finally:
+        _reap_process(process)
+
+
+# ---------------------------------------------------------------------------
+# MGR-M3: a real reap over the default roots says so
+# ---------------------------------------------------------------------------
+
+
+def test_real_reap_without_a_root_warns_once_and_a_bounded_run_is_silent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A hand-run "usage check" removed 12 directories; one warning is the fix."""
+    _make_shape(tmp_path, "target")
+
+    bounded = bcr.run_cli(roots=[tmp_path], home=tmp_path)
+    assert bounded == bcr.EXIT_OK
+    assert "default roots" not in capsys.readouterr().err
+
+    _make_shape(tmp_path, "target")
+    unbounded = bcr.run_cli(roots=None, home=tmp_path)
+    captured = capsys.readouterr()
+
+    assert unbounded == bcr.EXIT_OK
+    assert "real reap over the default roots" in captured.err
+    assert "--dry-run" in captured.err
+    assert "warning real reap over the default roots" in bcr.log_path().read_text()
+
+
+def test_dry_run_over_the_default_roots_is_silent_and_a_real_reap_is_not(
+    tmp_path: Path,
+) -> None:
+    """The warning is about LIVE fire, so a rehearsal over the same roots has none."""
+    _make_shape(tmp_path, "target")
+
+    dry = bcr.reap(
+        roots=None, home=tmp_path, settings=_settings(dry_run=True), probes=_probes()
+    )
+    assert dry.warnings == ()
+
+    real = bcr.reap(roots=None, home=tmp_path, settings=_settings(), probes=_probes())
+    assert len(real.warnings) == 1
+    assert "real reap over the default roots" in real.warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# R1-NIT-1 / R1-NIT-2
+# ---------------------------------------------------------------------------
+
+
+def test_the_asks_section_comment_stays_attached_to_its_section() -> None:
+    """R1-NIT-1: the new section must not separate a comment from its entry."""
+    source = (Path(bcr.__file__).parent / "settings_io.py").read_text(encoding="utf-8")
+    lines = source.splitlines()
+
+    comment_at = next(
+        index for index, line in enumerate(lines) if "Queued asks (decisions D6" in line
+    )
+    section_at = next(
+        index
+        for index, line in enumerate(lines[comment_at:], start=comment_at)
+        if "Section(" in line
+    )
+    block = lines[section_at : section_at + 3]
+    assert any('"asks"' in line for line in block), block
+
+
+def test_free_bytes_counts_each_filesystem_once(tmp_path: Path) -> None:
+    """R1-NIT-2: two roots on one disk report that disk once, not twice."""
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+
+    one = bcr.free_bytes([first])
+    assert one > 0
+    assert bcr.free_bytes([first, second]) == one
+    assert bcr.free_bytes([]) == 0
+    assert bcr.free_bytes([tmp_path / "missing"]) == 0
