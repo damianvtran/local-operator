@@ -34,12 +34,15 @@ def _fields(**overrides):
 # The review-economy pointers (context contract, scope, freshness, round
 # hygiene) raised coder/manager/designer/ux/qa slightly after trimming the
 # duplicated coverage prose; reviewer stayed inside its 3500 by trimming.
-# The targeted-test-evidence rule (PR CI runs no unit tests, so the PR's
+# The targeted-test-evidence rule (PR CI runs only fast guards, so the PR's
 # `## Targeted test evidence` block is the test gate) replaced the shorter
 # "whole-suite runs are CI's" lines and raised coder/reviewer/manager by the
 # measured ~165/120/115 chars: each role must state its half of that gate.
+# The coder's `WIDE:` -> full-suite.yml dispatch clause then measured 2616.
+# The PR CI wording also changed to "runs only fast guards"; the old "runs no
+# unit tests" was false once the guards job ran ~984 guard tests per code PR.
 BUDGETS = {
-    "coder": 2600,
+    "coder": 2650,
     "reviewer": 3650,
     "manager": 3600,
     "designer": 5650,
@@ -93,7 +96,12 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
     # attempts (41.4 h) after the last product commit — against ~800 tokens of
     # on-demand guide read. Trim prose, not the invariants, before raising it: a
     # rule that names no measurement is the defect this section exists to stop.
-    assert len(policy) < 12200
+    #
+    # Raised to 12300 for the `WIDE:` clause (+81 chars net after trimming the
+    # lease and CI paragraphs; 12199 -> 12280 measured with `len(read_text())`):
+    # without it "no local full suite" reads as forbidding the one sanctioned
+    # full-suite dispatch that `make test-affected` asks for on infra changes.
+    assert len(policy) < 12300
 
 
 def test_root_instructions_link_detail_instead_of_duplicating_it():

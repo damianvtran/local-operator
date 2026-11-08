@@ -29,11 +29,13 @@ Describe the impact of these changes on the codebase:
 
 ## Targeted test evidence
 
-CI runs no unit tests; this block is the test gate. Re-run on the final head.
+PR CI runs only the fast guard tests; this block is the test gate. Re-run on the final head.
+If `make test-affected` prints `WIDE:`, dispatch `gh workflow run full-suite.yml --ref <branch>` and cite it.
 
 - Scope: `<base-sha>..<head-sha>`
 - Command(s): `make test-affected` (or `scripts/affected_tests.py --since <base> --run --evidence`) plus additions by judgement
 - Result: `<N passed, M failed>` in `<wall time>`; other interpreter (3.12/3.13) if version/OS-sensitive
+- WIDE dispatch run (if any): <url>
 - Not run, and why:
 
 ## Checklist

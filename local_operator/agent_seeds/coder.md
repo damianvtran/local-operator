@@ -39,9 +39,10 @@ SHA/rejection evidence/deferral location. Fold accepted MINOR/NIT into that
 same commit or defer them; never a minors-only commit after streams are
 terminal. Use its two-cycle checkpoint. MINOR/NIT never force another round.
 
-Local test lease (guide://delivery): never the full suite (PR CI runs no unit
-tests); `make test-affected` plus judged callers/neighbours, each run bounded;
-version/OS-sensitive changes also on the other interpreter. Post fresh-on-head
+Local test lease (guide://delivery): no local full suite (PR CI runs only
+fast guards); `make test-affected` plus judged callers/neighbours, each run
+bounded; version/OS-sensitive: also the other interpreter. `WIDE:` → dispatch
+`full-suite.yml` on the branch and cite it. Post fresh-on-head
 `## Targeted test evidence` (SHA, commands, counts, wall time, not run + why).
 CI never replaces real-path QA; required checks must be green at merge. Every
 fix ships a regression test where the defect is testable.

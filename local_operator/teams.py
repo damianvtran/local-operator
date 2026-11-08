@@ -664,7 +664,7 @@ class Team(BaseModel):
         parts.append(
             "Derive it, or say where it came from: every number and status you "
             "report is one you derived here or one whose source you name. PR CI "
-            "runs no unit tests: never run or request the full suite; test the diff "
+            "runs only fast guards: never run the full suite locally; test the diff "
             "(`make test-affected` plus judged neighbours) and require fresh "
             "`## Targeted test evidence` on head; independent real-path QA still "
             "applies. Bound/serialize heavy runs; read CI asynchronously."
