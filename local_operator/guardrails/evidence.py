@@ -54,13 +54,15 @@ same one as ``python -c 'shutil.rmtree(...)'``.
 DESCENDANTS. Found, recursively, from the harness-written lineage registry
 (``provenance.read_lineage``, under ``<state>/guardrails/``) — not from the
 parent's roster, which is pruned. ``origin.json`` parent pointers are a
-MIGRATION fallback only, for child directories born before the registry file
-itself was (sessions that predate this change, such as the 2026-11-07 QA
-field case): a directory planted later is born after the registry existed,
-so it cannot use the fallback. That is a narrowing, not a seal — macOS
-``utimes`` can move a birth time backwards, and an interpreter write is the
-same ceiling as above. Symlinked session directories, transcripts and
-``origin.json`` files are never read.
+MIGRATION fallback only, for child directories born before the guard went
+live on this machine — the birth of the earliest installed generation that
+carries it, else (dev/editable runs) the registry file's own birth
+(``provenance.legacy_lineage_cutoff``; sessions that predate this
+change, such as the 2026-11-07 QA field case): a directory planted later is
+born after the guard could refuse the plant, so it cannot use the fallback.
+That is a narrowing, not a seal — macOS ``utimes`` can move a birth time
+backwards, and an interpreter write is the same ceiling as above. Symlinked
+session directories, transcripts and ``origin.json`` files are never read.
 """
 
 from __future__ import annotations
@@ -194,8 +196,9 @@ def session_tree(state_root: str | os.PathLike[str], session_id: str) -> list[st
     """``session_id`` followed by every descendant.
 
     Registry children are trusted as recorded. A legacy ``origin.json`` child
-    is adopted only when its directory was born BEFORE the lineage registry
-    was (the migration window) AND no earlier than the parent's
+    is adopted only when its directory was born BEFORE the guard went live
+    on this machine (``provenance.legacy_lineage_cutoff``: the migration
+    window) AND no earlier than the parent's
     ``created_at`` (slack allowed). A session whose own creation time cannot
     be read adopts no legacy children (fail closed: no evidence, the old
     ranking). Forgery is narrowed elsewhere (``classify._touch_reason``): a
@@ -208,13 +211,10 @@ def session_tree(state_root: str | os.PathLike[str], session_id: str) -> list[st
     """
     if not session_id:
         return []
-    from local_operator.guardrails.provenance import (
-        ensure_lineage_registry,
-        read_lineage,
-    )
+    from local_operator.guardrails.provenance import legacy_lineage_cutoff, read_lineage
 
     sessions = Path(state_root) / "sessions"
-    cutoff = ensure_lineage_registry(state_root)
+    cutoff = legacy_lineage_cutoff(state_root)
     registry: dict[str, list[str]] = {}
     for child, row in read_lineage(state_root).items():
         for parent in (row.get("parent"), row.get("opener")):

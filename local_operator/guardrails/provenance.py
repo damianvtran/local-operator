@@ -166,6 +166,73 @@ def ensure_lineage_registry(state_root: str | os.PathLike[str] | None = None) ->
     return float(getattr(st, "st_birthtime", st.st_ctime))
 
 
+#: The module whose arrival on this machine made the plant-blocking guard
+#: live: a generation carrying it ranks every shell write into ``sessions/``
+#: CRITICAL. Globbed relative to a generation root (``update`` layout:
+#: ``<gen>/tools/<tool>/lib/python3.X/site-packages/...``).
+_GUARD_MODULE_GLOB = "tools/*/lib/python*/site-packages/local_operator/guardrails/provenance.py"
+#: ``generations_dir`` → cutoff. Generations are written once and never
+#: touched, so one scan per process is enough.
+_GUARD_LIVE_CACHE: dict[str, float | None] = {}
+
+
+def guard_live_at() -> float | None:
+    """Birth time of the EARLIEST installed generation carrying the guard.
+
+    ``None`` when no generation carries it (an editable/dev run, or a layout
+    from before the generation installer); callers then fall back to the
+    registry file's birth.
+    """
+    from local_operator.update import generations_dir
+
+    root = generations_dir()
+    key = str(root)
+    if key in _GUARD_LIVE_CACHE:
+        return _GUARD_LIVE_CACHE[key]
+    births: list[float] = []
+    try:
+        entries = [e for e in os.scandir(root) if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        entries = []
+    for entry in entries:
+        try:
+            if not any(Path(entry.path).glob(_GUARD_MODULE_GLOB)):
+                continue
+            st = entry.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        births.append(float(getattr(st, "st_birthtime", st.st_ctime)))
+    value = min(births) if births else None
+    _GUARD_LIVE_CACHE[key] = value
+    return value
+
+
+def legacy_lineage_cutoff(state_root: str | os.PathLike[str] | None = None) -> float | None:
+    """Children born before this may be adopted from ``origin.json`` alone.
+
+    WHY THE INSTALL, NOT THE REGISTRY FILE. The window exists for children
+    spawned by a runtime too old to write registry rows. It closes when the
+    plant-blocking guard went live HERE — from then on a shell write into
+    ``sessions/`` (a forged ``origin.json``) is CRITICAL, so a later legacy
+    child cannot have been planted from the shell. The registry file's birth
+    was a proxy for that, and a bad one: a dev or QA run against real state
+    created ``lineage.jsonl`` early (Nov 7, before any guarded runtime was
+    installed), which shrank the window and orphaned a real ``task`` child
+    spawned by a pre-registry runtime, so its parent could not delete the
+    clone the child made. Generation dirs live in the install layout, which
+    is CRITICAL to shell writes, so their birth cannot be moved by an agent's
+    shell. An interpreter computing paths itself remains the documented
+    ceiling (see ``evidence`` module doc).
+
+    ``None`` when the registry cannot be created/read: no legacy adoption.
+    """
+    registry_born = ensure_lineage_registry(state_root)
+    if registry_born is None:
+        return None
+    live = guard_live_at()
+    return live if live is not None else registry_born
+
+
 def read_lineage(state_root: str | os.PathLike[str] | None = None) -> dict[str, dict[str, Any]]:
     """``child → row``; the FIRST row for a child wins (a later row cannot re-parent it)."""
     out: dict[str, dict[str, Any]] = {}

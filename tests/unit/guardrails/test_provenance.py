@@ -1806,3 +1806,124 @@ def test_other_pad_dotdot_resolving_inside_it_is_high(home: Path) -> None:
         verdict = _verdict(home, op.format(word))
         assert verdict.risk is Risk.HIGH, op
         assert "another session's files" in verdict.reasons
+
+
+# -- the legacy window closes when the guard went live, not at the registry's birth --------
+#
+# Field case (2026-11-08): a ``task`` child spawned by a pre-registry runtime
+# cloned ``.worktrees/lop-update-clone-869dea``; its parent could not delete
+# it, because ``lineage.jsonl`` had been created EARLIER by a dev/QA run, so
+# the child was born after the registry and outside the origin.json window.
+
+
+def _generation(home: Path, name: str, *, guarded: bool) -> Path:
+    gen = home / ".local" / "share" / "lop" / "generations" / name
+    pkg = gen / "tools" / "local-operator" / "lib" / "python3.14" / "site-packages"
+    guard = pkg / "local_operator" / "guardrails"
+    guard.mkdir(parents=True)
+    if guarded:
+        (guard / "provenance.py").write_text("# synthetic\n")
+    return gen
+
+
+def _clone_child(home: Path, sid: str, clone: Path) -> None:
+    """``sid`` (origin.json → SID, no registry row) ran the measured clone.
+
+    The directory gets no ``.git``: a directory holding one is a primary
+    checkout, which history never vouches for (``evidence.covers``, #3565),
+    so this pins lineage only."""
+    start = time.time() - 1
+    command = (
+        f"cd {clone.parent.parent} && C=.worktrees/{clone.name}"
+        " && git clone -q --local --no-checkout . $C"
+    )
+    clone.mkdir(parents=True)
+    _write_transcript(
+        home,
+        sid,
+        [
+            _row(start, _call("b1", "bash", {"command": command})),
+            _row(time.time() + 1, _result("b1", "bash", "exit code: 0")),
+        ],
+        parent=SID,
+    )
+
+
+def test_legacy_window_runs_to_the_first_guarded_generation(home: Path) -> None:
+    state = home / ".local-operator"
+    prov._GUARD_LIVE_CACHE.clear()
+    ev_mod._TREE_CACHE.clear()
+    # A dev run creates the registry early; an unguarded generation is older still.
+    _generation(home, "20261101T000000Z-old", guarded=False)
+    assert prov.ensure_lineage_registry(state) is not None
+    time.sleep(0.05)
+    clone = home / "repo" / ".worktrees" / "lop-update-clone-869dea"
+    _clone_child(home, "869deaa18c49", clone)
+    time.sleep(0.05)
+    live = _generation(home, "20261108T053357Z-guarded", guarded=True)
+    time.sleep(0.05)
+    _generation(home, "20261109T000000Z-later", guarded=True)
+    assert prov.guard_live_at() == pytest.approx(live.stat().st_birthtime)
+    _write_transcript(home, SID, [_row(time.time() - 600, {"role": "user", "content": []})])
+    target = os.path.realpath(clone)
+    found = ev_mod.gather([target], session_id=SID, env=_env(home), stop=_stop(home))
+    assert found.covers.get(target), found
+    assert "869deaa18c49" in found.listed[found.covers[target][0]].label
+
+
+def test_child_born_after_the_guard_went_live_adopts_nothing(home: Path) -> None:
+    """Born after the guard could refuse the plant, no registry row: no evidence,
+    even though the registry file (a dev run's) is older than the child."""
+    state = home / ".local-operator"
+    prov._GUARD_LIVE_CACHE.clear()
+    ev_mod._TREE_CACHE.clear()
+    assert prov.ensure_lineage_registry(state) is not None
+    _generation(home, "20261108T053357Z-guarded", guarded=True)
+    time.sleep(0.05)
+    late = home / "repo" / ".worktrees" / "lop-update-clone-late"
+    _clone_child(home, "869deaa18c50", late)
+    _write_transcript(home, SID, [_row(time.time() - 600, {"role": "user", "content": []})])
+    assert "869deaa18c50" not in ev_mod.session_tree(state, SID)
+    target = os.path.realpath(late)
+    found = ev_mod.gather([target], session_id=SID, env=_env(home), stop=_stop(home))
+    assert not found.covers.get(target)
+
+
+def test_legacy_window_falls_back_to_the_registry_without_generations(home: Path) -> None:
+    state = home / ".local-operator"
+    prov._GUARD_LIVE_CACHE.clear()
+    registry = prov.ensure_lineage_registry(state)
+    assert prov.guard_live_at() is None
+    assert prov.legacy_lineage_cutoff(state) == registry
+
+
+def test_task_job_children_get_a_registry_row(home: Path) -> None:
+    """The CURRENT runtime's ``task`` spawn stamps origin through
+    ``resume.mark_session_origin``, which appends the registry row."""
+    from local_operator.resume import mark_session_origin
+
+    state = home / ".local-operator"
+    child = state / "sessions" / "cccccccccc77"
+    mark_session_origin(child, "subagent", parent=SID)
+    assert prov.read_lineage(state)["cccccccccc77"]["parent"] == SID
+
+
+# -- ``cd -P`` / ``set -P`` follow the kernel (review R2-MINOR-2) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "prefix", ["cd -P {pad}/sub/..", "set -P; cd {pad}/sub/..", "set -o physical; cd {pad}/sub/.."]
+)
+def test_physical_cd_through_a_link_cannot_forge_an_ask_store(home: Path, prefix: str) -> None:
+    pad, asks = _pad_sub_link_to_sessions(home, OTHER)
+    command = prefix.format(pad=pad) + f" && echo f >> {OTHER}/asks.jsonl"
+    command = command.replace("; cd", " && cd")
+    assert _verdict(home, command).risk is Risk.CRITICAL, command
+
+
+def test_logical_cd_dotdot_stays_lexical(home: Path) -> None:
+    """Plain ``cd a/..`` is resolved lexically by bash itself: the pad."""
+    pad, _ = _pad_sub_link_to_sessions(home, OTHER)
+    (pad / OTHER).mkdir()
+    verdict = _verdict(home, f"cd {pad}/sub/.. && echo f >> {OTHER}/x.log")
+    assert verdict.risk is Risk.HIGH  # another session's pad, not its ask store

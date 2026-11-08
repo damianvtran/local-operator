@@ -36,7 +36,12 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from local_operator.guardrails.resolve import Creation, Target, resolve_command
+from local_operator.guardrails.resolve import (
+    Creation,
+    Target,
+    kernel_path,
+    resolve_command,
+)
 
 _STATE_DIRNAME = ".local-operator"
 _CONFIG_FILE = "config.yml"
@@ -395,35 +400,6 @@ def _hardlinked_file(path: str | None) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
 
 
-def _kernel_path(raw: str | None) -> str | None:
-    """Where the kernel lands ``raw`` (absolute, un-normalised), resolving
-    ``..`` AFTER links as path lookup does; ``None`` if that is unknowable.
-
-    ``os.path.realpath`` of the nearest EXISTING ancestor, plus the remaining
-    components. Those must hold no ``..``: below a missing directory the
-    lookup itself fails, and a guess there must not grant an exemption.
-    """
-    if not raw or not raw.startswith("/"):
-        return None
-    parts = [c for c in raw.split("/") if c and c != "."]
-    for cut in range(len(parts), -1, -1):
-        head = "/" + "/".join(parts[:cut])
-        try:
-            exists = os.path.lexists(head) if cut == len(parts) else os.path.isdir(head)
-        except OSError:
-            exists = False
-        if not exists:
-            continue
-        rest = parts[cut:]
-        if ".." in rest:
-            return None
-        try:
-            return os.path.join(os.path.realpath(head), *rest)
-        except OSError:
-            return None
-    return None
-
-
 def _kernel_reason(target: Target, prot: _Protected) -> str | None:
     """``_touch_reason`` for a word written with ``..`` (``Target.dotdot``).
 
@@ -435,7 +411,7 @@ def _kernel_reason(target: Target, prot: _Protected) -> str | None:
     ``OTHER_SCRATCHPAD`` (HIGH), and anything else under ``sessions/`` or
     ``guardrails/`` — or a landing that cannot be known — is CRITICAL.
     """
-    kernel = _kernel_path(target.raw_path)
+    kernel = kernel_path(target.raw_path)
     if kernel is None:
         # Opaque, globbed or unresolvable: no exemption, so the literal path
         # decides; under session state that is CRITICAL.

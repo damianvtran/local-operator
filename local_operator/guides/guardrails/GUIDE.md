@@ -78,8 +78,10 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   Descendants come from the harness-written lineage registry
   (`<config_dir>/guardrails/lineage.jsonl`, appended when the harness spawns a
   subagent or opens an agent session). `origin.json` parent pointers are only a
-  migration fallback for child directories born before that registry file was:
-  a directory planted later is born after it. That is a narrowing, not a seal —
+  migration fallback for child directories born before the guard went live on
+  this machine (the earliest installed `lop` generation carrying it; a dev run
+  falls back to the registry file's birth): a directory planted later is born
+  after the guard could refuse the plant. That is a narrowing, not a seal —
   macOS `utimes` can move a birth time backwards. Symlinked session directories,
   transcripts and `origin.json` files are never read.
   Writes into `<config_dir>/sessions/` (outside every session's scratchpad) or
@@ -92,7 +94,10 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   CRITICAL. A path written with `..` is judged where the kernel lands it
   (`..` resolves after following links): inside your own scratchpad it stays
   LOW, inside another session's scratchpad HIGH, anywhere else in session
-  state CRITICAL. The
+  state CRITICAL. Where it cannot be pinned at check time — a `..` below a directory that
+  does not exist yet, as in `mkdir -p <pad>/n && rm -f <pad>/n/../x` — it is
+  deliberately CRITICAL: write `rm -f <pad>/x` instead. `cd -P` (or `cd` after
+  `set -P`/`set -o physical`) is followed to the directory the kernel resolves. The
   `write`/`edit` file tools are not ranked HIGH there: they refuse only the
   evidence files, so a plain file in another session's scratchpad is not
   refused by them. CRITICAL here means every redirection (`>`, `>>`, `>|`,
