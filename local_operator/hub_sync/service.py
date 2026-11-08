@@ -6020,7 +6020,8 @@ def publish_skill(
             publication,
             local_id,
             (
-                str(error)
+                # safe_message is persisted in the receipt and read by the model.
+                refusal_text_en(error)
                 if isinstance(error, LinkError)
                 else "the local link could not be materialized"
             ),
@@ -6165,7 +6166,11 @@ def _local_skill_fields(ctx: HubSyncContext, record: prov.BaselineRecord) -> dic
     try:
         snapshot = adapter.snapshot(ctx.config_dir, record.local_id)
     except Exception as error:  # noqa: BLE001 - an unreadable copy is a named refusal
-        raise LinkError("local-concurrent-edit", f"could not read the local skill: {error}")
+        # The wrapped LinkError text lands in the persisted check detail / last_error,
+        # so a catalogued storage refusal is pinned to English (see refusal_text_en).
+        raise LinkError(
+            "local-concurrent-edit", f"could not read the local skill: {refusal_text_en(error)}"
+        )
     if "bundle" in (record.fields or {}):
         return dict(snapshot.fields)
     return dict(adapter.canonical_fields(snapshot.fields))

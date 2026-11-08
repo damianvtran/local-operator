@@ -256,3 +256,69 @@ def test_adoption_refusals_carry_their_message_and_other_errors_pass_through() -
     assert refusal_text_en(_refusal("something-else", "plain english")) == "plain english"
     assert refusal_text_en(LinkError("x", "plain")) == "plain"
     assert refusal_text_en(ValueError("boom")) == "boom"
+
+
+def test_skill_check_detail_stays_english_when_storage_refuses_under_fr(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q1: the check's persisted ``detail`` must not carry the French sentence.
+
+    ``check_hub_skills`` wraps the storage's catalogued ``projection-unsupported``
+    refusal (Windows-style: no secure projection, but a projection file already
+    exists for the alias) into ``ItemCheck.detail``, which ``status.json``
+    persists as ``last_error`` and the model reads. Wrapping ``str(error)`` put
+    the active-locale (fr) text there; ``refusal_text_en`` keeps it English.
+    """
+    from local_operator.hub_sync import check as chk
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+    from tests.unit.hub_sync.test_skill_apply import _profile
+
+    key = "wire.skill_adoption.projection_unsupported"
+    english = _catalogue("en", "wire.skill_adoption", key)
+    french = _catalogue("fr", "wire.skill_adoption", key)
+    assert french != english
+
+    storage, hub, _ctx, _identity, document = _profile(tmp_path)
+    # A projection file the (simulated) unsupported platform cannot read safely:
+    # ``_projection_absent`` is False, so ``snapshot`` raises the catalogued error.
+    storage._write_projection(document.name, {})
+    monkeypatch.setattr(ManagedSkillStorage, "_projection_supported", lambda self: False)
+
+    text.set_active_locale("fr")
+    (row,) = chk.check_hub_skills(
+        config_dir=storage.config_dir, client_for_tenant=lambda _t: hub.client()
+    )
+    assert row.reason == "local-concurrent-edit"
+    assert row.detail == f"could not read the local skill: {english}"
+    assert french not in (row.detail or "")
+
+
+def test_local_skill_fields_wrap_keeps_storage_refusal_english_under_fr(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The publish/link path re-wraps the same storage refusal; it stays English.
+
+    ``_local_skill_fields`` turns an unreadable local copy into a new LinkError
+    whose text is persisted (link status / pending receipts) and read by the
+    model, so it must not embed the active-locale ``str(error)``.
+    """
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+    from tests.unit.hub_sync.test_skill_apply import _profile
+
+    key = "wire.skill_adoption.projection_unsupported"
+    english = _catalogue("en", "wire.skill_adoption", key)
+
+    storage, _hub, ctx, identity, document = _profile(tmp_path)
+    storage._write_projection(document.name, {})
+    monkeypatch.setattr(ManagedSkillStorage, "_projection_supported", lambda self: False)
+    record = prov.read_baseline(storage.config_dir, "skill", identity.local_id)
+    assert record is not None
+
+    text.set_active_locale("fr")
+    with pytest.raises(LinkError) as raised:
+        svc._local_skill_fields(ctx, record)
+    assert raised.value.code == "local-concurrent-edit"
+    assert str(raised.value) == f"could not read the local skill: {english}"
