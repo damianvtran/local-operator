@@ -15,7 +15,7 @@
 #
 
 # Declare all targets as phony (not representing files)
-.PHONY: server dev-server cli openapi test test-affected coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
+.PHONY: server dev-server cli openapi test test-affected merge-gate coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
 
 # Default target when running 'make' without arguments
 .DEFAULT_GOAL := help
@@ -148,6 +148,87 @@ check-changed: ## Run the CI gates this branch's diff can affect
 test-affected: ## Run the tests this branch's diff affects; print PR evidence
 	@base="$$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse origin/main)"; \
 	.venv/bin/python scripts/affected_tests.py --since "$$base" --python .venv/bin/python --evidence
+
+# RE-ARM THE MERGE GATE on PR=<number>.
+#
+# The full suite runs on a pull request ONLY for a `labeled` event, because
+# running it per push is the cost this repository paid for years. That makes
+# the gate's check a property of the SHA it ran on: any push AFTER the gate
+# leaves `Merge gate (full suite)` unreported on the new head, where it sits in
+# "Expected" and blocks the merge — correctly, since nothing verified that
+# head. Re-dispatching the workflow by hand is not the narrow exit either: a
+# `workflow_dispatch` DOES report this workflow's checks on the head (every run
+# publishes the verdict of its own `needs`, which is why the gate carries no
+# event guard), but dispatch is the `WIDE:` infra route and spends a full suite
+# on purpose. Removing and re-adding the label is the narrow, documented exit
+# from that block, and it is the REASON no `if:` in full-suite.yml may test the
+# label's NAME: a job made conditional on a label reports `skipped` on runs
+# started by another label, and GitHub counts `skipped` as a passed required
+# check.
+#
+# It verifies what it armed instead of assuming: the PR must exist and be OPEN,
+# removing an already-present label must actually succeed (otherwise the add is
+# a no-op, no `labeled` event fires, and the head stays stuck in "Expected"),
+# and the run it prints is resolved by head SHA + created-after timestamp —
+# never `--limit 1`, whose single row is the PREVIOUS run on any re-arm. No new
+# run within the bounded poll is an error with the next commands to run, not a
+# `gh run watch null`.
+#
+# The run list is filtered by the SYSTEM `jq`, not by `gh --jq`: `gh` has no
+# `--arg` flag and its `--jq` takes exactly one token, so a query needing three
+# parameters cannot be expressed there at all. Measured on gh 2.100.0,
+# `--jq --arg sha … --arg since … --arg prev …` exits 1 with `unknown flag:
+# --arg`, and since the failed lookup was swallowed, `prev` stayed empty and the
+# poll matched nothing — the ritual armed a real run and then reported that it
+# had armed none, on every arming. `jq --arg` is the supported way to bind the
+# values, and gh's `--json` output is what it consumes.
+#
+# Prints the triggered run and how to follow it.
+merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
+	@set -e; \
+	if [ -z "$(PR)" ]; then echo "usage: make merge-gate PR=<number>" >&2; exit 2; fi; \
+	command -v jq >/dev/null 2>&1 \
+	  || { echo "make merge-gate: jq is required (the run list is filtered with 'jq --arg', which gh's --jq cannot take); install it, e.g. 'brew install jq'" >&2; exit 1; }; \
+	spec="$$(gh pr view "$(PR)" --json state,headRefOid,headRefName \
+	  --jq '.state + " " + .headRefOid + " " + .headRefName')" \
+	  || { echo "make merge-gate: PR #$(PR) not found (gh pr view failed); pass the number, e.g. PR=3631" >&2; exit 1; }; \
+	set -- $$spec; state="$$1"; head_sha="$$2"; head="$$3"; \
+	if [ "$$state" != "OPEN" ]; then \
+	  echo "make merge-gate: PR #$(PR) is $$state, not OPEN; only an open PR can be re-armed" >&2; exit 1; \
+	fi; \
+	prev="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" --limit 20 \
+	  --json databaseId,headSha \
+	  | jq -r --arg sha "$$head_sha" '[.[] | select(.headSha == $$sha)] | .[0].databaseId // empty')" || prev=""; \
+	since="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+	gh label create ready-to-merge --color 0E8A16 \
+	  --description "Run the full-suite merge gate on this PR" 2>/dev/null || true; \
+	if gh pr view "$(PR)" --json labels --jq '.labels[].name' | grep -qx ready-to-merge; then \
+	  gh pr edit "$(PR)" --remove-label ready-to-merge >/dev/null \
+	    || { echo "make merge-gate: could not remove ready-to-merge from PR #$(PR); with the label still on, the add below is a no-op, no labeled event fires and no run starts" >&2; exit 1; }; \
+	  sleep 3; \
+	fi; \
+	gh pr edit "$(PR)" --add-label ready-to-merge >/dev/null; \
+	run=""; i=0; \
+	while [ $$i -lt 12 ]; do \
+	  i=$$((i + 1)); \
+	  run="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" --limit 20 \
+	    --json databaseId,url,headSha,createdAt \
+	    | jq -r --arg sha "$$head_sha" --arg since "$$since" --arg prev "$$prev" \
+	      '[.[] | select(.headSha == $$sha and .createdAt >= $$since and ((.databaseId | tostring) != $$prev))] | .[0] | select(. != null) | "\(.databaseId) \(.url)"')" || run=""; \
+	  if [ -n "$$run" ]; then break; fi; \
+	  sleep 5; \
+	done; \
+	if [ -z "$$run" ]; then \
+	  echo "make merge-gate: armed ready-to-merge on PR #$(PR) ($$head), but no NEW full-suite pull_request run for $$head_sha appeared within 60 s; nothing would follow" >&2; \
+	  echo "  check: gh run list --workflow=full-suite.yml --branch $$head --limit 5" >&2; \
+	  echo "         (a GH_TOKEN that is an Actions token starts no workflow run from the edit)" >&2; \
+	  echo "         gh pr checks $(PR)" >&2; \
+	  exit 1; \
+	fi; \
+	echo "re-armed the merge gate on PR #$(PR) ($$head)"; \
+	echo "  run:    $${run#* }"; \
+	echo "  follow: gh run watch $${run%% *} --exit-status"; \
+	echo "  checks: gh pr checks $(PR)"
 
 # Run type checking with pyright
 #

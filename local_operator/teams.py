@@ -664,10 +664,14 @@ class Team(BaseModel):
         parts.append(
             "Derive it, or say where it came from: every number and status you "
             "report is one you derived here or one whose source you name. PR CI "
-            "runs only fast guards: never run the full suite locally; test the diff "
-            "(`make test-affected` plus judged neighbours) and require fresh "
-            "`## Targeted test evidence` on head; independent real-path QA still "
-            "applies. Bound/serialize heavy runs; read CI asynchronously."
+            "runs only fast guards: never run the full suite locally. It runs "
+            "ONCE, at the merge gate — label `ready-to-merge` only when rounds are "
+            "clean and the head is final, a red `Merge gate (full suite)` blocks "
+            "the merge, and `make merge-gate PR=<n>` re-arms it after any push. "
+            "Test the diff (`make test-affected` plus judged neighbours) and "
+            "require fresh `## Targeted test evidence` on head; independent "
+            "real-path QA still applies. Bound/serialize heavy runs; read CI "
+            "asynchronously."
         )
         parts.append(
             "Own routine bounded allocations within authorization; escalate genuine "
