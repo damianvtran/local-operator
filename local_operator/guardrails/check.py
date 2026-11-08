@@ -357,10 +357,10 @@ class DeleteCase:
         ``ALLOW evidence=<every listed id>`` the judge's answer can only be
         that ALLOW or a false refusal, so the checkpoint decides it here.
 
-        Same bar as a cited ALLOW, nothing looser: every concrete target must
-        re-verify through :func:`evidence.verify` (fresh birth-time and name
-        checks, and for a primary checkout ``clone_state == clean`` inside
-        ``covers``); any unverifiable target (opaque, unresolved, an empty
+        The cited-ALLOW bar and stricter (``evidence.covers_alone``): every
+        concrete target must re-verify through :func:`evidence.verify` (fresh
+        birth-time checks, B1 or a ``clone_state == clean`` clone the call
+        made, no foreign ``.git`` below it); any unverifiable target (opaque, unresolved, an empty
         glob) or operator-only target (an overridden CRITICAL) keeps the judge.
         """
         if self.unverifiable or self.operator_only or not self.paths:
@@ -368,10 +368,14 @@ class DeleteCase:
         listed = list(getattr(self.evidence, "listed", {}) or {})
         if not listed:
             return ""
-        basis, missing = self.verify("ALLOW evidence=" + ",".join(listed))
+        # ``alone``: resolver-pinned coverage only, and no git repository
+        # below a target the clone check did not vouch for (PR #3614 review
+        # R1-MAJOR-1 / R1-MINOR-1); anything weaker goes to the judge with
+        # its evidence listed.
+        basis, missing = self.verify("ALLOW evidence=" + ",".join(listed), alone=True)
         return "" if missing else basis
 
-    def verify(self, answer: str) -> tuple[str, str]:
+    def verify(self, answer: str, *, alone: bool = False) -> tuple[str, str]:
         """``(basis, missing)``: what verified each path, and what did not verify.
 
         The answer's first line may cite ``evidence=e1,e2``, ``ask=a-1234`` and
@@ -397,7 +401,7 @@ class DeleteCase:
         # there is no path to check a citation against. ``_dangerous_delete``
         # never sends such a call to the forked judge.
         by_evidence = verify_evidence(
-            evidence_ids, self.paths, self.evidence, env=self.env, stop=self.stop
+            evidence_ids, self.paths, self.evidence, env=self.env, stop=self.stop, alone=alone
         )
         basis: list[str] = []
         missing: list[str] = []

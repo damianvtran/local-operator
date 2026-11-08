@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -504,12 +505,10 @@ async def test_history_route_allows_and_names_the_creating_call(home: Path) -> N
     outcome = await _check(home, "rm -rf " + " ".join(f"~/{n}" for n in names), judge)
     assert outcome is not None and not outcome.blocked
     assert any(f"subagent {CHILD} call b1" in w for w in outcome.warnings)
-    # Every target re-verifies against e1, so the checkpoint decides without the
-    # judge (``DeleteCase.evidence_basis``; live incident 2026-11-08).
-    assert judge.prompts == []
-    refusing = _Judge("BLOCK: no operator message names these")
-    outcome = await _check(home, "rm -rf " + " ".join(f"~/{n}" for n in names), refusing)
-    assert outcome is not None and not outcome.blocked and refusing.prompts == []
+    # A rig script's name PREFIX (B2) is not resolver-pinned, so the judge still
+    # decides, with e1 in its brief, and its cited ALLOW verifies (PR #3614
+    # review R1-MINOR-1: only B1/clone coverage skips the judge).
+    assert len(judge.prompts) == 1 and "e1:" in judge.prompts[0]
     # One uncovered target keeps the judge, and it still sees the evidence list.
     (home / "fresh").mkdir()
     mixed = _Judge("ALLOW evidence=e1")
@@ -2286,3 +2285,81 @@ async def test_loop_still_asks_the_judge_when_the_clone_is_dirty(home: Path) -> 
     assert executed == [] and result.is_error
     assert len(judge.prompts) == 1
     assert "BLOCKED by guardrail dangerous-delete (review)" in result.content[0].text
+
+
+# -- PR #3614 review round 1: what may skip the judge ---------------------------------------
+
+
+def _own_call(home: Path, cid: str, command: str, output: str, born: Path) -> None:
+    """This session ran ``command`` and ``born`` appeared inside its window."""
+    start = time.time() - 1
+    born.mkdir()
+    _write_transcript(
+        home,
+        SID,
+        [
+            _row(start, _call(cid, "bash", {"command": command})),
+            _row(time.time() + 1, _result(cid, "bash", output)),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_repo_inside_a_made_dir_goes_to_the_judge(home: Path) -> None:
+    """R1-MAJOR-1 repro: ``mkdir ~/scratch`` (B1), then another actor ``git init``s a repo
+    with uncommitted work inside it. The ledger route sends that to the judge
+    (``provenance._foreign_inside``); the judge-free skip must too."""
+    _own_call(home, "c1", "mkdir ~/scratch", "exit code: 0", home / "scratch")
+    # Control: the bare directory this call made needs no judge.
+    idle = _Judge(LIVE_REFUSAL)
+    outcome = await _check(home, "rm -rf ~/scratch", idle)
+    assert outcome is not None and not outcome.blocked and idle.prompts == []
+    other = home / "scratch" / "otherrepo"
+    other.mkdir()
+    _git_run("init", "-q", cwd=other)
+    (other / "precious.txt").write_text("only copy\n")
+    judge = _Judge(LIVE_REFUSAL)
+    outcome = await _check(home, "rm -rf ~/scratch", judge)
+    assert len(judge.prompts) == 1 and "e1:" in judge.prompts[0]
+    assert outcome is not None and outcome.blocked
+    assert (other / "precious.txt").exists()
+    # Fail closed on a tree too deep to scan: a judge call, never a skip.
+    shutil.rmtree(other)
+    (home / "scratch" / "a" / "b" / "c" / "d" / "e").mkdir(parents=True)
+    deep = _Judge(LIVE_REFUSAL)
+    outcome = await _check(home, "rm -rf ~/scratch", deep)
+    assert len(deep.prompts) == 1 and outcome is not None and outcome.blocked
+
+
+@pytest.mark.asyncio
+async def test_a_refused_call_is_never_evidence(home: Path) -> None:
+    """R1-MINOR-1(b): a call the guardrail refused ran nothing, so a directory born in
+    its window is not its creation — not even for the judge's citation."""
+    refusal = (
+        "BLOCKED by guardrail dangerous-delete (review): x. Targets: ~/victimdir. "
+        "Nothing was run."
+    )
+    _own_call(home, "c1", "mkdir ~/victimdir && rm -rf ~/x", refusal, home / "victimdir")
+    target = os.path.realpath(home / "victimdir")
+    found = ev_mod.gather([target], session_id=SID, env=_env(home), stop=_stop(home))
+    assert found.covers[target] == []
+    judge = _Judge("ALLOW evidence=e1")
+    outcome = await _check(home, "rm -rf ~/victimdir", judge)
+    assert len(judge.prompts) == 1 and outcome is not None and outcome.blocked
+
+
+@pytest.mark.asyncio
+async def test_a_name_only_match_goes_to_the_judge_with_its_evidence(home: Path) -> None:
+    """R1-MINOR-1(a): ``~/build`` born while ``pytest -k build`` ran matches by name (B2)
+    only. That stays evidence the judge may cite, but never settles the call alone."""
+    _own_call(home, "c1", "python3 -m pytest -k build tests/", "1 passed", home / "build")
+    target = os.path.realpath(home / "build")
+    found = ev_mod.gather([target], session_id=SID, env=_env(home), stop=_stop(home))
+    assert found.covers[target] == ["e1"]
+    refusing = _Judge(LIVE_REFUSAL)
+    outcome = await _check(home, "rm -rf ~/build", refusing)
+    assert len(refusing.prompts) == 1 and "e1:" in refusing.prompts[0]
+    assert outcome is not None and outcome.blocked
+    citing = _Judge("ALLOW evidence=e1")
+    outcome = await _check(home, "rm -rf ~/build", citing)
+    assert len(citing.prompts) == 1 and outcome is not None and not outcome.blocked
