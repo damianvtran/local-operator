@@ -6,18 +6,21 @@ cannot exist:
 
 * ``window is None`` — the owner's runtime predates the field. It served no
   window at all, and updating the peer really is the fix.
-* ``window.status`` non-``ok`` — a SIZE verdict from a runtime that is already
-  current. ``full_required`` is the owner's answer when one message group
-  exceeds the page budget (``history_window.DISPLAY_HISTORY_BYTES`` /
-  ``DISPLAY_HISTORY_MESSAGES``), and it is what both wire fallbacks substitute
-  when the attach push frame or the ``frontend_sync`` reply exceeds
+* ``window.status == "full_required"`` — a SIZE verdict from a runtime that is
+  already current. It is the owner's answer when one message group exceeds the
+  page budget (``history_window.DISPLAY_HISTORY_BYTES`` /
+  ``DISPLAY_HISTORY_MESSAGES``), and what both wire fallbacks substitute when the
+  attach push frame or the ``frontend_sync`` reply exceeds
   ``server._MAX_LINE_BYTES``. The peer needs no update; the reader has to reach
   the device that holds the conversation.
+
+``reset`` is neither — a cursor that stopped resolving — and must not be told
+its history is too large (review round 1, MINOR-1).
 
 Before the split, every non-ok page raised the "runtime is too old" refusal, so
 an oversized session on the same build reported itself as a version problem —
 the one symptom that cannot be acted on. These cells drive the real
-``_load_frontend_history`` on a remote placement (and, third, prove the local
+``_load_frontend_history`` on a remote placement (and prove the local
 placement's honest full replay still runs unchanged).
 """
 
@@ -29,6 +32,7 @@ from typing import Literal
 
 import pytest
 
+from local_operator.harness.types import Message
 from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import (
     FrontendModelSpec,
@@ -83,13 +87,19 @@ def _page(
     total: int = 4312,
     has_more: bool = False,
 ) -> DisplayHistoryWindow:
+    # ONE ROW IS PRESENT ON PURPOSE. The page this refusal sees is blanked by the
+    # wire fallbacks, but the log line's contract is that it carries no history
+    # CONTENT — a cell that shipped an empty row list cannot prove that, so the
+    # row below is planted and the rendered line asserted verbatim (agent review
+    # round 1, NIT-2).
+    row = Message.user("PLANTED-ROW-CONTENT-7a41")
     return DisplayHistoryWindow(
         status=status,
         conversation_id="s1",
         owner_epoch="e1",
         history_generation=1,
         through_id=None,
-        messages=[],
+        messages=[row],
         start=total,
         total_message_count=total,
         before_token=None,
@@ -123,7 +133,10 @@ async def test_a_size_verdict_names_the_size_and_never_the_build(
 ) -> None:
     """The defect: a same-build size verdict reported as "the peer is too old"."""
     viewer = _remote_viewer(tmp_path)
-    caplog.set_level(logging.INFO, logger="local_operator.session.attached")
+    # NO ``caplog.set_level`` HERE, deliberately: forcing the level is what makes
+    # a level regression invisible (agent review round 1, MINOR-2). At the
+    # default capture level an INFO line either arrives as INFO — failing the
+    # ``levelno`` assertion below — or is filtered, failing ``assert records``.
 
     with pytest.raises(ConnectionError) as raised:
         await viewer._load_frontend_history(_frontend(_page()))  # noqa: SLF001
@@ -132,15 +145,19 @@ async def test_a_size_verdict_names_the_size_and_never_the_build(
     assert "too old" not in message, message
     assert "update" not in message, message
     assert "too large" in message and "device that holds it" in message, message
+    # THE LANE BUDGET (design review round 1, D1): 110 cells is the transcript
+    # lane at 120 columns, and a sentence over it orphans its closing clause.
+    assert len(message) <= 110, f"{len(message)} chars: {message}"
 
     # The log line is the after-the-fact record of WHY the page was refused:
     # nothing on the wire carries the reason, so this is where size is told
-    # from version. It must carry the status and counts, and no rows.
+    # from version. It must survive the daemon's WARNING default, and it must
+    # carry the status and nothing off the rows.
     records = [r for r in caplog.records if r.name == "local_operator.session.attached"]
     assert records, "a refused non-ok page must leave a log line"
-    rendered = records[-1].getMessage()
-    assert "full_required" in rendered, rendered
-    assert "total_message_count=4312" in rendered, rendered
+    assert records[-1].levelno == logging.WARNING, records[-1].levelname
+    assert records[-1].getMessage() == "display history page is full_required (has_more=False)"
+    assert "PLANTED-ROW-CONTENT-7a41" not in records[-1].getMessage()
 
 
 @pytest.mark.asyncio
@@ -154,6 +171,24 @@ async def test_a_missing_window_still_names_the_build(tmp_path: Path) -> None:
     message = str(raised.value)
     assert "too old" in message and "update it" in message, message
     assert "too large" not in message, message
+
+
+@pytest.mark.asyncio
+async def test_a_reset_page_does_not_get_the_size_sentence(tmp_path: Path) -> None:
+    """``reset`` is a cursor verdict, not a size one (review round 1, MINOR-1).
+
+    A page whose cursor stopped resolving is answered by a re-sync, so telling
+    the reader its history is too large would be false twice: the rows are not
+    oversized, and travelling to the other device would not help.
+    """
+    viewer = _remote_viewer(tmp_path)
+
+    with pytest.raises(ConnectionError) as raised:
+        await viewer._load_frontend_history(_frontend(_page(status="reset")))  # noqa: SLF001
+
+    message = str(raised.value)
+    assert "too large" not in message, message
+    assert "too old" in message and "update it" in message, message
 
 
 @pytest.mark.asyncio
