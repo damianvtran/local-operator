@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install a pinned, checksum-verified ripgrep for CI (called by ci.yml "Install ripgrep").
+# Install a pinned, checksum-verified ripgrep for CI (called by full-suite.yml "Install ripgrep").
 #
 # WHY a script: run 42463603282 lost four test shards before any test ran because
 # github.com release downloads returned 504 four times in 7 s and the old inline
@@ -39,10 +39,10 @@ for ((i = 1; i <= attempts; i++)); do
   code=$(curl -sSL --max-time "$max_time" -o "$tgz" -w '%{http_code}' "$url" 2>"$tmp/rg.curl.err") || rc=$?
   if [[ $rc -eq 0 && $code =~ ^2 ]]; then ok=1; break; fi
   if [[ $rc -eq 0 && $code =~ ^4 && $code != 408 && $code != 429 ]]; then
-    echo "::error::ripgrep download failed with permanent HTTP $code for $url (check RG_VERSION)" >&2
+    echo "::error::ripgrep download failed with permanent HTTP $code for $url (check RG_VERSION): $(tr '\n' ' ' <"$tmp/rg.curl.err")" >&2
     exit 1
   fi
-  last_err="HTTP ${code:-000}, curl exit $rc: $(tr '\n' ' ' <"$tmp/rg.curl.err")"
+  last_err="HTTP $code, curl exit $rc: $(tr '\n' ' ' <"$tmp/rg.curl.err")"
   echo "attempt $i/$attempts failed ($last_err)" >&2
   if ((i < attempts)); then
     echo "retrying in ${delay}s" >&2
@@ -60,20 +60,34 @@ if ((ok == 1)); then
 fi
 
 echo "::warning::ripgrep download exhausted $attempts attempts ($last_err); trying verified fallback" >&2
-# 1) Preinstalled rg that is at least the pinned version.
-if command -v rg >/dev/null 2>&1; then
-  have=$(rg --version | head -n1 | awk '{print $2}')
-  if [[ -n $have && $(printf '%s\n%s\n' "$RG_VERSION" "$have" | sort -V | head -n1) == "$RG_VERSION" ]]; then
-    echo "FALLBACK: using preinstalled rg $have (>= pinned $RG_VERSION)"
-    rg --version
-    exit 0
+# ONE version gate for BOTH fallback branches: an apt install can succeed as a
+# no-op while an OLD distro rg is already present, so the apt branch must never
+# return a binary this check would reject. `sort -V` alone false-passes garbage
+# (e.g. "error:" sorts after digits), hence the strict numeric-format guard.
+rg_meets_pin() {
+  local have
+  have=$(rg --version 2>/dev/null | head -n1 | awk '{print $2}') || have=""
+  if [[ ! $have =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+    echo "rg version unreadable (got '${have}'); not using it" >&2
+    return 1
   fi
-  echo "preinstalled rg ${have:-unknown} is older than pinned $RG_VERSION; not using it" >&2
+  if [[ $(printf '%s\n%s\n' "$RG_VERSION" "$have" | sort -V | head -n1) != "$RG_VERSION" ]]; then
+    echo "rg $have is older than pinned $RG_VERSION; not using it" >&2
+    return 1
+  fi
+  RG_HAVE="$have"
+}
+
+# 1) Preinstalled rg that is at least the pinned version.
+if command -v rg >/dev/null 2>&1 && rg_meets_pin; then
+  echo "::warning::FALLBACK: using preinstalled rg $RG_HAVE (>= pinned $RG_VERSION)"
+  exit 0
 fi
 # 2) Distro package from the local apt index (no `apt-get update`: that is the
 #    slow, unbounded step the pinned tarball replaced).
-if $sudo_cmd timeout 60 apt-get install -y --no-install-recommends ripgrep >/dev/null 2>&1 && command -v rg >/dev/null 2>&1; then
-  echo "FALLBACK: installed distro ripgrep $(rg --version | head -n1)"
+if $sudo_cmd timeout 60 apt-get install -y --no-install-recommends ripgrep >/dev/null 2>&1 \
+  && command -v rg >/dev/null 2>&1 && rg_meets_pin; then
+  echo "::warning::FALLBACK: installed distro ripgrep $RG_HAVE (>= pinned $RG_VERSION)"
   exit 0
 fi
 echo "::error::ripgrep unavailable: no verified fallback. Original error: $last_err" >&2
