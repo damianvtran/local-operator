@@ -327,6 +327,164 @@ def _birth_model(birth: ModelSpec, configured_of: Callable[[], str | None]) -> F
     return carried.model_copy(update=update) if update else carried
 
 
+def _paint_spec(provider: str, model_id: str) -> ModelSpec | None:
+    """``build_model_spec`` from the DISPLAY path's metadata, or ``None`` when it cannot answer.
+
+    WHY THIS EXISTS AT ALL (the operator's own report: a click on a conversation
+    in the desktop app took 5-10 s to paint). ``spec_for_target`` builds its
+    target through ``build_model_spec(provider, model_id)`` with no ``info``, so
+    the call passes through ``resolve_model_info`` -- the DISCOVERY resolver --
+    and on a daemon that has not resolved this model yet there is no listing
+    document to answer from, so that leg fetches the provider's ``/models``
+    listing with the stored credential. The fetch is not the worst of it: two
+    lazy imports hang off the leg and both land on the user's click.
+    ``local_operator.secrets.access`` (the credential read, via
+    ``configure._catalogue_credential`` -> ``registry.provider_secret_value``,
+    measured 0.25 s) and, through the module that owns the discovery driver,
+    ``httpx`` (0.89 s, and ``httpx/__init__.py:15`` imports the package's CLI
+    unconditionally, so ``httpx/_main.py`` is paid too). Measured on this host:
+    a cold ``resolve_conversation_model`` is 1456 ms against 125 ms with those
+    two modules pre-imported.
+
+    ``resolve_model_info_paint`` is the resolver the REST OF THE DISPLAY PATH
+    already uses for precisely this reason (the status band's pricing and the
+    1 Hz subagent harvest): the memoised answer when this process has one, the
+    STATIC registry row when it does not, and NEVER a fetch -- which is what
+    keeps the credential module unimported. Handing its ``ModelInfo`` to
+    ``build_model_spec`` as ``info`` skips the discovery leg outright (see that
+    function's ``if info is None``); every OTHER input to the spec is
+    untouched, including the listing's own effort ladder, which comes from the
+    memo-only ``_listing_effort`` and never fetches.
+
+    WHAT THIS GIVES UP, named rather than hidden: a model whose real limits
+    only the provider's live listing knows -- an id newer than the shipped
+    rows -- has NO window in the seeded catalogue, and this returns ``None``
+    for it so the caller keeps today's full resolution
+    (:func:`_display_target_spec`). That is the branch that genuinely needs the
+    heavy module, and it is why this is a fast path rather than a replacement.
+    The alternative -- painting that model from the placeholder -- is the
+    128k-window bug this module exists to prevent: measured on this host,
+    ``openai/gpt-6.1-sol`` (not in the shipped rows) paints 128_000/``gpt-6.1-sol``
+    from the placeholder against the 872_000/``GPT-6.1-Sol`` the full
+    resolution reports, a 6.8x wrong denominator under the band's percentage.
+    """
+    from local_operator.model.configure import (
+        build_model_spec,
+        resolve_model_info_paint,
+    )
+
+    info, _memo_hit = resolve_model_info_paint(provider, model_id)
+    # NO WINDOW IS THE CATALOGUE SAYING IT HAS NEVER SEEN THIS MODEL. Every
+    # shipped row and every discovery answer carries one; the unknown templates
+    # leave it ``None`` (and the ``-1`` registry sentinel is the same no-data
+    # value). The full resolution would fetch the provider listing and could
+    # answer where this cannot, so this is exactly the input that must stay on
+    # the slow path -- see the docstring's last paragraph.
+    if not info.context_window or info.context_window <= 0:
+        return None
+    return build_model_spec(provider, model_id, info=info)
+
+
+def _carried_display_effort(base: ModelSpec, target_provider: str) -> str | None:
+    """The level the first frame may carry from ``base`` onto ``target_provider``.
+
+    THE SAME RULE AS ``providers.failover._carried_effort``, spelled here because
+    importing that module is the cost this whole module now avoids (see
+    :func:`_paint_spec`; it is where ``httpx`` comes from). The rule itself does
+    not need anything from it: an AGGREGATOR target may receive a level the user
+    CHOSE but never the automatic seed ``build_model_spec`` puts on a direct
+    spec, and the documented test for "a choice" is
+    ``reasoning_effort != reasoning_default_effort`` (the pair diverges the
+    moment the user picks a rung).
+
+    A SECOND SPELLING IS ONLY SAFE BECAUSE IT IS PINNED: this function and
+    ``spec_for_target`` are compared cell by cell against the same metadata in
+    ``test_cold_model_display_spec_matches_the_failover_driver``, so the two
+    cannot drift apart silently. ``AGGREGATOR_PROVIDERS`` is imported at call
+    time: it is a provider table, and ``build_model_spec`` in the same call has
+    already pulled it.
+    """
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if base.reasoning_effort is None:
+        return None
+    if target_provider not in AGGREGATOR_PROVIDERS:
+        return base.reasoning_effort
+    if base.reasoning_effort == base.reasoning_default_effort:
+        return None
+    return base.reasoning_effort
+
+
+def _display_target_spec(base: ModelSpec, selector: str, effort: str | None) -> ModelSpec:
+    """``providers.failover.spec_for_target`` for the FIRST FRAME, unplugged.
+
+    IDENTICAL SEMANTICS, ONE EXPENSIVE INPUT SWAPPED. The derivation is the one
+    ``spec_for_target`` documents at length: the target's own spec is built from
+    the target's metadata (a cross-provider hop must never send one provider's
+    base URL, window or capabilities to another), and then exactly two fields
+    carry -- ``reasoning_effort`` and ``fast_mode``:
+
+    * an explicit ``effort`` (including the ``auto`` sentinel, which resolves to
+      the target's own level) wins verbatim, exactly as the driver trusts a
+      chain entry's level; :func:`_saved_model` clamps it afterwards against the
+      target's ladder, which is where this module's clamp has always lived;
+    * with no named level, the base's choice carries through
+      :func:`resolve_effort_in` clamped against the TARGET spec's ladder, and
+      through :func:`_carried_display_effort` so a hop onto an aggregator gets
+      only a level the user actually chose;
+    * ``fast_mode`` is ``base.fast_mode AND the target's own support`` -- an
+      ``and``, because a route that does not sell the tier 400s on the request.
+
+    ``spec_for_target`` also writes ``temperature``/``top_p`` onto its result;
+    both are the TARGET spec's own values, so writing them here would be a
+    no-op on a copy of that same spec and they are omitted rather than spelled
+    twice.
+
+    WHY NOT JUST IMPORT IT: see :func:`_paint_spec`. That import is measured at
+    0.82-3.4 s of the cold click, and this is the frame painted while the user
+    waits. The saved selection is a pair the catalogue almost always ships, so
+    the fast path is the common one.
+
+    THE ONE BRANCH THAT KEEPS THE HEAVY MODULE, and why it is unavoidable: when
+    the seeded catalogue has no window for the model (:func:`_paint_spec`
+    returning ``None``), only the provider's own listing can say what it is, and
+    fetching it needs both ``httpx`` and the credential. A first frame painted
+    from the placeholder would be a confidently wrong denominator -- the defect
+    this module was written to stop -- so that case takes today's path
+    verbatim, LATE-BOUND, and the daemon's engage warm
+    (``index_prewarm.warm_engage_imports_in_background``) has usually already
+    put both modules in ``sys.modules`` by then, which is what makes the import
+    here a dict lookup rather than 0.8-3.4 s.
+
+    Anything this function cannot answer still degrades the same way it always
+    has -- :func:`_saved_model`'s ``except Exception`` leaves the bare saved
+    pair, which the band has always known how to render.
+    """
+    provider, _slash, model_id = selector.partition("/")
+    target = _paint_spec(provider, model_id)
+    if target is None:
+        from local_operator.providers.failover import FallbackTarget, spec_for_target
+
+        return spec_for_target(base, FallbackTarget(selector, effort))
+    from local_operator.model.effort import resolve_effort_in
+
+    resolved_effort = (
+        (target.reasoning_effort if effort == "auto" else effort)
+        if effort is not None
+        else resolve_effort_in(
+            target.reasoning_efforts,
+            target.reasoning_default_effort,
+            _carried_display_effort(base, provider) or target.reasoning_effort,
+        )
+    )
+    return target.model_copy(
+        update={
+            "reasoning_effort": resolved_effort,
+            "fast_mode": bool(base.fast_mode and target.supports_fast_mode),
+        }
+    )
+
+
 def resolve_saved_model(saved: StoredModelSelection, config_dir: Path) -> FrontendModelSpec:
     """The conversation's OWN saved selection as the spec a resumed turn runs on.
 
@@ -349,11 +507,14 @@ def resolve_saved_model(saved: StoredModelSelection, config_dir: Path) -> Fronte
     not cover (a release newer than the rows, any resold route) painted its bare id
     until the full load finished.
 
-    ``spec_for_target`` rather than ``build_model_spec`` directly: it is the
-    derivation the failover driver and ``Session._spec_for_route`` already build a
-    resumed selection's spec with, and its own docstring is explicit that deriving
-    the display spec any other way is how the band and the wire end up disagreeing
-    about effort and the context window. Its base is
+    :func:`_display_target_spec` rather than ``build_model_spec`` directly: it is
+    the derivation the failover driver and ``Session._spec_for_route`` already
+    build a resumed selection's spec with (its docstring is the specification),
+    and its own docstring is explicit that deriving the display spec any other way
+    is how the band and the wire end up disagreeing about effort and the context
+    window. It is spelled locally instead of imported for one measured reason:
+    ``providers.failover`` and ``secrets.access`` on the click path cost 0.8-3.4 s
+    of a 5-10 s open (:func:`_paint_spec`). Its base is
     :func:`configured_base_model` — the same base the runtime holds when it restores
     this selection — so the cold frame and the resumed frame agree by construction
     rather than by coincidence.
@@ -378,8 +539,6 @@ def _saved_model(
     if not saved.provider or not saved.model_id:
         return bare
     try:
-        from local_operator.providers.failover import FallbackTarget, spec_for_target
-
         # The base exists for the two things a hop may CARRY, and neither is
         # reachable when the journal named a level: ``spec_for_target`` reads the
         # base's effort only under ``target.effort is None``, and reads its
@@ -392,7 +551,7 @@ def _saved_model(
         # far more cold, and the resolution below already resolves the target
         # (review round 1, minor 4).
         base = base_of() if saved.effort is None else FrontendModelSpec(provider="", model_id="")
-        resolved = spec_for_target(base, FallbackTarget(saved.selector, saved.effort))
+        resolved = _display_target_spec(base, saved.selector, saved.effort)
         if saved.effort:
             # THE COLD FRAME CLAMPS WHAT THE WARM RESTORE CLAMPS. A saved level
             # is a durable record the catalogue can move under, and

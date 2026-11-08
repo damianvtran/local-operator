@@ -306,3 +306,172 @@ async def test_a_row_without_a_dial_paints_a_standard_speed_frame(tmp_path) -> N
 
     assert state.selected_model is not None
     assert state.selected_model.fast_mode is False
+
+
+#: The two modules the cold frame used to pull, plus ``httpx`` (which
+#: ``providers.failover`` drags in at module scope, and whose ``_main`` CLI module
+#: ``httpx/__init__.py`` imports unconditionally). Named as strings because this
+#: process must never import them to check.
+_ENGAGE_STACK = (
+    "local_operator.providers.failover",
+    "local_operator.secrets.access",
+    "httpx",
+)
+
+#: Run in a FRESH interpreter: "does a cold call import X" is a question about a
+#: process that has not imported it yet, and this suite's own module imports (and
+#: every test that ran before it, in file or random order) have already paid some
+#: of that graph. A ``sys.modules`` delta in-process would be measuring the suite.
+_COLD_IMPORT_PROBE = """
+import sys
+from pathlib import Path
+import local_operator.session.cold_model as cold_model
+from local_operator.session.model_selection import StoredModelSelection
+
+# The module under test is imported FIRST, so the delta below is the CALL's own
+# cost and not the resolver's import graph.
+before = set(sys.modules)
+spec = cold_model.resolve_saved_model(
+    StoredModelSelection(provider={provider!r}, model_id={model!r}, effort={effort!r}),
+    Path({config_dir!r}),
+)
+pulled = [name for name in {watched!r} if name in set(sys.modules) - before]
+print("PULLED:" + ",".join(pulled))
+print("WINDOW:%s" % spec.context_window)
+print("NAME:%s" % spec.display_name)
+"""
+
+
+def test_the_cold_display_spec_pulls_nothing_from_the_engage_stack(tmp_path) -> None:
+    """The first frame must not import the fallback driver or the credential reader.
+
+    THE OPERATOR'S REPORT: clicking a conversation in the desktop app took 5-10 s
+    to paint. Measured on this host (fresh process per run, isolated config),
+    ``resolve_saved_model`` for a selection the catalogue ships was 1654 ms and
+    pulled all three of :data:`_ENGAGE_STACK`; with the metadata answered from the
+    seeded catalogue row instead it is 86 ms and pulls none of them. A
+    ``sys.modules`` delta is the right instrument because the cost IS the import:
+    ``providers.failover`` -> ``httpx`` (0.89 s) and
+    ``configure._catalogue_credential`` -> ``registry.provider_secret_value`` ->
+    ``local_operator.secrets.access`` (0.25 s).
+
+    Run in a FRESH interpreter (see :data:`_COLD_IMPORT_PROBE`) so the assertion
+    is about a cold call rather than about whatever this suite already imported.
+    The pair is the shipped direct-provider one above, which is the branch the
+    fast path owns; the branch that genuinely needs the driver is covered
+    separately below.
+    """
+    import os
+    import subprocess
+    import sys
+
+    probe = _COLD_IMPORT_PROBE.format(
+        provider=DIRECT_PROVIDER,
+        model=DIRECT_MODEL,
+        effort="high",
+        config_dir=str(tmp_path),
+        watched=list(_ENGAGE_STACK),
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[3])},
+    )
+    assert completed.returncode == 0, completed.stderr
+    reported = dict(
+        line.split(":", 1) for line in completed.stdout.strip().splitlines() if ":" in line
+    )
+    assert reported["PULLED"] == "", (
+        f"the cold display path imported {reported['PULLED']!r}; the first frame is "
+        f"paying the engage stack again (stderr: {completed.stderr[-400:]})"
+    )
+    # ...and it still answered from the catalogue row, which is what makes the
+    # saving worth having: a path that skipped the imports by giving up on the
+    # display would be the 128k-placeholder bug this module exists to prevent.
+    assert int(reported["WINDOW"]) > 0
+    assert reported["NAME"] and reported["NAME"] != DIRECT_MODEL
+
+
+def test_the_cold_display_spec_keeps_the_display_and_the_carry_rules(tmp_path) -> None:
+    """The fast path must answer EXACTLY what ``spec_for_target`` answers.
+
+    The saved-selection branch is a local spelling of the failover driver's
+    carry rules (it cannot import that module on the click path — see
+    ``_paint_spec``), so the two are compared cell by cell here and a drift fails
+    the build rather than repainting a band.
+
+    ``resolve_model_info`` is answered from the SAME metadata both sides would
+    see (``resolve_model_info_paint``), which is what makes this a test of the
+    CARRY logic rather than of who fetched what: with that pinned, a difference
+    can only come from the local spelling. Network-independent by construction.
+    """
+    from local_operator.model.configure import resolve_model_info_paint
+    from local_operator.providers.failover import FallbackTarget, spec_for_target
+    from local_operator.session.cold_model import _display_target_spec
+
+    info, _memo_hit = resolve_model_info_paint(DIRECT_PROVIDER, DIRECT_MODEL)
+    assert info.context_window and info.context_window > 0, (
+        "this pair is no longer answered from the shipped rows, so the fast path "
+        "is not the branch under test any more"
+    )
+    import local_operator.model.configure as configure
+
+    original = configure.resolve_model_info
+    configure.resolve_model_info = lambda provider, model_id, **kwargs: info
+    try:
+        for effort in (None, "auto", "none", "low", "high", "max"):
+            for base_effort, base_fast in (("max", True), ("min", False), (None, False)):
+                base = ModelSpec(
+                    provider="deepseek",
+                    model_id="deepseek-flash",
+                    reasoning_effort=base_effort,
+                    reasoning_default_effort="high",
+                    fast_mode=base_fast,
+                )
+                expected = spec_for_target(base, FallbackTarget(DIRECT_SELECTOR, effort))
+                actual = _display_target_spec(base, DIRECT_SELECTOR, effort)
+                assert actual.model_dump() == expected.model_dump(), (
+                    f"effort={effort!r} base_effort={base_effort!r} "
+                    f"base_fast={base_fast}: the first frame would disagree with the "
+                    f"runtime's own spec"
+                )
+    finally:
+        configure.resolve_model_info = original
+
+
+def test_an_unshipped_pair_keeps_the_full_resolution(tmp_path, monkeypatch) -> None:
+    """The one branch that MUST stay on the heavy path, proven to stay there.
+
+    A model the catalogue has no window for can only be described by the
+    provider's listing, and fetching it needs the fallback driver and the
+    credential reader. Painting the placeholder instead is measured-wrong: the
+    agent model this document's own runs use (``openai/gpt-6.1-sol``) is absent
+    from the shipped rows and would paint ``128_000``/``gpt-6.1-sol`` against the
+    ``872_000``/``GPT-6.1-Sol`` the full resolution reports — a 6.8x wrong
+    denominator under the band's percentage.
+
+    ``spec_for_target`` is what proves the branch is taken, so it is wrapped
+    rather than mocked-away; the resolver is also stubbed so this stays
+    network-independent.
+    """
+    from local_operator.providers import failover
+    from local_operator.session.cold_model import _display_target_spec
+
+    seen: list[tuple[str, str | None]] = []
+    original = failover.spec_for_target
+
+    def recording(base, target):
+        seen.append((target.selector, target.effort))
+        return original(base, target)
+
+    monkeypatch.setattr(failover, "spec_for_target", recording)
+    monkeypatch.setattr("local_operator.model.configure.resolve_model_info", lambda *a, **k: None)
+
+    _display_target_spec(ModelSpec(provider="", model_id=""), "openai/no-such-model", "high")
+
+    assert seen == [("openai/no-such-model", "high")], (
+        "a pair the seeded catalogue cannot describe was answered from the fast "
+        "path, which would paint the 128k placeholder as a real window"
+    )

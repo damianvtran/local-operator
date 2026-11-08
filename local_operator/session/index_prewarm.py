@@ -60,6 +60,7 @@ rather than double-parsing. It is bounded by the replay cache's own entry bound
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import os
 import shutil
@@ -977,6 +978,82 @@ async def warm_model_metadata(
         await asyncio.sleep(0)
     logger.debug("model prewarm resolved %d of %d user journals", resolved, len(candidates))
     return resolved
+
+
+#: The engage import warm's thread; one per process, which is what makes
+#: :func:`warm_engage_imports_in_background` idempotent.
+_ENGAGE_WARM_THREAD: threading.Thread | None = None
+
+#: The modules EVERY engage reaches and no boot import has already pulled.
+#:
+#: ``providers.failover`` is the fallback driver: ``AttachedSession``'s model
+#: resolution, ``spec_for_target``, and every resumed turn's route go through it,
+#: and it imports ``httpx`` at module scope. ``secrets.access`` is the credential
+#: read behind ``configure._catalogue_credential`` -- reached by the first model
+#: resolution a daemon does, which is the one the operator's first click triggers.
+#:
+#: NAMES ONLY, imported inside the worker: a module that moved or was renamed must
+#: degrade to this warm doing nothing, never to a failed daemon start.
+_ENGAGE_WARM_MODULES: tuple[str, ...] = (
+    "local_operator.providers.failover",
+    "local_operator.secrets.access",
+)
+
+
+def _warm_engage_imports() -> None:
+    """The warm's body: import each module once, best-effort, releasing the latch on failure.
+
+    A failure clears :data:`_ENGAGE_WARM_THREAD` so a later boot in this process
+    may retry rather than the warm being dead for the process's lifetime.
+    """
+    global _ENGAGE_WARM_THREAD
+    try:
+        for name in _ENGAGE_WARM_MODULES:
+            importlib.import_module(name)
+    except Exception:  # noqa: BLE001 — a prewarm must never hurt; the engage imports lazily
+        logger.debug("engage import prewarm failed", exc_info=True)
+        _ENGAGE_WARM_THREAD = None
+
+
+def warm_engage_imports_in_background() -> None:
+    """Pay the engage import cost at boot instead of on the operator's first click.
+
+    WHY (the operator's report: clicking a conversation in the desktop app took
+    5-10 s to paint). The FIRST request a freshly started daemon serves --
+    ``GET /v1/desktop/sessions/{id}`` -- drives ``AttachedSession.cold`` ->
+    ``resolve_conversation_model``, and that call used to enter
+    ``providers.failover`` and ``secrets.access`` for the first time in the
+    process. Measured cold-vs-prewarmed on this host: 2447 ms for the fresh-daemon
+    first request against a 109 ms warm p50, with the two imports 0.82-3.4 s of
+    it (``httpx`` 0.89 s, pulled by ``failover``, and its ``httpx/_main.py`` CLI
+    module, which ``httpx/__init__.py`` imports unconditionally).
+
+    This does not remove the imports from the process; it moves them to a moment
+    where nobody is waiting. The engine is already idempotent -- ``sys.modules`` is
+    the cache -- so a second call after a real engage has run costs a dict lookup.
+
+    WHAT IT DELIBERATELY IS NOT, and the constraints that make it safe to call
+    from a FastAPI ``lifespan``:
+
+    * NOT ON THE READINESS PATH. It starts a daemon thread and returns; nothing
+      awaits it, so ``--wait tcp`` and ``/health`` answer exactly as fast as
+      before. Awaiting either import here was measured at 1.5-3 s of daemon
+      STARTUP on a loaded host, which trades the click for the attach.
+    * NOTHING USER-SPECIFIC AND NO I/O. Importing a module compiles and executes
+      Python only: no config read, no journal, no keychain, no socket. Both names
+      are library modules, not ``ConfigManager``/``AttachedSession`` construction,
+      so a warm cannot touch a credential, a session or a network -- the property
+      that makes it safe to run while the daemon is still coming up.
+    * NEVER RAISES and never blocks the caller: the caller is ``lifespan``, where
+      an escaping exception fails startup.
+    """
+    global _ENGAGE_WARM_THREAD
+    if _ENGAGE_WARM_THREAD is not None:
+        return
+    _ENGAGE_WARM_THREAD = threading.Thread(
+        target=_warm_engage_imports, name="lop-engage-prewarm", daemon=True
+    )
+    _ENGAGE_WARM_THREAD.start()
 
 
 async def cancel_prewarm() -> None:

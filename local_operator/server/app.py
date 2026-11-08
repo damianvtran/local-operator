@@ -178,6 +178,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 — a warm-up must never be the failure
         logger.debug("bytecode prewarm unavailable at startup", exc_info=True)
 
+    # THE ENGAGE IMPORT WARM, under the same rule as the two above: fire and
+    # forget, wrapped including the import, because a raise here fails startup.
+    #
+    # WHY IT BELONGS TO THE DAEMON AND NOT TO THE FIRST REQUEST. The first
+    # request a fresh daemon serves is the desktop open, and its model
+    # resolution enters ``providers.failover`` and ``secrets.access`` for the
+    # first time -- 0.82-3.4 s of the operator's measured 5-10 s click, since
+    # ``failover`` imports ``httpx`` (which imports its own CLI module
+    # unconditionally). Nothing awaits this thread, so ``--wait tcp`` and
+    # ``/health`` answer exactly as fast as before; the imports follow on their
+    # own while the daemon finishes coming up. See
+    # ``index_prewarm.warm_engage_imports_in_background`` for the full case and
+    # for why an import-only warm cannot touch a credential or the network.
+    try:
+        from local_operator.session.index_prewarm import (
+            warm_engage_imports_in_background,
+        )
+
+        warm_engage_imports_in_background()
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("engage prewarm unavailable at startup", exc_info=True)
+
     # Initialize on startup by setting up the credential and config managers
     from local_operator.paths import config_dir as resolve_config_dir
 
