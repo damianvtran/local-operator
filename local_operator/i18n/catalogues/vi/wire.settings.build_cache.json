@@ -1,0 +1,12 @@
+{
+  "wire.settings.build_cache.age_hours.help": "Không đụng tới thư mục khi tệp mới nhất của nó còn chưa đạt mốc này. Chính bước kiểm tra bản dựng đang chạy mới bảo vệ một lần biên dịch đang diễn ra; đây chỉ là lớp bảo vệ thứ hai, chậm hơn, dành cho thư mục bị thay đổi giữa hai lần dựng.",
+  "wire.settings.build_cache.age_hours.label": "Tuổi tối thiểu (giờ)",
+  "wire.settings.build_cache.description": "Dọn phần đầu ra bản dựng có thể tạo lại (Rust target/, Next.js .next/) khi không có gì đang dùng, và ghi lại mọi lần xóa. Chạy khi cần bằng lop build-cache reap; chạy thử sẽ báo những gì sẽ bị xóa.",
+  "wire.settings.build_cache.dry_run.help": "Bật: báo đúng các ứng viên và số byte như vậy mà không xóa gì. lop build-cache reap --dry-run buộc chế độ này cho một lần chạy, không đổi cài đặt.",
+  "wire.settings.build_cache.dry_run.label": "Chỉ báo cáo (chạy thử)",
+  "wire.settings.build_cache.enabled.help": "Công tắc chính. Tắt: không bao giờ xóa gì; lệnh vẫn báo những gì một lần chạy thử sẽ làm.",
+  "wire.settings.build_cache.enabled.label": "Dọn cache bản dựng",
+  "wire.settings.build_cache.include_extra_shapes.help": "Mặc định tắt vì ý nghĩa của chúng thay đổi: build/ là đầu ra của CMake hoặc Gradle trong phần lớn kho mã, nhưng ở nơi khác lại là thư mục mã nguồn do người dùng tự đặt tên, còn dist/ là đầu ra đóng gói mà một số kho mã vẫn commit. Chỉ bật nếu các bản checkout trên máy này dùng chúng làm đầu ra.",
+  "wire.settings.build_cache.include_extra_shapes.label": "Gồm cả build/ và dist/",
+  "wire.settings.build_cache.title": "Dọn dẹp cache bản dựng"
+}

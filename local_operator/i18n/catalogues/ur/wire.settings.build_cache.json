@@ -1,0 +1,12 @@
+{
+  "wire.settings.build_cache.age_hours.help": "جب تک فولڈر کی سب سے نئی فائل اس دورانیے تک نہ پہنچی ہو، فولڈر کو ہاتھ نہیں لگاتا۔ چلتی ہوئی بلڈ کی اصل حفاظت لائیو بلڈ جانچ کرتی ہے؛ یہ دوسری اور سست حفاظتی پرت ہے، جو دو بلڈز کے درمیان چھوئے گئے فولڈر کے لیے ہے۔",
+  "wire.settings.build_cache.age_hours.label": "کم از کم عمر (گھنٹے)",
+  "wire.settings.build_cache.description": "جب کوئی چیز استعمال میں نہ ہو تو دوبارہ بنائی جا سکنے والی بلڈ آؤٹ پٹ (Rust target/, Next.js .next/) ہٹاتا ہے، اور ہر ہٹائی کو لاگ کرتا ہے۔ lop build-cache reap سے طلب پر چلائیں؛ ڈرائی رن بتاتا ہے کہ کیا ہٹایا جائے گا۔",
+  "wire.settings.build_cache.dry_run.help": "آن: وہی امیدوار اور وہی بائٹس بتاتا ہے، کچھ ہٹائے بغیر۔ lop build-cache reap --dry-run ایک ہی رن کے لیے یہ لازمی کر دیتا ہے اور سیٹنگ نہیں بدلتا۔",
+  "wire.settings.build_cache.dry_run.label": "صرف رپورٹ (ڈرائی رن)",
+  "wire.settings.build_cache.enabled.help": "مرکزی سوئچ۔ آف: کبھی کچھ نہیں ہٹتا؛ کمانڈ پھر بھی بتاتی ہے کہ ڈرائی رن کیا کرتا۔",
+  "wire.settings.build_cache.enabled.label": "بلڈ کیش ہٹائیں",
+  "wire.settings.build_cache.include_extra_shapes.help": "ڈیفالٹ میں آف، کیونکہ ان کا مطلب بدلتا رہتا ہے: زیادہ تر ریپوزیٹریز میں build/ CMake یا Gradle کا آؤٹ پٹ ہے، مگر کچھ میں یہ ہاتھ سے رکھا گیا سورس فولڈر ہے، اور dist/ پیکیجنگ آؤٹ پٹ ہے جسے کچھ ریپوزیٹریز commit کر دیتے ہیں۔ صرف اس وقت آن کریں جب اس مشین کے چیک آؤٹ انہیں آؤٹ پٹ کے طور پر استعمال کرتے ہوں۔",
+  "wire.settings.build_cache.include_extra_shapes.label": "build/ اور dist/ شامل کریں",
+  "wire.settings.build_cache.title": "بلڈ کیش صفائی"
+}

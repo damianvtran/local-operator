@@ -1,0 +1,12 @@
+{
+  "wire.settings.build_cache.age_hours.help": "Laisse un dossier tranquille tant que son fichier le plus récent est moins ancien que cette valeur. C’est la vérification de build actif qui protège une compilation en cours ; celle-ci est la seconde barrière, plus lente, contre un dossier modifié entre deux builds.",
+  "wire.settings.build_cache.age_hours.label": "Âge minimal (heures)",
+  "wire.settings.build_cache.description": "Purge les sorties de build régénérables (Rust target/, Next.js .next/) quand rien ne les utilise, et consigne chaque suppression. À exécuter à la demande avec lop build-cache reap ; une simulation indique ce qui serait supprimé.",
+  "wire.settings.build_cache.dry_run.help": "Activé : signale les mêmes candidats et les mêmes octets sans rien supprimer. lop build-cache reap --dry-run force ce mode pour une exécution, sans modifier le réglage.",
+  "wire.settings.build_cache.dry_run.label": "Signaler uniquement (simulation)",
+  "wire.settings.build_cache.enabled.help": "Interrupteur principal. Désactivé : rien n’est jamais supprimé ; la commande signale quand même ce qu’une simulation aurait fait.",
+  "wire.settings.build_cache.enabled.label": "Purger les caches de build",
+  "wire.settings.build_cache.include_extra_shapes.help": "Désactivé par défaut, car leur sens varie : build/ est une sortie CMake ou Gradle dans la plupart des dépôts, mais un dossier source nommé à la main dans d’autres, et dist/ est une sortie d’empaquetage que certains dépôts versionnent. Activez uniquement si les checkouts de cette machine les utilisent comme sorties.",
+  "wire.settings.build_cache.include_extra_shapes.label": "Inclure build/ et dist/",
+  "wire.settings.build_cache.title": "Nettoyage des caches de build"
+}

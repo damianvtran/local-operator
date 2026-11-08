@@ -1,0 +1,12 @@
+{
+  "wire.settings.build_cache.age_hours.help": "जब तक फ़ोल्डर की सबसे नई फ़ाइल इस अवधि तक नहीं पहुँची होती, यह उस फ़ोल्डर को नहीं छेड़ता। चल रही बिल्ड की असली सुरक्षा लाइव-बिल्ड जाँच करती है; यह दूसरी, धीमी सुरक्षा परत है, जो दो बिल्डों के बीच छुए गए फ़ोल्डर के लिए है।",
+  "wire.settings.build_cache.age_hours.label": "न्यूनतम उम्र (घंटे)",
+  "wire.settings.build_cache.description": "जब कुछ भी उपयोग में न हो तो दोबारा बनने योग्य बिल्ड आउटपुट (Rust target/, Next.js .next/) हटाता है, और हर बार हटाने को लॉग करता है। ज़रूरत पड़ने पर lop build-cache reap से चलाएँ; ड्राई रन बताता है कि क्या हटाया जाएगा।",
+  "wire.settings.build_cache.dry_run.help": "चालू: वही उम्मीदवार और वही बाइट बताता है, कुछ भी हटाए बिना। lop build-cache reap --dry-run इसे एक बार के रन के लिए लागू करता है और सेटिंग नहीं बदलता।",
+  "wire.settings.build_cache.dry_run.label": "केवल रिपोर्ट (ड्राई रन)",
+  "wire.settings.build_cache.enabled.help": "मुख्य स्विच। बंद: कुछ भी कभी नहीं हटता; कमांड फिर भी बताती है कि ड्राई रन क्या करता।",
+  "wire.settings.build_cache.enabled.label": "बिल्ड कैश हटाएँ",
+  "wire.settings.build_cache.include_extra_shapes.help": "डिफ़ॉल्ट रूप से बंद, क्योंकि इनका अर्थ बदलता रहता है: अधिकांश रिपॉज़िटरी में build/ CMake या Gradle का आउटपुट है, पर कुछ में यह हाथ से रखा गया स्रोत फ़ोल्डर है, और dist/ पैकेजिंग आउटपुट है जिसे कुछ रिपॉज़िटरी commit कर देती हैं। केवल तब चालू करें जब इस मशीन के चेकआउट इन्हें आउटपुट के रूप में उपयोग करते हों।",
+  "wire.settings.build_cache.include_extra_shapes.label": "build/ और dist/ शामिल करें",
+  "wire.settings.build_cache.title": "बिल्ड कैश सफ़ाई"
+}

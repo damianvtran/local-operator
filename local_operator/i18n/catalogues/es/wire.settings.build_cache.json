@@ -1,0 +1,12 @@
+{
+  "wire.settings.build_cache.age_hours.help": "Deja una carpeta intacta mientras su archivo más reciente tenga menos antigüedad que este valor. La detección de una compilación activa es lo que protege la compilación en curso; esta es la segunda barrera, más lenta, frente a una carpeta modificada entre compilaciones.",
+  "wire.settings.build_cache.age_hours.label": "Antigüedad mínima (horas)",
+  "wire.settings.build_cache.description": "Purga las salidas de compilación regenerables (Rust target/, Next.js .next/) cuando nada las usa y registra cada eliminación. Se ejecuta bajo demanda con lop build-cache reap; un simulacro indica lo que eliminaría.",
+  "wire.settings.build_cache.dry_run.help": "Activado informa de los mismos candidatos y bytes sin eliminar nada. lop build-cache reap --dry-run lo fuerza para una ejecución sin cambiar el ajuste.",
+  "wire.settings.build_cache.dry_run.label": "Solo informar (simulacro)",
+  "wire.settings.build_cache.enabled.help": "Interruptor principal. Desactivado: nunca se elimina nada; el comando sigue informando de lo que habría hecho un simulacro.",
+  "wire.settings.build_cache.enabled.label": "Purgar cachés de compilación",
+  "wire.settings.build_cache.include_extra_shapes.help": "Desactivado de forma predeterminada porque su significado varía: build/ es salida de CMake o Gradle en la mayoría de los repositorios, pero en otros es una carpeta de código que alguien nombró así a mano, y dist/ es salida de empaquetado que algunos repositorios versionan. Actívalo solo si los checkouts de esta máquina los usan como salida.",
+  "wire.settings.build_cache.include_extra_shapes.label": "Incluir build/ y dist/",
+  "wire.settings.build_cache.title": "Purga de cachés de compilación"
+}

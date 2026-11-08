@@ -1,0 +1,12 @@
+{
+  "wire.settings.build_cache.age_hours.help": "只要目录中最新的文件还不到这个时长，就不动这个目录。真正保护正在进行的编译的是实时构建检查；这一项只是更慢的第二道防线，用来拦住两次构建之间被改动过的目录。",
+  "wire.settings.build_cache.age_hours.label": "文件年龄下限（小时）",
+  "wire.settings.build_cache.description": "在没有东西使用的时候清理可再生的构建产物（Rust target/、Next.js .next/），并记录每一次清除。用lop build-cache reap按需运行；试运行会报告将要清除的内容。",
+  "wire.settings.build_cache.dry_run.help": "开启后会报告相同的候选对象和字节数，但不做任何清除。单次运行时加上lop build-cache reap --dry-run即可强制启用，且不会更改该设置。",
+  "wire.settings.build_cache.dry_run.label": "仅报告（试运行）",
+  "wire.settings.build_cache.enabled.help": "总开关。关闭：任何内容都不会被清除；命令仍会报告试运行会做什么。",
+  "wire.settings.build_cache.enabled.label": "清理构建缓存",
+  "wire.settings.build_cache.include_extra_shapes.help": "默认关闭，因为它们的含义并不固定：build/在多数仓库中是CMake或Gradle的输出，在另一些仓库中却是手工命名的源码目录；dist/是打包输出，有些仓库会一并提交。只有当本机的检出把它们当作输出时才开启。",
+  "wire.settings.build_cache.include_extra_shapes.label": "包含build/、dist/",
+  "wire.settings.build_cache.title": "构建缓存清理"
+}
