@@ -1559,3 +1559,124 @@ def test_concurrent_stamp_migration_is_tolerated(home: Path) -> None:
     conn.close()
     with sqlite3.connect(db) as check:
         assert "stamp" in {row[1] for row in check.execute("PRAGMA table_info(created)")}
+
+
+# -- another session's scratchpad is not evidence (v0.101.22 false refusal) ---------------
+#
+# The operator approved, through a verified ask, deleting a leftover key file in
+# ANOTHER session's scratchpad; the guard refused it CRITICAL as "session state",
+# which no ask can lift. A scratchpad holds working files, never provenance: it
+# ranks HIGH ("another session's files") like any other liftable target, while
+# the evidence files, whole session dirs and links into them stay CRITICAL.
+
+PAD_FILE = f"~/.local-operator/sessions/{OTHER}/scratchpad/qa344/or.env"
+PAD_QUESTION = f"May I delete the leftover key file `{PAD_FILE}`?"
+
+
+def _other_pad_file(home: Path) -> Path:
+    path = home / ".local-operator" / "sessions" / OTHER / "scratchpad" / "qa344" / "or.env"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("SYNTHETIC=1\n")
+    return path
+
+
+def test_other_scratchpad_delete_is_high_not_critical(home: Path) -> None:
+    _other_pad_file(home)
+    verdict = _verdict(home, f"rm -f {PAD_FILE}")
+    assert verdict.risk is Risk.HIGH
+    assert verdict.reasons == ["another session's files"]
+
+
+@pytest.mark.asyncio
+async def test_other_scratchpad_delete_allowed_by_a_verified_ask(home: Path) -> None:
+    _other_pad_file(home)
+    _ask_log(home, SID, "a-0344", PAD_QUESTION, "Delete them", "desktop")
+    # The answer lands in the transcript as an ask-response row naming its id.
+    answer = CustomMessage(custom_type=ASK_RESPONSE_MESSAGE_TYPE, details={"ask_id": "a-0344"})
+    ok = await _check(home, f"rm -f {PAD_FILE}", _Judge("ALLOW ask=a-0344"), [answer])
+    assert ok is not None and not ok.blocked, ok
+    assert "named by ask a-0344" in ok.warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_other_scratchpad_delete_without_evidence_is_refused_high(home: Path) -> None:
+    _other_pad_file(home)
+    refused = await _check(home, f"rm -f {PAD_FILE}", _Judge("ALLOW ask=a-0344"))
+    assert refused is not None and refused.blocked and refused.risk == "high"
+
+
+def _pad_link_to_transcript(home: Path) -> str:
+    other = home / ".local-operator" / "sessions" / OTHER
+    (other / "transcript.jsonl").write_text("{}\n")
+    (other / "scratchpad" / "x").symlink_to(other / "transcript.jsonl")
+    return f"~/.local-operator/sessions/{OTHER}/scratchpad/x"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"rm -f ~/.local-operator/sessions/{OTHER}/transcript.jsonl",
+        f"rm -f ~/.local-operator/sessions/{OTHER}/origin.json",
+        f"rm -f ~/.local-operator/sessions/{OTHER}/asks.jsonl",
+        f"echo x > ~/.local-operator/sessions/{OTHER}/asks.jsonl",
+        f"rm -rf ~/.local-operator/sessions/{OTHER}",
+        "rm -f ~/.local-operator/guardrails/created.sqlite",
+        # ``..`` and globbed ``scratch*`` components can leave the pad.
+        "rm -f ~/.local-operator/sessions/*/scratch*/../transcript.jsonl",
+        "rm -f ~/.local-operator/sessions/*/scratch*/x",
+        # An unknowable part may print ``../transcript.jsonl``: fail closed.
+        f"rm -f ~/.local-operator/sessions/{OTHER}/scratchpad/$(cat name)",
+    ],
+)
+def test_evidence_beside_a_scratchpad_stays_critical(home: Path, command: str) -> None:
+    assert _verdict(home, command).risk is Risk.CRITICAL, command
+
+
+@pytest.mark.parametrize("op", ["rm -f {}", "echo x > {}", "rm -f {}*"])
+def test_scratchpad_link_into_evidence_stays_critical(home: Path, op: str) -> None:
+    link = _pad_link_to_transcript(home)
+    assert _verdict(home, op.format(link)).risk is Risk.CRITICAL
+
+
+def test_scratchpad_glob_is_high_unless_a_match_resolves_into_evidence(home: Path) -> None:
+    _other_pad_file(home)
+    (home / ".local-operator" / "sessions" / OTHER / "scratchpad" / "k.env").write_text("x")
+    glob = "rm -f ~/.local-operator/sessions/*/scratchpad/*.env"
+    assert _verdict(home, glob).risk is Risk.HIGH
+    _pad_link_to_transcript(home)
+    linked = home / ".local-operator" / "sessions" / OTHER / "scratchpad" / "y.env"
+    linked.symlink_to(home / ".local-operator" / "sessions" / OTHER / "transcript.jsonl")
+    assert _verdict(home, glob).risk is Risk.CRITICAL
+
+
+def test_own_scratchpad_delete_stays_low(home: Path) -> None:
+    scratch = home / ".local-operator" / "sessions" / SID / "scratchpad"
+    (scratch / "or.env").write_text("x")
+    verdict = classify_bash(
+        f"rm -f {scratch}/or.env",
+        cwd=str(home),
+        env=_env(home),
+        scratchpad=str(scratch),
+        session_id=SID,
+    )
+    assert verdict.risk is Risk.LOW
+
+
+@pytest.mark.asyncio
+async def test_file_tools_may_write_another_sessions_scratchpad_but_not_through_a_link(
+    home: Path,
+) -> None:
+    """``evidence_write_verdict`` already ranks only the evidence files: a
+    write into another pad is not refused CRITICAL, a write through a pad link
+    into the transcript still is (it resolves every spelling)."""
+    ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=SID)
+    _other_pad_file(home)
+    plain = await check_tool_call(
+        "write", {"path": PAD_FILE, "content": "x"}, ctx, judge=None, settings=GuardSettings()
+    )
+    assert plain is None or not plain.blocked
+    link = _pad_link_to_transcript(home)
+    forged = await check_tool_call(
+        "write", {"path": link, "content": "x"}, ctx, judge=None, settings=GuardSettings()
+    )
+    assert forged is not None and forged.blocked and forged.risk == "critical"
