@@ -17,6 +17,7 @@ import shutil
 import stat
 import subprocess
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -853,7 +854,9 @@ def test_default_probes_detect_a_toolchain_process_attributed_to_the_candidate(
 # ---------------------------------------------------------------------------
 
 
-def _spawn_stand_in(directory: Path, name: str, *, cwd: Path | None = None) -> subprocess.Popen[bytes]:
+def _spawn_stand_in(
+    directory: Path, name: str, *, cwd: Path | None = None
+) -> subprocess.Popen[bytes]:
     """A sleeping process whose argv[0] is named ``name``.
 
     The same technique as the existing attribution test: a copy of nothing named
@@ -881,7 +884,9 @@ def _reap_process(process: subprocess.Popen[bytes]) -> None:
     process.wait(timeout=10)
 
 
-def _wait_for_attribution(probes: bcr.Probes, candidate: Path, *, deadline_s: float = 5.0) -> bool | None:
+def _wait_for_attribution(
+    probes: bcr.Probes, candidate: Path, *, deadline_s: float = 5.0
+) -> bool | None:
     """Poll the toolchain probe until the spawned process is visible and attributed.
 
     Polling on the POSITIVE answer is what keeps the paired negative assertion
@@ -1412,15 +1417,35 @@ def test_the_asks_section_comment_stays_attached_to_its_section() -> None:
     assert any('"asks"' in line for line in block), block
 
 
-def test_free_bytes_counts_each_filesystem_once(tmp_path: Path) -> None:
-    """R1-NIT-2: two roots on one disk report that disk once, not twice."""
+def test_free_bytes_counts_each_filesystem_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-NIT-2: two roots on one disk report that disk once, not twice.
+
+    ``disk_usage`` is stubbed rather than read: this machine's free space moves
+    by megabytes between two calls (~25 concurrent sessions), so comparing two
+    live readings is a flaky assertion about the disk, not about the code. What
+    the fix actually promises is COUNTING: one filesystem contributes one
+    reading, however many roots sit on it.
+    """
     first = tmp_path / "a"
     second = tmp_path / "b"
     first.mkdir()
     second.mkdir()
+    # The real reading first, while the real `disk_usage` is still in place: the
+    # function must work against a filesystem, not only against a stub.
+    assert bcr.free_bytes([tmp_path]) > 0
 
-    one = bcr.free_bytes([first])
-    assert one > 0
-    assert bcr.free_bytes([first, second]) == one
+    measured: list[str] = []
+
+    def fake_disk_usage(path: str) -> object:
+        measured.append(path)
+        return types.SimpleNamespace(free=6)
+
+    monkeypatch.setattr(bcr.shutil, "disk_usage", fake_disk_usage)
+
+    assert bcr.free_bytes([first, second]) == 6
+    assert len(measured) == 1  # same device: measured once, not added twice
     assert bcr.free_bytes([]) == 0
     assert bcr.free_bytes([tmp_path / "missing"]) == 0
+    assert len(measured) == 1  # an unreadable path never reaches disk_usage

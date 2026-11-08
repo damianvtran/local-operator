@@ -18407,7 +18407,9 @@ def main() -> int:
             # The reaper owns its own defaults, probes and output; the CLI only
             # parses. Function-local import so the CLI start does not pay for a
             # module most invocations never use.
-            from local_operator.build_cache_reaper import run_cli as run_build_cache_reap
+            from local_operator.build_cache_reaper import (
+                run_cli as run_build_cache_reap,
+            )
 
             if getattr(args, "build_cache_command", None) != "reap":
                 print(
