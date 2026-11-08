@@ -9,7 +9,10 @@ from typing import Any, cast
 
 import pytest
 from lop_osworld_v2_adapter.providers.aws import AwsProvider, _Clients
-from lop_osworld_v2_adapter.remote_command import answer_from_error_body
+from lop_osworld_v2_adapter.remote_command import (
+    UNKNOWN_OUTCOME_CAUTION,
+    answer_from_error_body,
+)
 
 from local_operator.evaluation.adapters.api import (
     EvaluationAdapter,
@@ -203,7 +206,8 @@ async def test_malformed_control_reply_is_a_result_not_an_error() -> None:
     """
 
     cases = (
-        ({"output": "{}", "returncode": 0}, "the target command wrapper failed"),
+        # No payload at all and no server status: the wrapper never reported.
+        ({"output": "", "returncode": 0}, "finished without reporting a result"),
         (
             {"status": "success", "output": json.dumps({}), "returncode": 0},
             "is not a command result",
@@ -243,6 +247,13 @@ async def test_a_wrapper_killed_by_a_signal_is_a_result_that_names_it() -> None:
     assert not result.timed_out
     assert result.error is not None
     assert "SIGTERM" in result.error
+    # The server's own status said "success" and the wrapper died anyway: quoting
+    # it beside ``exit_code: none`` reads as a contradiction, so it is dropped.
+    assert "success" not in result.error
+    # The shell is in its own session (``start_new_session=True``), so a dead
+    # wrapper says nothing about it -- and the sealed run's agent re-issued a
+    # near-identical command one turn later because nothing said so.
+    assert UNKNOWN_OUTCOME_CAUTION in result.error
 
 
 @pytest.mark.asyncio
@@ -260,6 +271,160 @@ async def test_a_guest_error_answer_is_a_result_carrying_its_reason() -> None:
     assert result.exit_code is None
     assert not result.timed_out
     assert result.error is not None and "timed out after 60 seconds" in result.error
+
+
+@pytest.mark.asyncio
+async def test_the_guest_deadline_answer_is_a_result_and_warns_about_the_shell() -> None:
+    """The body the guest really sends when ITS OWN deadline fires.
+
+    ``desktop_env/server/main.py:107-112`` (upstream ``36a6adf4``) catches every
+    exception from ``/execute`` -- ``subprocess.TimeoutExpired`` among them -- and
+    answers 500 ``{"status": "error", "message": str(e)}``. No ``output``, no
+    ``returncode``: the old filter rejected that body and the call raised, so a
+    command the TARGET reported on was still treated as a channel failure and
+    poisoned the session. It is also the same physical event as a dead wrapper --
+    the handler kills only its direct child -- so the answer carries the same
+    caution.
+    """
+
+    import requests
+
+    message = (
+        "Command '['python3', '-c', '\\nimport base64, codecs, json, ...', "
+        "'ZWNobyBoaQ==', '60.0', '262144']' timed out after 65.0 seconds"
+    )
+    body = {"status": "error", "message": message}
+
+    class Response:
+        content = json.dumps(body).encode()
+        status_code = 500
+
+    def post(*args: Any) -> Any:
+        raise requests.HTTPError("500 Server Error", response=Response())
+
+    result = await _provider(post).run_command(_params("true"))
+
+    assert result.exit_code is None
+    assert not result.timed_out
+    assert result.error is not None
+    assert "timed out after 65.0 seconds" in result.error
+    assert UNKNOWN_OUTCOME_CAUTION in result.error
+
+
+@pytest.mark.asyncio
+async def test_a_huge_guest_diagnostic_keeps_its_conclusion_and_the_caution() -> None:
+    """A quoted argv must not push the actionable part out of the bound.
+
+    ``str(TimeoutExpired)`` puts the whole command list in FRONT of "timed out
+    after N seconds", and this layer now quotes that message, so a head-only cut
+    would drop exactly the fact the model needs.
+    """
+
+    import requests
+
+    message = "Command '['" + "x" * 4000 + "']' timed out after 65.0 seconds"
+    body = {"status": "error", "message": message}
+
+    class Response:
+        content = json.dumps(body).encode()
+        status_code = 500
+
+    def post(*args: Any) -> Any:
+        raise requests.HTTPError("500 Server Error", response=Response())
+
+    result = await _provider(post).run_command(_params("true"))
+
+    assert result.error is not None and len(result.error) <= 4096
+    assert "timed out after 65.0 seconds" in result.error
+    assert UNKNOWN_OUTCOME_CAUTION in result.error
+
+
+@pytest.mark.asyncio
+async def test_a_command_cannot_match_its_own_wrapper_in_the_process_table() -> None:
+    """The measured root cause, not its symptom.
+
+    ``pkill -f``/``pgrep -f`` match a process's WHOLE argv. The sealed run's
+    command contained ``pkill -f citysheet``, and ``payload_for`` put the command
+    TEXT in the wrapper's argv, so the command SIGTERM'd the wrapper running it
+    (``returncode: -15``, 6.0 s into a 60 s deadline) and the failure was blamed
+    on a deadline that never fired. The command is base64'd now, so it is not in
+    the process table at all.
+
+    The pattern is assembled at runtime on purpose: a literal would sit in the
+    shell's own argv and match itself, which would prove nothing about the
+    wrapper.
+
+    ``argv=`` is the load-bearing half on Darwin, where ``pgrep`` does not report
+    a calling process's ancestors at all (measured: it misses the wrapper even
+    with the command text in its argv). ``wrapper=`` is the half that carries on
+    the Linux guest, whose ``pgrep -f`` matches ``/proc/<pid>/cmdline`` -- the
+    same bytes ``ps`` prints -- and is where the sealed run's self-kill happened.
+    """
+
+    from lop_osworld_v2_adapter.remote_command import payload_for
+
+    command = (
+        'pat=city; snap=sheet; term="$pat$snap"; '
+        "parent=$(ps -o ppid= -p $$ | tr -d ' '); "
+        'hits=$(pgrep -f "$term" | tr -d \' \' | tr "\\n" " "); '
+        'case " $hits " in *" $parent "*) w=MATCHED;; *) w=CLEAN;; esac; '
+        'case "$(ps -o args= -p "$parent")" in *"$term"*) a=PRESENT;; *) a=ABSENT;; esac; '
+        'echo "wrapper=$w argv=$a"'
+    )
+
+    argv = " ".join(str(part) for part in payload_for(_params(command))["command"])
+    assert "citysheet" not in argv
+
+    # And the behaviour, through the real wrapper this module sends.
+    result = await _provider().run_command(_params(command, timeout_s=15.0))
+    assert result.stdout.strip() == "wrapper=CLEAN argv=ABSENT"
+    assert result.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_a_2xx_body_this_layer_cannot_read_is_a_result_not_a_raise() -> None:
+    """The target ANSWERED, unreadably; that is not a lost reply.
+
+    ``http_post_json`` raises for these before ``decode_result`` is reached --
+    ``response.json()`` on a non-JSON body, and its own ``ValueError`` for a JSON
+    body that is not an object -- so the decode branch could never see them.
+    """
+
+    for error in (
+        ValueError("guest control server returned a non-object body"),
+        json.JSONDecodeError("Expecting value", "<html>502 Bad Gateway</html>", 0),
+    ):
+
+        def post(*args: Any, error: Exception = error) -> Any:
+            raise error
+
+        result = await _provider(post).run_command(_params("true"))
+
+        assert result.exit_code is None
+        assert not result.timed_out
+        assert result.error is not None and UNKNOWN_OUTCOME_CAUTION in result.error
+
+
+@pytest.mark.asyncio
+async def test_a_non_success_status_does_not_discard_a_valid_payload() -> None:
+    """QA N1: a server complaint is not a reason to throw the command away.
+
+    The payload is written by the wrapper AFTER it has waited for the shell, so
+    it is the only evidence about what the command did; the server's own status
+    is about the request and says nothing about the command. Dropping the payload
+    (the previous rule) lost the answer without gaining any certainty.
+    """
+
+    payload = {"exit_code": 0, "timed_out": False, "stdout": "hi\n", "stderr": ""}
+    for body in (
+        {"status": "error", "output": json.dumps(payload), "error": "", "returncode": 0},
+        {"status": "error", "output": json.dumps(payload), "error": "", "returncode": 3},
+    ):
+        result = await _provider(lambda *args, body=body: body).run_command(_params("echo hi"))
+
+        assert result.exit_code == 0
+        assert result.stdout == "hi\n"
+        assert result.error is None
 
 
 @pytest.mark.asyncio
@@ -306,6 +471,7 @@ async def test_a_non_2xx_body_carrying_the_guest_answer_is_decoded() -> None:
 
     class Response:
         content = json.dumps(body).encode()
+        status_code = 500
 
     def post(*args: Any) -> Any:
         raise requests.HTTPError("500 Server Error", response=Response())
@@ -330,15 +496,24 @@ async def test_a_non_2xx_body_that_is_not_the_guest_answer_still_fails_the_call(
         await _provider(post).run_command(_params("true"))
 
 
-def test_answer_from_error_body_reads_only_the_guest_answer_shape() -> None:
+def test_answer_from_error_body_reads_only_the_guest_answer_shapes() -> None:
+    """Both shapes the AMI's handler really emits, and nothing else."""
+
     body = {"status": "success", "output": "", "error": "", "returncode": 0}
     assert answer_from_error_body(json.dumps(body).encode()) == body
+    # The handler's exception envelope (its own deadline included).
+    deadline = {"status": "error", "message": "Command '['sleep']' timed out after 65 seconds"}
+    assert answer_from_error_body(json.dumps(deadline).encode()) == deadline
     for content in (
         b"",
         b"<html>502</html>",
         b'{"message": "upstream connect error"}',
         b"[]",
+        # An envelope with nothing to quote is not an answer.
         b'{"status": "error"}',
+        # A word the control server does not use is not the control server.
+        b'{"status": "weird", "output": "", "returncode": 0}',
+        b'{"output": "", "returncode": 0}',
     ):
         assert answer_from_error_body(content) is None
 
@@ -350,6 +525,9 @@ async def test_the_failure_text_is_bounded() -> None:
     body = {"status": "error", "output": "", "error": "E" * 100_000, "returncode": 1}
     result = await _provider(lambda *args: body).run_command(_params("true"))
     assert result.error is not None and len(result.error) <= 4096
+    # The caution is the last sentence, so a bound that dropped the tail would
+    # delete the one instruction a re-issuing model has to read.
+    assert UNKNOWN_OUTCOME_CAUTION in result.error
 
 
 @pytest.mark.asyncio

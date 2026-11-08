@@ -1486,13 +1486,19 @@ class AwsProvider:
     async def run_command(self, params: RunCommandParams) -> RunCommandResult:
         """One bounded guest shell; only a reply that never came escapes.
 
-        The guest answers some COMMAND outcomes with a non-2xx status while
-        still carrying its own four-key body -- upstream's timeout handler is
-        one. That body is the target talking, so it is decoded into a
-        ``RunCommandResult`` like any other (``decode_result`` never raises for
-        one); re-raising the HTTP error instead turned a command outcome into a
-        channel failure, which poisons the session and loses the episode
-        (sealed run ``t27b-t003-20261108-090532``: ``score: null``).
+        Two things the target says are decoded rather than raised on, because
+        both mean it ANSWERED: its command answer (``{status, output, error,
+        returncode}``), and its exception envelope (``{"status": "error",
+        "message": ...}``, status 500) which is what its own deadline fires --
+        ``subprocess.TimeoutExpired`` is one of the exceptions that handler
+        catches, so the command outcome that handler reports is one this layer
+        must not turn into a channel failure. Re-raising either poisoned the
+        session and lost the episode (sealed run
+        ``t27b-t003-20261108-090532``: ``score: null``).
+
+        A 2xx body that cannot be read at all (not JSON, not an object) is the
+        same class: ``http_post_json`` raises before ``decode_result`` sees it,
+        and an unreadable answer is not a lost reply.
 
         A genuine channel failure still escapes without retries: connection
         refused, a lost reply, a redirect, a body that is not the guest's
@@ -1505,14 +1511,18 @@ class AwsProvider:
             answer_from_error_body,
             decode_result,
             payload_for,
+            unreadable_answer,
         )
 
         url = f"http://{self._public_ip}:{GUEST_PORT}{_EXECUTE_PATH}"
+        # Built OUTSIDE the ``try`` below, so the ``ValueError`` arm can only ever
+        # mean the transport answered something unreadable.
+        payload = payload_for(params)
         try:
             body = await asyncio.to_thread(
                 self._clients.http_post_json,
                 url,
-                payload_for(params),
+                payload,
                 params.timeout_s + 10,
             )
         except requests.HTTPError as error:
@@ -1525,7 +1535,22 @@ class AwsProvider:
                     answered = None
             if answered is None:
                 raise
+            # Logged, not silent: every other guest anomaly in this module is,
+            # and a command answered with an error STATUS is the moment the
+            # control server is degrading. The model gets a result either way.
+            logger.warning(
+                "guest answered %s for a command; decoded as a result",
+                response.status_code,
+            )
             body = answered
+        except ValueError as error:
+            # ``requests.JSONDecodeError`` and ``UnicodeDecodeError`` are both
+            # ``ValueError``s, and so is ``http_post_json``'s own non-object
+            # check, so this arm is the whole "2xx but unreadable" class. It is
+            # NOT a lost reply: the target answered, so it must not poison the
+            # session.
+            logger.warning("guest answered an unreadable 2xx body for a command: %r", error)
+            return unreadable_answer(error)
         return decode_result(body, params)
 
     def _run_guest_command(
