@@ -79,6 +79,15 @@ def urdu_corpus(tmp_path, monkeypatch):
     catalogues._CATALOGUES = real_root
     try:
         set_active_locale("en")
+        # ``set_active_locale`` runs the refreshers only on a CHANGE. A test that
+        # already moved back to en inside the fake corpus
+        # (``test_ur_to_en_recovery…``) makes the call above a no-op, which left
+        # ``QUEUED_ROW_TEXT`` reading this corpus's "Queued — press up to recall"
+        # for the rest of the worker. ``test_retiring_refusal`` then failed
+        # whenever xdist co-located it after this file (PR #3558's shard 5).
+        # Re-materialise from the real catalogue unconditionally.
+        messages._namespace_for.cache_clear()
+        transcript._reload_copy()
     finally:
         catalogues._CATALOGUES = patched
     messages._namespace_for.cache_clear()
