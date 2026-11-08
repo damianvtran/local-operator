@@ -4,7 +4,7 @@
   "protocol": "evals/team_bridge_moderation/screen/PROTOCOL-ho4.md",
   "builder": {
     "path": "scripts/build_bridge_screen_split.py",
-    "sha256": "8928218308a6e8d954622b820be4add83e8f4637e27558a089567380fd547707"
+    "sha256": "aa5f55ca0dedb447d0adcc1e32fb58aaa0d9276c5f48360180f1a6bb330fc80d"
   },
   "seed": 20261108,
   "requested": {
@@ -121,7 +121,7 @@
     ],
     "distinct_body_hashes": 268,
     "overlap": 0,
-    "check": "normalised body sha256; overlap is a hard failure, never a trim"
+    "check": "whitespace-normalised body sha256, then case-folded equality, then any shared 40-character run; overlap is a hard failure, never a trim"
   },
   "split": {
     "path": "evals/team_bridge_moderation/screen/corpus/ho4.jsonl",

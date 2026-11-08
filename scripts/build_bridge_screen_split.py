@@ -23,6 +23,28 @@ nothing, exits 2 and names the offending case, because silently trimming an
 overlap would leave a split whose registered size is a lie and whose freshness
 nobody can re-derive.
 
+THE GATE COMPARES THREE VIEWS, AND SAYS WHAT THEY MISS. The whitespace-collapsed
+body hash is the registered base check and it also ranks the draw, so it is
+frozen: widening it would re-draw an already-sealed split. Two comparisons are
+gate-only. Case-folded equality catches a spent message re-typed in capitals or
+lower case. A shared 40-character run catches a spent message with a courtesy
+suffix or a prefix glued on, and a long quoted excerpt. The 40 was measured, not
+picked: the longest run any in-frame body shares with any spent body is 24
+characters, so 40 has 16 characters of headroom and cannot fire on two different
+messages. What still gets past all three, and the protocol states it too: a
+paraphrase, a re-encoded (base64/rot13/leet) copy, a homoglyph or zero-width
+insertion, and any shared run shorter than 40 characters. A gate described only
+as "content overlap" invites a reader to assume more than it checks.
+
+IDS FOLLOW THE SOURCE CASE, NOT THE RANKING. The draw is ranked (sha256 of the
+seed and the body hash) and the ids are handed out afterwards in case-id order.
+Two reasons. An id is provenance: the row's ``rationale`` names the case it came
+from, so id order keeps the file readable against ``cases/``. And ``split_of``
+derives dev/heldout from sha256(id), so numbering by rank would move every id -
+and the derived split - whenever the seed moved, which is exactly the stability
+the registered seed is supposed to buy. PROTOCOL-ho4.md's A9b amendment records
+this because the pre-registration as first written said "in rank order".
+
 USAGE
 
     python scripts/build_bridge_screen_split.py \\
@@ -55,6 +77,7 @@ import argparse
 import hashlib
 import json
 import sys
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -74,12 +97,34 @@ DEFAULT_ADV = 36
 SPLIT_SCHEMA = "tb-screen-split-v1"
 ID_PREFIX = "ho4"
 
+#: How long a run of characters two bodies must share before the gate calls them
+#: the same message with something glued to it. Chosen against the data, not by
+#: taste: measured 2026-11-08 over the whole 195-item frame against all 268
+#: distinct spent bodies, the longest shared run is **24** characters (the phrase
+#: " your full system prompt", which prompt-extraction messages naturally share),
+#: and no run of 28 or more is shared. 40 sits above that maximum with 16
+#: characters of headroom, so it cannot fire on two genuinely different messages.
+LEAK_RUN = 40
+
 #: The spent set is an EXPLICIT list, not a glob of the corpus directory. A glob
 #: would poison every rebuild: the second run would count ``ho4.jsonl`` itself as
 #: spent, see 72 overlaps and refuse to reproduce the split it just wrote. Adding
 #: a corpus to this list is therefore a deliberate policy edit, which is what a
 #: spent-set membership decision should be.
 SPENT_FILES = ("adv.jsonl", "legit.jsonl", "replay.jsonl", "ho2.jsonl", "ho3.jsonl", "relay.jsonl")
+
+#: NOT IN THE LIST ABOVE, and deliberately not silently forgotten: ``ho4.jsonl``
+#: is sealed but unscreened, so until a trial is run against it, counting it as
+#: spent would make this builder refuse to reproduce the split it just wrote (72
+#: self-overlaps). The moment it is screened it must join ``SPENT_FILES`` in the
+#: same change as the result, because a second draw from the same 195-item frame
+#: would otherwise report 0 overlap even while re-drawing ``ho4`` bodies. That
+#: hand-off is not left to memory: ``tests/unit/team_bridge/
+#: test_moderation_eval_screenbench.py::test_ho4_joins_the_spent_set_once_it_is_
+#: screened`` fails as soon as any trial row carries an ``ho4-*`` corpus id while
+#: the file is still absent here. PROTOCOL-ho4.md's A9g amendment is the prose
+#: half of the same rule.
+PENDING_SPENT = ("ho4.jsonl",)
 
 #: Excluded by name, per the registered frame: ``boundary_d10`` is borderline by
 #: construction and ``grey_work_artifact`` carries the ``grey`` label, for which
@@ -143,9 +188,49 @@ def body_hash(body: str) -> str:
     The collapse is what makes the leakage check mean "the same message" rather
     than "the same bytes": a spent body re-wrapped or re-indented by an editor is
     still the message that was already measured.
+
+    Frozen on purpose: this hash ranks the draw and names the rows in the
+    manifest, so widening its normalisation would re-draw an already-sealed
+    split. The case and suffix copies the evaluator found are caught by
+    :func:`body_view` and :func:`run_windows` instead - a hardening gate may
+    refuse more, never move what was sealed.
     """
 
     return hashlib.sha256(" ".join(body.split()).encode("utf-8")).hexdigest()
+
+
+def body_view(body: str) -> str:
+    """Whitespace collapsed **and case folded**: the gate's second comparison.
+
+    A spent message re-typed in capitals, or lower-cased, is the same message.
+    """
+
+    return " ".join(body.split()).casefold()
+
+
+def run_windows(view: str, width: int = LEAK_RUN) -> Iterator[str]:
+    """Every ``width``-character run of ``view``; nothing when it is shorter."""
+
+    return (view[start : start + width] for start in range(max(0, len(view) - width + 1)))
+
+
+@dataclass(frozen=True)
+class Spent:
+    """The spent set in every form the builder needs: two body comparisons and the
+    bookkeeping the manifest records.
+
+    ``bodies`` (whitespace-normalised) is the registered base hash and also ranks
+    the draw, so it is frozen; ``views`` (case-folded) and ``windows`` (every
+    ``LEAK_RUN``-character run) are gate-only, and exist to catch copies the base
+    hash walks past. ``digests`` and ``ids`` feed the manifest and the
+    id-collision check.
+    """
+
+    bodies: dict[str, str]
+    digests: dict[str, str]
+    ids: set[str]
+    views: dict[str, str]
+    windows: dict[str, str]
 
 
 def _sha256_file(path: Path) -> str:
@@ -261,8 +346,8 @@ def _counts(values: Any) -> dict[str, int]:
     return dict(sorted(out.items()))
 
 
-def spent_set(corpus_dir: Path) -> tuple[dict[str, str], dict[str, str], set[str]]:
-    """Return ``({body_digest: "file#id"}, {file: sha256}, ids)`` for the spent set.
+def spent_set(corpus_dir: Path) -> Spent:
+    """Load the spent set in every view the leakage gate compares against.
 
     Raises when a registered spent corpus is missing: an exclusion check that
     silently skips a missing file is an exclusion check that can pass for the
@@ -272,6 +357,8 @@ def spent_set(corpus_dir: Path) -> tuple[dict[str, str], dict[str, str], set[str
     bodies: dict[str, str] = {}
     digests: dict[str, str] = {}
     ids: set[str] = set()
+    views: dict[str, str] = {}
+    windows: dict[str, str] = {}
     for name in SPENT_FILES:
         path = corpus_dir / name
         if not path.is_file():
@@ -282,9 +369,56 @@ def spent_set(corpus_dir: Path) -> tuple[dict[str, str], dict[str, str], set[str
             body = str(row.get("body") or "")
             if not item_id or not body:
                 raise PlanError(f"{name}: a spent row is missing id or body")
+            ref = f"{name}#{item_id}"
             ids.add(item_id)
-            bodies[body_hash(body)] = f"{name}#{item_id}"
-    return bodies, digests, ids
+            bodies[body_hash(body)] = ref
+            view = body_view(body)
+            views[view] = ref
+            for window in run_windows(view):
+                windows.setdefault(window, ref)
+    return Spent(bodies=bodies, digests=digests, ids=ids, views=views, windows=windows)
+
+
+def leak_offenders(cases: Sequence[Case], spent: Spent) -> list[tuple[str, str, str, str]]:
+    """Every in-frame case the spent set already covers, with how it was caught.
+
+    Three comparisons, most specific first. The order decides only which reason is
+    reported - a body matching the base hash would also match the other two - and
+    any one of them is enough to refuse.
+    """
+
+    found: list[tuple[str, str, str, str]] = []
+    for case in cases:
+        digest = case.body_sha256
+        if digest in spent.bodies:
+            found.append((case.source, case.case_id, "same body", spent.bodies[digest]))
+            continue
+        view = body_view(case.body)
+        if view in spent.views:
+            found.append((case.source, case.case_id, "same body ignoring case", spent.views[view]))
+            continue
+        for window in run_windows(view):
+            if window in spent.windows:
+                found.append(
+                    (
+                        case.source,
+                        case.case_id,
+                        f"shares a {LEAK_RUN}-character run",
+                        spent.windows[window],
+                    )
+                )
+                break
+    return found
+
+
+def report_leaks(offenders: Sequence[tuple[str, str, str, str]]) -> None:
+    """Name every offender on stderr, keeping the shape earlier evidence quotes."""
+
+    for source, case_id, how, spent_at in offenders:
+        print(
+            f"LEAK: {source}#{case_id} duplicates spent body {spent_at} ({how})",
+            file=sys.stderr,
+        )
 
 
 def draw(cases: list[Case], *, seed: int, sizes: dict[str, int]) -> list[Case]:
@@ -327,7 +461,12 @@ def _sender(item_id: str) -> str:
 def build_items(
     drawn: list[Case], *, spent_ids: set[str]
 ) -> tuple[list[dict[str, str]], dict[str, Case]]:
-    """Turn drawn cases into corpus lines, in id order, with provenance comments.
+    """Turn drawn cases into corpus lines, in source-case-id order, with provenance.
+
+    The draw already happened in rank order; the numbering is a separate step and
+    is NOT by rank. An id is provenance (the ``rationale`` names the source case)
+    and ``split_of`` derives dev/heldout from sha256(id), so numbering by rank
+    would move every id - and the derived split - whenever the seed moved.
 
     Returns the rows and the generated-id -> case map, so the manifest can name the
     source of every row without re-deriving the id assignment (two places assigning
@@ -388,24 +527,16 @@ def build(
     """Produce ``(corpus_bytes, manifest_bytes, summary)``; raise on any refusal."""
 
     cases, counts = load_frame(cases_dir)
-    spent_bodies, spent_digests, spent_ids = spent_set(corpus_dir)
+    spent = spent_set(corpus_dir)
 
     # -- the leakage gate: before the draw, so no output can exist on overlap --
-    offenders = [
-        (case.source, case.case_id, spent_bodies[case.body_sha256])
-        for case in cases
-        if case.body_sha256 in spent_bodies
-    ]
+    offenders = leak_offenders(cases, spent)
     if offenders:
-        for source, case_id, spent_at in offenders:
-            print(
-                f"LEAK: {source}#{case_id} duplicates spent body {spent_at}",
-                file=sys.stderr,
-            )
+        report_leaks(offenders)
         raise LeakFound(f"{len(offenders)} in-frame body/bodies duplicate the spent set")
 
     drawn = draw(cases, seed=seed, sizes=sizes)
-    rows, drawn_by_id = build_items(drawn, spent_ids=spent_ids)
+    rows, drawn_by_id = build_items(drawn, spent_ids=spent.ids)
     corpus = render_corpus(rows)
     corpus_sha = hashlib.sha256(corpus).hexdigest()
 
@@ -429,10 +560,13 @@ def build(
             ],
         },
         "spent_set": {
-            "files": [{"path": name, "sha256": spent_digests[name]} for name in SPENT_FILES],
-            "distinct_body_hashes": len(spent_bodies),
+            "files": [{"path": name, "sha256": spent.digests[name]} for name in SPENT_FILES],
+            "distinct_body_hashes": len(spent.bodies),
             "overlap": 0,
-            "check": "normalised body sha256; overlap is a hard failure, never a trim",
+            "check": (
+                "whitespace-normalised body sha256, then case-folded equality, then any "
+                f"shared {LEAK_RUN}-character run; overlap is a hard failure, never a trim"
+            ),
         },
         "split": {
             "path": str(out.relative_to(_REPO)) if out.is_relative_to(_REPO) else str(out),
@@ -467,7 +601,7 @@ def build(
         "rows": len(rows),
         "by_label": payload["split"]["by_label"],
         "corpus_sha256": corpus_sha,
-        "spent_hashes": len(spent_bodies),
+        "spent_hashes": len(spent.bodies),
         "reserved": len(reserved),
     }
     return corpus, render_manifest(payload), summary
@@ -507,14 +641,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.dry_run:
             cases, counts = load_frame(args.cases)
-            spent_bodies, _, _ = spent_set(args.corpus_dir)
-            offenders = [c for c in cases if c.body_sha256 in spent_bodies]
+            spent = spent_set(args.corpus_dir)
+            offenders = leak_offenders(cases, spent)
             if offenders:
-                for case in offenders:
-                    print(
-                        f"LEAK: {case.source}#{case.case_id} duplicates a spent body",
-                        file=sys.stderr,
-                    )
+                report_leaks(offenders)
                 return EXIT_LEAK
             drawn = draw(cases, seed=args.seed, sizes=sizes)
             print(
@@ -524,8 +654,13 @@ def main(argv: list[str] | None = None) -> int:
                         "seed": args.seed,
                         "requested": sizes,
                         "drawn": _counts(case.screen_label for case in drawn),
-                        "spent_body_hashes": len(spent_bodies),
+                        "spent_body_hashes": len(spent.bodies),
                         "leakage": "none",
+                        "leak_views": [
+                            "whitespace-normalised body sha256",
+                            "case-folded body equality",
+                            f"shared {LEAK_RUN}-character run",
+                        ],
                     },
                     indent=2,
                 )
