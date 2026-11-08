@@ -1754,6 +1754,16 @@ export type MessageParams = {
   "wire.settings.account_policy.legacy.label": undefined;
   "wire.settings.account_policy.reset_soonest.description": undefined;
   "wire.settings.account_policy.reset_soonest.label": undefined;
+  "wire.settings.build_cache.age_hours.help": undefined;
+  "wire.settings.build_cache.age_hours.label": undefined;
+  "wire.settings.build_cache.description": undefined;
+  "wire.settings.build_cache.dry_run.help": undefined;
+  "wire.settings.build_cache.dry_run.label": undefined;
+  "wire.settings.build_cache.enabled.help": undefined;
+  "wire.settings.build_cache.enabled.label": undefined;
+  "wire.settings.build_cache.include_extra_shapes.help": undefined;
+  "wire.settings.build_cache.include_extra_shapes.label": undefined;
+  "wire.settings.build_cache.title": undefined;
   "wire.settings.hub_defaults.agents.help": undefined;
   "wire.settings.hub_defaults.agents.label": undefined;
   "wire.settings.hub_defaults.agents.off.description": undefined;

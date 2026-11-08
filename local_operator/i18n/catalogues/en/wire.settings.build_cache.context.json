@@ -1,0 +1,52 @@
+{
+  "wire.settings.build_cache.age_hours.help": {
+    "note": "One INT setting's help text, in HOURS. Never translate the unit into a different one: the stored value is hours and the row renders the number as-is. The sentence distinguishes TWO guards and must keep that distinction: the process/handle probe protects a running build, this age floor protects a directory touched between builds. Do not present the age floor as the safety mechanism. `build-cache reap` and `--dry-run` are literal command text and stay untranslated.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.build_cache.age_hours.label": {
+    "note": "Control label for an INT row whose value is HOURS (unit rendered separately by the settings page). Keep it short — it sits in a value column beside the number.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "wire.settings.build_cache.description": {
+    "note": "Section description for a maintenance feature that deletes regenerable build output. Must convey that removal happens only when nothing is using the directory, and that removals are logged, because those two facts are what make the feature safe to leave on. `target/`, `.next/` and `lop build-cache reap` are literal path and command text; keep them unchanged and untranslated, including their slashes.",
+    "role": "section description",
+    "tone": "plain, precise, reassuring"
+  },
+  "wire.settings.build_cache.dry_run.help": {
+    "note": "Help for a BOOL setting that turns deletion into reporting. `lop build-cache reap --dry-run` is literal command text with flags and must stay untranslated. Make clear the flag is a per-run override that does not write the setting.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.build_cache.dry_run.label": {
+    "note": "Control label for a BOOL row. A parenthetical gloss is acceptable when the locale has a natural equivalent; otherwise the bare concept of a report-only run.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "wire.settings.build_cache.enabled.help": {
+    "note": "Help for the master switch of a destructive maintenance feature. The load-bearing clause is that OFF means NOTHING is ever removed — never weaken it into a suggestion or an 'idle only' claim. `dry run` here refers to the sibling setting, not to a mode that still deletes.",
+    "role": "help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.build_cache.enabled.label": {
+    "note": "Control label for the master BOOL switch of a maintenance feature. Keep it short; it is one row in a settings page.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "wire.settings.build_cache.include_extra_shapes.help": {
+    "note": "Help for a BOOL that opts into TWO extra directory names. `build/` and `dist/` are literal directory names with trailing slashes: never translate or transliterate them. The warning is the point of the sentence — these names mean output in some ecosystems and source or committed artifacts in others, so it is the user's call, not a default. Do not claim they are always output.",
+    "role": "help text",
+    "tone": "plain, precise, cautionary"
+  },
+  "wire.settings.build_cache.include_extra_shapes.label": {
+    "note": "Control label naming two literal directory names. Keep `build/` and `dist/` exactly as written, slashes included; only the verb phrase may be localized.",
+    "role": "control label",
+    "tone": "plain, precise"
+  },
+  "wire.settings.build_cache.title": {
+    "note": "Section title for a maintenance feature that reclaims disk space from regenerable build output. Short; it heads a settings page.",
+    "role": "section title",
+    "tone": "plain, precise"
+  }
+}

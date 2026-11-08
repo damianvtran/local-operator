@@ -314,6 +314,49 @@ def build_cli_parser() -> LocalizedArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="subcommand")
+    # The standing build-cache reaper (``local_operator/build_cache_reaper.py``).
+    # A verb as well as a launchd job, because the one thing a user needs when a
+    # disk is filling is to see what it WOULD remove before trusting a scheduled
+    # run — and to bound that preview to one checkout (``--root``) rather than the
+    # whole home. Help text stays plain English: it is developer-facing CLI
+    # surface, the exception AGENTS.md allows for commands and flags.
+    build_cache_parser = subparsers.add_parser(
+        "build-cache",
+        help="Prune regenerable build output (target/, .next/) that nothing is using.",
+        parents=[parent_parser],
+    )
+    build_cache_subparsers = build_cache_parser.add_subparsers(dest="build_cache_command")
+    build_cache_reap_parser = build_cache_subparsers.add_parser(
+        "reap",
+        help="Reclaim idle build-cache directories; --dry-run only reports.",
+        parents=[parent_parser],
+    )
+    build_cache_reap_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help=(
+            "Report the same candidates and bytes without deleting anything. "
+            "Overrides maintenance.build_cache.dry_run for this run only."
+        ),
+    )
+    build_cache_reap_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the report as JSON instead of a summary.",
+    )
+    build_cache_reap_parser.add_argument(
+        "--root",
+        action="append",
+        metavar="PATH",
+        dest="roots",
+        default=None,
+        help=(
+            "Scan PATH instead of the home directory. Repeatable; each use replaces "
+            "the home default for this run, so a rehearsal against a fixture tree or "
+            "a run bounded to one checkout needs no HOME change."
+        ),
+    )
     # Human inspection shares the TUI runner, not the model tool schema.
     from local_operator.memory_cli import configure_parser as configure_memory_parser
 
@@ -18360,6 +18403,23 @@ def main() -> int:
             return sound_main(args)
         elif args.subcommand == "sessions":
             return sessions_command(args)
+        elif args.subcommand == "build-cache":
+            # The reaper owns its own defaults, probes and output; the CLI only
+            # parses. Function-local import so the CLI start does not pay for a
+            # module most invocations never use.
+            from local_operator.build_cache_reaper import run_cli as run_build_cache_reap
+
+            if getattr(args, "build_cache_command", None) != "reap":
+                print(
+                    "usage: lop build-cache reap [--dry-run] [--json] [--root PATH]",
+                    file=sys.stderr,
+                )
+                return 2
+            return run_build_cache_reap(
+                dry_run=bool(getattr(args, "dry_run", False)),
+                json_output=bool(getattr(args, "json", False)),
+                roots=getattr(args, "roots", None),
+            )
         elif args.subcommand == "stop":
             return stop_command(args)
         elif args.subcommand == "refresh":

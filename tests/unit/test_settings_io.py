@@ -548,6 +548,20 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.stt import cleanup as cleanup_policy
 
     consumers["speech.transcription.cleanup"] = cleanup_policy.DEFAULT_CLEANUP
+
+    # The build-cache reaper's keys, asked of the module that READS them. The
+    # registry rows carry literals because ``settings_io`` is imported on every
+    # CLI start and the reaper is a separate launchd entry point; this block is
+    # the half that turns a drifted literal into a red test rather than a page
+    # advertising an age floor the reaper does not apply.
+    from local_operator import build_cache_reaper
+
+    consumers["maintenance.build_cache.enabled"] = build_cache_reaper.DEFAULT_ENABLED
+    consumers["maintenance.build_cache.age_hours"] = build_cache_reaper.DEFAULT_AGE_HOURS
+    consumers["maintenance.build_cache.dry_run"] = build_cache_reaper.DEFAULT_DRY_RUN
+    consumers["maintenance.build_cache.include_extra_shapes"] = (
+        build_cache_reaper.DEFAULT_INCLUDE_EXTRA_SHAPES
+    )
     return consumers
 
 

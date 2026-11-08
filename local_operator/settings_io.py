@@ -73,6 +73,7 @@ from local_operator.i18n.keys import wire_notification_sound as _ns
 from local_operator.i18n.keys import wire_radient_saver as _rsv
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
+from local_operator.i18n.keys import wire_settings_build_cache as _bc
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
 from local_operator.i18n.keys import wire_settings_hub_org as _ho
 from local_operator.i18n.keys import wire_settings_keymap as _wk
@@ -123,6 +124,7 @@ logger = logging.getLogger(__name__)
 #: (QA round 1, Q1) while buying nothing the namespace split did not already buy.
 _CHILD_SETTINGS_NAMESPACES = (
     "wire.settings.account_policy",
+    "wire.settings.build_cache",
     "wire.settings.hub_defaults",
     "wire.settings.hub_org",
     "wire.settings.keymap",
@@ -1107,6 +1109,20 @@ SECTIONS: tuple[Section, ...] = (
     # projection per publish — and a running session republishes on the
     # change (``Session._apply_config_change``), so an edit lands with no
     # relaunch on the terminal, the desktop app and the phone alike.
+    # The standing build-cache reaper (``local_operator/build_cache_reaper.py``).
+    # LIVE, honestly: the reaper reads all four keys at the start of every tick
+    # and has no long-lived process to reload, so an edit lands on the next reap
+    # — the next scheduled run, or the ``lop build-cache reap`` a user invokes
+    # right after changing it. Its own section rather than rows under an existing
+    # one because this is disk maintenance, a different subject from sessions,
+    # tools or agents; a user looking for "why is my disk full" should find it by
+    # name.
+    Section(
+        "maintenance",
+        _t(_bc.title()),
+        Scope.LIVE,
+        _t(_bc.description()),
+    ),
     Section(
         "asks",
         _t(_ws.asks_title()),
@@ -6349,6 +6365,59 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.remote_compute_enabled_choice_true_description()),
             _t(_ws.remote_compute_enabled_choice_false_description()),
         ),
+    ),
+    # -- build-cache reaper --------------------------------------------------
+    # Every default below is a LITERAL on purpose: ``settings_io`` is imported on
+    # every CLI start and must not pull the reaper's module graph in (it is a
+    # launchd entry point), and ``_consumer_defaults()`` in
+    # tests/unit/test_settings_io.py imports the module's real constants and pins
+    # them to these rows — the pair is what stops the settings page from
+    # advertising a default the reaper does not act on.
+    #
+    # The key is genuinely THREE levels deep (``maintenance.build_cache.enabled``)
+    # and ``path`` spells that nesting out: a two-level path here would write a
+    # key nothing reads while looking like success from every angle.
+    Setting(
+        key="maintenance.build_cache.enabled",
+        path=("maintenance", "build_cache", "enabled"),
+        section="maintenance",
+        label=_t(_bc.enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_bc.enabled_help()),
+    ),
+    Setting(
+        key="maintenance.build_cache.age_hours",
+        path=("maintenance", "build_cache", "age_hours"),
+        section="maintenance",
+        label=_t(_bc.age_hours_label()),
+        kind=Kind.INT,
+        default=6,
+        minimum=1,
+        maximum=720,
+        unit="hours",
+        help=_t(_bc.age_hours_help()),
+    ),
+    Setting(
+        key="maintenance.build_cache.dry_run",
+        path=("maintenance", "build_cache", "dry_run"),
+        section="maintenance",
+        label=_t(_bc.dry_run_label()),
+        kind=Kind.BOOL,
+        default=False,
+        help=_t(_bc.dry_run_help()),
+    ),
+    Setting(
+        key="maintenance.build_cache.include_extra_shapes",
+        path=("maintenance", "build_cache", "include_extra_shapes"),
+        section="maintenance",
+        label=_t(_bc.include_extra_shapes_label()),
+        kind=Kind.BOOL,
+        # OFF: ``build/`` and ``dist/`` are build output in some ecosystems and
+        # hand-named source or committed artifacts in others, so opting in is the
+        # user's call (the module docstring makes the argument case by case).
+        default=False,
+        help=_t(_bc.include_extra_shapes_help()),
     ),
 )
 

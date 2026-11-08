@@ -1,0 +1,12 @@
+{
+  "wire.settings.build_cache.age_hours.help": "Leaves a directory alone while its newest file is younger than this. The live-build check is what protects a running compile; this is the slower second guard against a directory touched between builds.",
+  "wire.settings.build_cache.age_hours.label": "Minimum age (hours)",
+  "wire.settings.build_cache.description": "Prunes regenerable build output (Rust target/, Next.js .next/) when nothing is using it, and logs every removal. Run on demand with lop build-cache reap; a dry run reports what it would remove.",
+  "wire.settings.build_cache.dry_run.help": "On reports the same candidates and bytes without removing anything. lop build-cache reap --dry-run forces this for one run without changing the setting.",
+  "wire.settings.build_cache.dry_run.label": "Report only (dry run)",
+  "wire.settings.build_cache.enabled.help": "Master switch. Off means nothing is ever removed; the command still reports what a dry run would have done.",
+  "wire.settings.build_cache.enabled.label": "Reap build caches",
+  "wire.settings.build_cache.include_extra_shapes.help": "Off by default because their meaning varies: build/ is CMake or Gradle output in most repositories but a hand-named source directory in others, and dist/ is packaging output that some repositories commit. Turn on only if this machine's checkouts use them as output.",
+  "wire.settings.build_cache.include_extra_shapes.label": "Include build/ and dist/",
+  "wire.settings.build_cache.title": "Build-cache reaper"
+}
