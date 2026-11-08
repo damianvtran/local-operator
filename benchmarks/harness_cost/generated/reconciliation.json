@@ -1,0 +1,1689 @@
+{
+  "label": "EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/",
+  "corrections": "CORRECTIONS.md",
+  "runs": [
+    {
+      "run_id": "clean__codex__37608790__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0163898,
+      "component_cost_usd": 0.0163898,
+      "openrouter_usage_cost_usd": 0.0163898,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__37608790__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0625608,
+      "component_cost_usd": 0.0625608,
+      "openrouter_usage_cost_usd": 0.0625608,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__37608790__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.023735600000000003,
+      "component_cost_usd": 0.023735600000000003,
+      "openrouter_usage_cost_usd": 0.0237356,
+      "difference_usd": 3.469446951953614e-18
+    },
+    {
+      "run_id": "clean__omp__37608790__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0184808,
+      "component_cost_usd": 0.018480800000000002,
+      "openrouter_usage_cost_usd": 0.0184808,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__37608790__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.02423427,
+      "component_cost_usd": 0.02423427,
+      "openrouter_usage_cost_usd": 0.02423427,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__abed40dc__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.02016252,
+      "component_cost_usd": 0.020162520000000003,
+      "openrouter_usage_cost_usd": 0.02016252,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__abed40dc__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.055049100000000004,
+      "component_cost_usd": 0.055049100000000004,
+      "openrouter_usage_cost_usd": 0.055049100000000004,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__abed40dc__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0548737,
+      "component_cost_usd": 0.0548737,
+      "openrouter_usage_cost_usd": 0.0548737,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__abed40dc__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0165538,
+      "component_cost_usd": 0.0165538,
+      "openrouter_usage_cost_usd": 0.0165538,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__abed40dc__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.019931499999999998,
+      "component_cost_usd": 0.019931499999999998,
+      "openrouter_usage_cost_usd": 0.0199315,
+      "difference_usd": -3.469446951953614e-18
+    },
+    {
+      "run_id": "clean__claude-code__01b269ae__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0552318,
+      "component_cost_usd": 0.055231800000000005,
+      "openrouter_usage_cost_usd": 0.0552318,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__01b269ae__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.016827500000000002,
+      "component_cost_usd": 0.0168275,
+      "openrouter_usage_cost_usd": 0.016827500000000002,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__01b269ae__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.02136117,
+      "component_cost_usd": 0.02136117,
+      "openrouter_usage_cost_usd": 0.02136117,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__01b269ae__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.057078000000000004,
+      "component_cost_usd": 0.057078000000000004,
+      "openrouter_usage_cost_usd": 0.057078000000000004,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__01b269ae__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.022606400000000002,
+      "component_cost_usd": 0.0226064,
+      "openrouter_usage_cost_usd": 0.0226064,
+      "difference_usd": 3.469446951953614e-18
+    },
+    {
+      "run_id": "clean__codex__1e8df695__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.055509199999999995,
+      "component_cost_usd": 0.055509199999999995,
+      "openrouter_usage_cost_usd": 0.055509199999999995,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__1e8df695__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0548886,
+      "component_cost_usd": 0.0548886,
+      "openrouter_usage_cost_usd": 0.054888599999999996,
+      "difference_usd": 6.938893903907228e-18
+    },
+    {
+      "run_id": "clean__omp__1e8df695__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0173391,
+      "component_cost_usd": 0.0173391,
+      "openrouter_usage_cost_usd": 0.0173391,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__1e8df695__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.020051495000000003,
+      "component_cost_usd": 0.020051495000000003,
+      "openrouter_usage_cost_usd": 0.020051495,
+      "difference_usd": 3.469446951953614e-18
+    },
+    {
+      "run_id": "clean__local-operator__1e8df695__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0216389,
+      "component_cost_usd": 0.0216389,
+      "openrouter_usage_cost_usd": 0.0216389,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__eb03d19a__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0600288,
+      "component_cost_usd": 0.0600288,
+      "openrouter_usage_cost_usd": 0.0600288,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__eb03d19a__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.024834345,
+      "component_cost_usd": 0.024834344999999997,
+      "openrouter_usage_cost_usd": 0.024834345,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__eb03d19a__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0222732,
+      "component_cost_usd": 0.0222732,
+      "openrouter_usage_cost_usd": 0.0222732,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__eb03d19a__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0234655,
+      "component_cost_usd": 0.0234655,
+      "openrouter_usage_cost_usd": 0.0234655,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__eb03d19a__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.063208,
+      "component_cost_usd": 0.063208,
+      "openrouter_usage_cost_usd": 0.063208,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__7a4e4bc8__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0687125,
+      "component_cost_usd": 0.0687125,
+      "openrouter_usage_cost_usd": 0.0687125,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__7a4e4bc8__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.03134892,
+      "component_cost_usd": 0.03134892,
+      "openrouter_usage_cost_usd": 0.03134892,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__7a4e4bc8__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0350735,
+      "component_cost_usd": 0.0350735,
+      "openrouter_usage_cost_usd": 0.0350735,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__7a4e4bc8__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.0313817,
+      "component_cost_usd": 0.031381700000000005,
+      "openrouter_usage_cost_usd": 0.0313817,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__7a4e4bc8__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0719918,
+      "component_cost_usd": 0.07199180000000001,
+      "openrouter_usage_cost_usd": 0.0719918,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__51b11269__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0572087,
+      "component_cost_usd": 0.0572087,
+      "openrouter_usage_cost_usd": 0.0572087,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__51b11269__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0185774,
+      "component_cost_usd": 0.0185774,
+      "openrouter_usage_cost_usd": 0.0185774,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__51b11269__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.027991095,
+      "component_cost_usd": 0.027991095,
+      "openrouter_usage_cost_usd": 0.027991095,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__51b11269__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.024638800000000002,
+      "component_cost_usd": 0.0246388,
+      "openrouter_usage_cost_usd": 0.0246388,
+      "difference_usd": 3.469446951953614e-18
+    },
+    {
+      "run_id": "clean__claude-code__51b11269__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0650482,
+      "component_cost_usd": 0.0650482,
+      "openrouter_usage_cost_usd": 0.0650482,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__0cecd4f3__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0638284,
+      "component_cost_usd": 0.0638284,
+      "openrouter_usage_cost_usd": 0.0638284,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__0cecd4f3__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0223392,
+      "component_cost_usd": 0.0223392,
+      "openrouter_usage_cost_usd": 0.0223392,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__0cecd4f3__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.032037095,
+      "component_cost_usd": 0.032037095,
+      "openrouter_usage_cost_usd": 0.032037095,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__0cecd4f3__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0310982,
+      "component_cost_usd": 0.0310982,
+      "openrouter_usage_cost_usd": 0.0310982,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__0cecd4f3__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.07278090000000001,
+      "component_cost_usd": 0.07278090000000001,
+      "openrouter_usage_cost_usd": 0.07278090000000001,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__0e763496__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0196719,
+      "component_cost_usd": 0.019671900000000003,
+      "openrouter_usage_cost_usd": 0.0196719,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__0e763496__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.023384595,
+      "component_cost_usd": 0.023384595,
+      "openrouter_usage_cost_usd": 0.023384595,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__0e763496__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0682535,
+      "component_cost_usd": 0.0682535,
+      "openrouter_usage_cost_usd": 0.0682535,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__0e763496__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.030539,
+      "component_cost_usd": 0.030539,
+      "openrouter_usage_cost_usd": 0.030539,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__0e763496__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0750825,
+      "component_cost_usd": 0.07508250000000001,
+      "openrouter_usage_cost_usd": 0.0750825,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__e528b65e__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0579541,
+      "component_cost_usd": 0.0579541,
+      "openrouter_usage_cost_usd": 0.0579541,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__e528b65e__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.02316422,
+      "component_cost_usd": 0.02316422,
+      "openrouter_usage_cost_usd": 0.02316422,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__e528b65e__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0551586,
+      "component_cost_usd": 0.055158599999999995,
+      "openrouter_usage_cost_usd": 0.0551586,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__e528b65e__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0183616,
+      "component_cost_usd": 0.018361600000000002,
+      "openrouter_usage_cost_usd": 0.0183616,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__e528b65e__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0220251,
+      "component_cost_usd": 0.022025100000000002,
+      "openrouter_usage_cost_usd": 0.0220251,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__d53ff5ee__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.06142620000000001,
+      "component_cost_usd": 0.0614262,
+      "openrouter_usage_cost_usd": 0.0614262,
+      "difference_usd": 6.938893903907228e-18
+    },
+    {
+      "run_id": "clean__omp__d53ff5ee__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0209813,
+      "component_cost_usd": 0.020981299999999998,
+      "openrouter_usage_cost_usd": 0.0209813,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__d53ff5ee__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.022373,
+      "component_cost_usd": 0.022373,
+      "openrouter_usage_cost_usd": 0.022373,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__d53ff5ee__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.029981395,
+      "component_cost_usd": 0.029981395,
+      "openrouter_usage_cost_usd": 0.029981394999999997,
+      "difference_usd": 3.469446951953614e-18
+    },
+    {
+      "run_id": "clean__codex__d53ff5ee__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0722647,
+      "component_cost_usd": 0.0722647,
+      "openrouter_usage_cost_usd": 0.0722647,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__73c99fb9__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.050714999999999996,
+      "component_cost_usd": 0.050715,
+      "openrouter_usage_cost_usd": 0.050714999999999996,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__73c99fb9__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0549506,
+      "component_cost_usd": 0.0549506,
+      "openrouter_usage_cost_usd": 0.0549506,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__73c99fb9__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0238796,
+      "component_cost_usd": 0.0238796,
+      "openrouter_usage_cost_usd": 0.0238796,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__73c99fb9__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.029294920000000002,
+      "component_cost_usd": 0.029294920000000002,
+      "openrouter_usage_cost_usd": 0.029294920000000002,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__73c99fb9__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.0309489,
+      "component_cost_usd": 0.0309489,
+      "openrouter_usage_cost_usd": 0.030948899999999998,
+      "difference_usd": 3.469446951953614e-18
+    },
+    {
+      "run_id": "clean__omp__edb61b14__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0237042,
+      "component_cost_usd": 0.0237042,
+      "openrouter_usage_cost_usd": 0.0237042,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__edb61b14__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0630315,
+      "component_cost_usd": 0.06303149999999999,
+      "openrouter_usage_cost_usd": 0.0630315,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__edb61b14__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0659029,
+      "component_cost_usd": 0.0659029,
+      "openrouter_usage_cost_usd": 0.0659029,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__edb61b14__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.026256545,
+      "component_cost_usd": 0.026256545,
+      "openrouter_usage_cost_usd": 0.026256545,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__edb61b14__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.0306313,
+      "component_cost_usd": 0.0306313,
+      "openrouter_usage_cost_usd": 0.0306313,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__9cf05d24__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.050771300000000005,
+      "component_cost_usd": 0.0507713,
+      "openrouter_usage_cost_usd": 0.0507713,
+      "difference_usd": 6.938893903907228e-18
+    },
+    {
+      "run_id": "clean__omp__9cf05d24__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0130194,
+      "component_cost_usd": 0.0130194,
+      "openrouter_usage_cost_usd": 0.0130194,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__9cf05d24__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.017661745,
+      "component_cost_usd": 0.017661745,
+      "openrouter_usage_cost_usd": 0.017661745,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__codex__9cf05d24__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0529766,
+      "component_cost_usd": 0.0529766,
+      "openrouter_usage_cost_usd": 0.0529766,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__9cf05d24__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.018055,
+      "component_cost_usd": 0.018055,
+      "openrouter_usage_cost_usd": 0.018055,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__276cc624__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.015038570000000001,
+      "component_cost_usd": 0.015038570000000001,
+      "openrouter_usage_cost_usd": 0.01503857,
+      "difference_usd": 1.734723475976807e-18
+    },
+    {
+      "run_id": "clean__codex__276cc624__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0506181,
+      "component_cost_usd": 0.0506181,
+      "openrouter_usage_cost_usd": 0.0506181,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__276cc624__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0513683,
+      "component_cost_usd": 0.05136829999999999,
+      "openrouter_usage_cost_usd": 0.0513683,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__276cc624__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0117423,
+      "component_cost_usd": 0.0117423,
+      "openrouter_usage_cost_usd": 0.0117423,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__local-operator__276cc624__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0180502,
+      "component_cost_usd": 0.0180502,
+      "openrouter_usage_cost_usd": 0.0180502,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__claude-code__930fdb3b__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0527974,
+      "component_cost_usd": 0.0527974,
+      "openrouter_usage_cost_usd": 0.0527974,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__opencode__930fdb3b__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.015356245000000001,
+      "component_cost_usd": 0.015356245000000001,
+      "openrouter_usage_cost_usd": 0.015356245,
+      "difference_usd": 1.734723475976807e-18
+    },
+    {
+      "run_id": "clean__codex__930fdb3b__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.0505582,
+      "component_cost_usd": 0.0505582,
+      "openrouter_usage_cost_usd": 0.0505582,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "clean__omp__930fdb3b__r0",
+      "rep": 0,
+      "calls": 3,
+      "model_cost_usd": 0.017185100000000002,
+      "component_cost_usd": 0.017185100000000002,
+      "openrouter_usage_cost_usd": 0.0171851,
+      "difference_usd": 3.469446951953614e-18
+    },
+    {
+      "run_id": "clean__local-operator__930fdb3b__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0223321,
+      "component_cost_usd": 0.0223321,
+      "openrouter_usage_cost_usd": 0.0223321,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__1e8df695__r9",
+      "rep": 9,
+      "calls": 4,
+      "model_cost_usd": 0.07593135,
+      "component_cost_usd": 0.07593135000000001,
+      "openrouter_usage_cost_usd": 0.07593135,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__1e8df695__r9",
+      "rep": 9,
+      "calls": 20,
+      "model_cost_usd": 0.1434191,
+      "component_cost_usd": 0.1434191,
+      "openrouter_usage_cost_usd": 0.1434191,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__1e8df695__r9",
+      "rep": 9,
+      "calls": 5,
+      "model_cost_usd": 0.10124369999999999,
+      "component_cost_usd": 0.10124369999999999,
+      "openrouter_usage_cost_usd": 0.1012437,
+      "difference_usd": -1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__claude-code__1e8df695__r9",
+      "rep": 9,
+      "calls": 6,
+      "model_cost_usd": 1.4886197,
+      "component_cost_usd": 1.4886196999999999,
+      "openrouter_usage_cost_usd": 1.4886197,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__codex__1e8df695__r9",
+      "rep": 9,
+      "calls": 29,
+      "model_cost_usd": 2.2155286,
+      "component_cost_usd": 2.2155286,
+      "openrouter_usage_cost_usd": 2.2155286,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__1e8df695__r8",
+      "rep": 8,
+      "calls": 4,
+      "model_cost_usd": 0.11819749999999998,
+      "component_cost_usd": 0.1181975,
+      "openrouter_usage_cost_usd": 0.11819750000000001,
+      "difference_usd": -2.7755575615628914e-17
+    },
+    {
+      "run_id": "full__local-operator__eb303e01__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.1144462,
+      "component_cost_usd": 0.11444619999999997,
+      "openrouter_usage_cost_usd": 0.1144462,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__eb303e01__r0",
+      "rep": 0,
+      "calls": 7,
+      "model_cost_usd": 0.1272192,
+      "component_cost_usd": 0.12721919999999998,
+      "openrouter_usage_cost_usd": 0.1272192,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__eb303e01__r0",
+      "rep": 0,
+      "calls": 22,
+      "model_cost_usd": 0.1831393,
+      "component_cost_usd": 0.18313930000000003,
+      "openrouter_usage_cost_usd": 0.1831393,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__eb303e01__r0",
+      "rep": 0,
+      "calls": 9,
+      "model_cost_usd": 0.147752125,
+      "component_cost_usd": 0.147752125,
+      "openrouter_usage_cost_usd": 0.147752125,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__aceb0368__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.1333261,
+      "component_cost_usd": 0.1333261,
+      "openrouter_usage_cost_usd": 0.1333261,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__aceb0368__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.1222271,
+      "component_cost_usd": 0.1222271,
+      "openrouter_usage_cost_usd": 0.1222271,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__aceb0368__r0",
+      "rep": 0,
+      "calls": 21,
+      "model_cost_usd": 0.1609709,
+      "component_cost_usd": 0.16097090000000003,
+      "openrouter_usage_cost_usd": 0.1609709,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__aceb0368__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.09043965,
+      "component_cost_usd": 0.09043965000000001,
+      "openrouter_usage_cost_usd": 0.09043965,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__81c425f5__r0",
+      "rep": 0,
+      "calls": 7,
+      "model_cost_usd": 0.1301259,
+      "component_cost_usd": 0.13012590000000002,
+      "openrouter_usage_cost_usd": 0.1301259,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__81c425f5__r0",
+      "rep": 0,
+      "calls": 7,
+      "model_cost_usd": 0.0701142,
+      "component_cost_usd": 0.0701142,
+      "openrouter_usage_cost_usd": 0.0701142,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__81c425f5__r0",
+      "rep": 0,
+      "calls": 23,
+      "model_cost_usd": 0.1235638,
+      "component_cost_usd": 0.12356380000000002,
+      "openrouter_usage_cost_usd": 0.1235638,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__81c425f5__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.142443395,
+      "component_cost_usd": 0.142443395,
+      "openrouter_usage_cost_usd": 0.142443395,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__bc2b57f3__r0",
+      "rep": 0,
+      "calls": 9,
+      "model_cost_usd": 0.1407509,
+      "component_cost_usd": 0.1407509,
+      "openrouter_usage_cost_usd": 0.14075089999999998,
+      "difference_usd": 2.7755575615628914e-17
+    },
+    {
+      "run_id": "full__local-operator__bc2b57f3__r0",
+      "rep": 0,
+      "calls": 7,
+      "model_cost_usd": 0.0604809,
+      "component_cost_usd": 0.0604809,
+      "openrouter_usage_cost_usd": 0.060480900000000004,
+      "difference_usd": -6.938893903907228e-18
+    },
+    {
+      "run_id": "full__omp__bc2b57f3__r0",
+      "rep": 0,
+      "calls": 22,
+      "model_cost_usd": 0.0711375,
+      "component_cost_usd": 0.0711375,
+      "openrouter_usage_cost_usd": 0.07113749999999999,
+      "difference_usd": 1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__opencode__bc2b57f3__r0",
+      "rep": 0,
+      "calls": 8,
+      "model_cost_usd": 0.097472495,
+      "component_cost_usd": 0.097472495,
+      "openrouter_usage_cost_usd": 0.097472495,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__51f5801c__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0818694,
+      "component_cost_usd": 0.0818694,
+      "openrouter_usage_cost_usd": 0.08186940000000001,
+      "difference_usd": -1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__local-operator__51f5801c__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.0337537,
+      "component_cost_usd": 0.033753700000000005,
+      "openrouter_usage_cost_usd": 0.0337537,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__51f5801c__r0",
+      "rep": 0,
+      "calls": 21,
+      "model_cost_usd": 0.050885900000000005,
+      "component_cost_usd": 0.0508859,
+      "openrouter_usage_cost_usd": 0.0508859,
+      "difference_usd": 6.938893903907228e-18
+    },
+    {
+      "run_id": "full__opencode__51f5801c__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.06628281999999999,
+      "component_cost_usd": 0.06628282,
+      "openrouter_usage_cost_usd": 0.06628282,
+      "difference_usd": -1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__claude-code__5bc63fb9__r0",
+      "rep": 0,
+      "calls": 7,
+      "model_cost_usd": 0.1126452,
+      "component_cost_usd": 0.11264520000000001,
+      "openrouter_usage_cost_usd": 0.1126452,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__5bc63fb9__r0",
+      "rep": 0,
+      "calls": 7,
+      "model_cost_usd": 0.053453,
+      "component_cost_usd": 0.053453,
+      "openrouter_usage_cost_usd": 0.053453,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__5bc63fb9__r0",
+      "rep": 0,
+      "calls": 22,
+      "model_cost_usd": 0.0910736,
+      "component_cost_usd": 0.0910736,
+      "openrouter_usage_cost_usd": 0.0910736,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__5bc63fb9__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.11983181999999999,
+      "component_cost_usd": 0.11983181999999999,
+      "openrouter_usage_cost_usd": 0.11983181999999999,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__20236825__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.0939944,
+      "component_cost_usd": 0.09399439999999999,
+      "openrouter_usage_cost_usd": 0.09399439999999999,
+      "difference_usd": 1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__local-operator__20236825__r0",
+      "rep": 0,
+      "calls": 8,
+      "model_cost_usd": 0.0435564,
+      "component_cost_usd": 0.0435564,
+      "openrouter_usage_cost_usd": 0.0435564,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__20236825__r0",
+      "rep": 0,
+      "calls": 21,
+      "model_cost_usd": 0.0540942,
+      "component_cost_usd": 0.0540942,
+      "openrouter_usage_cost_usd": 0.0540942,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__20236825__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.070215845,
+      "component_cost_usd": 0.070215845,
+      "openrouter_usage_cost_usd": 0.070215845,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__8df7e444__r0",
+      "rep": 0,
+      "calls": 10,
+      "model_cost_usd": 0.14998129999999998,
+      "component_cost_usd": 0.14998129999999998,
+      "openrouter_usage_cost_usd": 0.14998129999999998,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__8df7e444__r0",
+      "rep": 0,
+      "calls": 12,
+      "model_cost_usd": 0.08579880000000001,
+      "component_cost_usd": 0.08579880000000001,
+      "openrouter_usage_cost_usd": 0.08579880000000001,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__8df7e444__r0",
+      "rep": 0,
+      "calls": 24,
+      "model_cost_usd": 0.1066386,
+      "component_cost_usd": 0.1066386,
+      "openrouter_usage_cost_usd": 0.1066386,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__8df7e444__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.087853645,
+      "component_cost_usd": 0.087853645,
+      "openrouter_usage_cost_usd": 0.08785364500000001,
+      "difference_usd": -1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__claude-code__37608790__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0786921,
+      "component_cost_usd": 0.0786921,
+      "openrouter_usage_cost_usd": 0.0786921,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__37608790__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.024582899999999998,
+      "component_cost_usd": 0.024582899999999998,
+      "openrouter_usage_cost_usd": 0.024582899999999998,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__37608790__r0",
+      "rep": 0,
+      "calls": 21,
+      "model_cost_usd": 0.0481849,
+      "component_cost_usd": 0.0481849,
+      "openrouter_usage_cost_usd": 0.0481849,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__37608790__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.06756567000000001,
+      "component_cost_usd": 0.06756567,
+      "openrouter_usage_cost_usd": 0.06756567000000001,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__abed40dc__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0782626,
+      "component_cost_usd": 0.0782626,
+      "openrouter_usage_cost_usd": 0.0782626,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__abed40dc__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0240009,
+      "component_cost_usd": 0.0240009,
+      "openrouter_usage_cost_usd": 0.0240009,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__abed40dc__r0",
+      "rep": 0,
+      "calls": 20,
+      "model_cost_usd": 0.041229,
+      "component_cost_usd": 0.041229,
+      "openrouter_usage_cost_usd": 0.041228999999999995,
+      "difference_usd": 6.938893903907228e-18
+    },
+    {
+      "run_id": "full__opencode__abed40dc__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.06015322,
+      "component_cost_usd": 0.06015322,
+      "openrouter_usage_cost_usd": 0.06015322,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__01b269ae__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0804462,
+      "component_cost_usd": 0.0804462,
+      "openrouter_usage_cost_usd": 0.0804462,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__01b269ae__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0266786,
+      "component_cost_usd": 0.0266786,
+      "openrouter_usage_cost_usd": 0.0266786,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__01b269ae__r0",
+      "rep": 0,
+      "calls": 20,
+      "model_cost_usd": 0.0440778,
+      "component_cost_usd": 0.0440778,
+      "openrouter_usage_cost_usd": 0.0440778,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__01b269ae__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.06309907000000001,
+      "component_cost_usd": 0.06309907000000001,
+      "openrouter_usage_cost_usd": 0.06309907,
+      "difference_usd": 1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__claude-code__1e8df695__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0805191,
+      "component_cost_usd": 0.0805191,
+      "openrouter_usage_cost_usd": 0.0805191,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__1e8df695__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0269777,
+      "component_cost_usd": 0.0269777,
+      "openrouter_usage_cost_usd": 0.0269777,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__1e8df695__r0",
+      "rep": 0,
+      "calls": 20,
+      "model_cost_usd": 0.047456899999999996,
+      "component_cost_usd": 0.047456899999999996,
+      "openrouter_usage_cost_usd": 0.0474569,
+      "difference_usd": -6.938893903907228e-18
+    },
+    {
+      "run_id": "full__opencode__1e8df695__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.06358669500000001,
+      "component_cost_usd": 0.063586695,
+      "openrouter_usage_cost_usd": 0.063586695,
+      "difference_usd": 1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__claude-code__eb03d19a__r0",
+      "rep": 0,
+      "calls": 1,
+      "model_cost_usd": 0.0038280000000000002,
+      "component_cost_usd": 0.0038280000000000002,
+      "openrouter_usage_cost_usd": 0.003828,
+      "difference_usd": 4.336808689942018e-19
+    },
+    {
+      "run_id": "full__local-operator__eb03d19a__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.031718300000000005,
+      "component_cost_usd": 0.031718300000000005,
+      "openrouter_usage_cost_usd": 0.031718300000000005,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__eb03d19a__r0",
+      "rep": 0,
+      "calls": 20,
+      "model_cost_usd": 0.042612500000000005,
+      "component_cost_usd": 0.042612500000000005,
+      "openrouter_usage_cost_usd": 0.042612500000000005,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__eb03d19a__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.069207245,
+      "component_cost_usd": 0.069207245,
+      "openrouter_usage_cost_usd": 0.069207245,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__7a4e4bc8__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0848956,
+      "component_cost_usd": 0.08489559999999999,
+      "openrouter_usage_cost_usd": 0.0848956,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__7a4e4bc8__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.0362307,
+      "component_cost_usd": 0.036230700000000005,
+      "openrouter_usage_cost_usd": 0.0362307,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__7a4e4bc8__r0",
+      "rep": 0,
+      "calls": 21,
+      "model_cost_usd": 0.057202,
+      "component_cost_usd": 0.057202,
+      "openrouter_usage_cost_usd": 0.057202,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__7a4e4bc8__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.06961611999999999,
+      "component_cost_usd": 0.06961611999999999,
+      "openrouter_usage_cost_usd": 0.06961612,
+      "difference_usd": -1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__claude-code__51b11269__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0848424,
+      "component_cost_usd": 0.0848424,
+      "openrouter_usage_cost_usd": 0.0848424,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__51b11269__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0318718,
+      "component_cost_usd": 0.0318718,
+      "openrouter_usage_cost_usd": 0.0318718,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__51b11269__r0",
+      "rep": 0,
+      "calls": 20,
+      "model_cost_usd": 0.047536,
+      "component_cost_usd": 0.047536,
+      "openrouter_usage_cost_usd": 0.047536,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__51b11269__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.07468909500000001,
+      "component_cost_usd": 0.074689095,
+      "openrouter_usage_cost_usd": 0.07468909500000001,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__0cecd4f3__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.08637790000000001,
+      "component_cost_usd": 0.08637790000000001,
+      "openrouter_usage_cost_usd": 0.0863779,
+      "difference_usd": 1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__local-operator__0cecd4f3__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.025862,
+      "component_cost_usd": 0.025862,
+      "openrouter_usage_cost_usd": 0.025862,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__0cecd4f3__r0",
+      "rep": 0,
+      "calls": 22,
+      "model_cost_usd": 0.0655202,
+      "component_cost_usd": 0.0655202,
+      "openrouter_usage_cost_usd": 0.0655202,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__0cecd4f3__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.080282395,
+      "component_cost_usd": 0.080282395,
+      "openrouter_usage_cost_usd": 0.080282395,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__0e763496__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0910314,
+      "component_cost_usd": 0.0910314,
+      "openrouter_usage_cost_usd": 0.0910314,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__0e763496__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0305928,
+      "component_cost_usd": 0.0305928,
+      "openrouter_usage_cost_usd": 0.0305928,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__0e763496__r0",
+      "rep": 0,
+      "calls": 20,
+      "model_cost_usd": 0.0494048,
+      "component_cost_usd": 0.049404800000000006,
+      "openrouter_usage_cost_usd": 0.0494048,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__0e763496__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.074883195,
+      "component_cost_usd": 0.07488319500000001,
+      "openrouter_usage_cost_usd": 0.074883195,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__e528b65e__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.080049,
+      "component_cost_usd": 0.08004900000000001,
+      "openrouter_usage_cost_usd": 0.080049,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__e528b65e__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0264181,
+      "component_cost_usd": 0.0264181,
+      "openrouter_usage_cost_usd": 0.0264181,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__e528b65e__r0",
+      "rep": 0,
+      "calls": 20,
+      "model_cost_usd": 0.046456,
+      "component_cost_usd": 0.046456000000000004,
+      "openrouter_usage_cost_usd": 0.046456,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__e528b65e__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.06829992,
+      "component_cost_usd": 0.06829992,
+      "openrouter_usage_cost_usd": 0.06829992,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__d53ff5ee__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0973609,
+      "component_cost_usd": 0.09736089999999999,
+      "openrouter_usage_cost_usd": 0.0973609,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__d53ff5ee__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.034049499999999996,
+      "component_cost_usd": 0.034049499999999996,
+      "openrouter_usage_cost_usd": 0.0340495,
+      "difference_usd": -6.938893903907228e-18
+    },
+    {
+      "run_id": "full__omp__d53ff5ee__r0",
+      "rep": 0,
+      "calls": 21,
+      "model_cost_usd": 0.061201500000000006,
+      "component_cost_usd": 0.0612015,
+      "openrouter_usage_cost_usd": 0.0612015,
+      "difference_usd": 6.938893903907228e-18
+    },
+    {
+      "run_id": "full__opencode__d53ff5ee__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.074835495,
+      "component_cost_usd": 0.074835495,
+      "openrouter_usage_cost_usd": 0.074835495,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__73c99fb9__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.09050470000000001,
+      "component_cost_usd": 0.0905047,
+      "openrouter_usage_cost_usd": 0.0905047,
+      "difference_usd": 1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__local-operator__73c99fb9__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.035616800000000004,
+      "component_cost_usd": 0.0356168,
+      "openrouter_usage_cost_usd": 0.0356168,
+      "difference_usd": 6.938893903907228e-18
+    },
+    {
+      "run_id": "full__omp__73c99fb9__r0",
+      "rep": 0,
+      "calls": 21,
+      "model_cost_usd": 0.0669654,
+      "component_cost_usd": 0.0669654,
+      "openrouter_usage_cost_usd": 0.0669654,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__73c99fb9__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.06537992,
+      "component_cost_usd": 0.06537992,
+      "openrouter_usage_cost_usd": 0.06537992,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__edb61b14__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0844365,
+      "component_cost_usd": 0.0844365,
+      "openrouter_usage_cost_usd": 0.0844365,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__edb61b14__r0",
+      "rep": 0,
+      "calls": 6,
+      "model_cost_usd": 0.0359495,
+      "component_cost_usd": 0.035949499999999995,
+      "openrouter_usage_cost_usd": 0.0359495,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__edb61b14__r0",
+      "rep": 0,
+      "calls": 21,
+      "model_cost_usd": 0.057285800000000005,
+      "component_cost_usd": 0.057285800000000005,
+      "openrouter_usage_cost_usd": 0.0572858,
+      "difference_usd": 6.938893903907228e-18
+    },
+    {
+      "run_id": "full__opencode__edb61b14__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.073951645,
+      "component_cost_usd": 0.073951645,
+      "openrouter_usage_cost_usd": 0.073951645,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__9cf05d24__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0748927,
+      "component_cost_usd": 0.0748927,
+      "openrouter_usage_cost_usd": 0.07489269999999999,
+      "difference_usd": 1.3877787807814457e-17
+    },
+    {
+      "run_id": "full__local-operator__9cf05d24__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0221603,
+      "component_cost_usd": 0.0221603,
+      "openrouter_usage_cost_usd": 0.0221603,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__9cf05d24__r0",
+      "rep": 0,
+      "calls": 20,
+      "model_cost_usd": 0.040619,
+      "component_cost_usd": 0.040619,
+      "openrouter_usage_cost_usd": 0.040619,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__9cf05d24__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.058418145,
+      "component_cost_usd": 0.058418145,
+      "openrouter_usage_cost_usd": 0.058418145,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__claude-code__276cc624__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.0759301,
+      "component_cost_usd": 0.0759301,
+      "openrouter_usage_cost_usd": 0.0759301,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__276cc624__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0208187,
+      "component_cost_usd": 0.020818700000000002,
+      "openrouter_usage_cost_usd": 0.0208187,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__omp__276cc624__r0",
+      "rep": 0,
+      "calls": 20,
+      "model_cost_usd": 0.039971400000000004,
+      "component_cost_usd": 0.0399714,
+      "openrouter_usage_cost_usd": 0.0399714,
+      "difference_usd": 6.938893903907228e-18
+    },
+    {
+      "run_id": "full__opencode__276cc624__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.057030370000000004,
+      "component_cost_usd": 0.057030370000000004,
+      "openrouter_usage_cost_usd": 0.05703037,
+      "difference_usd": 6.938893903907228e-18
+    },
+    {
+      "run_id": "full__claude-code__930fdb3b__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.075186,
+      "component_cost_usd": 0.075186,
+      "openrouter_usage_cost_usd": 0.075186,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__local-operator__930fdb3b__r0",
+      "rep": 0,
+      "calls": 5,
+      "model_cost_usd": 0.0252161,
+      "component_cost_usd": 0.025216099999999998,
+      "openrouter_usage_cost_usd": 0.025216099999999998,
+      "difference_usd": 3.469446951953614e-18
+    },
+    {
+      "run_id": "full__omp__930fdb3b__r0",
+      "rep": 0,
+      "calls": 20,
+      "model_cost_usd": 0.0402172,
+      "component_cost_usd": 0.0402172,
+      "openrouter_usage_cost_usd": 0.0402172,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__opencode__930fdb3b__r0",
+      "rep": 0,
+      "calls": 4,
+      "model_cost_usd": 0.058301445,
+      "component_cost_usd": 0.058301445,
+      "openrouter_usage_cost_usd": 0.058301445,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__codex__eb303e01__r0",
+      "rep": 0,
+      "calls": 19,
+      "model_cost_usd": 9.9649595,
+      "component_cost_usd": 9.964959499999997,
+      "openrouter_usage_cost_usd": 9.9649595,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__codex__aceb0368__r0",
+      "rep": 0,
+      "calls": 43,
+      "model_cost_usd": 2.99744,
+      "component_cost_usd": 2.9974400000000005,
+      "openrouter_usage_cost_usd": 2.99744,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__codex__81c425f5__r0",
+      "rep": 0,
+      "calls": 119,
+      "model_cost_usd": 6.480072,
+      "component_cost_usd": 6.480072000000001,
+      "openrouter_usage_cost_usd": 6.480072,
+      "difference_usd": 0.0
+    },
+    {
+      "run_id": "full__codex__bc2b57f3__r0",
+      "rep": 0,
+      "calls": 53,
+      "model_cost_usd": 3.5656837,
+      "component_cost_usd": 3.5656836999999992,
+      "openrouter_usage_cost_usd": 3.5656837,
+      "difference_usd": 0.0
+    }
+  ],
+  "priced_requests": 1533,
+  "all_requests": 1575,
+  "excluded_discovery_requests": 41,
+  "unmetered_message_requests": 1,
+  "model_cost_usd": 36.909711435,
+  "openrouter_usage_cost_usd": 36.909711435,
+  "rep0_cost_usd": 32.766771485,
+  "smoke_cost_usd": 4.14293995,
+  "note": "OpenRouter usage.cost is derived from the same usage block, not an independent invoice; earlier aborted logs are not included"
+}

@@ -1,0 +1,478 @@
+[
+  {
+    "layout": "cc-deferred",
+    "fixture_sha256": "e601f8ff69ce5cdbc4bf2b2b205ed0fdfef83d1121bc04d2140ded16f248038d",
+    "n_tools": 12,
+    "system_shape": "list",
+    "native_markers": [
+      [
+        "/system/1",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/system/2",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/messages/7/content/0",
+        {
+          "type": "ephemeral"
+        }
+      ]
+    ],
+    "first_tool_has_description": true,
+    "first_tool_deferred": false,
+    "native_markers_preserved": true,
+    "neutralized_breakpoints": 0,
+    "policy": "cache-namespace-decimal-v2",
+    "scope_sha256": "41fc53afd6ce7924017f4b6adccbf8a1bc4ea943d9268fff14e95cf9f50d46cb",
+    "tag_chars": 125,
+    "locations": [
+      "/tools/0/description",
+      "/system/0/text"
+    ],
+    "before_sha256": "e601f8ff69ce5cdbc4bf2b2b205ed0fdfef83d1121bc04d2140ded16f248038d",
+    "after_sha256": "cca48bc4189dc51b17634a173fa09f60a5c90363d039ba2c6a212fa5cd117e75",
+    "tools_sha256": "8a3ad199add99c6233216efbdec5e799007047889289d768c4f2efbf2c538b2a",
+    "system_sha256": "b029e559078a4627ae519452db3dc25aa1aa66d93cbe5df8bef7dacdd4a9bb50",
+    "prefix_fingerprints": [
+      {
+        "path": "/system/1",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "62b8ad66e988c56001d595a644161ee3a52ddea13d6b8157520483de5d38b82c",
+        "canonical_json_prefix_bytes": 43285
+      },
+      {
+        "path": "/system/2",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "1904ceda6fc4f7da6940e54dccfb31f5e7bd6899d59dd7ffebbe77b1a5f049c9",
+        "canonical_json_prefix_bytes": 70863
+      },
+      {
+        "path": "/messages/7/content/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "9c1f5ad733f77c97f7c8565be3ab1c2753c36f9dea5d302f79d5c7602282af61",
+        "canonical_json_prefix_bytes": 111072
+      }
+    ]
+  },
+  {
+    "layout": "codex-eager",
+    "fixture_sha256": "b8b22c68b8873a174bab6cc53c11544a7bb36d7288b0cb55b3c51b532155e261",
+    "n_tools": 496,
+    "system_shape": "list",
+    "native_markers": [],
+    "first_tool_has_description": true,
+    "first_tool_deferred": false,
+    "native_markers_preserved": true,
+    "neutralized_breakpoints": 0,
+    "policy": "cache-namespace-decimal-v2",
+    "scope_sha256": "41fc53afd6ce7924017f4b6adccbf8a1bc4ea943d9268fff14e95cf9f50d46cb",
+    "tag_chars": 125,
+    "locations": [
+      "/tools/0/description",
+      "/system/0/text"
+    ],
+    "before_sha256": "b8b22c68b8873a174bab6cc53c11544a7bb36d7288b0cb55b3c51b532155e261",
+    "after_sha256": "2c51e7e1e1faa6e14a6f848daecae51c54ef3171422ca5d57426bd52fd28c9c4",
+    "tools_sha256": "181dbf9c389def2caa0f68006fc14b1ce3dfa594541f438e1ac64d20b97f062f",
+    "system_sha256": "6f93efb7a8c9f031af8398680a4b2610d4045cf9b987bb513d357c64d558d59b",
+    "prefix_fingerprints": []
+  },
+  {
+    "layout": "codex-search-bridged",
+    "fixture_sha256": "cb0b8793d5af9d66443efbd1a6828c59c7f2edfc4eb1d8b832c5efb50bc901d9",
+    "n_tools": 12,
+    "system_shape": "list",
+    "native_markers": [],
+    "first_tool_has_description": true,
+    "first_tool_deferred": false,
+    "native_markers_preserved": true,
+    "neutralized_breakpoints": 0,
+    "policy": "cache-namespace-decimal-v2",
+    "scope_sha256": "41fc53afd6ce7924017f4b6adccbf8a1bc4ea943d9268fff14e95cf9f50d46cb",
+    "tag_chars": 125,
+    "locations": [
+      "/tools/0/description",
+      "/system/0/text"
+    ],
+    "before_sha256": "cb0b8793d5af9d66443efbd1a6828c59c7f2edfc4eb1d8b832c5efb50bc901d9",
+    "after_sha256": "4e27b5ba0975ec462f803a64914c374d6aa77528058482e80acec6302be309ce",
+    "tools_sha256": "d3a4222b3b2a2d6161e216f3fb5d575ad53e6aa604f0d759e5fa050b7a8f386a",
+    "system_sha256": "46ad0a5d109b3a1c77bc64c13bb8fd4a6ed259ca17600237a921ac1bab778e58",
+    "prefix_fingerprints": []
+  },
+  {
+    "layout": "lop",
+    "fixture_sha256": "49fed4474e114500dded21962075bc022b03823400a93b399fc64c21e2008b97",
+    "n_tools": 28,
+    "system_shape": "list",
+    "native_markers": [
+      [
+        "/system/0",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/system/1",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/messages/0/content/0",
+        {
+          "type": "ephemeral"
+        }
+      ]
+    ],
+    "first_tool_has_description": true,
+    "first_tool_deferred": false,
+    "native_markers_preserved": true,
+    "neutralized_breakpoints": 0,
+    "policy": "cache-namespace-decimal-v2",
+    "scope_sha256": "41fc53afd6ce7924017f4b6adccbf8a1bc4ea943d9268fff14e95cf9f50d46cb",
+    "tag_chars": 125,
+    "locations": [
+      "/tools/0/description",
+      "/system/0/text"
+    ],
+    "before_sha256": "49fed4474e114500dded21962075bc022b03823400a93b399fc64c21e2008b97",
+    "after_sha256": "52f1772acfe301dc22efa6ed46cc0a1037bcd5c619165e453b954c1e34de363d",
+    "tools_sha256": "316ec282550d2b57b8e481ac5d93b1ec042b7662d11a836af77b65b915e9f1b8",
+    "system_sha256": "7debdff2b4aa822c9e42d7202f73505c45dc7b8bc4fe11adf90a74a2752aa0ed",
+    "prefix_fingerprints": [
+      {
+        "path": "/system/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "2266edc20a11a334647696e078a099b11aec17b4e4b41ef934b3ff6287b9ed5d",
+        "canonical_json_prefix_bytes": 80630
+      },
+      {
+        "path": "/system/1",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "6dd19ad91d6cc795743bf5bee70a2c7271024a6bc7d592c9206898f1814b9a2e",
+        "canonical_json_prefix_bytes": 81910
+      },
+      {
+        "path": "/messages/0/content/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "d2ec1b804870afefb346ba9f0bac3c3f8aa65064d06ef350365bceb06f2d32f9",
+        "canonical_json_prefix_bytes": 85923
+      }
+    ]
+  },
+  {
+    "layout": "omp",
+    "fixture_sha256": "73ad1c89e85349fea24f0050a9f7619440134a039c0b2ba76c7847727f030bef",
+    "n_tools": 11,
+    "system_shape": "list",
+    "native_markers": [
+      [
+        "/tools/10",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/system/0",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/messages/5/content/1",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/messages/6/content/0",
+        {
+          "type": "ephemeral"
+        }
+      ]
+    ],
+    "first_tool_has_description": true,
+    "first_tool_deferred": false,
+    "native_markers_preserved": true,
+    "neutralized_breakpoints": 0,
+    "policy": "cache-namespace-decimal-v2",
+    "scope_sha256": "41fc53afd6ce7924017f4b6adccbf8a1bc4ea943d9268fff14e95cf9f50d46cb",
+    "tag_chars": 125,
+    "locations": [
+      "/tools/0/description",
+      "/system/0/text"
+    ],
+    "before_sha256": "73ad1c89e85349fea24f0050a9f7619440134a039c0b2ba76c7847727f030bef",
+    "after_sha256": "d4c42694940524681d817f0950ddd3252c171c72417b5beaf935d2423d2ff37d",
+    "tools_sha256": "9ec0c00bfc5af9afe4718234ff395b61f45e51690bf63e2cfa5d765d44d1b624",
+    "system_sha256": "ca82ff4c68c8df967476e3051014852b2ab356ce6954b3ebd140e6d30a05c08d",
+    "prefix_fingerprints": [
+      {
+        "path": "/tools/10",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "8f819ec9a98d0f985dc0fc93f8ad050fece18fd21e84c6df696d114c194a71bc",
+        "canonical_json_prefix_bytes": 17001
+      },
+      {
+        "path": "/system/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "15893f1960d46ac500c8bfecaae28ddd362b96bba23b428b924697e1384b247c",
+        "canonical_json_prefix_bytes": 111699
+      },
+      {
+        "path": "/messages/5/content/1",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "438652c6131dc11bb8045b7eea9ca83d97393bf66105587bf4c494aeed3c1725",
+        "canonical_json_prefix_bytes": 138168
+      },
+      {
+        "path": "/messages/6/content/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "0f864ca78f75c2db7efe08fbf7cadabf37489a85a3efea87549bca244e3b93bd",
+        "canonical_json_prefix_bytes": 138679
+      }
+    ]
+  },
+  {
+    "layout": "opencode",
+    "fixture_sha256": "b178256bff36c99e2e40380f7537c6ab6f7c543d4ed95523f5238bd987546209",
+    "n_tools": 12,
+    "system_shape": "list",
+    "native_markers": [
+      [
+        "/tools/11",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/system/0",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/system/3",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/messages/0/content/0",
+        {
+          "type": "ephemeral"
+        }
+      ]
+    ],
+    "first_tool_has_description": true,
+    "first_tool_deferred": false,
+    "native_markers_preserved": true,
+    "neutralized_breakpoints": 0,
+    "policy": "cache-namespace-decimal-v2",
+    "scope_sha256": "41fc53afd6ce7924017f4b6adccbf8a1bc4ea943d9268fff14e95cf9f50d46cb",
+    "tag_chars": 125,
+    "locations": [
+      "/tools/0/description",
+      "/system/0/text"
+    ],
+    "before_sha256": "b178256bff36c99e2e40380f7537c6ab6f7c543d4ed95523f5238bd987546209",
+    "after_sha256": "e3ba7e2ae6045c3f546e0db9bb07762e783e310fa0de43b65f441e52c07813de",
+    "tools_sha256": "268f1e2f24c3024d4833ee6ca52ab79d958a9266cc5e15b48db9d002f4706968",
+    "system_sha256": "dcc903ee554fb50c19409767023ffb83aabca896dee45f4d83130ae6d0432f91",
+    "prefix_fingerprints": [
+      {
+        "path": "/tools/11",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "9f96cf6dd0d788fbef8105631ff17cbc842ab427cb54e0d3f37526c1f6ffcc3d",
+        "canonical_json_prefix_bytes": 12932
+      },
+      {
+        "path": "/system/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "9a9916ef7668cfe6be086c4f27ccd8f54a3954287843d7ac0141184ad7320e97",
+        "canonical_json_prefix_bytes": 14929
+      },
+      {
+        "path": "/system/3",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "eae60ed619cf5fafe78e6c35039b46e2395cd6b99b0831fe4534de95863ec663",
+        "canonical_json_prefix_bytes": 54118
+      },
+      {
+        "path": "/messages/0/content/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "89fee34b5b214cc1ef8e119141e20a41bd087084f554636db4443efd908a4ae6",
+        "canonical_json_prefix_bytes": 54845
+      }
+    ]
+  },
+  {
+    "layout": "hermes",
+    "fixture_sha256": "72c728e0b8efaf10a939c611bb2580ad046ddfcb11c91fb7210727afe3898e05",
+    "n_tools": 20,
+    "system_shape": "list",
+    "native_markers": [
+      [
+        "/system/0",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/system/1",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/messages/0/content/0",
+        {
+          "type": "ephemeral"
+        }
+      ]
+    ],
+    "first_tool_has_description": true,
+    "first_tool_deferred": false,
+    "native_markers_preserved": true,
+    "neutralized_breakpoints": 0,
+    "policy": "cache-namespace-decimal-v2",
+    "scope_sha256": "41fc53afd6ce7924017f4b6adccbf8a1bc4ea943d9268fff14e95cf9f50d46cb",
+    "tag_chars": 125,
+    "locations": [
+      "/tools/0/description",
+      "/system/0/text"
+    ],
+    "before_sha256": "72c728e0b8efaf10a939c611bb2580ad046ddfcb11c91fb7210727afe3898e05",
+    "after_sha256": "59bdbefd2235a9ae7868a1feb78ceed61169c275f5c59d3f96cfbff00c39e1ee",
+    "tools_sha256": "440a236f98e151892b02927faeac550bd592e0446a142d0326a025dfc0f11d91",
+    "system_sha256": "e74c8b4ad53ef58144e94c8ab04e09882b3fc4d77b059be3d2834e943ce710a2",
+    "prefix_fingerprints": [
+      {
+        "path": "/system/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "ef36d4d68a56a3b837ef07828069e21fd14a92b666eb4ced119f20b72aa3d8d5",
+        "canonical_json_prefix_bytes": 51517
+      },
+      {
+        "path": "/system/1",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "869151f5b54b7c17ce5e48ed3585a738eeb58959999d55f5e5019e6614a0b16a",
+        "canonical_json_prefix_bytes": 61467
+      },
+      {
+        "path": "/messages/0/content/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "6bfdc524815b372ebf7b67fba58f38b93e7fb256cf0e70107b496349e547d21c",
+        "canonical_json_prefix_bytes": 62308
+      }
+    ]
+  },
+  {
+    "layout": "dsh-reduced-not-full",
+    "fixture_sha256": "ae4934b60fc2cd82173460406bfd919583c2e597a6b002d430f1809f43c6f3a1",
+    "n_tools": 24,
+    "system_shape": "list",
+    "native_markers": [
+      [
+        "/tools/23",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/system/0",
+        {
+          "type": "ephemeral"
+        }
+      ],
+      [
+        "/messages/11/content/0",
+        {
+          "type": "ephemeral"
+        }
+      ]
+    ],
+    "first_tool_has_description": true,
+    "first_tool_deferred": false,
+    "native_markers_preserved": true,
+    "neutralized_breakpoints": 0,
+    "policy": "cache-namespace-decimal-v2",
+    "scope_sha256": "41fc53afd6ce7924017f4b6adccbf8a1bc4ea943d9268fff14e95cf9f50d46cb",
+    "tag_chars": 125,
+    "locations": [
+      "/tools/0/description",
+      "/system/0/text"
+    ],
+    "before_sha256": "ae4934b60fc2cd82173460406bfd919583c2e597a6b002d430f1809f43c6f3a1",
+    "after_sha256": "fcda87d490187bc2e7626e17377555ba0e722b4b3520aa8f0beb75f2ab1a8d0a",
+    "tools_sha256": "6eacfb4511b5e7012b92310488da6676bd4869c017af57c2c78bd16de21dc749",
+    "system_sha256": "8713473a037a3dd3d3056520ba57c4ae9a61456867966b1a70b7439f9c7a5df8",
+    "prefix_fingerprints": [
+      {
+        "path": "/tools/23",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "9adeba8c235894981a6ed56c114a18d97d8177599220b8f2eafe62dfee5b9c7e",
+        "canonical_json_prefix_bytes": 19633
+      },
+      {
+        "path": "/system/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "e4fb559ab37c8e70fd00a90fcb019dea7cd9be65873b37cfeac8f7f21f48b39f",
+        "canonical_json_prefix_bytes": 22510
+      },
+      {
+        "path": "/messages/11/content/0",
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "conceptual_prefix_sha256": "a7ace268831197c40518c4b7495a1b4ed968fd2230a62df273a24f67febf0b10",
+        "canonical_json_prefix_bytes": 65839
+      }
+    ]
+  }
+]

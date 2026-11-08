@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+.mplconfig/
+public_loadout/kit-src/
+public_loadout/mcp_calls.jsonl
+*.zip

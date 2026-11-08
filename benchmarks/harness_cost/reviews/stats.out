@@ -1,0 +1,50 @@
+
+== arm=full metric=warm tier=all n_tasks=24
+omp          n=24 omp/LOP geo-mean ratio 1.63 [1.52,1.74]  median 1.63 [1.58,1.76]  ratio-of-means 1.57 [1.46,1.70]  LOP cheaper 24/24 sign p=1.2e-07  Wilcoxon p=1.2e-07  | pass LOP 16 vs 17 discordant 0/1 McNemar p=1.00
+opencode     n=24 opencode/LOP geo-mean ratio 2.03 [1.76,2.29]  median 2.22 [1.96,2.37]  ratio-of-means 1.82 [1.53,2.19]  LOP cheaper 23/24 sign p=3e-06  Wilcoxon p=6e-07  | pass LOP 16 vs 17 discordant 1/2 McNemar p=1.00
+claude-code  n=24 claude-code/LOP geo-mean ratio 2.18 [1.60,2.71]  median 2.60 [2.29,2.98]  ratio-of-means 2.13 [1.78,2.56]  LOP cheaper 23/24 sign p=3e-06  Wilcoxon p=9.1e-05  | pass LOP 16 vs 14 discordant 2/0 McNemar p=0.50
+  | pass LOP 2 vs 3 discordant 0/1 McNemar p=1.00
+
+== arm=full metric=cold tier=all n_tasks=24
+omp          n=24 omp/LOP geo-mean ratio 1.45 [1.41,1.48]  median 1.44 [1.42,1.49]  ratio-of-means 1.44 [1.40,1.48]  LOP cheaper 24/24 sign p=1.2e-07  Wilcoxon p=1.2e-07  | pass LOP 16 vs 17 discordant 0/1 McNemar p=1.00
+opencode     n=24 opencode/LOP geo-mean ratio 0.81 [0.77,0.87]  median 0.77 [0.75,0.82]  ratio-of-means 0.82 [0.77,0.89]  LOP cheaper 3/24 sign p=0.00028  Wilcoxon p=2e-05  | pass LOP 16 vs 17 discordant 1/2 McNemar p=1.00
+claude-code  n=24 claude-code/LOP geo-mean ratio 1.03 [0.76,1.21]  median 1.18 [1.16,1.19]  ratio-of-means 1.14 [1.03,1.21]  LOP cheaper 23/24 sign p=3e-06  Wilcoxon p=9.1e-05  | pass LOP 16 vs 14 discordant 2/0 McNemar p=0.50
+  | pass LOP 2 vs 3 discordant 0/1 McNemar p=1.00
+
+== arm=full metric=warm tier=short n_tasks=16
+omp          n=16 omp/LOP geo-mean ratio 1.73 [1.63,1.86]  median 1.74 [1.59,1.83]  ratio-of-means 1.74 [1.63,1.87]  LOP cheaper 16/16 sign p=3.1e-05  Wilcoxon p=3.1e-05  | pass LOP 12 vs 12 discordant 0/0 McNemar p=1.00
+opencode     n=16 opencode/LOP geo-mean ratio 2.38 [2.22,2.53]  median 2.36 [2.20,2.59]  ratio-of-means 2.35 [2.20,2.53]  LOP cheaper 16/16 sign p=3.1e-05  Wilcoxon p=3.1e-05  | pass LOP 12 vs 12 discordant 1/1 McNemar p=1.00
+claude-code  n=16 claude-code/LOP geo-mean ratio 2.41 [1.57,3.09]  median 2.98 [2.66,3.20]  ratio-of-means 2.72 [2.28,3.05]  LOP cheaper 15/16 sign p=0.00052  Wilcoxon p=0.0052  | pass LOP 12 vs 10 discordant 2/0 McNemar p=0.50
+
+== arm=full metric=warm tier=long n_tasks=8
+omp          n= 8 omp/LOP geo-mean ratio 1.43 [1.29,1.58]  median 1.41 [1.24,1.70]  ratio-of-means 1.44 [1.30,1.60]  LOP cheaper 8/8 sign p=0.0078  Wilcoxon p=0.0078  | pass LOP 4 vs 5 discordant 0/1 McNemar p=1.00
+opencode     n= 8 opencode/LOP geo-mean ratio 1.48 [1.14,1.85]  median 1.61 [1.02,2.03]  ratio-of-means 1.41 [1.09,1.85]  LOP cheaper 7/8 sign p=0.07  Wilcoxon p=0.039  | pass LOP 4 vs 5 discordant 0/1 McNemar p=1.00
+claude-code  n= 8 claude-code/LOP geo-mean ratio 1.78 [1.43,2.16]  median 1.98 [1.11,2.33]  ratio-of-means 1.66 [1.33,2.11]  LOP cheaper 8/8 sign p=0.0078  Wilcoxon p=0.0078  | pass LOP 4 vs 4 discordant 0/0 McNemar p=1.00
+  | pass LOP 2 vs 3 discordant 0/1 McNemar p=1.00
+
+== arm=clean metric=warm tier=all n_tasks=16
+omp          n=16 omp/LOP geo-mean ratio 0.83 [0.76,0.92]  median 0.78 [0.75,0.88]  ratio-of-means 0.85 [0.77,0.95]  LOP cheaper 3/16 sign p=0.021  Wilcoxon p=0.0076  | pass LOP 13 vs 13 discordant 1/1 McNemar p=1.00
+opencode     n=16 opencode/LOP geo-mean ratio 0.99 [0.90,1.08]  median 0.99 [0.90,1.06]  ratio-of-means 1.00 [0.91,1.09]  LOP cheaper 7/16 sign p=0.8  Wilcoxon p=0.63  | pass LOP 13 vs 13 discordant 1/1 McNemar p=1.00
+claude-code  n=16 claude-code/LOP geo-mean ratio 2.50 [2.31,2.65]  median 2.63 [2.36,2.75]  ratio-of-means 2.47 [2.29,2.65]  LOP cheaper 16/16 sign p=3.1e-05  Wilcoxon p=3.1e-05  | pass LOP 13 vs 12 discordant 2/1 McNemar p=1.00
+codex        n=16 codex/LOP geo-mean ratio 2.34 [1.92,2.68]  median 2.51 [2.29,2.76]  ratio-of-means 2.40 [2.11,2.67]  LOP cheaper 15/16 sign p=0.00052  Wilcoxon p=6.1e-05  | pass LOP 13 vs 12 discordant 2/1 McNemar p=1.00
+
+== arm=clean metric=cold tier=all n_tasks=16
+omp          n=16 omp/LOP geo-mean ratio 0.59 [0.57,0.62]  median 0.58 [0.56,0.60]  ratio-of-means 0.59 [0.57,0.62]  LOP cheaper 0/16 sign p=3.1e-05  Wilcoxon p=3.1e-05  | pass LOP 13 vs 13 discordant 1/1 McNemar p=1.00
+opencode     n=16 opencode/LOP geo-mean ratio 0.45 [0.43,0.48]  median 0.46 [0.42,0.48]  ratio-of-means 0.46 [0.43,0.49]  LOP cheaper 0/16 sign p=3.1e-05  Wilcoxon p=3.1e-05  | pass LOP 13 vs 13 discordant 1/1 McNemar p=1.00
+claude-code  n=16 claude-code/LOP geo-mean ratio 1.56 [1.52,1.60]  median 1.58 [1.54,1.61]  ratio-of-means 1.56 [1.52,1.60]  LOP cheaper 16/16 sign p=3.1e-05  Wilcoxon p=3.1e-05  | pass LOP 13 vs 12 discordant 2/1 McNemar p=1.00
+codex        n=16 codex/LOP geo-mean ratio 0.75 [0.71,0.79]  median 0.73 [0.71,0.78]  ratio-of-means 0.76 [0.71,0.80]  LOP cheaper 0/16 sign p=3.1e-05  Wilcoxon p=3.1e-05  | pass LOP 13 vs 12 discordant 2/1 McNemar p=1.00
+
+== pass rate Wilson 95% CI, full arm
+local-operator  16/24 = 67% [47%,82%]
+omp             17/24 = 71% [51%,85%]
+opencode        17/24 = 71% [51%,85%]
+claude-code     14/24 = 58% [39%,76%]
+
+== cost per pass, bootstrap over tasks, full arm (ratio vs LOP)
+local-operator  cpp 6.5c [4.3,10.4]  ratio vs LOP [1.00,1.00]
+omp             cpp 9.6c [6.7,14.8]  ratio vs LOP [1.28,1.66]
+opencode        cpp 11.2c [8.5,16.1]  ratio vs LOP [1.29,2.28]
+claude-code     cpp 15.8c [11.4,24.7]  ratio vs LOP [1.95,3.18]
+
+Friedman (4 harnesses, 24 tasks, warm): FriedmanchisquareResult(statistic=np.float64(52.150000000000034), pvalue=np.float64(2.7825251403164187e-11))
+mean ranks (1=cheapest): {'lop': np.float64(1.08), 'omp': np.float64(2.29), 'oc': np.float64(2.96), 'cc': np.float64(3.67)}

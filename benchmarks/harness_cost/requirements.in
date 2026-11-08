@@ -1,0 +1,6 @@
+# Analysis only: no harness, office, MCP, statistics, or API-client dependencies.
+matplotlib==3.10.7
+numpy==2.3.4
+# Match the application's botocore-compatible dateutil range when CI installs
+# this standalone kit for type discovery. Plot regeneration does not use dates.
+python-dateutil==2.9.0.post0

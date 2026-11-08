@@ -1,0 +1,3 @@
+# Optional historical hypothesis tests; not needed to regenerate figures.
+-r ../requirements.txt
+scipy==1.16.3

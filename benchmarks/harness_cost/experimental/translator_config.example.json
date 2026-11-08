@@ -1,0 +1,18 @@
+{
+  "model_list": [
+    {
+      "model_name": "claude-sonnet-5-5",
+      "litellm_params": {
+        "model": "anthropic/claude-sonnet-5-5",
+        "api_base": "http://127.0.0.1:8787/r/@current",
+        "api_key": "bench-local-placeholder"
+      }
+    }
+  ],
+  "litellm_settings": {
+    "drop_params": false
+  },
+  "general_settings": {
+    "master_key": "os.environ/BENCH_LITELLM_KEY"
+  }
+}
