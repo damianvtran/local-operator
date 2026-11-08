@@ -168,6 +168,8 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # which a complete viewer must never mistake for a complete result. Named
     # here so the tuple, the ask condition and the tests read ONE spelling.
     "peer-journal-source-v1",
+    # Conditional member-table pull; see MEMBER_LIST_DIGEST_V1 below for why.
+    "member-list-digest-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: The complete peer-source stored-read capability (``relay.py``'s source
@@ -223,6 +225,18 @@ PAIR_OFFER_V1 = "pair-offer-v1"
 #: so it is the one capability the codec itself consumes: ``Handshake.codec``
 #: enables compression on a link only when BOTH ends advertised this string.
 ZLIB_RECORDS_V1 = "zlib-records-v1"
+#: The conditional member-table read (``relay._op_member_list``). WHY: every live
+#: link re-pulls the WHOLE member table every 15 s in each direction
+#: (``relay.MEMBERSHIP_PULL_MIN_INTERVAL_S``) and on a settled mesh the answer is
+#: the same table every time — measured on the two-relay rig 2026-11-08 at
+#: 1.43 KB per reply with 2 members (below the compression threshold) and ~0.79 KB
+#: compressed with 6, i.e. ~17 MB per link per day for no information. A puller
+#: that negotiated this string sends ``if_digest`` (its own
+#: ``relay.member_sync_digest``) and a server whose table hashes the same answers
+#: ``unchanged`` with no rows. GATED BOTH WAYS: a build without the string never
+#: sends ``if_digest`` and keeps getting full tables, and a peer without it is
+#: never sent one, so a mixed mesh pulls exactly as before.
+MEMBER_LIST_DIGEST_V1 = "member-list-digest-v1"
 
 
 # ---------------------------------------------------------------------------

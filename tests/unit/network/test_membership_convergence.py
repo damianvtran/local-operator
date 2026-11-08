@@ -2010,3 +2010,204 @@ def test_status_verb_control_the_old_empty_assertion_fails_after_a_legitimate_pa
     assert (
         a.server._membership_seq == seq_before + 1  # noqa: SLF001
     ), "reading the report ran another pass"
+
+
+# ---------------------------------------------------------------------------
+# The conditional member pull (``wire.MEMBER_LIST_DIGEST_V1``)
+# ---------------------------------------------------------------------------
+#
+# WHY THESE EXIST. Every live link re-pulled the WHOLE member table every 15 s in
+# each direction, and on a settled mesh that is the same table every time (measured
+# 2026-11-08 on the two-relay rig: 1.43 KB per reply with 2 members, ~0.79 KB
+# compressed with 6). The conditional pull answers "unchanged" instead — and the
+# cells below pin the two ways that could go wrong: a table change hidden behind an
+# "unchanged" answer, and an older build being sent a key it does not know.
+
+
+def _spy_member_list(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Record every ``net_member_list`` a relay ANSWERS: who, what was asked, what went back.
+
+    Patched on the class BEFORE any relay is built: the op table binds the handler in
+    ``RelayServer.__init__``, so a relay built first would keep the unpatched one.
+    """
+    seen: list[dict[str, Any]] = []
+    original = relay.RelayServer._op_member_list  # noqa: SLF001 — the handler under test
+
+    def _spy(self: relay.RelayServer, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        reply = original(self, link, frame)
+        detail = reply.get("detail") or {}
+        seen.append(
+            {
+                "server": self.identity.device_id,
+                "asker": link.device_id,
+                "if_digest": "if_digest" in frame,
+                "unchanged": detail.get("unchanged") is True,
+                "rows": len(detail.get("members") or []),
+            }
+        )
+        return reply
+
+    monkeypatch.setattr(relay.RelayServer, "_op_member_list", _spy)
+    return seen
+
+
+def _synthetic_row(
+    template: types.MemberRecord | None, tag: str, **fields: Any
+) -> types.MemberRecord:
+    """A real row's shape under a new id and key: what a third member looks like."""
+    assert template is not None
+    return replace(
+        template,
+        device_id=tag + template.device_id[len(tag) :],
+        public_key=tag + template.public_key[len(tag) :],
+        name=f"device-{tag}",
+        **fields,
+    )
+
+
+def _row(device: Device, device_id: str) -> types.MemberRecord | None:
+    record = store.load(store.list_networks(device.root)[0].network_id, device.root)
+    return record.member(device_id)
+
+
+def test_the_sync_digest_ignores_local_observations_and_moves_on_relayed_fields(
+    tmp_path: Path,
+) -> None:
+    """The validator must cover what ``adopt_members`` takes, and nothing it ignores.
+
+    ``members_digest_of`` (authority fields only) would hide an endpoint move or a
+    rename behind an "unchanged" answer; a digest over ``last_seen_at`` would never
+    match between two devices and save nothing.
+    """
+    server = relay.RelayServer(
+        root=tmp_path / "x",
+        settings=relay.NetworkSettings(port=0),
+        identity=identity.mint(tmp_path / "x", name="x"),
+        audit=audit_mod.AuditLog(tmp_path / "x"),
+    )
+    record = _init_network(server)
+    record.members.append(_synthetic_row(record.members[0], "ff", endpoints=["10.0.0.1:1"]))
+    base = relay.member_sync_digest(record)
+    row = record.members[-1]
+
+    row.last_seen_at, row.observed_endpoint, row.last_seen_instance = 1.0, "1.2.3.4:5", "i"
+    row.duplicate_count, row.suspect = 3, True
+    assert relay.member_sync_digest(record) == base
+
+    for name, value in (("endpoints", ["10.0.0.2:1"]), ("name", "renamed")):
+        moved = replace(row, **{name: value})
+        record.members[-1] = moved
+        assert relay.member_sync_digest(record) != base, name
+        # ...and the authority digest does NOT see it, which is why it is not the validator.
+        assert relay.members_digest_of(record) == relay.members_digest_of(
+            replace(record, members=[*record.members[:-1], row])
+        )
+        record.members[-1] = row
+
+
+def test_a_settled_link_pulls_no_rows_and_every_change_still_lands(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A settled link answers "unchanged"; an added row AND a rename still cross.
+
+    Fails on a build without the conditional pull (no answer is ever ``unchanged``),
+    and on one keyed on the authority digest (the rename never lands).
+    """
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", 1.0)
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
+    seen = _spy_member_list(monkeypatch)
+    a = _make(devices, "a", mode=DIAL_ONLY)
+    c = _make(devices, "c", mode=HUB)
+    record = _init_network(c.server)
+    assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
+    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    assert link is not None, reason
+    assert wire.MEMBER_LIST_DIGEST_V1 in link.capabilities
+
+    def _c_answered_a(**match: Any) -> bool:
+        return any(
+            row["server"] == c.device_id
+            and row["asker"] == a.device_id
+            and all(row[k] == v for k, v in match.items())
+            for row in list(seen)
+        )
+
+    assert net_fixtures.wait_for(
+        lambda: _c_answered_a(unchanged=True, rows=0)
+    ), f"a settled link never answered unchanged: {seen}"
+    # The first pull of a link stays FULL whatever the digest says.
+    assert any(not row["if_digest"] and row["rows"] for row in seen), seen
+
+    # A ROW ADDED on C crosses: the digests now differ, so C answers with the table.
+    with store.mutate(record.network_id, c.root) as copy:
+        copy.members.append(
+            _synthetic_row(copy.member(c.device_id), "ee", endpoints=["10.9.9.9:1"])
+        )
+        store.save(copy, c.root)
+        late_id = copy.members[-1].device_id
+    assert net_fixtures.wait_for(lambda: late_id in _members(a)), _members(a)
+
+    # A RENAME of an existing row crosses too — a field the authority digest does
+    # not cover and ``adopt_members`` does take (from the device the row names, so
+    # C renames ITSELF; a third party's rename would be refused by design).
+    with store.mutate(record.network_id, c.root) as copy:
+        own = copy.member(c.device_id)
+        assert own is not None
+        own.name = "hub-renamed"
+        store.save(copy, c.root)
+    assert net_fixtures.wait_for(
+        lambda: (row := _row(a, c.device_id)) is not None and row.name == "hub-renamed"
+    ), _row(a, c.device_id)
+    # ...and the link settles again afterwards.
+    count = len(seen)
+    assert net_fixtures.wait_for(
+        lambda: any(row["unchanged"] and row["asker"] == a.device_id for row in seen[count:])
+    ), seen[count:]
+
+
+def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One end of a link predates ``member-list-digest-v1``; the mesh still converges.
+
+    Modelled at the negotiation, which is the only place the build difference is
+    visible: C's link to A is told A did not advertise the string, so C must keep
+    asking full tables (an old A would not know ``if_digest``), while A — which sees
+    C advertise it — pulls conditionally. A row added on EITHER side reaches the other.
+    """
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", 1.0)
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
+    seen = _spy_member_list(monkeypatch)
+    a = _make(devices, "a", mode=DIAL_ONLY)
+    c = _make(devices, "c", mode=HUB)
+    record = _init_network(c.server)
+    assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
+    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    assert link is not None, reason
+    assert net_fixtures.wait_for(
+        lambda: any(
+            item.device_id == a.device_id and item.alive
+            for item in c.server.links.values()  # noqa: SLF001
+        )
+    )
+    for item in list(c.server.links.values()):  # noqa: SLF001
+        if item.device_id == a.device_id:
+            item.capabilities = frozenset(item.capabilities - {wire.MEMBER_LIST_DIGEST_V1})
+    count = len(seen)
+
+    for owner, tag in ((c, "e1"), (a, "e2")):
+        with store.mutate(record.network_id, owner.root) as copy:
+            copy.members.append(_synthetic_row(copy.member(c.device_id), tag))
+            store.save(copy, owner.root)
+    both = {row.device_id for row in store.load(record.network_id, c.root).active_members()}
+    both |= {row.device_id for row in store.load(record.network_id, a.root).active_members()}
+    assert net_fixtures.wait_for(
+        lambda: _members(a) == both and _members(c) == both
+    ), (_members(a), _members(c), both)
+    # And after convergence A's conditional pulls settle to "unchanged" (the new side
+    # still saves), while every pull C made of the "old" A stayed full.
+    assert net_fixtures.wait_for(
+        lambda: any(r["unchanged"] and r["asker"] == a.device_id for r in seen[count:])
+    ), seen[count:]
+    from_c = [r for r in seen[count:] if r["asker"] == c.device_id]
+    assert from_c and all(not r["if_digest"] and r["rows"] for r in from_c), from_c

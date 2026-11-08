@@ -1814,6 +1814,36 @@ def members_digest_of(record: NetworkRecord) -> str:
     return wire.hex64(wire.sha256(wire.canonical_json(payload)))
 
 
+#: Member-row fields that are THIS device's own observation of a peer, never a
+#: statement the table relays: each device stamps its own ``last_seen_*``,
+#: ``observed_endpoint``, ``duplicate_count`` and ``suspect`` from its own links,
+#: so two devices holding the same membership never agree on them, and
+#: :func:`adopt_members` ignores all five on a row it already holds.
+_SYNC_DIGEST_LOCAL_FIELDS = frozenset(
+    {"last_seen_at", "observed_endpoint", "last_seen_instance", "duplicate_count", "suspect"}
+)
+
+
+def member_sync_digest(record: NetworkRecord) -> str:
+    """The validator of the conditional member pull (``wire.MEMBER_LIST_DIGEST_V1``).
+
+    NOT :func:`members_digest_of`. That digest covers the AUTHORITY fields only,
+    while :func:`adopt_members` also takes ``endpoints``, ``name`` and the
+    rotation fields from a peer's rows; an ``unchanged`` answer keyed on it would
+    swallow an endpoint or rename the full pull used to carry. So this hashes
+    every field of every row (tombstones included) EXCEPT the receiver-local
+    observations in :data:`_SYNC_DIGEST_LOCAL_FIELDS` — which is exactly the set
+    the merge ignores, so two tables with the same digest have nothing to teach
+    each other. Both ends of a link that negotiated the capability run this same
+    function, so the comparison is between like and like.
+    """
+    payload = [
+        {k: v for k, v in member.to_json().items() if k not in _SYNC_DIGEST_LOCAL_FIELDS}
+        for member in sorted(record.members, key=lambda row: row.device_id)
+    ]
+    return wire.hex64(wire.sha256(wire.canonical_json(payload)))
+
+
 def membership_conflict(record: NetworkRecord, device_id: str, public_key: str = "") -> str:
     """The sentence a member list refuses with, or ``""`` when it would not refuse.
 
@@ -6269,24 +6299,43 @@ class RelayServer:
         """
         if not link.alive:
             return "link_down"
-        reply = link.request(
-            {"op": "net_member_list", "req": self._next_relay_req(), "locality": "remote"},
-            timeout=MEMBERSHIP_PULL_TIMEOUT_S,
-        )
-        if reply is None:
-            return "no_answer"
-        if reply.get("op") != "ack":
-            return str(reply.get("code") or reply.get("op") or "refused")
-        detail = reply.get("detail")
-        if not isinstance(detail, dict) or not isinstance(detail.get("members"), list):
-            return "bad_answer"
-        rows = detail["members"]
         listed = next(
             (item for item in store.list_networks(self.root) if item.network_id == link.network_id),
             None,
         )
         if listed is None:
             return "unknown_network"
+        frame: dict[str, Any] = {
+            "op": "net_member_list",
+            "req": self._next_relay_req(),
+            "locality": "remote",
+        }
+        # CONDITIONAL ONLY ON A LINK THAT HAS ALREADY TAKEN ONE FULL TABLE, and only
+        # when the peer advertised ``wire.MEMBER_LIST_DIGEST_V1`` (an older build is
+        # never sent a key it does not know and keeps answering full tables). The
+        # first pull of every link stays full so each (re)connection re-reads the
+        # peer's rows whole whatever the digest says; after that a settled mesh
+        # trades ~0.8-1.4 KB of identical rows per 15 s for a ~0.2 KB "unchanged".
+        conditional = (
+            wire.MEMBER_LIST_DIGEST_V1 in link.capabilities and link.member_pulled_at > 0
+        )
+        if conditional:
+            frame["if_digest"] = member_sync_digest(listed)
+        reply = link.request(frame, timeout=MEMBERSHIP_PULL_TIMEOUT_S)
+        if reply is None:
+            return "no_answer"
+        if reply.get("op") != "ack":
+            return str(reply.get("code") or reply.get("op") or "refused")
+        detail = reply.get("detail")
+        if conditional and isinstance(detail, dict) and detail.get("unchanged") is True:
+            # The peer's table hashes to ours: the answer is still a fresh answer
+            # (the stamp is what `status`/`ls` age), it just has nothing to merge.
+            link.member_pulled_at = time.time()
+            link.member_pull_added = []
+            return ""
+        if not isinstance(detail, dict) or not isinstance(detail.get("members"), list):
+            return "bad_answer"
+        rows = detail["members"]
         # STAMPED BEFORE THE MERGE, and stamped on an answer that changed nothing:
         # the stamp is evidence that this peer's TABLE answered, not that its table
         # differed, and the reporting surfaces read it as exactly that.
@@ -8554,6 +8603,22 @@ class RelayServer:
         record = self.store_view.network(link.network_id)
         if record is None:
             raise MeshRefusal("not_a_member", "this device is not in that network")
+        # The conditional half of ``wire.MEMBER_LIST_DIGEST_V1``: answer without the
+        # rows only when the asker's table hashes exactly like ours. Any difference
+        # — a member either side lacks, a moved endpoint, a rename, a tombstone —
+        # gets the full table, so this can only ever withhold rows the asker holds.
+        asked = frame.get("if_digest")
+        if isinstance(asked, str) and asked and asked == member_sync_digest(record):
+            return {
+                "op": "ack",
+                "req": frame.get("req"),
+                "detail": {
+                    "network_id": record.network_id,
+                    "epoch": record.epoch,
+                    "unchanged": True,
+                    "members_digest": members_digest_of(record),
+                },
+            }
         return {
             "op": "ack",
             "req": frame.get("req"),
