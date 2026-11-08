@@ -86,8 +86,11 @@ BUILD OUTPUT: WHY THE FOURTH CATEGORY IS GATED ON PROVENANCE
       ours to delete;
     * a project root that is ``$HOME`` or a standard data directory
       (:data:`PROTECTED_DATA_DIRS`), and a candidate that CONTAINS one of those
-      directories — ``protected-location``: one stray manifest is not evidence
-      that somebody's own folder is build output;
+      directories at any depth — ``protected-location``: one stray manifest is
+      not evidence that somebody's own folder is build output. Both comparisons
+      are by identity and case-insensitive (:func:`same_location`,
+      :func:`is_protected_data_dir_name`), because a case-folding volume makes
+      ``~/documents`` and ``~/Documents`` one directory;
     * tracked files inside it (``git-tracked``), or a shape git does not ignore
       (``git-not-ignored``); a git that cannot answer is ``git-unknown`` and
       keeps, never "nothing is tracked";
@@ -323,6 +326,14 @@ BUILD_OUTPUT_GENERIC_PRODUCERS: frozenset[str] = frozenset(
 #: The Go-cache category already refuses ``$HOME`` for the same reason.
 PROTECTED_DATA_DIRS: frozenset[str] = frozenset(
     {"Documents", "Desktop", "Downloads", "Movies", "Music", "Pictures"}
+)
+
+#: :data:`PROTECTED_DATA_DIRS` folded once for comparison. APFS (macOS default)
+#: is case-insensitive, so ``~/documents`` and ``~/Documents`` are ONE directory
+#: and the guard protects whichever case it happens to be told. Every match —
+#: the project-root check and the walk's ``prune_names`` — folds both sides.
+_PROTECTED_DATA_DIRS_FOLDED: frozenset[str] = frozenset(
+    name.casefold() for name in PROTECTED_DATA_DIRS
 )
 
 #: What :func:`producer_kind` answers for one process.
@@ -568,8 +579,9 @@ class Walk:
     #: The walk STOPPED there, so bytes are a lower bound and nothing past it was
     #: measured — another filesystem's contents are not this tree's to delete.
     mount_crossed: str = ""
-    #: ``prune_names`` only: directories the walk refused to descend into. Empty
-    #: is the only answer that leaves the tree fully measured.
+    #: ``prune_names`` only: directories the walk refused to descend into, matched
+    #: case-insensitively at any depth. Empty is the only answer that leaves the
+    #: tree fully measured.
     pruned: list[str] = field(default_factory=list)
 
 
@@ -602,8 +614,17 @@ def walk_allocated(
     ``prune_names`` is not descended into and is recorded in
     :attr:`Walk.pruned` — never silently, because a walk that did not cover the
     tree cannot be used to justify deleting all of it.
+
+    ``prune_names`` is matched CASE-INSENSITIVELY, at any depth. The names it
+    carries are the standard data directories (:data:`PROTECTED_DATA_DIRS`), and
+    on a case-insensitive volume ``target/documents`` and ``target/Documents`` are
+    the same directory: matching only the table's spelling would have measured
+    (and then deleted) somebody's documents through the other one. Folding both
+    sides costs one ``casefold`` per directory entry and does not depend on how
+    either the table or the disk happens to be cased.
     """
     result = Walk()
+    prune_folded = frozenset(name.casefold() for name in prune_names)
     try:
         top = os.lstat(root)
     except OSError as exc:
@@ -649,7 +670,7 @@ def walk_allocated(
                 if crossed:
                     result.mount_crossed = entry.path
                     return result
-            if stat.S_ISDIR(st.st_mode) and entry.name in prune_names:
+            if stat.S_ISDIR(st.st_mode) and entry.name.casefold() in prune_folded:
                 if len(result.pruned) < 5:
                     result.pruned.append(entry.path)
                 continue
@@ -2124,6 +2145,40 @@ def _in_config_dir(path: str, config_root: Path) -> bool:
     return any(_inside(form, base) for form in forms for base in roots)
 
 
+def same_location(left: str, right: str) -> bool:
+    """Whether two paths name the SAME directory, however either is spelled.
+
+    Spelling is not identity. macOS's APFS is case-insensitive by default:
+    ``~/documents`` and ``~/Documents`` are one directory (identical ``st_ino``),
+    so a guard that compares spellings protects only the spelling it was told
+    about — the operator (or a build tool) typing the other case walked straight
+    past it. ``os.path.samefile`` asks the filesystem instead, which is the answer
+    that holds for ``./x``, a trailing slash and any case the volume folds.
+
+    ``samefile`` needs BOTH paths to exist and raises ``OSError`` otherwise, so a
+    path that cannot be stat-ed falls back to a ``casefold`` comparison of the
+    spellings: that keeps the guard answering for a directory the operator is
+    about to create, and case-folding it is the conservative direction (a
+    differently-cased name is refused, never reclaimed on the grounds that the
+    volume happens to be case-sensitive).
+    """
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return left.casefold() == right.casefold()
+
+
+def is_protected_data_dir_name(name: str) -> bool:
+    """Whether ``name`` is one of :data:`PROTECTED_DATA_DIRS`, in any case.
+
+    The table carries the canonical spelling; the volume may fold case, so the
+    comparison must not. :func:`protected_location_reason` calls this, and
+    :func:`walk_allocated` applies the same fold to whatever ``prune_names`` it is
+    given, so neither half of the guard can be case-blind on its own.
+    """
+    return bool(name) and name.casefold() in _PROTECTED_DATA_DIRS_FOLDED
+
+
 def protected_location_reason(project_root: str) -> str | None:
     """Why ``project_root`` may not be a build-output root, or ``None`` when it may.
 
@@ -2138,20 +2193,25 @@ def protected_location_reason(project_root: str) -> str | None:
     Both spellings are compared, like every path comparison in this module: the
     root is what the operator typed (``abspath``, never ``realpath`` — see
     :func:`plan_build_output`) and home is what the environment says either way.
+    The comparison is by IDENTITY (:func:`same_location`) and the name by
+    casefold (:func:`is_protected_data_dir_name`), never by spelling: on a
+    case-insensitive volume ``~/documents`` IS ``~/Documents``, and a guard that
+    only knows the canonical case refuses the spelling the reviewer happened to
+    test (round 2: ``~/documents`` planned a reclaim while ``~/Documents`` was
+    refused).
     """
     home = os.path.expanduser("~")
     home_forms = {os.path.abspath(home), os.path.realpath(home)}
     root_forms = {os.path.abspath(project_root), os.path.realpath(project_root)}
     for form in root_forms:
-        if form in home_forms:
-            return (
-                f"{project_root} is your home directory; name the project directory "
-                "inside it instead"
-            )
         for home_form in home_forms:
-            if (
-                os.path.dirname(form) == home_form
-                and os.path.basename(form) in PROTECTED_DATA_DIRS
+            if same_location(form, home_form):
+                return (
+                    f"{project_root} is your home directory; name the project "
+                    "directory inside it instead"
+                )
+            if is_protected_data_dir_name(os.path.basename(form)) and same_location(
+                os.path.dirname(form) or os.sep, home_form
             ):
                 return (
                     f"{project_root} is a standard data directory; the folders in it "
@@ -2218,8 +2278,9 @@ def assess_build_output(
     is the dangerous case, and the ``.git``-inside guard is what closes it. Age is
     next, because the bounded walk also stops early the moment a tree is provably
     too young. The three structural findings that same walk can turn up — a mount
-    point it had to stop at, a standard data directory it refused to descend into
-    (:data:`PROTECTED_DATA_DIRS`), a nested ``.git`` — are judged immediately
+    point it had to stop at, a directory named like a standard data directory it
+    refused to descend into at ANY depth (:data:`PROTECTED_DATA_DIRS`, matched
+    case-insensitively), a nested ``.git`` — are judged immediately
     after it: every one means the tree was either not fully measured or holds
     something no rebuild can recreate. git provenance follows, and the live-build
     probes are last: they are the most expensive, and their "cannot tell" is the
@@ -2324,9 +2385,9 @@ def assess_build_output(
         return _keep_build_output(
             candidate,
             "protected-location",
-            "it contains a standard data directory ("
+            "it holds a directory named like a standard data directory ("
             + ", ".join(os.path.relpath(path, candidate) for path in walk.pruned[:3])
-            + "), whose contents are the user's own data",
+            + "), at any depth; those folders are the user's own data",
             **evidence,
         )
     if walk.nested_git:
@@ -2712,9 +2773,23 @@ def remove_build_output(
     except OSError as exc:
         return f"refusing: the mount probe failed ({exc.strerror or exc})"
 
-    walk = walk_allocated(item.path, stop_at_mount=True)
+    walk = walk_allocated(
+        item.path, stop_at_mount=True, prune_names=PROTECTED_DATA_DIRS
+    )
     if walk.error:
         return f"refusing: the tree could not be measured ({walk.error})"
+    if walk.pruned:
+        # The containment check the preview made, made again here. Revalidation
+        # already re-judges it, so this closes only the window between that answer
+        # and the delete — the same race, and the same shape of answer, as the
+        # mount check below. The two must stay symmetric: measuring this walk
+        # WITHOUT pruning would count a data directory that appeared since the
+        # preview and then hand the tree to `_remove_tree`, which descends it.
+        return (
+            "refusing: it now holds a directory named like a standard data "
+            "directory at removal time "
+            f"({os.path.relpath(walk.pruned[0], item.path)})"
+        )
     if walk.mount_crossed:
         # The same race as the mount check above, one level down: the walk stops at
         # the boundary, so nothing past it was measured — and `_remove_tree` would

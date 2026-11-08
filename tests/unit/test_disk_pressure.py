@@ -1733,8 +1733,14 @@ def test_a_different_live_producer_in_the_project_still_keeps_it(fx: Fx) -> None
     assert child.poll() is not None
 
 
-def test_the_two_tables_drop_this_process_and_its_lsof_child() -> None:
-    """The exclusion lives in the READERS, so no attribution path can see us."""
+def test_both_readers_drop_this_process() -> None:
+    """The exclusion lives in the READERS, so no attribution path can see us.
+
+    What is asserted is our OWN pid's absence from both tables. The ``lsof``
+    child's pid is only knowable inside :func:`read_open_handles` (it is created
+    and reaped there), so by the time this test looks it is gone and its absence
+    proves nothing — the name says what the body can show.
+    """
     rows = dp.read_process_table()
     assert rows, "ps lists at least one process on every supported platform"
     assert all(pid != os.getpid() for pid, _ in rows)
@@ -1863,3 +1869,132 @@ def test_a_data_directory_inside_a_candidate_keeps_it(tmp_path: Path) -> None:
     assert [item.code for item in items] == ["protected-location"], items
     assert items[0].action == dp.ACTION_KEEP
     assert (documents / "invoice.pdf").exists()
+
+
+def test_same_location_answers_by_identity_and_folds_case_without_one(
+    tmp_path: Path,
+) -> None:
+    """The comparator R2-1 turned on: inode identity first, casefold as fallback.
+
+    Both paths existing is the case ``samefile`` owns — it is the only answer that
+    holds for a trailing slash, ``.`` or a case the volume folds. Neither path
+    existing is the case it CANNOT answer (it raises), and the fallback must then
+    compare the spellings case-insensitively: that is the direction the guard
+    fails in, refusing a name rather than measuring it.
+    """
+    folder = tmp_path / "Documents"
+    folder.mkdir()
+
+    assert dp.same_location(str(folder), str(folder) + "/") is True
+    assert dp.same_location(str(folder), str(tmp_path / "missing")) is False
+    # Neither exists, so the answer comes from the fallback: folded, they are one.
+    assert dp.same_location(str(tmp_path / "nope"), str(tmp_path / "NOPE")) is True
+
+    assert dp.is_protected_data_dir_name("documents") is True
+    assert dp.is_protected_data_dir_name("DOCUMENTS") is True
+    assert dp.is_protected_data_dir_name("Documents") is True
+    assert dp.is_protected_data_dir_name("Documents-old") is False
+    assert dp.is_protected_data_dir_name("") is False
+
+
+def test_the_home_comparison_is_identity_not_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``$HOME`` spelled in another case still IS the home directory.
+
+    The reviewer measured ``~/documents`` and ``~/Documents`` with the same
+    ``st_ino``, so the only comparison that can see what a case-folding volume
+    folds is identity — or the casefold fallback where the volume (or the path)
+    cannot answer. Either way ``~/documents`` under a differently-cased ``$HOME``
+    is a data directory, never a project root.
+    """
+    home = Path(os.environ["HOME"])
+    other = Path(str(home).upper())
+    monkeypatch.setenv("HOME", str(other))
+
+    reason = dp.protected_location_reason(str(other / "documents"))
+
+    assert reason is not None, "a case-folded spelling of home must still refuse"
+    assert "standard data directory" in reason, reason
+
+
+@pytest.mark.parametrize("spelling", ["documents", "DOCUMENTS", "DoCuMeNtS"])
+def test_the_data_directory_guard_does_not_depend_on_case(
+    tmp_path: Path, spelling: str
+) -> None:
+    """R2-1 regression row: ``~/documents`` is ``~/Documents`` on APFS.
+
+    Measured through the shipped code in an isolated ``HOME`` before the fix: the
+    canonical spelling was refused while the lowercase one PLANNED A RECLAIM (same
+    ``st_ino``), and removal-time revalidation agreed with the plan. The volume
+    decides whether these spellings are one directory or two, and the answer is
+    ``protected-location`` either way.
+
+    Two comparisons are covered because they are two different code paths: the
+    project-root NAME (the casefolded table, :func:`is_protected_data_dir_name`)
+    and the containment walk's ``prune_names`` match (also casefolded), which is
+    what ``target/documents`` hits. The canonical spelling is covered by
+    :func:`test_home_and_the_data_directories_are_never_project_roots` and
+    :func:`test_a_data_directory_inside_a_candidate_keeps_it`.
+    """
+    home = Path(os.environ["HOME"])
+    holder = home / spelling
+    holder.mkdir(exist_ok=True)
+    (holder / "package.json").write_text("{}\n")
+    (holder / "build").mkdir(exist_ok=True)
+    (holder / "build" / "x.js").write_text("x\n")
+    _idle(home, hours=800)
+
+    # ... as a project ROOT, the spelling the reviewer measured a reclaim on.
+    items, refusals = plan_bo(holder)
+    assert items == [], (spelling, items)
+    assert [r["category"] for r in refusals] == [dp.CATEGORY_BUILD_OUTPUT], spelling
+    assert "standard data directory" in refusals[0]["reason"], spelling
+    assert (holder / "build" / "x.js").exists(), spelling
+
+    # ... and as a directory INSIDE a candidate, which is the walk's prune match.
+    root = _project(tmp_path)
+    shape = _shape(root)
+    inner = shape / spelling
+    inner.mkdir()
+    (inner / "invoice.pdf").write_text("data\n")
+    _idle(root)
+
+    items, _ = plan_bo(root)
+    assert [item.code for item in items] == ["protected-location"], (spelling, items)
+    assert items[0].action == dp.ACTION_KEEP, spelling
+    assert (inner / "invoice.pdf").exists(), spelling
+
+
+def test_the_walk_before_delete_reapplies_the_data_dir_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-2: the removal-time walk carries BOTH checks, not just the mount one.
+
+    Revalidation re-judges the whole tree, so a data directory already present is
+    refused earlier and this test would pass without the fix. The case here is the
+    RACE the second walk exists for: revalidation answers "still qualifies" and the
+    directory lands between that answer and the measurement. Without
+    ``prune_names`` on that walk the tree was measured WHOLE and handed to
+    ``_remove_tree``, which descends it — asymmetric, since the mount check WAS
+    carried through.
+    """
+    root = _project(tmp_path)
+    shape = _shape(root)
+    _idle(root)
+    items, _ = plan_bo(root)
+    assert [item.code for item in items] == ["reclaim"], items
+    item = items[0]
+
+    # Freeze revalidation's answer at "still qualifies": that is the race.
+    monkeypatch.setattr(dp, "revalidate_build_output", lambda *a, **kw: item)
+    documents = shape / "documents"
+    documents.mkdir()
+    (documents / "invoice.pdf").write_text("data\n")
+
+    detail = dp.remove_build_output(item, min_idle_minutes=60, probes=_bo_probes())
+
+    assert detail and detail.startswith("refusing"), detail
+    assert "standard data" in detail, detail
+    assert (documents / "invoice.pdf").exists(), "a refusal must not delete"
+    assert shape.exists()
