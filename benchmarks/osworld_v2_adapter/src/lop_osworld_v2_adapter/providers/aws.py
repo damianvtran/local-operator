@@ -50,7 +50,6 @@ import asyncio
 import json
 import logging
 import os
-import signal
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -88,6 +87,11 @@ from lop_osworld_v2_adapter.providers.base import (
     transport_retry_delay,
 )
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
+
+# Re-exported: ``remote_command`` owns the guest-exit vocabulary now, because
+# the wrapper-failure answer names a signal too. The diagnostics here and the
+# tests that pin them keep reading it from this module.
+from lop_osworld_v2_adapter.remote_command import _exit_description
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
 from local_operator.evaluation.adapters.api import RunCommandParams, RunCommandResult
@@ -267,37 +271,6 @@ class GuestExecutionError(RuntimeError):
         super().__init__(message)
         self.delivery = delivery
         self.nothing_sent = nothing_sent
-
-
-def _exit_description(returncode: int) -> str:
-    """Describe a guest exit status: an ordinary code, or death by signal.
-
-    ``subprocess`` reports a signal-killed child as a NEGATIVE returncode, so
-    ``exit -15`` in a diagnostic is really "SIGTERM killed it" wearing a
-    misleading costume. A reader who does not know that convention reads -15 as
-    an exit code and looks for a program that returned one; naming the signal
-    removes a research step that has already cost a full investigation.
-
-    Deliberately says WHAT happened and not WHY. A signal death has many
-    possible originators — the OS, a supervisor, another process, or the
-    command's own actions — and this layer cannot distinguish them. Naming a
-    specific cause here would encode a guess into every future incident report,
-    which is the failure mode that made the last one expensive.
-
-    Leaks nothing: the output is a signal NAME from the stdlib's fixed
-    enumeration or a bare integer, never command text, guest stdout, or stderr.
-    That is the same discipline ``execute`` applies to transport errors.
-    """
-
-    if returncode >= 0:
-        return f"exit {returncode}"
-    try:
-        name = signal.Signals(-returncode).name
-    except ValueError:
-        # An unrecognised signal number is still worth reporting as a signal
-        # rather than as a negative exit code.
-        return f"terminated by signal {-returncode}"
-    return f"terminated by signal {name}"
 
 
 class ReadinessTimeout(AllocationError):
@@ -1511,16 +1484,48 @@ class AwsProvider:
         return guest_supervisor.empty_restart("result_unavailable")
 
     async def run_command(self, params: RunCommandParams) -> RunCommandResult:
-        """One bounded guest shell; transport errors escape without retries."""
-        from lop_osworld_v2_adapter.remote_command import decode_result, payload_for
+        """One bounded guest shell; only a reply that never came escapes.
+
+        The guest answers some COMMAND outcomes with a non-2xx status while
+        still carrying its own four-key body -- upstream's timeout handler is
+        one. That body is the target talking, so it is decoded into a
+        ``RunCommandResult`` like any other (``decode_result`` never raises for
+        one); re-raising the HTTP error instead turned a command outcome into a
+        channel failure, which poisons the session and loses the episode
+        (sealed run ``t27b-t003-20261108-090532``: ``score: null``).
+
+        A genuine channel failure still escapes without retries: connection
+        refused, a lost reply, a redirect, a body that is not the guest's
+        protocol answer at all. A command that may already have run must never
+        be replayed, and that ambiguity is the session's to end, not this
+        layer's to paper over.
+        """
+        import requests  # local, like ``build_clients``: the HTTP client is optional
+        from lop_osworld_v2_adapter.remote_command import (
+            answer_from_error_body,
+            decode_result,
+            payload_for,
+        )
 
         url = f"http://{self._public_ip}:{GUEST_PORT}{_EXECUTE_PATH}"
-        body = await asyncio.to_thread(
-            self._clients.http_post_json,
-            url,
-            payload_for(params),
-            params.timeout_s + 10,
-        )
+        try:
+            body = await asyncio.to_thread(
+                self._clients.http_post_json,
+                url,
+                payload_for(params),
+                params.timeout_s + 10,
+            )
+        except requests.HTTPError as error:
+            response = error.response
+            answered = None
+            if response is not None:
+                try:
+                    answered = answer_from_error_body(response.content)
+                except Exception:  # noqa: BLE001 - an unreadable body is not an answer
+                    answered = None
+            if answered is None:
+                raise
+            body = answered
         return decode_result(body, params)
 
     def _run_guest_command(

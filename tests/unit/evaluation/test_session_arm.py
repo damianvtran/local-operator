@@ -5591,6 +5591,45 @@ class TestBridgeCommand:
         assert [p for k, p in rows if k == "command"][0]["exit_code"] is None
 
     @pytest.mark.asyncio
+    async def test_a_command_the_target_could_not_run_is_a_result_the_model_can_read(
+        self, tmp_path: Path
+    ) -> None:
+        """The target's own failure reads as an outcome, never as a tool error.
+
+        This is the shape the sealed run ``t27b-t003-20261108-090532`` died
+        without: the guest SIGTERM'd the wrapper, the adapter raised, and the
+        episode lost every later call plus its score. ``is_error`` stays False
+        because the CALL succeeded -- the command did not -- exactly as a
+        non-zero exit is a normal result.
+        """
+
+        rows: list[tuple[str, dict[str, Any]]] = []
+        reason = (
+            "the target command wrapper failed (status='success', "
+            "wrapper terminated by signal SIGTERM)"
+        )
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            del command, timeout_s
+            return _command_result(exit_code=None, timed_out=False, error=reason)
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=rows)
+        await bridge.start()
+        try:
+            reply = await _speak_command(bridge, {"command": "compose"})
+        finally:
+            await bridge.stop()
+        assert reply["is_error"] is False
+        text = reply["content"][0]["text"]
+        assert "exit_code: none" in text
+        assert "timed_out: false" in text
+        assert f"error: {reason}" in text
+        assert reply["details"]["error"] == reason
+        recorded = [payload for kind, payload in rows if kind == "command"][0]
+        assert recorded["error"] == reason
+        assert recorded["exit_code"] is None
+
+    @pytest.mark.asyncio
     async def test_a_failing_target_is_an_error_result_not_swallowed(self, tmp_path: Path) -> None:
         rows: list[tuple[str, dict[str, Any]]] = []
 

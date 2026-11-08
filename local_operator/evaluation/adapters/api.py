@@ -848,17 +848,33 @@ class RunCommandResult(ProtocolModel):
     it. ``*_bytes`` is the raw number of bytes each stream produced (before
     capping and decoding) and ``*_truncated``
     says whether the cap cut it, so a cut is always visible in the result.
-    ``exit_code`` is ``None`` exactly when ``timed_out`` is True: a command
-    that was stopped has no exit status of its own, and one that finished
-    always has one.
 
-    A command that RAN and failed (non-zero exit) is a normal result. Only a
-    target that could not run the command at all raises, so the two are never
-    confused.
+    ``exit_code`` is ``None`` exactly when the shell's own status is unknown:
+    either ``timed_out`` is True (the command was stopped and has no exit
+    status of its own) or ``error`` says why no status could be had. A
+    command that finished always has one.
+
+    ``error`` is the TARGET's own explanation of why it could not run or
+    finish the command: its wrapper was killed before printing a result, its
+    payload did not parse, its control server answered an error body. It is
+    the only way an unrun command is expressed -- as this result, never as a
+    raised exception -- for a reason the sealed run
+    ``t27b-t003-20261108-090532`` measured: the parent treats an exception from
+    a mutating call as an ambiguous mutation and POISONS the session, so one
+    command the target refused took every later tool call AND ``score`` with
+    it (``failed / bridge-wedged``, ``score: null``). A command's failure is an
+    outcome the model must be able to read and react to; the session stays
+    perfectly usable. A command that RAN and failed (non-zero exit) is still a
+    normal result with no ``error``, so the two are never confused.
+
+    Only a genuine CHANNEL failure -- no answer from the target's control
+    server at all, so the command may or may not have run -- may still fail the
+    call, because replaying a possibly-applied mutation is unsafe.
     """
 
     exit_code: int | None
     timed_out: bool
+    error: str | None = Field(default=None, max_length=MAX_COMMAND_OUTPUT_BYTES)
     stdout: str = Field(max_length=MAX_COMMAND_OUTPUT_BYTES)
     stderr: str = Field(max_length=MAX_COMMAND_OUTPUT_BYTES)
     stdout_bytes: SafeCount
@@ -866,10 +882,41 @@ class RunCommandResult(ProtocolModel):
     stdout_truncated: bool
     stderr_truncated: bool
 
+    @model_serializer(mode="wrap")
+    def _omit_absent_error(self, handler: Any, info: Any) -> Any:
+        """Omit ``error`` from the wire when it is absent.
+
+        TARGETED, and deliberately not ``exclude_none``: only THIS field's null
+        is dropped, so every successful command's canonical bytes are exactly
+        what they were before the field existed (same reason as
+        ``AdapterSelector._omit_absent_core_source``). Without it, every clean
+        result would grow an ``error: null`` line, moving wire bytes that no
+        schema-version bump accompanies -- the field is added to an existing
+        result shape, and a bump is only owed when an existing line's bytes
+        move. A PRESENT error still rides: that is the documented, narrower
+        incompatible direction, and it cannot happen here because a result is
+        only ever decoded by the same exact-version-pinned build that produced
+        it (``AdapterSelector`` refuses mixed peers at selection).
+        """
+
+        data = handler(self)
+        if isinstance(data, dict) and data.get("error") is None:
+            data.pop("error", None)
+        return data
+
     @model_validator(mode="after")
     def _consistent(self) -> "RunCommandResult":
-        if self.timed_out != (self.exit_code is None):
-            raise ValueError("exit_code is None exactly when the command timed out")
+        if self.timed_out:
+            # A stopped command has no exit status of its own; a reported one
+            # would be the wrapper's, read as the command's.
+            if self.exit_code is not None:
+                raise ValueError("a timed-out command has no exit code")
+        elif self.exit_code is None and self.error is None:
+            raise ValueError(
+                "exit_code is None only for a timeout or a failure the target reported"
+            )
+        if self.error is not None and not self.error.strip():
+            raise ValueError("an error must say what happened")
         for name in ("stdout", "stderr"):
             # No "text no longer than its size" check: the size counts the
             # RAW bytes the command wrote, and decoding non-UTF-8 output with

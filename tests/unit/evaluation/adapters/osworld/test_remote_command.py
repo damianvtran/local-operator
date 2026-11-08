@@ -9,8 +9,13 @@ from typing import Any, cast
 
 import pytest
 from lop_osworld_v2_adapter.providers.aws import AwsProvider, _Clients
+from lop_osworld_v2_adapter.remote_command import answer_from_error_body
 
-from local_operator.evaluation.adapters.api import EvaluationAdapter, RunCommandParams
+from local_operator.evaluation.adapters.api import (
+    EvaluationAdapter,
+    RunCommandParams,
+    RunCommandResult,
+)
 
 
 def _params(command: str, **overrides: Any) -> RunCommandParams:
@@ -187,11 +192,161 @@ async def test_multibyte_output_is_not_split_at_the_cap() -> None:
 
 
 @pytest.mark.asyncio
-async def test_malformed_control_reply_is_an_error() -> None:
-    for body in (
-        {"output": "{}", "returncode": 0},
-        {"status": "success", "output": json.dumps({}), "returncode": 0},
-        {"status": "success", "output": "", "returncode": 1, "error": "wrapper failed"},
+async def test_malformed_control_reply_is_a_result_not_an_error() -> None:
+    """A payload this layer cannot use is the TARGET's failure, not the call's.
+
+    It used to raise, which the parent reads as an adapter failure on a
+    mutating call: the session is poisoned and the episode is lost. The three
+    bodies here are one per way that can happen -- no ``status``/``returncode``
+    at all, a payload that is not a command result, and a wrapper that exited
+    nonzero after writing its stderr (the sealed run's shape).
+    """
+
+    cases = (
+        ({"output": "{}", "returncode": 0}, "the target command wrapper failed"),
+        (
+            {"status": "success", "output": json.dumps({}), "returncode": 0},
+            "is not a command result",
+        ),
+        (
+            {"status": "success", "output": "", "returncode": 1, "error": "wrapper failed"},
+            "wrapper failed",
+        ),
+    )
+    for body, expected in cases:
+        result = await _provider(lambda *args, body=body: body).run_command(_params("true"))
+        assert isinstance(result, RunCommandResult)
+        assert result.exit_code is None
+        assert not result.timed_out
+        assert result.error is not None and expected in result.error
+        assert (result.stdout, result.stderr) == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_a_wrapper_killed_by_a_signal_is_a_result_that_names_it() -> None:
+    """The sealed run's exact body: the guest deadline SIGTERM'd the wrapper.
+
+    ``t27b-t003-20261108-090532`` (episode ``ep-640575925798``) answered a
+    command with ``{'status': 'success', 'output': '', 'error': '',
+    'returncode': -15}``; the resulting ``RuntimeError`` poisoned the session,
+    three later commands failed, and ``score`` failed with them (``score:
+    null``). ``-15`` is a signal in an exit code's costume, so the message names
+    it rather than leaving a reader to look up the number.
+    """
+
+    body = {"status": "success", "output": "", "error": "", "returncode": -15}
+    result = await _provider(lambda *args: body).run_command(_params("compose"))
+
+    assert result.exit_code is None
+    # Not a timeout: nothing in the body says the command's own deadline
+    # elapsed, and this layer does not invent one.
+    assert not result.timed_out
+    assert result.error is not None
+    assert "SIGTERM" in result.error
+
+
+@pytest.mark.asyncio
+async def test_a_guest_error_answer_is_a_result_carrying_its_reason() -> None:
+    """The control server answering an error body is the target talking."""
+
+    body = {
+        "status": "error",
+        "output": "",
+        "error": "Command timed out after 60 seconds",
+        "returncode": 1,
+    }
+    result = await _provider(lambda *args: body).run_command(_params("sleep 99"))
+
+    assert result.exit_code is None
+    assert not result.timed_out
+    assert result.error is not None and "timed out after 60 seconds" in result.error
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_payload_is_capped_not_refused() -> None:
+    """A wrapper that ignored the cap reports truncation, not a failure.
+
+    The shipped wrapper enforces the cap itself, so this body is what a
+    drifted or older guest would send. Raising ``ValueError`` for it (the old
+    behaviour) lost the command's real exit status AND poisoned the session.
+    """
+
+    payload = {
+        "exit_code": 0,
+        "timed_out": False,
+        "stdout": "x" * 5000,
+        "stderr": "y" * 5000,
+        "stdout_bytes": 5000,
+        "stderr_bytes": 5000,
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+    }
+    body = {"status": "success", "output": json.dumps(payload), "returncode": 0, "error": ""}
+    result = await _provider(lambda *args: body).run_command(_params("emit", max_output_bytes=100))
+
+    assert result.exit_code == 0
+    assert result.error is None
+    assert (len(result.stdout.encode()), len(result.stderr.encode())) == (100, 100)
+    assert result.stdout_truncated and result.stderr_truncated
+    assert (result.stdout_bytes, result.stderr_bytes) == (5000, 5000)
+
+
+@pytest.mark.asyncio
+async def test_a_non_2xx_body_carrying_the_guest_answer_is_decoded() -> None:
+    """An error STATUS with the guest's own body is still the guest answering.
+
+    Upstream answers a command outcome this way (its timeout handler is one).
+    Re-raising the HTTP error turned that outcome into a channel failure, which
+    poisons; only a body that is NOT the guest's answer may still fail the call.
+    """
+
+    import requests
+
+    body = {"status": "error", "output": "", "error": "Command timed out", "returncode": 1}
+
+    class Response:
+        content = json.dumps(body).encode()
+
+    def post(*args: Any) -> Any:
+        raise requests.HTTPError("500 Server Error", response=Response())
+
+    result = await _provider(post).run_command(_params("true"))
+    assert result.error is not None and "Command timed out" in result.error
+
+
+@pytest.mark.asyncio
+async def test_a_non_2xx_body_that_is_not_the_guest_answer_still_fails_the_call() -> None:
+    """A proxy page is a CHANNEL failure: the command may or may not have run."""
+
+    import requests
+
+    class Response:
+        content = b"<html>502 Bad Gateway</html>"
+
+    def post(*args: Any) -> Any:
+        raise requests.HTTPError("502 Bad Gateway", response=Response())
+
+    with pytest.raises(requests.HTTPError):
+        await _provider(post).run_command(_params("true"))
+
+
+def test_answer_from_error_body_reads_only_the_guest_answer_shape() -> None:
+    body = {"status": "success", "output": "", "error": "", "returncode": 0}
+    assert answer_from_error_body(json.dumps(body).encode()) == body
+    for content in (
+        b"",
+        b"<html>502</html>",
+        b'{"message": "upstream connect error"}',
+        b"[]",
+        b'{"status": "error"}',
     ):
-        with pytest.raises((ValueError, RuntimeError)):
-            await _provider(lambda *args: body).run_command(_params("true"))
+        assert answer_from_error_body(content) is None
+
+
+@pytest.mark.asyncio
+async def test_the_failure_text_is_bounded() -> None:
+    """A huge guest diagnostic must not become a huge RPC frame."""
+
+    body = {"status": "error", "output": "", "error": "E" * 100_000, "returncode": 1}
+    result = await _provider(lambda *args: body).run_command(_params("true"))
+    assert result.error is not None and len(result.error) <= 4096
