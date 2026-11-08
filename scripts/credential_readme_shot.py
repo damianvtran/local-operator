@@ -254,11 +254,13 @@ async def shoot(outdir: Path, size: tuple[int, int], theme: str) -> dict[str, di
                 raise RuntimeError("the synthetic secret reached the screen as plaintext")
             if name == "credential-masked-typing" and TYPED_SECRET in frame:
                 raise RuntimeError("the typed secret reached the screen unmasked")
-            # README.md:928's alt text asserts this notice is on the frame, so a
-            # frame without it would publish a figure whose caption is false.
+            # docs/guide/configuration.md's alt text (moved there from the README)
+            # asserts this notice is on the frame, so a frame without it would
+            # publish a figure whose caption is false.
             if name == "credential-masked-typing" and "masked as you type" not in frame:
                 raise RuntimeError(
-                    "the masked frame lost the 'masked as you type' notice README.md:928 asserts"
+                    "the masked frame lost the 'masked as you type' notice "
+                    "docs/guide/configuration.md asserts"
                 )
 
             full = outdir / f"{name}.full.svg"
