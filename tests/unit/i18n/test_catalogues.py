@@ -101,6 +101,14 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Account-routing policy copy is an approved English-only child, not
         # an edit to the already-audited wire.settings or translated ledgers.
         "wire.settings.account_policy",
+        # The standing build-cache reaper's settings section: a CHILD of
+        # `wire.settings` so its four rows never move the already-audited
+        # `wire.settings` source hash. Unlike the English-only children in this
+        # list it is translated in all seven locales, each with its own
+        # audit-history shard on this branch (the settings page renders it in the
+        # active locale, see `settings_io._CHILD_SETTINGS_NAMESPACES`), so it is
+        # a populated shipped namespace, not a stub.
+        "wire.settings.build_cache",
         "wire.slash",
         # The Library slice's two slash doors (`/library`, `/librarian`)
         # resolve through this English-only CHILD of `wire.slash`, the
@@ -178,6 +186,9 @@ def test_shipped_wire_namespaces_exist() -> None:
     # below still reject undeclared additions, removals and emptied namespaces.
     assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
     assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
+    # The reaper's section: populated in en and in all seven translated locales,
+    # so the pinned set above is not admitting a stub.
+    assert catalogues.load_catalogue("en", "wire.settings.build_cache") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
     assert catalogues.load_catalogue("en", "wire.slash.library") != {}
     assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
