@@ -4336,7 +4336,6 @@ async def test_the_order_warning_survives_the_off_default_clause(
     from local_operator.tui.theme import semantic_color
 
     warning = settings_io.BY_KEY["providers.openrouter.order"].warning
-    danger = semantic_color("danger")
 
     def spans_by_color(text: Any) -> dict[str, list[str]]:
         out: dict[str, list[str]] = {}
@@ -4352,6 +4351,12 @@ async def test_the_order_warning_survives_the_off_default_clause(
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
+        # Resolve the expected ink against the theme the app ACTIVATED, not
+        # the process-global one this test happened to inherit (#3409): the
+        # theme is a module singleton, and reading it before the app applies
+        # its own choice let a neighbour that left "light" behind make the
+        # expectation `#b23a31` while the page painted dark's `#ef8078`.
+        danger = semantic_color("danger")
         view = await _open_page(pilot, app)
 
         # At default: the warning leads, in danger ink, and the SOFT how-to

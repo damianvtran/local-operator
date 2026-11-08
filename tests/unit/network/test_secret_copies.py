@@ -119,7 +119,13 @@ def secret_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch)
 
     assert _lop_network("credential", "share", KEY, "--with", server_b.identity.name) == 0
     pulled = _pull(SimpleNamespace(b=server_b, borrower=server_b.identity.device_id))
-    assert KEY in pulled.get("changed", []), pulled
+    # ``credential share`` now PUSHES the row (``share_push``), so the pull may find it
+    # already merged; what matters is that the member holds it after the pull.
+    from local_operator.network.credentials import placement as placement_mod
+
+    assert KEY in pulled.get("changed", []) or placement_mod.PlacementDocument.load(
+        record.network_id, server_b.root, self_device=server_b.identity.device_id
+    ).is_holder(KEY, server_b.identity.device_id), pulled
 
     engine_b = sync.SyncEngine(
         server_b,

@@ -61,6 +61,16 @@ from tests.unit.network.test_secret_copies import (  # noqa: F401 — fixtures b
 )
 
 
+def _holds(mesh: Any, key: str) -> bool:
+    """Whether the member's placement document names it as a holder of ``key``."""
+    from local_operator.network.credentials import placement as placement_mod
+
+    document = placement_mod.PlacementDocument.load(
+        mesh.network_id, mesh.b.root, self_device=mesh.member
+    )
+    return document.is_holder(key, mesh.member)
+
+
 @pytest.fixture()
 def copied_mesh(request: pytest.FixtureRequest) -> Any:
     """``secret_mesh`` with A's copy ALREADY delivered to B (one real exchange)."""
@@ -410,7 +420,9 @@ def test_an_unconfirmable_wipe_does_not_starve_other_keys(
     mesh.store_a.set(second_name, VALUE_1, description="M2's second key")
     assert _lop_network("credential", "share", second_key, "--with", mesh.b.identity.name) == 0
     pulled = _pull(SimpleNamespace(b=mesh.b, borrower=mesh.member))
-    assert second_key in pulled.get("changed", []), pulled
+    # ``credential share`` now PUSHES the row (``share_push``), so the pull may find it
+    # already merged; what matters is that the member holds it after the pull.
+    assert second_key in pulled.get("changed", []) or _holds(mesh, second_key), pulled
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
     assert net_fixtures.wait_for(lambda: _member_has(mesh.b.root, second_name))
@@ -559,7 +571,9 @@ def test_a_re_share_after_a_wipe_delivers_again(copied_mesh: Any) -> None:
 
     restore_finite(mesh.a.root, KEY, mesh.b.identity.name)
     pulled = _pull(SimpleNamespace(b=mesh.b, borrower=mesh.member))
-    assert KEY in pulled.get("changed", []), pulled
+    # ``credential share`` now PUSHES the row (``share_push``), so the pull may find it
+    # already merged; what matters is that the member holds it after the pull.
+    assert KEY in pulled.get("changed", []) or _holds(mesh, KEY), pulled
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
     assert net_fixtures.wait_for(

@@ -507,6 +507,10 @@ LOCAL_OPS: tuple[str, ...] = (
     # GitHub tokens for one ``(key, holder)`` immediately — the same local-op
     # boundary as the three leg-1 verbs, a different direction of travel.
     "credential_revoke",
+    # The share push (credentials/share_push.py): the CLI's ``credential share``
+    # asks THIS device's relay to hand the new placement row to its holder now —
+    # local because the link to the holder lives in the relay process.
+    "credential_share_push",
     # The member-side repair pull (mesh-mcp-credentials.md §4): a local act by the
     # same boundary rule — this device's own relay is told to pull one copy from
     # its owner now, and the link it needs lives in that process.

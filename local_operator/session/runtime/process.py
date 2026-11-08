@@ -2075,6 +2075,14 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             drained = True
         if not (drained or preempted or requested):
             continue
+        if not requested and await _queued_work_arrived(handle):
+            # A QUEUED MESSAGE IS WORK (PR #3447 QA Q1). An owner whose idle
+            # clock ran out while it was stopped (SIGSTOP, a long system sleep)
+            # wakes straight into this exit before its 1 s inbox watcher ticks,
+            # and the rows senders were told "runs when free" would wait for the
+            # next open. One live pass first: whatever it delivers starts work,
+            # and the next tick re-reads the residency predicate.
+            continue
         # The LAST instant before the exit, and the reason it is a latch rather
         # than another ``_should_exit`` sample: the grace loop's condition can
         # go false on the same tick that a ``prompt`` or ``peer_message`` opens
@@ -4785,7 +4793,7 @@ def _resume_consumed_ids(directory: Path) -> set[str]:
     return {item for item in consumed if isinstance(item, str) and item}
 
 
-async def _drain_inbox_into(handle: object) -> int:
+async def _drain_inbox_into(handle: object, *, live: bool = False) -> int:
     from local_operator.session.runtime.inbox import (
         claim_read_batch_or_defer,
         settle_read_batch,
@@ -4804,14 +4812,14 @@ async def _drain_inbox_into(handle: object) -> int:
     delivered = 0
     try:
         if await claim_read_batch_or_defer(batch):
-            delivered = await _drain_inbox_into_claimed(handle, batch)
+            delivered = await _drain_inbox_into_claimed(handle, batch, live=live)
     except BaseException as exc:
         error = exc
     await settle_read_batch(batch, error, cwd=str(getattr(handle, "_desktop_cwd", "") or ""))
     return delivered
 
 
-async def _drain_inbox_into_claimed(handle: object, batch) -> int:
+async def _drain_inbox_into_claimed(handle: object, batch, *, live: bool = False) -> int:
     """Deliver every message spooled while this session was cold. Count sent.
 
     Also the handover path: the same file is where a DRAINING runtime spools what
@@ -4945,12 +4953,17 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
     # rows whose delivery has not reached the transcript yet, i.e. one queued
     # behind another in THIS loop.
     seen_owner_ids: set[str] = set()
+    hold_owner_prompts = False
     for line in lines:
         owner_row = getattr(line, "source", "") == SOURCE_USER
+        if live and owner_row and hold_owner_prompts and getattr(line, "mode", "") != "steer":
+            continue
         try:
             if owner_row:
                 await admit_batch_row(
-                    batch, ordinals[id(line)], _run_owner_prompt(handle, line, seen=seen_owner_ids)
+                    batch,
+                    ordinals[id(line)],
+                    _run_owner_prompt(handle, line, seen=seen_owner_ids, live=live),
                 )
             elif callable(probed):
                 fields: dict[str, Any] = {
@@ -5003,6 +5016,12 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
             else:
                 raise RuntimeError("this handle cannot receive a spooled peer message")
             delivered += 1
+        except _LeaveQueued:
+            # Left for a later pass (see ``_run_owner_prompt``). Every LATER
+            # owner prompt row stays too, so the queue keeps its FIFO order: a
+            # row behind a held one must not overtake it (PR #3447 UX U3).
+            hold_owner_prompts = True
+            continue
         except Exception:  # noqa: BLE001 — one bad row is not the others' problem
             # THE ROW GOES BACK. ``drain_inbox`` empties the file by contract, so a
             # delivery that raises has already consumed the message: without this the
@@ -5046,7 +5065,53 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
     return delivered
 
 
-async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> None:
+class _LeaveQueued(Exception):
+    """A LIVE pass leaves this row in the inbox, untouched, for a later pass.
+
+    Raised instead of delivering, so ``admit_batch_row`` never marks the row
+    handled and ``commit_inbox_batch`` never deletes it. Not a failure: the
+    drain counts it as neither delivered nor failed and logs nothing.
+    """
+
+
+def _turn_in_flight(handle: object) -> bool:
+    """Whether a TURN holds this session right now (not jobs, not subagents).
+
+    The live drain's hold-back gate (PR #3447 review m2, UX U3/U4). A queued
+    PROMPT delivered while a turn runs would be admitted with
+    ``wait_for_turn=True``: the inbox read lease would be held for the whole
+    turn (a concurrent rewrite then fails the commit and re-delivers legacy
+    rows), and the message would sit in the handle's in-memory backlog, where an
+    Esc-stop can take it with the stopped work. Left in the inbox instead, it
+    stays durable, keeps its FIFO place, survives the stop, and is admitted on
+    the first tick after the turn ends, when admission is an immediate append.
+    Deliberately narrower than ``is_busy``: a background job or a running
+    subagent is not a turn, and a socket prompt would not wait for one either.
+    """
+    session = getattr(handle, "_session", None)
+    if getattr(session, "is_streaming", False):
+        return True
+    lock = getattr(session, "_turn_lock", None)
+    if lock is not None and lock.locked():
+        return True
+    return bool(getattr(handle, "_prompt_queue", None))
+
+
+def _reserved_by_owner(handle: object, command_id: str) -> bool:
+    """Whether this runtime holds ``command_id`` as admitted-but-not-durable."""
+    reservations = getattr(handle, "_command_reservations", None)
+    holds = getattr(reservations, "holds", None)
+    if not command_id or not callable(holds):
+        return False
+    try:
+        return bool(holds(command_id))
+    except Exception:  # noqa: BLE001 — unknown means leave it: a later boot drain dedupes
+        return True
+
+
+async def _run_owner_prompt(
+    handle: object, line: Any, *, seen: set[str], live: bool = False
+) -> None:
     """Run one spooled OWNER prompt on this runtime, at most once.
 
     The continuation of the drain's own promise: a runtime that latched a
@@ -5093,6 +5158,22 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
     if command_id and callable(admitted) and admitted(command_id):
         logger.info("spooled prompt already in the transcript; not running it twice")
         return
+    if live and _reserved_by_owner(handle, command_id):
+        # THE ROW IS INSURANCE, NOT A MESSAGE TO DELIVER (PR #3447 review B1).
+        # ``ServingSessionHandle._admit_steer`` spools every accepted steer BEFORE
+        # acknowledging it, and that row is the only durable copy until
+        # ``Session._drain_steering`` writes the transcript row at the next
+        # boundary (the 2026-10-28 lost-steer fix); a prompt the socket admitted
+        # is in the same state until its append. "Delivering" either here was
+        # answered "already admitted" and the commit then DELETED the insurance,
+        # so a crash before the boundary lost an acknowledged message again. The
+        # row is left; whoever makes it durable removes it (``remove_owner_row``),
+        # and a successor's boot drain dedupes it by the transcript index if that
+        # removal is lost.
+        raise _LeaveQueued()
+    if live and getattr(line, "mode", "") != "steer" and _turn_in_flight(handle):
+        # Held back until the turn ends; see :func:`_turn_in_flight`.
+        raise _LeaveQueued()
     # REFUSE, DO NOT WAIT: the serving handle now makes an accepted prompt wait
     # out a turn it did not open, and this drain runs before the control socket
     # listens — waiting here would keep the runtime unreachable for a whole
@@ -5109,10 +5190,26 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
     parameters = inspect.signature(run).parameters
     fields: dict[str, Any] = {}
     if "wait_for_turn" in parameters:
+        # The BOOT drain must not wait (the socket is not listening yet; see
+        # ``ServingSessionHandle.prompt``). The live pass also opts out:
+        # a turn can win the lock after our
+        # preflight (the claim uses a worker thread). Its refusal below leaves
+        # the row in the inbox for a later pass, never holds this lease across
+        # that turn and never turns a queued prompt into an unsolicited steer.
         fields["wait_for_turn"] = False
     if "harness_injected" in parameters:
         fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
     try:
+        if live and getattr(line, "mode", "") == "steer":
+            # A LIVE-QUEUED STEER: the user's mid-turn message that the busy
+            # owner could not acknowledge in time. It joins the turn in flight
+            # exactly as the socket op would have -- raised into the steer arm
+            # below, which dedupes by ``command_id`` through the same
+            # reservation map, so a socket copy the owner DID take answers
+            # "already admitted" rather than steering twice.
+            from local_operator.session.errors import TurnInFlight
+
+            raise TurnInFlight()
         if command_id:
             await run(line.text, command_id=command_id, **fields)
             # RECORDED AFTER THE DELIVERY, not before it: the batch's own repeat
@@ -5140,6 +5237,8 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
 
         if not isinstance(error, TurnInFlight) and "already streaming" not in str(error):
             raise
+        if live and getattr(line, "mode", "") != "steer":
+            raise _LeaveQueued() from None
         steer = getattr(handle, "steer", None)
         if not callable(steer):
             raise
@@ -5279,6 +5378,141 @@ STALL_BEAT_RESTARTS = 3
 #: window shorter than one heartbeat would make the budget unreachable, because
 #: attempts cannot be closer together than the tick's own leading sleep.
 STALL_BEAT_WINDOW_S = 300.0
+
+
+#: How often a LIVE runtime looks at its own ``inbox.jsonl`` for rows a sender
+#: queued because this runtime did not answer in time. See :func:`_watch_live_inbox`.
+LIVE_INBOX_POLL_S = 1.0
+
+#: How long the watcher may skip an UNCHANGED inbox after a pass that delivered
+#: nothing (PR #3447 review m1). Rows a live pass deliberately leaves -- peer
+#: rows deferred on an unengaged session, a steer's insurance row, a prompt held
+#: behind a turn, a malformed line -- otherwise cost a claim, two locks, a read
+#: and a log line every second for the life of the runtime. An append or rewrite
+#: changes size/mtime and is seen on the next tick; a turn ending voids the skip
+#: at once; this bound only re-checks state the file cannot show (a reservation
+#: going durable) within half a minute.
+LIVE_INBOX_RECHECK_S = 30.0
+
+
+async def _queued_work_arrived(handle: object) -> bool:
+    """One live inbox pass before an idle retire; True when it delivered a row."""
+    if not getattr(handle, "live_inbox_drain", False):
+        return False
+    session = getattr(handle, "_session", None)
+    directory = getattr(getattr(session, "transcript", None), "directory", None)
+    if directory is None:
+        return False
+    from local_operator.session.runtime.inbox import inbox_path
+
+    try:
+        if inbox_path(Path(directory)).stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    try:
+        return await _drain_inbox_into(handle, live=True) > 0
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — a failed pass must not keep a runtime resident
+        logger.warning("pre-retire inbox pass failed; retiring anyway", exc_info=True)
+        return False
+
+
+async def _watch_live_inbox(handle: object, stop: asyncio.Event) -> None:
+    """Deliver rows queued to THIS runtime's inbox while it is running.
+
+    WHY IT EXISTS (the 2026-11-04 Aida incident). The spool used to be read at
+    boot (:func:`_drain_inbox_into`, before the socket listens) and once at the
+    first turn (``Session._drain_spooled_peer_inbox``), so it could only carry a
+    message to a runtime that did not exist yet. A message to a runtime that
+    DID exist but was too busy to acknowledge inside the desktop envelope
+    (``DESKTOP_CONTROL_ATTACH_S``) or the peer dial's budget was therefore
+    REFUSED — the desktop answered ``runtime_busy`` 503 and the operator's two
+    messages never reached the transcript; ``send`` refused a ``wedged`` peer
+    outright. With this watcher a sender may instead append the message to
+    the inbox and answer "queued": this loop picks it up the next time the
+    runtime's own loop runs, which is exactly when the runtime could have
+    answered the socket anyway.
+
+    AT-MOST-ONCE, against the socket copy. A sender that times out may have
+    had its socket write taken by the owner as well, so the same message can
+    arrive twice. Delivery reuses the boot drain's own per-row paths, and both
+    are idempotent by the sender's identity: an owner row by ``command_id``
+    (:func:`_run_owner_prompt` consults the in-memory reservation through
+    ``prompt`` and the durable transcript index ``has_admitted_command``), a
+    peer row by ``message_id`` (``Session.receive_peer_message`` answers a
+    known id as a duplicate).
+
+    A STAT, NOT A READ, ON THE STEADY-STATE TICK: the file is empty or absent
+    on a healthy session, so the loop costs one ``stat`` per
+    :data:`LIVE_INBOX_POLL_S` and claims a batch only when bytes are present.
+    The claim itself is the shared one (``try_enter_read_batch`` /
+    ``claim_read_batch_or_defer``), so it cannot race the first-turn drain or a
+    successor's boot drain into delivering a row twice.
+
+    WHY POLLING RATHER THAN AN ERRAND OVER THE SOCKET: the whole point is the
+    case where the socket did not answer. Anything that needs this runtime's
+    loop to run in order to be told about the row has the same problem as the
+    message itself; a file the loop looks at whenever it next runs does not.
+
+    NEVER RAISES OUT: a failed pass is logged and the next tick tries again. A
+    runtime that is updating or retiring is left alone — its successor's boot
+    drain owns the spool then (``serving._spool_for_successor``).
+    """
+    session = getattr(handle, "_session", None)
+    directory = getattr(getattr(session, "transcript", None), "directory", None)
+    if directory is None:
+        return
+    from local_operator.session.runtime.inbox import inbox_path
+
+    path = inbox_path(Path(directory))
+    #: ``(size, mtime_ns, monotonic)`` of the last pass that delivered nothing.
+    idle_mark: tuple[int, int, float] | None = None
+    was_in_turn = False
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=LIVE_INBOX_POLL_S)
+            return
+        except TimeoutError:
+            pass
+        if getattr(handle, "_updating", "") or getattr(handle, "_retiring_cause", ""):
+            continue
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if info.st_size == 0:
+            idle_mark = None
+            continue
+        # A turn ENDING is what a held-back prompt waits for, so it voids the
+        # skip at once rather than after the recheck bound.
+        in_turn = _turn_in_flight(handle)
+        turn_ended, was_in_turn = was_in_turn and not in_turn, in_turn
+        if (
+            idle_mark is not None
+            and not turn_ended
+            and idle_mark[:2] == (info.st_size, info.st_mtime_ns)
+            and time.monotonic() - idle_mark[2] < LIVE_INBOX_RECHECK_S
+        ):
+            continue
+        try:
+            delivered = await _drain_inbox_into(handle, live=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the next tick retries; a pass never ends the runtime
+            logger.warning("live inbox pass failed; retrying next tick", exc_info=True)
+            idle_mark = None
+            continue
+        if delivered:
+            idle_mark = None
+            logger.info("delivered %d queued message(s) to the live runtime", delivered)
+            continue
+        try:
+            after = path.stat()
+            idle_mark = (after.st_size, after.st_mtime_ns, time.monotonic())
+        except OSError:
+            idle_mark = None
 
 
 async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
@@ -5776,6 +6010,15 @@ async def amain(operator_cap: bytes | None = None) -> int:
         except Exception:  # noqa: BLE001 — an unarmable scheduler is not a dead runtime
             logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
+    # SET BEFORE THE SERVER EXISTS: ``RuntimeServer`` builds the record's
+    # capability list from the handle, and ``live-inbox-v1`` promises senders
+    # that :func:`_watch_live_inbox` (started below, beside the reaper) reads
+    # this runtime's spool while it runs. Only this entry point starts that
+    # watcher, so only it may set the flag.
+    try:
+        setattr(handle, "live_inbox_drain", True)
+    except Exception:  # noqa: BLE001 — a handle that refuses it simply does not advertise
+        logger.debug("handle does not accept the live-inbox flag", exc_info=True)
     runtime = RuntimeServer(handle, kind=RUNTIME_RECORD_KIND, operator_cap=operator_cap)
     # THE RUN KEY AT ITS OTHER END, announced the moment the run has an identity
     # and before the serving plane can make this process addressable. Removed only
@@ -6106,6 +6349,10 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # armed for an in-process host that never went through this module's entry
     # point, where ``beat`` is a no-op.
     stall_beats = asyncio.ensure_future(_watch_stall_beats(stop))
+    # The live inbox drain, same lifetime as the two above. See
+    # :func:`_watch_live_inbox`; its capability string was advertised on the
+    # record from the flag set before ``RuntimeServer`` was constructed.
+    live_inbox = asyncio.ensure_future(_watch_live_inbox(handle, stop))
     reaper_ran_clean_exit = False
     await stop.wait()
     if routing.draining is not None and not routing.draining.done():
@@ -6115,6 +6362,8 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # which has now happened, so it is cancelled rather than left to wake
         # against a session that is already disposing.
         routing.draining.cancel()
+    if not live_inbox.done():
+        live_inbox.cancel()
     if not stall_beats.done():
         # The SUPERVISOR, so this reaches the live tick through its await rather
         # than skipping a dead one: a tick that died and was re-created is not

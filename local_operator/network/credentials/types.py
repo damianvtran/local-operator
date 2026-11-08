@@ -65,6 +65,9 @@ LOCAL_CREDENTIAL_OPS: tuple[str, ...] = (
     # ``{ok, state, code}``. Local for the same reason as the rest of the
     # family — the pull needs a link, and the link lives in the relay.
     "credential_sync_pull",
+    # The share push (``share_push``): ``credential share`` asks THIS device's relay
+    # to hand the row it just wrote to the new holder over the relay's own link.
+    "credential_share_push",
 )
 
 #: Leg 2 (relay → owner relay). ONE peer op with a ``kind`` discriminator, as the
