@@ -86,6 +86,7 @@ from local_operator.providers.auth_store import AuthStoreError, OAuthAccess
 from local_operator.providers.radient_credentials import (
     org_destination_refused_sentence,
     org_oauth_destination_allowed,
+    strip_base_credentials,
 )
 from local_operator.team_bridge import availability
 from local_operator.team_bridge import screening_observation as _observation
@@ -122,6 +123,58 @@ from local_operator.team_bridge.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The refusal for a hub base spelled with URL credentials (``user:pass@``).
+#: Deliberately quotes nothing from the base: the credential is the one part of
+#: it that must not be echoed into a CLI error, a server response or a log. No
+#: ``@`` either, so a log scan for one stays a clean leak signal.
+CREDENTIALED_BASE_REFUSED_SENTENCE = (
+    "organization operations are refused because the configured Radient hub URL "
+    "carries credentials (a user name or password before the host). The hub is "
+    "authenticated with the "
+    "signed-in account's bearer only; remove the credentials from `radient_base_url`."
+)
+
+
+def _split_base_credentials(base_url: str) -> tuple[str, bool]:
+    """``base_url`` without its URL credentials, and whether it carried any.
+
+    REFUSE, NOT LIFT INTO ``Authorization: Basic`` (security round 2 on #3587,
+    S-r2-1). This client authenticates every hub request with the signed-in
+    account's pinned ``Bearer`` (see ``_dispatch``), and a request has ONE
+    ``Authorization`` header: a Basic header lifted from the URL could only
+    replace the bearer, which is what httpx 0.28.1 already did with such a base
+    (measured: the hub received ``Basic`` and never the bearer). So a
+    credentialed base never authenticated as the account; it only leaked: httpx
+    logs ``HTTP Request: <full url>`` at INFO, credentials included.
+
+    STRIPPED AT CONSTRUCTION, refused at the destination guard: the stored base
+    is what reaches httpx, the latch key, ``base_url`` callers and the refusal
+    sentences, so none of them can carry the credential even before the guard
+    runs. Parsed by hand rather than with ``urlsplit``, which raises on a
+    malformed bracketed host and would leave such a base unstripped.
+
+    ANY ``@`` IS CREDENTIALS (security round 1 on #3588, S-1). A hub API base
+    never legitimately carries an ``@``, so this does NOT follow RFC 3986's
+    authority boundary: a password spelled with a raw ``/``, ``?`` or ``#``
+    (``https://ops:pa/ss@hub``) ends the RFC authority early, and an
+    authority-only split missed it — the base went unflagged, the generic
+    refusal echoed it whole and httpx raised ``InvalidURL`` naming part of the
+    password. Everything up to the LAST ``@`` is dropped, which is the safe
+    direction: every byte that could be a credential goes, and the base is
+    refused anyway, so the remainder only has to be credential-free, not
+    faithful. EMPTY credentials (``https://@host``) count too. On httpx 0.28.1
+    they KEEP the bearer (measured in that round: only non-empty credentials
+    swap it for Basic), so this is not about the wire; it keeps the rule one
+    predicate a reviewer can check — no ``@``, or refused.
+
+    The split itself is :func:`strip_base_credentials`, shared with the refusal
+    sentence's sanitizer so the stored base and the quoted one obey ONE rule:
+    the last ``@`` across the whole value (security round 2, S-4), and a fixed
+    placeholder when no trustworthy scheme precedes the credentials.
+    """
+
+    return strip_base_credentials(base_url)
 
 
 def _attach_observation(
@@ -1638,7 +1691,9 @@ class TeamBridgeClient:
         credential_id: int | None = None,
     ) -> None:
         self._config_dir = config_dir
-        self._base_url = (base_url or resolve_radient_api_base_url()).rstrip("/")
+        self._base_url, self._base_had_credentials = _split_base_credentials(
+            (base_url or resolve_radient_api_base_url()).rstrip("/")
+        )
         self._store = store
         self._transport = transport
         #: The owner pin (see the module docstring): the exact credential row
@@ -1739,13 +1794,31 @@ class TeamBridgeClient:
         ``RADIENT_ORG_ALLOW_NONCANONICAL_BASE`` opt-in (the resolvers' rule);
         without it the refusal names the configuration remedy rather than the
         sign-in one, because that is the move that works.
+
+        A base that carried URL credentials is refused FIRST, opt-in or not: the
+        opt-in accepts a host, never a second credential riding beside the
+        bearer (see :func:`_split_base_credentials`).
         """
 
+        self._refuse_credentialed_base()
         if not org_oauth_destination_allowed(self._base_url):
             raise BridgeRefusal(
                 "bridge_destination_refused",
                 org_destination_refused_sentence(self._base_url, DEFAULT_RADIENT_API_BASE_URL),
             )
+
+    def _refuse_credentialed_base(self) -> None:
+        """Refuse a base that carried URL credentials (see :func:`_split_base_credentials`).
+
+        Called from :meth:`_require_destination` AND from :meth:`_dispatch`
+        (security round 1 on #3588, S-2): a caller handing a ready ``access``
+        (``status(access=)``, the poll, ``_guarded_access``) never passes
+        through ``current_access``, so the dispatch every hub request ends in is
+        the one place no future path can route around.
+        """
+
+        if self._base_had_credentials:
+            raise BridgeRefusal("bridge_destination_refused", CREDENTIALED_BASE_REFUSED_SENTENCE)
 
     async def current_access(self) -> OAuthAccess:
         """The signed-in Radient OAuth account, pinned to its exact row.
@@ -1868,6 +1941,9 @@ class TeamBridgeClient:
         # gate lives here: no caller can reach `/agents/owned` by spelling the
         # path itself (#3022 R1-1).
         _refuse_unscoped_owner_audit(path, method)
+        # Before the AsyncClient exists: no credentialed base reaches httpx,
+        # whichever caller minted the token (S-2).
+        self._refuse_credentialed_base()
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
         # connector (H4) needs a PERSISTENT client with an owned ``aclose()``
@@ -6794,11 +6870,12 @@ class StatusDiscipline:
         self._states.clear()
 
 
-#: Process-wide disciplines, keyed by (config root, hub base URL) — the two
-#: inputs that can change any answer. This is what makes one read serve every
+#: Process-wide disciplines, keyed by (config root, credential-free hub base
+#: URL, whether the configured base carried credentials) — the inputs that can
+#: change any answer. This is what makes one read serve every
 #: session on the machine ("coalesce per account across sessions"); tests reset
 #: it with :func:`reset_status_disciplines`.
-_DISCIPLINES: dict[tuple[str, str], StatusDiscipline] = {}
+_DISCIPLINES: dict[tuple[str, str, bool], StatusDiscipline] = {}
 
 
 def get_status_discipline(
@@ -6807,7 +6884,18 @@ def get_status_discipline(
     """The shared discipline for one config root + hub base URL."""
 
     resolved_base = (base_url or resolve_radient_api_base_url()).rstrip("/")
-    key = (str(config_dir) if config_dir is not None else "", resolved_base)
+    # Keyed on the STRIPPED base (security round 1 on #3588, S-3) so the
+    # process-wide map never holds a URL credential as a key; the discipline
+    # itself still gets the raw base, so its client flags and refuses it. The
+    # credentials FLAG is part of the key (security round 2, S-5): stripping
+    # alone made a credentialed and a clean spelling of one hub share an entry,
+    # so whichever came first decided whether the other was refused.
+    stripped_base, had_credentials = _split_base_credentials(resolved_base)
+    key = (
+        str(config_dir) if config_dir is not None else "",
+        stripped_base,
+        had_credentials,
+    )
     discipline = _DISCIPLINES.get(key)
     if discipline is None:
         discipline = StatusDiscipline(config_dir, base_url=resolved_base)
