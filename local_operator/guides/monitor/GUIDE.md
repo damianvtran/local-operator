@@ -156,7 +156,7 @@ monitor({op:"create", name:"product-feedback-watch",
   delta when the session is re-engaged, bounded like any delivery (about 12
   preview lines, the delivery budget, the hourly cap), never a replay of every
   missed tick. `lop stop` on the session parks the watch (`lop monitor status`
-  marks it `idle`), so record which session owns a channel watch when you arm
+  marks it `dormant` until the session is reopened), so record which session owns a channel watch when you arm
   it, and don't stop that session.
 - **A watch armed before the record split** keeps working: its stored
   baseline is re-read in the new shape, so a message that landed during the
