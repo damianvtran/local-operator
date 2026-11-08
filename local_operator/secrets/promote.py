@@ -44,6 +44,27 @@ class PromotionResult:
     already_present: bool = False
 
 
+def _is_vault_sourced(store: Any, key: str) -> bool | None:
+    """Whether session credential ``key`` was resolved from Radient Vault.
+
+    Read through the public ``list_credentials`` (names and sources, never
+    values). ``None`` when the listing cannot be read: the caller refuses then,
+    because promoting a value whose provenance is unknown could persist a
+    teammate's credential (fail closed).
+    """
+
+    lister: Any = getattr(store, "list_credentials", None)
+    if not callable(lister):
+        return False
+    try:
+        rows: Any = lister()
+        return any(
+            getattr(c, "key", None) == key and getattr(c, "source", None) == "vault" for c in rows
+        )
+    except Exception:  # noqa: BLE001 - see the docstring
+        return None
+
+
 def promote_session_credential(
     store: Any,
     key: str,
@@ -82,6 +103,21 @@ def promote_session_credential(
     # else must not raise out of a promotion.
     if not isinstance(values, dict):
         return PromotionResult(False, key, "This session's credential store could not be read.")
+    vault_sourced = _is_vault_sourced(store, key)
+    if vault_sourced is None:
+        return PromotionResult(False, key, "This session's credential store could not be read.")
+    if vault_sourced:
+        # A teammate's shared value stays SESSION-ONLY. Their rotation, expiry
+        # and revocation are what make sharing safe (VAULT.md §4: never in a
+        # durable store), and a long-term copy on this disk would outlive all
+        # three. The message rides a model-visible channel, so it names no
+        # workaround.
+        return PromotionResult(
+            False,
+            key,
+            f"{key} came from Radient Vault and stays session-only, so the teammate's "
+            "rotation and revocation still apply. It was not saved to the long-term store.",
+        )
     value = values.get(key)
     if not value:
         # NAMES THE GESTURE THAT STILL WORKS. This used to advise

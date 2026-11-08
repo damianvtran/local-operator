@@ -3934,6 +3934,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes the fixed <config>/hub/org_catalogue.json record on sign-out",
     ),
+    # -- Radient Vault agent grant cache --------------------------------------
+    # ``vault_agent/eligibility.py`` writes through the hub record's writer above
+    # (no replace of its own). ``clear_grant`` unlinks ONE fixed file,
+    # ``<config>/vault/agent_access.json`` (``vault_dir`` + the ``GRANT_NAME``
+    # constant): no caller-supplied path, so no session directory is reachable.
+    (
+        "local_operator/vault_agent/eligibility.py::clear_grant",
+        "<path>.unlink",
+        "Removes the fixed <config>/vault/agent_access.json grant cache (disconnect, revoke)",
+    ),
     (
         "local_operator/hub_sync/skill_bundle.py::extract_archive",
         "shutil.rmtree",

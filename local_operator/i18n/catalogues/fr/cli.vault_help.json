@@ -1,0 +1,9 @@
+{
+  "cli.vault_help.vault": "Permettre à l’agent de cette machine de lire les identifiants que vos coéquipiers ont partagés dans Radient Vault (Radient Team)",
+  "cli.vault_help.connect": "Créer la clé de cet agent, afficher son empreinte et ouvrir la page d’approbation",
+  "cli.vault_help.no_open": "Afficher le lien d’approbation au lieu d’ouvrir un navigateur",
+  "cli.vault_help.timeout": "Durée d’attente de votre approbation, en secondes (600 par défaut)",
+  "cli.vault_help.status": "Indiquer si l’accès des agents est disponible, ainsi que l’empreinte de la clé de cet agent et son approbation",
+  "cli.vault_help.json": "Afficher l’état au format JSON",
+  "cli.vault_help.disconnect": "Supprimer les clés d’agent de cette machine (révoquez leur accès séparément dans la console)"
+}

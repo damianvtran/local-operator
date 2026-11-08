@@ -305,7 +305,11 @@ class SecretsMapping(Mapping[str, SecretValue]):
             # `list(secrets)` in a cell that is exploring should report "none
             # here", and the verbs that actually need the store still raise.
             return iter([])
-        return iter([record.name for record in records])
+        from local_operator.secrets.store import is_delegation_secret_name
+
+        # The Vault delegation seed's row is never offered to a cell: every verb
+        # here refuses it anyway, and a name the agent can see invites a read.
+        return iter([r.name for r in records if not is_delegation_secret_name(r.name)])
 
     def __len__(self) -> int:
         return sum(1 for _ in self)

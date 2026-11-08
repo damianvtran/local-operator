@@ -1732,7 +1732,9 @@ async def test_the_trigger_respects_the_configured_cap() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_local_credential_intent_never_reaches_vault_through_the_roster() -> None:
+async def test_a_local_credential_intent_never_reaches_vault_through_the_roster(
+    tmp_path,
+) -> None:
     """Vault guidance is gated off the recommendation path for everyone, today.
 
     Operator requirement: local use recommends the ``secret`` tool, and Vault is
@@ -1745,11 +1747,26 @@ async def test_a_local_credential_intent_never_reaches_vault_through_the_roster(
     secret tool through the roster builder, and EVERY packaged guide rather than
     only ``credentials``, so a later description edit to any guide that starts
     advertising Vault fails here, not in a user's prompt.
+
+    The ONE exception is a gated guide: ``radient-vault`` (``requires:
+    radient-vault``) names Vault by design, and the session builder drops it
+    through ``guides_available`` before the roster exists unless the signed-in
+    Team + Vault + Team Bridge gate is open. So the roster is built from what an
+    INELIGIBLE root sees, the same filter ``session_factory`` applies, and the
+    gated guide's absence is asserted rather than assumed.
     """
     from local_operator.guides import discover_guides
+    from local_operator.guides.discovery import guides_available
     from scripts.real_tool_surface import build_real_tools
 
-    guides = discover_guides()
+    packaged = discover_guides()
+    assert "radient-vault" in {guide.name for guide in packaged}
+    guides = guides_available(packaged, tmp_path)
+    assert "radient-vault" not in {guide.name for guide in guides}
+    # Only gated guides may be dropped; every ungated one still reaches the check.
+    assert {g.name for g in packaged} - {g.name for g in guides} <= {
+        g.name for g in packaged if g.requires
+    }
     # Guard the guard: an empty catalogue would make the all() below vacuous.
     assert len(guides) > 1
     assert "credentials" in {guide.name for guide in guides}

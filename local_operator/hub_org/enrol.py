@@ -149,10 +149,26 @@ def run_boundary(
         finally:
             if refreshed is not None:
                 refreshed.set()
+        if orgs:
+            # The Radient Vault agent gate rides the same boundaries (sign-in,
+            # daemon start, the 6 h timer): it is meaningful only for a
+            # team-plan account, and its own TTL keeps this a no-op most ticks.
+            _refresh_vault_gate(Path(config_dir), boundary, force=force)
         if orgs and auto_enrol_enabled(Path(config_dir)):
             sync_new_items(Path(config_dir), orgs)
     except Exception:  # noqa: BLE001 - see module docstring
         logger.debug("org hub enrol failed (%s)", boundary, exc_info=True)
+
+
+def _refresh_vault_gate(config_dir: Path, boundary: str, *, force: bool) -> None:
+    """Refresh ``vault_agent.eligibility`` at this boundary. Never raises."""
+
+    try:
+        from local_operator.vault_agent import eligibility as vault_gate
+
+        vault_gate.refresh(config_dir, boundary=boundary, force=force)
+    except Exception:  # noqa: BLE001 - a gate refresh never fails a boundary
+        logger.debug("vault agent gate refresh failed (%s)", boundary, exc_info=True)
 
 
 def sync_new_items(config_dir: Path, orgs: Iterable[el.OrgRef] | None = None) -> None:

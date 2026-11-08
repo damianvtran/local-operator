@@ -1,0 +1,162 @@
+{
+  "cli.vault.compare": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Printed BEFORE the fingerprint grid. The safety meaning must survive: the person compares the printed groups with the trusted approval page BEFORE approving. Never say the harness verified anything."
+  },
+  "cli.vault.opening": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Followed by the URL on its own line."
+  },
+  "cli.vault.open_manually": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Shown when no browser could be opened; followed by the URL on its own line."
+  },
+  "cli.vault.waiting": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "{minutes} is an integer >= 1. Ctrl+C is a key name; keep it."
+  },
+  "cli.vault.connected_until": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Leads with the state. {until} is a local date and time already formatted (e.g. 2026-11-14 09:30 PST)."
+  },
+  "cli.vault.timed_out": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "The backticked command is literal and stays byte-identical."
+  },
+  "cli.vault.interrupted": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "The backticked command is literal."
+  },
+  "cli.vault.unavailable": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "The ONE sentence for the dark state (the service is not switched on yet). Not an error, not an up-sell, no retry advice. Short."
+  },
+  "cli.vault.no_access": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Route 29 refused (403 / vault_no_access). Names the cause and the next step; `lop vault connect` is a command, keep it verbatim."
+  },
+  "cli.vault.error": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Transient failure."
+  },
+  "cli.vault.signed_out": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "The backticked command is literal."
+  },
+  "cli.vault.not_team": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "The ONLY sentence shown to an account with no team-plan organization: a direct answer, never an up-sell. 'Radient Team' is a plan name; keep it verbatim."
+  },
+  "cli.vault.no_endpoint": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "'agent messages' is the product name of Team Bridge (match cli.team_bridge). The backticked command is literal."
+  },
+  "cli.vault.not_eligible": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "{org} is an organization name. Direct, no up-sell."
+  },
+  "cli.vault.frozen": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "The organization's plan lapsed; matches the console's wording for a frozen organization."
+  },
+  "cli.vault.disabled": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "{org} is an organization name."
+  },
+  "cli.vault.not_approved": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "{org} is an organization name."
+  },
+  "cli.vault.status_no_key": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "The backticked command is literal."
+  },
+  "cli.vault.status_not_connected": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "'active' matches the console's grant states (Active / Expired / Revoked). `lop vault connect` is a command."
+  },
+  "cli.vault.disconnected": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "{count} is how many agent keys were deleted (>= 1). The agent, not the key, is what reads vaults."
+  },
+  "cli.vault.nothing_to_remove": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "plain sentence"
+  },
+  "cli.vault.revoke_hint": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Followed by the console URL on its own line. 'Agent access' is the console page title; keep the console's term."
+  },
+  "cli.vault.title": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "First line of the key block. {org} is an organization name (or a tnt_ id). The middle dot is a separator; keep it."
+  },
+  "cli.vault.title_bare": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "cli.vault.title without the organization: used when only the tenant id is known. Must read exactly as cli.vault.title minus its ' · {org}' suffix."
+  },
+  "cli.vault.endpoint_row": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Label/value row. 'Agent endpoint' is the console's own field label (user-console Agent access); keep it identical to the console's term in this locale. {endpoint} is a bep_ id."
+  },
+  "cli.vault.fingerprint_label": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Label line above the instruction and the 4-line fingerprint grid. 'Key fingerprint' is the console's own field label; match the console's term."
+  },
+  "cli.vault.fingerprint_held": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Label above the fingerprint grid in `lop vault status` when access is not currently usable: the key still exists on this machine. 'Key fingerprint' is the console label."
+  },
+  "cli.vault.compare_stop": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Follows cli.vault.compare on its own line: on any mismatch, do not approve. Short and imperative (the console says 'If they differ, stop.')."
+  },
+  "cli.vault.connected_scope": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Follows connected_until. 'shared with it' = the vaults the person chose on the approval page."
+  },
+  "cli.vault.waiting_seconds": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "Used when the wait is under a minute. {seconds} is an integer >= 1. Ctrl+C is a key name; keep it."
+  },
+  "cli.vault.key_unreadable": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "The stored agent key is damaged or the store could not be read. Both commands are verbatim."
+  },
+  "cli.vault.store_error": {
+    "role": "lop vault CLI output",
+    "tone": "plain, direct, operator-facing; no alarm, no up-sell",
+    "note": "`lop vault disconnect` could not open the local encrypted secret store; nothing was deleted."
+  }
+}
