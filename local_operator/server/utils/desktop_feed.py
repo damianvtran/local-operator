@@ -139,6 +139,7 @@ from typing import Any, AsyncIterator, Callable, cast
 import yaml
 
 from local_operator.config import CONFIG_FILE_NAME
+from local_operator.i18n.boot import follow_language
 from local_operator.i18n.frames import config_frame_payload
 from local_operator.i18n.resolve import resolve_language
 from local_operator.monitors.store import read_index as read_monitor_index
@@ -1424,6 +1425,14 @@ class DesktopFeed:
                         language = await asyncio.to_thread(
                             resolve_language, raw if isinstance(raw, str) else "auto"
                         )
+                        # The same doorbell is the server's only view of a
+                        # language written by ANOTHER process (CLI/TUI/hand
+                        # edit): move the process's active locale with it so
+                        # the settings registry copy and wire resolvers stop
+                        # painting the boot language (``follow_language``).
+                        # Idempotent, so the PATCH route's own move is a no-op
+                        # here. ``language`` is already the resolved locale.
+                        follow_language(language)
                         # The payload comes from the SHARED builder so this
                         # surface and the relay daemon's /api/config/events
                         # cannot drift (see i18n/frames.py).
