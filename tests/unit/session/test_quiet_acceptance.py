@@ -163,6 +163,7 @@ def timeout_state(session, events, steer_attempts, steer_returns):
         + (f"(quiet_accepted={event.quiet_accepted})" if isinstance(event, AgentEndEvent) else "")
         for event in events[-12:]
     )
+
     def describe_task(task):
         """Bare label plus the await chain a pending task is parked on.
 
@@ -180,7 +181,11 @@ def timeout_state(session, events, steer_attempts, steer_returns):
                     break
                 frame = getattr(node, "cr_frame", None) or getattr(node, "gi_frame", None)
                 name = getattr(node, "__qualname__", type(node).__name__)
-                where = f"@{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_lineno}" if frame else ""
+                where = (
+                    f"@{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_lineno}"
+                    if frame
+                    else ""
+                )
                 chain.append(f"{name}{where}")
                 node = getattr(node, "cr_await", None) or getattr(node, "gi_yieldfrom", None)
             if node is not None:
