@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -3380,6 +3381,61 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
         assert served is not None and served["access"] == "access-2", served
         assert served["refresh"] == "rotated-1", served
         assert broker.grant_is_dead(row.id) is False
+        owner_session.close()
+        broker.close()
+
+    async def test_a_forced_retake_frees_the_lease_when_the_re_read_itself_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#3560 review nit: the retake branch's release is a ``finally``.
+
+        Each early exit used to release on its own line, so a re-read that RAISED
+        (here: the row read failing once the lease is retaken) leaked the lease for
+        the whole of ``AUTH_REFRESH_LEASE_MS`` and stranded every peer's refresh.
+        """
+        import time as _time
+        import types
+
+        from local_operator.providers import auth_store as auth_store_mod
+
+        db = tmp_path / "auth.db"
+        owner_session = AuthStore(db)
+        broker = AuthStore(db)
+        row = owner_session.upsert_credential(
+            "openai", _oauth(access="access-1", expires=int(_time.time() * 1000) + 1000)
+        )
+        assert owner_session._try_refresh_lease(row.id) is True  # a live holder
+
+        async def holder_frees_during_the_wait(_seconds: float) -> None:
+            owner_session._release_refresh_lease(row.id)
+
+        shim = types.ModuleType("asyncio_shim")
+        shim.__dict__.update(asyncio.__dict__)
+        shim.sleep = holder_frees_during_the_wait  # type: ignore[attr-defined]
+        monkeypatch.setattr(auth_store_mod, "asyncio", shim)
+
+        retaken = {"held": False}
+        real_take = broker._try_refresh_lease
+        real_get = broker.get_credential
+
+        def take(credential_id: int) -> bool:
+            won = real_take(credential_id)
+            retaken["held"] = retaken["held"] or won
+            return won
+
+        def get(credential_id: int) -> Any:
+            if retaken["held"]:
+                raise sqlite3.OperationalError("database is locked")
+            return real_get(credential_id)
+
+        monkeypatch.setattr(broker, "_try_refresh_lease", take)
+        monkeypatch.setattr(broker, "get_credential", get)
+
+        with pytest.raises(Exception):
+            await broker.ensure_oauth_fresh_or_raise(row.id, force=True)
+        assert retaken["held"] is True, "the test never reached the retake branch"
+        # The lease is FREE: another process can take it at once.
+        assert owner_session._try_refresh_lease(row.id) is True, "the retake leaked its lease"
         owner_session.close()
         broker.close()
 

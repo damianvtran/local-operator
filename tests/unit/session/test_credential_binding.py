@@ -139,7 +139,11 @@ class _StubMesh:
         model_id: str = "",
         retry_after_ms: int = 0,
         block_scope: str = "",
+        credential_id: int = 0,
     ) -> None:
+        # ``credential_id`` mirrors ``CredentialSource.report_sync`` (#3616): the store
+        # passes the failing bearer's lent row. A stand-in that answers ``None`` is an
+        # owner with nothing to say about a refresh, the pre-#3616 behaviour.
         return None
 
     def close(self) -> None:

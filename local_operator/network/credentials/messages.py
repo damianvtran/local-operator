@@ -565,6 +565,77 @@ def render_repair_notice(peer_name: str, key: str, *, name: str = "") -> str:
     )
 
 
+def render_owner_refresh_outcome(
+    key: str, owner: str, *, code: str, retry_after_ms: int | float | None = None
+) -> str:
+    """The BORROWER's sentence when the owner could not refresh a refused sign-in.
+
+    Reached from ``MeshCredentialClient`` when the provider refused a borrowed
+    bearer here, this device reported it, the owner's forced refresh produced no
+    new token (#3560's ``refresh_failed`` / ``unchanged`` reply), AND the owner has
+    no other login to lend. It is the turn's error text, so it carries the whole
+    remedy on its own, in as few words as that takes (#3616 design review D2: the
+    owner is named at most twice):
+
+    * ``grant_invalid`` is the IdP's own verdict, the one case where signing in
+      again on the owner is certainly the fix — so it says so directly, and gives
+      no wait, because waiting fixes nothing;
+    * every other reason (a transient refresh failure, a row the owner cannot
+      refresh, a refresh that produced nothing) LEADS WITH THE WAIT and makes the
+      sign-in conditional (D1): an IdP outage is not a broken login, and telling
+      the operator to sign in for one sends them to fix what is not broken.
+
+    "Try again in about …", never "this device asks again" (D4): nothing re-sends
+    the turn, and the hold can end EARLIER than the stated time when the owner
+    announces a new sign-in — so the time is when a retry certainly reaches that
+    login again, a bound that cannot be wrong, rather than a promise of an event.
+
+    The command is the borrower-side spelling ``render_broker_error`` uses for the
+    same fact (``lop login <provider>``, ``/mcp login <name>``; D3) — the reader
+    of this line sees the borrow-time refusals too, and one fix must not have two
+    commands. ``owner`` is written by another device (the placement document), so
+    it is made safe for ONE line here (#3616 m1/Q5): control sequences, newlines,
+    bidi and zero-width characters cannot repaint the error or forge a second
+    line, and the name is bounded like a notice label. Takes no credential value.
+    """
+    named = _one_line_device_name(owner)
+    owner = named or "the owner device"
+    # The temporary arms START with the owner, so the unnamed fallback must not open
+    # the sentence in lowercase (#3616 design D7). A name the operator chose keeps
+    # its own case, even at the start.
+    lead = named or "The owner device"
+    label = render_key_name(key) or "that credential"
+    command = mcp_login_command(key) if key.startswith("mcp:") else f"lop login {label}"
+    if code == "grant_invalid":
+        return (
+            f"The '{label}' sign-in on {owner} has expired. Run '{command}' on {owner}, "
+            "then try again."
+        )
+    left = render_retry_after(retry_after_ms)
+    when = f"Try again in about {left}" if left else "Try again shortly"
+    if code == "refresh_failed":
+        head = f"{lead} could not refresh the '{label}' sign-in just now."
+    else:
+        head = f"{lead} has no newer '{label}' token than the one the provider refused."
+    return f"{head} {when}; if it keeps failing, run '{command}' on {owner}."
+
+
+def _one_line_device_name(name: str) -> str:
+    """A peer-authored device name, safe and bounded for one line of an error.
+
+    The same treatment a notice label gets (:func:`_account_label`):
+    ``ansi.sanitize_prompt_line`` strips control sequences, collapses every run
+    of whitespace (newline, CR) to one space and makes format characters (RLO,
+    zero-width) visible; the result is middle-elided to the notice bound.
+    """
+    from local_operator.ansi import sanitize_prompt_line
+
+    text = sanitize_prompt_line(name or "", limit=_NOTICE_LABEL_SOURCE_LIMIT).strip()
+    if len(text) <= _NOTICE_LABEL_LIMIT:
+        return text
+    return _middle_elide(text, _NOTICE_LABEL_LIMIT)
+
+
 #: THE ONE COMMITMENT THE DESIGN MAKES ABOUT ENDING A COPY (§2.3). These exact lines close
 #: ``credential revoke`` on a stored secret, every ``member rm`` ending, and the network
 #: guide's credentials section. Two surfaces say the same thing in their own words instead:

@@ -2058,9 +2058,10 @@ class MeshCredentialBroker:
             return {**common, "action": "refreshed"}
         # Nothing new was obtained and nothing failed: the store declined (an
         # unsettled send holding the refresh off, a row that is gone or disabled, or
-        # an MCP row whose refresh has no force). The reply says so. No borrower
-        # reads it yet — ``report_sync`` discards the ack — so today the honest
-        # outcome serves the wire and a later borrower-side surface, not the user.
+        # an MCP row whose refresh has no force). The reply says so, and the
+        # borrower acts on it: ``client._note_refresh_outcome`` turns this (and
+        # every ``refresh_failed``) into a held refusal naming this device and its
+        # login command, and stops reporting until ``retry_after_ms`` passes.
         return {**common, "action": "unchanged"}
 
     def _stored_bearer(self, credential_id: int) -> str:

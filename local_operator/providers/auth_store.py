@@ -4052,25 +4052,38 @@ class AuthStore:
                 # token the force asked for, and is served without a POST; only an
                 # unchanged row goes on to the exchange, re-checked for a tombstone
                 # the sibling may have written instead.
-                retaken = self.get_credential(row.id)
-                if retaken is None or retaken.disabled_cause is not None:
-                    self._release_refresh_lease(row.id)
-                    raise AuthStoreError(f"Credential {row.id} disappeared during refresh")
-                retaken_data = dict(retaken.data)
-                if retaken_data.get("access") != fresh.get(
-                    "access"
-                ) or self._presented_refresh_token(retaken_data) != (
-                    self._presented_refresh_token(fresh)
-                ):
-                    self._release_refresh_lease(row.id)
-                    return retaken_data
-                if self._grant_dead_at(retaken_data) is not None:
-                    self._release_refresh_lease(row.id)
-                    raise CredentialInvalidError(
-                        f"OAuth grant for '{row.provider}' was refused by the identity "
-                        f"provider; run /login {row.provider} to sign in again"
-                    )
-                fresh = retaken_data
+                #
+                # ONE RELEASE FOR EVERY EXIT BUT THE ONE THAT KEEPS THE LEASE (#3560
+                # review nit). The three early exits each used to call the release
+                # themselves, so an exception from the re-read itself (a locked or
+                # corrupt row, a malformed payload in ``_presented_refresh_token``)
+                # left the lease held for the whole of AUTH_REFRESH_LEASE_MS and
+                # stranded every peer — the same leak the exchange's own ``finally``
+                # below exists to prevent. ``keep_lease`` is set only on the path
+                # that falls through to that exchange, whose ``finally`` then owns
+                # the release.
+                keep_lease = False
+                try:
+                    retaken = self.get_credential(row.id)
+                    if retaken is None or retaken.disabled_cause is not None:
+                        raise AuthStoreError(f"Credential {row.id} disappeared during refresh")
+                    retaken_data = dict(retaken.data)
+                    if retaken_data.get("access") != fresh.get(
+                        "access"
+                    ) or self._presented_refresh_token(retaken_data) != (
+                        self._presented_refresh_token(fresh)
+                    ):
+                        return retaken_data
+                    if self._grant_dead_at(retaken_data) is not None:
+                        raise CredentialInvalidError(
+                            f"OAuth grant for '{row.provider}' was refused by the identity "
+                            f"provider; run /login {row.provider} to sign in again"
+                        )
+                    fresh = retaken_data
+                    keep_lease = True
+                finally:
+                    if not keep_lease:
+                        self._release_refresh_lease(row.id)
             # Imported here, not at module scope: `callback_server` drags in
             # http.server/ssl/email (~138 ms, 150-odd modules), and three
             # separate comments in this codebase exist to stop anyone

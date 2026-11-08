@@ -1026,7 +1026,11 @@ class ProviderError(RenderedStreamError):
         exhausted for …"); prefixing those with ``provider error:`` produced a
         stutter and named a provider that was never called.
         """
-        if self.kind == "aborted" or (self.kind == "unknown" and self.status is None):
+        if (
+            self.kind == "aborted"
+            or (self.kind == "unknown" and self.status is None)
+            or getattr(self, VERBATIM_MESSAGE_ATTR, False)
+        ):
             return self.message
         facts = []
         if self.status is not None:
@@ -4716,6 +4720,9 @@ async def _stream_with_failover_events(
                         current_token = last_access.access_token
                         error = None
                     else:
+                        refused = _borrowed_refresh_refusal(auth, provider)
+                        if refused is not None:
+                            record(refused, primary=is_primary, target=target)
                         break  # rotation exhausted for this provider
                 if access is None and not _provider_allows_missing(provider):
                     # "No API key configured" is only true when the provider has
@@ -5990,6 +5997,50 @@ def _mark_prewire_refusal(error: ProviderError) -> ProviderError:
 
     setattr(error, PREWIRE_REFUSAL_ATTR, True)
     return error
+
+
+#: Set on a :class:`ProviderError` whose message is a complete sentence for a person
+#: and must render WITHOUT the kind label, while keeping its ``kind`` for ranking.
+#: Only :func:`_borrowed_refresh_refusal` sets it (#3616 design D6): the label is
+#: what the display layers key their LOCAL auth hint on (``is_rendered_auth_error``
+#: -> ``append_auth_recovery``, TUI and headless alike), and that hint ("To fix:
+#: /login <provider> … here") contradicts a sentence whose remedy is on ANOTHER
+#: device. Verbatim also makes the first failing turn read exactly like the later
+#: turns, which reach the same sentence through ``_no_credential_error``.
+VERBATIM_MESSAGE_ATTR = "lo_verbatim_message"
+
+
+def _borrowed_refresh_refusal(auth: FailoverAuthStore, provider: str) -> ProviderError | None:
+    """The OWNER's could-not-refresh sentence, for a borrowed bearer's 401, or ``None``.
+
+    Asked only where rotation is exhausted after a provider error. A borrowed
+    credential's 401 is reported to the device that owns the login; when that
+    device answers that it could not refresh it and has no other login to lend,
+    the mesh-aware store holds a sentence naming that device and the command to
+    run there (``network.credentials.store.borrowed_refresh_refusal``). Without
+    this the loop broke out on the provider's own "authentication failed (HTTP
+    401)" and the remedy appeared only on the NEXT turn (#3616 QA Q2).
+
+    Kind ``auth``, so it ranks with the 401 it explains and — recorded after it —
+    wins the report slot at equal rank (``record``'s ``>=``); a primary target's
+    failure still outranks a fallback's as before. RENDERED VERBATIM
+    (:data:`VERBATIM_MESSAGE_ATTR`), so no display layer adds the local re-login
+    hint to a remedy that lives on the owner. Not retryable: the loop-back
+    sweep would only be answered by the same hold. Duck-typed like
+    :func:`_no_credential_error`'s hook: every other store lacks the method.
+    """
+    reason_for = getattr(auth, "borrowed_refresh_refusal", None)
+    if not callable(reason_for):
+        return None
+    try:
+        reason = reason_for(provider)
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return None
+    if not isinstance(reason, str) or not reason:
+        return None
+    refused = ProviderError(None, reason, retryable=False, kind="auth")
+    setattr(refused, VERBATIM_MESSAGE_ATTR, True)
+    return refused
 
 
 def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:
