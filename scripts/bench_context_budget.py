@@ -1867,8 +1867,10 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # surface had no model-facing text outside one tenant's skills, so an agent asked
 # to coordinate with a colleague found Slack configured and the bridge absent
 # from every prompt it reads. Measured with THIS script, base re-measured over
-# the branch's own parent by stashing the six changed product files:
-#   base (origin/main 3d1b735d0e1 + release 2b8c19d82db) 97,525 chars = ~35,081 billed
+# the branch's own parent by stashing the six changed product files (the single
+# measured base is the tree the branch was cut from; the release merge that landed
+# it is not a second base):
+#   base (origin/main 2b8c19d82db)                      97,525 chars = ~35,081 billed
 #   head (this branch)                                  97,945 chars = ~35,232 billed
 #   delta                                                  +420 chars = ~+151
 # The +420 is EXACTLY the two start-level strings this branch adds, nowhere
@@ -2084,7 +2086,21 @@ BUDGET_BILLED_TOKENS = 35_287
 # is not in play. The remediation round's +21 chars still leave 48 of headroom,
 # so the ratchet is not moved a second time. The calibration round's +15 chars bring
 # it to 86,518 chars = ~31,122, 42 of headroom: still under, still not moved.
-BUDGET_CHILD_BILLED_TOKENS = 31_164
+#
+# RAISED 31,164 -> 31,317 with the top arm above, for TEAM BRIDGE DISCOVERABILITY.
+# A child holds ``bridge`` (it is not in ``CHILD_NEVER_HOLDS``), so this arm pays
+# the SAME two start-level strings the top arm pays, and nothing child-only moved:
+#   base (origin/main 2b8c19d82db)  86,487 chars = ~31,110 billed / 54 headroom
+#   head (this branch)              86,907 chars = ~31,262 billed
+#   delta                             +420 chars = ~+152
+# The +420 is EXACTLY the two strings: the ``system.md`` ``has_bridge`` clause
+# (+223) and the ``bridge`` tool description (+197). The base sat only 54 under
+# this ceiling, inside the band rather than below it, so the top arm's rise was
+# always going to breach it here — the ceiling was ratcheted for the top pair and
+# not for the child pair, which is what CI caught. Re-derived the documented way,
+# this tree's own measurement plus the 55 band (31,262 + 55), so the next branch
+# inherits 31,317 and the tighten band below (1,200) is not in play.
+BUDGET_CHILD_BILLED_TOKENS = 31_317
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
