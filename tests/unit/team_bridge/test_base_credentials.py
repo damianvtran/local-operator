@@ -318,3 +318,62 @@ def test_a_credentialed_and_a_clean_base_never_share_a_discipline(
         assert by_base[clean]._client._base_had_credentials is False
     finally:
         tb_client.reset_status_disciplines()
+
+
+# ---------------------------------------------------------------------------
+# Security round 3 on #3588: S-6 (a compatibility ``@`` is still credentials).
+# ---------------------------------------------------------------------------
+
+#: ``@`` spelled as a compatibility character: FULLWIDTH COMMERCIAL AT
+#: (U+FF20) and SMALL COMMERCIAL AT (U+FE6B), both NFKC-equal to ``@``. An
+#: ASCII-only check passed them through unflagged, so the refusal and the
+#: sentence quoted the password; a later NFKC step anywhere downstream (IDNA
+#: host mapping does one) would turn either back into a real userinfo split.
+_COMPAT_AT_BASES = [
+    "https://ops:" + _MARKER + at + "hub.example/v1" for at in ("\uff20", "\ufe6b")
+] + [
+    # An ASCII ``@`` earlier, the compatibility one after it: the remainder
+    # after the last ASCII ``@`` still carries the marker.
+    "https://x@ops:"
+    + _MARKER
+    + "\uff20hub.example/v1",
+]
+
+
+@pytest.mark.parametrize("base_url", _COMPAT_AT_BASES)
+@pytest.mark.asyncio
+async def test_a_compatibility_at_sign_is_still_credentials(
+    caplog: pytest.LogCaptureFixture, base_url: str
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"features": {}})
+
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.INFO, logger="httpx")
+    assert tb_client._split_base_credentials(base_url) == (INVALID_HUB_BASE_PLACEHOLDER, True)
+    client = tb_client.TeamBridgeClient(
+        None, base_url=base_url, store=FakeStore(), transport=httpx.MockTransport(handler)
+    )
+
+    with pytest.raises(tb_client.BridgeRefusal) as refused:
+        await client.status()
+
+    assert refused.value.code == "bridge_destination_refused"
+    assert seen == []
+    sentence = org_destination_refused_sentence(base_url, "https://api.radienthq.com/v1")
+    assert INVALID_HUB_BASE_PLACEHOLDER in sentence
+    texts = [str(refused.value), repr(refused.value), client.base_url, sentence]
+    texts += [record.getMessage() for record in caplog.records]
+    _assert_clean(texts)
+    for text in texts:
+        assert "\uff20" not in text and "\ufe6b" not in text
+
+
+def test_a_percent_encoded_at_without_a_real_one_is_untouched() -> None:
+    """The negative control: ``%40`` is not an ``@`` under NFKC, so nothing is flagged."""
+
+    base_url = "https://hub.example/v1/team%40ops"
+    assert tb_client._split_base_credentials(base_url) == (base_url, False)

@@ -547,7 +547,9 @@ def resolve_screening_chain(
     configured default and its ``retry.fallbackChains``, exactly as screening
     ran before the pin. Operator directive 2026-11-04: the pin must never
     block Team Bridge because a receiver has no Anthropic account or is out of
-    quota. Pairs already tried in stage 1 are dropped. These hops carry
+    quota. Pairs already tried in stage 1 are dropped, compared by credential
+    owner (``credential_provider_id``) so a login flavour of a tried provider
+    serving the same model is not tried again. These hops carry
     ``preferred = False`` even for a listed pair, so a verdict
     they produce is stamped non-preferred: delivered normally, but never
     reused from the receipt cache and never eligible for a B4b release.
@@ -591,10 +593,21 @@ def resolve_screening_chain(
         selection = _selection_for(provider, model_id)
         if selection is not None:
             hops.append(selection)
-    tried = {(hop.provider, hop.model_id) for hop in hops}
+    # Deduped on the CREDENTIAL OWNER, not the literal provider id (#343 code
+    # review, "Where to fold the login flavour"; #3572 remediation r2): a
+    # default on a login flavour (``anthropic-key``) serves the same model on
+    # the same credential as the preferred ``anthropic`` hop, so retrying it
+    # after that hop failed re-spends the same quota refusal. Only duplicates
+    # drop: stage-2 order, its fallbacks and the stage-1 pins are untouched, so
+    # a receiver whose preferred hops are absent or exhausted still falls
+    # through to every distinct default and fallback.
+    from local_operator.providers.registry import credential_provider_id
+
+    tried = {(credential_provider_id(hop.provider), hop.model_id) for hop in hops}
     for hop in _receiver_cascade(config_dir, settings):
-        if (hop.provider, hop.model_id) not in tried:
-            tried.add((hop.provider, hop.model_id))
+        key = (credential_provider_id(hop.provider), hop.model_id)
+        if key not in tried:
+            tried.add(key)
             hops.append(hop)
     return hops
 

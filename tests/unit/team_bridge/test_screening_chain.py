@@ -1344,3 +1344,93 @@ def test_prewire_marker_never_outranks_the_guard_send_count() -> None:
     # emitter said, and the scrubbed copy carries no marker of its own.
     after_send = _scrub_wire_failure(refusal, sent=True)
     assert getattr(after_send, _ADVANCE_ATTR) is False
+
+
+# -- (f) stage 2 dedupes by credential owner, not literal provider id ----------
+#
+# #343 code review ("Where to fold the login flavour") and #3572 remediation r2:
+# a default on the ``anthropic-key`` login flavour serves the SAME model through
+# the SAME credential as the preferred ``anthropic`` hop, so retrying it after
+# that hop failed only re-spends a refusal. Order, the fallback set and the
+# preferred pins are unchanged; only the duplicate is dropped.
+
+
+def _real_table_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hosting: str, model: str, held: set[str]
+) -> None:
+    from local_operator.team_bridge import model_boundary
+
+    # The REAL preferred table (the autouse rig never replaces it unless
+    # ``_config`` runs), with exactly the credentials this test names.
+    monkeypatch.setattr(model_boundary, "_credentialed_providers", lambda _config_dir: set(held))
+    (tmp_path / "config.yml").write_text(
+        "values:\n"
+        f"  hosting: {hosting}\n"
+        f"  model_name: {model}\n"
+        "  retry:\n"
+        "    modelFallback: true\n"
+        "    fallbackChains:\n"
+        "      default:\n"
+        "        - openai/gpt-5.4\n"
+    )
+
+
+def test_a_login_flavour_default_is_not_screened_twice(tmp_path, monkeypatch) -> None:
+    _real_table_config(tmp_path, monkeypatch, "anthropic-key", "claude-sonnet-5-5", {"anthropic"})
+    hops = [(h.provider, h.model_id, h.preferred) for h in resolve_screening_chain(tmp_path)]
+    assert hops == [
+        ("anthropic", "claude-sonnet-5-5", True),
+        ("anthropic", "claude-opus-5-5", True),
+        # The ``anthropic-key`` default is gone; its fallback still follows.
+        ("openai", "gpt-5.4", False),
+    ]
+
+
+def test_an_out_of_quota_preferred_model_falls_through_without_a_repeat(
+    tmp_path, monkeypatch
+) -> None:
+    store, owner = _setup(tmp_path)
+    _real_table_config(tmp_path, monkeypatch, "anthropic-key", "claude-sonnet-5-5", {"anthropic"})
+    wire = _Wire(
+        {
+            "claude-sonnet-5-5": ("fail", 429),
+            "claude-opus-5-5": ("fail", 429),
+            "gpt-5.4": ("reply", DELIVER),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert result is not None and result.disposition == "deliver"
+    assert result.receipt.model == "gpt-5.4"
+    assert [(s["provider"], s["model"]) for s in wire.sends] == [
+        ("anthropic", "claude-sonnet-5-5"),
+        ("anthropic", "claude-opus-5-5"),
+        ("openai", "gpt-5.4"),
+    ]
+
+
+def test_a_user_with_no_anthropic_account_is_screened_by_their_default(
+    tmp_path, monkeypatch
+) -> None:
+    """Operator directive: the preferred pin never blocks a receiver without Anthropic.
+
+    A regression guard for the dedupe above: nothing credentialed for the
+    preferred stage, so the default (and its fallback) carry screening alone.
+    """
+
+    store, owner = _setup(tmp_path)
+    _real_table_config(tmp_path, monkeypatch, "deepseek", "deepseek-flash", {"deepseek", "openai"})
+    assert [(h.provider, h.model_id) for h in resolve_screening_chain(tmp_path)] == [
+        ("deepseek", "deepseek-flash"),
+        ("openai", "gpt-5.4"),
+    ]
+    wire = _Wire({"deepseek-flash": ("reply", DELIVER), "gpt-5.4": ("reply", HOLD)})
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert result is not None and result.disposition == "deliver"
+    assert result.receipt.model == "deepseek-flash"
+    assert [(s["provider"], s["model"]) for s in wire.sends] == [("deepseek", "deepseek-flash")]
