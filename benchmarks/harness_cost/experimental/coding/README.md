@@ -25,11 +25,23 @@ versions. Harbor's implementations are imported, not copied. Codex's catalog and
 `tool_search` translation are a separately labelled **codex-best** configuration,
 not Codex as shipped. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+**codex-best has no server-side web search (S9e).** Its base `config.toml`
+(`driver.codex_config`) sets Codex 0.147's top-level `web_search = "disabled"`.
+Otherwise Codex sends its Responses `web_search` tool, LiteLLM 1.106.6 turns it
+into Anthropic's server tool `web_search_20250305`, and the meter refuses every
+request as an unpriced server tool (402; d0b2b32c DEV capture, 12 refusals per
+pass). No other arm sends a server tool on this path, so equal treatment is no
+server-side web search for any arm. The meter keeps refusing server tools; no
+price is added. As a backstop, `codex_bridge.py` refuses (400, nothing
+forwarded) any request carrying a `web_search*` tool, so a config regression
+fails at $0 instead of being silently stripped.
+
 ## Cheap checks (no installation, network, Docker or model)
 
 ```sh
 python3 -B -m unittest -v test_guard test_driver_safety test_adapters test_lop_container
 BENCH_TASK_ROOT=<terminal-bench-2-1 task root> python3 -B -m unittest -v test_public_provenance
+<Harbor 0.25.0 interpreter> -B -m unittest -v test_harbor_integration
 python3 -B -c 'from pathlib import Path; [compile(p.read_text(), str(p), "exec") for p in Path(".").glob("*.py")]'
 python3 -B driver.py --help
 ```
@@ -38,6 +50,12 @@ The stdlib-only tests exercise preflight refusals, disk thresholds, frozen-file
 hashes, CLI refusal and the container contracts (egress override, pull guard,
 gold/quiescence/egress probe, gate relay, verifier record). They do **not** import Harbor, run ASGI,
 start Docker, execute Linux runtimes or verify model-tool translation.
+`test_harbor_integration` is the exception that needs Harbor itself (it fails,
+never skips, without it): it builds a trial through Harbor's own `Trial.create`
+(no container is started) to prove `QualificationOracle` gets Harbor's oracle
+values under stock Harbor 0.25, which hands `task_dir`/`trial_paths` only to an
+agent *named* `oracle` (S9e; no rig entry point such as `harbor_qual.py` is
+needed), and renders codex-best's config through Harbor's Codex builder.
 `test_public_provenance` re-derives the F27 policy from real task bytes, so it
 FAILS, not skips, when `BENCH_TASK_ROOT` is unset or lacks the tasks (R12 F33).
 `BENCH_TASK_ROOT_OPTIONAL=1` downgrades that to a skip for local iteration only;

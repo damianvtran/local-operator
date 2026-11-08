@@ -113,6 +113,86 @@ class DriverSafetyTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 driver._signal_owned_group(123, 0)
 
+    def test_exiting_members_are_not_a_live_group(self):
+        # S9e: Darwin ps marks a member that is mid-exit "E"; like a zombie it
+        # can no longer be signalled and must not read as a live group.
+        with (
+            patch.object(driver.os, "killpg", side_effect=PermissionError),
+            patch.object(driver.subprocess, "run") as ps,
+        ):
+            ps.return_value.stdout = "123 Z\n123 E\n123 Es\n456 S\n"
+            self.assertFalse(driver._signal_owned_group(123, 0))
+
+    def test_stop_survives_a_group_that_vanishes_mid_teardown(self):
+        # S9e (d0b2b32c DEV capture, pass A): LiteLLM had already exited when
+        # driver.stop signalled its group; the EPERM probe saw a member still
+        # exiting, raised, and the rig wrote no result.json. A transient EPERM
+        # during the grace period must keep polling, not abort teardown, and
+        # only the exact owned pgid is ever signalled.
+        class Proc:
+            pid = 2_000_000_001
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        proc = Proc()
+        driver._OWNED_GROUPS[proc] = (os.getpid(), proc.pid)
+        sent = []
+
+        def killpg(group, sig):
+            sent.append((group, sig))
+            if sig != signal.SIGTERM:
+                raise PermissionError
+
+        tables = iter([f"{proc.pid} R\n", f"{proc.pid} Z\n"])
+        try:
+            with (
+                patch.object(driver.os, "killpg", side_effect=killpg),
+                patch.object(driver.subprocess, "run") as ps,
+            ):
+                ps.side_effect = lambda *a, **k: argparse.Namespace(stdout=next(tables))
+                driver.stop(proc)
+        finally:
+            driver._OWNED_GROUPS.pop(proc, None)
+        self.assertNotIn(proc, driver._OWNED_GROUPS)
+        self.assertEqual({group for group, _ in sent}, {proc.pid})
+        self.assertEqual(sent[0], (proc.pid, signal.SIGTERM))
+        self.assertNotIn((proc.pid, signal.SIGKILL), sent)
+
+    def test_stop_still_raises_for_a_live_group_it_cannot_signal(self):
+        # The tolerance is bounded by the grace period: a member that stays
+        # live and unsignallable is a real permission failure, never swallowed.
+        class Proc:
+            pid = 2_000_000_003
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        proc = Proc()
+        driver._OWNED_GROUPS[proc] = (os.getpid(), proc.pid)
+
+        def killpg(group, sig):
+            if sig != signal.SIGTERM:
+                raise PermissionError
+
+        try:
+            with (
+                patch.object(driver, "STOP_GRACE_SECONDS", 0.2),
+                patch.object(driver.os, "killpg", side_effect=killpg),
+                patch.object(driver.subprocess, "run") as ps,
+            ):
+                ps.return_value.stdout = f"{proc.pid} S\n"
+                with self.assertRaises(PermissionError):
+                    driver.stop(proc)
+        finally:
+            driver._OWNED_GROUPS.pop(proc, None)
+
     def test_paid_preflight_refuses_before_any_evidence_or_side_effect(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
             manifest = Path(tmp) / "self-asserted.json"

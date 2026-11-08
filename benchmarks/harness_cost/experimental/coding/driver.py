@@ -55,6 +55,9 @@ HARNESS = {
 # (an automated promotion of rc.3), per the frozen ls-remote capture.
 HERMES_SOURCE_REVISION = "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab"
 HERMES_TAG_EVIDENCE = "hermes-tag-evidence.json"
+# Tracked files of HERMES_SOURCE_REVISION (git ls-tree), all hashed by the host
+# source check. Exact, not "> 0": a partial tree must not verify (R13 M1).
+HERMES_CHECKED_FILES = 22066
 
 
 def hermes_version(source_verification, evidence=None):
@@ -65,11 +68,17 @@ def hermes_version(source_verification, evidence=None):
     copy. The version is the release tag the frozen ls-remote lines peel to
     that commit; HARNESS["hermes"] must equal it. Runtime builders call this
     instead of parsing ``hermes --version``.
+
+    The real record lists offending paths, so missing/mismatched/
+    unsupported_git_entries must be EMPTY LISTS (S9e: comparing them with 0
+    refused every real record); any other type refuses.
     """
     tree = source_verification.get("hermes_tracked_source") or {}
     if (tree.get("commit") != HERMES_SOURCE_REVISION or tree.get("all_checked_match") is not True
-            or not isinstance(tree.get("checked_files"), int) or tree["checked_files"] <= 0
-            or any(tree.get(k) != 0 for k in ("missing", "mismatched", "unsupported_git_entries"))):
+            or type(tree.get("checked_files")) is not int
+            or tree["checked_files"] != HERMES_CHECKED_FILES
+            or any(tree.get(k) != [] or not isinstance(tree.get(k), list)
+                   for k in ("missing", "mismatched", "unsupported_git_entries"))):
         raise ValueError("Hermes source tree is not the verified pinned commit")
     if evidence is None:
         evidence = json.loads((HERE / HERMES_TAG_EVIDENCE).read_text())
@@ -751,15 +760,16 @@ def _signal_owned_group(group, sig):
         return False
     except PermissionError:
         # Darwin reports EPERM, not ESRCH, for an orphan group containing only
-        # zombies. Do not swallow real permission failures: prove no live member
-        # remains, using a read-only process table (no ambient process signals).
+        # zombies or members already exiting (ps stat "Z" / "E"). Do not swallow
+        # real permission failures: prove no live member remains, using a
+        # read-only process table (no ambient process signals).
         rows = subprocess.run(
             ["ps", "-axo", "pgid=,stat="], capture_output=True, text=True, check=True, timeout=5
         ).stdout.splitlines()
         members = [
             row.split()[1] for row in rows if len(row.split()) == 2 and row.split()[0] == str(group)
         ]
-        if any(not status.startswith("Z") for status in members):
+        if any(not status.startswith(("Z", "E")) for status in members):
             raise
         return False
 
@@ -779,8 +789,16 @@ def stop(proc):
         deadline = time.monotonic() + STOP_GRACE_SECONDS
         while time.monotonic() < deadline:
             proc.poll()  # Reap our direct child, not someone else's descendants.
-            if not _signal_owned_group(group, 0):
-                return
+            try:
+                if not _signal_owned_group(group, 0):
+                    return
+            except PermissionError:
+                # S9e (d0b2b32c capture, pass A): a group torn down by its own
+                # exit can report EPERM while a member is still leaving, and
+                # raising here lost the trial's result.json. Within the grace
+                # period keep polling; the SIGKILL sweep below re-raises if a
+                # member is still live and unsignallable after it.
+                pass
             time.sleep(min(0.05, max(0, deadline - time.monotonic())))
         _signal_owned_group(group, signal.SIGKILL)
         proc.wait(timeout=STOP_GRACE_SECONDS)
@@ -931,6 +949,34 @@ def stop_edge(edge):
     stop(proc)
 
 
+def codex_config(base_url):
+    """codex-best's base ``config.toml`` (Harbor ``--ak config=``), as a dict.
+
+    ``web_search = "disabled"`` (S9e): Codex 0.147 otherwise sends its
+    Responses ``web_search`` tool, which LiteLLM 1.106.6 translates into
+    Anthropic's server tool ``web_search_20250305``. The meter refuses every
+    unpriced server tool (402, d0b2b32c DEV capture), and no other arm sends
+    one on this path, so equal treatment is no server-side web search for any
+    arm. The key is Codex's own top-level setting (its binary documents
+    ``"live"``/``"indexed"``/``"cached"``/``"disabled"``; Harbor's own
+    ``web_search`` option writes the same key). The bridge refuses the tool
+    as a backstop; the meter's refusal is unchanged.
+    """
+    return {
+        "model_provider": "bench",
+        "model_catalog_json": "/tmp/bench-support/codex-model-catalog.json",
+        "web_search": "disabled",
+        "model_providers": {
+            "bench": {
+                "name": "bench",
+                "base_url": base_url,
+                "env_key": "OPENAI_API_KEY",
+                "wire_api": "responses",
+            }
+        },
+    }
+
+
 def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge, canary,
                      provenance):
     import egress
@@ -1006,18 +1052,7 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
     if harness == "claude-code":
         argv += ["--ae", "ENABLE_TOOL_SEARCH=true", "--effort", "high"]
     if harness == "codex-best":
-        config = {
-            "model_provider": "bench",
-            "model_catalog_json": "/tmp/bench-support/codex-model-catalog.json",
-            "model_providers": {
-                "bench": {
-                    "name": "bench",
-                    "base_url": plan["urls"]["codex"],
-                    "env_key": "OPENAI_API_KEY",
-                    "wire_api": "responses",
-                }
-            },
-        }
+        config = codex_config(plan["urls"]["codex"])
         argv += [
             "--base-url",
             plan["urls"]["codex"],

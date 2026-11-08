@@ -199,6 +199,39 @@ class BridgeSSETests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(await self.request(module, wire, True, 429), wire)
 
+    async def test_coding_bridge_never_forwards_a_web_search_tool(self):
+        # S9e: codex-best disables Codex web search in config; the bridge is
+        # the last hop before LiteLLM, so it refuses (never strips) any
+        # server-side web search tool at $0 and forwards nothing upstream.
+        module = self.bridges[1]
+        forwarded = []
+
+        def upstream(request):
+            forwarded.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True})
+
+        await module.client.aclose()
+        module.client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=module.app), base_url="http://bridge.test"
+        ) as client:
+            for tool in ({"type": "web_search"}, {"type": "web_search_preview"},
+                         {"type": "web_search", "external_web_access": False}):
+                with self.subTest(tool=tool):
+                    response = await client.post("/v1/responses", json={
+                        "tools": [{"type": "function", "name": "shell"}, tool],
+                        "input": [], "stream": True})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json()["reason"], "server-side web search tool")
+            self.assertEqual(forwarded, [])
+            # A function tool merely NAMED web_search is a client tool: forwarded.
+            response = await client.post("/v1/responses", json={
+                "tools": [{"type": "function", "name": "web_search"}], "input": []})
+            self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(forwarded), 1)
+        log = [json.loads(line) for line in module.LOG.read_text().splitlines()]
+        self.assertEqual([row["status"] for row in log], [400, 400, 400, 200])
+
 
 if __name__ == "__main__":
     unittest.main()

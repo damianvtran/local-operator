@@ -192,6 +192,21 @@ class GuardTests(unittest.TestCase):
                 driver.preflight(args)
             self.assertNotIn("toolwire harness set", str(caught.exception))
 
+    def test_codex_best_config_disables_server_side_web_search(self):
+        # S9e: LiteLLM 1.106.6 turns Codex's Responses `web_search` tool into
+        # Anthropic's `web_search_20250305` server tool, which the meter
+        # (rightly) refuses as unpriced. No other arm sends a server tool, so
+        # codex-best runs with Codex 0.147's top-level `web_search = "disabled"`.
+        config = driver.codex_config("http://bench-gate:8789/v1")
+        self.assertEqual(config["web_search"], "disabled")
+        self.assertEqual(config["model_provider"], "bench")
+        self.assertEqual(config["model_providers"]["bench"]["base_url"],
+                         "http://bench-gate:8789/v1")
+        self.assertEqual(config["model_providers"]["bench"]["wire_api"], "responses")
+        self.assertEqual(config["model_catalog_json"],
+                         "/tmp/bench-support/codex-model-catalog.json")
+        self.assertNotIn("tools", config)  # no per-tool override shadows the mode
+
     def test_hermes_identity_is_the_verified_commit_and_its_frozen_tags(self):
         # S9d: Hermes' CLI says "vunknown" and its dist metadata 0.0.0, so the
         # version comes from the verified source commit plus the captured tags.
@@ -201,11 +216,22 @@ class GuardTests(unittest.TestCase):
         evidence = json.loads((driver.HERE / driver.HERMES_TAG_EVIDENCE).read_text())
         self.assertIn(f"{commit}\trefs/tags/v0.22.6^{{}}", evidence["ls_remote_lines"])
         self.assertIn(f"{commit}\trefs/tags/rc.3-v0.22.6^{{}}", evidence["ls_remote_lines"])
-        verified = {"commit": commit, "checked_files": 22066, "missing": 0, "mismatched": 0,
-                    "unsupported_git_entries": 0, "all_checked_match": True}
+        # S9e: the exact shape of the real source-verification.json record:
+        # missing/mismatched/unsupported are LISTS of paths, and the tree has
+        # exactly the pinned 22066 tracked files (R13 M1).
+        verified = {"commit": commit, "checked_files": 22066, "missing": [], "mismatched": [],
+                    "unsupported_git_entries": [], "declared_eol_normalized": ["a.bat"],
+                    "all_checked_match": True}
+        self.assertEqual(driver.HERMES_CHECKED_FILES, 22066)
         self.assertEqual(driver.hermes_version({"hermes_tracked_source": verified}), "0.22.6")
-        for bad in ({"commit": "0" * 40}, {"all_checked_match": False}, {"mismatched": 1},
-                    {"missing": 2}, {"checked_files": 0}, {"unsupported_git_entries": 1}):
+        for bad in ({"commit": "0" * 40}, {"all_checked_match": False},
+                    {"mismatched": ["x.py"]}, {"missing": ["a", "b"]},
+                    {"unsupported_git_entries": ["sub"]},
+                    # The pre-S9e integer shape is not the record and refuses.
+                    {"missing": 0}, {"mismatched": 0}, {"unsupported_git_entries": 0},
+                    {"missing": None}, {"missing": ""},
+                    {"checked_files": 0}, {"checked_files": 22065}, {"checked_files": 22067},
+                    {"checked_files": "22066"}, {"checked_files": True}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 driver.hermes_version({"hermes_tracked_source": {**verified, **bad}})
         with self.assertRaises(ValueError):

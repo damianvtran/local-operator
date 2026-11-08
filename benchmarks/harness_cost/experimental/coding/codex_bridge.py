@@ -32,6 +32,14 @@ WHAT this shim does (it sits between Codex and LiteLLM, both speaking Responses)
              `.added` and argument-delta events are withheld because Codex
              parses items on `.done`, and in `response.completed` the item is
              rewritten the same way.
+  refuse   * any server-side web search tool (`type` starting `web_search`,
+             e.g. `web_search`, `web_search_preview`): 400, nothing forwarded
+             (S9e). codex-best runs with `web_search = "disabled"`; LiteLLM
+             would turn the tool into Anthropic's unpriced server tool
+             `web_search_20250305`, which no other arm sends. Refused, never
+             stripped, so a config regression is visible at $0 instead of
+             silently changing what Codex asked for. A *function* tool that
+             merely is named `web_search` is client-side and passes.
 Everything else passes through byte-for-byte. Headers are forwarded
 untouched except hop-by-hop ones; nothing is logged except one JSON line per
 request with counts (no bodies, no headers, no credentials).
@@ -209,9 +217,22 @@ def _is_search_fc(item: object) -> TypeGuard[_SearchFunctionCall]:
     )
 
 
+def _server_web_search(body: _RequestBody) -> bool:
+    return any(
+        isinstance(t, dict) and str(t.get("type", "")).startswith("web_search")
+        for t in body.get("tools") or []
+    )
+
+
 async def responses(request: Request) -> Response:
     raw = await request.body()
     body = json.loads(raw)
+    if _server_web_search(body):
+        reason = "server-side web search tool"
+        with LOG.open("a") as fh:
+            fh.write(json.dumps({"ts": time.time(), "status": 400, "refused": reason}) + "\n")
+        return Response(json.dumps({"error": "refused by the bench bridge", "reason": reason}),
+                        status_code=400, media_type="application/json")
     body, stats = rewrite_request(body)
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
     # Only the host transport receives auth; never load a private YAML/auth DB.

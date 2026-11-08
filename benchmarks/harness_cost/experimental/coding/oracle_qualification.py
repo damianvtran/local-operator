@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -89,7 +90,52 @@ def _oracle_base() -> type:
 _FILE_STAGING = importlib.import_module("harbor.utils.file_staging")
 
 
+def _constructing_trial(logs_dir):
+    """The Harbor ``Trial`` whose ``_init_agent`` is constructing this agent.
+
+    WHY (S9e, d0b2b32c sweep): Harbor 0.25 ``Trial._init_agent`` hands
+    ``task_dir``, ``trial_paths`` and ``agent_timeout_sec`` ONLY to an agent
+    whose ``--agent`` name is ``oracle``; an import-path subclass (how this
+    module is selected) gets ``logs_dir`` alone and Harbor's stock
+    ``OracleAgent.__init__`` raises TypeError before setup. A name of
+    ``oracle`` cannot carry an import path (the factory then builds the stock
+    oracle). So the values are read from the one object that holds them: the
+    constructing Trial on the call stack, bound by ``paths.agent_dir ==
+    logs_dir`` (Harbor passes ``logs_dir=self.paths.agent_dir``). These are
+    the exact objects Harbor gives its own oracle; nothing is reconstructed,
+    and no rig shim or extra ``--ak`` is needed. No matching Trial refuses.
+    """
+    trial_cls = importlib.import_module("harbor.trial.trial").Trial
+    frame = inspect.currentframe()
+    try:
+        while frame is not None:
+            owner = frame.f_locals.get("self")
+            if isinstance(owner, trial_cls) and Path(owner.paths.agent_dir) == Path(logs_dir):
+                return owner
+            frame = frame.f_back
+    finally:
+        del frame
+    raise TypeError("QualificationOracle needs task_dir/trial_paths: construct it from a "
+                    "Harbor Trial, or pass Harbor's oracle kwargs explicitly")
+
+
 class QualificationOracle(_oracle_base()):  # type: ignore[misc]
+    def __init__(self, logs_dir, task_dir=None, trial_paths=None, *args,
+                 agent_timeout_sec=None, **kwargs):
+        # Explicit oracle kwargs (Harbor's ``oracle`` branch, or a direct
+        # caller) are forwarded unchanged; only when ALL are absent are
+        # Harbor's own values taken from the constructing Trial.
+        if task_dir is None and trial_paths is None:
+            trial = _constructing_trial(logs_dir)
+            task_dir, trial_paths = trial.task.task_dir, trial.paths
+            if agent_timeout_sec is None:
+                agent_timeout_sec = trial.agent_timeout_sec
+        elif task_dir is None or trial_paths is None:
+            raise TypeError("QualificationOracle needs both task_dir and trial_paths")
+        if agent_timeout_sec is not None:
+            kwargs["agent_timeout_sec"] = agent_timeout_sec
+        super().__init__(logs_dir, task_dir, trial_paths, *args, **kwargs)
+
     @staticmethod
     def name() -> str:
         return "bench-qualification-oracle"
