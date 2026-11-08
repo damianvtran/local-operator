@@ -13,13 +13,12 @@ Keep internal gate evidence out of user-facing notes.
 
 - A manager owns routine bounded technical allocations inside the authorized
   task: a reversible implementation, a bounded test lease, ordinary library,
-  layout, test or lane choices. Escalate genuine
-  access/security decisions, destructive actions, operator preferences and
-  material scope changes. Authorization to fix is not authorization to delete.
-- Give each slice one owner identified by stable session ID, scope, acceptance
-  criteria and a durable receipt (project record or linked task/PR). Address the
-  owner directly; no status hunts or unchanged resends after a durable ACK.
-  Update only material deltas; verify completion from primary evidence.
+  layout, test or lane choices. Escalate genuine access/security decisions,
+  destructive actions, operator preferences and material scope changes. Authorization to fix is not authorization to delete.
+- Give each slice one owner (stable session ID), scope, acceptance criteria and
+  a durable receipt (project or linked task/PR). Address the owner directly; no
+  status hunts or resends after an ACK. Update only material deltas; verify
+  completion from primary evidence.
 - Prefer metadata/narrow indexes before logs. Verify surprising first reads one
   step further; cite relayed sources. Root recovery restores only prerequisites;
   cross-repository hardening is separate scope.
@@ -57,13 +56,14 @@ PR #156: 36 failures, 118 min median cadence); harness-lost attempts count.
 Spent, stop and escalate with each option's consequence: merge on unit/contract
 tests plus manual device QA; split the harness out; drop the row; or extend by a
 stated amount for a stated reason. No new mechanism or retry meanwhile. A lane
-never succeeding in 3 attempts is a harness problem until shown otherwise.
+never succeeding in 3 attempts is a harness problem until shown otherwise (41.4 h
+of failures came after the last product commit).
 
 **Measure before you cap; name the invariant.** No new timeout, cap, threshold or
 retry count without the distribution it bounds (n, median, max, source) and a
 setting above the observed max; every mechanism (cache, reuse, skip, fixture,
 gate) and shortcut names its invariant and the check proving it — no check, no
-shortcut (PR #156 capped reads at 20 s over a measured 66–173 s).
+shortcut (PR #156 capped hierarchy reads at 20 s over a measured 66–173 s).
 
 ## Worktrees
 
@@ -71,18 +71,17 @@ The manager (or lead coder) owns ONE PR worktree in `<repo>/.worktrees/` from
 latest origin/main, briefs its absolute path and SHA, and freezes the head while
 readers work. Reviewer/QA/UX/design/copy/i18n reuse it read-only every round
 (`git checkout --detach <head>`, targeted tests, shared deps): no clone,
-install, new worktree or full-tree copy into scratch. Python:
+install or new worktree, and no full-tree copies into scratch. Python:
 `PYTHONPATH=<worktree>` with the primary `.venv`; `python -c 'import
 local_operator;print(local_operator.__file__)'` must print a worktree path.
 Exception, with a manager lease: a conflicting commit author or an isolated
 mutable build collision gets a detached-SHA worktree on shared deps, bounded and
-creator-removed. Remove clean
+creator-removed, with isolated HOME/config. Remove clean
 worktrees on merge/close; the manager verifies (`scripts/worktree_janitor.py`).
 
 ## Never use a live peer as the revoke test
 
-Never remove a live peer to test revocation. Use a disposable peer; if none can
-be created, exercise revocation at the grant/token layer instead. Before any
+Use a disposable peer, else exercise revocation at the grant/token layer. Before any
 membership change, list the peer's sessions and worktree state, confirm a
 reachable head and console path, get explicit operator approval naming the
 peer, and record it. Authorization to test is not authorization to delete.
@@ -96,8 +95,8 @@ CI's when CI runs the same suite (#3575: ~3.7 h of rc=124 local pytest).
 
 **CI is concurrent, never awaited.** CI runs on every push alongside review/QA.
 Read it once, non-blocking, when collecting each wave's reports; fold failures
-into that wave's one remediation. Never `--watch`, sleep-poll or wait on it
-mid-cycle; the merge gate blocks only on required checks (#3575 read CI after 3
+into that wave's one remediation. Never `--watch` or wait on CI, and never
+sleep-poll it mid-cycle; the merge gate blocks only on required checks (#3575 read CI after 3
 clean rounds: 4 failures, +2.3 h). Run omitted required surfaces bounded and
 record them; CI never replaces real-path QA. Resource holds forbid hold-class
 runs, not evidence. Investigate even out-of-slice fails.
@@ -108,23 +107,24 @@ runs, not evidence. Investigate even out-of-slice fails.
 into a PR mid-review, except when GitHub reports DIRTY and a required run cannot
 start — prefer `workflow_dispatch` on the branch ref (a conflicting PR's
 `pull_request` workflow gets no merge ref).
-At the gate: converge, rebase proof, ONE round on files upstream also touched, CI.
+At the gate: converge, rebase proof, ONE round on files upstream also touched, CI
+(PR #156 merged main 13 times).
 
 **Harness-only delta: no numbered round.** After a clean round on head R, delta
 R..H takes no `### Agent review — round N` when
 `scripts/harness_delta_proof.py R H` exits 0 (same merge-base,
-`.github/harness-paths` unchanged, every changed path under a `harness:` glob,
-nothing ship-reachable): *no byte the shipping pipeline consumes differs*.
+`.github/harness-paths` present and unchanged, every changed path under a
+`harness:` glob): *no byte the shipping pipeline consumes differs between R and H*.
 Instead, ONE `### Harness delta check — R..H` at the merge gate by an independent
 reviewer reading for gate weakening (loosened assertions, skips, widened
 tolerances, `continue-on-error`, a probe that cannot fail) and harness changes
 running with release triggers, secrets, signing or publishing; QA retained. Anything unreadable, unresolvable or unclassifiable is a round or exit
-2, never a pass: a fail-closed reachability classifier, not a behaviour proof.
+2, never a pass: a reachability classifier made safe by failing closed.
 
 **Split when the harness outgrows the feature.** At each review request compare
 added lines under harness globs with all others (`--split` prints both); harness
 above product moves the harness to its own PR (review plus its own negative
-control, no product QA), leaving the feature a minimal proof.
+control, no product QA). PR #156 crossed at round 1 (2,787 vs 2,764 lines).
 
 Manager collects all reports into ONE deduplicated severity/evidence ledger and
 batches clarifications before edits. Implementer verifies claims, then fixes
@@ -138,12 +138,13 @@ checks its own new code for the same class before pushing.
 Follow up on `<previous_reviewed_head>..<new_head>` plus direct regression
 neighbors; a late BLOCKER/MAJOR needs a concrete code path/reproducer there.
 Retain evidence only with
-byte/source compatibility proof; backend response-shape changes may need rendered
-proof. Provenance-only addenda reset nothing.
+byte/source compatibility proof (response-shape changes may need rendered proof).
+Provenance-only addenda reset nothing.
 
 After two unsuccessful cycles, freeze the ledger, a root-transition/authority
-matrix (failing state, intended transition, owner) and exit criteria first. An unknown persisting twice escalates to
-its owner. This checkpoint never waives unresolved BLOCKER/MAJOR or evidence gates.
+matrix (failing state, intended transition, owner) and exit criteria first. An
+unknown persisting twice escalates to its owner. This never waives BLOCKER/MAJOR
+or evidence gates.
 
 A moved base (rebase OR merge of main) is NOT a blind re-pin: post
 `scripts/rebase_proof.py`'s `### Rebase proof` (range-diff `=`, byte-identical
@@ -182,8 +183,8 @@ never waives correctness, security or regression risk.
   ONLY extra exemption. A clean stream is NOT re-run when the delta misses its
   surface: a test-only, docs-only, CI-fix or comment-only commit after clean
   rounds gets at most a delta code check, no QA/design/UX round. `tests/` is
-  product (weakening a test weakens the gate): never harness-only, yet still
-  just that delta code check. Executable code needs a delta round plus QA
+  product here (weakening a test weakens the gate): never harness-only, yet
+  still just that delta code check. Executable code needs a delta round plus QA
   re-testing prior FAIL rows and the surfaces it moved; other rows stay
   `retained (<sha>)`.
 - **Hygiene.** Rounds only on pushed heads; one comment per stream per round; no
