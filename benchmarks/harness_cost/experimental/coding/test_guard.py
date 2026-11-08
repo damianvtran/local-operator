@@ -195,7 +195,7 @@ class GuardTests(unittest.TestCase):
     def test_codex_best_config_disables_server_side_web_search(self):
         # S9e: LiteLLM 1.106.6 turns Codex's Responses `web_search` tool into
         # Anthropic's `web_search_20250305` server tool, which the meter
-        # (rightly) refuses as unpriced. No other arm sends a server tool, so
+        # (rightly) refuses as unpriced. No arm gets a server tool (R14 M2), so
         # codex-best runs with Codex 0.147's top-level `web_search = "disabled"`.
         config = driver.codex_config("http://bench-gate:8789/v1")
         self.assertEqual(config["web_search"], "disabled")

@@ -36,7 +36,8 @@ WHAT this shim does (it sits between Codex and LiteLLM, both speaking Responses)
              e.g. `web_search`, `web_search_preview`): 400, nothing forwarded
              (S9e). codex-best runs with `web_search = "disabled"`; LiteLLM
              would turn the tool into Anthropic's unpriced server tool
-             `web_search_20250305`, which no other arm sends. Refused, never
+             `web_search_20250305`; no arm gets a server tool (R14 M2,
+             adapters.SERVER_TOOL_AUDIT). Refused, never
              stripped, so a config regression is visible at $0 instead of
              silently changing what Codex asked for. A *function* tool that
              merely is named `web_search` is client-side and passes.

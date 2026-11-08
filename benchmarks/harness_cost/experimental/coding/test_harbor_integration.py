@@ -102,6 +102,18 @@ class HarborIntegrationTests(unittest.TestCase):
             oracle_qualification.QualificationOracle(
                 logs_dir=trial.paths.agent_dir, task_dir=self.task)
 
+    def test_harbor_renders_claude_code_websearch_deny(self):
+        # R14 M2: Harbor's own ClaudeCode option builder must put the native
+        # deny on the CLI (and into its settings permissions on the ACP path).
+        import adapters
+
+        agent = adapters.FrozenClaudeCode(logs_dir=self.root / "agent",
+                                          model_name="anthropic/claude-sonnet-5-5")
+        self.assertEqual(agent.options.disallowed_tools, "WebSearch")
+        flags = agent.build_cli_flags()
+        self.assertIn("--disallowedTools WebSearch", flags)
+        self.assertNotIn("WebFetch", flags)
+
     def test_harbor_renders_codex_best_web_search_disabled(self):
         # Harbor's own Codex builder renders the driver's --ak config into the
         # config.toml Codex reads; the mode must survive as "disabled".

@@ -160,24 +160,34 @@ class ConnectionLog:
 
 
 async def _pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                counts: dict[str, int], key: str) -> str | None:
-    """Copy one direction; the reset's exception name, or None on a clean EOF.
+                counts: dict[str, int], key: str, src: str, dst: str) -> str | None:
+    """Copy one direction; ``"<side>-reset"`` naming the side that failed, or None.
 
     Bytes are counted into ``counts[key]`` AS THEY MOVE, so a tunnel that ends
-    in an error or a cancellation still logs what it carried (S9e). Cancellation
-    propagates: the caller logs it as such.
+    in an error or a cancellation still logs what it carried (S9e). A failed
+    read blames ``src``, a failed write/drain blames ``dst`` (R14 n1: label the
+    side, not the direction). Cancellation propagates: the caller logs it.
     """
     # Half-close on EOF (not close): the other direction may still be carrying
     # the response, as in gate_relay._pipe.
-    try:
-        while chunk := await reader.read(65536):
-            counts[key] += len(chunk)
+    while True:
+        try:
+            chunk = await reader.read(65536)
+        except (ConnectionError, OSError):
+            return f"{src}-reset"
+        if not chunk:
+            break
+        counts[key] += len(chunk)
+        try:
             writer.write(chunk)
             await writer.drain()
+        except (ConnectionError, OSError):
+            return f"{dst}-reset"
+    try:
         if writer.can_write_eof():
             writer.write_eof()
-    except (ConnectionError, OSError) as exc:
-        return type(exc).__name__
+    except (ConnectionError, OSError):
+        return f"{dst}-reset"
     return None
 
 
@@ -336,17 +346,18 @@ class PackageProxy:
         too: nothing more can be delivered, and a stalled peer must not keep
         the tunnel (and its row) open forever.
         """
-        tasks = {
-            asyncio.ensure_future(_pump(reader, up_writer, counts, "up")): "client-reset",
-            asyncio.ensure_future(_pump(up_reader, writer, counts, "down")): "upstream-reset",
-        }
+        tasks = [
+            asyncio.ensure_future(_pump(reader, up_writer, counts, "up", "client", "upstream")),
+            asyncio.ensure_future(_pump(up_reader, writer, counts, "down", "upstream", "client")),
+        ]
         try:
             pending = set(tasks)
             while pending:
                 done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
-                    if task.result() is not None:  # re-raises a pump's error
-                        return tasks[task]
+                    failed = task.result()  # re-raises a pump's error
+                    if failed is not None:
+                        return failed
             return "closed"
         finally:
             for task in tasks:

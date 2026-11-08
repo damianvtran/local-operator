@@ -760,7 +760,10 @@ def _signal_owned_group(group, sig):
         return False
     except PermissionError:
         # Darwin reports EPERM, not ESRCH, for an orphan group containing only
-        # zombies or members already exiting (ps stat "Z" / "E"). Do not swallow
+        # zombies or members already exiting. In ``ps -o stat`` the FIRST
+        # character is the run state (Z = zombie) and "E" (trying to exit) is a
+        # trailing flag: "?E", "RE", "UE", "SE" (R14 M1). Every stop() signal
+        # (first SIGTERM, grace probe, SIGKILL sweep) goes through here. Do not swallow
         # real permission failures: prove no live member remains, using a
         # read-only process table (no ambient process signals).
         rows = subprocess.run(
@@ -769,7 +772,7 @@ def _signal_owned_group(group, sig):
         members = [
             row.split()[1] for row in rows if len(row.split()) == 2 and row.split()[0] == str(group)
         ]
-        if any(not status.startswith(("Z", "E")) for status in members):
+        if any(not (status[0] == "Z" or "E" in status[1:]) for status in members):
             raise
         return False
 
@@ -954,10 +957,10 @@ def codex_config(base_url):
 
     ``web_search = "disabled"`` (S9e): Codex 0.147 otherwise sends its
     Responses ``web_search`` tool, which LiteLLM 1.106.6 translates into
-    Anthropic's server tool ``web_search_20250305``. The meter refuses every
-    unpriced server tool (402, d0b2b32c DEV capture), and no other arm sends
-    one on this path, so equal treatment is no server-side web search for any
-    arm. The key is Codex's own top-level setting (its binary documents
+    Anthropic's server tool ``web_search_20250305``. Benchmark rule (R14 M2):
+    no arm gets a server-side tool -- each is denied natively
+    (``adapters.SERVER_TOOL_AUDIT``) and the meter refuses any (402) as the
+    backstop. The key is Codex's own top-level setting (its binary documents
     ``"live"``/``"indexed"``/``"cached"``/``"disabled"``; Harbor's own
     ``web_search`` option writes the same key). The bridge refuses the tool
     as a backstop; the meter's refusal is unchanged.

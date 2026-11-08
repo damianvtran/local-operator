@@ -113,15 +113,76 @@ class DriverSafetyTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 driver._signal_owned_group(123, 0)
 
+    # Real Darwin ``ps -o stat=`` shapes (R14 M1): the FIRST character is the
+    # run state (I/R/S/T/U/Z or ?); "E" (trying to exit) is a trailing flag.
+    GONE = ("Z", "Zs", "?E", "RE", "UE", "SE", "SEs")
+    LIVE = ("S", "R+", "Ss", "U", "T", "I")
+
     def test_exiting_members_are_not_a_live_group(self):
-        # S9e: Darwin ps marks a member that is mid-exit "E"; like a zombie it
-        # can no longer be signalled and must not read as a live group.
+        # S9e/R14 M1: a zombie or a member flagged "E" can no longer be
+        # signalled and must not read as a live group; anything else is live.
         with (
             patch.object(driver.os, "killpg", side_effect=PermissionError),
             patch.object(driver.subprocess, "run") as ps,
         ):
-            ps.return_value.stdout = "123 Z\n123 E\n123 Es\n456 S\n"
+            ps.return_value.stdout = "".join(f"123 {s}\n" for s in self.GONE) + "456 S\n"
             self.assertFalse(driver._signal_owned_group(123, 0))
+            for live in self.LIVE:
+                with self.subTest(stat=live):
+                    ps.return_value.stdout = f"123 ?E\n123 {live}\n"
+                    with self.assertRaises(PermissionError):
+                        driver._signal_owned_group(123, 0)
+
+    def _owned_stub(self, pid):
+        class Proc:
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        proc = Proc()
+        proc.pid = pid
+        driver._OWNED_GROUPS[proc] = (os.getpid(), pid)
+        self.addCleanup(driver._OWNED_GROUPS.pop, proc, None)
+        return proc
+
+    def test_every_stop_signal_tolerates_an_exiting_group(self):
+        # R14 M1: the first SIGTERM (stop_edge after the leader exited), the
+        # grace-loop probe and the final SIGKILL sweep all meet EPERM with
+        # only exiting members; none may raise and lose result.json.
+        for stat in ("?E", "RE", "UE", "SE", "Z"):
+            for failing in ({signal.SIGTERM, 0, signal.SIGKILL}, {0, signal.SIGKILL}):
+                with self.subTest(stat=stat, failing=sorted(failing)):
+                    proc = self._owned_stub(2_000_000_011)
+                    sent = []
+
+                    def killpg(group, sig, failing=failing):
+                        sent.append((group, sig))
+                        if sig in failing:
+                            raise PermissionError
+
+                    with (
+                        patch.object(driver, "STOP_GRACE_SECONDS", 0.2),
+                        patch.object(driver.os, "killpg", side_effect=killpg),
+                        patch.object(driver.subprocess, "run") as ps,
+                    ):
+                        ps.return_value.stdout = f"{proc.pid} {stat}\n"
+                        driver.stop(proc)
+                    self.assertEqual({g for g, _ in sent}, {proc.pid})
+                    self.assertNotIn(proc, driver._OWNED_GROUPS)
+
+    def test_a_live_unsignallable_member_still_raises_on_the_first_signal(self):
+        for stat in self.LIVE:
+            with self.subTest(stat=stat):
+                proc = self._owned_stub(2_000_000_013)
+                with (
+                    patch.object(driver.os, "killpg", side_effect=PermissionError),
+                    patch.object(driver.subprocess, "run") as ps,
+                ):
+                    ps.return_value.stdout = f"{proc.pid} {stat}\n"
+                    with self.assertRaises(PermissionError):
+                        driver.stop(proc)
 
     def test_stop_survives_a_group_that_vanishes_mid_teardown(self):
         # S9e (d0b2b32c DEV capture, pass A): LiteLLM had already exited when

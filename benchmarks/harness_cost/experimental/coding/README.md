@@ -25,16 +25,36 @@ versions. Harbor's implementations are imported, not copied. Codex's catalog and
 `tool_search` translation are a separately labelled **codex-best** configuration,
 not Codex as shipped. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-**codex-best has no server-side web search (S9e).** Its base `config.toml`
-(`driver.codex_config`) sets Codex 0.147's top-level `web_search = "disabled"`.
-Otherwise Codex sends its Responses `web_search` tool, LiteLLM 1.106.6 turns it
-into Anthropic's server tool `web_search_20250305`, and the meter refuses every
-request as an unpriced server tool (402; d0b2b32c DEV capture, 12 refusals per
-pass). No other arm sends a server tool on this path, so equal treatment is no
-server-side web search for any arm. The meter keeps refusing server tools; no
-price is added. As a backstop, `codex_bridge.py` refuses (400, nothing
-forwarded) any request carrying a `web_search*` tool, so a config regression
+**No arm gets a server-side tool (R14 M2).** An Anthropic-executed tool
+(web search/fetch, code execution, computer use, ...) runs outside the network
+fence, a contamination route, and is unpriced by our rules. Client-side web
+tools stay available to every arm and fail identically: there is no route. Each
+arm's server tools are denied through its own native mechanism
+(`adapters.SERVER_TOOL_AUDIT`, tested in `test_adapters`), and the meter still
+refuses every server tool (402) as the backstop; no price is added.
+
+Codex 0.147 would otherwise send its Responses `web_search` tool, which LiteLLM
+1.106.6 turns into `web_search_20250305` (d0b2b32c DEV capture: 6 refusals per
+pass, 12 across both passes). Claude Code 2.1.274 lists `WebSearch` as a
+deferred tool and implements it as a sub-request carrying `web_search_20250305`
+(the d0b2b32c fixture passes never chose it). `codex_bridge.py` also refuses
+(400, nothing forwarded) any `web_search*` tool, so a codex config regression
 fails at $0 instead of being silently stripped.
+
+Read-only audit of the pinned binaries/packages for server tool types
+(`web_search_*`, `web_fetch_*`, `code_execution_*`, `computer_*`, `bash_*`,
+`text_editor_*`, `memory_*`, `tool_search_tool_*`):
+
+| arm | tool | client/server | action |
+|---|---|---|---|
+| claude-code | WebSearch | server (`web_search_20250305`, `max_uses: 8`) | denied: `--disallowedTools WebSearch` (`FrozenClaudeCode`; Harbor also writes it to its settings `permissions.deny` on the ACP path) |
+| claude-code | WebFetch | client (no `web_fetch_*` type in the binary) | kept, fenced |
+| codex-best | web_search | server once translated | denied: `web_search = "disabled"`; bridge refuses |
+| omp | web_search | server (searches through a model role, default `anthropic/claude-haiku-4-5` + `web_search_20250305`) | denied: `--config` overlay `web_search.enabled: false` (`adapters.Omp`) |
+| opencode | websearch, webfetch | client (websearch needs a configured provider; none is) | kept, fenced; no server tool type in the binary |
+| local-operator | web_search | client (HTTP providers from the tool process) | kept, fenced. Its `deepseek` provider calls a server tool at api.deepseek.com (not the meter); it needs a DeepSeek credential (none), and `deepseek.com` is a fence model host |
+| hermes | web tools | client | kept; server types appear only in its refusal check (`side_question_request.has_server_side_tools`) |
+| dsh | web tools | client | kept; no server tool type in the pinned package |
 
 ## Cheap checks (no installation, network, Docker or model)
 

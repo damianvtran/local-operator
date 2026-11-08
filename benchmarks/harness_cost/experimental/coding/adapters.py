@@ -218,8 +218,57 @@ async def _link(agent, environment, binary: str, name: str) -> None:
     )
 
 
+# R14 M2 -- benchmark rule: NO arm gets a server-side (Anthropic-executed) tool.
+# Such a tool runs outside the network fence (a contamination route) and is
+# unpriced by the meter, which refuses it (402) as the backstop. Client-side
+# web tools stay available to every arm and fail identically (no route).
+# Read-only audit of each pinned binary/config for server tool types
+# (web_search_*, web_fetch_*, code_execution_*, computer_*, bash_*/text_editor_*
+# server variants, tool_search_tool_*); coding/README.md carries the evidence.
+# (tool, client|server, action) per arm.
+SERVER_TOOL_AUDIT = {
+    "claude-code": (
+        ("WebSearch", "server", "denied: --disallowedTools WebSearch (FrozenClaudeCode)"),
+        ("WebFetch", "client", "kept: fetched in the container, fenced"),
+    ),
+    "codex-best": (
+        ("web_search", "server", 'denied: config.toml web_search = "disabled"; bridge refuses'),
+    ),
+    "omp": (
+        ("web_search", "server", "denied: --config overlay web_search.enabled: false (Omp)"),
+        ("fetch/browser", "client", "kept: fenced"),
+    ),
+    "opencode": (
+        ("websearch", "client", "kept: needs a configured provider (none); fenced"),
+        ("webfetch", "client", "kept: fenced"),
+    ),
+    "local-operator": (
+        ("web_search", "client", "kept: HTTP providers from the tool process; fenced. Its "
+         "deepseek provider (a server tool at api.deepseek.com, not the meter) needs a "
+         "DeepSeek credential (none) and deepseek.com is a fence model host"),
+    ),
+    "hermes": (
+        ("web tools", "client", "kept: fenced; server types appear only in its refusal check"),
+    ),
+    "dsh": (
+        ("web tools", "client", "kept: fenced; no server tool type in the pinned package"),
+    ),
+}
+
+
 class FrozenClaudeCode(ClaudeCode):
-    """Harbor's built-in Claude Code run path, byte-pinned installer only."""
+    """Harbor's built-in Claude Code run path, byte-pinned installer only.
+
+    WebSearch is denied natively (R14 M2): Claude Code 2.1.274 implements it as
+    a sub-request carrying the server tool ``web_search_20250305``. WebFetch
+    fetches in the container (client-side, fenced) and stays. Harbor's own
+    ``disable_web_search`` would also drop WebFetch, so the deny is explicit.
+    """
+
+    def __init__(self, *args, **kwargs):
+        tools = [t for t in (kwargs.get("disallowed_tools") or "").split(",") if t]
+        kwargs["disallowed_tools"] = ",".join(tools + ["WebSearch"] * ("WebSearch" not in tools))
+        super().__init__(*args, **kwargs)
 
     async def install(self, environment):
         await _link(self, environment, "/opt/bench/claude/bin/claude", "claude")
@@ -412,6 +461,14 @@ class LocalOperator(_Native):
         )
 
 
+# omp 18.11.2's web_search tool searches through a model role (by default
+# anthropic/claude-haiku-4-5 with the server tool ``web_search_20250305``), so
+# it is switched off with its own ``web_search.enabled`` setting (R14 M2),
+# loaded as a ``--config`` overlay ("config.yml-style", repeatable).
+OMP_DENY_PATH = "/tmp/bench-support/omp-deny.yml"
+OMP_DENY_CONFIG = "web_search:\n  enabled: false\n"
+
+
 class Omp(_Native):
     """Released Linux amd64 omp 18.11.2, not Harbor's upstream pi agent."""
 
@@ -427,11 +484,18 @@ class Omp(_Native):
 
     @with_prompt_template
     async def run(self, instruction, environment, context):
+        await self.exec_as_agent(
+            environment,
+            "mkdir -p /tmp/bench-support && printf %s "
+            + shlex.quote(OMP_DENY_CONFIG) + " > " + OMP_DENY_PATH,
+        )
         # cwd is Harbor's task cwd; omitting --cwd preserves it exactly.
         await self._run(
             environment,
             [
                 "/opt/bench/omp/bin/omp",
+                "--config",
+                OMP_DENY_PATH,
                 "-p",
                 "--mode",
                 "json",

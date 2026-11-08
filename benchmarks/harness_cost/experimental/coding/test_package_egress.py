@@ -301,8 +301,25 @@ class PackageEgressTests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.02)
         [row] = self.rows()
-        self.assertIn(row["end"], ("client-reset", "closed"))
+        self.assertEqual(row["end"], "client-reset")
         self.assertEqual(row["bytes_up"], 2)
+
+    async def test_end_reason_names_the_side_that_failed_not_the_direction(self):
+        # R14 n1: a failed WRITE to the upstream while copying client bytes is
+        # the upstream's reset, though it happens in the client->upstream pump.
+        class DeadWrite(ScriptedUpstream):
+            def write(self, data):
+                raise BrokenPipeError
+
+        upstream = DeadWrite([], "hang")
+
+        async def opener(host, p):
+            return upstream, upstream
+
+        self.proxy.opener = opener
+        await self.exchange(b"CONNECT pypi.org:443 HTTP/1.1\r\n\r\nhello")
+        [row] = self.rows()
+        self.assertEqual((row["end"], row["bytes_up"]), ("upstream-reset", 5))
 
     async def test_denials_and_unreachable_upstreams_carry_an_end_reason(self):
         await self.exchange(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
