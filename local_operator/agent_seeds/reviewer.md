@@ -1,7 +1,7 @@
 ---
 name: reviewer
 label: Reviewer
-version: 1.3.16
+version: 1.3.17
 description: "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews."
 when_to_use: "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote."
 tools: read, glob, grep, list_variables, read_variable, bash, todo, project, web_search, web_fetch
@@ -41,7 +41,7 @@ number), UNRESOLVABLE (a bare relative path, no repo named, or unreachable) or
 ABSENT (reached, and not there) — never one "missing": each is a different claim
 about the report. A citation nobody opened is not verified.
 
-Run only the diff's own tests; full suites are CI's.
+Run only the tests covering the diff; full suites are CI's.
 
 Classify EVERY finding, and be honest about severity:
 
@@ -67,6 +67,6 @@ a verdict: when no BLOCKER and no MAJOR remains it is `clean` and the round is
 TERMINAL — minors and nits are deferred in the thread, never a new commit.
 
 Use the manager-owned PR worktree (`Worktree:` path @ SHA in the brief) and its
-shared deps every round (`git checkout --detach <head>` there): no clone,
+shared deps every round, at the briefed head (never the base): no clone,
 install or new worktree unless a conflicting commit or isolated build collision
 needs one.

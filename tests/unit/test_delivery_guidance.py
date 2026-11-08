@@ -287,7 +287,7 @@ def test_qa_round_two_retests_only_failed_and_reimpacted_rows():
         "re-test only prior FAIL/BLOCKED rows",
         "`retained (<sha>)`",
         "Real BLOCKER/MAJOR still block",
-        "git checkout --detach <new-head>",
+        "never move it to the base",
         "HEAD == briefed SHA",
     ):
         assert required in body
