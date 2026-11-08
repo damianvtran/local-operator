@@ -8,3 +8,7 @@ check. Never merged.
 
 def test_the_merge_gate_refuses_a_red_full_suite() -> None:
     assert False, "probe: intentional failure for the merge-gate refusal test"
+
+
+def test_the_probe_survives_a_remediation_push() -> None:
+    assert True
