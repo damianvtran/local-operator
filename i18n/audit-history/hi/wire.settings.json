@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.settings",
-  "history_sha256": "d718f8b50f2fb89ccc979f589fc686519c41823be678f7187ad97b035aed2fec",
+  "history_sha256": "0aa917589d10001b00611597ffcea00f3eda37b7bb215762a98f59fb65af22f4",
   "entries": [
     {
       "locale": "hi",
@@ -109,6 +109,26 @@
       },
       "status": "passed",
       "note": "Delta re-audit of the ambient help, 0 findings. 'असंबोधित सीमा में से निकाला गया हिस्सा, खाते की सीमा में जोड़ा नहीं जाता' names the unaddressed parent and the account total, so ambient <= unaddressed holds and raising the slice never raises the account total; the habitual negative reads as a standing rule (masc. agreement binds it to हिस्सा, not सीमा). 97 cells, two lines at both 74 and 94, nukta spellings match the catalogue."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "a6301181965176db933ba0600331d424edb6db83f5f0327937f6e2c7308cfd07",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3570 implementer)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, session 8035a3c0e3b6, task i18n-audit-3570-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'और वापस पूर्ण पर जाने से वे लौटते नहीं' checked for accuracy, glossary (choice label 'पूर्ण' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). F1 MAJOR glossary: help 'कॉम्पैक्शन' vs glossary/hi guide/shipped 'संपीडन' (18 uses, section title) -> fixed. F2 minor glossary drift: 'पुनः आरंभ' in label and card.description vs shipped 'फिर शुरू' (25 uses incl. this key's own help) -> aligned. F3 minor glossary drift: 'संदेश' for turn vs shipped 'टर्न' (41 uses) -> aligned in full.description and help. Latin digits n/a. No placeholders/ICU/plurals. Receipt valid only if applied bytes equal expected-final-values.json."
     }
   ]
 }

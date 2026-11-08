@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "37ed120a8afecbf2473fb86f54310adad9315ac5edf84606433dd17b45e8dfb6",
+  "history_sha256": "c2f736b66807179ed9b329680dce2cb93e5b9ab4a1c7173cebe9fee2fc15b152",
   "entries": [
     {
       "locale": "vi",
@@ -109,6 +109,26 @@
       },
       "status": "passed",
       "note": "Delta re-audit of the ambient help, 0 findings. 'Lấy ra từ trần không đích danh, không bao giờ thêm vào trần tài khoản' names the unaddressed parent and the account total explicitly, so the order claim survives and is stronger than the previous value (which never named the account ceiling). The trims ('cộng thêm vào' -> 'thêm vào', 'chỉ được dùng ... trong mỗi giờ' -> 'dùng ... mỗi giờ') lose no proposition. 145 cells, wraps to two rows at 74 (where the previous 149-cell value needed three and was cut) and at 94."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "a6301181965176db933ba0600331d424edb6db83f5f0327937f6e2c7308cfd07",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3570 implementer)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, session 8035a3c0e3b6, task i18n-audit-3570-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'và chuyển lại đầy đủ cũng không khôi phục chúng' checked for accuracy, glossary (choice label 'đầy đủ' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass; R2-V1 nit: 'chuyển lại' could read 'chuyển về', accepted unchanged. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). Passed as submitted. N1 nit: help opening 'Những gì một phiên được tiếp tục phát lại sau khi nén' is parseable but slightly heavy; accepted. nén/phiên/tiếp tục/lượt/người vận hành/thẻ/phát lại all match glossary and shipped vi. No placeholders/ICU/plurals."
     }
   ]
 }

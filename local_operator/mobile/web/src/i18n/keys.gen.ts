@@ -999,6 +999,12 @@ export type MessageParams = {
   "wire.settings.compaction_mid_turn_enabled.choice.true.description": undefined;
   "wire.settings.compaction_mid_turn_enabled.help": undefined;
   "wire.settings.compaction_mid_turn_enabled.label": undefined;
+  "wire.settings.compaction_resume_replay.choice.card.description": undefined;
+  "wire.settings.compaction_resume_replay.choice.card.label": undefined;
+  "wire.settings.compaction_resume_replay.choice.full.description": undefined;
+  "wire.settings.compaction_resume_replay.choice.full.label": undefined;
+  "wire.settings.compaction_resume_replay.help": undefined;
+  "wire.settings.compaction_resume_replay.label": undefined;
   "wire.settings.compaction_strategy.choice.auto.description": undefined;
   "wire.settings.compaction_strategy.choice.auto.label": undefined;
   "wire.settings.compaction_strategy.choice.context_full.description": undefined;

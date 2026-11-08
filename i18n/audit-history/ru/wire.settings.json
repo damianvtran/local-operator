@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings",
-  "history_sha256": "57ddc49f18a714ef8ebb4563b31fdc5268a785860054caf9bc589fd699a3ff77",
+  "history_sha256": "f8f956b9689811b5b773362415403484953206d781c6027c58b232448f8daa32",
   "entries": [
     {
       "locale": "ru",
@@ -109,6 +109,26 @@
       },
       "status": "passed",
       "note": "Delta re-audit of the ambient help, 0 findings. 'Выделяется из потолка неадресованных и никогда не повышает потолок учётной записи' keeps the carve-out and the order claim; the sibling's 'не добавляется к нему' was unusable here because 'к нему' would bind to the nearest antecedent (the unaddressed ceiling) and invert the claim, and the explicit parallel form would need a third row. 144 cells vs 143 English, wraps in two lines at 74 and 94, no numerals, placeholders or bidi controls."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "a6301181965176db933ba0600331d424edb6db83f5f0327937f6e2c7308cfd07",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3570 implementer)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, session 8035a3c0e3b6, task i18n-audit-3570-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-07",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'и возврат к «полностью» их не восстанавливает' checked for accuracy, glossary (choice label 'полностью' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). Passed as submitted, nits only. N1: 'реплики' for turn where the catalogue mostly uses 'ход' (192 uses) - accepted, because the sentence is about verbatim text and 'реплика' names the text of a turn. N2: label 'Воспроизведение при возобновлении' 33 chars vs en 13, inside the namespace's existing label range (max 49) - optional 'Повтор при возобновлении'. N3: full.label adverb 'полностью' beside noun 'карточка' - accepted. сжатие/сессия/карточка/воспроизведение match glossary and cli.global_help.resume. No placeholders/ICU/plurals."
     }
   ]
 }
