@@ -1,0 +1,244 @@
+"""Independent mechanical audit for wire.settings.build_cache (audit id bcr1).
+
+Read-only: compares the en source + context sidecar against the seven committed
+target catalogues. Prints findings; exits 1 if any key-set or literal-token
+defect is found. Reproduce from the repo root with .venv/bin/python.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+from rich.cells import cell_len
+
+ROOT = Path.cwd()
+NS = "wire.settings.build_cache"
+LOCALES = ["fr", "es", "zh-CN", "ru", "vi", "ur", "hi"]
+CAT = ROOT / "local_operator" / "i18n" / "catalogues"
+
+
+def load(locale: str, suffix: str = ".json") -> dict[str, str]:
+    return json.loads((CAT / locale / f"{NS}{suffix}").read_text(encoding="utf-8"))
+
+
+def digest(locale: str, suffix: str = ".json") -> str:
+    return hashlib.sha256((CAT / locale / f"{NS}{suffix}").read_bytes()).hexdigest()
+
+
+en = load("en")
+ctx = load("en", ".context.json")
+targets = {loc: load(loc) for loc in LOCALES}
+
+print("=" * 78)
+print("wire.settings.build_cache — independent audit mechanics (audit id bcr1)")
+print("=" * 78)
+print(f"en keys: {len(en)}   context keys: {len(ctx)}   locales: {', '.join(LOCALES)}")
+print()
+
+failures: list[str] = []
+
+# ---------------------------------------------------------------- key sets
+print("-- 1. key-set parity vs en " + "-" * 50)
+for loc in LOCALES:
+    t = targets[loc]
+    missing = sorted(set(en) - set(t))
+    extra = sorted(set(t) - set(en))
+    ok = not missing and not extra
+    print(f"  {loc:<6} keys={len(t):<3} missing={missing or 'none'} extra={extra or 'none'} -> "
+          f"{'PASS' if ok else 'FAIL'}")
+    if not ok:
+        failures.append(f"{loc}: key-set mismatch")
+print(f"  context sidecar covers every en key: "
+      f"{'PASS' if set(ctx) == set(en) else 'FAIL ' + str(sorted(set(en) ^ set(ctx)))}")
+print()
+
+# ------------------------------------------------------------- placeholders
+print("-- 2. ICU placeholder scan (en and all targets) " + "-" * 31)
+PLACEHOLDER = re.compile(
+    r"\{[^{}]*\}"                       # {name}, {0}, {count, plural, ...}
+    r"|\{[A-Za-z_][A-Za-z0-9_]*\}"      # simple named
+    r"|%[sdif]"                          # printf style
+    r"|%\(\w+\)s"                        # python mapping style
+)
+total_hits = 0
+for loc in ["en", *LOCALES]:
+    src = en if loc == "en" else targets[loc]
+    hits = {k: PLACEHOLDER.findall(v) for k, v in src.items() if PLACEHOLDER.search(v)}
+    total_hits += len(hits)
+    print(f"  {loc:<6} messages with placeholder syntax: {hits or 'none'}")
+print(f"  VERDICT: namespace carries {total_hits} ICU/printf placeholders "
+      f"-> claim 'no ICU placeholders' {'CONFIRMED' if total_hits == 0 else 'REFUTED'}")
+print()
+
+# --------------------------------------------------------- literal tokens
+print("-- 3. literal-token preservation (must be byte-identical) " + "-" * 23)
+LITERALS = ["target/", ".next/", "build/", "dist/", "lop build-cache reap",
+            "--dry-run", "Rust", "Next.js", "CMake", "Gradle"]
+print(f"  literals expected in en description/help: {LITERALS}")
+print()
+print(f"  {'locale':<7}" + "".join(f"{lit:<22}" for lit in LITERALS))
+for loc in ["en", *LOCALES]:
+    src = en if loc == "en" else targets[loc]
+    blob = "\n".join(src.values())
+    row = ""
+    for lit in LITERALS:
+        en_count = "\n".join(en.values()).count(lit)
+        c = blob.count(lit)
+        row += f"{('yes(' + str(c) + ')') if c == en_count and c else ('MISSING' if c == 0 else 'COUNT ' + str(c) + '!=' + str(en_count)):<22}"
+        if loc != "en" and c != en_count:
+            failures.append(f"{loc}: literal {lit!r} count {c} != en {en_count}")
+    print(f"  {loc:<7}{row}")
+print()
+
+# per-key presence, so a literal is never silently dropped by one key
+print("  per-key literal presence (key -> literals found in en vs target):")
+for key in sorted(en):
+    en_lits = [lit for lit in LITERALS if lit in en[key]]
+    if not en_lits:
+        continue
+    for loc in LOCALES:
+        got = [lit for lit in en_lits if lit in targets[loc][key]]
+        if got != en_lits:
+            print(f"    FAIL {loc} {key}: en={en_lits} target={got}")
+            failures.append(f"{loc} {key}: dropped literal")
+print("    all keys keep every literal their en counterpart carries"
+      if not any(f.startswith(tuple(LOCALES)) and "literal" in f for f in failures)
+      else "    see FAIL rows above")
+print()
+
+# ----------------------------------------------- punctuation & typography
+print("-- 4. typography: French thin space, RTL controls, NFC " + "-" * 23)
+FR_NBSP = "\u202f"
+print("  fr — U+202F required before : ; ! ? in prose")
+bad_fr = []
+for key, val in targets["fr"].items():
+    for m in re.finditer(r".{3}[:;!?]", val):
+        seg = m.group(0)
+        pre = seg[-2]
+        if pre != FR_NBSP:
+            bad_fr.append((key, repr(seg)))
+if bad_fr:
+    for k, s in bad_fr:
+        print(f"    FAIL {k}: {s} — plain space before punctuator")
+    failures.extend(f"fr {k}: no U+202F" for k, _ in bad_fr)
+else:
+    print("    PASS — every : ; ! ? in fr prose is preceded by U+202F")
+
+BIDI = {"\u200e": "LRM", "\u200f": "RLM", "\u202a": "LRE", "\u202b": "RLE",
+        "\u202c": "PDF", "\u202d": "LRO", "\u202e": "RLO", "\u2066": "LRI",
+        "\u2067": "RLI", "\u2068": "FSI", "\u2069": "PDI"}
+print("  ur — no manually inserted bidi control characters (render layer applies FSI/PDI)")
+ur_hits = [(k, BIDI[ch]) for k, v in targets["ur"].items() for ch in v if ch in BIDI]
+print(f"    {'PASS — none found' if not ur_hits else 'FAIL ' + str(ur_hits)}")
+if ur_hits:
+    failures.append("ur: bidi control characters")
+
+print("  ur — guide's Urdu punctuation set, and no Devanagari/Latin prose separators")
+# The ur guide REQUIRES: ۔ full stop (U+06D4), ، comma (U+060C), ؛ semicolon
+# (U+061B), ؟ question mark (U+061F), and forbids the Devanagari danda (U+0964).
+# A first version of this check wrongly treated ، and ؛ as foreign; the guide
+# settles it, and the shipped ur corpus uses them (87 commas in wire.settings).
+UR_REQUIRED = {"\u06d4": "۔ full stop", "\u060c": "، comma", "\u061b": "؛ semicolon"}
+UR_FORBIDDEN = {"\u0964": "DEVANAGARI DANDA ।"}
+for mark, name in UR_REQUIRED.items():
+    n = sum(v.count(mark) for v in targets["ur"].values())
+    print(f"    {name:<16} used {n:>2}x -> {'PASS' if n else 'ABSENT'}")
+    if not n:
+        failures.append(f"ur: required punctuation {name} absent")
+for mark, name in UR_FORBIDDEN.items():
+    hits = [k for k, v in targets["ur"].items() if mark in v]
+    print(f"    forbids {name:<28} {'PASS — none' if not hits else 'FAIL ' + str(hits)}")
+    if hits:
+        failures.append(f"ur: forbidden punctuation {name}")
+# Latin prose separators would be a register break outside code spans/flags.
+latin_sep = {k: v.count(", ") for k, v in targets["ur"].items() if ", " in v.replace("target/, ", "").replace("Next.js .next/", "")}
+print(f"    Latin comma-space outside literals: {'PASS — none' if not latin_sep else latin_sep}")
+if latin_sep:
+    failures.append("ur: Latin comma in prose")
+
+print("  all locales — value must be NFC (precomposed) form")
+for loc in LOCALES:
+    bad = [k for k, v in targets[loc].items() if not unicodedata.is_normalized("NFC", v)]
+    print(f"    {loc:<6} {'PASS' if not bad else 'FAIL ' + str(bad)}")
+    if bad:
+        failures.append(f"{loc}: not NFC")
+print()
+
+# ------------------------------------------------------------------ widths
+print("-- 5. width discipline for a settings list (rich.cells.cell_len) " + "-" * 16)
+LABELS = [k for k in en if k.endswith((".label", ".title"))]
+print(f"  {'key':<52}{'en':>5}{'fr':>5}{'es':>5}{'zh':>5}{'ru':>5}{'vi':>5}{'ur':>5}{'hi':>5}")
+width_rows = {}
+for key in sorted(LABELS):
+    row = {"en": cell_len(en[key])}
+    for loc in LOCALES:
+        row[loc] = cell_len(targets[loc][key])
+    width_rows[key] = row
+    cells = "".join(f"{row[c]:>5}" for c in ["en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi"])
+    print(f"  {key:<52}{cells}")
+print()
+print("  ratio vs en per locale (flag if a label roughly doubles, i.e. >= 2.0):")
+for loc in LOCALES:
+    ratios = {k: round(v[loc] / v["en"], 2) for k, v in width_rows.items()}
+    worst = max(ratios.items(), key=lambda kv: kv[1])
+    over = {k: r for k, r in ratios.items() if r >= 2.0}
+    print(f"    {loc:<6} worst {worst[0].split('.')[-2] + '.' + worst[0].split('.')[-1]}"
+          f"={worst[1]}x  over-2x: {over or 'none'}")
+    if over:
+        failures.append(f"{loc}: label >=2x en {over}")
+print()
+
+# ------------------------------------------------------ punctuation shape
+print("-- 6. sentence punctuation shape (help strings are sentences) " + "-" * 21)
+for loc in ["en", *LOCALES]:
+    src = en if loc == "en" else targets[loc]
+    helplike = [k for k in src if k.endswith((".help", ".description"))]
+    endings = sorted({src[k][-1] for k in helplike})
+    print(f"  {loc:<6} help/description final characters: {endings}")
+print()
+
+# ------------------------------------------------------- hygiene extras
+print("-- 6b. label/title trailing punctuation, whitespace, duplicate values " + "-" * 10)
+for loc in ["en", *LOCALES]:
+    src = en if loc == "en" else targets[loc]
+    bad_punct = {
+        k: v[-1]
+        for k, v in src.items()
+        if k.endswith((".label", ".title")) and v.rstrip() != v.rstrip(".:：。")
+    }
+    bad_ws = {k: repr(v[:30]) for k, v in src.items() if v != v.strip() or "  " in v}
+    print(f"  {loc:<6} label punctuation: {'none' if not bad_punct else bad_punct}"
+          f" | stray/double whitespace: {'none' if not bad_ws else bad_ws}")
+    if bad_punct or bad_ws:
+        failures.append(f"{loc}: punctuation/whitespace hygiene")
+for loc in LOCALES:
+    seen: dict[str, list[str]] = {}
+    for k, v in targets[loc].items():
+        seen.setdefault(v, []).append(k)
+    dupes = {v[:50]: ks for v, ks in seen.items() if len(ks) > 1}
+    print(f"  {loc:<6} duplicated value across keys: {'none' if not dupes else dupes}")
+    if dupes:
+        failures.append(f"{loc}: duplicated value")
+print()
+
+# --------------------------------------------------------------- hashes
+print("-- 7. input hashes (repository rule: sha256 of the committed bytes) " + "-" * 13)
+print(f"  en source   {digest('en')}   (catalogues.catalogue_sha256('en', NS) rule)")
+print(f"  en context  {digest('en', '.context.json')}")
+for loc in LOCALES:
+    print(f"  {loc:<10} {digest(loc)}")
+print()
+
+print("=" * 78)
+if failures:
+    print(f"FAILURES ({len(failures)}):")
+    for f in failures:
+        print(f"  - {f}")
+    sys.exit(1)
+print("No mechanical defect: key sets, literals, placeholders, typography, NFC "
+      "and width budget all pass.")

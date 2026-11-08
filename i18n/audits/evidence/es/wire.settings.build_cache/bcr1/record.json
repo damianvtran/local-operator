@@ -1,0 +1,121 @@
+{
+  "schema": 1,
+  "audit_id": "bcr1",
+  "audit_round": 1,
+  "audit_kind": "independent_full_namespace_audit",
+  "locale": "es",
+  "namespace": "wire.settings.build_cache",
+  "audit_date": "2026-11-08",
+  "source_audit_revision": "b24b7b78c63370cf17ca69be336fefb5535f455d",
+  "source_audit_revision_note": "The translated catalogue bytes are the ones committed at this revision. This audit's own commit adds only the ledger row and this bundle, so the audited bytes are still the current bytes.",
+  "key_count": {
+    "en": 10,
+    "target": 10,
+    "context": 10
+  },
+  "verdict": "passed",
+  "current_report_verdict": "passed",
+  "result": "passed",
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "open_findings": [
+    {
+      "id": "ES-BCR1-N1",
+      "severity": "nit",
+      "status": "open — non-gating, not fixed",
+      "keys": [
+        "wire.settings.build_cache.include_extra_shapes.help"
+      ],
+      "detail": "'Actívalo solo si los checkouts de esta máquina los usan como salida.' The second 'los' sits three words after 'los checkouts', so the anaphor is momentarily ambiguous; it resolves to build/ and dist/ (read as 'los directorios'), which is coherent, and the wrong reading collapses to nonsense, so nothing is lost.",
+      "remediation": "Optional: '…si los checkouts de esta máquina usan esas carpetas como salida.' Left unchanged: the audit applies no edit to a value it judged."
+    }
+  ],
+  "closed_findings": [],
+  "accepted_candidates": [
+    "Bare 'Activado …' without a colon (es) — shipped corpus precedent; style, not error."
+  ],
+  "auditor": {
+    "agent": "independent i18n-auditor (lopdev task subagent, build-cache settings lane)",
+    "session": "6368251d546b",
+    "model": "deepseek/deepseek-flash",
+    "model_note": "Served model, disclosed: this lane opened on anthropic/claude-opus-5-5 and two provider quota failures switched it (claude-opus-5-5 -> openai/gpt-6.1-sol -> deepseek/deepseek-flash) before the substantive reading; every check, all reading of the seven targets and all judgement below ran under deepseek/deepseek-flash. Self-reported from this session's model-switch notices, not independently observable.",
+    "date": "2026-11-08",
+    "independence": "Independent by construction: I did not translate these values and this round does not audit my own work. I edited no catalogue value, sidecar, glossary, style guide or generated artifact; the only writes are the seven ledger rows under i18n/audit-history/ and these evidence bundles. Every nit below is reported, not fixed.",
+    "actual_model_source": "self-reported from the session's model-switch notices; the harness exposed no independent route log to this lane"
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "commit": "b24b7b78c63370cf17ca69be336fefb5535f455d",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-08",
+    "fallback_used": false,
+    "provenance": "Translator identity supplied by the delegation brief. No translator receipt file exists in the tree; commit b24b7b78c63 carries the seven catalogues and its message records the translating lane, which explicitly deferred the ledger rows and the generated artifacts to this auditor lane."
+  },
+  "independence_statement": "Independent: the auditor did not translate these values, and no value was edited by this round. Findings are reported, not silently repaired.",
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/wire.settings.build_cache.json",
+    "context": "local_operator/i18n/catalogues/en/wire.settings.build_cache.context.json",
+    "target": "local_operator/i18n/catalogues/es/wire.settings.build_cache.json"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.build_cache.json",
+      "revision": "b24b7b78c63370cf17ca69be336fefb5535f455d",
+      "sha256": "944b0165dc0ec308a5ea9568e6f27628e48f3670be5949d8b7e4a11e5b15496e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.build_cache.context.json",
+      "revision": "b24b7b78c63370cf17ca69be336fefb5535f455d",
+      "sha256": "9f4669a6509a4b895b272308a1aa6fae3398582d04872e6640257323b834681c"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.settings.build_cache.json",
+      "revision": "b24b7b78c63370cf17ca69be336fefb5535f455d",
+      "sha256": "7ca60196f7bd0045f52dc00d15bd0c81092bb39da602d4164e002c49974a5acb"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "source_sha256_derivation": "The repository's own rule, used by scripts/i18n/generate.py for the shipped set: catalogues.catalogue_sha256('en', namespace) — sha256 of the committed English file bytes. Verified by recomputing after regeneration; the value is unchanged, so regenerating does not move it.",
+  "checks": {
+    "catalogue_check": "0 problem(s)",
+    "key_set_parity": "10/10 in every locale; sets exactly equal to en",
+    "context_sidecar_coverage": "10/10 keys",
+    "placeholder_scan": "0 ICU/printf placeholders (claim verified, not assumed)",
+    "literal_tokens": "target/, .next/, build/, dist/, 'lop build-cache reap', --dry-run, Rust, Next.js, CMake, Gradle — byte-identical, English counts matched per key",
+    "nfc": "passed for all 10 values",
+    "bidi_controls": "ur: none inserted (render layer applies FSI/PDI)",
+    "plural_messages": 0,
+    "numerals_in_namespace": 0,
+    "generator_check": "158 artifact(s) byte-identical",
+    "coverage_gate": "tests/unit/i18n/test_language_manifest.py — 35 passed",
+    "ships": true
+  },
+  "ledger_storage": {
+    "row_path": "i18n/audit-history/es/wire.settings.build_cache.json",
+    "note": "Rows land in the ordered-suffix store via scripts/i18n/ledger.py append; i18n/ledger.json is a pinned aggregate mirror and is not a generation target in migrated mode."
+  },
+  "artifacts": [
+    "audit.log",
+    "record.json",
+    "report.md",
+    "reproduction.py.txt"
+  ],
+  "limitations": [
+    "No rendered-frame or layout proof; widths measured with rich.cells.cell_len on the strings.",
+    "No native-speaker certification.",
+    "ur TUI keeps the documented degraded LTR layout; no shaping or mirroring claim.",
+    "Served model is self-reported from the session's model-switch notices and is not independently observable."
+  ],
+  "evidence_files": [
+    "audit.log",
+    "record.json",
+    "report.md",
+    "reproduction.py.txt"
+  ],
+  "reproduction": "reproduction.py.txt is the audit's own mechanical script, retained as .py.txt so the evidence is not a second executable source tree. Run it from the worktree root with .venv/bin/python; audit.log section 2 is its verbatim output."
+}

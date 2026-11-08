@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "audit_id": "bcr1",
+  "locale": "ur",
+  "namespace": "wire.settings.build_cache",
+  "audit_date": "2026-11-08",
+  "verdict": "passed",
+  "auditor": {
+    "agent": "independent i18n-auditor (lopdev task subagent, build-cache settings lane)",
+    "session": "6368251d546b",
+    "model": "deepseek/deepseek-flash",
+    "fallback_used": true
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "commit": "b24b7b78c63370cf17ca69be336fefb5535f455d",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback_used": false
+  },
+  "source_sha256": "944b0165dc0ec308a5ea9568e6f27628e48f3670be5949d8b7e4a11e5b15496e",
+  "context_sha256": "9f4669a6509a4b895b272308a1aa6fae3398582d04872e6640257323b834681c",
+  "target_sha256": "a4aef1a122a5a8b5724f58d4209a1427b47594b88b0dcbd84ae6eb1e0f3f85e0",
+  "current_bytes_match_audited_hashes": true,
+  "companion_sha256": {
+    "audit.log": "69fa057e2bbdaac74dcd2a6af4738f59f55fb5ece3ccb05e1b25ced472daa966",
+    "record.json": "00562a398cb7e365d6446d59ce33824db73fad254384b041e27b46964e812613",
+    "report.md": "f7c235aceb61d08dcc0e64c4453d5963edc9d5cb3194c2b9b639178cfdfb108b",
+    "reproduction.py.txt": "0d7b0cfa9ecf3dc1b552569459ba85961c77fb0c6f1ecb30148d3e8b14bc9e39"
+  },
+  "note": "companion_sha256 hashes this bundle's other three files as written; record.json is hashed here rather than by itself."
+}

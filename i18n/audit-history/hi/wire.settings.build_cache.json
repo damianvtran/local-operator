@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.settings.build_cache",
+  "history_sha256": "b8cf4300ff1875195227cd4e9e8e447c53e5de746ea46714c386c0b46ed91686",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.build_cache",
+      "source_sha256": "944b0165dc0ec308a5ea9568e6f27628e48f3670be5949d8b7e4a11e5b15496e",
+      "translator": {
+        "agent": "i18n-translator",
+        "commit": "b24b7b78c63370cf17ca69be336fefb5535f455d",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-08",
+        "fallback_used": false,
+        "provenance": "Translator identity supplied by the delegation brief. No translator receipt file exists in the tree; commit b24b7b78c63 carries the seven catalogues and its message records the translating lane, which explicitly deferred the ledger rows and generated artefacts to the auditor lane."
+      },
+      "auditor": {
+        "agent": "independent i18n-auditor (lopdev task subagent, build-cache settings lane)",
+        "session": "6368251d546b",
+        "model": "deepseek/deepseek-flash",
+        "model_note": "Served model, disclosed: this lane opened on anthropic/claude-opus-5-5 and two provider quota failures switched it (claude-opus-5-5 -> openai/gpt-6.1-sol -> deepseek/deepseek-flash) before the substantive reading; all analysis, checks and judgement ran under deepseek/deepseek-flash. Self-reported from the session's model-switch notices, not independently observable.",
+        "date": "2026-11-08",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "fallback_used": true,
+        "independence": "Independent: I did not translate these values. I edited no value in this namespace — the only writes are the ledger rows and the evidence bundle; nits are reported, not fixed.",
+        "evidence": "i18n/audits/evidence/hi/wire.settings.build_cache/bcr1/record.json"
+      },
+      "status": "passed",
+      "note": "bcr1 independent audit, 10 keys @b24b7b78c63: 0 blocker/major/minor, 0 nit; no value edited; literals byte-identical; no placeholders; labels <2x en. deepseek/deepseek-flash (opus-5-5 quota fallback). Evidence: i18n/audits/evidence/hi/wire.settings.build_cache/bcr1/record.json"
+    }
+  ]
+}

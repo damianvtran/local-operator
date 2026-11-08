@@ -1,0 +1,219 @@
+# audit log — wire.settings.build_cache — audit id bcr1 — es — 2026-11-08
+#
+# worktree: /Users/damian/local-operator/.worktrees/build-cache-reaper
+# audited revision: b24b7b78c63370cf17ca69be336fefb5535f455d
+# every command below ran from the worktree root, with .venv/bin/python.
+#
+# This audit covers ONE namespace with ONE English source, so the namespace-wide
+# checks (sections 1, 2, 4, 5, 6, 7) ran once for all seven locales; section 3 is
+# this locale's own extract from section 2. Nothing below is a note or a summary:
+# each block is verbatim command output, including the pre-ledger failure state
+# in section 4, which is the state the translation commit left behind.
+
+## 1. catalogue check (shape, literals, sidecar agreement)
+
+### command: .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+## 2. independent mechanical audit — key sets, literals, placeholders, typography, NFC, width
+
+### command: .venv/bin/python bcr1_audit.py  (independent mechanical audit)
+==============================================================================
+wire.settings.build_cache — independent audit mechanics (audit id bcr1)
+==============================================================================
+en keys: 10   context keys: 10   locales: fr, es, zh-CN, ru, vi, ur, hi
+
+-- 1. key-set parity vs en --------------------------------------------------
+  fr     keys=10  missing=none extra=none -> PASS
+  es     keys=10  missing=none extra=none -> PASS
+  zh-CN  keys=10  missing=none extra=none -> PASS
+  ru     keys=10  missing=none extra=none -> PASS
+  vi     keys=10  missing=none extra=none -> PASS
+  ur     keys=10  missing=none extra=none -> PASS
+  hi     keys=10  missing=none extra=none -> PASS
+  context sidecar covers every en key: PASS
+
+-- 2. ICU placeholder scan (en and all targets) -------------------------------
+  en     messages with placeholder syntax: none
+  fr     messages with placeholder syntax: none
+  es     messages with placeholder syntax: none
+  zh-CN  messages with placeholder syntax: none
+  ru     messages with placeholder syntax: none
+  vi     messages with placeholder syntax: none
+  ur     messages with placeholder syntax: none
+  hi     messages with placeholder syntax: none
+  VERDICT: namespace carries 0 ICU/printf placeholders -> claim 'no ICU placeholders' CONFIRMED
+
+-- 3. literal-token preservation (must be byte-identical) -----------------------
+  literals expected in en description/help: ['target/', '.next/', 'build/', 'dist/', 'lop build-cache reap', '--dry-run', 'Rust', 'Next.js', 'CMake', 'Gradle']
+
+  locale target/               .next/                build/                dist/                 lop build-cache reap  --dry-run             Rust                  Next.js               CMake                 Gradle                
+  en     yes(1)                yes(1)                yes(2)                yes(2)                yes(2)                yes(1)                yes(1)                yes(1)                yes(1)                yes(1)                
+  fr     yes(1)                yes(1)                yes(2)                yes(2)                yes(2)                yes(1)                yes(1)                yes(1)                yes(1)                yes(1)                
+  es     yes(1)                yes(1)                yes(2)                yes(2)                yes(2)                yes(1)                yes(1)                yes(1)                yes(1)                yes(1)                
+  zh-CN  yes(1)                yes(1)                yes(2)                yes(2)                yes(2)                yes(1)                yes(1)                yes(1)                yes(1)                yes(1)                
+  ru     yes(1)                yes(1)                yes(2)                yes(2)                yes(2)                yes(1)                yes(1)                yes(1)                yes(1)                yes(1)                
+  vi     yes(1)                yes(1)                yes(2)                yes(2)                yes(2)                yes(1)                yes(1)                yes(1)                yes(1)                yes(1)                
+  ur     yes(1)                yes(1)                yes(2)                yes(2)                yes(2)                yes(1)                yes(1)                yes(1)                yes(1)                yes(1)                
+  hi     yes(1)                yes(1)                yes(2)                yes(2)                yes(2)                yes(1)                yes(1)                yes(1)                yes(1)                yes(1)                
+
+  per-key literal presence (key -> literals found in en vs target):
+    all keys keep every literal their en counterpart carries
+
+-- 4. typography: French thin space, RTL controls, NFC -----------------------
+  fr — U+202F required before : ; ! ? in prose
+    PASS — every : ; ! ? in fr prose is preceded by U+202F
+  ur — no manually inserted bidi control characters (render layer applies FSI/PDI)
+    PASS — none found
+  ur — guide's Urdu punctuation set, and no Devanagari/Latin prose separators
+    ۔ full stop      used 10x -> PASS
+    ، comma          used  7x -> PASS
+    ؛ semicolon      used  3x -> PASS
+    forbids DEVANAGARI DANDA ।           PASS — none
+    Latin comma-space outside literals: PASS — none
+  all locales — value must be NFC (precomposed) form
+    fr     PASS
+    es     PASS
+    zh-CN  PASS
+    ru     PASS
+    vi     PASS
+    ur     PASS
+    hi     PASS
+
+-- 5. width discipline for a settings list (rich.cells.cell_len) ----------------
+  key                                                    en   fr   es   zh   ru   vi   ur   hi
+  wire.settings.build_cache.age_hours.label              19   20   25   20   26   20   20   14
+  wire.settings.build_cache.dry_run.label                21   32   25   16   29   22   20   17
+  wire.settings.build_cache.enabled.label                17   26   28   12   19   18   14   10
+  wire.settings.build_cache.include_extra_shapes.label   24   23   22   17   23   22   26   22
+  wire.settings.build_cache.title                        18   29   30   12   19   22   13   10
+
+  ratio vs en per locale (flag if a label roughly doubles, i.e. >= 2.0):
+    fr     worst build_cache.title=1.61x  over-2x: none
+    es     worst build_cache.title=1.67x  over-2x: none
+    zh-CN  worst age_hours.label=1.05x  over-2x: none
+    ru     worst dry_run.label=1.38x  over-2x: none
+    vi     worst build_cache.title=1.22x  over-2x: none
+    ur     worst include_extra_shapes.label=1.08x  over-2x: none
+    hi     worst include_extra_shapes.label=0.92x  over-2x: none
+
+-- 6. sentence punctuation shape (help strings are sentences) ---------------------
+  en     help/description final characters: ['.']
+  fr     help/description final characters: ['.']
+  es     help/description final characters: ['.']
+  zh-CN  help/description final characters: ['。']
+  ru     help/description final characters: ['.']
+  vi     help/description final characters: ['.']
+  ur     help/description final characters: ['۔']
+  hi     help/description final characters: ['।']
+
+-- 6b. label/title trailing punctuation, whitespace, duplicate values ----------
+  en     label punctuation: none | stray/double whitespace: none
+  fr     label punctuation: none | stray/double whitespace: none
+  es     label punctuation: none | stray/double whitespace: none
+  zh-CN  label punctuation: none | stray/double whitespace: none
+  ru     label punctuation: none | stray/double whitespace: none
+  vi     label punctuation: none | stray/double whitespace: none
+  ur     label punctuation: none | stray/double whitespace: none
+  hi     label punctuation: none | stray/double whitespace: none
+  fr     duplicated value across keys: none
+  es     duplicated value across keys: none
+  zh-CN  duplicated value across keys: none
+  ru     duplicated value across keys: none
+  vi     duplicated value across keys: none
+  ur     duplicated value across keys: none
+  hi     duplicated value across keys: none
+
+-- 7. input hashes (repository rule: sha256 of the committed bytes) -------------
+  en source   944b0165dc0ec308a5ea9568e6f27628e48f3670be5949d8b7e4a11e5b15496e   (catalogues.catalogue_sha256('en', NS) rule)
+  en context  9f4669a6509a4b895b272308a1aa6fae3398582d04872e6640257323b834681c
+  fr         3578ea6f0e8b4d423536fed5e073499bcbc15b6e83568dea3958e57809f2f897
+  es         7ca60196f7bd0045f52dc00d15bd0c81092bb39da602d4164e002c49974a5acb
+  zh-CN      5137a9ad469fadfc67cc4b1ce6d87f1ec3c9e3e61bb6fbcef76e4f6e82bd91c7
+  ru         fc2e6abe78b7180b23607fb31773f72bab2efcf4b5e922c5e4ce92ec8722fbcb
+  vi         e06ade5d218764d44ac22e10f00d11cd09776212c6c19b845389b7e441af3cbd
+  ur         a4aef1a122a5a8b5724f58d4209a1427b47594b88b0dcbd84ae6eb1e0f3f85e0
+  hi         ddffdfb5ce4c84345bab3d7b5847338b464dfeb40df044094129c3fe57729f4d
+
+==============================================================================
+No mechanical defect: key sets, literals, placeholders, typography, NFC and width budget all pass.
+
+## 3. this locale's own rows, extracted from section 2 (es)
+
+$ grep -E '^\s+(en|es)\s'  # key-set and literal-token rows
+  es     keys=10  missing=none extra=none -> PASS
+  en     messages with placeholder syntax: none
+  es     messages with placeholder syntax: none
+  en     yes(1)                yes(1)                yes(2)                yes(2)                yes(2)                yes(1)                yes(1)                yes(1)                yes(1)                yes(1)                
+  es     yes(1)                yes(1)                yes(2)                yes(2)                yes(2)                yes(1)                yes(1)                yes(1)                yes(1)                yes(1)                
+    es     PASS
+    es     worst build_cache.title=1.67x  over-2x: none
+  en     help/description final characters: ['.']
+  es     help/description final characters: ['.']
+  en     label punctuation: none | stray/double whitespace: none
+  es     label punctuation: none | stray/double whitespace: none
+  es     duplicated value across keys: none
+  en source   944b0165dc0ec308a5ea9568e6f27628e48f3670be5949d8b7e4a11e5b15496e   (catalogues.catalogue_sha256('en', NS) rule)
+  en context  9f4669a6509a4b895b272308a1aa6fae3398582d04872e6640257323b834681c
+  es         7ca60196f7bd0045f52dc00d15bd0c81092bb39da602d4164e002c49974a5acb
+
+$ grep -E '^\s+es\s+worst'  # width ratio vs English
+    es     worst build_cache.title=1.67x  over-2x: none
+
+$ grep -E '^\s+es\s+[a-f0-9]{64}'  # input hash row
+  es         7ca60196f7bd0045f52dc00d15bd0c81092bb39da602d4164e002c49974a5acb
+
+## 4. generator --check at the audited revision, BEFORE this audit's ledger rows
+
+### command: .venv/bin/python scripts/i18n/generate.py --check   (state at the audited revision, BEFORE this audit's ledger rows)
+generate.py --check: committed artifacts are stale — regenerate with
+  .venv/bin/python scripts/i18n/generate.py
+(the emitter is pinned to Node 24 — CI's setup-node major — and its output is normalised to be node-major stable; see the note in scripts/i18n/emit.mjs)
+  changed: local_operator/i18n/data/shipped.json
+  changed: local_operator/mobile/web/src/i18n/bundled.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.es.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.fr.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.hi.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.ru.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.ur.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.vi.gen.ts
+  orphaned: local_operator/mobile/web/src/i18n/bundled.zh-CN.gen.ts
+EXIT=1
+
+## 5. generator --check after the ledger rows landed
+
+### command: .venv/bin/python scripts/i18n/generate.py --check   (after the ledger rows landed)
+generate.py --check: 158 artifact(s) byte-identical
+EXIT=0
+
+## 6. coverage gate — tests/unit/i18n/test_language_manifest.py, single file, serial, bounded
+     (one recorded run, at the final state of this commit; run_bounded strips the pytest
+     deprecation banner, which is not part of this gate)
+
+### command: .venv/bin/python scripts/run_bounded.py --contract=command-status --timeout 600 -- .venv/bin/python -m pytest tests/unit/i18n/test_language_manifest.py -q -p no:cacheprovider
+[run_bounded] memory budget 3740 MiB (inherited); sampled owned child group and escaped descendants
+pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4, available 5,734 MB, reserve 2,048 MB, siblings 1)
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+bringing up nodes...
+bringing up nodes...
+...................................                                      [100%]
+35 passed in 2.20s
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=b4920b8b1f634faa91a76570b06ad6d1 completion=/Users/damian/.local-operator/sessions/6368251d546b/scratchpad/run-bounded-runs/b4920b8b1f634faa91a76570b06ad6d1.completion.json
+
+## 7. per-namespace shipping proof (the generator's own rule)
+
+### command: .venv/bin/python - <<PY  (per-namespace shipping proof, the generator's own rule)
+en source_sha256 (repository rule) : 944b0165dc0ec308a5ea9568e6f27628e48f3670be5949d8b7e4a11e5b15496e
+shipped.json locales               : {'locales': ['en', 'fr', 'es', 'zh-CN', 'ru', 'vi', 'ur', 'hi'], 'schema': 1}
+_shipped_locales()                 : ['en', 'fr', 'es', 'zh-CN', 'ru', 'vi', 'ur', 'hi']
+
+locale  keys   status  sha fresh  ships
+fr        10   passed       True   True
+es        10   passed       True   True
+zh-CN     10   passed       True   True
+ru        10   passed       True   True
+vi        10   passed       True   True
+ur        10   passed       True   True
+hi        10   passed       True   True
+
+coverage-allowance entries for wire.settings.build_cache: none (no translation debt)
