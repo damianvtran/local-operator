@@ -18,7 +18,6 @@ from __future__ import annotations
 import base64
 import json
 import re
-import time
 from typing import Any, cast
 
 import pytest
@@ -31,6 +30,7 @@ from local_operator.harness.types import ToolContext
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import host as host_mod
 from local_operator.team_bridge.client import TeamBridgeClient
+from local_operator.team_bridge import inline_data
 from local_operator.team_bridge.inline_data import (
     MAX_PREFIX_CHARS,
     bound_inline_data_payload,
@@ -150,20 +150,52 @@ def test_every_marker_shape_is_withheld(label: str, body: str) -> None:
     assert bounded.startswith("chart") or bounded.startswith("x "), bounded[:40]
 
 
-def test_a_one_megabyte_marker_dense_body_stays_fast() -> None:
-    """Cost is one substring search plus one slice, on attacker-sized input.
+def _count_marker_searches(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count ``_MARKER.search`` calls for the duration of one bounded call.
 
-    The bound is generous on purpose — this is a ceiling that fails a return to
-    per-URI parsing, not a micro-benchmark. Earlier designs measured 3.5 s here.
+    Returns a list the test reads as a NUMBER of searches: the bounded function
+    must consult the marker pattern once per body, never once per marker. The
+    patch goes through ``monkeypatch`` so it is reverted — a global swap would
+    leave the counting pattern installed for every later test in the session.
+    Patching the module attribute is enough because ``bound_inline_data_uris``
+    resolves it through the module globals on every call.
+    """
+    real = inline_data._MARKER
+    calls: list[int] = []
+
+    class _CountingPattern:
+        def search(self, text, *args, **kwargs):
+            calls.append(len(text))
+            return real.search(text, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr(inline_data, "_MARKER", _CountingPattern())
+    return calls
+
+
+def test_a_one_megabyte_marker_dense_body_stays_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cost is ONE substring search plus one slice, on attacker-sized input.
+
+    Asserts the shape rather than the clock. This used to be ``elapsed < 0.05``,
+    and the docstring had to warn that the bound was a ceiling rather than a
+    micro-benchmark — because a loaded runner can spend 50 ms on anything, which
+    made it a future red shard for a shape that had not changed. What the cost
+    claim actually reduces to is countable: however many markers a body carries,
+    the bounded function searches the whole string exactly once and slices once.
+    A return to per-URI parsing either never consults this pattern (count 0) or
+    consults it per marker (count 50_000), and both fail here on any host.
     """
 
     body = "data:image/png;base64," * 50_000
     assert len(body) > 1_000_000
-    started = time.perf_counter()
+    searched = _count_marker_searches(monkeypatch)
     bounded = bound_inline_data_uris(body)
-    elapsed = time.perf_counter() - started
-    assert elapsed < 0.05, elapsed
     assert "inline base64 data withheld:" in bounded
+    assert searched == [len(body)], (
+        f"the body was searched {len(searched)} times for 50_000 markers"
+    )
 
 
 def test_the_payload_walker_passes_an_unaffected_page_through_by_identity() -> None:

@@ -196,24 +196,30 @@ async def test_starting_the_warm_never_blocks_and_never_raises(tmp_path, monkeyp
     # below would show it.
     hold = asyncio.Event()
     real_start = prewarm.start_refresh
+    began_refreshes: list[str] = []
 
     def slow_start(_root, session_id):
         # SYNCHRONOUS, because ``start_refresh`` is: it returns its task, and the
         # task is what waits here.
         async def scan():
             await hold.wait()
+            began_refreshes.append(session_id)
             task, _started = real_start(_root, session_id)
             await task
 
         return asyncio.get_running_loop().create_task(scan()), True
 
     monkeypatch.setattr(prewarm, "start_refresh", slow_start)
-    began = time.perf_counter()
     task = prewarm.start_index_prewarm(root)
-    elapsed = time.perf_counter() - began
 
+    # The refresh is GATED on ``hold``, and the gate is still shut here, so the
+    # question this used to ask with a 50 ms wall clock — "did startup wait for
+    # the warm?" — is now asked of the work itself: the refresh had not BEGUN
+    # when the starter returned. A starter that awaited or ran the refresh inline
+    # records one here before returning and fails on any host; the wall clock
+    # instead failed whenever a loaded runner spent 50 ms on anything at all.
     assert task is not None
-    assert elapsed < 0.05, f"starting the warm took {elapsed:.3f}s"
+    assert began_refreshes == [], "start_index_prewarm ran the warm inline instead of scheduling it"
     hold.set()
     await task
     # And a failure inside the queue is the task's, never the caller's.

@@ -1673,12 +1673,27 @@ async def test_pricing_a_child_never_blocks_the_paint(monkeypatch) -> None:
     case these stats exist to surface, so the slow path is the interesting
     one. The reading is taken off-thread; the row paints without its numbers
     for a frame rather than the app pausing to earn them.
+
+    THE CLAIM IS "THE PAINT PATH NEVER RESOLVES ON ITS OWN THREAD", not "the
+    paint path is fast". It used to be asserted as ``elapsed < 0.2`` over
+    ``sync`` + ``_tick``, which measures the host as much as the code and fails a
+    loaded runner for a shape that has not changed. The property the docstring
+    above describes is the thread the resolver runs on: the panel may price a
+    child, but never on the loop the paint runs on, which is why the row paints
+    without its numbers for a frame instead of the app pausing to earn them.
+    That is exact — a regression that resolves inline fails here on any host,
+    however fast or loaded.
     """
+    import threading
+
     import local_operator.model.configure as cfg
 
+    loop_name = threading.current_thread().name
     real = cfg.resolve_model_info
+    resolved: list[tuple[str, str, str]] = []
 
     def slow(provider: str, model_id: str):
+        resolved.append((provider, model_id, threading.current_thread().name))
         time.sleep(0.4)
         return real(provider, model_id)
 
@@ -1697,11 +1712,17 @@ async def test_pricing_a_child_never_blocks_the_paint(monkeypatch) -> None:
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()
         panel = app.query_one(SubagentPanel)
-        started = time.perf_counter()
+        # Only resolutions taken DURING the repaint are this test's subject. The
+        # panel resolves once on its boot paint too (recorded before this line),
+        # and that is a different path with its own accounting — counting it here
+        # would report a boot cost as a repaint cost.
+        repaints_from = len(resolved)
         panel.sync(session)
         panel._tick()
-        elapsed = time.perf_counter() - started
-        assert elapsed < 0.2, f"the paint path blocked for {elapsed * 1000:.0f} ms"
+        on_loop = [row for row in resolved[repaints_from:] if row[2] == loop_name]
+        assert on_loop == [], (
+            f"the repaint resolved a model on its own thread (a 10 s listing there): {on_loop}"
+        )
         assert "docs sweep" in str(getattr(panel._rows["j1"], "content", ""))
 
 
