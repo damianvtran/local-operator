@@ -41,6 +41,8 @@ from local_operator.artifacts import walk as artifacts_walk
 from local_operator.artifacts.rung import CancelSupport, RungSpec, SourceSupport
 from local_operator.clients._http import APIError
 from local_operator.env import resolve_radient_api_base_url
+from local_operator.i18n.keys import wire_voice_availability as _vk
+from local_operator.i18n.messages import Msg, render_resolved
 from local_operator.imagegen import availability as image_availability
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.radient_credentials import (
@@ -149,15 +151,19 @@ _MODE_PHRASES: dict[str, str] = {
 }
 
 #: Per-route availability reasons — the pair a user is shown.
-_ROUTE_REASONS: dict[VideoRoute, tuple[str, str]] = {
-    VideoRoute.RADIENT: ("Signed in to Radient.", "Not signed in to Radient."),
-    VideoRoute.FAL: ("A FAL key is stored.", "No FAL key is stored."),
+#:
+#: Message factories, not rendered strings: a module-level table of finished
+#: sentences would freeze the boot language, and these are DISPLAY text the
+#: desktop prints verbatim (``wire.voice_availability``, deferred, rendered here).
+_ROUTE_REASONS: dict[VideoRoute, tuple[Callable[[], Msg], Callable[[], Msg]]] = {
+    VideoRoute.RADIENT: (_vk.radient_signed_in, _vk.radient_signed_out),
+    VideoRoute.FAL: (_vk.fal_stored, _vk.fal_missing),
 }
 
 
 def _route_reason(route: VideoRoute, available: bool) -> str:
-    yes, no = _ROUTE_REASONS.get(route, ("Available.", "Not available."))
-    return yes if available else no
+    yes, no = _ROUTE_REASONS.get(route, (_vk.route_available, _vk.route_unavailable))
+    return render_resolved((yes if available else no)())
 
 
 def _ensure_store(config_dir: Path | None, store: AuthStore | None) -> tuple[AuthStore, bool]:

@@ -1,0 +1,10 @@
+{
+  "wire.language_receipts.show_terminal": "language: {tag} ({name}) — /language <value>; space browses",
+  "wire.language_receipts.show_options": "language: {tag} ({name}) — {options}",
+  "wire.language_receipts.unknown_terminal": "unknown language {echo} — press space to list values",
+  "wire.language_receipts.unknown_options": "unknown language {echo} — available: {options}",
+  "wire.language_receipts.already": "language: already {key} — resolves to {tag} ({name})",
+  "wire.language_receipts.unregistered": "language: the setting is not registered in this build",
+  "wire.language_receipts.save_failed": "language: could not save {key} — {error}",
+  "wire.language_receipts.saved": "language: {key} saved — active {tag} ({name})"
+}

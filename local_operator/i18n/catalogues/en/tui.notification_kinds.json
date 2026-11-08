@@ -1,0 +1,4 @@
+{
+  "tui.notification_kinds.word_closed": "completed",
+  "tui.notification_kinds.word_retired": "retired for an update"
+}

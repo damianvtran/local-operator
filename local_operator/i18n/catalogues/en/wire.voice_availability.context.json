@@ -1,0 +1,57 @@
+{
+  "wire.voice_availability.radient_signed_in": {
+    "role": "One-line availability reason shown beside a voice/video provider rung in Settings (a plain sentence the desktop prints verbatim) — provider reachable",
+    "tone": "plain status sentence with full stop",
+    "note": "EN-only context sidecar. `Radient` is a product name: keep it. No ICU arguments."
+  },
+  "wire.voice_availability.radient_signed_out": {
+    "role": "One-line availability reason shown beside a voice/video provider rung in Settings (a plain sentence the desktop prints verbatim) — provider unreachable",
+    "tone": "plain status sentence with full stop",
+    "note": "EN-only context sidecar. `Radient` is a product name: keep it. No ICU arguments."
+  },
+  "wire.voice_availability.elevenlabs_stored": {
+    "role": "One-line availability reason shown beside a voice/video provider rung in Settings (a plain sentence the desktop prints verbatim) — key present",
+    "tone": "plain status sentence with full stop",
+    "note": "EN-only context sidecar. `ElevenLabs` is a product name: keep it. No ICU arguments."
+  },
+  "wire.voice_availability.elevenlabs_missing": {
+    "role": "One-line availability reason shown beside a voice/video provider rung in Settings (a plain sentence the desktop prints verbatim) — key absent",
+    "tone": "plain status sentence with full stop",
+    "note": "EN-only context sidecar. `ElevenLabs` is a product name: keep it. No ICU arguments."
+  },
+  "wire.voice_availability.openai_stored": {
+    "role": "One-line availability reason shown beside a voice/video provider rung in Settings (a plain sentence the desktop prints verbatim) — key present",
+    "tone": "plain status sentence with full stop",
+    "note": "EN-only context sidecar. `OpenAI` is a product name: keep it. No ICU arguments."
+  },
+  "wire.voice_availability.openai_missing": {
+    "role": "One-line availability reason shown beside a voice/video provider rung in Settings (a plain sentence the desktop prints verbatim) — key absent",
+    "tone": "plain status sentence with full stop",
+    "note": "EN-only context sidecar. `OpenAI` is a product name: keep it. No ICU arguments."
+  },
+  "wire.voice_availability.no_tts_provider": {
+    "role": "Reason shown when no text-to-speech route can be served",
+    "tone": "plain, instructive, one sentence",
+    "note": "EN-only context sidecar. Names the two ways to fix it: sign in to Radient, or store a provider key. Product names verbatim. No ICU arguments."
+  },
+  "wire.voice_availability.fal_stored": {
+    "role": "One-line availability reason shown beside a voice/video provider rung in Settings (a plain sentence the desktop prints verbatim) — video provider key present",
+    "tone": "plain status sentence with full stop",
+    "note": "EN-only context sidecar. `FAL` is a product name: keep it. No ICU arguments."
+  },
+  "wire.voice_availability.fal_missing": {
+    "role": "One-line availability reason shown beside a voice/video provider rung in Settings (a plain sentence the desktop prints verbatim) — video provider key absent",
+    "tone": "plain status sentence with full stop",
+    "note": "EN-only context sidecar. `FAL` is a product name: keep it. No ICU arguments."
+  },
+  "wire.voice_availability.route_available": {
+    "role": "One-line availability reason shown beside a voice/video provider rung in Settings (a plain sentence the desktop prints verbatim) — generic fallback for a route with no specific wording",
+    "tone": "single word with full stop",
+    "note": "EN-only context sidecar. No ICU arguments."
+  },
+  "wire.voice_availability.route_unavailable": {
+    "role": "One-line availability reason shown beside a voice/video provider rung in Settings (a plain sentence the desktop prints verbatim) — generic fallback for a route with no specific wording",
+    "tone": "short with full stop",
+    "note": "EN-only context sidecar. No ICU arguments."
+  }
+}

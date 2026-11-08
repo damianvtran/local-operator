@@ -16,6 +16,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from local_operator.i18n.keys import wire_harness_import_detail as _detail_keys
+from local_operator.i18n.messages import render_resolved
+
 SourceKind = Literal["claude", "codex", "omp"]
 
 #: Stable order used by listings, previews and result summaries.
@@ -48,9 +51,37 @@ class SourceInfo:
     #: Worst availability across the sessions found (``full`` when any body is
     #: readable). A source with only index metadata is still listed honestly.
     availability: Availability = "full"
+    #: The ENGLISH diagnostic. It is the model-facing text (the import tool
+    #: hands it to the agent) and the fallback for a detail that has no key, so
+    #: it never changes with the user's language.
     detail: str = ""
+    #: Which ``wire.harness_import_detail`` sentence ``detail`` is, set only where
+    #: a source reports "nothing found", with the ``{path}`` it names. A closed
+    #: key (not a held ``Msg``) because the deferred namespace is rendered
+    #: in-process only: DISPLAY surfaces (the desktop route, the terminal Import
+    #: screen) go through :meth:`display_detail`; no code crosses the wire and
+    #: nothing branches on either string.
+    detail_key: Literal["omp_missing", "claude_missing", "codex_missing", ""] = ""
+    detail_path: str = ""
 
-    def to_dict(self) -> dict[str, Any]:
+    def display_detail(self) -> str:
+        """``detail`` for a human, in the user's language (English when unkeyed)."""
+        if not self.detail:
+            return self.detail
+        if self.detail_key == "omp_missing":
+            return render_resolved(_detail_keys.omp_missing())
+        if self.detail_key == "claude_missing":
+            return render_resolved(_detail_keys.claude_missing(path=self.detail_path))
+        if self.detail_key == "codex_missing":
+            return render_resolved(_detail_keys.codex_missing(path=self.detail_path))
+        return self.detail
+
+    def to_dict(self, *, localized: bool = False) -> dict[str, Any]:
+        """The wire shape. ``localized`` swaps ``detail`` for its display rendering.
+
+        Default stays English because the preview shared with the agent tool is
+        built from this; the desktop route opts in.
+        """
         return {
             "source": self.source,
             "label": self.label,
@@ -58,7 +89,7 @@ class SourceInfo:
             "detected": self.detected,
             "session_count": self.session_count,
             "availability": self.availability,
-            "detail": self.detail,
+            "detail": self.display_detail() if localized else self.detail,
         }
 
 

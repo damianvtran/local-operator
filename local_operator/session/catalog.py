@@ -540,7 +540,14 @@ class CatalogEntry:
         from local_operator.incidents import stop_rung_phrase
 
         if self.completion_kind == "retired":
-            return f"{base} — retired for an update"
+            # Backend-composed and printed verbatim by every client (the sidebar
+            # contract forbids re-deriving status), so the cause is keyed like
+            # ``scheduled_label``. ``base`` is the row's already-composed word.
+            from local_operator.i18n.keys import wire_session_status
+            from local_operator.i18n.messages import render
+
+            message = wire_session_status.retired_label(base=base)
+            return render(message.code, dict(message.params), locale=_label_locale())
         phrase = stop_rung_phrase(self.completion_reason or "")
         return f"{base} — {phrase}" if phrase else base
 

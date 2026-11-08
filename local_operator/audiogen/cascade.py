@@ -65,12 +65,20 @@ from local_operator.audiogen import rungs as audio_rungs
 from local_operator.audiogen.models import AudioJobSpec
 from local_operator.clients._http import APIError
 from local_operator.env import resolve_radient_api_base_url
+from local_operator.i18n.keys import wire_voice_availability as _vk
+from local_operator.i18n.messages import render_resolved
 from local_operator.providers.radient_credentials import resolve_radient_credential
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.harness.types import AbortSignal
 
 logger = logging.getLogger(__name__)
+
+# Availability reasons are DISPLAY text the desktop Settings page prints verbatim
+# (it never compares them), so they are keyed in the deferred
+# ``wire.voice_availability`` namespace and rendered at call time, in the language
+# the config resolves (``render_resolved``). The ``APIError`` messages further
+# down are diagnostics that flow into tool results and logs, so they stay English.
 
 #: One rung's own budget: generous, because a voiceover can take tens of
 #: seconds and the poll loop is cheap; the OVERALL budget below is the worst
@@ -139,15 +147,19 @@ def resolve_audio_route(
     )
     reasons = {
         AudioRoute.RADIENT: (
-            "Signed in to Radient." if probes[0][1] else "Not signed in to Radient."
+            render_resolved(_vk.radient_signed_in())
+            if probes[0][1]
+            else render_resolved(_vk.radient_signed_out())
         ),
         AudioRoute.ELEVENLABS: (
-            "An ElevenLabs API key is stored."
+            render_resolved(_vk.elevenlabs_stored())
             if probes[1][1]
-            else "No ElevenLabs API key is stored."
+            else render_resolved(_vk.elevenlabs_missing())
         ),
         AudioRoute.OPENAI: (
-            "An OpenAI API key is stored." if probes[2][1] else "No OpenAI API key is stored."
+            render_resolved(_vk.openai_stored())
+            if probes[2][1]
+            else render_resolved(_vk.openai_missing())
         ),
     }
     rungs = tuple(

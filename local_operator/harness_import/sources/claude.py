@@ -239,6 +239,8 @@ class ClaudeAdapter(SourceAdapter):
             session_count=len(rows),
             availability=_worst_availability(rows),
             detail="" if detected else f"no Claude store at {root}",
+            detail_key="" if detected else "claude_missing",
+            detail_path="" if detected else str(root),
         )
 
     def list_sessions(self, *, include_subagents: bool = False) -> list[SourceSession]:

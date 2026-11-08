@@ -1,0 +1,5 @@
+{
+  "wire.harness_import_detail.omp_missing": "no omp agent directory found",
+  "wire.harness_import_detail.claude_missing": "no Claude store at {path}",
+  "wire.harness_import_detail.codex_missing": "no Codex store at {path}"
+}

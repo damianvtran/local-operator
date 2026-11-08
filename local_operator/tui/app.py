@@ -137,6 +137,7 @@ from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_library
+from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
 from local_operator.i18n.keys import tui_setup_cues as _setup_keys
@@ -145,6 +146,8 @@ from local_operator.i18n.keys import tui_sound as _sound_keys
 from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.keys import tui_update as _upd
+from local_operator.i18n.keys import wire_language_receipts as _lang_keys
+from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import register_refresh, tr
 from local_operator.logger import current_log_file
 
@@ -614,6 +617,10 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
+#: The `/language` receipts live in a deferred wire namespace so the phone-sheet
+#: twin (`session/runtime/serving.py`) renders the SAME words; resolved per call.
+_lang_t = tr("wire.language_receipts")
+_kind_t = tr("tui.notification_kinds")
 #: `/update`'s progress notices. Their own namespace because they carry the
 #: reassurance the operator asked for (2026-11-03): an update does not stop a
 #: running session. Session runtimes are detached processes
@@ -47663,7 +47670,7 @@ class OperatorApp(App[None]):
         from local_operator import settings_io
         from local_operator.i18n.resolve import (
             DEFAULT_LANGUAGE,
-            language_name,
+            language_native_name,
             language_options,
             normalise_locale,
             resolve_language,
@@ -47677,9 +47684,10 @@ class OperatorApp(App[None]):
             # The value space is NOT enumerated: shipped locales grow, and the
             # space key opens `_language_choices`, which lists every accepted
             # value. The refusal names that same affordance.
+            # The parenthetical is the language's NATIVE name (data, not prose), so
+            # the sentence carries no English word once the catalogue is translated.
             self._system_notice(
-                f"language: {resolved} ({language_name(resolved)}) — "
-                "/language <value>; space browses"
+                _lang_t(_lang_keys.show_terminal(tag=resolved, name=language_native_name(resolved)))
             )
             return
         key = (
@@ -47691,19 +47699,20 @@ class OperatorApp(App[None]):
             # Bound the echoed token so the refusal cannot outgrow the notice
             # row, then name the affordance this client actually has.
             self._system_notice(
-                f"unknown language {_quoted_echo_within_cells(wanted)} — "
-                "press space to list values",
+                _lang_t(_lang_keys.unknown_terminal(echo=_quoted_echo_within_cells(wanted))),
                 "warning",
             )
             return
         if key == self._language_current():
             self._system_notice(
-                f"language: already {key} — resolves to {resolved} " f"({language_name(resolved)})"
+                _lang_t(
+                    _lang_keys.already(key=key, tag=resolved, name=language_native_name(resolved))
+                )
             )
             return
         setting = settings_io.resolve_key("language")
         if setting is None:  # the registry owns the key; guard a broken build
-            self._system_notice("language: the setting is not registered in this build", "warning")
+            self._system_notice(_lang_t(_lang_keys.unregistered()), "warning")
             return
         try:
             from local_operator.config import ConfigManager
@@ -47711,11 +47720,14 @@ class OperatorApp(App[None]):
 
             settings_io.write_setting(ConfigManager(config_dir()), setting, key)
         except Exception as error:  # noqa: BLE001 — reported to the user verbatim
-            self._system_notice(f"language: could not save {key} — {error}", "warning")
+            self._system_notice(
+                _lang_t(_lang_keys.save_failed(key=key, error=str(error))), "warning"
+            )
             return
         active = resolve_language()
         self._apply_language(active)
-        notice(f"language: {key} saved — active {active} ({language_name(active)})")
+        # Composed AFTER the switch, so the receipt itself is in the new language.
+        notice(_lang_t(_lang_keys.saved(key=key, tag=active, name=language_native_name(active))))
 
     def _apply_language(self, locale: str) -> None:
         """Point every rendering surface at ``locale``, live (slice C).
@@ -47738,7 +47750,20 @@ class OperatorApp(App[None]):
         """
         from local_operator.i18n import text as i18n_text
 
+        # The composer's PAINTED placeholder is a property on the widget, not a
+        # render-time lookup, so a locale move leaves it in the old language. It
+        # is a SHARED channel (bang-mode, the aside, read-only, the credential
+        # prompt and the setup cue all write it), so only a composer still
+        # showing the RESTING invitation is repainted: comparing against the
+        # pre-switch resting text keeps another mode's placeholder untouched.
+        try:
+            composer = self.query_one(Editor)
+        except Exception:  # noqa: BLE001 — not mounted yet (boot, teardown)
+            composer = None
+        resting_before = composer.resting_placeholder if composer is not None else ""
         i18n_text.set_active_locale(locale)
+        if composer is not None and composer.placeholder == resting_before:
+            composer.placeholder = self._composer_placeholder_for(composer)
         # The slash registry re-materialises its own descriptions in place (its
         # ``register_refresh`` hook), which reaches ``/help`` because that block
         # reads ``SLASH_COMMANDS`` per render. The PICKER does not: the editor
@@ -65259,10 +65284,26 @@ NOTIFICATIONS_LISTING_ROWS = 10
 #: not — "— closed" is a journal token, not English (agent review round 1,
 #: NIT-1), and ``retired`` needs its why. An UNKNOWN kind keeps its raw token
 #: on purpose: a receipt may be terse, never wrong.
-NOTIFICATION_KIND_WORDS: dict[str, str] = {
-    "closed": "completed",
-    "retired": "retired for an update",
+#:
+#: Keyed (``tui.notification_kinds``) and resolved PER CALL by
+#: :func:`notification_kind_word`: a module-level ``dict[str, str]`` of the
+#: rendered words would freeze the boot language, so a live ``/language`` switch
+#: would leave this listing's kind column in the old one (the by-value-at-import
+#: bug class ``tui.notify._reload_copy`` documents).
+NOTIFICATION_KIND_WORDS: dict[str, Callable[[], Msg]] = {
+    "closed": _kind_keys.word_closed,
+    "retired": _kind_keys.word_retired,
 }
+
+
+def notification_kind_word(kind: str) -> str:
+    """The word ``/notifications`` prints for ``kind`` in the ACTIVE language.
+
+    An unknown kind keeps its raw store token on purpose (a receipt may be
+    terse, never wrong); the token is a journal identifier, not product copy.
+    """
+    factory = NOTIFICATION_KIND_WORDS.get(kind)
+    return _kind_t(factory()) if factory is not None else kind
 
 
 def _notifications_listing(
@@ -65315,7 +65356,7 @@ def _notifications_listing(
         # the taxonomy: "✓ name —  · 2h" would read as a missing column. The
         # WORD comes from ``NOTIFICATION_KIND_WORDS`` where the token is not one
         # (see its own note): the v2 kinds must not surface as journal tokens.
-        word = NOTIFICATION_KIND_WORDS.get(entry.completion_kind, entry.completion_kind)
+        word = notification_kind_word(entry.completion_kind)
         kind = f" — {word}" if entry.completion_kind else ""
         tail = f"{kind} · {format_age(max(0, time.time() - entry.row.mtime))}"
         label = entry.row.name or UNTITLED_CONVERSATION

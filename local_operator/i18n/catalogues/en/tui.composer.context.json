@@ -1,0 +1,8 @@
+{
+  "tui.composer.placeholder_default": {
+    "role": "Placeholder shown inside the empty chat composer in the terminal UI",
+    "tone": "inviting, imperative, short; product name stays",
+    "maxCells": 40,
+    "note": "EN-only context sidecar. Shown in the dim ink while the composer is empty and idle; it vanishes on the first keystroke. `Local Operator` is the product name: keep it. Keep the trailing ellipsis character. Must fit a 40-column split without wrapping. No ICU arguments."
+  }
+}

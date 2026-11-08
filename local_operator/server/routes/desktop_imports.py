@@ -91,7 +91,9 @@ async def import_sources(request: Request) -> CRUDResponse[Any]:
     return CRUDResponse(
         status=200,
         message="Import sources.",
-        result={"sources": [info.to_dict() for info in sources]},
+        # ``localized``: the desktop prints ``detail`` verbatim, so it must already
+        # be in the user's language (the English sentence stays on the model tool).
+        result={"sources": [info.to_dict(localized=True) for info in sources]},
     )
 
 

@@ -263,7 +263,7 @@ async def test_a_shipped_wave_locale_switches_and_persists(config_dir: Path) -> 
         await pilot.pause()
         assert _stored(config_dir) == "fr"
         assert any(
-            text.startswith("language: fr saved — active fr (French)") for text in _notices(app)
+            text.startswith("language: fr saved — active fr (Français)") for text in _notices(app)
         ), _notices(app)
         for text in _language_notices(app):
             assert cell_len(text) <= 70, text

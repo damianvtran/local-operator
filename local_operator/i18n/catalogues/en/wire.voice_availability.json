@@ -1,0 +1,13 @@
+{
+  "wire.voice_availability.radient_signed_in": "Signed in to Radient.",
+  "wire.voice_availability.radient_signed_out": "Not signed in to Radient.",
+  "wire.voice_availability.elevenlabs_stored": "An ElevenLabs API key is stored.",
+  "wire.voice_availability.elevenlabs_missing": "No ElevenLabs API key is stored.",
+  "wire.voice_availability.openai_stored": "An OpenAI API key is stored.",
+  "wire.voice_availability.openai_missing": "No OpenAI API key is stored.",
+  "wire.voice_availability.no_tts_provider": "No text-to-speech provider is available: sign in to Radient, or store an ElevenLabs or OpenAI API key.",
+  "wire.voice_availability.fal_stored": "A FAL key is stored.",
+  "wire.voice_availability.fal_missing": "No FAL key is stored.",
+  "wire.voice_availability.route_available": "Available.",
+  "wire.voice_availability.route_unavailable": "Not available."
+}

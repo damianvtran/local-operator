@@ -61,6 +61,8 @@ from typing import Any, Optional
 from local_operator.clients._http import APIError
 from local_operator.clients.radient import RadientClient
 from local_operator.env import resolve_radient_api_base_url
+from local_operator.i18n.keys import wire_voice_availability as _vk
+from local_operator.i18n.messages import render_resolved
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.radient_credentials import (
     has_persisted_radient_credential,
@@ -78,6 +80,12 @@ from local_operator.tts import clients as tts_clients
 from local_operator.tts.descriptor import VoiceDescriptor
 
 logger = logging.getLogger(__name__)
+
+# Availability reasons are DISPLAY text the desktop Settings page prints verbatim
+# (it never compares them), so they are keyed in the deferred
+# ``wire.voice_availability`` namespace and rendered at call time, in the language
+# the config resolves (``render_resolved``). The ``APIError`` messages further
+# down are diagnostics that flow into tool results and logs, so they stay English.
 
 __all__ = [
     "TTS_OVERALL_TIMEOUT_S",
@@ -259,21 +267,29 @@ async def resolve_voice_path(
         RungAvailability(
             VoicePath.PROVIDER_TTS_RADIENT,
             radient_available,
-            "Signed in to Radient." if radient_available else "Not signed in to Radient.",
+            (
+                render_resolved(_vk.radient_signed_in())
+                if radient_available
+                else render_resolved(_vk.radient_signed_out())
+            ),
         ),
         RungAvailability(
             VoicePath.PROVIDER_TTS_ELEVENLABS,
             elevenlabs_available,
             (
-                "An ElevenLabs API key is stored."
+                render_resolved(_vk.elevenlabs_stored())
                 if elevenlabs_available
-                else "No ElevenLabs API key is stored."
+                else render_resolved(_vk.elevenlabs_missing())
             ),
         ),
         RungAvailability(
             VoicePath.PROVIDER_TTS_OPENAI,
             openai_available,
-            "An OpenAI API key is stored." if openai_available else "No OpenAI API key is stored.",
+            (
+                render_resolved(_vk.openai_stored())
+                if openai_available
+                else render_resolved(_vk.openai_missing())
+            ),
         ),
     )
     available = next((rung for rung in rungs if rung.available), None)
@@ -286,10 +302,7 @@ async def resolve_voice_path(
         )
     return VoicePathResolution(
         path=VoicePath.NONE,
-        reason=(
-            "No text-to-speech provider is available: sign in to Radient, or store an "
-            "ElevenLabs or OpenAI API key."
-        ),
+        reason=render_resolved(_vk.no_tts_provider()),
         rungs=rungs,
         servable=False,
     )

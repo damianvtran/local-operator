@@ -123,6 +123,29 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.slash.notifications_page": (
         "the notifications page description rendered by slash_commands.py::_desc"
     ),
+    "wire.settings.keymap": (
+        "hotkey row labels/help rendered by settings_io._t as plain label/help strings"
+    ),
+    "wire.language_receipts": (
+        "the /language receipts printed by tui/app.py and returned as finished "
+        "text by session/runtime/serving.py; no envelope identity is sent"
+    ),
+    "wire.voice_availability": (
+        "provider availability reasons rendered in-process by the tts/stt/audiogen/"
+        "video cascades and sent to the desktop as finished text"
+    ),
+    "wire.harness_import_detail": (
+        "import-source detail lines rendered in-process by harness_import.types "
+        "and sent to the desktop/terminal as finished text"
+    ),
+    "wire.wakes_supervisor": (
+        "supervisor detail line rendered in-process by wakes/install.py and "
+        "sent to the desktop Schedules page as finished text"
+    ),
+    "wire.session_status": (
+        "sidebar/picker row status suffix rendered in-process by "
+        "session/catalog.py and printed verbatim by clients"
+    ),
     "wire.tool_rows.bridge": (
         "bridge rows reach the phone as already-rendered text "
         '(harness/bridge_copy.py, _t = tr("wire.tool_rows.bridge"))'

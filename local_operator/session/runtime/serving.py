@@ -10833,14 +10833,22 @@ class ServingSessionHandle(SessionHandle):
         word for word.
         """
         from local_operator import settings_io
+        from local_operator.i18n.keys import wire_language_receipts as keys
+        from local_operator.i18n.messages import render, render_resolved
         from local_operator.i18n.resolve import (
             DEFAULT_LANGUAGE,
             config_value,
-            language_name,
+            language_native_name,
             language_options,
             normalise_locale,
             resolve_language,
         )
+
+        # The same deferred namespace the terminal's receipts use: the words are
+        # rendered here, in-process, in the language the config resolves NOW
+        # (this runtime never moves the TUI's active locale), and the phone sheet
+        # prints them verbatim (no envelope identity is sent).
+        receipt = render_resolved
 
         wanted = arg.strip()
         resolved = resolve_language()
@@ -10851,8 +10859,12 @@ class ServingSessionHandle(SessionHandle):
                 # The phone sheet has no argument picker, so this client DOES
                 # enumerate the value space; the terminal receipt (which has
                 # the space picker) does not, for its 70-cell notice row.
-                text=(
-                    f"language: {resolved} ({language_name(resolved)}) — " f"{', '.join(options)}"
+                text=receipt(
+                    keys.show_options(
+                        tag=resolved,
+                        name=language_native_name(resolved),
+                        options=", ".join(options),
+                    )
                 ),
                 style="info",
             )
@@ -10866,9 +10878,10 @@ class ServingSessionHandle(SessionHandle):
             # unaudited locale keys no catalogue and would render codes.
             return SlashResult(
                 kind="notice",
-                text=(
-                    f"unknown language {_quoted_echo_within_cells(wanted)} — "
-                    f"available: {', '.join(options)}"
+                text=receipt(
+                    keys.unknown_options(
+                        echo=_quoted_echo_within_cells(wanted), options=", ".join(options)
+                    )
                 ),
                 style="warning",
             )
@@ -10877,15 +10890,16 @@ class ServingSessionHandle(SessionHandle):
         if key == current:
             return SlashResult(
                 kind="notice",
-                text=f"language: already {key} — resolves to {resolved} "
-                f"({language_name(resolved)})",
+                text=receipt(
+                    keys.already(key=key, tag=resolved, name=language_native_name(resolved))
+                ),
                 style="info",
             )
         setting = settings_io.resolve_key("language")
         if setting is None:  # the registry owns the key; guard a broken build
             return SlashResult(
                 kind="notice",
-                text="language: the setting is not registered in this build",
+                text=receipt(keys.unregistered()),
                 style="warning",
             )
         try:
@@ -10895,12 +10909,19 @@ class ServingSessionHandle(SessionHandle):
             settings_io.write_setting(ConfigManager(config_dir()), setting, key)
         except Exception as error:  # noqa: BLE001 — reported to the caller verbatim
             return SlashResult(
-                kind="notice", text=f"language: could not save {key} — {error}", style="warning"
+                kind="notice",
+                text=receipt(keys.save_failed(key=key, error=str(error))),
+                style="warning",
             )
         active = resolve_language()
+        saved = keys.saved(key=key, tag=active, name=language_native_name(active))
         return SlashResult(
             kind="notice",
-            text=f"language: {key} saved — active {active} ({language_name(active)})",
+            # Rendered at ``active`` EXPLICITLY: this process's catalogue locale is
+            # moved by the config watcher AFTER the write, so ``receipt`` here
+            # would still speak the language being left. The success receipt is
+            # the one sentence that must already be in the new one.
+            text=render(saved.code, dict(saved.params), locale=active),
             style="info",
         )
 

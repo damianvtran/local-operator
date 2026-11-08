@@ -1,0 +1,12 @@
+{
+  "tui.notification_kinds.word_closed": {
+    "role": "Kind word in a `/notifications` listing row: `✓ <session> — <word> · 2h`",
+    "tone": "lowercase single word/short phrase, past participle",
+    "note": "EN-only context sidecar. Sits after an em dash and before a middle dot and an age. The store token is `closed` (a journal word, not English), so this is its human reading. Lowercase; no punctuation. No ICU arguments."
+  },
+  "tui.notification_kinds.word_retired": {
+    "role": "Kind phrase in a `/notifications` listing row: `⊘ <session> — <phrase> · 2h`",
+    "tone": "lowercase short phrase naming the cause",
+    "note": "EN-only context sidecar. The session's turn was cut because Local Operator was updating itself; the phrase must say WHY, not blame the user. Lowercase; no punctuation. No ICU arguments."
+  }
+}

@@ -1,0 +1,3 @@
+{
+  "wire.wakes_supervisor.shared_unit_mismatch": "this store is not the one the shared unit serves; launchd cannot supervise it"
+}

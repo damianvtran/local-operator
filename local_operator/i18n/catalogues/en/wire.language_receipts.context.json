@@ -1,0 +1,47 @@
+{
+  "wire.language_receipts.show_terminal": {
+    "role": "`/language` slash receipt printed as a notice row in the terminal and as the phone sheet's slash result — answer to bare `/language` in the terminal",
+    "tone": "plain, terse, lowercase command-receipt voice; no emoji",
+    "maxCells": 70,
+    "note": "EN-only context sidecar. Terminal form: the value space is NOT enumerated because the terminal has a space-key picker. `/language <value>` is the literal command and stays verbatim; `space` names the key that opens the picker. {tag} / {key} are locale tags or the word `auto` (technical tokens: keep them verbatim, never translate or transliterate). {name} is the language's OWN native name (for example `Français`), already localized data: do not translate it. Must fit the 70-cell notice row at 80 columns."
+  },
+  "wire.language_receipts.show_options": {
+    "role": "`/language` slash receipt printed as a notice row in the terminal and as the phone sheet's slash result — answer to bare `/language` on the phone sheet",
+    "tone": "plain, terse, lowercase command-receipt voice; no emoji",
+    "note": "EN-only context sidecar. Phone form: the sheet has no argument picker, so {options} is the comma-separated list of accepted values (`auto` plus shipped locale tags): technical tokens, keep verbatim. {tag} / {key} are locale tags or the word `auto` (technical tokens: keep them verbatim, never translate or transliterate). {name} is the language's OWN native name (for example `Français`), already localized data: do not translate it."
+  },
+  "wire.language_receipts.unknown_terminal": {
+    "role": "`/language` slash receipt printed as a notice row in the terminal and as the phone sheet's slash result — refusal of an unrecognised value in the terminal",
+    "tone": "plain, terse, warning tier",
+    "maxCells": 70,
+    "note": "EN-only context sidecar. {echo} is the value the user typed, already clipped to fit the row and quoted: keep it verbatim. `space` names the key that lists the values."
+  },
+  "wire.language_receipts.unknown_options": {
+    "role": "`/language` slash receipt printed as a notice row in the terminal and as the phone sheet's slash result — refusal of an unrecognised value on the phone sheet",
+    "tone": "plain, terse, warning tier",
+    "note": "EN-only context sidecar. {echo} is the user's clipped, quoted input (verbatim). {options} is the comma-separated list of accepted values (technical tokens, verbatim)."
+  },
+  "wire.language_receipts.already": {
+    "role": "`/language` slash receipt printed as a notice row in the terminal and as the phone sheet's slash result — no-op when the requested value is already stored",
+    "tone": "plain, terse, lowercase command-receipt voice; no emoji",
+    "maxCells": 70,
+    "note": "EN-only context sidecar. Said when `/language <value>` names the value already saved; {tag} is what that value resolves to on this machine (with `auto` it comes from the environment, then the OS). {tag} / {key} are locale tags or the word `auto` (technical tokens: keep them verbatim, never translate or transliterate). {name} is the language's OWN native name (for example `Français`), already localized data: do not translate it."
+  },
+  "wire.language_receipts.unregistered": {
+    "role": "`/language` slash receipt printed as a notice row in the terminal and as the phone sheet's slash result — guard for a broken build",
+    "tone": "plain, terse, warning tier",
+    "maxCells": 70,
+    "note": "EN-only context sidecar. Developer-facing guard that should never show to a user; keep short. No ICU arguments."
+  },
+  "wire.language_receipts.save_failed": {
+    "role": "`/language` slash receipt printed as a notice row in the terminal and as the phone sheet's slash result — the config write failed",
+    "tone": "plain, terse, warning tier",
+    "note": "EN-only context sidecar. {key} is the value that could not be saved (tag or `auto`, verbatim). {error} is a short English system reason from the config layer and is NOT translated; place it last."
+  },
+  "wire.language_receipts.saved": {
+    "role": "`/language` slash receipt printed as a notice row in the terminal and as the phone sheet's slash result — success receipt after switching",
+    "tone": "plain, terse, lowercase command-receipt voice; no emoji",
+    "maxCells": 70,
+    "note": "EN-only context sidecar. Printed once, in the NEW language, right after the switch: {key} is what was saved (`auto` or a tag), {tag}/{name} is the language now active. {tag} / {key} are locale tags or the word `auto` (technical tokens: keep them verbatim, never translate or transliterate). {name} is the language's OWN native name (for example `Français`), already localized data: do not translate it."
+  }
+}

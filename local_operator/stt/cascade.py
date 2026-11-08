@@ -59,6 +59,8 @@ from typing import Any, Optional
 from local_operator.clients._http import APIError
 from local_operator.clients.radient import RadientClient
 from local_operator.env import resolve_radient_api_base_url
+from local_operator.i18n.keys import wire_voice_availability as _vk
+from local_operator.i18n.messages import render_resolved
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.radient_credentials import (
     has_persisted_radient_credential,
@@ -95,6 +97,12 @@ from local_operator.stt.radient_cleanup import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Availability reasons are DISPLAY text the desktop Settings page prints verbatim
+# (it never compares them), so they are keyed in the deferred
+# ``wire.voice_availability`` namespace and rendered at call time, in the language
+# the config resolves (``render_resolved``). The ``APIError`` messages further
+# down are diagnostics that flow into tool results and logs, so they stay English.
 
 #: One STT rung's wire-call bound. The executor passes ``min`` of this and the
 #: overall budget remaining, so a late rung never outlives the deadline.
@@ -289,21 +297,29 @@ async def resolve_audio_path(
         RungAvailability(
             AudioPath.PROVIDER_STT_RADIENT,
             radient_available,
-            "Signed in to Radient." if radient_available else "Not signed in to Radient.",
+            (
+                render_resolved(_vk.radient_signed_in())
+                if radient_available
+                else render_resolved(_vk.radient_signed_out())
+            ),
         ),
         RungAvailability(
             AudioPath.PROVIDER_STT_ELEVENLABS,
             elevenlabs_available,
             (
-                "An ElevenLabs API key is stored."
+                render_resolved(_vk.elevenlabs_stored())
                 if elevenlabs_available
-                else "No ElevenLabs API key is stored."
+                else render_resolved(_vk.elevenlabs_missing())
             ),
         ),
         RungAvailability(
             AudioPath.PROVIDER_STT_OPENAI,
             openai_available,
-            "An OpenAI API key is stored." if openai_available else "No OpenAI API key is stored.",
+            (
+                render_resolved(_vk.openai_stored())
+                if openai_available
+                else render_resolved(_vk.openai_missing())
+            ),
         ),
         RungAvailability(AudioPath.PROVIDER_STT_SUPERWHISPER, False, SUPERWHISPER_REASON),
         RungAvailability(

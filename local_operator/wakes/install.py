@@ -66,6 +66,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from local_operator import launchd, procname, procstate, supervisors
+from local_operator.i18n.keys import wire_wakes_supervisor
+from local_operator.i18n.messages import render_resolved
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.paths import config_dir as ambient_config_dir
 
@@ -478,7 +480,10 @@ def supervisor_state(config_dir: Path) -> SupervisorState:
             loaded=False,
             running=False,
             verifiable=False,
-            detail="this store is not the one the shared unit serves; launchd cannot supervise it",
+            # Display text (the desktop Schedules page and `lop` status print it),
+            # keyed in the deferred ``wire.wakes_supervisor`` namespace and
+            # rendered now, in the active language. Nothing branches on the words.
+            detail=render_resolved(wire_wakes_supervisor.shared_unit_mismatch()),
         )
     result = _launchctl("print", f"{_domain()}/{LABEL}")
     if result.returncode != 0:
