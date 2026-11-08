@@ -1863,7 +1863,9 @@ def test_legacy_window_runs_to_the_first_guarded_generation(home: Path) -> None:
     live = _generation(home, "20261108T053357Z-guarded", guarded=True)
     time.sleep(0.05)
     _generation(home, "20261109T000000Z-later", guarded=True)
-    assert prov.guard_live_at() == pytest.approx(live.stat().st_birthtime)
+    st = live.stat()
+    born = getattr(st, "st_birthtime", st.st_ctime)  # Linux has no birth time
+    assert prov.guard_live_at() == pytest.approx(born)
     _write_transcript(home, SID, [_row(time.time() - 600, {"role": "user", "content": []})])
     target = os.path.realpath(clone)
     found = ev_mod.gather([target], session_id=SID, env=_env(home), stop=_stop(home))
