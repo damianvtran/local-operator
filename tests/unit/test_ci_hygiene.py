@@ -52,6 +52,11 @@ from scripts import check_serial_controls, ci_scope, run_bounded, shard_tests
 
 REPO = Path(__file__).resolve().parents[2]
 CI_YML = REPO / ".github" / "workflows" / "ci.yml"
+#: The unit suites (`test`, `coverage-report`, `tui-e2e`) moved here from
+#: ci.yml; it runs on `main` only. See `_ci_jobs` for how the pins follow them.
+FULL_SUITE_YML = REPO / ".github" / "workflows" / "full-suite.yml"
+#: Jobs that live in full-suite.yml, not ci.yml. `changes` is in both.
+FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "report"})
 PYPROJECT = REPO / "pyproject.toml"
 MAKEFILE = REPO / "Makefile"
 
@@ -84,6 +89,26 @@ DEPENDENCY_DIFF = (
 
 
 def _ci_jobs() -> dict[str, Any]:
+    """Every job the classifier models: ci.yml's plus full-suite.yml's.
+
+    The classifier (`scripts/ci_scope.py`) still models the moved unit jobs —
+    `make check-changed` runs them locally and full-suite.yml gates them with
+    the same `changes` job — so every pin on them keeps reading the real
+    definition, now from the file it lives in. `changes` exists in both files
+    and must be identical (`test_full_suite_changes_job_matches_ci`), so
+    taking ci.yml's copy loses nothing. Any OTHER id in both files is an
+    ambiguity this union would hide, so it is refused.
+    """
+    jobs = yaml.safe_load(CI_YML.read_text())["jobs"]
+    moved = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    assert isinstance(jobs, dict) and isinstance(moved, dict)
+    clash = (set(jobs) & set(moved)) - {"changes"}
+    assert not clash, f"job ids defined in both ci.yml and full-suite.yml: {sorted(clash)}"
+    return {**moved, **jobs}
+
+
+def _pr_jobs() -> dict[str, Any]:
+    """ci.yml's jobs alone: what a pull request actually runs."""
     jobs = yaml.safe_load(CI_YML.read_text())["jobs"]
     assert isinstance(jobs, dict)
     return jobs
@@ -268,9 +293,11 @@ def test_tui_e2e_does_not_need_the_unit_suite_or_pip_audit() -> None:
         "tui-e2e needs `pip-audit`, so a newly-published CVE skips the "
         "freeze guard — the same latent disarm as `needs: test`"
     )
-    assert needs == {"changes", "lint", "type-check"}, (
-        f"tui-e2e.needs={sorted(needs)!r}; expected only the classifier and "
-        "the two cheap syntax gates (the job does not install through them)"
+    # Only the classifier since the move to full-suite.yml: lint/type-check
+    # are PR-only jobs, and every commit on `main` already passed them.
+    assert needs == {"changes"}, (
+        f"tui-e2e.needs={sorted(needs)!r}; expected only the classifier "
+        "(full-suite.yml has no lint/type-check jobs to depend on)"
     )
 
 
@@ -287,7 +314,9 @@ def test_cli_and_server_sanity_still_wait_on_the_cheap_gates() -> None:
     what `pip-audit` is gated on — so a skipped audit cannot skip them (A4 is
     the assertion that keeps that implication true).
     """
-    expected = {"changes", "lint", "type-check", "test", "pip-audit"}
+    # `guards` took `test`'s place when the unit matrix moved to
+    # full-suite.yml: same `unit` flag, still a failed-gate stop before spend.
+    expected = {"changes", "lint", "type-check", "guards", "pip-audit"}
     for name in ("cli-sanity", "server-sanity"):
         assert _needs(name) == expected, (
             f"{name}.needs drifted; live-LLM jobs are supposed to keep "
@@ -1964,10 +1993,15 @@ def test_a_docs_only_diff_runs_two_cheap_checks_and_code_still_runs_everything()
     for flag in scope.FLAGS:
         assert docs_only[flag] is False, f"a docs-only diff set {flag}=True"
     assert docs_only["release_bump"] is False
-    ran = {job for job, verdict in scope.job_plan(docs_only).items() if verdict == "run"}
-    assert ran == {"changes", "version-bump-guard"}, (
-        "a docs-only PR must cost two checks — the classifier and the version "
-        "guard — not a matrix; `coverage-report` inherits the skip from `test`. "
+    pr_jobs = set(_pr_jobs())
+    ran = {
+        job
+        for job, verdict in scope.job_plan(docs_only).items()
+        if verdict == "run" and job in pr_jobs
+    }
+    assert ran == {"changes", "version-bump-guard", "ci-gate"}, (
+        "a docs-only PR must cost three checks — the classifier, the version "
+        "guard and the CI Gate aggregate — not a matrix. "
         f"This run would report {sorted(ran)}"
     )
 
@@ -2463,7 +2497,7 @@ def test_status_only_gates_request_the_command_status_contract() -> None:
     assert all(flag in spelling for spelling in spellings), spellings
     bench = (REPO / "scripts" / "bench_send_admission_ab.sh").read_text()
     assert re.search(r"run_bounded\.py\" " + re.escape(flag), bench), "bench wrapper"
-    serial = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+    serial = FULL_SUITE_YML.read_text()  # the serial controls moved with `test`
     assert "run_bounded.py --timeout 400" in serial, "CI serial wrapper stays strict"
 
 
@@ -3349,7 +3383,11 @@ def test_agents_doc_states_the_check_count_a_release_bump_pr_runs() -> None:
     """
     scope = _scope()
     bump = scope.classify(["pyproject.toml"], VERSION_BUMP_DIFF)
-    ci_rows = [job for job, verdict in scope.job_plan(bump).items() if verdict == "run"]
+    # ci.yml's rows only: full-suite.yml never runs on a pull request.
+    pr_jobs = set(_pr_jobs())
+    ci_rows = [
+        job for job, verdict in scope.job_plan(bump).items() if verdict == "run" and job in pr_jobs
+    ]
 
     gate = yaml.safe_load((CI_YML.parent / "release-gate.yml").read_text())
     # PyYAML reads the bare `on:` key as the boolean True (YAML 1.1).
@@ -3390,3 +3428,88 @@ def test_shard_plugin_bootstrap_does_not_export_a_cwd_pythonpath():
     run = _run_step("test")
     assert "python -m pytest -p tests.ci_order_owned_first" in run
     assert "PYTHONPATH=" not in run
+
+
+# --- slim PR CI: the unit suites live on `main`, PRs keep fast gates --------
+#
+# The PR path dropped `test`, `coverage-report` and `tui-e2e` (89% of its
+# runner time, measured 2026-10-24..11-07) in favour of targeted local
+# evidence (`scripts/affected_tests.py`) plus a `guards` job; the full suite
+# runs post-merge/nightly in full-suite.yml and files a `ci-main-red` issue.
+# These pins keep each half of that bargain from eroding silently.
+
+
+def test_pull_requests_do_not_run_the_unit_suites() -> None:
+    """The moved jobs exist ONLY in full-suite.yml, which never runs on a PR."""
+    pr_jobs = _pr_jobs()
+    assert not ({"test", "coverage-report", "tui-e2e"} & set(pr_jobs)), sorted(pr_jobs)
+    full = yaml.safe_load(FULL_SUITE_YML.read_text())
+    triggers = full.get("on", full.get(True))
+    assert "pull_request" not in triggers and "pull_request_target" not in triggers
+    assert triggers["push"]["branches"] == ["main"]
+    assert triggers["schedule"] and "workflow_dispatch" in triggers
+    assert set(full["jobs"]) == FULL_SUITE_JOBS | {"changes"}
+    for job in pr_jobs.values():
+        needs = job.get("needs") or []
+        needs = [needs] if isinstance(needs, str) else needs
+        assert not (set(needs) & FULL_SUITE_JOBS), f"a PR job still needs a moved job: {needs}"
+
+
+def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
+    """3.13 is where version-class bugs surface; one running + newest pending."""
+    full = yaml.safe_load(FULL_SUITE_YML.read_text())
+    for job in ("test", "coverage-report"):
+        assert full["jobs"][job]["strategy"]["matrix"]["python-version"] == ["3.12", "3.13"]
+    # main keeps one fixed group; a branch dispatch (WIDE infra PRs) gets its
+    # own, so it can never evict main's newest pending run.
+    group = full["concurrency"]["group"]
+    assert full["concurrency"]["cancel-in-progress"] is False
+    assert "'full-suite-main'" in group and "github.ref" in group, group
+    assert "workflow_dispatch" in (full.get("on", full.get(True)) or {})
+    assert full["permissions"] == {"contents": "read"}, "test jobs must keep a read-only token"
+    report = full["jobs"]["report"]
+    assert report["if"] == "always()"
+    assert report["permissions"] == {"issues": "write"}
+    assert set(report["needs"]) == set(full["jobs"]) - {"report"}
+    run = report["steps"][0]["run"]
+    assert (
+        'if [ "$GITHUB_REF" != "refs/heads/main" ]' in run
+    ), "branch runs must not touch the issue"
+    for needle in ("--label ci-main-red", "gh issue create", "gh issue comment", "gh issue close"):
+        assert needle in run, needle
+
+
+def test_full_suite_changes_job_matches_ci() -> None:
+    """`_ci_jobs` takes ci.yml's `changes`; that is only honest if they agree."""
+    full = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]["changes"]
+    assert full == _pr_jobs()["changes"]
+
+
+def test_guards_job_reads_the_one_guard_list() -> None:
+    """The guard list is spelled once (GUARD_TESTS), and every entry exists."""
+    from scripts import affected_tests
+
+    assert affected_tests.GUARD_TESTS, "an empty guard list runs nothing on PRs"
+    for node in affected_tests.GUARD_TESTS:
+        rel, _, name = node.partition("::")
+        assert (REPO / rel).is_file(), f"GUARD_TESTS names a missing file: {rel}"
+        # A renamed test function would make pytest error "not found" in CI;
+        # catch it here first, where the fix is obvious.
+        assert not name or f"def {name}(" in (REPO / rel).read_text(), node
+    job = _pr_jobs()["guards"]
+    assert "needs.changes.outputs.unit != 'false'" in _if("guards")
+    run = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "scripts/affected_tests.py --guards" in run
+    assert "tests/unit/" not in run, "the guard list must not be re-spelled in ci.yml"
+
+
+def test_ci_gate_aggregates_every_pr_job() -> None:
+    """`CI Gate` is the single required check: it must see every job."""
+    jobs = _pr_jobs()
+    gate = jobs["ci-gate"]
+    assert gate["name"] == "CI Gate"
+    assert gate["if"] == "always()"
+    assert set(gate["needs"]) == set(jobs) - {"ci-gate"}
+    run = gate["steps"][-1]["run"]
+    assert '"failure"' in run and '"cancelled"' in run and "exit 1" in run
+    assert '"skipped"' not in run, "a classifier skip must pass the gate"

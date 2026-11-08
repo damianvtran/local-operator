@@ -281,7 +281,9 @@ def _assert_registered_pytest_invocation(command):
 
 @pytest.mark.parametrize("violation", ["late-registry", "lost-plugin"])
 def test_workflow_contract_rejects_broken_handoff(violation):
-    workflow = yaml.safe_load((Path(__file__).parents[2] / ".github/workflows/ci.yml").read_text())
+    workflow = yaml.safe_load(
+        (Path(__file__).parents[2] / ".github/workflows/full-suite.yml").read_text()
+    )
     command = next(
         step["run"]
         for step in workflow["jobs"]["test"]["steps"]
@@ -315,7 +317,9 @@ def test_controller_identity_and_real_cli_workflow_contract(tmp_path, monkeypatc
     assert watchdog.run_dir().name == f"run-{os.getpid()}"
     monkeypatch.setattr(watchdog, "_RUN_DIR", tmp_path / "lo-shard-stall" / RUN)
     owned_file(watchdog.run_dir() / "worker-1.log", b"Timeout (0:04:00)!\nfirst\nlater\n")
-    workflow = yaml.safe_load((Path(__file__).parents[2] / ".github/workflows/ci.yml").read_text())
+    workflow = yaml.safe_load(
+        (Path(__file__).parents[2] / ".github/workflows/full-suite.yml").read_text()
+    )
     steps = workflow["jobs"]["test"]["steps"]
     stage = next(s for s in steps if s.get("id") == "stage_stall")
     pytest_step = next(s for s in steps if s.get("id") == "shard_pytest")

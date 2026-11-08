@@ -51,7 +51,7 @@ def test_r1_failed_stage_never_authorizes_upload_of_preexisting_sentinel(tmp_pat
     result = cli(root, old, registry)
     assert result.returncode == 2
     assert (old / "private-fixture.txt").read_text() == "must never upload"
-    workflow = yaml.safe_load((REPO / ".github/workflows/ci.yml").read_text())
+    workflow = yaml.safe_load((REPO / ".github/workflows/full-suite.yml").read_text())
     steps = workflow["jobs"]["test"]["steps"]
     stage = next(s for s in steps if s.get("id") == "stage_stall")
     upload = next(s for s in steps if s.get("name") == "Upload current-invocation timeout files")
