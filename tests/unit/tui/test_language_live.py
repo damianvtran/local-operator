@@ -88,7 +88,10 @@ def _fr_catalogues(tmp_path: Path) -> Path:
     # (slice 9), so a fixture root without it would render the key CODE instead
     # of the notice text — the extraction moved the literal, and every root that
     # renders a receipt has to carry the namespace it moved into.
-    for namespace in ("tui.welcome", "tui.status", "tui.app"):
+    # "wire.language_receipts" rides along for the same reason: the `/language`
+    # receipt is a catalogue key too, and this root carries no `fr` file for it,
+    # so the fixture locale renders the English template from `en`.
+    for namespace in ("tui.welcome", "tui.status", "tui.app", "wire.language_receipts"):
         shutil.copyfile(real / "en" / f"{namespace}.json", root / "en" / f"{namespace}.json")
     # Marker fr values for the same namespace too: the receipt in THIS test is
     # built before the move, so it renders en — but a receipt resolved under
@@ -213,7 +216,7 @@ async def test_a_running_switch_swaps_the_band_and_the_splash(
         status.update(tunnel_parked=True)
         assert "FR:parked" in status.render_text(200).plain
         # The receipt names the resolved language.
-        assert any("language: fr saved — active fr (French)" in n for n in _notices(app))
+        assert any("language: fr saved — active fr (Français)" in n for n in _notices(app))
 
         # A switch BACK is the same mechanism in reverse (and proves the
         # constants were not merely frozen at import).

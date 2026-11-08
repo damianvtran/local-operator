@@ -170,6 +170,7 @@ class OmpAdapter(SourceAdapter):
             session_count=len(rows),
             availability=_worst_availability(rows),
             detail="" if detected else "no omp agent directory found",
+            detail_key="" if detected else "omp_missing",
         )
 
     def list_sessions(self, *, include_subagents: bool = False) -> list[SourceSession]:

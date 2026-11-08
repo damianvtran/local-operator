@@ -1,0 +1,7 @@
+{
+  "wire.wakes_supervisor.shared_unit_mismatch": {
+    "role": "Supervisor detail on the Schedules page when this config store is not the one the machine-wide launchd unit serves",
+    "tone": "lowercase diagnostic sentence, no full stop",
+    "note": "EN-only context sidecar. `launchd` is the macOS service manager (verbatim). The sentence explains why wakes cannot be supervised for this store. No ICU arguments."
+  }
+}

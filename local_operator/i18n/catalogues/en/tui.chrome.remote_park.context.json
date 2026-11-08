@@ -1,0 +1,81 @@
+{
+  "tui.chrome.remote_park.approval_title": {
+    "role": "Title line of a notification/card for a session parked on ANOTHER device that needs an approval",
+    "tone": "plain state sentence, no full stop",
+    "maxCells": 40,
+    "note": "EN-only context sidecar. Notification-centre title and inbox row title. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.ask_title": {
+    "role": "Title line of a notification/card for a session parked on ANOTHER device that asks a question",
+    "tone": "plain state sentence, no full stop",
+    "maxCells": 40,
+    "note": "EN-only context sidecar. Notification-centre title and inbox row title. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.approval_lead": {
+    "role": "First sentence of the body for a remote approval park, read by someone elsewhere",
+    "tone": "plain imperative sentence",
+    "note": "EN-only context sidecar. The one gesture available from this machine is DENY. Followed (after a space) by `approval_remainder`; keep it self-contained. No ICU arguments."
+  },
+  "tui.chrome.remote_park.approval_attached_lead": {
+    "role": "Replacement first sentence when the reader is already attached to the session but the gate card is not yet on screen",
+    "tone": "plain sentence",
+    "note": "EN-only context sidecar. Followed (after a space) by `approval_remainder`. No ICU arguments."
+  },
+  "tui.chrome.remote_park.approval_remainder": {
+    "role": "Rest of the body for a remote approval park: where allowing happens and what to do if it cannot",
+    "tone": "plain, instructive, product words (no terminal commands)",
+    "note": "EN-only context sidecar. `Touch ID` is Apple's name (verbatim). `Local Operator` is the product name. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.approval_remedy": {
+    "role": "Second paragraph of the inbox row body: the exact one-time remedy, with commands",
+    "tone": "plain, instructive, exact",
+    "note": "EN-only context sidecar. The two `lop …` commands and `anchor.json` are literal and must stay verbatim (they are typed by the reader). `Touch ID` is Apple's name. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.ask_body": {
+    "role": "Body for a remote ask park",
+    "tone": "plain imperative sentence",
+    "note": "EN-only context sidecar. No ICU arguments."
+  },
+  "tui.chrome.remote_park.approval_banner": {
+    "role": "OS banner BODY for a remote approval park",
+    "tone": "terse, one line",
+    "maxCells": 110,
+    "note": "EN-only context sidecar. macOS Notification Centre shows about 110 characters on one line; keep close to the English length. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.ask_banner": {
+    "role": "OS banner BODY for a remote ask park",
+    "tone": "terse, one line",
+    "maxCells": 110,
+    "note": "EN-only context sidecar. About 110 characters on one line. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.approval_hint_phone": {
+    "role": "Longest rung of the gate card's hint row: where allow happens, what works here",
+    "tone": "terse lowercase clause",
+    "note": "EN-only context sidecar. The card sheds WHOLE rungs by width, longest first; the four approval rungs must keep this order of detail. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.approval_hint_touch_id": {
+    "role": "Second rung of the gate card's hint row",
+    "tone": "terse lowercase clause",
+    "note": "EN-only context sidecar. Shorter than the phone rung. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.approval_hint_there": {
+    "role": "Third rung of the gate card's hint row",
+    "tone": "terse lowercase clause",
+    "note": "EN-only context sidecar. Shorter than the Touch ID rung. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.approval_hint_floor": {
+    "role": "Floor rung of the approval card's hint row",
+    "tone": "terse lowercase fragment",
+    "note": "EN-only context sidecar. The locality fact alone; implies nothing about allowing from here. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.ask_hint_answer": {
+    "role": "Longest rung of the ask card's hint row",
+    "tone": "terse lowercase clause",
+    "note": "EN-only context sidecar. Asks can be answered from here; there is no deny on this card. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  },
+  "tui.chrome.remote_park.ask_hint_floor": {
+    "role": "Floor rung of the ask card's hint row",
+    "tone": "terse lowercase fragment",
+    "note": "EN-only context sidecar. The locality fact alone. {device} is the other device's human name (a proper name: keep verbatim, never translate)."
+  }
+}

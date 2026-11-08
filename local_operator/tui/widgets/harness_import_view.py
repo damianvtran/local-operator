@@ -570,7 +570,9 @@ class HarnessImportView(Vertical):
                 )
             )
             self._append_row(text, row, selected=selected, width=width)
-            detail = info.detail or _home_relative(info.root) or _t(_kt.source_no_detail())
+            detail = (
+                info.display_detail() or _home_relative(info.root) or _t(_kt.source_no_detail())
+            )
             text.append(
                 truncate_cells("  " + _shorten_home(detail), max(10, width - 2)),
                 style=Style(color=theme_mod.semantic_color("dim")),

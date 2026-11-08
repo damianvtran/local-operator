@@ -1,0 +1,5 @@
+{
+  "wire.harness_import_detail.omp_missing": "未找到omp智能体目录",
+  "wire.harness_import_detail.claude_missing": "未找到Claude存储，路径：{path}",
+  "wire.harness_import_detail.codex_missing": "未找到Codex存储，路径：{path}"
+}

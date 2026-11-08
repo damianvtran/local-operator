@@ -1,0 +1,3 @@
+{
+  "wire.wakes_supervisor.shared_unit_mismatch": "यह स्टोर वह नहीं है जिसे साझा यूनिट संभालती है; launchd इसे निगरानी में नहीं ला सकता"
+}

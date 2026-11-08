@@ -1,0 +1,12 @@
+{
+  "wire.settings.keymap.new_session.label": "Nouvelle session",
+  "wire.settings.keymap.new_session.help": "Lance une nouvelle conversation, comme /new.",
+  "wire.settings.keymap.resume.label": "Reprendre une session",
+  "wire.settings.keymap.resume.help": "Ouvre le sélecteur des conversations récentes, comme /resume.",
+  "wire.settings.keymap.quick_send.label": "Envoi rapide",
+  "wire.settings.keymap.quick_send.help": "Ouvre une petite zone de saisie au-dessus des autres applications ; envoie un message à la cheffe de cabinet.",
+  "wire.settings.keymap.push_to_talk.label": "Appuyer pour parler",
+  "wire.settings.keymap.push_to_talk.help": "Maintenez pour dicter (application de bureau) ; relâchez pour arrêter.",
+  "wire.settings.keymap.start_recording.label": "Démarrer l’enregistrement",
+  "wire.settings.keymap.start_recording.help": "Démarre l’enregistrement de dictée dans la fenêtre de l’application de bureau."
+}

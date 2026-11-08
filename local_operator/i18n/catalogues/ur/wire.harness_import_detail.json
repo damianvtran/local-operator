@@ -1,0 +1,5 @@
+{
+  "wire.harness_import_detail.omp_missing": "omp ایجنٹ ڈائریکٹری نہیں ملی",
+  "wire.harness_import_detail.claude_missing": "Claude اسٹور نہیں ملا: {path}",
+  "wire.harness_import_detail.codex_missing": "Codex اسٹور نہیں ملا: {path}"
+}

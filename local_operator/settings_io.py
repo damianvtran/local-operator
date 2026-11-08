@@ -75,6 +75,7 @@ from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
 from local_operator.i18n.keys import wire_settings_hub_org as _ho
+from local_operator.i18n.keys import wire_settings_keymap as _wk
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
 from local_operator.memory_capture import (
@@ -124,6 +125,7 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.settings.account_policy",
     "wire.settings.hub_defaults",
     "wire.settings.hub_org",
+    "wire.settings.keymap",
     "wire.aida_cadence",
     "wire.host_speed",
     "wire.guardrails",
@@ -205,6 +207,36 @@ def _t(message: _Msg) -> str:
                 except _i18n_runtime.MessageError:
                     pass
         return _LocalizedText(message.code, message)
+
+
+#: Catalogue copy for the hotkey rows, by action id. ``keymap.KEY_ACTIONS`` keeps
+#: the English ``label``/``help`` it always had — they feed the group-conflict
+#: refusal and the registry's own tests — and THIS table is what the settings
+#: surfaces (TUI page, ``/v1/settings`` for the desktop) paint. Keyed here, not
+#: in ``keymap.py``, so the registry stays import-light and the strings reach
+#: the frozen registry's locale refresher like every other row.
+_KEYMAP_COPY = {
+    "keymap.new_session": (_wk.new_session_label, _wk.new_session_help),
+    "keymap.resume": (_wk.resume_label, _wk.resume_help),
+    "keymap.quick_send": (_wk.quick_send_label, _wk.quick_send_help),
+    "keymap.push_to_talk": (_wk.push_to_talk_label, _wk.push_to_talk_help),
+    "keymap.start_recording": (_wk.start_recording_label, _wk.start_recording_help),
+}
+
+
+def _keymap_copy(action: "_keymap.KeyAction", field: str) -> str:
+    """A hotkey row's ``label``/``help`` from the catalogue, English if unkeyed.
+
+    An action added to ``KEY_ACTIONS`` without an entry above degrades to its
+    registry English rather than a message code; ``tests/unit/test_settings_io``
+    pins that every registered action has an entry, so that fallback is a
+    build-time failure, not a shipped state.
+    """
+    entry = _KEYMAP_COPY.get(action.id)
+    if entry is None:
+        return action.label if field == "label" else action.help
+    label_msg, help_msg = entry
+    return _t((label_msg if field == "label" else help_msg)())
 
 
 class ConfigUnreadableError(Exception):
@@ -3221,10 +3253,10 @@ SETTINGS: tuple[Setting, ...] = (
             key=action.id,
             path=(action.id,),
             section="keymap",
-            label=action.label,
+            label=_keymap_copy(action, "label"),
             kind=Kind.HOTKEY,
             default=action.default,
-            help=action.help,
+            help=_keymap_copy(action, "help"),
             hotkey_scope=action.scope,
             synonyms=_HOTKEY_SYNONYMS,
         )

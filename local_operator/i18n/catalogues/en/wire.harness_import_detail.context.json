@@ -1,0 +1,17 @@
+{
+  "wire.harness_import_detail.omp_missing": {
+    "role": "Detail line under a detected-harness row in the Import screen (terminal and desktop Settings) when no store was found",
+    "tone": "lowercase diagnostic phrase, no full stop",
+    "note": "EN-only context sidecar. `omp` is a program name: keep it verbatim. No ICU arguments."
+  },
+  "wire.harness_import_detail.claude_missing": {
+    "role": "Detail line under a detected-harness row in the Import screen (terminal and desktop Settings) when no store was found",
+    "tone": "lowercase diagnostic phrase, no full stop",
+    "note": "EN-only context sidecar. `Claude` is a product name (verbatim). {path} is a filesystem path (technical token, verbatim, may be long: put it last)."
+  },
+  "wire.harness_import_detail.codex_missing": {
+    "role": "Detail line under a detected-harness row in the Import screen (terminal and desktop Settings) when no store was found",
+    "tone": "lowercase diagnostic phrase, no full stop",
+    "note": "EN-only context sidecar. `Codex` is a product name (verbatim). {path} is a filesystem path (technical token, verbatim, may be long: put it last)."
+  }
+}

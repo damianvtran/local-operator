@@ -1,0 +1,10 @@
+{
+  "wire.language_receipts.show_terminal": "زبان: {tag} ({name}) — /language <value>؛ space سے براؤز کریں",
+  "wire.language_receipts.show_options": "زبان: {tag} ({name}) — {options}",
+  "wire.language_receipts.unknown_terminal": "نامعلوم زبان {echo} — فہرست کے لیے space دبائیں",
+  "wire.language_receipts.unknown_options": "نامعلوم زبان {echo} — دستیاب: {options}",
+  "wire.language_receipts.already": "زبان: {key} پہلے ہی مقرر ہے — {tag} ({name}) پر طے ہوتی ہے",
+  "wire.language_receipts.unregistered": "زبان: یہ ترتیب اس بلڈ میں رجسٹرڈ نہیں ہے",
+  "wire.language_receipts.save_failed": "زبان: {key} محفوظ نہیں ہو سکی — {error}",
+  "wire.language_receipts.saved": "زبان: {key} محفوظ ہو گئی — فعال {tag} ({name})"
+}

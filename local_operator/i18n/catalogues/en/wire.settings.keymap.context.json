@@ -1,0 +1,52 @@
+{
+  "wire.settings.keymap.new_session.label": {
+    "role": "Settings row label for the hotkey that starts a fresh conversation",
+    "tone": "concise noun/verb phrase, sentence case",
+    "note": "EN-only context sidecar. Hotkey rows list the action name beside its key chord. No ICU arguments."
+  },
+  "wire.settings.keymap.new_session.help": {
+    "role": "Settings row help for the new-session hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. `/new` is a slash command: keep it verbatim. No ICU arguments."
+  },
+  "wire.settings.keymap.resume.label": {
+    "role": "Settings row label for the hotkey that opens the recent-conversations picker",
+    "tone": "concise verb phrase, sentence case",
+    "note": "EN-only context sidecar. No ICU arguments."
+  },
+  "wire.settings.keymap.resume.help": {
+    "role": "Settings row help for the resume hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. `/resume` is a slash command: keep it verbatim. No ICU arguments."
+  },
+  "wire.settings.keymap.quick_send.label": {
+    "role": "Settings row label for the desktop global hotkey that opens the mini composer",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. Desktop-only row. No ICU arguments."
+  },
+  "wire.settings.keymap.quick_send.help": {
+    "role": "Settings row help for the desktop quick-send global hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. `chief of staff` is the product's name for Aida's role; use the locale's established term from the glossary. No ICU arguments."
+  },
+  "wire.settings.keymap.push_to_talk.label": {
+    "role": "Settings row label for the desktop press-and-hold dictation hotkey",
+    "tone": "concise noun phrase, sentence case",
+    "note": "EN-only context sidecar. Desktop-only row. No ICU arguments."
+  },
+  "wire.settings.keymap.push_to_talk.help": {
+    "role": "Settings row help for the desktop push-to-talk hotkey",
+    "tone": "imperative, terse; parenthetical marks desktop-only",
+    "note": "EN-only context sidecar. The key is HELD (not tapped); releasing stops recording. `(desktop)` says only the desktop app has this key. No ICU arguments."
+  },
+  "wire.settings.keymap.start_recording.label": {
+    "role": "Settings row label for the desktop global hotkey that starts speech-to-text recording",
+    "tone": "concise verb phrase, sentence case",
+    "note": "EN-only context sidecar. Desktop-only row. No ICU arguments."
+  },
+  "wire.settings.keymap.start_recording.help": {
+    "role": "Settings row help for the desktop start-recording hotkey",
+    "tone": "plain, one sentence",
+    "note": "EN-only context sidecar. No ICU arguments."
+  }
+}

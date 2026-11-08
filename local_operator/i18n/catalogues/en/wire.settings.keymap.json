@@ -1,0 +1,12 @@
+{
+  "wire.settings.keymap.new_session.label": "New session",
+  "wire.settings.keymap.new_session.help": "Starts a fresh conversation, the same as /new.",
+  "wire.settings.keymap.resume.label": "Resume a session",
+  "wire.settings.keymap.resume.help": "Opens the picker of recent conversations, the same as /resume.",
+  "wire.settings.keymap.quick_send.label": "Quick send",
+  "wire.settings.keymap.quick_send.help": "Opens a small composer over other apps; messages the chief of staff.",
+  "wire.settings.keymap.push_to_talk.label": "Push to talk",
+  "wire.settings.keymap.push_to_talk.help": "Hold to dictate (desktop); release to stop.",
+  "wire.settings.keymap.start_recording.label": "Start recording",
+  "wire.settings.keymap.start_recording.help": "Starts speech-to-text recording in the desktop window."
+}

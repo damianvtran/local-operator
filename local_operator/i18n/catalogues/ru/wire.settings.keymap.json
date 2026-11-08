@@ -1,0 +1,12 @@
+{
+  "wire.settings.keymap.new_session.label": "Новая сессия",
+  "wire.settings.keymap.new_session.help": "Начинает новую беседу, как /new.",
+  "wire.settings.keymap.resume.label": "Возобновить сессию",
+  "wire.settings.keymap.resume.help": "Открывает выбор недавних бесед, как /resume.",
+  "wire.settings.keymap.quick_send.label": "Быстрая отправка",
+  "wire.settings.keymap.quick_send.help": "Открывает небольшое поле ввода поверх других приложений; пишет главе аппарата.",
+  "wire.settings.keymap.push_to_talk.label": "Диктовка по удержанию",
+  "wire.settings.keymap.push_to_talk.help": "Удерживайте для диктовки (настольное приложение); отпустите, чтобы остановить.",
+  "wire.settings.keymap.start_recording.label": "Начать запись",
+  "wire.settings.keymap.start_recording.help": "Запускает запись речи в текст в окне настольного приложения."
+}

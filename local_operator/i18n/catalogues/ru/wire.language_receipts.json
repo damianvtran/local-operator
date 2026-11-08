@@ -1,0 +1,10 @@
+{
+  "wire.language_receipts.show_terminal": "язык: {tag} ({name}) — /language <value>; пробел — список значений",
+  "wire.language_receipts.show_options": "язык: {tag} ({name}) — {options}",
+  "wire.language_receipts.unknown_terminal": "неизвестный язык {echo} — пробел: список значений",
+  "wire.language_receipts.unknown_options": "неизвестный язык {echo} — доступны: {options}",
+  "wire.language_receipts.already": "язык: уже {key} — соответствует {tag} ({name})",
+  "wire.language_receipts.unregistered": "язык: параметр не зарегистрирован в этой сборке",
+  "wire.language_receipts.save_failed": "язык: не удалось сохранить {key} — {error}",
+  "wire.language_receipts.saved": "язык: {key} сохранён — активен {tag} ({name})"
+}

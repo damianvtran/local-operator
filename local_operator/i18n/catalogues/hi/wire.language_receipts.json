@@ -1,0 +1,10 @@
+{
+  "wire.language_receipts.show_terminal": "भाषा: {tag} ({name}) — /language <value>; space से सूची देखें",
+  "wire.language_receipts.show_options": "भाषा: {tag} ({name}) — {options}",
+  "wire.language_receipts.unknown_terminal": "अज्ञात भाषा {echo} — मान देखने के लिए space दबाएँ",
+  "wire.language_receipts.unknown_options": "अज्ञात भाषा {echo} — उपलब्ध: {options}",
+  "wire.language_receipts.already": "भाषा: {key} पहले से सेट है — {tag} ({name}) के रूप में लागू",
+  "wire.language_receipts.unregistered": "भाषा: यह सेटिंग इस बिल्ड में पंजीकृत नहीं है",
+  "wire.language_receipts.save_failed": "भाषा: {key} सहेजा नहीं जा सका — {error}",
+  "wire.language_receipts.saved": "भाषा: {key} सहेजा गया — {tag} ({name}) सक्रिय"
+}

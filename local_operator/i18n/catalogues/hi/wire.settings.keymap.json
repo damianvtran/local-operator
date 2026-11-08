@@ -1,0 +1,12 @@
+{
+  "wire.settings.keymap.new_session.label": "नया सत्र",
+  "wire.settings.keymap.new_session.help": "नई बातचीत शुरू करता है, ठीक /new की तरह।",
+  "wire.settings.keymap.resume.label": "सत्र फिर शुरू करें",
+  "wire.settings.keymap.resume.help": "हाल की बातचीतों की सूची खोलता है, ठीक /resume की तरह।",
+  "wire.settings.keymap.quick_send.label": "क्विक सेंड",
+  "wire.settings.keymap.quick_send.help": "दूसरे ऐप्स के ऊपर एक छोटा कंपोज़र खोलता है; संदेश चीफ़ ऑफ़ स्टाफ़ को जाता है।",
+  "wire.settings.keymap.push_to_talk.label": "दबाकर बोलें",
+  "wire.settings.keymap.push_to_talk.help": "बोलकर लिखने के लिए दबाए रखें (डेस्कटॉप); छोड़ने पर रुक जाता है।",
+  "wire.settings.keymap.start_recording.label": "रिकॉर्डिंग शुरू करें",
+  "wire.settings.keymap.start_recording.help": "डेस्कटॉप विंडो में स्पीच-टू-टेक्स्ट रिकॉर्डिंग शुरू करता है।"
+}

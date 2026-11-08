@@ -1,0 +1,17 @@
+{
+  "tui.chrome.remote_park.approval_title": "Approbation attendue sur {device}",
+  "tui.chrome.remote_park.ask_title": "Réponse attendue sur {device}",
+  "tui.chrome.remote_park.approval_lead": "Ouvrez la session ici pour refuser la demande.",
+  "tui.chrome.remote_park.approval_attached_lead": "La carte d’approbation n’est pas encore arrivée dans cette vue — refusez-la ici dès qu’elle y apparaît.",
+  "tui.chrome.remote_park.approval_remainder": "L’autorisation se fait sur {device} (Touch ID) ou sur un téléphone appairé avec lui. Si rien là-bas ne peut vérifier une signature : demandez à Local Operator de configurer l’autorité de l’opérateur sur cet appareil (une approbation et une invite de mot de passe administrateur) — si cet appareil exécute un build plus ancien, c’est sa mise à jour qui règle le problème.",
+  "tui.chrome.remote_park.approval_remedy": "L’autorisation se fait sur {device} (Touch ID) ou sur un téléphone appairé avec lui. Si {device} ne peut pas encore vérifier de signature, l’ancre de l’opérateur de cette machine n’y est pas installée : exécutez `lop operator anchor export --file anchor.json` sur cette machine, copiez ce fichier sur {device}, puis exécutez une fois `lop operator install --from anchor.json` sur {device} (une invite de mot de passe administrateur). {device} pourra alors vérifier une signature faite sur cette machine ; rien d’autre n’est accordé.",
+  "tui.chrome.remote_park.ask_body": "Ouvrez la session ici pour y répondre.",
+  "tui.chrome.remote_park.approval_banner": "Approbation attendue sur {device} — autoriser là-bas ou sur son téléphone appairé ; refus après ouverture.",
+  "tui.chrome.remote_park.ask_banner": "Réponse attendue sur {device} — ouvrez la session pour répondre.",
+  "tui.chrome.remote_park.approval_hint_phone": "s’exécute sur {device} — autoriser là-bas (Touch ID) ou sur son téléphone appairé ; refus possible ici",
+  "tui.chrome.remote_park.approval_hint_touch_id": "s’exécute sur {device} — autoriser là-bas (Touch ID) ; refus possible ici",
+  "tui.chrome.remote_park.approval_hint_there": "s’exécute sur {device} — autoriser là-bas ; refus possible ici",
+  "tui.chrome.remote_park.approval_hint_floor": "s’exécute sur {device}",
+  "tui.chrome.remote_park.ask_hint_answer": "s’exécute sur {device} — répondre d’ici",
+  "tui.chrome.remote_park.ask_hint_floor": "s’exécute sur {device}"
+}

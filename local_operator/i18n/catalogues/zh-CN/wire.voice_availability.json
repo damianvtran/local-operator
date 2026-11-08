@@ -1,0 +1,13 @@
+{
+  "wire.voice_availability.radient_signed_in": "已登录Radient",
+  "wire.voice_availability.radient_signed_out": "未登录Radient",
+  "wire.voice_availability.elevenlabs_stored": "已存储ElevenLabs API密钥",
+  "wire.voice_availability.elevenlabs_missing": "未存储ElevenLabs API密钥",
+  "wire.voice_availability.openai_stored": "已存储OpenAI API密钥",
+  "wire.voice_availability.openai_missing": "未存储OpenAI API密钥",
+  "wire.voice_availability.no_tts_provider": "没有可用的文本转语音提供商：登录Radient，或存储ElevenLabs或OpenAI API密钥。",
+  "wire.voice_availability.fal_stored": "已存储FAL密钥",
+  "wire.voice_availability.fal_missing": "未存储FAL密钥",
+  "wire.voice_availability.route_available": "可用",
+  "wire.voice_availability.route_unavailable": "不可用"
+}

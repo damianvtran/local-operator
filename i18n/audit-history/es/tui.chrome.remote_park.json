@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tui.chrome.remote_park",
+  "history_sha256": "7862554ad1c78f1333df0ee921996fa65317f8dae23698bd09ec74721157be5e",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.chrome.remote_park",
+      "source_sha256": "3bfd9ea6e46573cb62ccf2ccdc0f5100ec8e6fcbddd788458de7fb11bcffe0e9",
+      "context_sha256": "4db983f47f52b08da2a7a7743f27e2e731f91f0aaccc5451310fc2677dd75f70",
+      "target_sha256": "b89b9a7c4d3fc2836b31832413744f4997e62a9ac493335b203684217e1f42c9",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "session": "62a99953d9f4",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (reported to the coder by the manager; the coder inspected no harness route log)"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev task subagent, profile 'translation-auditor'), first independent audit (round 1); independent instance, distinct from every translator",
+        "session": "046b4620ae98",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (reported to the coder by the manager; the coder inspected no harness route log)",
+        "result": "clean-with-findings",
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 4 nit",
+        "independent_from_translator": true,
+        "translator_session": "62a99953d9f4",
+        "scope": "full audit of every row of the namespace"
+      },
+      "status": "passed",
+      "note": "Full independent audit: clean-with-findings (0 blocker, 0 major, 0 minor, 4 nit). target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    }
+  ]
+}

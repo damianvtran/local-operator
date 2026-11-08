@@ -84,7 +84,16 @@ def test_shipped_wire_namespaces_exist() -> None:
         # row label, not an edit to an audited `wire.settings`/`wire.slash`
         # hash.
         "wire.session",
+        # Census-found backend English the desktop prints verbatim. Each is its
+        # own English-only child so no audited locale hash moves; all are
+        # DEFERRED (in-process render, never an envelope identity).
+        "wire.session_status",
+        "wire.language_receipts",
+        "wire.voice_availability",
+        "wire.harness_import_detail",
+        "wire.wakes_supervisor",
         "wire.settings",
+        "wire.settings.keymap",
         "wire.settings.hub_defaults",
         # The org Agent Hub section (Radient Team only) is its own child so its
         # copy never moves the audited wire.settings locale hashes.

@@ -703,9 +703,12 @@ async def test_language_slash_writes_through_the_shared_funnel(
     # Wave-2 QA: the longest resolved name (vi) must also fit the 70-cell
     # budget — switch through the same branch, then read the bare report.
     switched = await handle._slash_result("language", "vi", SlashResult)
-    assert switched.text == "language: vi saved — active vi (Vietnamese)"
+    # The receipt is keyed copy (wire.language_receipts), so the vi switch now
+    # answers in the shipped Vietnamese catalogue rather than the English
+    # fallback this test used to pin.
+    assert switched.text == "ngôn ngữ: đã lưu vi — đang dùng vi (Tiếng Việt)"
     wide = await handle._slash_result("language", "", SlashResult)
-    assert wide.text == "language: vi (Vietnamese) — auto, en, fr, es, zh-CN, ru, vi, ur, hi"
+    assert wide.text == ("ngôn ngữ: vi (Tiếng Việt) — auto, en, fr, es, zh-CN, ru, vi, ur, hi")
     assert cell_len(wide.text) <= 70
 
     # Hindi grows every bare receipt's option list. Exercise every accepted

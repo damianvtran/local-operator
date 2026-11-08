@@ -201,7 +201,23 @@ def new_references(
 #: Wrappers that turn a ``Msg`` into a rendered string. A deferred key call
 #: must sit inside one of these; returning the ``Msg`` for a caller to render
 #: is fine too (the reference is then not a call and never reaches this check).
-RENDER_WRAPPERS = frozenset({"_t", "_tr", "_desc", "render", "describe", "tr"})
+#: ``render_resolved`` (``i18n.messages``) is the in-process seam for display text a
+#: backend composes outside the TUI; ``_lang_t`` / ``_kind_t`` are ``tr(<namespace>)``
+#: resolvers bound under their own names where ``_t`` already means another
+#: namespace in the same module (``tui/app.py``).
+RENDER_WRAPPERS = frozenset(
+    {
+        "_t",
+        "_tr",
+        "_desc",
+        "render",
+        "describe",
+        "tr",
+        "render_resolved",
+        "_lang_t",
+        "_kind_t",
+    }
+)
 
 
 def _all_aliases(text: str, modules: set[str]) -> dict[str, str]:

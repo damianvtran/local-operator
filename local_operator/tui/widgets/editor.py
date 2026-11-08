@@ -143,6 +143,8 @@ from local_operator.clipboard import (
     read_clipboard,
 )
 from local_operator.harness.types import ImageContent
+from local_operator.i18n.keys import tui_composer as _composer_keys
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
 from local_operator.sigils import at_token_spans, skill_mentions, split_token
@@ -1736,7 +1738,33 @@ class ArgumentHighlightChanged(Message):
 #: statement needs room to qualify itself, which a one-line placeholder does
 #: not have and a help table does. Removed rather than reworded because
 #: permanent composer real estate is the most expensive surface in the app.
-DEFAULT_PLACEHOLDER = "Message Local Operator…"
+#:
+#: KEYED (``tui.composer.placeholder_default``) and resolved at paint time. The
+#: module constant below is the rendering at import / last locale move, kept for
+#: callers (tests, the e2e harness) that name it; EVERY runtime reader goes
+#: through :func:`default_placeholder` — :attr:`Editor.resting_placeholder` and
+#: the constructor default — so a live ``/language`` switch is not shadowed by
+#: the language the process booted in (the by-value-at-import bug class that
+#: ``tui.notify._reload_copy`` documents). The other mode placeholders beside it
+#: are not keyed yet.
+_composer_t = tr("tui.composer")
+
+
+def default_placeholder() -> str:
+    """The resting composer invitation in the ACTIVE language, resolved now."""
+    return _composer_t(_composer_keys.placeholder_default())
+
+
+DEFAULT_PLACEHOLDER = default_placeholder()
+
+
+def _reload_copy() -> None:
+    """Re-materialise :data:`DEFAULT_PLACEHOLDER` after a locale move."""
+    global DEFAULT_PLACEHOLDER
+    DEFAULT_PLACEHOLDER = default_placeholder()
+
+
+register_refresh(_reload_copy)
 
 #: What the composer says while it refuses input. It names the state AND the
 #: consequence, because the only useful thing to tell someone whose keys are
@@ -2104,7 +2132,7 @@ class Editor(TextArea):
 
     def __init__(
         self,
-        placeholder: str = DEFAULT_PLACEHOLDER,
+        placeholder: str | None = None,
         commands: list[SlashCommand] | None = None,
     ) -> None:
         # Built BEFORE super().__init__: TextArea's constructor loads its
@@ -2261,7 +2289,14 @@ class Editor(TextArea):
         self._pending_escape: Callable[[], object] | None = None
         # tab_behavior="indent": Tab NEVER moves focus (TUI-013). Command
         # completion consumes the key first; otherwise it indents.
-        super().__init__(placeholder=placeholder, soft_wrap=True, tab_behavior="indent")
+        # ``None`` means "the resting invitation", resolved HERE rather than as a
+        # ``= DEFAULT_PLACEHOLDER`` default, which Python binds once at class
+        # definition and would pin to the boot language.
+        super().__init__(
+            placeholder=default_placeholder() if placeholder is None else placeholder,
+            soft_wrap=True,
+            tab_behavior="indent",
+        )
         # The caret is SOLID and never blinks. Blinking made the caret cell flip
         # twice a second, and on the boot splash — where nothing else repaints —
         # that 2 Hz invert beside a static logo WAS the startup animation users
@@ -5764,7 +5799,7 @@ class Editor(TextArea):
         composer say?" on the way out, and one authority is what stops them
         drifting apart if that answer ever gains a second case again.
         """
-        return DEFAULT_PLACEHOLDER
+        return default_placeholder()
 
     def watch_selection(self, selection: Selection) -> None:
         """Retire the CLICK-CHAIN claim when the highlight it describes changes.

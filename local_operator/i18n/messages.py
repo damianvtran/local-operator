@@ -91,6 +91,21 @@ def msg(code: str, **params: Any) -> Msg:
     return Msg(code=code, params=params)
 
 
+def render_resolved(message: Msg) -> str:
+    """``message`` as plain text in the language the config resolves RIGHT NOW.
+
+    For DISPLAY text a backend composes inside a process that never moves the
+    TUI's active locale (``serve``, the session runtime, a one-shot CLI): the
+    wire carries finished prose, so the words must already be the user's. This
+    asks :func:`resolve.resolve_language` per call — the same chain, the
+    watcher's snapshot when one exists — instead of ``text.tr``'s process-wide
+    active locale, which only the TUI moves live (see ``session.catalog.
+    _label_locale``, which memoises the same read for the per-row hot path).
+    Unshipped, unknown or unreadable all degrade to English via :func:`render`.
+    """
+    return render(message.code, dict(message.params), locale=resolve.resolve_language())
+
+
 def envelope(
     code: str,
     params: Mapping[str, Any] | None = None,

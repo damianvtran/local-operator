@@ -1,0 +1,7 @@
+{
+  "wire.session_status.retired_label": {
+    "role": "Sidebar/picker row status label (a plain-text suffix) for a session whose turn was cut by a build update",
+    "tone": "terse status label with cause",
+    "note": "EN-only context sidecar. {base} is the row's ALREADY-composed status word (currently `Interrupted`), inserted verbatim; the suffix after the em dash names the cause (the app retired the turn to update; the operator did not stop it). One logical line: keep the cause short."
+  }
+}

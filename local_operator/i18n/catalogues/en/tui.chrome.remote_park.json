@@ -1,0 +1,17 @@
+{
+  "tui.chrome.remote_park.approval_title": "Waiting for approval on {device}",
+  "tui.chrome.remote_park.ask_title": "Waiting for your answer on {device}",
+  "tui.chrome.remote_park.approval_lead": "Open the session here to deny it.",
+  "tui.chrome.remote_park.approval_attached_lead": "Its gate card has not reached this view — deny it here once it does.",
+  "tui.chrome.remote_park.approval_remainder": "Allowing it happens on {device} (Touch ID) or on a phone paired with it. If nothing there can check a signature: ask Local Operator to set up operator authority there (one approval and one admin password prompt) — if that device is running an older build, updating it is what fixes that.",
+  "tui.chrome.remote_park.approval_remedy": "Allowing it happens on {device} (Touch ID) or on a phone paired with it. If {device} cannot check a signature yet, this machine's operator anchor is not installed there: run `lop operator anchor export --file anchor.json` on this machine, copy that file to {device}, then run `lop operator install --from anchor.json` on {device} once (one admin password prompt). That lets {device} check a signature made on this machine; it grants nothing else.",
+  "tui.chrome.remote_park.ask_body": "Open the session here to answer it.",
+  "tui.chrome.remote_park.approval_banner": "Waiting for approval on {device} — allow there or on its paired phone; deny after opening.",
+  "tui.chrome.remote_park.ask_banner": "Waiting for your answer on {device} — open it to answer.",
+  "tui.chrome.remote_park.approval_hint_phone": "runs on {device} — allow there (Touch ID) or its paired phone; deny works here",
+  "tui.chrome.remote_park.approval_hint_touch_id": "runs on {device} — allow there (Touch ID); deny works here",
+  "tui.chrome.remote_park.approval_hint_there": "runs on {device} — allow there; deny works here",
+  "tui.chrome.remote_park.approval_hint_floor": "runs on {device}",
+  "tui.chrome.remote_park.ask_hint_answer": "runs on {device} — answer it from here",
+  "tui.chrome.remote_park.ask_hint_floor": "runs on {device}"
+}

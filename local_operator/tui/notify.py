@@ -134,6 +134,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; the sound module loads lazi
 from local_operator import terminals
 from local_operator.harness.notice_copy import closed_notice_text, retired_notice_text
 from local_operator.i18n.keys import tui_chrome_banners as _x
+from local_operator.i18n.keys import tui_chrome_remote_park as _rp
 from local_operator.i18n.text import register_refresh, tr
 from local_operator.proc import spawn_detached
 from local_operator.tui.settings import settings_get
@@ -392,64 +393,25 @@ BACKGROUND_FALLBACK_TITLE = _t(_x.fallback_title())
 # callers fall back to the device id exactly as the lifecycle router does, so
 # these functions take whatever label the caller resolved rather than looking
 # one up.
-REMOTE_PARK_APPROVAL_TITLE = "Waiting for approval on {device}"
-#: The lead asks for the ONE deny gesture its reader can make. "Open the
-#: session here to deny it." is true for a reader somewhere else; the reader
-#: who IS this attached origin with no card on screen has nothing to open
-#: (beat-2 F-A / design round 1, D1), so that shape takes the attached lead.
-#: Everything after the lead is true in BOTH shapes and lives once in
-#: :data:`REMOTE_PARK_APPROVAL_REMAINDER`; the ask's single sentence already
-#: carries the right gesture for both readers, so only the approval lead
-#: swaps, and an attached phrasing for the ask waits on the designer if the
-#: ask shape ever needs one.
-REMOTE_PARK_APPROVAL_LEAD = "Open the session here to deny it."
-REMOTE_PARK_APPROVAL_ATTACHED_LEAD = (
-    "Its gate card has not reached this view — deny it here once it does."
-)
-#: The clause carries the DIAGNOSIS in product words (design round 1, D3): the
-#: sentence used to print two backtick commands (which the terminal rendered
-#: literally) and turned the remedy into a terminal instruction right after the
-#: first half had just left that register. What stays is the fact — an older build
-#: on the other device is what to fix — and the action a person can take.
-REMOTE_PARK_APPROVAL_REMAINDER = (
-    "Allowing it happens on {device} (Touch ID) or on a phone paired with it. "
-    "If nothing there can check a signature: ask Local Operator to set up operator "
-    "authority there (one approval and one admin password prompt) — if that device is "
-    "running an older build, updating it is what fixes that."
-)
-REMOTE_PARK_APPROVAL_BODY = REMOTE_PARK_APPROVAL_LEAD + " " + REMOTE_PARK_APPROVAL_REMAINDER
-#: The same card for the reader the F-A fix exists for: attached, with the
-#: gate card not on screen. Only the lead differs (see above).
-REMOTE_PARK_APPROVAL_ATTACHED_BODY = (
-    REMOTE_PARK_APPROVAL_ATTACHED_LEAD + " " + REMOTE_PARK_APPROVAL_REMAINDER
-)
-REMOTE_PARK_ASK_TITLE = "Waiting for your answer on {device}"
-REMOTE_PARK_ASK_BODY = "Open the session here to answer it."
-#: Banner bodies, ≤ ~110 characters for an ordinary device name — the budget
-#: is macOS Notification Centre's one-line body, and the two halves the reader
-#: needs there are WHERE the gesture happens and WHAT still works from here.
-REMOTE_PARK_APPROVAL_BANNER = (
-    "Waiting for approval on {device} — allow there or on its paired phone; deny after opening."
-)
-REMOTE_PARK_ASK_BANNER = "Waiting for your answer on {device} — open it to answer."
-#: The card hint's rungs, LONGEST FIRST: the attached viewer's one-line note
-#: that the gate it is looking at runs elsewhere. The card sheds WHOLE clauses
-#: down this ladder (the ``_hint_row`` discipline — never a mid-clause clamp),
-#: and the floor is the locality fact alone, which still implies nothing about
-#: an allow from here.
-REMOTE_PARK_APPROVAL_HINTS = (
-    "runs on {device} — allow there (Touch ID) or its paired phone; deny works here",
-    "runs on {device} — allow there (Touch ID); deny works here",
-    "runs on {device} — allow there; deny works here",
-    "runs on {device}",
-)
-#: Asks are ordinary from the origin (``ask_answer`` carries no authority
-#: check), so the ask hint says what is true — there is no deny on this card
-#: and no presence gesture behind an answer.
-REMOTE_PARK_ASK_HINTS = (
-    "runs on {device} — answer it from here",
-    "runs on {device}",
-)
+# The words live in ``tui.chrome.remote_park`` (keyed, English source plus
+# context sidecars) and are resolved PER CALL by the ``remote_park_*`` helpers
+# below. They used to be module-level ``str.format`` templates, which froze the
+# boot language: a live ``/language`` switch left a park banner in the old one
+# (the by-value-at-import class ``_reload_copy`` above documents). The rungs of
+# the card's hint ladder keep their LONGEST-FIRST order in the helper.
+#
+# The lead sentence asks for the ONE deny gesture its reader can make. "Open
+# the session here to deny it." is true for a reader somewhere else; the reader
+# who IS this attached origin with no card on screen has nothing to open
+# (beat-2 F-A / design round 1, D1), so that shape takes the attached lead.
+# Everything after the lead is true in BOTH shapes and lives once in the
+# remainder key. Asks are ordinary from the origin (``ask_answer`` carries no
+# authority check), so the ask hint says what is true — there is no deny on that
+# card and no presence gesture behind an answer. Banner bodies stay under ~110
+# characters for an ordinary device name — macOS Notification Centre's one-line
+# body — and the remainder carries the DIAGNOSIS in product words (design round
+# 1, D3): an older build on the other device is what to fix.
+_t_park = tr("tui.chrome.remote_park")
 
 # --- the park's DURABLE row -------------------------------------------------
 #
@@ -467,14 +429,6 @@ REMOTE_PARK_ASK_HINTS = (
 # set up operator authority", which is not a step. The commands are the ones
 # ``operator/cli.py`` actually ships (``anchor export --file``, ``install
 # --from``) — never a spelling invented here.
-REMOTE_PARK_APPROVAL_REMEDY_COMMANDS = (
-    "Allowing it happens on {device} (Touch ID) or on a phone paired with it. If {device} "
-    "cannot check a signature yet, this machine's operator anchor is not installed there: "
-    "run `lop operator anchor export --file anchor.json` on this machine, copy that file "
-    "to {device}, then run `lop operator install --from anchor.json` on {device} once "
-    "(one admin password prompt). That lets {device} check a signature made on this "
-    "machine; it grants nothing else."
-)
 
 
 def remote_park_item_title(device: str, kind: str) -> str:
@@ -485,8 +439,8 @@ def remote_park_item_title(device: str, kind: str) -> str:
     the fact the reader needs to know where the gesture happens.
     """
     if kind == "approval":
-        return REMOTE_PARK_APPROVAL_TITLE.format(device=device)
-    return REMOTE_PARK_ASK_TITLE.format(device=device)
+        return _t_park(_rp.approval_title(device=device))
+    return _t_park(_rp.ask_title(device=device))
 
 
 def remote_park_item_body(device: str, kind: str) -> str:
@@ -498,12 +452,8 @@ def remote_park_item_body(device: str, kind: str) -> str:
     at all, so its body stays the card's one sentence.
     """
     if kind == "approval":
-        return (
-            REMOTE_PARK_APPROVAL_LEAD
-            + "\n\n"
-            + REMOTE_PARK_APPROVAL_REMEDY_COMMANDS.format(device=device)
-        )
-    return REMOTE_PARK_ASK_BODY
+        return _t_park(_rp.approval_lead()) + "\n\n" + _t_park(_rp.approval_remedy(device=device))
+    return _t_park(_rp.ask_body())
 
 
 def remote_park_card(device: str, kind: str, *, name: str = "", attached: bool = False) -> str:
@@ -529,12 +479,12 @@ def remote_park_card(device: str, kind: str, *, name: str = "", attached: bool =
     must open it", which is the honest generic.
     """
     if kind == "approval":
-        title = REMOTE_PARK_APPROVAL_TITLE.format(device=device)
-        template = REMOTE_PARK_APPROVAL_ATTACHED_BODY if attached else REMOTE_PARK_APPROVAL_BODY
-        body = template.format(device=device)
+        title = _t_park(_rp.approval_title(device=device))
+        lead = _t_park(_rp.approval_attached_lead() if attached else _rp.approval_lead())
+        body = lead + " " + _t_park(_rp.approval_remainder(device=device))
     else:
-        title = REMOTE_PARK_ASK_TITLE.format(device=device)
-        body = REMOTE_PARK_ASK_BODY.format(device=device)
+        title = _t_park(_rp.ask_title(device=device))
+        body = _t_park(_rp.ask_body())
     if name:
         return f"{name}\n{title}\n{body}"
     return f"{title}\n{body}"
@@ -548,8 +498,8 @@ def remote_park_banner(device: str, kind: str) -> str:
     park at once and the name is what tells them apart.
     """
     if kind == "approval":
-        return REMOTE_PARK_APPROVAL_BANNER.format(device=device)
-    return REMOTE_PARK_ASK_BANNER.format(device=device)
+        return _t_park(_rp.approval_banner(device=device))
+    return _t_park(_rp.ask_banner(device=device))
 
 
 def remote_park_hints(device: str, kind: str) -> tuple[str, ...]:
@@ -560,8 +510,17 @@ def remote_park_hints(device: str, kind: str) -> tuple[str, ...]:
     the widget stack — ``notifications.compose`` and the desktop bridge import
     it precisely because it pulls in no Textual.
     """
-    rungs = REMOTE_PARK_APPROVAL_HINTS if kind == "approval" else REMOTE_PARK_ASK_HINTS
-    return tuple(rung.format(device=device) for rung in rungs)
+    if kind == "approval":
+        return (
+            _t_park(_rp.approval_hint_phone(device=device)),
+            _t_park(_rp.approval_hint_touch_id(device=device)),
+            _t_park(_rp.approval_hint_there(device=device)),
+            _t_park(_rp.approval_hint_floor(device=device)),
+        )
+    return (
+        _t_park(_rp.ask_hint_answer(device=device)),
+        _t_park(_rp.ask_hint_floor(device=device)),
+    )
 
 
 def background_digest_title(total: int) -> str:

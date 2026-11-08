@@ -1,0 +1,3 @@
+{
+  "wire.wakes_supervisor.shared_unit_mismatch": "此存储不是共享单元所服务的那个；launchd无法监督它"
+}

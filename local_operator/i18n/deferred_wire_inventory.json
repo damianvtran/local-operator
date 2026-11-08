@@ -291,6 +291,108 @@
         "settings_io.py": 23,
         "sound_cli.py": 19
       }
+    },
+    "wire.settings.keymap": {
+      "reason": "hotkey row labels/help rendered by settings_io._t as plain label/help strings",
+      "render_points": [
+        {
+          "path": "local_operator/settings_io.py",
+          "symbol": "settings_io._keymap_copy -> settings_io._t",
+          "note": "hotkey row label/help merged into the settings registry as plain strings; /v1/settings carries the strings, never a code"
+        }
+      ],
+      "references": {
+        "settings_io.py": 12
+      }
+    },
+    "wire.language_receipts": {
+      "reason": "the /language receipts printed by tui/app.py and returned as finished text by session/runtime/serving.py; no envelope identity is sent",
+      "render_points": [
+        {
+          "path": "local_operator/tui/app.py",
+          "symbol": "OperatorApp._cmd_language (_lang_t)",
+          "note": "terminal notice rows; plain text"
+        },
+        {
+          "path": "local_operator/session/runtime/serving.py",
+          "symbol": "SessionServing._cmd_language (render_resolved/render)",
+          "note": "SlashResult.text sent as finished text to the phone sheet; no code on the wire"
+        }
+      ],
+      "references": {
+        "session/runtime/serving.py": 1,
+        "tui/app.py": 8
+      }
+    },
+    "wire.voice_availability": {
+      "reason": "provider availability reasons rendered in-process by the tts/stt/audiogen/video cascades and sent to the desktop as finished text",
+      "render_points": [
+        {
+          "path": "local_operator/tts/cascade.py",
+          "symbol": "tts.cascade._va (render_resolved)",
+          "note": "RungAvailability.reason, a display sentence the desktop prints verbatim"
+        },
+        {
+          "path": "local_operator/stt/cascade.py",
+          "symbol": "stt.cascade._va (render_resolved)",
+          "note": "RungAvailability.reason, a display sentence the desktop prints verbatim"
+        },
+        {
+          "path": "local_operator/audiogen/cascade.py",
+          "symbol": "audiogen.cascade._va (render_resolved)",
+          "note": "availability reason strings, display only"
+        },
+        {
+          "path": "local_operator/video/cascade.py",
+          "symbol": "video.cascade._va (render_resolved)",
+          "note": "per-route availability reason, display only"
+        }
+      ],
+      "references": {
+        "audiogen/cascade.py": 7,
+        "stt/cascade.py": 7,
+        "tts/cascade.py": 8,
+        "video/cascade.py": 7
+      }
+    },
+    "wire.harness_import_detail": {
+      "reason": "import-source detail lines rendered in-process by harness_import.types and sent to the desktop/terminal as finished text",
+      "render_points": [
+        {
+          "path": "local_operator/harness_import/types.py",
+          "symbol": "SourceInfo.display_detail (render_resolved)",
+          "note": "SourceInfo.detail_message rendered for the desktop route and terminal Import screen; the English detail stays on the model tool"
+        }
+      ],
+      "references": {
+        "harness_import/types.py": 4
+      }
+    },
+    "wire.wakes_supervisor": {
+      "reason": "supervisor detail line rendered in-process by wakes/install.py and sent to the desktop Schedules page as finished text",
+      "render_points": [
+        {
+          "path": "local_operator/wakes/install.py",
+          "symbol": "wakes.install (render_resolved)",
+          "note": "SupervisorState.detail shown on the Schedules page / lop status; nothing branches on it"
+        }
+      ],
+      "references": {
+        "wakes/install.py": 2
+      }
+    },
+    "wire.session_status": {
+      "reason": "sidebar/picker row status suffix rendered in-process by session/catalog.py and printed verbatim by clients",
+      "render_points": [
+        {
+          "path": "local_operator/session/catalog.py",
+          "symbol": "CatalogEntry._stop_label (render)",
+          "note": "row status label suffix rendered with the memoised label locale and printed verbatim by clients"
+        }
+      ],
+      "references": {
+        "session/catalog.py": 2
+      }
     }
   }
 }

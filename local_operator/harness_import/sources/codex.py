@@ -302,6 +302,8 @@ class CodexAdapter(SourceAdapter):
             session_count=len(rows),
             availability=_worst_availability(rows),
             detail=detail,
+            detail_key="" if detected else "codex_missing",
+            detail_path="" if detected else str(root),
         )
 
     def _threads(self) -> tuple[list[dict[str, Any]], str]:

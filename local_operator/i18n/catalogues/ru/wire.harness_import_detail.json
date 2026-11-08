@@ -1,0 +1,5 @@
+{
+  "wire.harness_import_detail.omp_missing": "каталог агента omp не найден",
+  "wire.harness_import_detail.claude_missing": "хранилище Claude не найдено в {path}",
+  "wire.harness_import_detail.codex_missing": "хранилище Codex не найдено в {path}"
+}

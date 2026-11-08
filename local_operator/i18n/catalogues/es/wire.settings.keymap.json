@@ -1,0 +1,12 @@
+{
+  "wire.settings.keymap.new_session.label": "Nueva sesión",
+  "wire.settings.keymap.new_session.help": "Inicia una conversación nueva, igual que /new.",
+  "wire.settings.keymap.resume.label": "Reanudar una sesión",
+  "wire.settings.keymap.resume.help": "Abre el selector de conversaciones recientes, igual que /resume.",
+  "wire.settings.keymap.quick_send.label": "Envío rápido",
+  "wire.settings.keymap.quick_send.help": "Abre un compositor pequeño sobre otras aplicaciones; escribe a la jefa de gabinete.",
+  "wire.settings.keymap.push_to_talk.label": "Pulsar para hablar",
+  "wire.settings.keymap.push_to_talk.help": "Mantén pulsada la tecla para dictar (escritorio); suelta para detener.",
+  "wire.settings.keymap.start_recording.label": "Iniciar grabación",
+  "wire.settings.keymap.start_recording.help": "Inicia la grabación de voz a texto en la ventana de escritorio."
+}

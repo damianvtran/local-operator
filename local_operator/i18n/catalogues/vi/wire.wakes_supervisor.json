@@ -1,0 +1,3 @@
+{
+  "wire.wakes_supervisor.shared_unit_mismatch": "kho này không phải kho mà unit dùng chung đang phục vụ; launchd không thể giám sát nó"
+}

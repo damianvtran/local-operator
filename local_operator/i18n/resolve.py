@@ -404,6 +404,28 @@ _LANGUAGE_NAMES = {
 }
 
 
+#: Each supported locale's OWN name in its OWN script (autoglossonym).
+#:
+#: WHY NOT A TRANSLATED CATALOGUE KEY: a language's native name is data, not
+#: prose — "Français" is "Français" in every interface language — and it is
+#: what a language picker should show so a user stranded in a language they
+#: cannot read can still recognise theirs. `/language` receipts used to name the
+#: language with :func:`language_name` (English), which put an English word in
+#: the middle of a localized sentence ("langue : fr enregistrée (French)").
+#: Mirrors `native` in `i18n/languages.json`; `tests/unit/i18n` pins the two so
+#: a locale added to the manifest cannot be missing here.
+_NATIVE_NAMES = {
+    "en": "English",
+    "fr": "Français",
+    "es": "Español",
+    "zh-CN": "简体中文",
+    "ru": "Русский",
+    "vi": "Tiếng Việt",
+    "ur": "اردو",
+    "hi": "हिन्दी",
+}
+
+
 def locale_direction(locale: str | None) -> str:
     """Recognized text direction, not permission to render or mirror a client.
 
@@ -420,6 +442,15 @@ def locale_direction(locale: str | None) -> str:
 def language_name(locale: str) -> str:
     """The English display name for a supported locale (falls back to ``en``)."""
     return _LANGUAGE_NAMES.get(locale, _LANGUAGE_NAMES["en"])
+
+
+def language_native_name(locale: str) -> str:
+    """A supported locale's name in its own language (falls back to English).
+
+    Display-only data for receipts and pickers; never an identifier — the tag
+    (`fr`, `zh-CN`) stays the token anything compares or stores.
+    """
+    return _NATIVE_NAMES.get(locale, _NATIVE_NAMES["en"])
 
 
 def preferred_language_line(

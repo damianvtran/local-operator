@@ -1,0 +1,13 @@
+{
+  "wire.voice_availability.radient_signed_in": "Sesión iniciada en Radient.",
+  "wire.voice_availability.radient_signed_out": "No has iniciado sesión en Radient.",
+  "wire.voice_availability.elevenlabs_stored": "Hay una clave de API de ElevenLabs guardada.",
+  "wire.voice_availability.elevenlabs_missing": "No hay ninguna clave de API de ElevenLabs guardada.",
+  "wire.voice_availability.openai_stored": "Hay una clave de API de OpenAI guardada.",
+  "wire.voice_availability.openai_missing": "No hay ninguna clave de API de OpenAI guardada.",
+  "wire.voice_availability.no_tts_provider": "No hay ningún proveedor de texto a voz disponible: inicia sesión en Radient o guarda una clave de API de ElevenLabs o de OpenAI.",
+  "wire.voice_availability.fal_stored": "Hay una clave de FAL guardada.",
+  "wire.voice_availability.fal_missing": "No hay ninguna clave de FAL guardada.",
+  "wire.voice_availability.route_available": "Disponible.",
+  "wire.voice_availability.route_unavailable": "No disponible."
+}

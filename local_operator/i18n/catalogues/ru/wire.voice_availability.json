@@ -1,0 +1,13 @@
+{
+  "wire.voice_availability.radient_signed_in": "Вход в Radient выполнен.",
+  "wire.voice_availability.radient_signed_out": "Вход в Radient не выполнен.",
+  "wire.voice_availability.elevenlabs_stored": "Ключ API ElevenLabs сохранён.",
+  "wire.voice_availability.elevenlabs_missing": "Ключ API ElevenLabs не сохранён.",
+  "wire.voice_availability.openai_stored": "Ключ API OpenAI сохранён.",
+  "wire.voice_availability.openai_missing": "Ключ API OpenAI не сохранён.",
+  "wire.voice_availability.no_tts_provider": "Нет доступного провайдера преобразования текста в речь: войдите в Radient или сохраните ключ API ElevenLabs или OpenAI.",
+  "wire.voice_availability.fal_stored": "Ключ FAL сохранён.",
+  "wire.voice_availability.fal_missing": "Ключ FAL не сохранён.",
+  "wire.voice_availability.route_available": "Доступно.",
+  "wire.voice_availability.route_unavailable": "Недоступно."
+}
