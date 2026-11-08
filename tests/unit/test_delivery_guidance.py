@@ -41,10 +41,19 @@ def _fields(**overrides):
 # The coder's `WIDE:` -> full-suite.yml dispatch clause then measured 2616.
 # The PR CI wording also changed to "runs only fast guards"; the old "runs no
 # unit tests" was false once the guards job ran ~984 guard tests per code PR.
+# The merge gate (2026-11-08) replaced "never ask CI for the full suite" in
+# coder/manager/reviewer/qa-tester with the rule that actually holds `main`
+# green: the suite runs ONCE at a labeled-PR merge gate, a red gate blocks the
+# merge, and a push re-arms it. Measured with `len(body.split('---',2)[2])`:
+# coder 2782, manager 3726, reviewer 3655, qa-tester 2694 — so coder +132,
+# manager +126 and reviewer +5 of headroom, after compressing the lease
+# paragraph (the coder's pinned `MINOR/NIT never force another round` sentence
+# stays: a test asserts it). Trimming here would mean dropping a merge
+# invariant to keep a budget, which is the wrong trade.
 BUDGETS = {
-    "coder": 2650,
-    "reviewer": 3650,
-    "manager": 3600,
+    "coder": 2800,
+    "reviewer": 3660,
+    "manager": 3750,
     "designer": 5650,
     "ux-reviewer": 4650,
     "aida": 8000,
@@ -101,7 +110,13 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
     # lease and CI paragraphs; 12199 -> 12280 measured with `len(read_text())`):
     # without it "no local full suite" reads as forbidding the one sanctioned
     # full-suite dispatch that `make test-affected` asks for on infra changes.
-    assert len(policy) < 12300
+    #
+    # Raised to 12600 for the merge gate (+260 measured with `len(read_text())`,
+    # 12280 -> 12540): "no local full suite" had become the whole rule, and the
+    # rule that actually holds the main branch green is that the suite runs once
+    # at a labeled-PR merge gate, a red gate blocks the merge, and a push
+    # re-arms it with `make merge-gate PR=<n>`. Trim prose, not that invariant.
+    assert len(policy) < 12600
 
 
 def test_root_instructions_link_detail_instead_of_duplicating_it():

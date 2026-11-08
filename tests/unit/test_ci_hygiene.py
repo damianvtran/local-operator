@@ -53,10 +53,11 @@ from scripts import check_serial_controls, ci_scope, run_bounded, shard_tests
 REPO = Path(__file__).resolve().parents[2]
 CI_YML = REPO / ".github" / "workflows" / "ci.yml"
 #: The unit suites (`test`, `coverage-report`, `tui-e2e`) moved here from
-#: ci.yml; it runs on `main` only. See `_ci_jobs` for how the pins follow them.
+#: ci.yml; it runs on `main` plus the merge gate's `labeled` pull request. See
+#: `_ci_jobs` for how the pins follow them.
 FULL_SUITE_YML = REPO / ".github" / "workflows" / "full-suite.yml"
 #: Jobs that live in full-suite.yml, not ci.yml. `changes` is in both.
-FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "report"})
+FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "report", "merge-gate"})
 PYPROJECT = REPO / "pyproject.toml"
 MAKEFILE = REPO / "Makefile"
 
@@ -3383,7 +3384,9 @@ def test_agents_doc_states_the_check_count_a_release_bump_pr_runs() -> None:
     """
     scope = _scope()
     bump = scope.classify(["pyproject.toml"], VERSION_BUMP_DIFF)
-    # ci.yml's rows only: full-suite.yml never runs on a pull request.
+    # ci.yml's rows only: the PR check list is `CI Gate`; the full suite runs
+    # at the merge gate (`Merge gate (full suite)`), which a version-only bump
+    # PR never labels.
     pr_jobs = set(_pr_jobs())
     ci_rows = [
         job for job, verdict in scope.job_plan(bump).items() if verdict == "run" and job in pr_jobs
@@ -3430,22 +3433,38 @@ def test_shard_plugin_bootstrap_does_not_export_a_cwd_pythonpath():
     assert "PYTHONPATH=" not in run
 
 
-# --- slim PR CI: the unit suites live on `main`, PRs keep fast gates --------
+# --- slim PR CI: the unit suites run at the merge gate ----------------------
 #
 # The PR path dropped `test`, `coverage-report` and `tui-e2e` (89% of its
 # runner time, measured 2026-10-24..11-07) in favour of targeted local
-# evidence (`scripts/affected_tests.py`) plus a `guards` job; the full suite
-# runs post-merge/nightly in full-suite.yml and files a `ci-main-red` issue.
-# These pins keep each half of that bargain from eroding silently.
+# evidence (`scripts/affected_tests.py`) plus a `guards` job. The full suite
+# then runs ONCE, at the merge gate (`pull_request: [labeled]`), and
+# post-merge/nightly on `main` (which files a `ci-main-red` issue). These pins
+# keep each half of that bargain from eroding silently.
 
 
 def test_pull_requests_do_not_run_the_unit_suites() -> None:
-    """The moved jobs exist ONLY in full-suite.yml, which never runs on a PR."""
+    """The moved jobs exist ONLY in full-suite.yml, and run on a PR only when
+    the merge gate asks for them.
+
+    The bargain has two halves: review rounds stay cheap (no unit matrix on
+    `opened`/`synchronize`), and `main` cannot go without the full suite. Both
+    are pinned here — the trigger list is what keeps the first, and the
+    aggregate (`test_merge_gate_aggregates_every_full_suite_job`) is what keeps
+    the second from being a red pipeline reaching `main` through the label.
+    """
     pr_jobs = _pr_jobs()
     assert not ({"test", "coverage-report", "tui-e2e"} & set(pr_jobs)), sorted(pr_jobs)
     full = yaml.safe_load(FULL_SUITE_YML.read_text())
     triggers = full.get("on", full.get(True))
-    assert "pull_request" not in triggers and "pull_request_target" not in triggers
+    # `labeled` ONLY: `opened`, `synchronize` and `reopened` are the three that
+    # would put the matrix back on every push, so they are refused by name.
+    assert triggers["pull_request"] == {"types": ["labeled"]}, (
+        "full-suite.yml's pull_request trigger widened: the full suite is a "
+        "merge-gate run, not a per-push one "
+        f"(pull_request={triggers.get('pull_request')!r})"
+    )
+    assert "pull_request_target" not in triggers
     assert triggers["push"]["branches"] == ["main"]
     assert triggers["schedule"] and "workflow_dispatch" in triggers
     assert set(full["jobs"]) == FULL_SUITE_JOBS | {"changes"}
@@ -3453,6 +3472,100 @@ def test_pull_requests_do_not_run_the_unit_suites() -> None:
         needs = job.get("needs") or []
         needs = [needs] if isinstance(needs, str) else needs
         assert not (set(needs) & FULL_SUITE_JOBS), f"a PR job still needs a moved job: {needs}"
+
+
+# --- the merge gate: the full suite runs ONCE, for a labeled PR ------------
+#
+# Review rounds must not pay for the full suite, and a red pipeline must never
+# reach `main`. Merge queue is not available to this repository (user-owned,
+# so `enableMergeQueue` does not exist and `repository.mergeQueue` is null), so
+# the gate is a `labeled`-triggered run plus one required aggregate check. The
+# pins below keep the trigger narrow, the aggregate unskippable, and the re-arm
+# ritual present: each is a way the gate could be made to *look* green.
+
+
+def test_merge_gate_aggregates_every_full_suite_job() -> None:
+    """One stable required name, `always()`, PR-only, over every suite job.
+
+    `needs` is derived, not listed: a new suite job that the aggregate does not
+    wait on is a job that can go red while the required check stays green —
+    the whole defect this gate exists to prevent. `report` is the one
+    exclusion, and it is structural: it is the `ci-main-red` issue filer, it
+    acts only on `refs/heads/main`, and making the PR gate wait on it would put
+    an issue-writing job on the merge path.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    gate = jobs["merge-gate"]
+    assert gate["name"] == "Merge gate (full suite)", (
+        f"the required check name drifted to {gate['name']!r}: branch protection "
+        "names this exact string, and a rename stops gating silently"
+    )
+    assert gate["if"] == "always() && github.event_name == 'pull_request'", (
+        "the aggregate must always report on the merge-gate event and never on "
+        f"push/schedule/dispatch (if: {gate['if']!r})"
+    )
+    assert set(gate["needs"]) == set(jobs) - {"merge-gate", "report"}, (
+        "merge-gate must need every job that can go red, or a red suite passes "
+        f"it (needs={gate['needs']!r}, jobs={sorted(jobs)!r})"
+    )
+    assert not gate.get("continue-on-error"), (
+        "continue-on-error makes a required check report success for a red run"
+    )
+    run = gate["steps"][-1]["run"]
+    assert '"failure"' in run and '"cancelled"' in run and "exit 1" in run, (
+        "the aggregate must fail on a failed or cancelled need"
+    )
+    assert '"skipped"' not in run, (
+        "a classifier skip must pass the gate: a docs-only head legitimately "
+        "skips the matrix and must still be mergeable"
+    )
+
+
+def test_no_merge_gate_job_is_conditional_on_the_label_name() -> None:
+    """Hostile case: GitHub counts `skipped` as a passed required check.
+
+    A job whose `if:` read the label would report `skipped` on a run started by
+    ANY OTHER label, and a red PR would then merge on a check that never ran.
+    So the only event condition allowed in this workflow is the event NAME
+    (there is no other PR trigger for it to be true under), and no job — least
+    of all one in the gate's `needs` — may name the label.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    for job_id, job in jobs.items():
+        condition = str(job.get("if") or "")
+        assert "labels" not in condition and "ready-to-merge" not in condition, (
+            f"full-suite `{job_id}` tests the pull-request label in its `if:` "
+            f"({condition!r}). A label-gated job reports `skipped` on a run "
+            "started by another label, and `skipped` satisfies a required "
+            "status check — a red PR would merge"
+        )
+    assert jobs["merge-gate"]["if"].count("github.event_name") == 1
+
+
+def test_the_makefile_rearms_the_merge_gate_with_the_label_ritual() -> None:
+    """Hostile case: a push AFTER the gate leaves the check on the old head.
+
+    The required check is then unreported on the new head and the merge is
+    blocked — the intended block, but it has to be exitable by an agent with no
+    UI access and no way to re-point a check at a SHA. Removing and re-adding
+    the label is that exit, so the target is pinned like any other gate.
+    """
+    makefile = MAKEFILE.read_text()
+    assert re.search(r"^merge-gate: ##", makefile, re.M), (
+        "`make merge-gate PR=<n>` is gone: after a push the required check "
+        "sits in Expected forever with no documented way out"
+    )
+    recipe = makefile.split("merge-gate: ##", 1)[1][:2000]
+    for needle in (
+        "--remove-label ready-to-merge",
+        "--add-label ready-to-merge",
+        "gh label create ready-to-merge",
+        "gh run watch",
+        "gh pr checks",
+        "PR=<number>",
+    ):
+        assert needle in recipe, f"the merge-gate ritual lost {needle!r}"
+
 
 
 def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
@@ -3470,7 +3583,10 @@ def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
     report = full["jobs"]["report"]
     assert report["if"] == "always()"
     assert report["permissions"] == {"issues": "write"}
-    assert set(report["needs"]) == set(full["jobs"]) - {"report"}
+    # `merge-gate` is excluded deliberately: it only schedules on a pull
+    # request, so on `main` it is always skipped, and the issue filer is the
+    # aggregate that narrates main's health.
+    assert set(report["needs"]) == set(full["jobs"]) - {"report", "merge-gate"}
     run = report["steps"][0]["run"]
     assert (
         'if [ "$GITHUB_REF" != "refs/heads/main" ]' in run

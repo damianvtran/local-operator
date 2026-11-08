@@ -15,7 +15,7 @@
 #
 
 # Declare all targets as phony (not representing files)
-.PHONY: server dev-server cli openapi test test-affected coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
+.PHONY: server dev-server cli openapi test test-affected merge-gate coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
 
 # Default target when running 'make' without arguments
 .DEFAULT_GOAL := help
@@ -148,6 +148,40 @@ check-changed: ## Run the CI gates this branch's diff can affect
 test-affected: ## Run the tests this branch's diff affects; print PR evidence
 	@base="$$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse origin/main)"; \
 	.venv/bin/python scripts/affected_tests.py --since "$$base" --python .venv/bin/python --evidence
+
+# RE-ARM THE MERGE GATE on PR=<number>.
+#
+# The full suite runs on a pull request ONLY for a `labeled` event, because
+# running it per push is the cost this repository paid for years. That makes
+# the gate's check a property of the SHA it ran on: any push AFTER the gate
+# leaves `Merge gate (full suite)` unreported on the new head, where it sits in
+# "Expected" and blocks the merge — correctly, since nothing verified that
+# head. Re-dispatching the workflow by hand does not fix it either (a
+# `workflow_dispatch` run reports no `pull_request` checks). Removing and
+# re-adding the label is the one ritual that always produces a fresh run on the
+# current head, so it is the documented escape from that block — and it is the
+# REASON no `if:` in full-suite.yml may test the label's NAME: a job made
+# conditional on a label reports `skipped` on runs started by another label,
+# and GitHub counts `skipped` as a passed required check.
+#
+# Prints the triggered run and how to follow it.
+merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
+	@if [ -z "$(PR)" ]; then echo "usage: make merge-gate PR=<number>" >&2; exit 2; fi
+	@gh label create ready-to-merge --color 0E8A16 \
+	  --description "Run the full-suite merge gate on this PR" 2>/dev/null || true
+	@gh pr edit $(PR) --remove-label ready-to-merge >/dev/null 2>&1 || true
+	@sleep 3
+	@gh pr edit $(PR) --add-label ready-to-merge >/dev/null
+	@head="$$(gh pr view $(PR) --json headRefName --jq .headRefName)"; \
+	run=""; \
+	for i in 1 2 3 4 5 6; do \
+	  run="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" --limit 1 --json databaseId,url --jq '.[0] | "\(.databaseId) \(.url)"' 2>/dev/null)"; \
+	  [ -n "$$run" ] && break; sleep 5; \
+	done; \
+	echo "re-armed the merge gate on PR #$(PR) ($$head)"; \
+	echo "  run:    $${run#* }"; \
+	echo "  follow: gh run watch $${run%% *} --exit-status"; \
+	echo "  checks: gh pr checks $(PR)"
 
 # Run type checking with pyright
 #
