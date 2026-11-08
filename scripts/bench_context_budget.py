@@ -1863,7 +1863,25 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # The base sat 25 under the old ceiling, i.e. inside the band rather than below
 # it, so the ceiling is re-derived the documented way — this tree's own
 # measurement plus the 55 band — and the next branch inherits 35,111.
-BUDGET_BILLED_TOKENS = 35_111
+# RAISED 35,111 -> 35,287 for TEAM BRIDGE DISCOVERABILITY: the coordination
+# surface had no model-facing text outside one tenant's skills, so an agent asked
+# to coordinate with a colleague found Slack configured and the bridge absent
+# from every prompt it reads. Measured with THIS script, base re-measured over
+# the branch's own parent by stashing the six changed product files:
+#   base (origin/main 3d1b735d0e1 + release 2b8c19d82db) 97,525 chars = ~35,081 billed
+#   head (this branch)                                  97,945 chars = ~35,232 billed
+#   delta                                                  +420 chars = ~+151
+# The +420 is EXACTLY the two start-level strings this branch adds, nowhere
+# else: the ``system.md`` ``has_bridge`` clause (+223, the coordination surface
+# and the one-channel rule) and the ``bridge`` tool description (+197, the same
+# rule where a call is actually made). The guide's own description rewrite
+# (+24) is NOT in this number — the bench renders a fixed guide block and never
+# selects one — but it is turn-level cost when that guide is listed, and the
+# recommendation rule line is unchanged. The base sat 30 under the old ceiling,
+# i.e. inside the band rather than below it, so the ceiling is re-derived the
+# documented way — this tree's own measurement plus the 55 band (35,232 + 55) —
+# and the next branch inherits 35,287.
+BUDGET_BILLED_TOKENS = 35_287
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
