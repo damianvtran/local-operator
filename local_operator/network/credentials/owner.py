@@ -1963,7 +1963,6 @@ class MeshCredentialBroker:
         if credential_id is None:
             return {"kind": "ack", "key": key, "action": "noted"}
         material = self._login_material(credential_id)
-        slot = (credential_id, material)
         now = time.monotonic()
         # ``None`` MEANS "NEVER REFRESHED", and it is checked as such (review round 3,
         # F1). A ``0.0`` default read as "refreshed at clock zero", and ``monotonic``
@@ -1971,6 +1970,7 @@ class MeshCredentialBroker:
         # runner, a laptop just after a reboot — the FIRST report was coalesced and
         # nothing was refreshed. The same ``is not None`` guard the block arm uses.
         with self._report_lock:
+            slot = self._report_slot(credential_id, material)
             last = self._report_refreshed.get(slot)
             if last is not None and now - last < REPORT_REFRESH_MIN_INTERVAL_S:
                 return {"kind": "ack", "key": key, "action": "coalesced"}
@@ -2093,19 +2093,59 @@ class MeshCredentialBroker:
         bearer and ``updated_at`` both move on a rotation, so keying on either would
         turn every report into a fresh window and drop the bound §2.3 exists for.
 
-        ``""`` means "sign-in unknown" — an MCP row (whose refresh also writes through
-        ``upsert``, so its incarnation cannot attest), a row written before the column
-        existed, or a store that cannot answer. The window is then per row, exactly as
-        it was before this fix. Nothing secret is read: the accessor answers from the
-        bookkeeping column, not from the credential material.
+        ``""`` means "the sign-in could not be read THIS time" — a store that raised
+        (the accessor answers ``None`` on any ``sqlite3.Error``), a row written before
+        the column existed, or an MCP row (whose refresh also writes through
+        ``upsert``, so its incarnation can never attest). It is NOT a third sign-in:
+        the row has one at a time, and :meth:`_report_slot` folds an unreadable read
+        back into the window the row already has, so one flapped read cannot earn a
+        second probe inside one window (#3616 review M1). Nothing secret is read: the
+        accessor answers from the bookkeeping column, not from the credential material.
         """
-        read = getattr(self._auth_store_instance(), "native_login_incarnation", None)
-        if not callable(read):
-            return ""
         try:
+            store = self._auth_store_instance()
+            read = getattr(store, "native_login_incarnation", None)
+            if not callable(read):
+                return ""
             return str(read(credential_id) or "")
         except Exception:  # noqa: BLE001 — an unknown sign-in is not a new one
             return ""
+
+    def _report_slot(self, credential_id: int, material: str) -> tuple[int, str]:
+        """The ONE window entry a report for this row belongs to (#3616 review M1).
+
+        ``material == ""`` is a failed READ of the row's sign-in, not a sign-in of
+        its own — nothing about the credential changed between two reads of the same
+        row. Treated as a third key it becomes a bug: an unreadable read takes a slot
+        the next readable read then sweeps, and the following report is inside a
+        window that was opened twice, so it probes the IdP again inside
+        ``REPORT_REFRESH_MIN_INTERVAL_S``. Both directions are handled here, because a
+        flap can land on either side of the first report of a window:
+
+        * a read that FAILED joins the newest entry the row already has, and never
+          evicts a named sign-in;
+        * a read that SUCCEEDS and finds only the placeholder entry RELABELS that
+          entry (keeping its timestamp) instead of starting a second window — the
+          placeholder was this same sign-in, read before the store could name it.
+
+        So a flap costs at most one window, which is what the per-row key this
+        replaced always gave. Caller holds ``_report_lock``: this both reads and
+        rewrites the map.
+        """
+        mine = {k: v for k, v in self._report_refreshed.items() if k[0] == credential_id}
+        placeholder = (credential_id, "")
+        if not material:
+            if not mine:
+                return placeholder
+            return max(mine, key=lambda k: mine[k])
+        if list(mine) == [placeholder]:
+            # RELABEL IN PLACE. Dropping the placeholder and stamping the named entry
+            # fresh would give this window a second life; carrying the stamp over is
+            # what makes the two reads one window.
+            stamp = mine[placeholder]
+            del self._report_refreshed[placeholder]
+            self._report_refreshed[(credential_id, material)] = stamp
+        return (credential_id, material)
 
     def _stored_bearer(self, credential_id: int) -> str:
         """The bearer the owner's row holds right now, ``""`` when unreadable.

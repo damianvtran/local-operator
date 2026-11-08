@@ -755,13 +755,21 @@ def test_a_repeated_401_report_inside_the_window_costs_no_second_post(
     assert len(idp.posts) == 2, idp.posts
 
 
-def _resign_in_the_row(owner: Any) -> int:
+def _resign_in_the_row(owner: Any, idp: RotatingIdP) -> int:
     """The operator signing in again HERE, onto the same row (#3616 QA follow-up).
 
     ``upsert_credential`` is the interactive write, and the identity key does not
     change — so the row keeps its ID while the payload is replaced wholesale and the
     store mints a fresh ``login_incarnation``. The reused ID is exactly why a report
     window keyed on it spanned two different logins.
+
+    THE REFRESH TOKEN IS THE IDP'S LIVE ONE (#3616 review M2). Writing a token the IdP
+    will not honour made the next report's probe fail with ``invalid_grant``, so the
+    stored bearer never moved — and a window keyed on the BEARER then agreed with the
+    incarnation-keyed window, which made
+    ``test_two_401s_on_one_new_bearer_still_produce_exactly_one_report`` pass for the
+    one implementation it exists to reject. With the live token the probe really
+    rotates, so the two keyings differ.
     """
     row_id = int(owner.row.id)
     owner.auth.upsert_credential(
@@ -772,7 +780,7 @@ def _resign_in_the_row(owner: Any) -> int:
             # 401 on material minted after the previous report was answered.
             "access": "access-resigned",
             "expires": int(time.time() * 1000) + 3_600_000,
-            "refresh": "refresh-resigned",
+            "refresh": idp.current_refresh,
             "email": "owner@example.test",
         },
     )
@@ -798,11 +806,17 @@ def test_a_401_after_the_owner_signed_that_row_in_again_is_reported_promptly(
     assert first["action"] == "refreshed", first
     posts_before = len(idp.posts)
 
-    row_id = _resign_in_the_row(owner)
+    row_id = _resign_in_the_row(owner, idp)
+    live_refresh = idp.current_refresh
     again = _report(owner, BORROWER_DEVICE, "unauthorized", credential_id=row_id)
 
     assert again["action"] != "coalesced", again
     assert len(idp.posts) == posts_before + 1, idp.posts
+    # THE PROBE REALLY ROTATED (#3616 review M2): the reply is `refreshed` because the
+    # stored bearer moved, which is what lets the bearer-keyed window be told apart
+    # from this one in the test below.
+    assert again["action"] == "refreshed", again
+    assert idp.current_refresh != live_refresh, "the probe did not rotate the token"
 
 
 def test_two_401s_on_one_new_bearer_still_produce_exactly_one_report(
@@ -817,7 +831,7 @@ def test_two_401s_on_one_new_bearer_still_produce_exactly_one_report(
     """
     _borrow_live(owner, idp)
     _report(owner, BORROWER_DEVICE, "unauthorized")
-    row_id = _resign_in_the_row(owner)
+    row_id = _resign_in_the_row(owner, idp)
     posts_before = len(idp.posts)
 
     first = _report(owner, BORROWER_DEVICE, "unauthorized", credential_id=row_id)
@@ -828,6 +842,44 @@ def test_two_401s_on_one_new_bearer_still_produce_exactly_one_report(
     assert second["action"] == "coalesced", second
     assert another["action"] == "coalesced", another
     assert len(idp.posts) == posts_before + 1, idp.posts
+
+
+@pytest.mark.parametrize(
+    "blind_read", [1, 2], ids=["first-report-unreadable", "second-report-unreadable"]
+)
+def test_an_unreadable_sign_in_does_not_earn_a_second_probe(
+    owner: Any, idp: RotatingIdP, monkeypatch: pytest.MonkeyPatch, blind_read: int
+) -> None:
+    """#3616 review M1: ONE flapped read must not open a second window.
+
+    ``native_login_incarnation`` answers ``None`` on any ``sqlite3.Error``, so a
+    single transient failure reads as an unknown sign-in. Held as a third KEY that is
+    a hole the per-row key this replaced never had: the placeholder slot is stamped,
+    the next read names the sign-in and sweeps it, and the report after that probes
+    the owner's IdP again INSIDE the window the per-row key would have coalesced.
+    Both sides of the first report are covered, because a flap can land on either.
+
+    Not peer-triggerable — no frame can make this device's sqlite read fail — which is
+    why it is a bound to keep rather than an exploit to fix.
+    """
+    _borrow_live(owner, idp)
+    truthful = owner.auth.native_login_incarnation
+    reads = {"n": 0}
+
+    def flapping(credential_id: int) -> str | None:
+        reads["n"] += 1
+        return None if reads["n"] == blind_read else truthful(credential_id)
+
+    monkeypatch.setattr(owner.auth, "native_login_incarnation", flapping)
+
+    first = _report(owner, BORROWER_DEVICE, "unauthorized")
+    posts_after_first = len(idp.posts)
+    second = _report(owner, BORROWER_DEVICE, "unauthorized")
+
+    assert first["action"] == "refreshed", first
+    assert second["action"] == "coalesced", second
+    assert len(idp.posts) == posts_after_first, "a read flap bought a second probe"
+    assert reads["n"] == 2, "the arm should read the sign-in once per report"
 
 
 def test_a_dead_grant_on_the_forced_refresh_answers_the_relogin_remedy_once(

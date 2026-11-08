@@ -230,3 +230,65 @@ async def test_a_401_after_the_owner_signed_that_row_in_again_reaches_the_owner(
     app = OperatorApp(lambda: None)  # type: ignore[arg-type]
     app._session = MagicMock(model_label=f"{STUB_PROVIDER}/claude-opus-5-5")  # noqa: SLF001
     assert app._with_recovery_hint(text) == text  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_a_401_after_the_owner_signed_that_row_in_again_can_still_serve(
+    borrowed: Any, idp: Any
+) -> None:
+    """#3616 review N2: the OTHER half of "reported promptly" — the probe works.
+
+    The cell above asserts the owner's REFUSAL after a re-sign-in. This one asserts
+    the outcome the report exists for: the operator signs in again, the next 401 on a
+    borrowed bearer is reported (not coalesced), the owner's forced probe really
+    rotates the token, the borrower re-borrows the fresh bearer and the turn SUCCEEDS
+    with no error text at all. Coalesced, the borrower keeps the refused bearer, the
+    rotation runs out and the turn fails — so this cell fails on the pre-fix keying
+    for the opposite reason to the one above, which is what makes the pair cover both
+    answers rather than one.
+    """
+    owner = borrowed.owner
+    owner.auth.delete_credential(borrowed.row_b.id)  # A is the only login
+    # A DEAD GRANT FIRST, so turn one really fails and the hold is the `grant_invalid`
+    # kind — the only kind the owner's next lend clears (#3616 QA), which is what lets
+    # the re-signed-in row be lent again inside the hold's window.
+    owner.auth.upsert_credential(
+        STUB_PROVIDER,
+        {
+            "type": "oauth",
+            "access": "bearer-a",
+            "expires": int(time.time() * 1000) + 3_600_000,
+            "refresh": "refresh-0",
+            "email": "owner@example.test",
+        },
+    )
+    idp.invalid = True
+    stub = _Refuses401("bearer-a", "bearer-a2")
+    with pytest.raises(ProviderError):
+        await _turn(borrowed.store, stub, STUB_PROVIDER, "sess-401")
+
+    # THE OPERATOR SIGNS IN AGAIN, and the provider's grant is healthy afterwards:
+    # that is the state a re-sign-in is supposed to produce, and the state the probe
+    # must be able to turn into a served turn.
+    idp.invalid = False
+    owner.auth.upsert_credential(
+        STUB_PROVIDER,
+        {
+            "type": "oauth",
+            "access": "bearer-a2",
+            "expires": int(time.time() * 1000) + 3_600_000,
+            "refresh": idp.current_refresh,
+            "email": "owner@example.test",
+        },
+    )
+    posts_before = len(idp.posts)
+    stub.seen.clear()
+
+    events = await _turn(borrowed.store, stub, STUB_PROVIDER, "sess-401")
+
+    assert _ended(events), f"the turn after the re-sign-in never served: {events} / {stub.seen}"
+    assert len(idp.posts) == posts_before + 1, f"the owner's probe did not rotate: {idp.posts}"
+    # The re-signed-in bearer first, then the one the probe minted: the borrower went
+    # back to the owner for a new bearer instead of ending on the 401 it reported.
+    assert stub.seen[0] == "bearer-a2", stub.seen
+    assert stub.seen[-1] != "bearer-a2", stub.seen
