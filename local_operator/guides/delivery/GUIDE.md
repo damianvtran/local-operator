@@ -93,14 +93,14 @@ peer, and record it. Authorization to test is not authorization to delete.
 
 **Local test lease.** PR CI runs no unit tests; never run or request the full
 suite (#3575: ~3.7 h of rc=124 local pytest). Test the diff:
-`make test-affected` plus judged callers, neighbours, contracts;
-version/OS-sensitive changes also on the other interpreter. Post fresh-on-head
+`make test-affected` plus judged callers/neighbours/contracts;
+version/OS-sensitive: also the other interpreter. Post fresh-on-head
 `## Targeted test evidence` (SHA, commands, counts, wall time, not run + why).
-Open `ci-main-red`: fix forward; merges in that area wait.
+Open `ci-main-red`: fix forward; its area's merges wait.
 
 **CI is concurrent** with review/QA on every push. Read it once per wave,
 non-blocking, folding failures into that wave's remediation. No `--watch` or
-sleep-polling before the merge gate; at the gate
+waiting before the gate; never sleep-poll it mid-cycle; at the gate
 `CI Gate` must be green (#3575 read CI after 3 clean rounds: 4 failures,
 +2.3 h). Run omitted required surfaces bounded and record them; CI never
 replaces real-path QA. Resource holds forbid hold-class runs, not evidence.
