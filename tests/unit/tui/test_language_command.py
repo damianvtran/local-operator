@@ -116,9 +116,7 @@ def _receipt_cap(key: str) -> int:
     brief cannot drift apart on the number.
     """
     path = Path(i18n_catalogues.__file__).parent / "catalogues" / "en"
-    sidecar = json.loads(
-        (path / "wire.language_receipts.context.json").read_text(encoding="utf-8")
-    )
+    sidecar = json.loads((path / "wire.language_receipts.context.json").read_text(encoding="utf-8"))
     cap = sidecar[f"wire.language_receipts.{key}"]["maxCells"]
     assert isinstance(cap, int), (key, cap)
     return cap
