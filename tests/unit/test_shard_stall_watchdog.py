@@ -481,7 +481,7 @@ def test_the_workflow_enables_the_watchdog() -> None:
     import yaml
 
     repo = Path(__file__).resolve().parents[2]
-    jobs = yaml.safe_load((repo / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
+    jobs = yaml.safe_load((repo / ".github" / "workflows" / "full-suite.yml").read_text())["jobs"]
     env = jobs["test"].get("env") or {}
     assert env.get(watchdog.ENV_SECONDS), f"the test job does not set {watchdog.ENV_SECONDS}"
     assert float(env[watchdog.ENV_SECONDS]) > 0
@@ -1071,7 +1071,7 @@ def test_the_workflow_reports_through_the_module_not_a_raw_cat() -> None:
     import yaml
 
     repo = Path(__file__).resolve().parents[2]
-    jobs = yaml.safe_load((repo / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
+    jobs = yaml.safe_load((repo / ".github" / "workflows" / "full-suite.yml").read_text())["jobs"]
     step = next(s for s in jobs["test"]["steps"] if s.get("name") == "Print the shard stall report")
     assert "tests.shard_stall_watchdog" in step["run"]
     assert "cat " not in step["run"]
@@ -1093,7 +1093,7 @@ def test_no_ci_job_runs_both_watchdogs_in_one_process() -> None:
     import yaml
 
     repo = Path(__file__).resolve().parents[2]
-    jobs = yaml.safe_load((repo / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
+    jobs = yaml.safe_load((repo / ".github" / "workflows" / "full-suite.yml").read_text())["jobs"]
     config = tomllib.loads((repo / "pyproject.toml").read_text())
     addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
 

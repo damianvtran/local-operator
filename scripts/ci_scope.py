@@ -414,6 +414,14 @@ FLAGS = (
 
 #: job id in `ci.yml` -> the flags that gate it. Every flag here must be one of
 #: `FLAGS` and the job's `if:` must read each of them (asserted A1).
+#:
+#: `test` and `tui-e2e` (and `coverage-report` below) now live in
+#: `.github/workflows/full-suite.yml`, which runs on `main` only and carries
+#: the same `changes` job, so their gating is unchanged where they run. They
+#: stay in this map because `make check-changed` still runs them locally (the
+#: scoped pytest arms below); on a pull request their flag rows describe the
+#: local plan, not a ci.yml job. `guards` is the PR-path slice of the unit
+#: suite and takes the `unit` flag the moved matrix used.
 JOB_FLAGS: dict[str, tuple[str, ...]] = {
     "lint": ("lint",),
     "type-check": ("types",),
@@ -422,6 +430,7 @@ JOB_FLAGS: dict[str, tuple[str, ...]] = {
     "xplat-probe-linux": ("xplat",),
     "xplat-probe-windows": ("xplat",),
     "test": ("unit",),
+    "guards": ("unit",),
     "pip-audit": ("audit",),
     "tui-e2e": ("tui",),
     "cli-sanity": ("cli",),
@@ -445,6 +454,15 @@ UNGATED_JOBS: dict[str, str] = {
         "gated on the EVENT (pull_request), not on a scope flag: it must not "
         "become able to be skipped by the classifier whose output a PR could "
         "influence, and one check name per fact is the honest checks list (D12)"
+    ),
+    "ci-gate": (
+        "`if: always()` aggregate of every ci.yml job, the single required "
+        "check: it must report on every run, and it passes skipped needs, so "
+        "the classifier's skips flow through it rather than around it"
+    ),
+    "report": (
+        "full-suite.yml's `if: always()` issue filer: it exists to report a "
+        "red or green main run, so no scope flag may skip it"
     ),
     "coverage-report": (
         "no `if:` at all, `needs: test` only: GitHub's 'a skipped need skips the "
@@ -524,6 +542,9 @@ JOB_COMMANDS: dict[str, tuple[str, ...]] = {
         ".venv/bin/python -m local_operator.browser_bridge.gen_ts --check",
     ),
     "context-budget": (".venv/bin/python scripts/bench_context_budget.py --verbose",),
+    # The guard list is read from `scripts/affected_tests.py` (GUARD_TESTS),
+    # the same source ci.yml's `guards` job reads; `--run` bounds and reaps it.
+    "guards": (".venv/bin/python scripts/affected_tests.py --guards --run",),
     "test": (
         # The colour-capable environment is part of the documented gate: without
         # it the Textual pilot tests run against a NO_COLOR terminal and fail

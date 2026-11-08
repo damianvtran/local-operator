@@ -15,7 +15,7 @@
 #
 
 # Declare all targets as phony (not representing files)
-.PHONY: server dev-server cli openapi test coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
+.PHONY: server dev-server cli openapi test test-affected coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
 
 # Default target when running 'make' without arguments
 .DEFAULT_GOAL := help
@@ -139,6 +139,15 @@ check-changed: ## Run the CI gates this branch's diff can affect
 	@base="$$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse origin/main)"; \
 	echo "checking changes since $$base"; \
 	.venv/bin/python scripts/ci_scope.py --since "$$base" --run
+
+# Run the unit tests this branch's diff affects and print the PR evidence block.
+# Pull-request CI no longer runs the unit suite (it runs on `main` in
+# .github/workflows/full-suite.yml), so this is the targeted run a PR records
+# under `## Targeted test evidence`. Same merge-base rule as check-changed;
+# the selection rules and the always-on guard list live in the script.
+test-affected: ## Run the tests this branch's diff affects; print PR evidence
+	@base="$$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse origin/main)"; \
+	.venv/bin/python scripts/affected_tests.py --since "$$base" --python .venv/bin/python --evidence
 
 # Run type checking with pyright
 #
