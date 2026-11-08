@@ -4364,11 +4364,18 @@ def _flush_request_observation(
     """Serialize the queued request-final rows and price them ONCE.
 
     THE TWO MONEY FIGURES, kept separate (blueprint §2; ``cost_summary`` is
-    the ONE canonical pricer -- no second ledger): ``recorded_usd`` is the
-    receipts actually stamped, i.e. known charged money; ``estimated_usd``
-    is the same canonical table projection for rows without a stamp, so a
-    direct-route run keeps an estimate even though ``recorded_only`` alone
-    would lose it. ``missing_usage_request_ids`` names rows where NO usage
+    the ONE canonical pricer -- no second ledger): ``recorded_usd`` is known
+    charged money, which since the wire seam stamps ``estimated_usd_cost``
+    (``model.costs.stamp_record_estimate``) means a provider receipt OR a
+    record-time table estimate -- the two are both durable money and
+    ``cost_summary`` counts them in its ``recorded_only`` mode on purpose, so
+    on a direct route this field is the stamp's number, not the provider's
+    invoice. ``usd_cost is None`` on the usage, and the ``usage_coverage``
+    label on the row, are what still say "estimate, not a bill";
+    ``estimated_usd`` is the same canonical table projection across ALL rows,
+    including ones no stamp reached, so it can exceed ``recorded_usd`` and is
+    the figure that never hides an unpriced row.
+    ``missing_usage_request_ids`` names rows where NO usage
     frame arrived: unknown, NEVER a priced zero. Cache read/write and
     reasoning ride inside the usage buckets the canonical pricer already
     separates; nothing here re-adds them to input/output.

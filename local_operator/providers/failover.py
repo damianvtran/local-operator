@@ -52,6 +52,7 @@ from local_operator.harness.types import (
     StreamStartEvent,
     StreamUsageEvent,
     TextContent,
+    Usage,
     one_turn_public_text,
     one_turn_safe_log_detail,
     one_turn_scrubbed_text,
@@ -4019,6 +4020,7 @@ def _stamp_serving_spec(
     if usage is None:
         return event
     try:
+        from local_operator.model.costs import stamp_record_estimate
         from local_operator.providers.account_provenance import account_ref
         from local_operator.providers.registry import env_secret_is_oauth
         from local_operator.session.spend import inference_billing_labels
@@ -4061,6 +4063,16 @@ def _stamp_serving_spec(
                 "account_ref": ref,
             }
         )
+        # Money, at the ONE seam every provider's usage events pass through. A
+        # direct provider (DeepSeek, Anthropic, OpenAI, Gemini, Kimi, xAI) states
+        # only tokens on the wire -- only an aggregator precomputes
+        # ``usage.cost`` -- so without this the sealed turn records
+        # ``usd_cost: null`` and nothing else: indistinguishable from an
+        # unpriced call, and impossible to re-price from the record alone. See
+        # ``model.costs.stamp_record_estimate`` for the three-way contract; a
+        # receipt is never touched and an unpriced route is left alone.
+        if isinstance(stamped, Usage):
+            stamped = stamp_record_estimate(stamped, spec.provider, spec.model_id)
         return event.model_copy(update={"usage": stamped})
     except Exception:  # noqa: BLE001 — a stamp failure must not drop the event
         return event
