@@ -147,6 +147,12 @@ def test_shipped_wire_namespaces_exist() -> None:
         # English-only namespace, the `wire.host_speed` shape, so no audited
         # catalogue's hash moves; the seven locales land with their audit wave.
         "wire.guardrails",
+        # The `closed`/`retired` outcome sentences (transcript row, phone frame,
+        # desktop notice and banner body) and the phone push's count clause: two
+        # namespaces of their own so no already-audited catalogue's hash moves.
+        # Carried by all seven locales, each with its own passed ledger row.
+        "wire.outcome_notices",
+        "wire.push_alert",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

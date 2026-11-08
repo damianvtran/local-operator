@@ -1,0 +1,4 @@
+{
+  "wire.outcome_notices.closed": "Đã hoàn tất — runtime đã ngừng",
+  "wire.outcome_notices.retired": "Đã ngừng để cập nhật — một lượt đang chạy bị cắt ngang; phần đã tạo trước đó vẫn được giữ lại"
+}

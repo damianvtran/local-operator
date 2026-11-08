@@ -796,6 +796,9 @@ export type MessageParams = {
   "wire.notification_sound.title": undefined;
   "wire.notification_sound.volume.help": undefined;
   "wire.notification_sound.volume.label": undefined;
+  "wire.outcome_notices.closed": undefined;
+  "wire.outcome_notices.retired": undefined;
+  "wire.push_alert.attention_count": { "total": number; "count": string };
   "wire.radient_saver.command.badge": undefined;
   "wire.radient_saver.command.description": undefined;
   "wire.radient_saver.command.disabled": undefined;

@@ -1,0 +1,3 @@
+{
+  "wire.push_alert.attention_count": "{total, plural, one {{count} conversation vous attend} many {{count} de conversations vous attendent} other {{count} conversations vous attendent}}"
+}
