@@ -225,7 +225,8 @@ def _guest_detail(body: dict[str, Any]) -> str:
 
     ``error`` carries the command's/wrapper's stderr in the guest's command
     answer; ``message`` is what its exception handler returns instead
-    (``server/main.py:107-112``). Quoted, never paraphrased: this layer reports
+    (``execute_command``'s ``except Exception`` arm). Quoted, never
+    paraphrased: this layer reports
     what was observed, and the target's sentence is the observation.
     """
 
@@ -286,14 +287,16 @@ def answer_from_error_body(content: bytes | None) -> dict[str, Any] | None:
     ``server/main.py`` (upstream ``36a6adf4``), not assumed:
 
     * its COMMAND answer -- ``{status, output, error, returncode}`` -- which that
-      handler returns for a completed command (lines 100-105). Upstream answers
-      200 for it, so this arm is defensive rather than routine;
+      handler returns for a completed command, in ``execute_command``'s ``try``
+      body. Upstream answers 200 for it, so this arm is defensive rather than
+      routine;
     * its EXCEPTION envelope -- ``{"status": "error", "message": ...}`` -- which
-      every failure of that handler returns with status 500 (lines 107-112),
-      including its own ``subprocess.TimeoutExpired``. It carries no command
-      output at all, and answering it is the difference between a command the
-      target reported on and a session-ending channel failure: the guest's
-      deadline kills only the WRAPPER, whose shell keeps running.
+      every failure of that handler returns with status 500, from its
+      ``except Exception`` arm, ``subprocess.TimeoutExpired`` among them. It
+      carries no command output at all, and answering it is the difference
+      between a command the target reported on and a session-ending channel
+      failure: the guest's deadline kills only the WRAPPER, whose shell keeps
+      running.
 
     Anything else -- a redirect page, a reverse proxy's ``{"message": ...}`` --
     is not the guest, so it stays a channel failure, where failing the call and
@@ -329,7 +332,8 @@ def payload_for(params: RunCommandParams) -> dict[str, Any]:
 
     stdin would be the cleaner channel and is not available: ``/execute`` gives
     its child no per-request stdin at all -- upstream's handler pipes only
-    stdout and stderr (``server/main.py:98-104``) and the server's own stdin is
+    stdout and stderr (``execute_command``'s ``subprocess.run``) and the
+    server's own stdin is
     shared by every request -- so argv is the only channel this endpoint has.
     The taint is therefore removed where it can be (the command), and the
     wrapper's source, which no command can usefully match on, remains.

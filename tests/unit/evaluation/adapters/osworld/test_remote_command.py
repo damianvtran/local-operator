@@ -277,14 +277,14 @@ async def test_a_guest_error_answer_is_a_result_carrying_its_reason() -> None:
 async def test_the_guest_deadline_answer_is_a_result_and_warns_about_the_shell() -> None:
     """The body the guest really sends when ITS OWN deadline fires.
 
-    ``desktop_env/server/main.py:107-112`` (upstream ``36a6adf4``) catches every
-    exception from ``/execute`` -- ``subprocess.TimeoutExpired`` among them -- and
-    answers 500 ``{"status": "error", "message": str(e)}``. No ``output``, no
-    ``returncode``: the old filter rejected that body and the call raised, so a
-    command the TARGET reported on was still treated as a channel failure and
-    poisoned the session. It is also the same physical event as a dead wrapper --
-    the handler kills only its direct child -- so the answer carries the same
-    caution.
+    ``execute_command`` in ``desktop_env/server/main.py`` (upstream ``36a6adf4``)
+    catches every exception from ``/execute`` -- ``subprocess.TimeoutExpired``
+    among them -- and answers 500 ``{"status": "error", "message": str(e)}``. No
+    ``output``, no ``returncode``: the old filter rejected that body and the call
+    raised, so a command the TARGET reported on was still treated as a channel
+    failure and poisoned the session. It is also the same physical event as a
+    dead wrapper -- the handler kills only its direct child -- so the answer
+    carries the same caution.
     """
 
     import requests
