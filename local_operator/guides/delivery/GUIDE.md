@@ -39,7 +39,7 @@ Classify each lane at its start; record class and budget in the project.
 | Budget | <=30 min | <2 h | <=3 h impl. | 3-4 h | 8 h+, rare, reason stated |
 
 At budget, report to the delegator: elapsed, critical path, what remains,
-options. Continue only with that receipt; never overrun silently. The lane keeps
+options. Continue only with that receipt. The lane keeps
 working while a wave or CI runs.
 
 ## Preflight before expensive dispatch
@@ -70,8 +70,9 @@ shortcut (PR #156 capped hierarchy reads at 20 s over a measured 66–173 s).
 The manager (or lead coder) owns ONE PR worktree in `<repo>/.worktrees/` from
 latest origin/main, briefs its absolute path and SHA, and freezes the head while
 readers work. Reviewer/QA/UX/design/copy/i18n reuse it read-only every round
-(`git checkout --detach <head>`, targeted tests, shared deps): no clone,
-install or new worktree, and no full-tree copies into scratch. Python:
+at the briefed head (targeted tests, shared deps): no clone, install or new
+worktree, and no full-tree copies into scratch. Never move it off that head;
+base/before reads use `git show <base>:<path>` or `git archive` into scratch. Python:
 `PYTHONPATH=<worktree>` with the primary `.venv`; `python -c 'import
 local_operator;print(local_operator.__file__)'` must print a worktree path.
 Exception, with a manager lease: a conflicting commit author or an isolated
@@ -166,8 +167,8 @@ never waives correctness, security or regression risk.
   or repro a "might" is a lead, never BLOCKER/MAJOR.
 - **Waves.** Every applicable stream (code, real-path QA, design, UX, copy,
   security) starts round 1 on the SAME pushed head and completes its full
-  in-scope surface before remediation (a stream joining at round 2 forced a
-  round 3: +70 min); early BLOCKER alerts say incomplete. ONE ledger, ONE
+  in-scope surface before remediation (a round-2 joiner forced a round 3:
+  +70 min); early BLOCKER alerts say incomplete. ONE ledger, ONE
   remediation commit, ONE follow-up wave. Target <= 2 waves; a third needs a
   named open BLOCKER/MAJOR.
 - **Clean is terminal.** Fold accepted MINOR/NIT into the majors' commit or
