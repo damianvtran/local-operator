@@ -155,8 +155,10 @@ def test_date_substitution_one_word_opaque_high(home: Path) -> None:
     assert any("opaque" in r for r in verdict.reasons)
 
 
-def test_other_session_dir_high(home: Path) -> None:
-    assert _classify(home, "rm -rf ~/.local-operator/sessions/other").risk is Risk.HIGH
+def test_other_session_dir_critical(home: Path) -> None:
+    # Round 2 (R2-MAJOR-1): anything under ``sessions/`` outside this session's
+    # scratchpad is the guard's own evidence, so it is CRITICAL, not judged.
+    assert _classify(home, "rm -rf ~/.local-operator/sessions/other").risk is Risk.CRITICAL
 
 
 def test_state_root_child_high(home: Path) -> None:

@@ -626,6 +626,25 @@ def mark_session_origin(session_dir: Path, origin: str, **details: object) -> No
             os.utime(session_dir, (previous, previous))
     except (OSError, TypeError, ValueError):
         return
+    # The guardrail's lineage registry: the one harness-held record of who
+    # opened this session, which a session's own shell cannot write (the
+    # delete guard reads it to adopt a child's evidence and to decide whether
+    # a user row is the operator's). Every agent spawn path comes through
+    # here, so this is the single choke point. The state root is derived from
+    # the directory so a session store outside the default stays consistent.
+    if session_dir.parent.name == "sessions":
+        from local_operator.guardrails.provenance import record_lineage
+
+        opened_by = details.get("opened_by")
+        opener = opened_by.get("session") if isinstance(opened_by, dict) else None
+        parent = details.get("parent")
+        record_lineage(
+            session_dir.name,
+            origin=origin,
+            parent=parent if isinstance(parent, str) else None,
+            opener=opener if isinstance(opener, str) else None,
+            state_root=session_dir.parent.parent,
+        )
 
 
 def session_origin(session_dir: Path) -> str:

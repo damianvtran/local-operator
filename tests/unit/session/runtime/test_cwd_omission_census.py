@@ -22,6 +22,24 @@ SAFE_DEFAULTS = {
     ("guardrails/classify.py", "classify_bash"): (
         "HOME is a protected-path expansion root for static classification, not a spawn cwd"
     ),
+    # Guardrail provenance (PR 3565): pure path resolution for a ranking or
+    # evidence check. None spawns, writes session metadata or moves a cwd.
+    ("guardrails/check.py", "build_delete_case"): (
+        "HOME expands ~ in delete targets for the judge brief; static resolution only"
+    ),
+    ("guardrails/check.py", "evidence_write_verdict"): (
+        "resolves a write/edit path exactly as the file tools do (base or process cwd) "
+        "to refuse evidence writes; never a spawn cwd"
+    ),
+    ("guardrails/provenance.py", "plan_creations"): (
+        "HOME is a protected-path root for deciding what may be recorded as created"
+    ),
+    ("guardrails/evidence.py", "_b1"): (
+        "HOME expands ~ while re-resolving a cited call's creation targets"
+    ),
+    ("guardrails/evidence.py", "_names_full_path"): (
+        "HOME spells the ~-form of a target to compare against call text"
+    ),
     ("harness/loop.py", "_guardrail_outcome"): (
         "execution-time cwd for inspecting an already-planned call; "
         "does not write startup/session metadata or erase spawn omission"

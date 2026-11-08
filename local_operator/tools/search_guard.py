@@ -477,6 +477,23 @@ def lex(command: str) -> Lexed:
                 continue
             # No delimiter: keep the text so it is still read (fail closed).
             unterminated_heredoc = True
+        if (
+            ch in "|&"
+            and not quoted()
+            and (
+                (buf and buf[-1] in "<>")
+                or (ch == "&" and command[i + 1 : i + 2] == ">" and buf[-1:] != ["&"])
+            )
+        ):
+            # Part of a redirection, not an operator: ``>|`` (clobber),
+            # ``2>&1`` / ``<&3`` (fd duplication) and ``&>`` (both streams).
+            # Splitting there cut ``echo x >| FILE`` into ``echo x >`` and a
+            # stage named ``FILE``, so the file's write was never seen
+            # (guardrail round 2, Q6: "every redirection form").
+            buf.append(ch)
+            word_start = False
+            i += 1
+            continue
         if ch in ";|&\n" and not quoted():
             # Collapse runs (``&&``, ``||``) and note a single ``|`` pipe.
             j = i

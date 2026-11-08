@@ -33,9 +33,10 @@ scrutiny (opaque, empty, unknown cwd), never less.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from local_operator.tools.search_guard import (
@@ -782,7 +783,11 @@ class Target:
     #: Absolute, normalised path; for a glob/opaque word, the deepest literal
     #: directory above the unknowable part. ``None`` when nothing literal remains.
     path: str | None
-    op: str  # "delete" | "move" | "overwrite" | "clean"
+    #: ``append`` is a write that destroys nothing (``>>``, ``tee -a``,
+    #: ``sqlite3 FILE``, a copy INTO a directory). It is ranked only where the
+    #: write itself is the danger: the guard's own evidence (transcripts,
+    #: lineage, ask store, ledger) — see ``classify._evidence_reason``.
+    op: str  # "delete" | "move" | "overwrite" | "clean" | "append"
     program: str
     pattern: str | None = None
     empty: list[str] = field(default_factory=list)
@@ -807,6 +812,36 @@ class Target:
     # A judge cannot approve a root deliberately hidden for privacy. Keep this
     # distinct from ordinary opaque substitutions that can receive review.
     credential_derived: bool = False
+    #: ``git worktree remove <path>``: git itself refuses a dirty or primary
+    #: checkout unless forced, so the classifier may rank a CLEAN linked
+    #: worktree LOW (see ``provenance.clean_linked_worktree``).
+    worktree_remove: bool = False
+    #: ``--force``/``-f`` on that removal: git deletes uncommitted work, so the
+    #: clean-worktree exemption no longer holds and the ordinary ranking applies.
+    forced: bool = False
+
+
+@dataclass(frozen=True)
+class Creation:
+    """A directory a command may CREATE, for the provenance ledger.
+
+    WHY. The dangerous-delete guard ranks ``~/<name>`` and repository roots
+    HIGH, which used to refuse an agent cleaning up the rig directories and
+    worktrees it had made itself. The ledger (``guardrails/provenance.py``)
+    remembers what a session created so a later delete of exactly that can rank
+    LOW. Only literal, statically known paths qualify: a glob or substitution
+    could name anything, and a creation record must never be a guess.
+
+    ``path`` is an exact directory (``mkdir``, ``git worktree add``,
+    ``git clone``). For ``mktemp -d TEMPLATE`` the name is random, so ``path``
+    is ``None`` and ``parent``/``pattern`` describe where to look: the ledger
+    snapshots the matches before the call and records only new ones after it.
+    """
+
+    kind: str  # "mkdir" | "mktemp" | "worktree" | "clone"
+    path: str | None = None
+    parent: str | None = None
+    pattern: str | None = None
 
 
 @dataclass
@@ -904,6 +939,37 @@ class Resolution:
     #: The parser met a construct it cannot follow that MAY delete (``eval`` of a
     #: deleting word, an unbalanced quote around one): reasons, for the judge.
     opaque_reasons: list[str] = field(default_factory=list)
+    #: Directories the command may create (see :class:`Creation`). Never used
+    #: to rank THIS command; the loop records them after it runs.
+    created: list[Creation] = field(default_factory=list)
+    #: Paths checked against the guard's own evidence (``<state>/sessions/``,
+    #: ``<state>/guardrails/``) by ``classify._touch_reason``. Two shapes, by
+    #: ``Target.op``:
+    #:
+    #: * ``"write"`` — WRITE-SHAPED: every output redirection and the
+    #:   destination of a known writer (``ln``, ``rsync``, ``ditto``, ``cp``,
+    #:   ``install``, ``tar -x -C``, ``unzip -d``, ``touch``, ``truncate``,
+    #:   ``dd of=``, ``perl -i``, ``sqlite3`` without ``-readonly``). With the
+    #:   resolver's own destroyed/created targets these rank CRITICAL: they
+    #:   are how a forged child session or transcript gets planted (review
+    #:   R2-MAJOR-1, QA Q6).
+    #: * ``"touch"`` — a path-shaped word handed to a program this resolver
+    #:   neither models nor knows to be read-only (``python3 ana.py <path>``).
+    #:   What it does with the path is unknowable, so it ranks HIGH and the
+    #:   context-free judge (or the operator) can lift it — CRITICAL there
+    #:   refused routine transcript analysis with no way through (R3-MAJOR-2).
+    #:
+    #: Sources (``cp``/``rsync``/``zip``/``tar -c`` inputs) are not touches.
+    touched: list[Target] = field(default_factory=list)
+    #: Words naming a guard evidence file (``origin.json``, ``transcript.jsonl``
+    #: …) handed to a non-read-only program while the working directory is
+    #: unresolvable (``cd $(…)``, a glob or CDPATH ``cd``): it may be the one
+    #: under ``sessions/``. ``classify`` ranks each HIGH (review R6-MINOR-1).
+    blind: list[str] = field(default_factory=list)
+    #: The command may make ``**`` recursive (set by ``resolve_command`` from
+    #: the raw text; see ``_RECURSIVE_GLOB_RE``). Only then does ``**`` match
+    #: any depth (bash's default treats it as ``*``; review round 8, MAJOR-1).
+    globstar: bool = False
 
 
 def _operands(
@@ -949,6 +1015,32 @@ _SHRED_VALUE_FLAGS = frozenset({"-n", "-s", "--iterations", "--size"})
 _TRUNCATE_VALUE_FLAGS = frozenset({"-s", "-r", "--size", "--reference"})
 _MV_VALUE_FLAGS = frozenset({"-t", "-S", "--suffix", "--target-directory"})
 _RSYNC_VALUE_FLAGS = frozenset({"-e", "--rsh", "--exclude", "--include", "--filter", "-f"})
+_SQLITE_VALUE_FLAGS = frozenset({"-cmd", "-init", "-separator", "-newline", "-nullvalue"})
+_MKDIR_VALUE_FLAGS = frozenset({"-m", "--mode", "--context"})
+_MKTEMP_VALUE_FLAGS = frozenset({"-p", "--suffix"})
+_GIT_CLONE_VALUE_FLAGS = frozenset(
+    {
+        "-b",
+        "--branch",
+        "-o",
+        "--origin",
+        "--depth",
+        "--reference",
+        "-c",
+        "--config",
+        "--template",
+        "--separate-git-dir",
+        "-u",
+        "--upload-pack",
+        "--shallow-since",
+        "--shallow-exclude",
+        "--filter",
+        "-j",
+        "--jobs",
+        "--reference-if-able",
+    }
+)
+_GIT_WORKTREE_ADD_VALUE_FLAGS = frozenset({"-b", "-B", "--reason", "--orphan"})
 #: find: the predicates that make a match destructive.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: find predicates that select a SUBSET of the walk (R6).
@@ -1434,11 +1526,13 @@ class _Walker:
                     self._isolated_walk(body, depth + 1)
         herestrings: list[str] = []
         for op, raw in redirects:
-            if op in (">", ">|"):
+            if op in (">", ">|", ">>", ">&", "<>"):
                 for exp in expand_all(raw, st.env, st.home):
                     if exp.text.startswith("/dev/"):
                         continue
-                    self._add(exp, "overwrite", ">")
+                    self.result.touched.append(_target(exp, "write", op, st))
+                    if op in (">", ">|", ">>"):
+                        self._add(exp, "append" if op == ">>" else "overwrite", op)
             elif op == "<<<":
                 herestrings.append(expand(raw, st.env, st.home).text)
         # Leading prefix words and assignments.
@@ -1463,6 +1557,10 @@ class _Walker:
                     self._assign(w.text)
             return
         if name in ("cd", "pushd"):
+            if any(a.startswith("CDPATH=") for a in raw_assigns):
+                # ``CDPATH=… cd rel`` resolves ``rel`` against CDPATH, which
+                # this resolver does not model (review R6-MINOR-2).
+                st.env["CDPATH"] = OPAQUE_MARK
             self._cd(words[1:])
             return
         if name == "popd":
@@ -1485,11 +1583,23 @@ class _Walker:
             if _DELETE_WORD_RE.search(joined):
                 self.result.opaque_reasons.append("env -S runs a command string")
             return
+        # Kept for the backstop: a wrapper's own flags can carry a path
+        # (``env -Q<path>``, ``xargs -a <path>``) that peeling would hide.
+        unpeeled = words
         words, stdin_fed = _peel_wrappers(words)
         if not words:
+            self._backstop(os.path.basename(unpeeled[0].text), unpeeled, raw_assigns, set())
             return
         name = os.path.basename(words[0].text)
         args = words[1:]
+        # An inline assignment of a pager/git variable can run a program even
+        # under a read-only subcommand (``GIT_PAGER=sh git log``).
+        assigned = [a.split("=", 1)[0] for a in raw_assigns]
+        if not read_only_argv(name, [w.text for w in args], assigned=assigned):
+            exempt = self._touch(name, args)
+            # The program word too: after ``env``/``xargs`` peeling a path can
+            # BE the program (``xargs -Q <path>``).
+            self._backstop(name, unpeeled, raw_assigns, exempt)
         if name in _SHELL_C_WORDS:
             self._shell(
                 args,
@@ -1549,10 +1659,16 @@ class _Walker:
         if name in ("cp", "gcp", "install"):
             operands, _ = _operands(args, _MV_VALUE_FLAGS)
             if len(operands) >= 2:
-                self._add_overwrite_dest(operands[-1], name)
+                self._add_overwrite_dest(operands[-1], name, operands[:-1])
             return
         if name == "rsync":
             self._rsync(args)
+            return
+        if name in ("mkdir", "gmkdir"):
+            self._mkdir(args)
+            return
+        if name in ("mktemp", "gmktemp"):
+            self._mktemp(args)
             return
         if name == "git":
             self._git(args)
@@ -1564,9 +1680,17 @@ class _Walker:
             return
         if name == "tee":
             operands, flags = _operands(args)
-            if not _has_short(flags, "a") and "--append" not in flags:
-                for w in operands:
-                    self._add(w, "overwrite", name)
+            appending = _has_short(flags, "a") or "--append" in flags
+            for w in operands:
+                self._add(w, "append" if appending else "overwrite", name)
+            return
+        if name == "sqlite3":
+            # ``sqlite3 FILE [SQL]`` writes FILE whatever the SQL says; the
+            # guard's ledger is a sqlite file (R1-MAJOR-1).
+            operands, _ = _operands(args, _SQLITE_VALUE_FLAGS)
+            # ``-readonly`` opens the file read-only (R3-MAJOR-2 false positive).
+            if operands and not any(w.text == "-readonly" for w in args):
+                self._add(operands[0], "append", name)
             return
         if name in ("sed", "gsed") and _in_place_edit(name, args):
             self._in_place(name, args)
@@ -1813,8 +1937,17 @@ class _Walker:
             path = st.home
         else:
             w = operands[0]
-            if w.opaque or w.pattern is not None:
+            if w.pattern is not None:
+                # A glob cd lands somewhere the resolver cannot name; if the
+                # pattern can reach session state, that is a mention (R6-MAJOR-2).
+                self.result.touched.append(
+                    Target(path=w.text, op="touch", program="cd", pattern=w.pattern)
+                )
                 path = None
+            elif w.opaque:
+                path = None
+            elif st.env.get("CDPATH") and not w.text.startswith(("/", "~", "./", "../")):
+                path = None  # CDPATH search: unresolvable (R6-MINOR-2)
             elif w.text == "-":
                 # Bash updates OLDPWD after each cd, including cd -. Track it
                 # in the existing env snapshot so subshells/pipelines cannot
@@ -1941,7 +2074,7 @@ class _Walker:
         else:
             sources = operands[:-1]
             if len(operands) >= 2:
-                self._add_overwrite_dest(operands[-1], "mv")
+                self._add_overwrite_dest(operands[-1], "mv", sources)
         for w in sources:
             self._add(w, "move", "mv")
 
@@ -1966,6 +2099,9 @@ class _Walker:
                 args = args[2:]
                 continue
             args = args[1:]
+        if args and args[0].text in ("worktree", "clone"):
+            self._git_tree(args, cwd_override)
+            return
         if not args or args[0].text != "clean":
             return
         _operands_, flags = _operands(args[1:])
@@ -1975,6 +2111,205 @@ class _Walker:
             return
         root = cwd_override or Expanded(text=".")
         self._add(root, "clean", "git clean")
+
+    def _touch(self, name: str, args: list[Expanded]) -> set[int]:
+        """Record a known writer's destinations as ``write`` touches.
+
+        Returns the ids of words that are POSITIVELY identified sources of a
+        fully modelled copy (``cp``/``rsync``/``zip``/``tar -c`` with its
+        destination also identified): the only non-read-only words the
+        backstop below may skip.
+        """
+        st = self.state
+        surface = _write_surface(name, args, st.home)
+        if name in ("ln", "gln"):
+            self._link_targets(args)
+        if surface is None:
+            return set()
+        dests, fully = surface
+        for w in dests:
+            if w.text and not w.vanished:
+                self.result.touched.append(_target(w, "write", name, st))
+        if (
+            fully
+            and dests
+            and name in _COPY_FAMILY
+            and (name not in ("tar", "gtar", "bsdtar") or _tar_mode(args) == "create")
+        ):
+            dest_ids = {id(w) for w in dests}
+            return {id(w) for w in args if id(w) not in dest_ids}
+        return set()
+
+    def _link_targets(self, args: list[Expanded]) -> None:
+        """A link's TARGET, resolved where the link will live, is a touch.
+
+        WHY (review round 7). A glob is expanded at check time to catch a
+        symlink into session state — but a link made in the SAME command
+        does not exist yet. ``ln -s ../../<child> $P/m && sed -i … $P/m*/…``
+        would then pass, so a link pointing into ``sessions/``/``guardrails/``
+        ranks HIGH on its own.
+        """
+        st = self.state
+        operands = _plain_operands(args, _LN_FLAGS)
+        dest = _cluster_value(args, "t", "--target-directory")
+        if dest:
+            sources, link = operands, dest[0].text
+        elif len(operands) >= 2:
+            sources, link = operands[:-1], operands[-1].text
+        else:
+            sources, link = operands, "."
+        link_abs, _ = _absolute(link, st.cwd)
+        if link_abs is None:
+            return
+        base = link_abs if (dest or os.path.isdir(link_abs)) else os.path.dirname(link_abs)
+        for w in sources:
+            if not w.text or w.opaque:
+                continue
+            raw = w.text if w.text.startswith("/") else os.path.join(base, w.text)
+            self.result.touched.append(Target(path=os.path.normpath(raw), op="touch", program="ln"))
+
+    def _backstop(
+        self, name: str, args: list[Expanded], assigns: list[str], exempt: set[int]
+    ) -> None:
+        """THE INVARIANT (review R5): a non-read-only call that MENTIONS
+        protected state ranks at least HIGH.
+
+        WHY A BACKSTOP. The writer table above is best-effort: five review
+        waves each found a parser gap (a cluster, a dashless key, a glued
+        value, a script-embedded ``w``) that turned a write into LOW. This
+        pass does not parse programs at all. It marks, as a ``touch`` (HIGH
+        in ``classify``), every path-looking SUBSTRING of every argument and
+        inline assignment — so a path inside a quoted script (``1w <p>``,
+        ``--pager=tee <p>``) or a glued value still counts — plus the
+        effective cwd. ``classify._touch_reason`` keeps only those under
+        ``<state>/sessions/`` (outside this session's scratchpad) or
+        ``<state>/guardrails/``. Exempt: a strictly read-only program (never
+        reaches here) and the identified sources of a fully modelled copy.
+        A misparse can therefore cost a judge call, never a LOW.
+        """
+        st = self.state
+        words = [w for w in args if id(w) not in exempt]
+        texts = [w.text for w in words] + [a.split("=", 1)[1] for a in assigns if "=" in a]
+        for text in texts:
+            for raw in _MENTION_RE.findall(text):
+                if OPAQUE_MARK in raw or TEMP_MARK in raw:
+                    continue  # an opaque part: the word itself is added below
+                path = _mention_path(raw, st.home, st.cwd)
+                if path is None:
+                    continue
+                if _GLOB_CHARS.search(path):
+                    # ``sess*``, ``s[e]ssions``, ``se?sions``: compared as a
+                    # PATTERN in classify, never as a literal prefix (R6-MAJOR-2).
+                    self.result.touched.append(
+                        Target(
+                            path=_literal_prefix(path),
+                            op="touch",
+                            program=name or "a program",
+                            pattern=path,
+                        )
+                    )
+                else:
+                    self.result.touched.append(
+                        Target(path=path, op="touch", program=name or "a program")
+                    )
+            if st.cwd is None:
+                for part in re.split(r"[\s/'\"=]+", text):
+                    if part and _names_evidence(part):
+                        self.result.blind.append(part)
+        for w in words:
+            if w.opaque:
+                self.result.touched.append(_target(w, "touch", name, st))
+        if st.cwd and not st.private_cwd:
+            self.result.touched.append(Target(path=st.cwd, op="touch", program=name))
+
+    # -- creation (provenance ledger) ------------------------------------------
+    def _literal_dir(self, exp: Expanded, base: str | None = None) -> str | None:
+        """The absolute path a LITERAL word names, or ``None`` if not literal."""
+        if exp.opaque or exp.pattern is not None or exp.empty or not exp.text:
+            return None
+        if self.state.private_cwd and not exp.text.startswith("/"):
+            return None
+        path, _unknown = _absolute(exp.text, base if base is not None else self.state.cwd)
+        return path
+
+    def _create(self, kind: str, path: str | None) -> None:
+        if path is not None:
+            self.result.created.append(Creation(kind=kind, path=path))
+
+    def _mkdir(self, args: list[Expanded]) -> None:
+        operands, _flags = _operands(args, _MKDIR_VALUE_FLAGS)
+        for w in operands:
+            self._create("mkdir", self._literal_dir(w))
+
+    def _mktemp(self, args: list[Expanded]) -> None:
+        operands, flags = _operands(args, _MKTEMP_VALUE_FLAGS)
+        if not (_has_short(flags, "d") or "--directory" in flags):
+            return
+        if _has_short(flags, "tu") or "--dry-run" in flags or len(operands) != 1:
+            # No template (a random name under $TMPDIR, already LOW) or a form
+            # whose placement this parser does not model: record nothing.
+            return
+        template = operands[0]
+        base = self.state.cwd
+        for i, w in enumerate(args):
+            t = w.text
+            if t == "-p" and i + 1 < len(args):
+                base = self._literal_dir(args[i + 1]) or None
+            elif t.startswith("--tmpdir="):
+                base = self._literal_dir(Expanded(text=t.split("=", 1)[1])) or None
+        path = self._literal_dir(template, base)
+        if path is None or "XXX" not in os.path.basename(path):
+            return
+        name = os.path.basename(path)
+        stem = name.rstrip("X")
+        pattern = _glob_escape(stem) + "?" * (len(name) - len(stem))
+        self.result.created.append(
+            Creation(kind="mktemp", parent=os.path.dirname(path), pattern=pattern)
+        )
+
+    def _git_tree(self, args: list[Expanded], cwd_override: Expanded | None) -> None:
+        base = self.state.cwd
+        if cwd_override is not None:
+            base = self._literal_dir(cwd_override)
+            if base is None:
+                return
+        if args[0].text == "clone":
+            operands, _ = _operands(args[1:], _GIT_CLONE_VALUE_FLAGS)
+            if not operands:
+                return
+            if len(operands) >= 2:
+                self._create("clone", self._literal_dir(operands[1], base))
+                return
+            url = operands[0]
+            if url.opaque or url.pattern is not None:
+                return
+            # git's own default: the URL's last component minus ``.git``.
+            name = re.split(r"[/:]", url.text.rstrip("/"))[-1]
+            name = name[:-4] if name.endswith(".git") else name
+            if name and name not in (".", ".."):
+                self._create("clone", self._literal_dir(Expanded(text=name), base))
+            return
+        if len(args) < 2:
+            return
+        sub = args[1].text
+        if sub == "add":
+            operands, _ = _operands(args[2:], _GIT_WORKTREE_ADD_VALUE_FLAGS)
+            if operands:
+                self._create("worktree", self._literal_dir(operands[0], base))
+        elif sub == "remove":
+            operands, flags = _operands(args[2:])
+            forced = _has_short(flags, "f") or "--force" in flags
+            for w in operands:
+                saved = self.state.cwd
+                self.state.cwd = base
+                try:
+                    before = len(self.result.targets)
+                    self._add(w, "delete", "git worktree remove")
+                    for target in self.result.targets[before:]:
+                        target.worktree_remove = True
+                        target.forced = forced
+                finally:
+                    self.state.cwd = saved
 
     # -- recording ---------------------------------------------------------------
     def _add(self, exp: Expanded, op: str, program: str, *, selected: bool = False) -> None:
@@ -2009,12 +2344,24 @@ class _Walker:
                 self.result.targets.append(extra)
             del var
 
-    def _add_overwrite_dest(self, exp: Expanded, program: str) -> None:
+    def _add_overwrite_dest(
+        self, exp: Expanded, program: str, sources: list[Expanded] | None = None
+    ) -> None:
         if exp.opaque or exp.pattern is not None:
             return
         path, _ = _absolute(exp.text, self.state.cwd)
         if path is not None and os.path.isdir(path):
-            return  # moving/copying INTO a directory replaces nothing named here
+            # Moving/copying INTO a directory replaces nothing named here, but
+            # it CREATES ``dir/<source name>``: recorded as an append so a
+            # fake session directory moved into ``<state>/sessions/`` is ranked
+            # (``classify._evidence_reason``) and nothing else changes.
+            for src in sources or ():
+                if src.opaque or src.pattern is not None or not src.text:
+                    continue
+                name = os.path.basename(src.text.rstrip("/"))
+                if name:
+                    self._add(Expanded(text=os.path.join(path, name)), "append", program)
+            return
         self._add(exp, "overwrite", program)
 
     def _add_stdin(self, program: str) -> None:
@@ -2030,11 +2377,774 @@ class _Walker:
         )
 
 
+#: Programs that only READ the paths they are given (review R2-MAJOR-1): the
+#: one place the evidence check trusts a path operand under the state root.
+#: Interpreters are never here — what ``python x.py <path>`` does with a path
+#: is unknowable. ``echo``/``printf`` write only through a redirection, which
+#: is checked separately for every program.
+#:
+#: STRICT (review R6): only programs that cannot write a file or run another
+#: program by ANY flag. ``rg --pre``, ``less -o``, ``file -C``, ``sqlite3
+#: .once/.shell`` and ``sed``'s own ``w`` each did, so they are not here: a
+#: call to them that mentions session state goes through the backstop (HIGH,
+#: liftable by the judge) instead of being trusted.
+READ_ONLY_PROGRAMS = frozenset(
+    {
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "grep",
+        "egrep",
+        "fgrep",
+        "stat",
+        "du",
+        "df",
+        "wc",
+        "jq",
+        "echo",
+        "printf",
+        "true",
+        "test",
+        "[",
+        "pwd",
+        "which",
+        "readlink",
+        "realpath",
+        "basename",
+        "dirname",
+        "sleep",
+        # Shell words that move, bind or branch without writing a file; their
+        # bodies and later segments are walked on their own.
+        "cd",
+        "pushd",
+        "popd",
+        "export",
+        "declare",
+        "local",
+        "readonly",
+        "typeset",
+        "unset",
+        "set",
+        "for",
+        "if",
+        "while",
+        "until",
+        "case",
+        "do",
+        "then",
+        "else",
+        "elif",
+        "fi",
+        "done",
+        "esac",
+        "!",
+    }
+)
+_READ_ONLY_GIT = frozenset({"log", "status", "show", "diff", "rev-parse", "ls-files"})
+#: Git words that make even a read-only subcommand write a file or run a
+#: program (review R3-MAJOR-1: ``git log --output=<file>`` wrote the lineage
+#: registry at LOW). ``-c``/``--config-env`` can set ``core.pager`` and
+#: friends; ``-p``/``--paginate``/``--pager`` start the pager.
+_GIT_UNSAFE = (
+    "--output",
+    "-o",
+    "-c",
+    "--config-env",
+    "--ext-diff",
+    "--textconv",
+    "--exec-path",
+    "--git-dir",
+    "--work-tree",
+    "--pager",
+    "--paginate",
+    "-p",
+    "--no-index",
+)
+#: Variables that make git (or its pager) run something else.
+_GIT_UNSAFE_ENV_RE = re.compile(r"^(GIT_|PAGER$|LESS|EDITOR$|VISUAL$)")
+_FIND_WRITES = frozenset(
+    {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
+)
+
+
+def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) -> bool:
+    """Is ``name argv…`` a provably read-only invocation? Conservative: unknown → no."""
+    if name in READ_ONLY_PROGRAMS:
+        return True
+    if name == "find":
+        return not any(a in _FIND_WRITES for a in argv)
+    if name == "git":
+        if any(_GIT_UNSAFE_ENV_RE.match(a) for a in assigned):
+            return False
+        rest = list(argv)
+        while rest and rest[0].startswith("-"):
+            if rest[0] != "-C" and rest[0].split("=", 1)[0] in _GIT_UNSAFE:
+                return False
+            rest = rest[2:] if rest[0] == "-C" else rest[1:]
+        if not rest or rest[0] not in _READ_ONLY_GIT:
+            return False
+        sub, tail = rest[0], rest[1:]
+        for a in tail:
+            if a == "--":
+                break
+            key = a.split("=", 1)[0]
+            if key in _GIT_UNSAFE and not (key == "-p" and sub in ("log", "show", "diff")):
+                return False
+            # ``-o<file>`` / ``--output<…>`` glued forms.
+            if a.startswith("--output") or (a.startswith("-o") and sub in ("log", "show", "diff")):
+                return False
+        return True
+    return False
+
+
+# -- the evidence writer table (review R4-MAJOR-1) ---------------------------
+#
+# WHY A TABLE THAT FAILS CLOSED. ``_touch`` used to stop at any program it had
+# heard of, so an UNMODELLED write by a known program (``git -C <s> checkout``,
+# ``tar -cf <s>/origin.json``, ``perl -e 'open…' <s>``) ranked LOW with no
+# judge call. Now a program skips the HIGH fallback only when its WHOLE write
+# surface for the given mode is enumerated below AND every flag it was given
+# is one this table knows. Anything else — an unknown flag, an unlisted git
+# subcommand, a perl without ``-i`` — keeps its known destinations as CRITICAL
+# writes and ALSO sends every path-shaped word to the HIGH fallback.
+
+
+_LN_VALUE_FLAGS = frozenset({"-t", "--target-directory", "-S", "--suffix"})
+_TAR_VALUE_FLAGS = frozenset({"-f", "--file", "-C", "--directory", "-T", "--files-from", "-X"})
+
+
+@dataclass(frozen=True)
+class _Flags:
+    """The flags a fully-modelled program may carry: short letters (clusters
+    allowed), long names, and the flags whose value is the NEXT word."""
+
+    letters: str = ""
+    longs: frozenset[str] = frozenset()
+    values: frozenset[str] = frozenset()
+
+
+def _flags_known(args: list[Expanded], spec: _Flags) -> bool:
+    """Is every flag in ``args`` one ``spec`` lists? ``--`` ends the flags."""
+    skip = False
+    for w in args:
+        t = w.text
+        if skip:
+            skip = False
+            continue
+        if t == "--":
+            return True
+        if not t.startswith("-") or t == "-":
+            continue
+        if t.startswith("--"):
+            key = t.split("=", 1)[0]
+            if key not in spec.longs and key not in spec.values:
+                return False
+            skip = key in spec.values and "=" not in t
+            continue
+        if t in spec.values:
+            skip = True
+            continue
+        cluster = t[1:]
+        for k, c in enumerate(cluster):
+            if f"-{c}" in spec.values:
+                skip = k == len(cluster) - 1  # ``-f FILE`` vs glued ``-fFILE``
+                break
+            if c not in spec.letters:
+                return False
+    return True
+
+
+_CP_FLAGS = _Flags(
+    "aRrfinpvLPHlsxTXcEN",
+    frozenset(
+        {
+            "--recursive",
+            "--archive",
+            "--force",
+            "--interactive",
+            "--no-clobber",
+            "--verbose",
+            "--preserve",
+            "--no-preserve",
+            "--parents",
+            "--dereference",
+            "--no-dereference",
+            "--link",
+            "--symbolic-link",
+            "--update",
+            "--reflink",
+            "--sparse",
+            "--one-file-system",
+            "--no-target-directory",
+            "--remove-destination",
+            "--attributes-only",
+            "--strip-trailing-slashes",
+            "--backup",
+        }
+    ),
+    frozenset({"-t", "--target-directory", "-S", "--suffix"}),
+)
+_LN_FLAGS = _Flags(
+    "sfnvhiFTLPrb",
+    frozenset(
+        {
+            "--symbolic",
+            "--force",
+            "--no-dereference",
+            "--verbose",
+            "--interactive",
+            "--relative",
+            "--logical",
+            "--physical",
+            "--no-target-directory",
+            "--backup",
+        }
+    ),
+    _LN_VALUE_FLAGS,
+)
+_RSYNC_FLAGS = _Flags(
+    "avzrlptgoDhPnucqHAXWSxRbmiOJ8",
+    frozenset(
+        {
+            "--archive",
+            "--verbose",
+            "--compress",
+            "--recursive",
+            "--links",
+            "--perms",
+            "--times",
+            "--group",
+            "--owner",
+            "--devices",
+            "--specials",
+            "--human-readable",
+            "--progress",
+            "--partial",
+            "--dry-run",
+            "--update",
+            "--checksum",
+            "--quiet",
+            "--hard-links",
+            "--acls",
+            "--xattrs",
+            "--whole-file",
+            "--sparse",
+            "--one-file-system",
+            "--relative",
+            "--stats",
+            "--info",
+            "--itemize-changes",
+            "--delete",
+            "--delete-before",
+            "--delete-during",
+            "--delete-after",
+            "--delete-delay",
+            "--delete-excluded",
+            "--exclude",
+            "--include",
+            "--filter",
+            "--ignore-existing",
+            "--size-only",
+            "--no-perms",
+            "--no-owner",
+            "--no-group",
+            "--omit-dir-times",
+            "--prune-empty-dirs",
+            "--mkpath",
+            "--times",
+            "--safe-links",
+            "--copy-links",
+            "--copy-unsafe-links",
+        }
+    ),
+    _RSYNC_VALUE_FLAGS,
+)
+_DITTO_FLAGS = _Flags(
+    "VXckx",
+    frozenset(
+        {
+            "--keepParent",
+            "--rsrc",
+            "--norsrc",
+            "--extattr",
+            "--noextattr",
+            "--acl",
+            "--noacl",
+            "--qtn",
+            "--noqtn",
+            "--sequesterRsrc",
+            "--nocache",
+            "--hfsCompression",
+            "--nohfsCompression",
+            "--zlibCompressionLevel",
+        }
+    ),
+)
+_INSTALL_FLAGS = _Flags(
+    "dcpsvDCbS",
+    frozenset({"--directory", "--verbose", "--compare", "--preserve-timestamps"}),
+    frozenset({"-m", "--mode", "-o", "--owner", "-g", "--group", "-t", "--target-directory"}),
+)
+_TOUCH_FLAGS = _Flags(
+    "amch",
+    frozenset({"--no-create", "--no-dereference"}),
+    frozenset({"-r", "--reference", "-d", "--date", "-t", "-A"}),
+)
+_TRUNCATE_FLAGS = _Flags(
+    "co",
+    frozenset({"--no-create", "--io-blocks"}),
+    frozenset({"-s", "--size", "-r", "--reference"}),
+)
+_UNZIP_FLAGS = _Flags(
+    "qonjluvfaLCDKXV",
+    frozenset(),
+    frozenset({"-d", "-x", "-P"}),
+)
+_ZIP_FLAGS = _Flags(
+    "rqyj0123456789vumDTXgFS@",
+    frozenset({"--recurse-paths", "--quiet", "--symlinks", "--junk-paths", "--move"}),
+    frozenset({"-x", "-i", "-n", "-P", "-O", "--out"}),
+)
+_TAR_FLAGS = _Flags(
+    "xctruvfzjJZapPkmhOSlw",
+    frozenset(
+        {
+            "--extract",
+            "--get",
+            "--create",
+            "--list",
+            "--append",
+            "--update",
+            "--verbose",
+            "--gzip",
+            "--bzip2",
+            "--xz",
+            "--zstd",
+            "--preserve-permissions",
+            "--keep-old-files",
+            "--strip-components",
+            "--exclude",
+            "--no-same-owner",
+            "--same-owner",
+            "--overwrite",
+            "--to-stdout",
+            "--numeric-owner",
+            "--absolute-names",
+        }
+    ),
+    _TAR_VALUE_FLAGS,
+)
+_MKDIR_FLAGS = _Flags("pv", frozenset({"--parents", "--verbose"}), _MKDIR_VALUE_FLAGS)
+_META_FLAGS = _Flags(
+    "RfvhHLPxsdcrlpw",
+    frozenset(
+        {
+            "--recursive",
+            "--verbose",
+            "--silent",
+            "--quiet",
+            "--no-dereference",
+            "--dereference",
+            "--changes",
+            "--reference",
+        }
+    ),
+)
+_MV_FLAGS = _Flags(
+    "finvuhFTbc",
+    frozenset(
+        {
+            "--force",
+            "--interactive",
+            "--no-clobber",
+            "--verbose",
+            "--update",
+            "--no-target-directory",
+            "--strip-trailing-slashes",
+            "--backup",
+        }
+    ),
+    _MV_VALUE_FLAGS,
+)
+_TEE_FLAGS = _Flags("aip", frozenset({"--append", "--ignore-interrupts"}))
+_SED_FLAGS = _Flags(
+    "nEreisuz",
+    frozenset(
+        {
+            "--quiet",
+            "--silent",
+            "--regexp-extended",
+            "--in-place",
+            "--separate",
+            "--unbuffered",
+            "--null-data",
+            "--posix",
+        }
+    ),
+    frozenset({"-e", "--expression", "-f", "--file", "-l"}),
+)
+#: A sed script that writes a file of its own (``w FILE``, ``s/a/b/w FILE``).
+_SED_WRITES_RE = re.compile(r"[wWe]")
+#: A path-looking filename after a ``w``/``W`` (``1w /x``, ``s/a/b/gw ~/x``).
+_SED_W_PATH_RE = re.compile(r"[wW]\s*((?:/|~|\$\{?HOME\}?)[^\s;}'\"]*)")
+_DD_KEYS = frozenset(
+    {
+        "if",
+        "of",
+        "bs",
+        "ibs",
+        "obs",
+        "count",
+        "skip",
+        "seek",
+        "conv",
+        "status",
+        "iflag",
+        "oflag",
+        "cbs",
+        "iseek",
+        "oseek",
+    }
+)
+
+
+def _flag_value(args: list[Expanded], short: str, long: str) -> list[Expanded]:
+    """Values of ``-X v``, ``-Xv``, ``--long v`` and ``--long=v`` in ``args``."""
+    out: list[Expanded] = []
+    for k, w in enumerate(args):
+        t = w.text
+        if (t == long or (short and t == short)) and k + 1 < len(args):
+            out.append(args[k + 1])
+        elif t.startswith(long + "="):
+            out.append(Expanded(text=t.split("=", 1)[1], empty=w.empty))
+        elif short and t.startswith(short) and len(t) > len(short) and not t.startswith("--"):
+            out.append(Expanded(text=t[len(short) :], empty=w.empty))
+    return out
+
+
+def _plain_operands(args: list[Expanded], spec: _Flags) -> list[Expanded]:
+    operands, _ = _operands(args, spec.values)
+    return operands
+
+
+def _copy_dest(args: list[Expanded], spec: _Flags) -> list[Expanded]:
+    # Cluster-aware: GNU ``-at<dir>`` / ``-st<dir>`` glue the value after
+    # other letters (review R5-MINOR-3). ``-t`` only means a target directory
+    # where the program's own table says so.
+    target_dir = _cluster_value(args, "t", "--target-directory") if "-t" in spec.values else []
+    if target_dir:
+        return target_dir
+    operands = _plain_operands(args, spec)
+    return operands[-1:] if len(operands) >= 2 else []
+
+
+def _write_surface(
+    name: str, args: list[Expanded], home: str
+) -> tuple[list[Expanded], bool] | None:
+    """``(destinations, fully_modelled)`` for a known writer, else ``None``.
+
+    ``destinations`` are the paths the call WRITES (sources and inputs are
+    reads). ``fully_modelled`` is True only when that list is the program's
+    whole write surface for this mode and every flag given is known; a False
+    sends the call's path-shaped words to the HIGH fallback as well.
+    """
+    if name in DELETE_PROGRAMS:
+        return [], True  # every operand is the resolver's own delete target
+    if name in ("mv", "gmv"):
+        # Sources and a literal destination are resolver targets; a GLOB
+        # destination is not (``_add_overwrite_dest`` skips patterns), so name
+        # it here too (review R6-MAJOR-2: ``mv f <state>/s[e]ssions/…``).
+        return _copy_dest(args, _MV_FLAGS), _flags_known(args, _MV_FLAGS)
+    if name in ("tee",):
+        return [], _flags_known(args, _TEE_FLAGS)  # resolver targets
+    if name in ("mkdir", "gmkdir"):
+        return [], _flags_known(args, _MKDIR_FLAGS)  # resolver creations
+    if name in ("chmod", "chown", "chgrp", "xattr"):
+        return [], _flags_known(args, _META_FLAGS)  # metadata only, no content
+    if name in ("sed", "gsed"):
+        # ``-i`` operands are resolver targets; a script's own ``w`` is not.
+        scripts = " ".join(w.text for w in args if not w.text.startswith("-"))
+        # Its own ``w``/``W`` commands write: a parseable filename there is a
+        # destination (review R5-MINOR-1); a script that is not a provably
+        # read-only one is never fully modelled, so the backstop sees it.
+        dests = [
+            Expanded(text=_tilde_value(m, home))
+            for m in _SED_W_PATH_RE.findall(" ".join(w.text for w in args))
+        ]
+        return dests, _flags_known(args, _SED_FLAGS) and not _SED_WRITES_RE.search(scripts)
+    if name in ("cp", "gcp"):
+        return _copy_dest(args, _CP_FLAGS), _flags_known(args, _CP_FLAGS)
+    if name in ("ln", "gln"):
+        operands = _plain_operands(args, _LN_FLAGS)
+        dest = _cluster_value(args, "t", "--target-directory")
+        if not dest and len(operands) == 1:
+            # ``ln -s TARGET`` links into the cwd under the target's basename.
+            dest = [Expanded(text=os.path.basename(operands[0].text.rstrip("/")) or ".")]
+        elif not dest:
+            dest = operands[-1:] if len(operands) >= 2 else []
+        return dest, _flags_known(args, _LN_FLAGS)
+    if name == "rsync":
+        return _copy_dest(args, _RSYNC_FLAGS), _flags_known(args, _RSYNC_FLAGS)
+    if name == "ditto":
+        return _copy_dest(args, _DITTO_FLAGS), _flags_known(args, _DITTO_FLAGS)
+    if name in ("install", "ginstall"):
+        # ``-d`` may sit inside a cluster (``-dv``, ``-dm755``): a regression
+        # in round 4 read only the bare spelling (review R5-MAJOR-1).
+        if any(w.text == "--directory" or _short_has(w.text, "d", _INSTALL_FLAGS) for w in args):
+            return _plain_operands(args, _INSTALL_FLAGS), _flags_known(args, _INSTALL_FLAGS)
+        return _copy_dest(args, _INSTALL_FLAGS), _flags_known(args, _INSTALL_FLAGS)
+    if name in ("touch", "gtouch"):
+        return _plain_operands(args, _TOUCH_FLAGS), _flags_known(args, _TOUCH_FLAGS)
+    if name in ("truncate", "gtruncate"):
+        return _plain_operands(args, _TRUNCATE_FLAGS), _flags_known(args, _TRUNCATE_FLAGS)
+    if name == "dd":
+        dests = [
+            Expanded(text=_tilde_value(w.text[3:], home), empty=w.empty)
+            for w in args
+            if w.text.startswith("of=")
+        ]
+        known = all("=" in w.text and w.text.split("=", 1)[0] in _DD_KEYS for w in args)
+        return dests, known
+    if name == "unzip":
+        dest = _flag_value(args, "-d", "-d") or [Expanded(text=".")]
+        return dest, _flags_known(args, _UNZIP_FLAGS)
+    if name == "zip":
+        out = _flag_value(args, "-O", "--out")
+        operands = _plain_operands(args, _ZIP_FLAGS)
+        return out + operands[:1], _flags_known(args, _ZIP_FLAGS)
+    if name in ("tar", "gtar", "bsdtar"):
+        if args and args[0].text.isalpha():
+            # Old-style key (``tar cf OUT src``): the first word IS a flag
+            # cluster, so read it as one (review R5-MAJOR-2).
+            args = [Expanded(text="-" + args[0].text, empty=args[0].empty), *args[1:]]
+        mode = _tar_mode(args)
+        known = _flags_known(args, _TAR_FLAGS)
+        if mode == "extract":
+            return _cluster_value(args, "C", "--directory") or [Expanded(text=".")], known
+        if mode == "create":
+            # The ARCHIVE is written; ``-C`` names where inputs are read.
+            return _cluster_value(args, "f", "--file"), known
+        return [], known
+    if name == "perl":
+        # Never fully modelled: like every interpreter, what the script does
+        # with a path is unknowable, so its paths also go to the fallback.
+        return _perl_inplace(args), False
+    if name == "sqlite3":
+        # ``.output FILE``, ``.once``, ``.shell`` write or run elsewhere even
+        # under ``-readonly``: never fully modelled, so a mention of session
+        # state is HIGH through the backstop (review R6, pre-existing escapes).
+        operands, _ = _operands(args, _SQLITE_VALUE_FLAGS)
+        readonly = any(w.text == "-readonly" for w in args)
+        return ([] if readonly else operands[:1]), False
+    if name == "git":
+        return _git_writes(args), False
+    return None
+
+
+def _cluster_value(args: list[Expanded], letter: str, long: str) -> list[Expanded]:
+    """Like ``_flag_value``, but finds ``letter`` inside a short cluster too:
+    ``tar -czf OUT`` and ``tar -czfOUT`` both name ``OUT`` (review R4-MAJOR-1:
+    ``tar -cf <s>/origin.json`` read the cluster as a mode and missed it)."""
+    out = _flag_value(args, "", long)
+    for k, w in enumerate(args):
+        t = w.text
+        if not t.startswith("-") or t.startswith("--") or letter not in t[1:]:
+            continue
+        rest = t[1:].split(letter, 1)[1]
+        if rest:
+            out.append(Expanded(text=rest, empty=w.empty))
+        elif k + 1 < len(args):
+            out.append(args[k + 1])
+    return out
+
+
+def _short_has(text: str, letter: str, spec: _Flags) -> bool:
+    """Is ``-<letter>`` inside the short cluster ``text`` (before any value)?"""
+    if not text.startswith("-") or text.startswith("--"):
+        return False
+    for c in text[1:]:
+        if c == letter:
+            return True
+        if f"-{c}" in spec.values:
+            return False  # the rest of the cluster is that flag's value
+    return False
+
+
+def _perl_inplace(args: list[Expanded]) -> list[Expanded]:
+    if not any(_PERL_INPLACE_RE.match(w.text) for w in args):
+        return []
+    out = []
+    script_seen = False
+    skip = False
+    for w in args:
+        if skip:
+            skip = False
+            continue
+        if w.text.startswith("-"):
+            if re.match(r"^-[a-zA-Z]*[eE]$", w.text):
+                skip = script_seen = True  # the next word is the program text
+            continue
+        if not script_seen:
+            script_seen = True  # the first operand is the script file
+            continue
+        out.append(w)
+    return out
+
+
+def _git_writes(args: list[Expanded]) -> list[Expanded]:
+    """The paths a (non-read-only) git call is known to WRITE.
+
+    ``-C``/``--git-dir``/``--work-tree`` count as writes: a non-read-only
+    subcommand there can rewrite any file of that tree (``checkout``,
+    ``reset --hard``, ``apply``, ``stash pop``). Clone and worktree-add
+    destinations are the resolver's creations, checked as writes in classify.
+    """
+    out: list[Expanded] = []
+    rest = list(args)
+    while rest and rest[0].text.startswith("-"):
+        t = rest[0].text
+        if t in ("-C", "--git-dir", "--work-tree", "--namespace") and len(rest) > 1:
+            if t != "--namespace":
+                out.append(rest[1])
+            rest = rest[2:]
+            continue
+        if t.startswith(("--git-dir=", "--work-tree=")):
+            out.append(Expanded(text=t.split("=", 1)[1], empty=rest[0].empty))
+        rest = rest[2:] if t == "-c" else rest[1:]
+    sub = rest[0].text if rest else ""
+    tail = rest[1:]
+    out += _flag_value(tail, "", "--output") + _flag_value(tail, "", "--output-directory")
+    out += _flag_value(tail, "", "--prefix")  # checkout-index --prefix=<dir>/
+    for k, w in enumerate(tail):
+        t = w.text
+        if t == "-o" and k + 1 < len(tail):
+            out.append(tail[k + 1])
+        elif t.startswith("-o") and len(t) > 2 and not t.startswith("--"):
+            out.append(Expanded(text=t[2:], empty=w.empty))
+    operands = [w for w in tail if not w.text.startswith("-")]
+    if sub == "init":
+        out += operands[-1:] or [Expanded(text=".")]
+    elif sub == "bundle" and len(operands) >= 2 and operands[0].text == "create":
+        out.append(operands[1])
+    return out
+
+
+_PERL_INPLACE_RE = re.compile(r"^-[lnpaesw0]*i")
+
+
+def _tar_mode(args: list[Expanded]) -> str:
+    """``extract`` / ``create`` / ``list`` for a tar argv (unknown → ``extract``,
+    the writing reading, so a planter is never missed)."""
+    skip = False
+    for k, w in enumerate(args):
+        t = w.text
+        if skip:
+            skip = False
+            continue
+        if t in ("--create", "--append", "--update"):
+            return "create"
+        if t == "--list":
+            return "list"
+        if t in ("--extract", "--get"):
+            return "extract"
+        if t in _TAR_VALUE_FLAGS:
+            skip = True  # ``-C DIR`` / ``-f FILE``: the value is not a mode
+            continue
+        # A short cluster (``-czf``), or the dashless first word (``tar xf``).
+        if (t.startswith("-") and not t.startswith("--")) or (k == 0 and t.isalpha()):
+            letters = t.lstrip("-")
+            # Letters after ``f``/``C``/``T``/``X`` in a cluster are its value.
+            letters = re.split(r"[fCTX]", letters, maxsplit=1)[0]
+            if "x" in letters:
+                return "extract"
+            if any(c in letters for c in "cru"):
+                return "create"
+            if "t" in letters:
+                return "list"
+    return "extract"
+
+
+#: Programs whose sources the backstop may skip once ``_write_surface`` has
+#: identified their destination (review R5 exemption (b)).
+_COPY_FAMILY = frozenset({"cp", "gcp", "rsync", "zip", "tar", "gtar", "bsdtar"})
+#: A path-looking run inside any word: absolute, ``~/``, ``$HOME``/``${HOME}``,
+#: or a relative run containing ``/``. Deliberately over-matching.
+_MENTION_RE = re.compile(
+    r"(?:\$\{?HOME\}?|~|\.{1,2})?/[^\s'\"`;|&<>(){}]*"
+    # A relative run may not start mid-word (``-st/abs`` is the absolute
+    # ``/abs`` glued to a flag, not a relative ``-st/…``).
+    # Its first component may itself be a glob (``lnk*/origin.json``,
+    # ``*/x``): that spelling skipped the backstop (review round 8, MAJOR-2).
+    r"|(?<![\w.~$*?\[\]-])[\w.*?\[][\w.*?\[\]-]*/[^\s'\"`;|&<>(){}]*"
+)
+
+
+_GLOB_CHARS = re.compile(r"[*?\[{]")
+#: Basenames of the files the guard reads as evidence (``classify``'s
+#: ``_EVIDENCE_FILES`` plus the ``guardrails/`` records).
+_EVIDENCE_NAMES = (
+    "origin.json",
+    "transcript.jsonl",
+    "asks.jsonl",
+    "subagent-roster*",
+    "created.sqlite",
+    "lineage.jsonl",
+)
+
+
+def _names_evidence(word: str) -> bool:
+    """Could ``word`` be an evidence file's name? Case-insensitive, with
+    sqlite's ``-wal``/``-shm``/``-journal`` side files, and in BOTH
+    directions so a glob word (``ORIG*.json``) counts (review round 7)."""
+    folded = word.casefold()
+    for name in _EVIDENCE_NAMES:
+        for candidate in (name, name + "-wal", name + "-shm", name + "-journal"):
+            if fnmatch.fnmatchcase(folded, candidate) or fnmatch.fnmatchcase(candidate, folded):
+                return True
+    return False
+
+
+def _literal_prefix(pattern: str) -> str:
+    """The deepest directory of ``pattern`` above its first glob component."""
+    parts = pattern.split("/")
+    for k, part in enumerate(parts):
+        if _GLOB_CHARS.search(part):
+            return "/".join(parts[:k]) or "/"
+    return os.path.dirname(pattern) or "/"
+
+
+def _mention_path(raw: str, home: str, cwd: str | None) -> str | None:
+    """An absolute, normalised spelling of a ``_MENTION_RE`` match, or None."""
+    text = re.sub(r"^\$\{?HOME\}?", home, raw)
+    if text.startswith("~/"):
+        text = home + text[1:]
+    if not text.startswith("/"):
+        if cwd is None:
+            return None
+        text = os.path.join(cwd, text)
+    return os.path.normpath(text)
+
+
+#: Anything that can make ``**`` recursive for this command (review round 9,
+#: MAJOR-1): the word ``globstar`` (``shopt -s globstar``, ``bash -O
+#: globstar``) and shells where ``**/`` recurses by default or by ``setopt``.
+#: A bare ``-O`` is NOT here (round 10, MINOR-1): ``curl -O``/``gcc -O2``
+#: would turn on the deep walk for ordinary cleanups and hit the cap.
+#: Over-matching only costs a wider, still bounded, walk; a cap overflow
+#: ranks HIGH, never CRITICAL.
+_RECURSIVE_GLOB_RE = re.compile(r"globstar|\b(?:zsh|ksh|fish|setopt)\b")
+
+
 def resolve_command(
     command: str, *, cwd: str | None, env: Mapping[str, str], home: str
 ) -> Resolution:
     """Every path ``command`` would destroy, resolved statically. Never runs it."""
     walker = _Walker(env, cwd, home)
+    # Raw text, not parsed words, so a nested ``bash -c``/``zsh -c`` string
+    # counts too. Deliberately one-way: ``shopt -u globstar`` is ignored
+    # because a wider walk only errs safe (review round 9, NIT-1).
+    walker.result.globstar = bool(_RECURSIVE_GLOB_RE.search(command))
     try:
         walker.walk(command)
     except Exception as exc:  # noqa: BLE001 — a parser fault must not wave a call through

@@ -1,0 +1,1073 @@
+"""Who made this, and who asked for it: provenance for the dangerous-delete guard.
+
+WHY. The built-in guard (``classify.py``) ranks a direct child of ``$HOME`` and
+any git repository root HIGH, and a HIGH call goes to a forked judge that only
+sees the operator's words. That refused agents cleaning up after THEMSELVES:
+a QA lane could not remove the twenty ``~/qa-r5-dg-*`` rig directories it had
+just made, a merge step could not drop its own ``.worktrees/<name>``, and disk
+cleanup lanes stalled on their own old scratch. The operator's direction: let
+those cleanups through, keep dangerous deletes blocked unless a TRUSTED source
+explicitly asks for them. Three facts make that decidable without lowering the
+bar for anything else:
+
+1. **Creation ledger.** A session that created a directory may delete it. The
+   loop records what a bash call created (``plan_creations`` before it runs,
+   ``commit_creations`` after) and ``owned_record`` answers "did this session,
+   or one of its subagents, create this exact inode?". A record is keyed by
+   realpath AND ``st_dev``/``st_ino`` AND a creation stamp (see
+   ``creation_stamp``), so a directory deleted and re-made by someone else —
+   which on Linux tmpfs/ext4 routinely gets the SAME inode back — or swapped
+   for a symlink, no longer matches.
+2. **Clean linked worktree.** ``git worktree remove <path>`` without
+   ``--force`` refuses tracked/untracked changes and the primary checkout by
+   itself, but takes ignored files and a detached HEAD's commits with it.
+   ``worktree_state`` proves those absent too (only regenerable ignored
+   output, HEAD on a branch or in some ref) before the guard ranks it LOW.
+3. **Trusted words.** Only the operator's direct messages (in a session the
+   operator opened — never a delegating agent's brief), and their answers
+   to ``ask`` as recorded in the ask store, are consent. Team Bridge
+   deliveries, peer-agent messages, hub notes and tool output are DATA: a
+   compromised or confused agent can write anything into them. A peer message
+   may still POINT at an ask (``a-xxxx``); the pointer is checked against the
+   operator's durable ask store (``<state>/sessions/<sid>/asks.jsonl``), never
+   believed on its own.
+
+CONSTRAINTS. Nothing here may raise CRITICAL to anything lower; the ledger only
+ever turns HIGH into LOW. Every probe fails toward the existing ranking: a
+missing ledger, a sqlite error, a git timeout, an unreadable ask log all mean
+"no provenance", never "allowed".
+
+LEDGER LOCATION. ``<state>/guardrails/created.sqlite`` — inside the state root
+but OUTSIDE ``sessions/<id>/``, so the session's own bash cannot rewrite it at
+LOW: ``classify`` ranks overwriting or deleting it CRITICAL. A shell append or
+an interpreter one-liner is not modelled by the resolver (the same residual as
+``config.yml``); the inode check bounds what a forged row can claim.
+
+SUBAGENTS. A child's creation is written under the child's id AND every
+ancestor id it knows at write time (``ToolContext.ancestor_session_ids``), so
+a parent cleaning up after its subagents needs no lineage lookup at read time.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import glob as _glob
+import json
+import logging
+import os
+import re
+import sqlite3
+import subprocess
+import time
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+LEDGER_DIRNAME = "guardrails"
+LEDGER_FILENAME = "created.sqlite"
+#: sqlite busy wait. Rows are tiny and written once per creating bash call;
+#: a held lock past this is a stuck writer, and the guard degrades to "no
+#: provenance" (the old ranking) rather than stalling a turn.
+_DB_TIMEOUT_S = 2.0
+#: Bound on every git probe. Measured on this machine's worktrees (n=12,
+#: ``git status --porcelain --untracked-files=all`` on local-operator linked
+#: worktrees, 2026-11-07): median 0.015 s, max 0.86 s. 10 s is far above that and still
+#: short enough that a hung filesystem cannot hold the turn.
+_GIT_TIMEOUT_S = 10.0
+#: How far back the operator brief reads. A transcript can hold thousands of
+#: rows; the judge needs the recent operator words, not the session's history.
+_SCAN_LIMIT = 400
+_MAX_DIRECT = 3
+_MAX_ASKS = 4
+
+#: Ask-answer surfaces where a PERSON pressed the button. ``chat`` is excluded
+#: on purpose: it is written by the AGENT's ``ask_withdraw answered_in_chat``,
+#: i.e. the agent asserting what the operator said. ``relay``/``remote`` are
+#: another session's hop, not a human surface.
+TRUSTED_ASK_SURFACES = frozenset({"terminal", "tui", "desktop", "mirror"})
+
+#: Words that make an ask answer a refusal ("Leave them", "No, keep it").
+_DECLINE_RE = re.compile(
+    r"(?i)\b(no|nope|keep|cancel|don'?t|do not|stop|leave|not now|not yet|hold off"
+    r"|skip|later|wait|no thanks)\b"
+)
+_ASK_ID_RE = re.compile(r"(?<![\w-])(a-[0-9a-f]{4,12})(?![\w-])")
+
+
+# -- ledger -------------------------------------------------------------------
+
+
+#: The harness-written lineage registry (review R2-MAJOR-1/2): one JSON line
+#: per session the harness opened on an agent's behalf — ``{"child", "origin",
+#: "parent", "opener", "at"}`` — appended by ``resume.mark_session_origin`` at
+#: the spawn sites, never by a tool. It sits beside the ledger under
+#: ``<state>/guardrails/``, which the shell and the file tools cannot write
+#: (CRITICAL), so "who is whose child" no longer rests on ``origin.json``,
+#: which the session's own shell could once reach with ``ln``/``rsync``.
+LINEAGE_FILENAME = "lineage.jsonl"
+#: Origins that are NOT agent-opened: an operator's fork of their own
+#: conversation is theirs (``resume.USER_ORIGINS`` lists it as a user origin).
+_HUMAN_ORIGINS = frozenset({"fork"})
+
+
+def lineage_path(state_root: str | os.PathLike[str] | None = None) -> Path:
+    from local_operator.paths import config_dir
+
+    root = Path(state_root) if state_root is not None else config_dir()
+    return root / LEDGER_DIRNAME / LINEAGE_FILENAME
+
+
+def record_lineage(
+    child: str,
+    *,
+    origin: str,
+    parent: str | None = None,
+    opener: str | None = None,
+    state_root: str | os.PathLike[str] | None = None,
+) -> None:
+    """Append one registry row. Best-effort: a spawn never fails for it — the
+    cost of a missing row is that the child's creations go unproved (the old
+    ranking), never that a child is adopted it should not be."""
+    if not child or origin in _HUMAN_ORIGINS:
+        return
+    row = {"child": child, "origin": origin, "parent": parent, "opener": opener, "at": time.time()}
+    try:
+        path = lineage_path(state_root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, (json.dumps(row) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    except (OSError, TypeError, ValueError):
+        logger.debug("guardrails: lineage row not recorded", exc_info=True)
+
+
+def ensure_lineage_registry(state_root: str | os.PathLike[str] | None = None) -> float | None:
+    """Create the registry if missing; return its birth time (the legacy cutoff).
+
+    Created at the first checkpoint that needs lineage, not only at the first
+    spawn, so the migration window for ``origin.json``-only children closes
+    as early as possible on an upgraded install.
+    """
+    path = lineage_path(state_root)
+    try:
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.close(os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600))
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not os.path.isfile(path) or os.path.islink(path):
+        return None
+    return float(getattr(st, "st_birthtime", st.st_ctime))
+
+
+def read_lineage(state_root: str | os.PathLike[str] | None = None) -> dict[str, dict[str, Any]]:
+    """``child → row``; the FIRST row for a child wins (a later row cannot re-parent it)."""
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        fd = os.open(lineage_path(state_root), os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                child = row.get("child") if isinstance(row, dict) else None
+                if isinstance(child, str) and child and child not in out:
+                    out[child] = row
+    except OSError:
+        pass
+    return out
+
+
+def ledger_path(state_root: str | os.PathLike[str] | None = None) -> Path:
+    from local_operator.paths import config_dir
+
+    root = Path(state_root) if state_root is not None else config_dir()
+    return root / LEDGER_DIRNAME / LEDGER_FILENAME
+
+
+def creation_stamp(st: os.stat_result) -> int:
+    """An inode GENERATION stamp: ``dev+ino`` alone is reused after a delete.
+
+    * Birth time where the platform has it (macOS/BSD ``st_birthtime``): set
+      once at creation, never by later writes, so it is matched exactly.
+    * Otherwise (Linux; Python does not expose statx btime) ``st_ctime_ns``,
+      matched exactly too. A directory's ctime moves whenever an entry is
+      added, removed or renamed, or on chmod — so on Linux a ledger row stops
+      matching once the directory changes after the recording call. That is
+      deliberate: it fails CLOSED to the normal ranking, where the judge's
+      history evidence still covers a session's own directory. A ctime is
+      never accepted as "newer is fine": a recreation is exactly "newer".
+    """
+    birth = getattr(st, "st_birthtime", None)
+    # 0 means "unknown" on some filesystems (FAT/network mounts on macOS):
+    # every directory there would share one stamp, so use ctime instead.
+    if birth:
+        return int(round(float(birth) * 1_000_000_000))
+    return int(st.st_ctime_ns)
+
+
+@dataclass(frozen=True)
+class CreationRecord:
+    path: str
+    dev: int
+    ino: int
+    created_at: float
+    creator: str
+    kind: str
+    command: str
+    #: ``creation_stamp`` at record time; ``None`` on a pre-stamp row, which
+    #: therefore never matches.
+    stamp: int | None = None
+
+    def describe(self) -> str:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created_at))
+        return f"created by this session ({self.kind}, {when})"
+
+
+_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS created ("
+    " owner TEXT NOT NULL, path TEXT NOT NULL, dev INTEGER NOT NULL, ino INTEGER NOT NULL,"
+    " created_at REAL NOT NULL, creator TEXT NOT NULL, kind TEXT NOT NULL,"
+    " command TEXT NOT NULL, stamp INTEGER, PRIMARY KEY (owner, path))"
+)
+
+
+def _connect(path: Path, *, create: bool) -> sqlite3.Connection | None:
+    if not create and not path.exists():
+        return None
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=_DB_TIMEOUT_S)
+    try:
+        conn.execute(_SCHEMA)
+        # A ledger written before the stamp column existed: add it (old rows
+        # keep NULL and so never match — fail closed).
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(created)")}
+        if "stamp" not in columns:
+            try:
+                conn.execute("ALTER TABLE created ADD COLUMN stamp INTEGER")
+            except sqlite3.OperationalError:
+                # Two processes migrating at once: the loser sees "duplicate
+                # column". Re-check rather than fail the whole record/lookup.
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(created)")}
+                if "stamp" not in columns:
+                    raise
+    except BaseException:
+        conn.close()  # never leak a half-set-up connection
+        raise
+    return conn
+
+
+def write_records(
+    entries: Iterable[tuple[str, str]],
+    *,
+    owners: Sequence[str],
+    creator: str,
+    command: str,
+    state_root: str | os.PathLike[str] | None = None,
+) -> list[str]:
+    """Record ``(realpath, kind)`` entries for every owner; returns what was written."""
+    owners = [o for o in dict.fromkeys(owners) if o]
+    rows: list[tuple[Any, ...]] = []
+    written: list[str] = []
+    now = time.time()
+    for path, kind in entries:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        written.append(path)
+        for owner in owners:
+            rows.append(
+                (
+                    owner,
+                    path,
+                    st.st_dev,
+                    st.st_ino,
+                    now,
+                    creator,
+                    kind,
+                    command[:500],
+                    creation_stamp(st),
+                )
+            )
+    if not rows:
+        return []
+    conn = _connect(ledger_path(state_root), create=True)
+    assert conn is not None
+    try:
+        with conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO created"
+                " (owner, path, dev, ino, created_at, creator, kind, command, stamp)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+    finally:
+        conn.close()
+    return written
+
+
+def owned_record(
+    path: str, session_id: str, *, state_root: str | os.PathLike[str] | None = None
+) -> CreationRecord | None:
+    """The ledger row covering ``path`` for ``session_id``, or ``None``.
+
+    Covers = the recorded directory itself or anything strictly inside it,
+    compared on REALPATH so a symlink inside an owned directory that points
+    elsewhere is not covered. The recorded directory must still be the same
+    inode generation (dev, ino and ``creation_stamp``): a path deleted and
+    re-made by someone else is no longer this session's. Any error means "not owned".
+    """
+    if not session_id or not path:
+        return None
+    try:
+        real = os.path.realpath(path)
+        conn = _connect(ledger_path(state_root), create=False)
+        if conn is None:
+            return None
+        try:
+            rows = conn.execute(
+                "SELECT path, dev, ino, created_at, creator, kind, command, stamp FROM created"
+                " WHERE owner = ?",
+                (session_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        logger.debug("guardrail ledger unreadable", exc_info=True)
+        return None
+    best: CreationRecord | None = None
+    for row in rows:
+        rec = CreationRecord(*row)
+        if not (real == rec.path or real.startswith(rec.path.rstrip("/") + "/")):
+            continue
+        try:
+            st = os.stat(rec.path)
+        except OSError:
+            continue
+        if (st.st_dev, st.st_ino) != (rec.dev, rec.ino):
+            continue
+        if rec.stamp is None or creation_stamp(st) != rec.stamp:
+            continue  # same inode number, different generation (or unstamped)
+        if best is None or len(rec.path) > len(best.path):
+            best = rec
+    if best is not None and _foreign_inside(real, session_id, state_root=state_root):
+        return None
+    return best
+
+
+def _holds_git(directory: str) -> bool:
+    """A ``.git`` anywhere in ``directory`` (bounded; over the bound → True)."""
+    if not os.path.isdir(directory) or os.path.islink(directory):
+        return False
+    seen = 0
+    stack: list[tuple[str, int]] = [(directory, 0)]
+    while stack:
+        current, depth = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        seen += len(entries)
+        if seen > _WALK_ENTRIES:
+            return True
+        for entry in entries:
+            if entry.name == ".git":
+                return True
+            if depth < _WALK_DEPTH and entry.is_dir(follow_symlinks=False):
+                stack.append((entry.path, depth + 1))
+    return False
+
+
+#: Bounds on the work-tree walks (``_foreign_inside``, ``_holds_git``). Hitting either fails
+#: closed (not owned → the normal ranking/judge), never open.
+_WALK_DEPTH = 4
+_WALK_ENTRIES = 20_000
+
+
+def _foreign_inside(
+    real: str, session_id: str, *, state_root: str | os.PathLike[str] | None = None
+) -> bool:
+    """Does ``real`` hold something this session's ledger does not vouch for?
+
+    WHY (QA Q7). The ledger records the TOPMOST new directory, so the first
+    ``git worktree add .worktrees/a`` in a fresh repo records ``.worktrees``
+    itself — and "strictly inside a recorded path" then covered every later
+    sibling another session added there. A ledger-owned ancestor therefore
+    does not make a target LOW when (a) another session's ledger row is at or
+    under the target, or (b) the target is, or contains, a git work tree or
+    repository (a ``.git`` file or directory) whose directory this session's
+    ledger does not record itself. Either way the target goes to the normal
+    ranking and the judge.
+    """
+    prefix = real.rstrip("/") + "/"
+    try:
+        conn = _connect(ledger_path(state_root), create=False)
+        if conn is None:
+            return False
+        try:
+            rows = conn.execute("SELECT path, owner FROM created").fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        return True
+    own = {p for p, o in rows if o == session_id}
+    if any((p == real or p.startswith(prefix)) and p not in own for p, _ in rows):
+        return True
+    seen = 0
+    stack: list[tuple[str, int]] = [(real, 0)]
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        seen += len(entries)
+        if seen > _WALK_ENTRIES:
+            return True
+        for entry in entries:
+            if entry.name == ".git":
+                if os.path.realpath(directory) not in own:
+                    return True
+                continue
+            if depth < _WALK_DEPTH and entry.is_dir(follow_symlinks=False):
+                stack.append((entry.path, depth + 1))
+    return False
+
+
+@dataclass
+class PendingCreations:
+    """What a bash call may create, snapshotted BEFORE it runs."""
+
+    command: str
+    #: ``(kind, candidate path, topmost component that does not exist yet)``.
+    exact: list[tuple[str, str, str]] = field(default_factory=list)
+    #: ``(parent, pattern, matches that already existed)`` for ``mktemp -d``.
+    patterned: list[tuple[str, str, frozenset[str]]] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.exact or self.patterned)
+
+
+def _topmost_new(path: str) -> str | None:
+    if os.path.lexists(path):
+        return None
+    top = path
+    parent = os.path.dirname(top)
+    while parent and parent != top and not os.path.lexists(parent):
+        top, parent = parent, os.path.dirname(parent)
+    return top
+
+
+def plan_creations(
+    command: str, *, cwd: str | None, env: Mapping[str, str]
+) -> PendingCreations | None:
+    """Snapshot the creation candidates of ``command``; ``None`` when there are none."""
+    from local_operator.guardrails.resolve import resolve_command
+
+    home = env.get("HOME") or os.path.expanduser("~")
+    cwd_n = os.path.normpath(os.path.abspath(os.path.expanduser(cwd))) if cwd else None
+    resolution = resolve_command(command, cwd=cwd_n, env=env, home=home)
+    pending = PendingCreations(command=command)
+    for created in resolution.created:
+        if created.path is not None:
+            top = _topmost_new(created.path)
+            if top is not None:
+                pending.exact.append((created.kind, created.path, top))
+        elif created.parent and created.pattern:
+            before = frozenset(
+                _glob.glob(os.path.join(_glob.escape(created.parent), created.pattern))
+            )
+            pending.patterned.append((created.parent, created.pattern, before))
+    return pending or None
+
+
+def _recordable(
+    real: str, *, env: Mapping[str, str], scratchpad: str | None, session_id: str
+) -> bool:
+    """Never record a protected root, an ancestor of one, or someone else's state."""
+    from local_operator.guardrails.classify import (
+        _is_ancestor_or_self,
+        _protected,
+        _under,
+    )
+
+    prot = _protected(env, scratchpad, session_id)
+    if real == "/":
+        return False
+    roots = [
+        *prot.homes,
+        *prot.state_roots,
+        *prot.install_roots,
+        *prot.config_files,
+        *prot.secrets_dirs,
+        *prot.ledger_files,
+    ]
+    if any(_is_ancestor_or_self(real, root) for root in roots):
+        return False
+    for state in prot.state_roots:
+        if _under(real, state) and not any(_under(real, own) for own in prot.own_session):
+            return False
+    return True
+
+
+def commit_creations(
+    pending: PendingCreations,
+    *,
+    session_id: str,
+    ancestors: Sequence[str] = (),
+    env: Mapping[str, str],
+    scratchpad: str | None,
+) -> list[str]:
+    """Record what ``pending`` really created. Best-effort; never raises."""
+    try:
+        entries: list[tuple[str, str]] = []
+        for kind, path, top in pending.exact:
+            if not os.path.isdir(path) or not os.path.isdir(top):
+                continue
+            entries.append((os.path.realpath(top), kind))
+            if kind in ("worktree", "clone") and os.path.realpath(path) != os.path.realpath(top):
+                # The checkout itself too: a ledger-owned CONTAINER does not
+                # vouch for a work tree inside it (``_foreign_inside``), so
+                # the session's own worktree needs its own row (QA Q7).
+                entries.append((os.path.realpath(path), kind))
+        for parent, pattern, before in pending.patterned:
+            now = _glob.glob(os.path.join(_glob.escape(parent), pattern))
+            for match in now:
+                if match not in before and os.path.isdir(match):
+                    entries.append((os.path.realpath(match), "mktemp"))
+        entries = [
+            (p, k)
+            for p, k in dict(entries).items()
+            if _recordable(p, env=env, scratchpad=scratchpad, session_id=session_id)
+        ]
+        if not entries or not session_id:
+            return []
+        return write_records(
+            entries,
+            owners=[session_id, *ancestors],
+            creator=session_id,
+            command=pending.command,
+        )
+    except Exception:  # noqa: BLE001 — provenance is an optimisation, never a failure
+        logger.warning("guardrail creation ledger write failed", exc_info=True)
+        return []
+
+
+# -- git worktrees -------------------------------------------------------------
+
+
+def _git(args: Sequence[str], cwd: str) -> str | None:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    # Read-only probes: no prompts, no index refresh writes, no credential helper.
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_S,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+#: Ignored entries a clean-worktree removal may take with it: build and
+#: dependency output any checkout regenerates. Matched on the entry's basename.
+_REGENERABLE = frozenset(
+    {
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "build",
+        "dist",
+        ".next",
+        "target",
+        ".turbo",
+        "coverage",
+        ".tox",
+    }
+)
+
+
+def worktree_state(path: str) -> str:
+    """``clean`` / ``dirty`` / ``not-linked`` / ``unknown`` for a worktree path.
+
+    Linked = its ``.git`` is a FILE, its git-dir differs from the common dir,
+    and the repository's ``git worktree list`` names it (not as the main
+    checkout). Clean = ALL of: no tracked or untracked change, no ignored entry
+    outside :data:`_REGENERABLE`, and HEAD on a branch or contained in some
+    ref. Anything less is ``dirty`` and takes the ordinary ranking — where an
+    OWN worktree can still pass through the ledger or history evidence.
+    """
+    try:
+        real = os.path.realpath(path)
+        if not os.path.isfile(os.path.join(real, ".git")):
+            return "not-linked"
+    except OSError:
+        return "unknown"
+    dirs = _git(["rev-parse", "--absolute-git-dir", "--git-common-dir"], real)
+    if dirs is None:
+        return "unknown"
+    lines = [ln for ln in dirs.splitlines() if ln.strip()]
+    if len(lines) != 2:
+        return "unknown"
+    git_dir = os.path.realpath(lines[0])
+    common = os.path.realpath(os.path.join(real, lines[1]))
+    if git_dir == common:
+        return "not-linked"
+    listing = _git(["worktree", "list", "--porcelain"], real)
+    if listing is None:
+        return "unknown"
+    trees = [
+        os.path.realpath(ln[len("worktree ") :])
+        for ln in listing.splitlines()
+        if ln.startswith("worktree ")
+    ]
+    if real not in trees[1:]:
+        return "not-linked"
+    status = _git(["status", "--porcelain", "--untracked-files=all"], real)
+    if status is None:
+        return "unknown"
+    if status.strip():
+        return "dirty"
+    # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
+    # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy
+    # of its history went with it). Only regenerable entries may remain. A
+    # nested repository inside an ignored directory surfaces as that
+    # directory: under a name not on the list it is dirty outright, and under
+    # an allowlisted name (``build/keep/.git``) the bounded walk below finds
+    # it (review R2-MINOR-1).
+    ignored = _git(["status", "--porcelain", "--ignored"], real)
+    if ignored is None:
+        return "unknown"
+    for line in ignored.splitlines():
+        if not line.startswith("!! "):
+            continue
+        entry = line[3:].strip().strip('"').rstrip("/")
+        name = os.path.basename(entry)
+        if name not in _REGENERABLE and not fnmatch.fnmatchcase(name, "*.pyc"):
+            return "dirty"
+        if _holds_git(os.path.join(real, entry)):
+            return "dirty"
+    # A detached HEAD whose commit no ref contains is lost with the tree.
+    if _git(["symbolic-ref", "-q", "HEAD"], real) is None:
+        refs = _git(
+            [
+                "for-each-ref",
+                "--count=1",
+                "--contains",
+                "HEAD",
+                "refs/heads",
+                "refs/remotes",
+                "refs/tags",
+            ],
+            real,
+        )
+        if not (refs or "").strip():
+            return "dirty"
+    return "clean"
+
+
+def is_primary_checkout(path: str) -> bool:
+    try:
+        return os.path.isdir(os.path.join(path, ".git"))
+    except OSError:
+        return False
+
+
+# -- trusted operator words ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OperatorWords:
+    """One trusted row: ``label`` says why it is trusted."""
+
+    label: str
+    text: str
+    #: For an ask answer: the question/option text and the chosen answers, so
+    #: path naming is checked against what the OPERATOR saw.
+    ask_id: str = ""
+    session_id: str = ""
+
+
+@dataclass
+class OperatorBrief:
+    words: list[OperatorWords] = field(default_factory=list)
+    #: kind -> count of untrusted rows deliberately left out (never their text).
+    excluded: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def latest_direct(self) -> str:
+        for w in self.words:
+            if w.label == "operator, direct":
+                return w.text
+        return ""
+
+
+def _custom_kind(custom_type: str) -> str | None:
+    from local_operator.harness.message_types import (
+        HUB_MESSAGE_TYPE,
+        PEER_MESSAGE_MESSAGE_TYPE,
+        TEAM_BRIDGE_MESSAGE_TYPE,
+    )
+
+    return {
+        PEER_MESSAGE_MESSAGE_TYPE: "peer-agent message",
+        TEAM_BRIDGE_MESSAGE_TYPE: "Team Bridge delivery",
+        HUB_MESSAGE_TYPE: "hub message",
+    }.get(custom_type)
+
+
+def verified_ask(
+    session_id: str,
+    ask_id: str,
+    *,
+    state_root: str | os.PathLike[str] | None = None,
+) -> OperatorWords | None:
+    """The ask ``ask_id`` of ``session_id`` as consent, if the STORE proves it.
+
+    All must hold: the ask exists in that session's durable log, it was
+    ``answered``/``late``, the answer came from a human surface
+    (:data:`TRUSTED_ASK_SURFACES`), and it is not a Team Bridge question (a
+    ``question_id`` means the sender's picks, not the operator's). Whether the
+    answer APPROVES the delete is a judgement left to the judge, which sees the
+    question, the options and the chosen answer verbatim.
+    """
+    if not session_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session_id):
+        return None
+    try:
+        from local_operator.asks import store
+        from local_operator.paths import config_dir
+
+        root = Path(state_root) if state_root is not None else config_dir()
+        directory = store.session_dir(root, session_id)
+        if not directory.is_dir():
+            return None
+        records = store.fold(store.read_events(directory), store.now_ms())
+    except Exception:  # noqa: BLE001 — an unreadable store is no consent
+        logger.debug("guardrail: ask store unreadable", exc_info=True)
+        return None
+    record = next((r for r in records if str(r.get("ask_id")) == ask_id), None)
+    if record is None or str(record.get("status") or "") not in ("answered", "late"):
+        return None
+    surface = str((record.get("answered_by") or {}).get("surface") or "")
+    if surface not in TRUSTED_ASK_SURFACES:
+        return None
+    questions = [q for q in record.get("questions") or [] if isinstance(q, Mapping)]
+    if any(str(q.get("question_id") or "") for q in questions):
+        return None
+    answers = record.get("answers") or {}
+    parts: list[str] = []
+    for q in questions:
+        if q.get("secret"):
+            continue
+        chosen = [str(v) for v in (answers.get(str(q.get("id") or "")) or [])]
+        if not chosen or any(_DECLINE_RE.search(v) for v in chosen):
+            # Deterministic veto (review R1-MINOR-3): a declining answer is
+            # never consent, whatever a judge that read the history concludes.
+            continue
+        options = "; ".join(
+            str(o.get("label") or "") for o in (q.get("options") or []) if isinstance(o, Mapping)
+        )
+        parts.append(
+            f"Q: {q.get('question') or ''}"
+            + (f" [options: {options}]" if options else "")
+            + f" -> operator answered: {', '.join(chosen)}"
+        )
+    if not parts:
+        return None
+    return OperatorWords(
+        label="operator, answer to ask",
+        text="\n".join(parts),
+        ask_id=ask_id,
+        session_id=session_id,
+    )
+
+
+def _text_of(message: Any) -> str:
+    text = getattr(message, "text", None)
+    if isinstance(text, str):
+        return text
+    details = getattr(message, "details", None) or {}
+    return str(details.get("body") or details.get("text") or "")
+
+
+def read_origin(root: Path, session_id: str) -> dict[str, Any] | None:
+    """``origin.json`` of a session; ``{}`` when it has none.
+
+    Opened with ``O_NOFOLLOW`` and refused when the session directory itself
+    is a symlink: a dangling ``ln -sf`` raised ``FileNotFoundError`` and so
+    read as "operator-opened" (review R2-MAJOR-2). A symlink is unreadable
+    here — neither human nor a lineage pointer.
+    """
+    directory = root / "sessions" / session_id
+    if os.path.islink(directory):
+        return None
+    try:
+        fd = os.open(directory / "origin.json", os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return {} if os.path.isdir(directory) else None
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            value = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def session_lineage(
+    session_id: str,
+    ancestors: Sequence[str] = (),
+    *,
+    state_root: str | os.PathLike[str] | None = None,
+) -> tuple[list[str], bool]:
+    """``(lineage, operator_opened)`` for ``session_id``.
+
+    Lineage = the session, its harness-known ancestors, and every parent or
+    opener their ``origin.json`` names (``parent`` for a subagent,
+    ``opened_by.session`` for an agent-opened workstream), followed upward.
+    Those are the only ask stores a pointer may resolve in (review R1-MINOR-1:
+    a bare hex string must not aim the lookup at any session on disk).
+    The harness lineage registry (``read_lineage``) is read first; any shell
+    path into ``sessions/`` ranks CRITICAL, and ``origin.json`` is read
+    without following symlinks.
+
+    ``operator_opened`` (review R2-MAJOR-2) is True only when the harness
+    knows of NO parent or opener: no in-process ``ancestors``, no registry
+    row, and an ``origin.json`` that is genuinely absent from a real session
+    directory — how every session a person opened (terminal, desktop, phone)
+    is stored. A missing ``origin.json`` alone is never enough.
+    """
+    from local_operator.paths import config_dir
+
+    root = Path(state_root) if state_root is not None else config_dir()
+    valid = re.compile(r"[A-Za-z0-9_-]{1,64}")
+    registry = read_lineage(root)
+    lineage: list[str] = []
+    queue = [session_id, *ancestors]
+    operator_opened = False
+    while queue and len(lineage) < 32:
+        sid = queue.pop(0)
+        if not sid or sid in lineage or not valid.fullmatch(sid):
+            continue
+        lineage.append(sid)
+        row = registry.get(sid)
+        origin = read_origin(root, sid)
+        if sid == session_id:
+            operator_opened = not ancestors and row is None and origin == {}
+        pointers: list[object] = []
+        if row is not None:
+            pointers += [row.get("parent"), row.get("opener")]
+        if origin:
+            opened_by = origin.get("opened_by")
+            pointers += [
+                origin.get("parent"),
+                opened_by.get("session") if isinstance(opened_by, Mapping) else None,
+            ]
+        queue.extend(p for p in pointers if isinstance(p, str))
+    return lineage, operator_opened
+
+
+def operator_brief(
+    messages: Any,
+    *,
+    session_id: str = "",
+    ancestors: Sequence[str] = (),
+    cited: Sequence[str] = (),
+    state_root: str | os.PathLike[str] | None = None,
+) -> OperatorBrief:
+    """The trusted operator words in the recent transcript, newest first.
+
+    Trusted: a plain user row with no harness stamp — ONLY in a session the
+    operator opened (``session_lineage``): in a subagent or an agent-opened
+    workstream that row is the delegating agent's brief, which may relay a
+    Team Bridge or peer request (review R1-MAJOR-3 / QA Q3), so it is counted
+    as excluded and never quoted. And an ask answered by a human surface,
+    checked in the STORE of a session in this session's lineage. Everything
+    else is excluded BY STAMP: harness injections by ``harness_injected``;
+    peer, hub and Team Bridge rows by their ``custom_type``. Excluded rows are
+    counted by kind so the judge knows something was left out, but their text
+    never reaches it.
+
+    Ask ids (``a-xxxx``) cited anywhere — a peer body, an operator row, the
+    call's intent or command — are POINTERS only, resolved against the
+    lineage's ask stores; the store decides.
+    """
+    from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
+    from local_operator.harness.rows import is_harness_chrome, is_harness_injection
+
+    brief = OperatorBrief()
+    lineage, operator_opened = session_lineage(session_id, ancestors, state_root=state_root)
+    direct = 0
+    pointers: list[tuple[str, str]] = []  # (ask_id, relayed_by)
+    try:
+        rows = list(messages or ())[-_SCAN_LIMIT:]
+    except Exception:  # noqa: BLE001
+        rows = []
+    for message in reversed(rows):
+        try:
+            custom_type = getattr(message, "custom_type", None)
+            if custom_type is not None:
+                if custom_type == ASK_RESPONSE_MESSAGE_TYPE:
+                    ask_id = str((getattr(message, "details", None) or {}).get("ask_id") or "")
+                    if ask_id:
+                        pointers.append((ask_id, ""))
+                    continue
+                kind = _custom_kind(str(custom_type))
+                if kind is None:
+                    continue
+                brief.excluded[kind] = brief.excluded.get(kind, 0) + 1
+                details = getattr(message, "details", None) or {}
+                sender = details.get("sender") if isinstance(details, Mapping) else None
+                sender = sender if isinstance(sender, Mapping) else {}
+                who = str(sender.get("conversation_name") or sender.get("session_id") or kind)
+                for ask_id in _ASK_ID_RE.findall(_text_of(message)):
+                    pointers.append((ask_id, who))
+                continue
+            if getattr(message, "role", None) != "user":
+                continue
+            if is_harness_injection(message):
+                continue
+            text = getattr(message, "text", "")
+            if not isinstance(text, str) or not text.strip() or is_harness_chrome(text):
+                continue
+            pointers.extend((ask_id, "") for ask_id in _ASK_ID_RE.findall(text))
+            if not operator_opened:
+                kind = "delegating-agent message"
+                brief.excluded[kind] = brief.excluded.get(kind, 0) + 1
+                continue
+            if direct < _MAX_DIRECT:
+                brief.words.append(OperatorWords(label="operator, direct", text=text))
+                direct += 1
+        except Exception:  # noqa: BLE001 — one odd row never breaks the brief
+            continue
+    for text in cited:
+        pointers.extend((ask_id, "") for ask_id in _ASK_ID_RE.findall(text or ""))
+    asks = 0
+    seen: set[tuple[str, str]] = set()
+    for ask_id, relayed_by in pointers:
+        for sid in lineage:
+            if asks >= _MAX_ASKS or (ask_id, sid) in seen:
+                continue
+            seen.add((ask_id, sid))
+            found = verified_ask(sid, ask_id, state_root=state_root)
+            if found is None:
+                continue
+            label = found.label + (f" (relayed by {relayed_by})" if relayed_by else "")
+            if sid != session_id:
+                label += f" (session {sid})"
+            brief.words.append(
+                OperatorWords(label=label, text=found.text, ask_id=ask_id, session_id=sid)
+            )
+            asks += 1
+    return brief
+
+
+# -- naming --------------------------------------------------------------------
+
+_GLOBISH = re.compile(r"[*?\[]")
+_PATHISH = re.compile(r"[`'\"]?((?:~|/)[^\s`'\",;)]*)")
+
+
+def _expand_word(word: str, home: str, cwd: str | None) -> str | None:
+    word = word.rstrip(".:")
+    if word.startswith("~"):
+        if word != "~" and not word.startswith("~/"):
+            return None
+        word = home + word[1:]
+    elif not word.startswith("/"):
+        # Only absolute and ``~`` spellings name a path exactly (R1-MINOR-2).
+        del cwd
+        return None
+    return os.path.normpath(word)
+
+
+def names_path(
+    text: str,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """Does ``text`` (operator words) name ``path``, literally or by a safe glob?
+
+    Literal: the exact path (realpath or as spelled) or its ``~`` form —
+    never a ``parent/basename`` suffix, which names every same-named path in
+    every repository (review R1-MINOR-2), and never a cwd-relative word. A glob
+    covers ``path`` only when (a) it matches the realpath with ``fnmatch``,
+    component by component, (b) ``path`` sits under the glob's literal parent
+    directory, (c) that parent is not ``$HOME``'s ancestor and not a
+    protected root other than ``$HOME`` itself, (d) the wildcard sits only in
+    the last component and leaves at least three literal characters there
+    (``~/qa-r5-dg-*`` names the operator's rigs; ``~/*`` names nothing in
+    particular), and (e) ``path`` is not a primary checkout. CRITICAL targets
+    never reach this function: the caller ranks them first.
+    """
+    if not text or not path:
+        return False
+    real = os.path.realpath(path)
+    norm = os.path.normpath(path)
+    candidates = {real, norm}
+    for cand in list(candidates):
+        if cand.startswith(home.rstrip("/") + "/"):
+            candidates.add("~" + cand[len(home.rstrip("/")) :])
+    protected = {os.path.normpath(p) for p in protected}
+    for match in _PATHISH.finditer(text):
+        word = match.group(1).rstrip("/.:")
+        if not word:
+            continue
+        if not _GLOBISH.search(word):
+            if word in candidates or word.rstrip("/") in candidates:
+                return True
+            expanded = _expand_word(word, home, cwd)
+            if expanded is not None and expanded in (real, norm):
+                return True
+            continue
+        pattern = _expand_word(word, home, cwd)
+        if pattern is None:
+            continue
+        last = pattern.rsplit("/", 1)[-1]
+        if _GLOBISH.search(pattern.rsplit("/", 1)[0]) or len(_GLOBISH.sub("", last)) < 3:
+            # ``~/*``, ``~/??*`` or a wildcard above the last component names a
+            # class of directories, not the operator's chosen ones: never consent.
+            continue
+        literal = pattern[: _GLOBISH.search(pattern).start()]  # type: ignore[union-attr]
+        parent = literal[: literal.rfind("/")] if "/" in literal else ""
+        parent = os.path.normpath(parent or "/")
+        if parent == "/" or home.startswith(parent.rstrip("/") + "/"):
+            continue
+        if parent in protected and parent != os.path.normpath(home):
+            continue
+        if is_primary_checkout(real):
+            # A glob never vouches for a repository's primary checkout; only
+            # its literal name does (the branch above).
+            continue
+        for spelled in (real, norm):
+            if not spelled.startswith(parent.rstrip("/") + "/"):
+                continue
+            pat = [c for c in pattern.split("/") if c]
+            got = [c for c in spelled.split("/") if c]
+            if len(pat) == len(got) and all(
+                fnmatch.fnmatchcase(g, p) for g, p in zip(got, pat, strict=True)
+            ):
+                return True
+    return False
