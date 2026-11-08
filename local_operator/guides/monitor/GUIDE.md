@@ -150,20 +150,14 @@ monitor({op:"create", name:"product-feedback-watch",
 - **A multi-paragraph message is still one record.** Its body stays on the
   line that carries the author and the id; a blank line inside a message does
   not split it, so `ignore` and the delta both see one record.
-- **Ownership**: this watch only ticks while its session is hosted. A cold
-  session's watch is dormant — `lop monitor status` marks the row `idle` — so
-  a channel watch belongs to a session that stays up. Record where it lives
-  when you arm it, and treat the host as part of the arming.
-- **Hosting a watch costs a turn — say so when you arm it.** A watch lives only
-  as long as its session is hosted, so a channel that must not be missed needs
-  a host that stays up: an app tab left open on the session, or a recurring wake
-  (say every 2h) that re-hosts it so the next tick can run. Each wake fire is
-  one short turn even when nothing moved, and the monitor then delivers ONE
-  delta for the window it missed — bounded like any delivery (about 12 preview
-  lines, the delivery budget, the hourly cap), so it is not a replay of every
-  missed tick. That is the price of a watch that cannot miss: a wake is what
-  keeps a cold session's watch alive, and a cheaper way to host an idle
-  session does not exist today.
+- **Hosting**: the watch keeps its own session hosted (see "An armed monitor
+  keeps its own session hosted" below), so it needs no app tab and no
+  keep-alive wake. A missed window — a reboot, an update — is closed by ONE
+  delta when the session is re-engaged, bounded like any delivery (about 12
+  preview lines, the delivery budget, the hourly cap), never a replay of every
+  missed tick. `lop stop` on the session parks the watch (`lop monitor status`
+  marks it `idle`), so record which session owns a channel watch when you arm
+  it, and don't stop that session.
 - **A watch armed before the record split** keeps working: its stored
   baseline is re-read in the new shape, so a message that landed during the
   upgrade is still delivered. The exception is a baseline the old cap had
