@@ -3795,6 +3795,44 @@ async def test_child_route_pages_backwards_and_reports_a_vanished_cursor(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_child_route_point_reads_one_row_above_the_tail(tmp_path):
+    """``entry_id`` answers the one row the tail page cannot reach.
+
+    The run-details reader's tail page is 100 rows, so a busy child's launch row
+    (``subagent-launch:<job>``, the full brief) is out of reach on open while
+    the roster only ships a 200-char clip. The point read must return that row
+    whole, return nothing for an unknown id, and refuse a cursor alongside it.
+    """
+    parent_dir, child_dir = subagent_child(tmp_path)
+    transcript = Transcript(child_dir)
+    brief = "Brief head. " + "x" * 2_000 + " TAIL-MARKER"
+    launch = Message.user(brief)
+    launch.id = "subagent-launch:job123"
+    await transcript.append_message(launch)
+    for index in range(150):
+        await transcript.append_message(Message.user(f"child row {index}"))
+    name_child(parent_dir, child_dir)
+    pool = DesktopSessions(tmp_path)
+
+    tail = await pool.child_transcript(PARENT_ID, CHILD_ID, limit=100)
+    assert "subagent-launch:job123" not in [row["id"] for row in tail["entries"]]
+
+    point = await pool.child_transcript(PARENT_ID, CHILD_ID, entry_id="subagent-launch:job123")
+    assert point["state"] == "ready"
+    assert point["has_more"] is False
+    assert [row["id"] for row in point["entries"]] == ["subagent-launch:job123"]
+    assert TranscriptEntry.from_json(json.dumps(point["entries"][0])) is not None
+    assert "TAIL-MARKER" in json.dumps(point["entries"][0])
+
+    missing = await pool.child_transcript(PARENT_ID, CHILD_ID, entry_id="subagent-launch:nope")
+    assert missing["entries"] == []
+    assert missing["state"] == "ready"
+
+    with pytest.raises(ValueError):
+        await pool.child_transcript(PARENT_ID, CHILD_ID, entry_id="x", before_id="y")
+
+
+@pytest.mark.asyncio
 async def test_child_route_distinguishes_pending_ready_and_gone(tmp_path):
     """Three states, three different answers, and only the filesystem knows.
 
@@ -3948,6 +3986,8 @@ async def test_child_transcript_route_is_bearer_gated_and_no_store(tmp_path, mon
             headers=headers,
         )
         long_cursor = client.get(path + "?before_id=" + "a" * 129, headers=headers)
+        point = client.get(path + f"?entry_id={ids[0]}&limit=1", headers=headers)
+        long_entry = client.get(path + "?entry_id=" + "a" * 129, headers=headers)
 
     assert response.status_code == 200, response.text
     assert response.headers["cache-control"] == "no-store"
@@ -3974,6 +4014,11 @@ async def test_child_transcript_route_is_bearer_gated_and_no_store(tmp_path, mon
     # Limits and cursors are the app's own bugs, never a user state.
     assert not_a_child.status_code == 422
     assert long_cursor.status_code == 422
+    # The point read reaches the wire under the same envelope and bounds.
+    assert point.status_code == 200, point.text
+    assert [row["id"] for row in point.json()["result"]["entries"]] == ids[:1]
+    assert point.json()["result"]["has_more"] is False
+    assert long_entry.status_code == 422
 
 
 @pytest.mark.asyncio
