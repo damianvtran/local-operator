@@ -993,6 +993,20 @@ def build_cli_parser() -> LocalizedArgumentParser:
     )
     skills_sync.add_argument(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--prefer",
+        # The same choices `agents sync`/`teams sync` take (``_add_hub_sync_flags``):
+        # ``remote`` is the hub's side. It reaches the merge the desktop resolve
+        # uses (``apply_items(prefer=...)``) because agents cannot hand-edit the
+        # managed skills directory to settle a conflict themselves.
+        choices=("local", "remote"),
+        default=None,
+        help=(
+            "For --name: every file the merge could not settle takes this side's whole "
+            "file (remote = hub); cleanly merged files still merge"
+        ),
+    )
+    skills_sync.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "--json",
         action="store_true",
         help="Print the machine-readable JSON result",
@@ -13336,12 +13350,33 @@ def _reason_error(code: str) -> Any:
     return LinkError(code, detail)
 
 
+#: Item outcomes after which `lop skills sync` exits 1: the named skill was NOT
+#: brought up to date (a conflict left for a decision, a refusal, a failure).
+#: ``unavailable`` (the hub could not be read for that item) is in the set
+#: everywhere, not only under ``--prefer``: nothing was brought up to date.
+#: The same contract `lop skills push` keeps -- 0 only when the asked-for state
+#: holds -- so a script or agent cannot read a held merge as done (2026-11-07:
+#: a needs-review merge printed JSON and exited 0).
+_SKILL_SYNC_FAILED_OUTCOMES = frozenset({"needs-review", "refused", "failed", "unavailable"})
+
+
 def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
     import json as _json
 
     from local_operator.hub_sync import service as svc
 
     names = [args.name] if getattr(args, "name", None) else None
+    prefer = getattr(args, "prefer", None)
+    if prefer and (not names or getattr(args, "check", False)):
+        # ``--prefer`` discards the other side's conflicting text: it is a
+        # decision about ONE skill's merge, never a batch default (the service
+        # ignores it under update-all for the same reason) and never a preview.
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            "Error: --prefer needs --name <skill> and cannot be combined with --check.",
+            file=sys.stderr,
+        )
+        return 1
     ctx = svc.sync_context(ConfigManager(base_dir))
     checks = svc.check_items(ctx, kinds=("skill",), names=names)
     if not checks:
@@ -13376,14 +13411,40 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
         ctx,
         kind="skill",
         names=names,
-        all_available=True,
+        # Update-all drops any conflict decision by design; a named ``--prefer``
+        # is that decision, so it takes the per-item path the desktop resolve
+        # uses (same ``checks``, so it acts on exactly the item just checked).
+        all_available=not prefer,
+        prefer=prefer or "none",
         auto=False,
         checks=checks,
     )
     payload = report.to_json()
+    exit_code = (
+        1
+        if any(
+            str(item.get("outcome") or "") in _SKILL_SYNC_FAILED_OUTCOMES
+            for item in payload.get("reports") or []
+        )
+        else 0
+    )
+    held = [
+        str(item.get("name") or "")
+        for item in payload.get("reports") or []
+        if item.get("error_class") == "merge-refused" and item.get("outcome") == "needs-review"
+    ]
+    if held:
+        # The machine-readable twin of the text hint below: an agent reading
+        # --json gets the CLI way out of a held merge, not just its diagnosis.
+        # Two runnable commands, never ``local|remote``: pasted, that is a pipe.
+        payload["next_steps"] = [
+            f"lop skills sync --name {_safe(name)} --prefer {side}"
+            for name in held
+            for side in ("local", "remote")
+        ]
     if getattr(args, "json", False):
         print(_json.dumps(payload, indent=2))
-        return 0
+        return exit_code
     for item in payload.get("reports") or []:
         code = str(item.get("error_class") or "")
         detail = _skills_refusal(_reason_error(code)) if code else str(item.get("outcome") or "")
@@ -13391,7 +13452,32 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
             # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
             f"{_safe(item.get('name'))}: {item.get('outcome')} {detail}".rstrip()
         )
-    return 0
+        message = str(item.get("message") or "")
+        if message:
+            print(f"  {_safe(message, limit=2000)}")
+        for field in item.get("fields") or []:
+            # A ``--prefer`` that settled an edit/removal by REMOVING the file
+            # discarded the other side's edit; say so, not just "merged" (agent
+            # review round 2, m1). Only side-taken files carry the prefer note.
+            regions = field.get("regions") or []
+            if field.get("merged") is None and any(
+                str(r.get("note") or "").startswith("prefer=") for r in regions
+            ):
+                print(
+                    # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                    f"  removed {_safe(field.get('field'))} (the other side's edit was discarded)"
+                )
+        if code == "merge-refused" and item.get("outcome") == "needs-review":
+            print(
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                "  Settle it by choosing a side for each conflicted file (that side's whole file):"
+            )
+            for side in ("local", "remote"):
+                print(
+                    # i18n: ignore a runnable command line, a technical identifier
+                    f"    lop skills sync --name {_safe(item.get('name'))} --prefer {side}"
+                )
+    return exit_code
 
 
 def _skills_status(args: argparse.Namespace, base_dir: Path) -> int:

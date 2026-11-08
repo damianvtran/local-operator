@@ -29,6 +29,11 @@ Your Radient organization shares agents, teams and skills through its private Ag
 
 Pick `adopt-link` unless the user says the org copy should replace theirs (`adopt`). Report the backup paths you were given.
 
+## A skill sync that needs a decision
+
+- `lop skills sync` exits 1 when any skill is `needs-review`, `refused`, `failed` or `unavailable` (not brought up to date); `--check` only reports and exits 0. The message names each conflicted file and its kind (edit/edit, edit/removal, add/add).
+- Settle it from the CLI (never by editing `~/.local-operator/skills`): `lop skills sync --name <skill> --prefer local` or `--prefer remote` (remote = hub). Each file the merge could not settle takes that side's whole file; cleanly merged files still merge. Then `lop skills push <skill>` publishes a kept local side. Pick the side the user asked for; if unclear, ask.
+
 ## Automatic enrolment
 
 - On sign-in, daemon start and the hub update tick (at most hourly per organization), new organization items are pulled and same-name local copies are adopt-linked (content kept as it is). It never merges, never calls a model, never auto-pushes and never uses hub-wins.

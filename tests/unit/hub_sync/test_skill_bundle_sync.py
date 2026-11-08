@@ -1464,7 +1464,8 @@ def test_sync_and_status_name_the_reinstall_action(
     )
     sync_out = capsys.readouterr().out
 
-    assert code == 0
+    # A refused item is not "synced": the command exits 1 (the push contract).
+    assert code == 1
     assert "bundle-publisher-changed" in sync_out
     assert "--reinstall" in sync_out
 

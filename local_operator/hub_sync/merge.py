@@ -1272,6 +1272,53 @@ def file_add_conflict(path: str, local: str, remote: str) -> MergeResult:
     )
 
 
+def take_file_side(
+    path: str,
+    *,
+    base: str | None,
+    local: str | None,
+    remote: str | None,
+    take: Literal["local", "remote"],
+) -> MergeResult:
+    """An explicit side choice over ONE conflicted manifest file: that side, whole.
+
+    WHY WHOLE-FILE (QA round 1, Q2 on PR #3574): the text engine's ``prefer``
+    settles only the UNRESOLVED passages, so when it read one side's rewrite as
+    "remove the old sentence, add a new one" the added sentence counted as a
+    non-conflicting edit and survived ``--prefer local`` -- leaving a skill that
+    stated two contradictory rules. An operator or agent choosing a side for a
+    file the merge could not settle means "this side's file", so the chosen
+    side's exact bytes (or its ABSENCE, for an edit/removal) win; files that
+    merged cleanly never come here. ``merged`` is ``None`` when the chosen side
+    has no such file.
+    """
+
+    keep, drop = (local, remote) if take == "local" else (remote, local)
+    prov = "kept-local" if take == "local" else "taken-remote"
+    counts = _zero_counts()
+    counts[prov] += 1
+    inp = FieldInput(field=path, kind="text", base=base, local=local, remote=remote)
+    return MergeResult(
+        field=path,
+        outcome="unchanged" if keep == local else "merged",
+        merged=keep,
+        regions=(
+            _single_region(
+                inp,
+                path,
+                prov,
+                None if keep is not None else take,
+                keep,
+                dropped=drop if drop != keep else None,
+                note=f"prefer={take}",
+            ),
+        ),
+        counts=counts,
+        engine=EngineInfo(mode="replace"),
+        kind="text",
+    )
+
+
 def replace_field(inp: FieldInput, *, take: Literal["local", "remote"]) -> MergeResult:
     """The explicit ``--replace`` path (B5.5): one region, dropped text echoed.
 
