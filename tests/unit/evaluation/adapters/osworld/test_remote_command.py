@@ -350,3 +350,57 @@ async def test_the_failure_text_is_bounded() -> None:
     body = {"status": "error", "output": "", "error": "E" * 100_000, "returncode": 1}
     result = await _provider(lambda *args: body).run_command(_params("true"))
     assert result.error is not None and len(result.error) <= 4096
+
+
+@pytest.mark.asyncio
+async def test_a_target_failure_survives_the_real_worker_wire_as_a_result() -> None:
+    """The whole point: the failure crosses the RPC as a RESULT, not as an error.
+
+    The sealed run's poison started here -- an ``adapter_error`` frame built from
+    the adapter's raise. A result carrying ``error`` must instead come back as
+    ``result`` (no ``error`` frame), so the parent's mutating-call gate never
+    sees a failure at all.
+    """
+
+    import asyncio
+    import os
+
+    from local_operator.evaluation.adapters.rpc import (
+        IncrementalReader,
+        IncrementalWriter,
+        RpcRequest,
+    )
+    from local_operator.evaluation.adapters.worker import Worker
+    from tests.unit.evaluation.adapters.test_worker import exchange
+
+    reads, writes = os.pipe()
+    response_read, response_write = os.pipe()
+    worker = Worker(reads, response_write)
+    worker._state = "RUNNING"
+    # The measured body: the guest's deadline killed the wrapper (SIGTERM).
+    body = {"status": "success", "output": "", "error": "", "returncode": -15}
+    provider = _provider(lambda *args: body)
+
+    async def run(params: RunCommandParams) -> Any:
+        return await provider.run_command(params)
+
+    worker._adapter = cast(EvaluationAdapter, SimpleNamespace(run_command=run))
+    task = asyncio.create_task(worker.run())
+    writer, reader = IncrementalWriter(writes), IncrementalReader(response_read)
+    params = _params("compose", timeout_s=5.0).model_dump(mode="json")
+    try:
+        reply = await exchange(
+            writer,
+            reader,
+            RpcRequest(jsonrpc="2.0", id=1, method="run_command", params=params),
+        )
+        assert reply.error is None, reply.error
+        assert reply.result is not None
+        assert reply.result["exit_code"] is None
+        assert reply.result["timed_out"] is False
+        assert "SIGTERM" in reply.result["error"]
+    finally:
+        os.close(writes)
+        assert await asyncio.wait_for(task, 2) == 0
+        for fd in (reads, response_read, response_write):
+            os.close(fd)
