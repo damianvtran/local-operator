@@ -14,7 +14,7 @@ localized subtitle over an English body. A function resolves the ACTIVE locale
 on every call, so the transcript row, the phone projection frame and the
 desktop bridge follow a live language change with no bookkeeping; only the
 banner vocabulary still holds copies, and it re-materialises them through
-``register_refresh`` (``tui.notify._reload_notice_copy``).
+``register_refresh`` (``tui.notify._reload_copy``).
 
 NOTHING PARSES OR STORES THIS TEXT. The persisted attention record carries only
 ``kind`` / ``reason`` / ``cause`` tokens; the sentence is derived from them each
