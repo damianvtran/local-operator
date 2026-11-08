@@ -3469,9 +3469,24 @@ def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
     assert full["permissions"] == {"contents": "read"}, "test jobs must keep a read-only token"
     report = full["jobs"]["report"]
     assert report["if"] == "always()"
-    assert report["permissions"] == {"issues": "write"}
+    # The token stays MINIMAL, which is what this pin is for: two reads (the
+    # checkout the body builder needs, and the job log it reads) and exactly one
+    # write scope, the issue. `actions: read` is not decoration — without it the
+    # log fetch 403s and every body silently degrades to the thin one it had
+    # before (scripts/ci_main_red_body.py, and the failed run's own annotation).
+    assert report["permissions"] == {
+        "contents": "read",
+        "actions": "read",
+        "issues": "write",
+    }, "the report job may write nothing but the issue"
     assert set(report["needs"]) == set(full["jobs"]) - {"report"}
-    run = report["steps"][0]["run"]
+    # By name, not index: the checkout step sits in front of the filing step.
+    filing = next(
+        step
+        for step in report["steps"]
+        if step.get("name") == "File or close the ci-main-red issue"
+    )
+    run = filing["run"]
     assert (
         'if [ "$GITHUB_REF" != "refs/heads/main" ]' in run
     ), "branch runs must not touch the issue"

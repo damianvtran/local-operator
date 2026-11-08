@@ -912,6 +912,18 @@ jobs:
   # `issues: write` is granted on THIS job only; the test jobs keep the
   # workflow's read-only token, and they run repository code.
   #
+  # `actions: read` is here for ONE reason: the body this job files now carries
+  # the diagnosis (the failing step, its `##[error]` line, the last output, and
+  # the `FAILED tests/...` node ids), and reading a job's log is an Actions
+  # API call. `contents: read` is the checkout that the body builder itself
+  # needs. Both are narrower than they look: a job-level `permissions:` block
+  # zeroes everything it does not list, so naming these three IS the narrowing.
+  #
+  # The checkout runs `scripts/ci_main_red_body.py` from the pushed commit. That
+  # code is main's own merged code, and the alternative — 200 lines of log
+  # parsing in shell, unreadable and untestable — is worse. The script never
+  # writes to the repository and holds no secret beyond these three scopes.
+  #
   # Off `main` (a branch dispatch for an infra PR) the issue is never touched:
   # `ci-main-red` tracks main's health, and a feature branch's red or green
   # says nothing about it. The job still fails on red so the run reads red.
@@ -921,8 +933,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      contents: read
+      actions: read
       issues: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          # Only the body builder is needed; the full history is not.
+          fetch-depth: 1
+
       - name: File or close the ci-main-red issue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -932,6 +951,7 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+
           failed="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result == "failure") | .key')"
           cancelled="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result == "cancelled") | .key')"
           short="${SHA:0:12}"
@@ -945,16 +965,36 @@ jobs:
             --description "The main full-suite run is red" 2>/dev/null || true
           open="$(gh issue list --label ci-main-red --state open --json number --jq '.[0].number // empty')"
           if [ -n "$failed" ]; then
-            # shellcheck disable=SC2016 # the backticks are literal markdown
-            body="$(printf 'Full suite red at %s.\n\nFailing jobs:\n%s\n\nRun: %s\n' \
-              "$SHA" "$(echo "$failed" | sed 's/^/- `/; s/$/`/')" "$RUN_URL")"
-            # A red run can ALSO carry cancelled jobs (a shard at its cap);
-            # name them too, so the issue alone says which shards produced
-            # no verdict rather than leaving that to the run page.
-            if [ -n "$cancelled" ]; then
+            # The body now carries the diagnosis a triager needs: per failing job,
+            # the step it died in (and whether that was BEFORE the tests ran), its
+            # `##[error]` line, the last output before the failure, and the
+            # `FAILED tests/...` node ids from a failing shard.
+            #
+            # BEST-EFFORT, ALWAYS: this step is the only thing that tells anyone
+            # main is red, so a body builder that dies must never take the filing
+            # with it. The script degrades field by field on its own; the thin-body
+            # fallback below is the second net, for a script that cannot run at
+            # all, and it files exactly what this job filed before the change.
+            body_file="$RUNNER_TEMP/ci-main-red-body.md"
+            if ! python3 scripts/ci_main_red_body.py \
+                 --sha "$SHA" --run-url "$RUN_URL" --needs-json "$NEEDS" \
+                 --repo "$GH_REPO" --run-id "${GITHUB_RUN_ID:-}" --out "$body_file"; then
+              echo "::warning title=ci-main-red body builder failed::filing the thin body; the run page carries the diagnosis."
+            fi
+            if [ -s "$body_file" ]; then
+              body="$(cat "$body_file")"
+            else
               # shellcheck disable=SC2016 # the backticks are literal markdown
-              body="$body$(printf '\n\nCancelled jobs:\n%s\n' \
-                "$(echo "$cancelled" | sed 's/^/- `/; s/$/`/')")"
+              body="$(printf 'Full suite red at %s.\n\nFailing jobs:\n%s\n\nRun: %s\n' \
+                "$SHA" "$(echo "$failed" | sed 's/^/- `/; s/$/`/')" "$RUN_URL")"
+              # A red run can ALSO carry cancelled jobs (a shard at its cap);
+              # name them too, so the issue alone says which shards produced
+              # no verdict rather than leaving that to the run page.
+              if [ -n "$cancelled" ]; then
+                # shellcheck disable=SC2016 # the backticks are literal markdown
+                body="$body$(printf '\n\nCancelled jobs:\n%s\n' \
+                  "$(echo "$cancelled" | sed 's/^/- `/; s/$/`/')")"
+              fi
             fi
             if [ -n "$open" ]; then
               gh issue comment "$open" --body "$body"
