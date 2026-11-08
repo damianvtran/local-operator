@@ -151,22 +151,28 @@ def _split_base_credentials(base_url: str) -> tuple[str, bool]:
     is what reaches httpx, the latch key, ``base_url`` callers and the refusal
     sentences, so none of them can carry the credential even before the guard
     runs. Parsed by hand rather than with ``urlsplit``, which raises on a
-    malformed bracketed host and would leave such a base unstripped. The split
-    matches httpx and ``screening_observation.hub_origin``: the authority ends at
-    the first ``/``, ``?`` or ``#``, and the credentials end at its LAST ``@``
-    (so a raw ``@`` in the password is still credentials). EMPTY credentials
-    (``https://@host``) count, because httpx still sends Basic for them.
+    malformed bracketed host and would leave such a base unstripped.
+
+    ANY ``@`` IS CREDENTIALS (security round 1 on #3588, S-1). A hub API base
+    never legitimately carries an ``@``, so this does NOT follow RFC 3986's
+    authority boundary: a password spelled with a raw ``/``, ``?`` or ``#``
+    (``https://ops:pa/ss@hub``) ends the RFC authority early, and an
+    authority-only split missed it — the base went unflagged, the generic
+    refusal echoed it whole and httpx raised ``InvalidURL`` naming part of the
+    password. Everything up to the LAST ``@`` is dropped, which is the safe
+    direction: every byte that could be a credential goes, and the base is
+    refused anyway, so the remainder only has to be credential-free, not
+    faithful. EMPTY credentials (``https://@host``) count too. On httpx 0.28.1
+    they KEEP the bearer (measured in that round: only non-empty credentials
+    swap it for Basic), so this is not about the wire; it keeps the rule one
+    predicate a reviewer can check — no ``@``, or refused.
     """
 
+    if "@" not in base_url:
+        return base_url, False
     scheme, separator, rest = base_url.partition("://")
-    if not separator:
-        return base_url, False
-    ends = [index for index in (rest.find(mark) for mark in "/?#") if index >= 0]
-    end = min(ends, default=len(rest))
-    _credentials, at, host = rest[:end].rpartition("@")
-    if not at:
-        return base_url, False
-    return f"{scheme}://{host}{rest[end:]}", True
+    _credentials, _at, remainder = (rest if separator else base_url).rpartition("@")
+    return (f"{scheme}://{remainder}" if separator else remainder), True
 
 
 def _attach_observation(
@@ -1792,13 +1798,25 @@ class TeamBridgeClient:
         bearer (see :func:`_split_base_credentials`).
         """
 
-        if self._base_had_credentials:
-            raise BridgeRefusal("bridge_destination_refused", CREDENTIALED_BASE_REFUSED_SENTENCE)
+        self._refuse_credentialed_base()
         if not org_oauth_destination_allowed(self._base_url):
             raise BridgeRefusal(
                 "bridge_destination_refused",
                 org_destination_refused_sentence(self._base_url, DEFAULT_RADIENT_API_BASE_URL),
             )
+
+    def _refuse_credentialed_base(self) -> None:
+        """Refuse a base that carried URL credentials (see :func:`_split_base_credentials`).
+
+        Called from :meth:`_require_destination` AND from :meth:`_dispatch`
+        (security round 1 on #3588, S-2): a caller handing a ready ``access``
+        (``status(access=)``, the poll, ``_guarded_access``) never passes
+        through ``current_access``, so the dispatch every hub request ends in is
+        the one place no future path can route around.
+        """
+
+        if self._base_had_credentials:
+            raise BridgeRefusal("bridge_destination_refused", CREDENTIALED_BASE_REFUSED_SENTENCE)
 
     async def current_access(self) -> OAuthAccess:
         """The signed-in Radient OAuth account, pinned to its exact row.
@@ -1921,6 +1939,9 @@ class TeamBridgeClient:
         # gate lives here: no caller can reach `/agents/owned` by spelling the
         # path itself (#3022 R1-1).
         _refuse_unscoped_owner_audit(path, method)
+        # Before the AsyncClient exists: no credentialed base reaches httpx,
+        # whichever caller minted the token (S-2).
+        self._refuse_credentialed_base()
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
         # connector (H4) needs a PERSISTENT client with an owned ``aclose()``
@@ -6860,7 +6881,13 @@ def get_status_discipline(
     """The shared discipline for one config root + hub base URL."""
 
     resolved_base = (base_url or resolve_radient_api_base_url()).rstrip("/")
-    key = (str(config_dir) if config_dir is not None else "", resolved_base)
+    # Keyed on the STRIPPED base (security round 1 on #3588, S-3) so the
+    # process-wide map never holds a URL credential as a key; the discipline
+    # itself still gets the raw base, so its client flags and refuses it.
+    key = (
+        str(config_dir) if config_dir is not None else "",
+        _split_base_credentials(resolved_base)[0],
+    )
     discipline = _DISCIPLINES.get(key)
     if discipline is None:
         discipline = StatusDiscipline(config_dir, base_url=resolved_base)

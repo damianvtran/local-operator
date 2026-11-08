@@ -111,10 +111,37 @@ def org_destination_refused_sentence(base_url: str, default_url: str) -> str:
     ONE renderer for both consumers (the CLI's ``_resolve_org_client`` and the
     local server's ``_org_radient_credentials``): the sentence the user reads is
     the same one whichever surface refused.
+
+    The base is quoted as its sanitized ORIGIN, never raw (security round 1 on
+    #3588, S-1): both callers hand over the configured value, and a base
+    spelled with URL credentials would otherwise print the password into a CLI
+    error or a server response body. See :func:`_sanitized_origin`.
     """
     return ORG_DESTINATION_REFUSED_TEMPLATE.format(
-        base_url=base_url, default_url=default_url, opt_in=ORG_ALLOW_NONCANONICAL_ENV
+        base_url=_sanitized_origin(base_url),
+        default_url=default_url,
+        opt_in=ORG_ALLOW_NONCANONICAL_ENV,
     )
+
+
+def _sanitized_origin(base_url: str) -> str:
+    """``scheme://host[:port]`` of ``base_url``, lower-cased, with no credential byte.
+
+    The ``hub_origin`` shape, built by hand so it can never raise on a malformed
+    base (``urlsplit`` does on an unclosed ``[``) and so it drops everything up
+    to the LAST ``@`` anywhere in the value rather than only inside the RFC 3986
+    authority: a password with a raw ``/``, ``?`` or ``#`` ends that authority
+    early, and an RFC split would then quote the password as the host. A hub
+    base never legitimately carries an ``@``, so nothing real is lost.
+    """
+    scheme, separator, rest = str(base_url or "").strip().partition("://")
+    if not separator:
+        scheme, rest = "", scheme
+    authority = rest.rpartition("@")[2]
+    for mark in "/?#\\":
+        authority = authority.split(mark, 1)[0]
+    origin = f"{scheme}://{authority}" if separator else authority
+    return origin.lower()
 
 
 #: The accepted spellings of a truthy environment switch.
