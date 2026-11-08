@@ -1,0 +1,597 @@
+{
+ "families": [
+  "web_search",
+  "web_fetch",
+  "code_execution",
+  "computer",
+  "bash",
+  "text_editor",
+  "memory",
+  "tool_search_tool_regex",
+  "tool_search_tool_bm25",
+  "advisor",
+  "agent_toolset",
+  "browser_toolset",
+  "computer_toolset",
+  "mcp_toolset"
+ ],
+ "hits": {
+  "claude-code": {
+   "advisor_20260301": [
+    "claude/bin/claude",
+    "claude/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+   ],
+   "web_search_20250305": [
+    "claude/bin/claude",
+    "claude/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+   ]
+  },
+  "codex-best": {},
+  "dsh": {
+   "advisor_20260301": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts"
+   ],
+   "agent_toolset_20260401": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/lib/environments/worker.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/lib/environments/worker.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/lib/tools/SessionToolRunner.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/lib/tools/SessionToolRunner.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/agents/agents.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/agents/agents.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/lib/environments/worker.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/lib/tools/SessionToolRunner.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/agents/agents.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/tools/agent-toolset/node.browser.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/tools/agent-toolset/node.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/tools/agent-toolset/node.browser.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/tools/agent-toolset/node.browser.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/tools/agent-toolset/node.browser.js",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/tools/agent-toolset/node.browser.mjs",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/tools/agent-toolset/node.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/tools/agent-toolset/node.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/tools/agent-toolset/node.js",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/tools/agent-toolset/node.mjs"
+   ],
+   "bash_20241022": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts"
+   ],
+   "bash_20250124": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "browser_toolset_20260801": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "code_execution_20250522": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "code_execution_20250825": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "code_execution_20260120": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/CHANGELOG.md",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "code_execution_20260521": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "computer_20241022": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts"
+   ],
+   "computer_20250124": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts"
+   ],
+   "computer_20251124": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts"
+   ],
+   "computer_toolset_20260801": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "memory_20250818": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/helpers/beta/memory.js",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/helpers/beta/memory.mjs",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/helpers/beta/memory.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "text_editor_20241022": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts"
+   ],
+   "text_editor_20250124": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "text_editor_20250429": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/CHANGELOG.md",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "text_editor_20250728": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/CHANGELOG.md",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "tool_search_tool_bm25_20251119": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "tool_search_tool_regex_20251119": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "web_fetch_20250910": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/CHANGELOG.md",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "web_fetch_20260209": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "web_fetch_20260309": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "web_fetch_20260318": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "web_search_20250305": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-format-v0-to-v1/lib/index.js",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/worker.cjs",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-search-deepseek/lib/index.js",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-search-deepseek/lib/types/index.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-search-deepseek/lib/types/provider.d.ts"
+   ],
+   "web_search_20260209": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ],
+   "web_search_20260318": [
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/beta/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.mts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/beta/messages/messages.ts",
+    "dsh/lib/node_modules/@deepseek-ai/dsh/node_modules/@anthropic-ai/sdk/src/resources/messages/messages.ts"
+   ]
+  },
+  "hermes": {
+   "advisor_20260301": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_advisor_tool_20260301_param.py"
+   ],
+   "agent_toolset_20260401": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/lib/environments/_worker.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/lib/tools/agent_toolset.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_managed_agents_agent_toolset20260401.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_managed_agents_agent_toolset20260401_bash_input.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_managed_agents_agent_toolset20260401_params.py"
+   ],
+   "bash_20241022": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_bash_20241022_param.py"
+   ],
+   "bash_20250124": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_bash_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_bash_20250124_param.py"
+   ],
+   "browser_toolset_20260801": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic-0.125.0.dist-info/RECORD",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/__init__.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_browser_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_browser_toolset_configs_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/browser_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/browser_toolset_configs_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/message_count_tokens_tool_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_union_param.py"
+   ],
+   "code_execution_20250522": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20250522_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20250522_param.py"
+   ],
+   "code_execution_20250825": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/lib/tools/_beta_functions.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/lib/tools/mcp.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_advisor_tool_20260301_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_browser_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20250522_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20250825_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20260120_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20260521_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_computer_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_memory_tool_20250818_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_server_tool_caller.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_server_tool_caller_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_bash_20241022_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_bash_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20241022_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20251124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_search_tool_bm25_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_search_tool_regex_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20241022_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250429_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250728_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20250910_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260309_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20250305_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/browser_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20250522_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20250825_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20260120_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20260521_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/computer_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/memory_tool_20250818_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/server_tool_caller.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/server_tool_caller_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_bash_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_search_tool_bm25_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_search_tool_regex_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250429_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250728_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20250910_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260309_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20250305_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20260318_param.py"
+   ],
+   "code_execution_20260120": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/lib/tools/_beta_functions.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/lib/tools/mcp.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_advisor_tool_20260301_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_browser_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20250522_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20250825_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20260120_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20260521_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_computer_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_memory_tool_20250818_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_server_tool_caller_20260120.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_server_tool_caller_20260120_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_bash_20241022_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_bash_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20241022_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20251124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_search_tool_bm25_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_search_tool_regex_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20241022_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250429_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250728_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20250910_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260309_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20250305_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/browser_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20250522_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20250825_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20260120_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20260521_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/computer_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/memory_tool_20250818_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/server_tool_caller_20260120.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/server_tool_caller_20260120_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_bash_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_search_tool_bm25_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_search_tool_regex_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250429_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250728_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20250910_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260309_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20250305_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20260318_param.py"
+   ],
+   "code_execution_20260521": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/lib/tools/_beta_functions.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/lib/tools/mcp.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_advisor_tool_20260301_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_browser_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20250522_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20250825_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20260120_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_code_execution_tool_20260521_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_computer_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_memory_tool_20250818_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_bash_20241022_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_bash_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20241022_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20251124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_search_tool_bm25_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_search_tool_regex_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20241022_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250429_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250728_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20250910_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260309_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20250305_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/browser_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20250522_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20250825_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20260120_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/code_execution_tool_20260521_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/computer_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/memory_tool_20250818_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_bash_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_search_tool_bm25_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_search_tool_regex_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250429_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250728_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20250910_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260309_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20250305_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20260318_param.py"
+   ],
+   "computer_20241022": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20241022_param.py"
+   ],
+   "computer_20250124": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20250124_param.py"
+   ],
+   "computer_20251124": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_computer_use_20251124_param.py"
+   ],
+   "computer_toolset_20260801": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic-0.125.0.dist-info/RECORD",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/__init__.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_computer_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_computer_toolset_configs_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/computer_toolset_20260801_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/computer_toolset_configs_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/message_count_tokens_tool_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_union_param.py"
+   ],
+   "memory_20250818": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/lib/tools/_beta_builtin_memory_tool.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_memory_tool_20250818_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/memory_tool_20250818_param.py"
+   ],
+   "text_editor_20241022": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20241022_param.py"
+   ],
+   "text_editor_20250124": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250124_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250124_param.py"
+   ],
+   "text_editor_20250429": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250429_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250429_param.py"
+   ],
+   "text_editor_20250728": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_text_editor_20250728_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_text_editor_20250728_param.py"
+   ],
+   "tool_search_tool_bm25_20251119": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic-0.125.0.dist-info/RECORD",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/__init__.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_search_tool_bm25_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/message_count_tokens_tool_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_search_tool_bm25_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_union_param.py"
+   ],
+   "tool_search_tool_regex_20251119": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic-0.125.0.dist-info/RECORD",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/__init__.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_tool_search_tool_regex_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/message_count_tokens_tool_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_search_tool_regex_20251119_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/tool_union_param.py"
+   ],
+   "web_fetch_20250910": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20250910_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20250910_param.py"
+   ],
+   "web_fetch_20260209": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260209_param.py"
+   ],
+   "web_fetch_20260309": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260309_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260309_param.py"
+   ],
+   "web_fetch_20260318": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_fetch_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_fetch_tool_20260318_param.py"
+   ],
+   "web_search_20250305": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20250305_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20250305_param.py",
+    "hermes/hermes-agent/agent/side_question_request.py",
+    "hermes/hermes-agent/tests/agent/test_side_question_request.py"
+   ],
+   "web_search_20260209": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20260209_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20260209_param.py"
+   ],
+   "web_search_20260318": [
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/beta/beta_web_search_tool_20260318_param.py",
+    "hermes/hermes-agent/.venv/lib64/python3.14/site-packages/anthropic/types/web_search_tool_20260318_param.py"
+   ]
+  },
+  "local-operator": {
+   "web_search_20250305": [
+    "lop-baseline-500883ef/local_operator/web_search/providers.py",
+    "lop/lib64/python3.14/site-packages/local_operator/web_search/providers.py"
+   ]
+  },
+  "omp": {
+   "web_search_20250305": [
+    "omp/bin/omp"
+   ]
+  },
+  "opencode": {}
+ },
+ "method": "byte-level: every regular file under each pinned toolchain root (symlinks followed, node_modules and binaries included, no ignore rules), 8 MiB chunks with overlap, regex (?<![A-Za-z0-9_])<family>_20YYMMDD(?![0-9]); paths are relative to the toolchain root",
+ "roots": {
+  "claude-code": {
+   "files": 11,
+   "roots": [
+    "claude"
+   ]
+  },
+  "codex-best": {
+   "files": 11,
+   "roots": [
+    "codex"
+   ]
+  },
+  "dsh": {
+   "files": 26010,
+   "roots": [
+    "dsh"
+   ]
+  },
+  "hermes": {
+   "files": 28304,
+   "roots": [
+    "hermes"
+   ]
+  },
+  "local-operator": {
+   "files": 8018,
+   "roots": [
+    "lop-baseline-500883ef",
+    "lop"
+   ]
+  },
+  "omp": {
+   "files": 1,
+   "roots": [
+    "omp"
+   ]
+  },
+  "opencode": {
+   "files": 1,
+   "roots": [
+    "opencode"
+   ]
+  }
+ },
+ "toolchain_versions_sha256": "75a0c8c7833ca0874e70f6c9073144d54c6cf0b608ecc71aab5ca674d91213ed"
+}

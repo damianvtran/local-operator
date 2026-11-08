@@ -122,9 +122,41 @@ class ServerToolDenialTests(unittest.TestCase):
         for arm, rows in module.SERVER_TOOL_AUDIT.items():
             for tool, side, action in rows:
                 with self.subTest(arm=arm, tool=tool):
-                    self.assertIn(side, ("client", "server"))
+                    self.assertIn(side, ("client", "server", "types-only"))
                     if side == "server":
-                        self.assertTrue(action.startswith("denied"), action)
+                        # A server tool is denied natively, or unreachable/
+                        # inactive with the stated reason; never just "kept".
+                        self.assertRegex(action, r"^(denied|unreachable|inactive): ")
+
+    def test_frozen_byte_scan_hits_all_map_to_audit_rows(self):
+        # R15-M1: the published table must account for EVERY server-tool type
+        # the byte-level scan of the pinned toolchains found, per arm, and the
+        # scan must have looked for every audited family.
+        import json
+
+        module = _load()
+        scan = json.loads(Path(__file__).with_name("server-tool-scan.json").read_text())
+        self.assertEqual(tuple(scan["families"]), module.SERVER_TOOL_FAMILIES)
+        self.assertEqual(set(scan["hits"]), set(module.SERVER_TOOL_AUDIT))
+        self.assertTrue(scan["method"].startswith("byte-level"))
+        for arm, hits in scan["hits"].items():
+            tools = {row[0] for row in module.SERVER_TOOL_AUDIT[arm]}
+            for tool_type, paths in hits.items():
+                self.assertIn(tool_type.rsplit("_", 1)[0], module.SERVER_TOOL_FAMILIES)
+                for path in paths:
+                    with self.subTest(arm=arm, type=tool_type, path=path):
+                        row = module.scan_row(arm, path, tool_type)
+                        self.assertIsNotNone(row, "unaudited scan hit")
+                        self.assertTrue(set(row.split("|")) <= tools, row)
+        # Arms the scan found server types in may not claim a clean package.
+        readme = Path(__file__).with_name("README.md").read_text()
+        for arm, hits in scan["hits"].items():
+            if hits:
+                for line in readme.splitlines():
+                    if line.startswith(f"| {arm} |"):
+                        self.assertNotIn("no server tool type", line, arm)
+        for family in module.SERVER_TOOL_FAMILIES:
+            self.assertIn(f"`{family}_*`", readme, family)
 
 
 if __name__ == "__main__":

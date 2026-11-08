@@ -222,13 +222,27 @@ async def _link(agent, environment, binary: str, name: str) -> None:
 # Such a tool runs outside the network fence (a contamination route) and is
 # unpriced by the meter, which refuses it (402) as the backstop. Client-side
 # web tools stay available to every arm and fail identically (no route).
-# Read-only audit of each pinned binary/config for server tool types
-# (web_search_*, web_fetch_*, code_execution_*, computer_*, bash_*/text_editor_*
-# server variants, tool_search_tool_*); coding/README.md carries the evidence.
-# (tool, client|server, action) per arm.
+#
+# Evidence (R15): a BYTE-level scan of every file under each pinned toolchain
+# root (node_modules and single-file binaries included; no ignore rules) for
+# ``<family>_YYYYMMDD`` server tool types, frozen in server-tool-scan.json.
+# test_adapters requires every hit to map to a row below and the families to
+# equal the scan's. Context-management edits (clear_thinking_*, compact_*,
+# clear_tool_uses_*) are not tools and are not families.
+SERVER_TOOL_FAMILIES = (
+    "web_search", "web_fetch", "code_execution", "computer", "bash", "text_editor",
+    "memory", "tool_search_tool_regex", "tool_search_tool_bm25", "advisor",
+    "agent_toolset", "browser_toolset", "computer_toolset", "mcp_toolset",
+)
+# (tool, side, action) per arm. side: "server" (an Anthropic-executed tool the
+# arm can emit: must be denied, or unreachable with the reason stated),
+# "client" (runs in the container, fenced), "types-only" (type definitions or
+# parsers the arm vendors but never puts in a request).
 SERVER_TOOL_AUDIT = {
     "claude-code": (
         ("WebSearch", "server", "denied: --disallowedTools WebSearch (FrozenClaudeCode)"),
+        ("advisor", "server", "inactive: emitted only when an advisorModel setting is "
+         "present; the bench sets none, no action"),
         ("WebFetch", "client", "kept: fetched in the container, fenced"),
     ),
     "codex-best": (
@@ -243,17 +257,56 @@ SERVER_TOOL_AUDIT = {
         ("webfetch", "client", "kept: fenced"),
     ),
     "local-operator": (
-        ("web_search", "client", "kept: HTTP providers from the tool process; fenced. Its "
-         "deepseek provider (a server tool at api.deepseek.com, not the meter) needs a "
-         "DeepSeek credential (none) and deepseek.com is a fence model host"),
+        ("web_search deepseek provider", "server", "unreachable: a server tool at "
+         "api.deepseek.com, not the meter; needs a DeepSeek credential (none) and "
+         "deepseek.com is a fence model host"),
+        ("web_search", "client", "kept: other HTTP providers from the tool process; fenced"),
     ),
     "hermes": (
-        ("web tools", "client", "kept: fenced; server types appear only in its refusal check"),
+        ("server-tool refusal check", "types-only", "kept: types named only to refuse them"),
+        ("anthropic SDK", "types-only", "kept: vendored type definitions, never sent"),
+        ("web tools", "client", "kept: fenced"),
     ),
     "dsh": (
-        ("web tools", "client", "kept: fenced; no server tool type in the pinned package"),
+        ("web search deepseek provider", "server", "unreachable: dsh-web-search-deepseek "
+         "sends web_search_20250305 to api.deepseek.com ($DEEPSEEK_SEARCH_BASE_URL unset); "
+         "needs a DeepSeek credential (none) and deepseek.com is a fence model host"),
+        ("session format/persistence", "types-only", "kept: validates recorded tool types"),
+        ("anthropic SDK", "types-only", "kept: vendored type definitions, never sent"),
+        ("web tools", "client", "kept: fenced"),
     ),
 }
+# Scan hit -> audit row: (path substring, type prefix, row tool); the first
+# entry whose substring is in the hit's path AND whose prefix starts its type
+# wins ("" matches anything).
+SERVER_TOOL_SCAN_ROWS = {
+    "claude-code": (("", "web_search_", "WebSearch"), ("", "advisor_", "advisor")),
+    "codex-best": (),
+    "omp": (("omp/bin/omp", "web_search_", "web_search"),),
+    "opencode": (),
+    "local-operator": (
+        ("local_operator/web_search/providers.py", "web_search_", "web_search deepseek provider"),
+    ),
+    "hermes": (
+        ("agent/side_question_request.py", "", "server-tool refusal check"),
+        ("tests/agent/test_side_question_request.py", "", "server-tool refusal check"),
+        ("site-packages/anthropic", "", "anthropic SDK"),
+    ),
+    "dsh": (
+        ("dsh-web-search-deepseek/", "web_search_", "web search deepseek provider"),
+        ("dsh-session-format-v0-to-v1/", "", "session format/persistence"),
+        ("dsh-session-persistence-jsonl/", "", "session format/persistence"),
+        ("@anthropic-ai/sdk/", "", "anthropic SDK"),
+    ),
+}
+
+
+def scan_row(arm, path, tool_type):
+    """The audit row a frozen scan hit maps to, or None (an unaudited hit)."""
+    for fragment, prefix, row in SERVER_TOOL_SCAN_ROWS[arm]:
+        if fragment in path and tool_type.startswith(prefix):
+            return row
+    return None
 
 
 class FrozenClaudeCode(ClaudeCode):

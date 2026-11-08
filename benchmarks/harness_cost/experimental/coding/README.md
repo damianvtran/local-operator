@@ -41,20 +41,34 @@ deferred tool and implements it as a sub-request carrying `web_search_20250305`
 (400, nothing forwarded) any `web_search*` tool, so a codex config regression
 fails at $0 instead of being silently stripped.
 
-Read-only audit of the pinned binaries/packages for server tool types
-(`web_search_*`, `web_fetch_*`, `code_execution_*`, `computer_*`, `bash_*`,
-`text_editor_*`, `memory_*`, `tool_search_tool_*`):
+Read-only **byte-level** audit (R15): every file under each pinned toolchain
+root, `node_modules` and single-file binaries included, no ignore rules, for
+the server tool type families `web_search_*`, `web_fetch_*`, `code_execution_*`,
+`computer_*`, `bash_*`, `text_editor_*`, `memory_*`, `tool_search_tool_regex_*`,
+`tool_search_tool_bm25_*`, `advisor_*`, `agent_toolset_*`, `browser_toolset_*`,
+`computer_toolset_*` and `mcp_toolset_*` (`adapters.SERVER_TOOL_FAMILIES`). The
+hits are frozen in [server-tool-scan.json](server-tool-scan.json), and
+`test_adapters` requires every hit to map to a row here
+(`adapters.SERVER_TOOL_AUDIT` / `SERVER_TOOL_SCAN_ROWS`). Context-management
+edits (`clear_thinking_*`, `compact_*`, `clear_tool_uses_*`) are not tools.
 
-| arm | tool | client/server | action |
+| arm | tool | side | action |
 |---|---|---|---|
 | claude-code | WebSearch | server (`web_search_20250305`, `max_uses: 8`) | denied: `--disallowedTools WebSearch` (`FrozenClaudeCode`; Harbor also writes it to its settings `permissions.deny` on the ACP path) |
+| claude-code | advisor | server (`advisor_20260301`) | inactive: added to a request only when an `advisorModel` setting is present; the bench sets none, so no action |
 | claude-code | WebFetch | client (no `web_fetch_*` type in the binary) | kept, fenced |
-| codex-best | web_search | server once translated | denied: `web_search = "disabled"`; bridge refuses |
+| codex-best | web_search | server once translated (no versioned type in the binary) | denied: `web_search = "disabled"`; bridge refuses |
 | omp | web_search | server (searches through a model role, default `anthropic/claude-haiku-4-5` + `web_search_20250305`) | denied: `--config` overlay `web_search.enabled: false` (`adapters.Omp`) |
-| opencode | websearch, webfetch | client (websearch needs a configured provider; none is) | kept, fenced; no server tool type in the binary |
-| local-operator | web_search | client (HTTP providers from the tool process) | kept, fenced. Its `deepseek` provider calls a server tool at api.deepseek.com (not the meter); it needs a DeepSeek credential (none), and `deepseek.com` is a fence model host |
-| hermes | web tools | client | kept; server types appear only in its refusal check (`side_question_request.has_server_side_tools`) |
-| dsh | web tools | client | kept; no server tool type in the pinned package |
+| opencode | websearch, webfetch | client (websearch needs a configured provider; none is) | kept, fenced; the scan found no server tool type |
+| local-operator | web_search, `deepseek` provider | server, at api.deepseek.com (`web_search/providers.py`) | unreachable: not the meter; needs a DeepSeek credential (none), and `deepseek.com` is a fence model host |
+| local-operator | web_search, other providers | client (HTTP from the tool process) | kept, fenced |
+| hermes | server-tool refusal check | types only (`side_question_request.has_server_side_tools` names them to refuse them) | kept |
+| hermes | vendored `anthropic` SDK | types only (definitions, never sent) | kept |
+| hermes | web tools | client | kept, fenced |
+| dsh | web search, `deepseek` provider | server: `@deepseek-ai/dsh-web-search-deepseek` (via dsh-base) sends `web_search_20250305` to `https://api.deepseek.com/anthropic/v1` (`lib/index.js:119`; `$DEEPSEEK_SEARCH_BASE_URL` unset) | unreachable: not the meter; needs a DeepSeek credential (none), and `deepseek.com` is a fence model host |
+| dsh | session format/persistence | types only (validates recorded tool types) | kept |
+| dsh | vendored `@anthropic-ai/sdk` | types only (definitions, never sent) | kept |
+| dsh | web tools | client | kept, fenced |
 
 ## Cheap checks (no installation, network, Docker or model)
 

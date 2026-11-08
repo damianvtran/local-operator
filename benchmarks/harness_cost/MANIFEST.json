@@ -49,8 +49,8 @@
     },
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
-      "bytes": 11736,
-      "sha256": "b2796f3836fb7cbdf751022a115c2541de92834cc7d81077dea76cba2609dceb"
+      "bytes": 11886,
+      "sha256": "a4e27696a8f0f05700d699bb716cb8a7a847f3f0d722209f2bdfa9dcbf244507"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
@@ -59,8 +59,8 @@
     },
     {
       "path": "experimental/PREREGISTRATION.md",
-      "bytes": 43697,
-      "sha256": "f5877b8fa86da1f5e13e8377479bf826882edae9763ed13b2430af567b4b32f1"
+      "bytes": 43945,
+      "sha256": "60d42a981642c6d51b279fbf963a67958db9f8068e3adc1530bc24613b993a60"
     },
     {
       "path": "experimental/README.md",
@@ -144,8 +144,8 @@
     },
     {
       "path": "experimental/coding/README.md",
-      "bytes": 17945,
-      "sha256": "bfeed5c853a3e62ce1025e6dcc949bf5bc8ce21fcca2e75f479241c2848c5152"
+      "bytes": 19370,
+      "sha256": "48f165c5bf9317397fe30ea52f3cb54987677b419ca6d93f0a5b89d1891faa0d"
     },
     {
       "path": "experimental/coding/SOURCE_MAP.md",
@@ -164,8 +164,8 @@
     },
     {
       "path": "experimental/coding/adapters.py",
-      "bytes": 24311,
-      "sha256": "0e55fdb663a5081dfa54536bef48e449c66b3237b7d0c74acbf790a4b2b6fe9b"
+      "bytes": 27130,
+      "sha256": "cc8b72786ad073ca80bc755a08f85caf5e23aa328e64bf90952e5474e442d99a"
     },
     {
       "path": "experimental/coding/bench_verifier.py",
@@ -248,14 +248,19 @@
       "sha256": "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"
     },
     {
+      "path": "experimental/coding/server-tool-scan.json",
+      "bytes": 49068,
+      "sha256": "d1203b4efd61da614844de1c86d7b33e441cc5f594bea19a2872a03e64b170ac"
+    },
+    {
       "path": "experimental/coding/subset.json",
       "bytes": 8795,
       "sha256": "d240bd359aa8efd97fc03f563719cde6d55636f92fcb715cc195afcafdcfadee"
     },
     {
       "path": "experimental/coding/test_adapters.py",
-      "bytes": 5127,
-      "sha256": "c2753db7380b22659229d46dbc23205f05175b05ed83675b6e4a95a48a6b1b44"
+      "bytes": 7018,
+      "sha256": "175c31082536b8f669ca549b50dfa542d410fcd75a80b55f1163393f6d08dbb8"
     },
     {
       "path": "experimental/coding/test_driver_safety.py",
