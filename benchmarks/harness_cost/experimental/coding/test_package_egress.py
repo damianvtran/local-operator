@@ -58,6 +58,41 @@ class Fixture:
         return self.server.sockets[0].getsockname()[1]
 
 
+class ScriptedUpstream:
+    """An opened 'registry' that sends ``chunks`` then ends as ``then`` says.
+
+    ``then`` is an exception instance (raised from ``read``), "hang" (never
+    answers again, as a stalled mirror would) or "eof".
+    """
+
+    def __init__(self, chunks, then):
+        self.chunks, self.then, self.received = list(chunks), then, b""
+
+    async def read(self, _n):
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.then == "hang":
+            await asyncio.Event().wait()
+        if isinstance(self.then, BaseException):
+            raise self.then
+        return b""
+
+    def write(self, data):
+        self.received += data
+
+    async def drain(self):
+        pass
+
+    def can_write_eof(self):
+        return True
+
+    def write_eof(self):
+        pass
+
+    def close(self):
+        pass
+
+
 class PackageEgressTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         tmp = tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD"))
@@ -185,6 +220,107 @@ class PackageEgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.opened, [])
         self.assertEqual(len(self.rows()), len(cases))
 
+    async def test_every_exit_after_the_tunnel_opens_writes_exactly_one_row(self):
+        # S9e (d0b2b32c financial-document-processor): uv downloaded 30.8 MiB
+        # of cpython through the fence and the log has NO row for it. The row
+        # used to be written only after both pumps returned, so an error or a
+        # cancellation after "200 Connection Established" dropped it. Every
+        # exit path must leave one row with the bytes moved so far.
+        handlers: list[asyncio.Task] = []
+
+        async def tracked(reader, writer):
+            handlers.append(asyncio.current_task())
+            await self.proxy.handle(reader, writer)
+
+        server = await asyncio.start_server(tracked, "127.0.0.1", 0)
+        self.addAsyncCleanup(self._close, server)
+        port = server.sockets[0].getsockname()[1]
+        cases = (("hang", "cancelled"), (RuntimeError("boom"), "error:RuntimeError"),
+                 (ConnectionResetError(), "upstream-reset"), ("eof", "closed"))
+        for then, end in cases:
+            with self.subTest(end=end):
+                upstream = ScriptedUpstream([b"partial"], then)
+
+                async def opener(host, p, upstream=upstream):
+                    return upstream, upstream
+
+                self.proxy.opener = opener
+                before, handlers[:] = len(self.rows()), []
+                reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.write(b"CONNECT pypi.org:443 HTTP/1.1\r\n\r\nabc")
+                await writer.drain()
+                got = b""
+                while not got.endswith(b"partial"):
+                    got += await asyncio.wait_for(reader.read(65536), 5)
+                self.assertTrue(got.startswith(b"HTTP/1.1 200 Connection Established"))
+                for _ in range(250):  # the client's 3 bytes reach the upstream
+                    if upstream.received == b"abc":
+                        break
+                    await asyncio.sleep(0.01)
+                if then == "hang":
+                    handlers[0].cancel()  # e.g. the gate torn down mid-tunnel
+                if then == "eof":
+                    writer.close()  # half-close: a clean tunnel ends when both sides do
+                for _ in range(250):
+                    if len(self.rows()) > before:
+                        break
+                    await asyncio.sleep(0.02)
+                writer.close()
+                rows = self.rows()[before:]
+                self.assertEqual(len(rows), 1, rows)
+                [row] = rows
+                self.assertEqual((row["host"], row["allowed"], row["end"]),
+                                 ("pypi.org", True, end))
+                self.assertEqual((row["bytes_up"], row["bytes_down"]), (3, len(b"partial")))
+        await asyncio.sleep(0.05)
+        self.assertEqual(len(self.rows()), len(cases))  # nothing written twice
+
+    async def test_client_reset_mid_tunnel_writes_one_row(self):
+        import socket
+        import struct
+
+        upstream = ScriptedUpstream([], "hang")
+
+        async def opener(host, p):
+            return upstream, upstream
+
+        self.proxy.opener = opener
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        writer.write(b"CONNECT pypi.org:443 HTTP/1.1\r\n\r\nxy")
+        await writer.drain()
+        await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+        for _ in range(250):
+            if upstream.received == b"xy":
+                break
+            await asyncio.sleep(0.01)
+        sock = writer.get_extra_info("socket")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        writer.transport.abort()  # RST, not FIN
+        for _ in range(250):
+            if self.rows():
+                break
+            await asyncio.sleep(0.02)
+        [row] = self.rows()
+        self.assertIn(row["end"], ("client-reset", "closed"))
+        self.assertEqual(row["bytes_up"], 2)
+
+    async def test_denials_and_unreachable_upstreams_carry_an_end_reason(self):
+        await self.exchange(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+        self.assertEqual(self.rows()[-1]["end"], "denied")
+
+        async def failing(host, port):
+            raise PermissionError("non-public address")
+
+        self.proxy.opener = failing
+        await self.exchange(b"CONNECT pypi.org:443 HTTP/1.1\r\n\r\n")
+        self.assertEqual(self.rows()[-1]["end"], "upstream-unreachable")
+        self.assertEqual(len(self.rows()), 2)
+
+    @staticmethod
+    async def _close(server):
+        server.close()
+        await server.wait_closed()
+
     async def test_upstream_failure_is_502_and_logged(self):
         async def failing(host, port):
             raise PermissionError("non-public address")
@@ -195,6 +331,35 @@ class PackageEgressTests(unittest.IsolatedAsyncioTestCase):
         row = self.rows()[-1]
         self.assertIs(row["allowed"], True)
         self.assertIn("non-public", row["error"])
+
+
+class FenceRowTests(unittest.TestCase):
+    def test_unreadable_or_partial_rows_are_anomalies_complete_ends_are_not(self):
+        # S9e: rows now always carry their end reason. A row the fence cannot
+        # read in full (truncated JSON, a non-object line, missing fields)
+        # cannot vouch for the connection and stays an anomaly; a complete
+        # row to an allowlisted host is the fence working, however it ended.
+        from test_lop_container import _load_verifier
+
+        verifier, _env, _calls = _load_verifier([])
+        full = {"via": "gate", "method": "CONNECT", "host": "pypi.org", "port": 443,
+                "allowed": True, "bytes_up": 3, "bytes_down": 7, "end": "cancelled"}
+        denied = {**full, "host": "github.com", "allowed": False, "reason": "not-allowlisted",
+                  "bytes_up": 0, "bytes_down": 0, "end": "denied"}
+        partial = [{k: v for k, v in full.items() if k != drop}
+                   for drop in ("host", "allowed", "bytes_up", "bytes_down", "end")]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as t:
+            log = Path(t) / "connections.jsonl"
+            log.write_text(json.dumps(full) + "\n" + json.dumps(denied) + "\n"
+                           + json.dumps({**full, "end": "error:RuntimeError"}) + "\n")
+            self.assertEqual(verifier.fence_anomalies([str(log)], {"pypi.org"}), [])
+            for line in [json.dumps(row) for row in partial] + [
+                    '{"host": "pypi.org", "allo', "[1, 2]", '"text"', "null",
+                    json.dumps({**full, "allowed": "yes"})]:
+                with self.subTest(line=line):
+                    log.write_text(json.dumps(full) + "\n" + line + "\n")
+                    [anomaly] = verifier.fence_anomalies([str(log)], {"pypi.org"})
+                    self.assertTrue(anomaly["unparsed"] or anomaly["reason"] == "partial-row")
 
 
 class PolicyTests(unittest.TestCase):

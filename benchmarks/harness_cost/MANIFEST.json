@@ -50,7 +50,7 @@
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
       "bytes": 11736,
-      "sha256": "f3a41b1fec2961b828fb947576fe042a6d8d84e830c378a95396a6868c4fde9b"
+      "sha256": "4142bc726acd3ef529f4c3356528afd85b3f8e5a77a7f0500f45e9449c18dbc8"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
@@ -169,8 +169,8 @@
     },
     {
       "path": "experimental/coding/bench_verifier.py",
-      "bytes": 11181,
-      "sha256": "4279cd8a1e33223ae81df0d4754012edef426607a2bb0b6c2e4e39fcfe4d9ba3"
+      "bytes": 12005,
+      "sha256": "181fc2eede2bec4288d9d1249eb194a3bd3ba179b5255e5ce2b18c7a20119d07"
     },
     {
       "path": "experimental/coding/codex-model-catalog.json",
@@ -279,13 +279,13 @@
     },
     {
       "path": "experimental/coding/test_package_egress.py",
-      "bytes": 23829,
-      "sha256": "f70989245f016f611ee04b5cde8bbf84835a4b5e5e7b96cb4ac612164f2b0bf6"
+      "bytes": 31174,
+      "sha256": "e96d3b0da6f63a8ab34fff1c256ad3c141862236cdc751fa1bb937414a7c6584"
     },
     {
       "path": "experimental/coding/test_public_provenance.py",
-      "bytes": 56731,
-      "sha256": "0ee509d3d0029c522269be3e1028d0798dbaea603126aba21d9b07ad291fd35b"
+      "bytes": 56934,
+      "sha256": "a25834364f1c1d6b2c01d98140c1fcdc56b79eb455812e31f9da976aa301ab38"
     },
     {
       "path": "experimental/evaluate.py",
@@ -334,8 +334,8 @@
     },
     {
       "path": "experimental/lop_edge.py",
-      "bytes": 37492,
-      "sha256": "d29f2d4d4ed41dbd3359f9dfd54e43df0e8bab47607b958e0b155efaef6c39ec"
+      "bytes": 37543,
+      "sha256": "691a342c522fbc960de666d23cb31cbe2900f2da0ed7e63ad0765e47c82c52b1"
     },
     {
       "path": "experimental/lop_launch.py",
@@ -349,8 +349,8 @@
     },
     {
       "path": "experimental/package_egress.py",
-      "bytes": 12711,
-      "sha256": "0837572de66a7576845b7c3b85f9f5c9aae79a10ca56b33f82f947a1f4cf5a13"
+      "bytes": 15219,
+      "sha256": "2668133d4353ac7180bee87261de715d821680a3640bc99f035dfb49e67cd6a1"
     },
     {
       "path": "experimental/radient_meter/classifier.py",
@@ -414,8 +414,8 @@
     },
     {
       "path": "experimental/test_lop_edge.py",
-      "bytes": 40266,
-      "sha256": "7bbba426c24d288b50a28a093b46133319de050af051ccf4f99e6df9064ffabb"
+      "bytes": 41812,
+      "sha256": "0a9cc6414b4451a796d540a54cd97888141956ec993704ee135b15bb71eff4cd"
     },
     {
       "path": "experimental/test_runner_v2.py",

@@ -159,20 +159,26 @@ class ConnectionLog:
             fh.write(json.dumps({"ts": time.time(), "via": self.via, **fields}) + "\n")
 
 
-async def _pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
+async def _pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                counts: dict[str, int], key: str) -> str | None:
+    """Copy one direction; the reset's exception name, or None on a clean EOF.
+
+    Bytes are counted into ``counts[key]`` AS THEY MOVE, so a tunnel that ends
+    in an error or a cancellation still logs what it carried (S9e). Cancellation
+    propagates: the caller logs it as such.
+    """
     # Half-close on EOF (not close): the other direction may still be carrying
     # the response, as in gate_relay._pipe.
-    total = 0
     try:
         while chunk := await reader.read(65536):
-            total += len(chunk)
+            counts[key] += len(chunk)
             writer.write(chunk)
             await writer.drain()
         if writer.can_write_eof():
             writer.write_eof()
-    except (ConnectionError, OSError, asyncio.CancelledError):
-        pass
-    return total
+    except (ConnectionError, OSError) as exc:
+        return type(exc).__name__
+    return None
 
 
 async def read_head(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str]] | None:
@@ -250,54 +256,99 @@ class PackageProxy:
         target: str,
         headers: dict[str, str],
     ) -> None:
-        """Serve one already-parsed request head; the caller closes ``writer``."""
+        """Serve one already-parsed request head; the caller closes ``writer``.
+
+        Exactly ONE row per connection, written from ``finally`` (S9e): the
+        d0b2b32c financial-document-processor oracle moved a 30.8 MiB cpython
+        download through the fence and left no row, because the row used to be
+        written only after both pumps returned. An error or cancellation after
+        the tunnel opened skipped it. Now every exit path (denial, unreachable
+        upstream, clean close, client or upstream reset, error, cancellation)
+        logs the bytes moved so far and an ``end`` reason; the fence check
+        treats a row without one as an anomaly.
+        """
         started = time.monotonic()
         parsed = self.target(method, target)
         host, port, path = parsed or ("", 0, "")
         reason = "malformed" if parsed is None else self.policy.decide(host, port)
         row: dict[str, object] = {"method": method, "host": logged_host(host, reason),
-                                  "port": port}
+                                  "port": port, "allowed": reason is None}
         host = host.lower().rstrip(".")
-        if reason is not None:
-            self.log.write(**row, allowed=False, reason=reason, bytes_up=0, bytes_down=0)
-            writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n"
-                         b"Connection: close\r\n\r\n")
-            await writer.drain()
-            return
-        try:
-            up_reader, up_writer = await asyncio.wait_for(
-                self.opener(host, port), CONNECT_TIMEOUT_S
-            )
-        except (OSError, asyncio.TimeoutError) as exc:
-            self.log.write(**row, allowed=True, error=f"{type(exc).__name__}: {exc}"[:200],
-                           bytes_up=0, bytes_down=0)
-            writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n"
-                         b"Connection: close\r\n\r\n")
-            await writer.drain()
-            return
+        counts = {"up": 0, "down": 0}
         sent = 0
+        end: str | None = None
         try:
-            if method == "CONNECT":
-                writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            if reason is not None:
+                row["reason"], end = reason, "denied"
+                writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n"
+                             b"Connection: close\r\n\r\n")
                 await writer.drain()
-            else:
-                # One request per connection: ``Connection: close`` upstream.
-                # A pipelined follow-up still reaches only THIS host (the TCP
-                # destination was checked), and apt retries what it loses.
-                lines = [f"{method} {path} HTTP/1.1"]
-                # Host is ALWAYS the checked destination, never the client's:
-                # on a shared CDN edge plain-HTTP routing follows Host, so a
-                # forwarded client Host could reach another tenant (R8 F25).
-                lines += [f"{k}: {v}" for k, v in headers.items()
-                          if k not in _DROP and k != "host"]
-                lines.append(f"Host: {host}" if port == 80 else f"Host: {host}:{port}")
-                lines.append("Connection: close")
-                request = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
-                up_writer.write(request)
-                await up_writer.drain()
-                sent = len(request)
-            up, down = await asyncio.gather(_pump(reader, up_writer), _pump(up_reader, writer))
+                return
+            try:
+                up_reader, up_writer = await asyncio.wait_for(
+                    self.opener(host, port), CONNECT_TIMEOUT_S
+                )
+            except (OSError, asyncio.TimeoutError) as exc:
+                row["error"], end = f"{type(exc).__name__}: {exc}"[:200], "upstream-unreachable"
+                writer.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n"
+                             b"Connection: close\r\n\r\n")
+                await writer.drain()
+                return
+            try:
+                if method == "CONNECT":
+                    writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    await writer.drain()
+                else:
+                    # One request per connection: ``Connection: close`` upstream.
+                    # A pipelined follow-up still reaches only THIS host (the TCP
+                    # destination was checked), and apt retries what it loses.
+                    lines = [f"{method} {path} HTTP/1.1"]
+                    # Host is ALWAYS the checked destination, never the client's:
+                    # on a shared CDN edge plain-HTTP routing follows Host, so a
+                    # forwarded client Host could reach another tenant (R8 F25).
+                    lines += [f"{k}: {v}" for k, v in headers.items()
+                              if k not in _DROP and k != "host"]
+                    lines.append(f"Host: {host}" if port == 80 else f"Host: {host}:{port}")
+                    lines.append("Connection: close")
+                    request = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+                    up_writer.write(request)
+                    await up_writer.drain()
+                    sent = len(request)
+                end = await self._tunnel(reader, writer, up_reader, up_writer, counts)
+            finally:
+                up_writer.close()
+        except asyncio.CancelledError:
+            end = end or "cancelled"
+            raise
+        except Exception as exc:
+            end = end or f"error:{type(exc).__name__}"
+            raise
         finally:
-            up_writer.close()
-        self.log.write(**row, allowed=True, bytes_up=sent + up, bytes_down=down,
-                       duration_s=round(time.monotonic() - started, 3))
+            self.log.write(**row, bytes_up=sent + counts["up"], bytes_down=counts["down"],
+                           end=end or "error", duration_s=round(time.monotonic() - started, 3))
+
+    @staticmethod
+    async def _tunnel(reader, writer, up_reader, up_writer, counts) -> str:
+        """Pump both directions; how the tunnel ended.
+
+        A clean EOF half-closes and waits for the other direction (responses
+        still flowing). A reset or error on either side tears the other down
+        too: nothing more can be delivered, and a stalled peer must not keep
+        the tunnel (and its row) open forever.
+        """
+        tasks = {
+            asyncio.ensure_future(_pump(reader, up_writer, counts, "up")): "client-reset",
+            asyncio.ensure_future(_pump(up_reader, writer, counts, "down")): "upstream-reset",
+        }
+        try:
+            pending = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if task.result() is not None:  # re-raises a pump's error
+                        return tasks[task]
+            return "closed"
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)

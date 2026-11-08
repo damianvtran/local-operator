@@ -342,8 +342,8 @@ class EdgeTests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.02)
         [row] = self.package_rows()
-        self.assertEqual((row["via"], row["host"], row["port"], row["allowed"]),
-                         ("edge", "deb.debian.org", 80, True))
+        self.assertEqual((row["via"], row["host"], row["port"], row["allowed"], row["end"]),
+                         ("edge", "deb.debian.org", 80, True, "closed"))
         self.assertEqual(self.rows(), [])  # not a metered route
         self.assertFalse(Path(os.environ["BENCH_SPEND_FILE"]).exists())
 
@@ -364,9 +364,56 @@ class EdgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(opened, [])
         row = self.package_rows()[-1]
-        self.assertEqual((row["host"], row["allowed"], row["reason"]),
-                         ("example.invalid", False, "not-allowlisted"))
+        self.assertEqual((row["host"], row["allowed"], row["reason"], row["end"]),
+                         ("example.invalid", False, "not-allowlisted", "denied"))
         self.assertTrue(self.rows()[-1]["denied"])
+
+    async def test_package_tunnel_error_after_open_still_writes_one_row(self):
+        # S9e: the edge serves packages through the same dispatch, so an error
+        # after the upstream opened must leave its one row there too.
+        await self._package_edge()
+
+        chunk = b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\npar"
+
+        class Broken:
+            def __init__(self):
+                self.sent = [chunk]
+
+            async def read(self, _n):
+                if self.sent:
+                    return self.sent.pop(0)
+                raise RuntimeError("upstream exploded")
+
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+            def can_write_eof(self):
+                return True
+
+            def write_eof(self):
+                pass
+
+            def close(self):
+                pass
+
+        async def opener(host, p):
+            broken = Broken()
+            return broken, broken
+
+        self.edge._packages.opener = opener
+        with contextlib.suppress(httpx.HTTPError):
+            await self.client().get("http://deb.debian.org/debian/x")
+        for _ in range(250):
+            if self.package_rows():
+                break
+            await asyncio.sleep(0.02)
+        [row] = self.package_rows()
+        self.assertEqual((row["host"], row["allowed"], row["end"]),
+                         ("deb.debian.org", True, "error:RuntimeError"))
+        self.assertEqual(row["bytes_down"], len(chunk))
 
     async def _trust_edge(self):
         """A container-lane edge (public roots given) plus a TLS 'public' registry.

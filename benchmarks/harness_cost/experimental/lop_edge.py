@@ -554,7 +554,8 @@ class EdgeServer:
             self._packages.log.write(method=method,
                                      host=package_egress.logged_host(parsed[0], reason),
                                      port=parsed[1],
-                                     allowed=False, reason=reason, bytes_up=0, bytes_down=0)
+                                     allowed=False, reason=reason, bytes_up=0, bytes_down=0,
+                                     end="denied")
         return False
 
     async def _tunnel(

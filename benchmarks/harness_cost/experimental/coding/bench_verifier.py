@@ -58,6 +58,12 @@ DISCLOSED_FLAG = "hidden-digest-appeared-after-agent-phase"
 ALLOWLIST = Path(__file__).resolve().parent / "package-egress-allowlist.json"
 
 
+def _complete_row(row: dict) -> bool:
+    return (isinstance(row.get("host"), str) and isinstance(row.get("allowed"), bool)
+            and all(type(row.get(k)) is int for k in ("port", "bytes_up", "bytes_down"))
+            and isinstance(row.get("end"), str) and bool(row["end"]))
+
+
 def fence_anomalies(log_paths: list[str], allow: set[str]) -> list[dict[str, object]]:
     """Package-egress rows that void the S9b disclosure (not the trial).
 
@@ -70,6 +76,12 @@ def fence_anomalies(log_paths: list[str], allow: set[str]) -> list[dict[str, obj
     R11 F31: a MISSING log is an anomaly (fail closed). Every arm launches the
     gate's package proxy and the driver creates each listed log empty before
     the trial, so a missing file means it was removed, not "no connection".
+
+    S9e: the proxy writes every row from ``finally`` with its bytes and an
+    ``end`` reason, so a row the fence cannot read in full -- truncated JSON,
+    a non-object line, or a missing/ill-typed field -- cannot vouch for its
+    connection and is an anomaly (``unparsed`` / ``partial-row``). A complete
+    row to an allowlisted host is the fence working however it ended.
     """
     anomalies = []
     for raw in log_paths:
@@ -79,13 +91,17 @@ def fence_anomalies(log_paths: list[str], allow: set[str]) -> list[dict[str, obj
                               "reason": "missing-log", "unparsed": None})
             continue
         for line in path.read_text().splitlines():
+            if not line:
+                continue
             try:
-                row = json.loads(line) if line else None
+                row = json.loads(line)
             except ValueError:
                 row = {"unparsed": True}
             if not isinstance(row, dict):
-                continue
-            if (row.get("unparsed") or row.get("reason") == "model-host"
+                row = {"unparsed": True}
+            elif not _complete_row(row):
+                row = {**row, "reason": "partial-row"}
+            if (row.get("unparsed") or row.get("reason") in ("model-host", "partial-row")
                     or (row.get("allowed") is True and row.get("host") not in allow)):
                 anomalies.append({k: row.get(k) for k in ("host", "port", "allowed",
                                                           "reason", "unparsed")})

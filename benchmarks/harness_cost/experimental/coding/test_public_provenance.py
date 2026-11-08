@@ -981,12 +981,15 @@ class PostAgentDisclosureTests(unittest.TestCase):
     def test_fence_anomaly_refuses_a_late_match(self):
         _write(self.root / "image/app/process.py", self.fixture)
         iso = self.scan()
+        # Complete rows (S9e shape), so each case refuses for its own reason.
+        done = {"bytes_up": 0, "bytes_down": 0, "end": "denied"}
         for rows, egress_ok in (
                 ([{"host": "api.anthropic.com", "port": 443, "allowed": False,
-                   "reason": "model-host"}], True),
-                ([{"host": "evil.example", "port": 443, "allowed": True}], True),
+                   "reason": "model-host", **done}], True),
+                ([{"host": "evil.example", "port": 443, "allowed": True, **done,
+                   "end": "closed"}], True),
                 ([{"host": "github.com", "port": 443, "allowed": False,
-                   "reason": "not-allowlisted"}], False)):  # canary breach on re-probe
+                   "reason": "not-allowlisted", **done}], False)):  # canary breach on re-probe
             with self.subTest(rows=rows, egress_ok=egress_ok):
                 self.log.write_text("".join(json.dumps(r) + "\n" for r in rows))
                 record = self.assert_refused(iso, egress_ok=egress_ok)
