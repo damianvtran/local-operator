@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -46,6 +46,7 @@ from local_operator.evaluation.adapters.api import (
 from local_operator.evaluation.adapters.rpc import RpcErrorDetail, RpcRemoteError
 from local_operator.evaluation.adapters.supervisor import (
     MAX_DIAGNOSTIC_TAIL,
+    AdapterSupervisor,
     HostVerifier,
     SupervisionError,
     VerifiedAdapterSession,
@@ -1786,3 +1787,44 @@ async def test_call_raw_forwards_the_overhead_rate_and_sends_the_zero_default_ba
     await supervisor._call_raw("execute", params, ExecuteResult, timeout=1.0)
 
     assert rpc.calls == [("execute", 1.0, 2.5), ("execute", 1.0, None)]
+
+
+@pytest.mark.asyncio
+async def test_command_cap_is_enforced_for_any_adapter(tmp_path: Path) -> None:
+    from local_operator.evaluation.adapters.api import (
+        RunCommandParams,
+        RunCommandResult,
+    )
+
+    verifier = HostVerifier("task", "episode", tmp_path)
+    verifier.accept_initial(observation("task", "episode", 0))
+    raw = RawSupervisor(
+        [
+            RunCommandResult(
+                exit_code=0,
+                timed_out=False,
+                stdout="x" * 70000,
+                stderr="é" * 40000,
+                stdout_bytes=70000,
+                stderr_bytes=80000,
+                stdout_truncated=False,
+                stderr_truncated=False,
+            )
+        ]
+    )
+    # This fixture implements only the raw-call/termination seam exercised here.
+    session = VerifiedAdapterSession(cast(AdapterSupervisor, raw), verifier)
+    result = await session.run_command(
+        RunCommandParams(
+            operation_id="command",
+            episode_id="episode",
+            command="emit",
+            timeout_s=1,
+            max_output_bytes=65536,
+        ),
+        timeout=2,
+    )
+    assert len(result.stdout.encode()) == 65536
+    assert len(result.stderr.encode()) == 65536
+    assert result.stdout_truncated and result.stderr_truncated
+    assert (result.stdout_bytes, result.stderr_bytes) == (70000, 80000)

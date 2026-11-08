@@ -17,6 +17,14 @@ scratch. That keeps the MCP server a pure shape adapter (nothing
 OSWorld-specific and nothing environment-specific crosses into it), and it
 keeps the driver the only writer of episode state.
 
+A SECOND, CAPABILITY-GATED TOOL. When (and only when) the target advertised
+that it can run commands (``AdapterCapabilities.command``), the server also
+lists ``run_command``: one shell command on the target, answered as text
+(exit code, stdout, stderr, a timeout flag, loud truncation). It rides the
+same socket under its own ``tool`` name. Without the capability the listing,
+the schema and every frame are byte-identical to a build without the tool,
+and a call naming it is refused as an unknown tool.
+
 THE WIRE (``WIRE_PROTOCOL``). One connection per call; the request is
 ``{"protocol": 1, "tool": "apply_actions", "arguments": {...}}`` and the reply
 is ``{"protocol": 1, "content": [text|image blocks], "is_error": bool}``. The
@@ -90,6 +98,62 @@ DEFAULT_CALL_TIMEOUT_S: float | None = None
 _TEXT = "text"
 _IMAGE = "image"
 
+#: The remote command tool. Generic by construction: any adapter that can run
+#: a shell command on its target can back it, so nothing here names a
+#: particular environment. The wording says what the tool is FOR -- reading
+#: results as text -- because the measured alternative was typing commands
+#: into a remote terminal and reading the output back off a screenshot.
+COMMAND_TOOL_NAME = "run_command"
+
+COMMAND_TOOL_DESCRIPTION = (
+    "Run one shell command on the remote computer and get its result as text: "
+    "exit code, stdout and stderr (kept separate), and whether it timed out. "
+    "Use it to inspect files, read documents or compute values on the remote "
+    "computer instead of typing commands into a terminal on its screen. The "
+    "command runs non-interactively in a shell on the remote computer, not in "
+    "your local workspace; it cannot answer prompts or open windows you can "
+    "type into. Output beyond the cap is cut, and the result says so."
+)
+
+#: The model-facing timeout bounds. The ceiling stays well inside the
+#: harness-wide ``MAX_COMMAND_TIMEOUT_S``; the default covers ordinary file
+#: and text inspection, and a model that knows it needs longer can ask.
+COMMAND_DEFAULT_TIMEOUT_S = 60
+COMMAND_MAX_TIMEOUT_S = 300
+
+
+def command_tool_parameters() -> dict[str, Any]:
+    """The JSON schema of the command tool's arguments.
+
+    Deliberately small: a command string and an optional timeout. The output
+    cap is the harness's, not the model's, so a call cannot flood the context
+    window by asking for a larger one.
+    """
+
+    return {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": (
+                    "The command line, run as-is by a shell on the remote "
+                    "computer (pipes and redirections work)."
+                ),
+            },
+            "timeout_s": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": COMMAND_MAX_TIMEOUT_S,
+                "description": (
+                    f"Seconds before the command is stopped (default "
+                    f"{COMMAND_DEFAULT_TIMEOUT_S}, at most {COMMAND_MAX_TIMEOUT_S})."
+                ),
+            },
+        },
+        "required": ["command"],
+        "additionalProperties": False,
+    }
+
 
 class ActionBridgeUnreachable(RuntimeError):
     """The driver's bridge socket could not be reached for one call."""
@@ -137,12 +201,29 @@ def surface_from_json(payload: str) -> ActionSurface:
 _CONTENT_TYPES = (_TEXT, _IMAGE)
 
 
-def encode_call(arguments: Mapping[str, Any], *, call_id: str | None = None) -> bytes:
-    """One request frame: the tool, its arguments and a per-call id for logs."""
+#: Every tool name a frame may carry. The server decides which of them it
+#: OFFERS (the command tool only with the capability); the bridge decides
+#: which it SERVES. Both refuse anything outside this set on the first frame.
+_WIRE_TOOLS = frozenset({ACTION_TOOL_NAME, COMMAND_TOOL_NAME})
 
+
+def encode_call(
+    arguments: Mapping[str, Any],
+    *,
+    call_id: str | None = None,
+    tool: str = ACTION_TOOL_NAME,
+) -> bytes:
+    """One request frame: the tool, its arguments and a per-call id for logs.
+
+    ``tool`` defaults to the action tool, so every pre-existing caller keeps
+    its exact frame bytes.
+    """
+
+    if tool not in _WIRE_TOOLS:
+        raise ValueError(f"unknown tool {tool!r}")
     payload = {
         "protocol": WIRE_PROTOCOL,
-        "tool": ACTION_TOOL_NAME,
+        "tool": tool,
         "call_id": call_id or f"call-{uuid.uuid4().hex[:12]}",
         "arguments": dict(arguments),
     }
@@ -155,7 +236,7 @@ def decode_call(line: bytes) -> dict[str, Any]:
     payload = _decode_object(line, "call frame")
     if payload.get("protocol") != WIRE_PROTOCOL:
         raise ValueError(f"unsupported call protocol {payload.get('protocol')!r}")
-    if payload.get("tool") != ACTION_TOOL_NAME:
+    if payload.get("tool") not in _WIRE_TOOLS:
         raise ValueError(f"unknown tool {payload.get('tool')!r}")
     arguments = payload.get("arguments")
     if not isinstance(arguments, dict):
@@ -243,6 +324,7 @@ async def forward_call(
     arguments: Mapping[str, Any],
     *,
     timeout: float | None = DEFAULT_CALL_TIMEOUT_S,
+    tool: str = ACTION_TOOL_NAME,
 ) -> dict[str, Any]:
     """One call, one connection, one reply: the whole client half of the wire."""
 
@@ -254,12 +336,23 @@ async def forward_call(
         ) from error
     line = b""
     try:
-        writer.write(encode_call(arguments))
+        writer.write(encode_call(arguments, tool=tool))
         await writer.drain()
         if timeout is None:
             line = await reader.readline()
         else:
             line = await asyncio.wait_for(reader.readline(), timeout)
+    except asyncio.CancelledError:
+        if tool == COMMAND_TOOL_NAME:
+            # Half-close keeps the response half open for the bridge's cancel
+            # ACK. No retry: the target may already have executed the command.
+            # Bound the ACK wait because a dead bridge cannot answer it.
+            try:
+                writer.write_eof()
+                await asyncio.wait_for(reader.readline(), 1.0)
+            except (OSError, asyncio.TimeoutError):
+                pass
+        raise
     except asyncio.TimeoutError as error:
         raise ActionBridgeUnreachable(
             f"the episode's action bridge did not answer within {timeout}s"
@@ -306,12 +399,23 @@ def format_forward_error(error: BaseException) -> tuple[list[dict[str, Any]], bo
 # ---------------------------------------------------------------------------
 
 
-def build_mcp_server(endpoint: str, surface: ActionSurface, *, timeout: float | None):
+def build_mcp_server(
+    endpoint: str,
+    surface: ActionSurface,
+    *,
+    timeout: float | None,
+    command: bool = False,
+):
     """The low-level MCP server, wired by hand for one reason: the tool's
     ``inputSchema`` is the FLATTENED action projection, which a decorated
     Python function cannot express -- signature introspection would emit a
     ``$ref``/``anyOf``-laden schema some providers reject, and the projection
     exists precisely to avoid that. Everything else is the SDK's own server.
+
+    ``command`` adds the remote command tool to the listing and the call
+    router. False (the default) leaves both exactly as they were before the
+    tool existed: the gate is the listing itself, so a target that cannot run
+    commands never shows the model a tool that would only fail.
     """
 
     import mcp.types as types
@@ -323,26 +427,34 @@ def build_mcp_server(endpoint: str, surface: ActionSurface, *, timeout: float | 
         ctx: Any, params: types.PaginatedRequestParams
     ) -> types.ListToolsResult:
         del ctx, params
-        return types.ListToolsResult(
-            tools=[
+        tools = [
+            types.Tool(
+                name=ACTION_TOOL_NAME,
+                description=ACTION_TOOL_DESCRIPTION,
+                input_schema=action_tool_parameters(surface),
+            )
+        ]
+        if command:
+            tools.append(
                 types.Tool(
-                    name=ACTION_TOOL_NAME,
-                    description=ACTION_TOOL_DESCRIPTION,
-                    input_schema=action_tool_parameters(surface),
+                    name=COMMAND_TOOL_NAME,
+                    description=COMMAND_TOOL_DESCRIPTION,
+                    input_schema=command_tool_parameters(),
                 )
-            ]
-        )
+            )
+        return types.ListToolsResult(tools=tools)
 
     async def on_call_tool(ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
         del ctx
-        if params.name != ACTION_TOOL_NAME:
+        offered = {ACTION_TOOL_NAME, COMMAND_TOOL_NAME} if command else {ACTION_TOOL_NAME}
+        if params.name not in offered:
             return types.CallToolResult(
                 content=[types.TextContent(type=_TEXT, text=f"Unknown tool {params.name!r}")],
                 is_error=True,
             )
         arguments = params.arguments or {}
         try:
-            reply = await forward_call(endpoint, arguments, timeout=timeout)
+            reply = await forward_call(endpoint, arguments, timeout=timeout, tool=params.name)
         except (ActionBridgeUnreachable, ValueError) as error:
             blocks, is_error = format_forward_error(error)
             return _to_mcp_result(blocks, is_error=is_error)
@@ -367,12 +479,18 @@ def _to_mcp_result(blocks: Sequence[Any], *, is_error: bool):
     return types.CallToolResult(content=content, is_error=is_error)
 
 
-async def serve(endpoint: str, surface: ActionSurface, *, timeout: float | None) -> None:
+async def serve(
+    endpoint: str,
+    surface: ActionSurface,
+    *,
+    timeout: float | None,
+    command: bool = False,
+) -> None:
     """Serve one episode's action surface over stdio until stdin closes."""
 
     from mcp.server.stdio import stdio_server
 
-    server = build_mcp_server(endpoint, surface, timeout=timeout)
+    server = build_mcp_server(endpoint, surface, timeout=timeout, command=command)
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
@@ -397,6 +515,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CALL_TIMEOUT_S,
         help="seconds to wait for a forwarded call's reply (default: no bound here)",
     )
+    parser.add_argument(
+        "--command",
+        action="store_true",
+        help=(
+            "also offer the run_command tool (only when the target advertised "
+            "the command capability)"
+        ),
+    )
     return parser
 
 
@@ -408,7 +534,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"action_server: bad --surface: {error}", file=sys.stderr)
         return 2
     try:
-        asyncio.run(serve(args.endpoint, surface, timeout=args.call_timeout))
+        asyncio.run(serve(args.endpoint, surface, timeout=args.call_timeout, command=args.command))
     except KeyboardInterrupt:
         return 130
     return 0

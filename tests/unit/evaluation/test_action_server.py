@@ -308,3 +308,134 @@ class TestMain:
 
     def test_server_name_is_the_declared_one(self) -> None:
         assert SERVER_NAME == "episode-actions"
+
+
+class TestCommandToolGate:
+    """The remote command tool exists ONLY when the target advertised it.
+
+    A target without the capability must see today's surface exactly: one
+    tool, the same schema, the same description -- no dead tool the model
+    could call and no changed listing.
+    """
+
+    @staticmethod
+    async def _listed(server: Any) -> list[Any]:
+        import mcp.types as types
+
+        entry = server.get_request_handler("tools/list")
+        assert entry is not None
+        result = cast(Any, await entry.handler(cast(Any, None), types.PaginatedRequestParams()))
+        return list(result.tools)
+
+    @pytest.mark.asyncio
+    async def test_without_the_capability_the_listing_is_unchanged(self) -> None:
+        surface = ActionSurface(paste_text=True)
+        default = await self._listed(build_mcp_server("/x.sock", surface, timeout=0.1))
+        explicit = await self._listed(
+            build_mcp_server("/x.sock", surface, timeout=0.1, command=False)
+        )
+        assert [tool.model_dump() for tool in default] == [tool.model_dump() for tool in explicit]
+        assert [tool.name for tool in default] == [ACTION_TOOL_NAME]
+
+    @pytest.mark.asyncio
+    async def test_with_the_capability_the_command_tool_is_listed_second(self) -> None:
+        from local_operator.evaluation.action_server import (
+            COMMAND_TOOL_DESCRIPTION,
+            COMMAND_TOOL_NAME,
+            command_tool_parameters,
+        )
+
+        tools = await self._listed(
+            build_mcp_server("/x.sock", ActionSurface(), timeout=0.1, command=True)
+        )
+        assert [tool.name for tool in tools] == [ACTION_TOOL_NAME, COMMAND_TOOL_NAME]
+        assert tools[1].description == COMMAND_TOOL_DESCRIPTION
+        assert tools[1].input_schema == command_tool_parameters()
+        assert tools[1].input_schema["required"] == ["command"]
+
+    @pytest.mark.asyncio
+    async def test_the_command_tool_is_refused_when_not_offered(self) -> None:
+        import mcp.types as types
+
+        from local_operator.evaluation.action_server import COMMAND_TOOL_NAME
+
+        server = build_mcp_server("/nonexistent.sock", ActionSurface(), timeout=0.1)
+        entry = server.get_request_handler("tools/call")
+        assert entry is not None
+        result = cast(
+            Any,
+            await entry.handler(
+                cast(Any, None),
+                types.CallToolRequestParams(name=COMMAND_TOOL_NAME, arguments={"command": "ls"}),
+            ),
+        )
+        assert result.is_error is True
+
+    def test_no_benchmark_vocabulary_in_the_command_tool(self) -> None:
+        from local_operator.evaluation.action_server import (
+            COMMAND_TOOL_DESCRIPTION,
+            command_tool_parameters,
+        )
+
+        text = (COMMAND_TOOL_DESCRIPTION + json.dumps(command_tool_parameters())).lower()
+        for word in ("osworld", "kimi", "benchmark", "episode", "task"):
+            assert word not in text
+
+    @pytest.mark.asyncio
+    async def test_a_command_call_is_forwarded_under_its_own_tool_name(
+        self, tmp_path: Path
+    ) -> None:
+        import mcp.types as types
+
+        from local_operator.evaluation.action_server import COMMAND_TOOL_NAME
+
+        seen: list[dict[str, Any]] = []
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            request = decode_call(await reader.readline())
+            seen.append(request)
+            writer.write(encode_response([TextContent(text="exit_code: 0")]))
+            await writer.drain()
+            writer.close()
+
+        endpoint = str(tmp_path / "c.sock")
+        stub = await asyncio.start_unix_server(handle, path=endpoint)
+        server = build_mcp_server(endpoint, ActionSurface(), timeout=5.0, command=True)
+        entry = server.get_request_handler("tools/call")
+        assert entry is not None
+        try:
+            result = cast(
+                Any,
+                await entry.handler(
+                    cast(Any, None),
+                    types.CallToolRequestParams(
+                        name=COMMAND_TOOL_NAME, arguments={"command": "uname -a"}
+                    ),
+                ),
+            )
+        finally:
+            stub.close()
+            await stub.wait_closed()
+        assert result.is_error is False
+        assert seen[0]["tool"] == COMMAND_TOOL_NAME
+        assert seen[0]["arguments"] == {"command": "uname -a"}
+
+    def test_the_action_frame_bytes_are_unchanged(self) -> None:
+        # The default tool is still the action tool, so every existing frame
+        # keeps its exact bytes.
+        frame = json.loads(encode_call({"a": 1}, call_id="c1"))
+        assert frame == {
+            "protocol": WIRE_PROTOCOL,
+            "tool": ACTION_TOOL_NAME,
+            "call_id": "c1",
+            "arguments": {"a": 1},
+        }
+
+    def test_main_accepts_the_command_flag(self) -> None:
+        from local_operator.evaluation.action_server import build_parser
+
+        assert build_parser().parse_args(["--endpoint", "e", "--surface", "{}"]).command is False
+        assert (
+            build_parser().parse_args(["--endpoint", "e", "--surface", "{}", "--command"]).command
+            is True
+        )
