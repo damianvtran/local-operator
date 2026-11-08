@@ -1,0 +1,18 @@
+{
+  "tui.chrome.banners.body_approval": "स्वीकृति की प्रतीक्षा",
+  "tui.chrome.banners.body_ask": "आपके जवाब की प्रतीक्षा",
+  "tui.chrome.banners.body_background": "आप दूसरे सत्र में थे",
+  "tui.chrome.banners.body_background_digest": "इन्हें देखने के लिए सत्र साइडबार (Ctrl+B) खोलें",
+  "tui.chrome.banners.body_complete": "कार्य पूरा हुआ",
+  "tui.chrome.banners.body_error": "त्रुटि के साथ रुका",
+  "tui.chrome.banners.body_interrupted": "पूरा होने से पहले रुका",
+  "tui.chrome.banners.body_update": "एक एजेंट ने अपडेट की सूचना दी",
+  "tui.chrome.banners.context_attention": "ध्यान आवश्यक",
+  "tui.chrome.banners.context_complete": "पूर्ण",
+  "tui.chrome.banners.context_input_required": "इनपुट आवश्यक",
+  "tui.chrome.banners.context_interrupted": "बाधित",
+  "tui.chrome.banners.context_mixed": "मिले-जुले नतीजे",
+  "tui.chrome.banners.context_retired": "अपडेट से रुका",
+  "tui.chrome.banners.digest_title": "{total, plural, one {{count} सत्र पूरा हुआ} other {{count} सत्र पूरे हुए}}",
+  "tui.chrome.banners.fallback_title": "एक सत्र पूरा हुआ"
+}

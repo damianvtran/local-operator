@@ -1,0 +1,18 @@
+{
+  "tui.chrome.banners.body_approval": "منظوری کا انتظار",
+  "tui.chrome.banners.body_ask": "آپ کے جواب کا انتظار",
+  "tui.chrome.banners.body_background": "آپ دوسرے سیشن میں تھے",
+  "tui.chrome.banners.body_background_digest": "دیکھنے کے لیے سیشن سائیڈ بار (Ctrl+B) کھولیں",
+  "tui.chrome.banners.body_complete": "کام مکمل",
+  "tui.chrome.banners.body_error": "خرابی کے ساتھ رک گیا",
+  "tui.chrome.banners.body_interrupted": "مکمل ہونے سے پہلے رک گیا",
+  "tui.chrome.banners.body_update": "ایجنٹ نے اپ ڈیٹ کی اطلاع دی",
+  "tui.chrome.banners.context_attention": "توجہ درکار",
+  "tui.chrome.banners.context_complete": "مکمل",
+  "tui.chrome.banners.context_input_required": "ان پٹ درکار",
+  "tui.chrome.banners.context_interrupted": "روکا گیا",
+  "tui.chrome.banners.context_mixed": "ملے جلے نتائج",
+  "tui.chrome.banners.context_retired": "ریٹائر",
+  "tui.chrome.banners.digest_title": "{total, plural, one {1 سیشن مکمل ہوا} other {{count} سیشن مکمل ہوئے}}",
+  "tui.chrome.banners.fallback_title": "ایک سیشن مکمل ہوا"
+}

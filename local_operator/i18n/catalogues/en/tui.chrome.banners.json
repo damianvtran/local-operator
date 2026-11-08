@@ -1,0 +1,18 @@
+{
+  "tui.chrome.banners.body_approval": "Waiting for approval",
+  "tui.chrome.banners.body_ask": "Waiting for your answer",
+  "tui.chrome.banners.body_background": "You were in another session",
+  "tui.chrome.banners.body_background_digest": "Open the session sidebar (Ctrl+B) to see them",
+  "tui.chrome.banners.body_complete": "Task complete",
+  "tui.chrome.banners.body_error": "Stopped with an error",
+  "tui.chrome.banners.body_interrupted": "Stopped before finishing",
+  "tui.chrome.banners.body_update": "An agent flagged an update",
+  "tui.chrome.banners.context_attention": "Needs attention",
+  "tui.chrome.banners.context_complete": "Complete",
+  "tui.chrome.banners.context_input_required": "Input required",
+  "tui.chrome.banners.context_interrupted": "Interrupted",
+  "tui.chrome.banners.context_mixed": "Mixed outcomes",
+  "tui.chrome.banners.context_retired": "Retired",
+  "tui.chrome.banners.digest_title": "{total, plural, one {1 session finished} other {{count} sessions finished}}",
+  "tui.chrome.banners.fallback_title": "A session finished"
+}

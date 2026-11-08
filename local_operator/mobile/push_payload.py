@@ -92,7 +92,13 @@ from local_operator.notifications.sound import (
     builtin,
     configured,
 )
-from local_operator.tui.notify import APP_NAME, BODIES, BODY_COMPLETE, digest_subtitle
+from local_operator.tui import notify as _notify
+from local_operator.tui.notify import APP_NAME, BODIES, digest_subtitle
+
+# ``BODY_COMPLETE`` is read as ``_notify.BODY_COMPLETE`` at call time, not
+# imported by value: ``tui.notify._reload_copy`` rebinds it on a live language
+# switch, and a by-value import would keep the import-time language on the
+# unknown-kind fallback path (``BODIES`` itself is updated in place).
 
 #: The alert object: the user-visible text the machine composes and the cloud
 #: delivers verbatim. Its two keys are named here because the deny list is
@@ -251,7 +257,7 @@ def completion_alert(kind: str, count: int) -> dict[str, str]:
     local banner takes, so a push and a toast never disagree about an outcome the
     vocabulary does not carry.
     """
-    body = BODIES.get(kind, BODY_COMPLETE)
+    body = BODIES.get(kind, _notify.BODY_COMPLETE)
     return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: f"{body} · {count_phrase(count)}"}
 
 

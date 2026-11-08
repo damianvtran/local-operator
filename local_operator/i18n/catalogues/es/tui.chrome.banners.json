@@ -1,0 +1,18 @@
+{
+  "tui.chrome.banners.body_approval": "Esperando aprobación",
+  "tui.chrome.banners.body_ask": "Esperando tu respuesta",
+  "tui.chrome.banners.body_background": "Estabas en otra sesión",
+  "tui.chrome.banners.body_background_digest": "Abre la barra lateral (Ctrl+B) para verlas",
+  "tui.chrome.banners.body_complete": "Tarea completada",
+  "tui.chrome.banners.body_error": "Se detuvo con un error",
+  "tui.chrome.banners.body_interrupted": "Se detuvo sin terminar",
+  "tui.chrome.banners.body_update": "Un agente señaló una novedad",
+  "tui.chrome.banners.context_attention": "Requiere atención",
+  "tui.chrome.banners.context_complete": "Completada",
+  "tui.chrome.banners.context_input_required": "Acción requerida",
+  "tui.chrome.banners.context_interrupted": "Interrumpida",
+  "tui.chrome.banners.context_mixed": "Resultados mixtos",
+  "tui.chrome.banners.context_retired": "Retirada",
+  "tui.chrome.banners.digest_title": "{total, plural, one {1 sesión terminada} many {{count} de sesiones terminadas} other {{count} sesiones terminadas}}",
+  "tui.chrome.banners.fallback_title": "Una sesión terminó"
+}

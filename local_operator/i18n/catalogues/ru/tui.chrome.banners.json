@@ -1,0 +1,18 @@
+{
+  "tui.chrome.banners.body_approval": "Ожидает одобрения",
+  "tui.chrome.banners.body_ask": "Ждёт вашего ответа",
+  "tui.chrome.banners.body_background": "Вы были в другой сессии",
+  "tui.chrome.banners.body_background_digest": "Откройте боковую панель (Ctrl+B) — они там",
+  "tui.chrome.banners.body_complete": "Задача выполнена",
+  "tui.chrome.banners.body_error": "Остановлено из-за ошибки",
+  "tui.chrome.banners.body_interrupted": "Остановлено до завершения",
+  "tui.chrome.banners.body_update": "Агент сообщил об обновлении",
+  "tui.chrome.banners.context_attention": "Требует внимания",
+  "tui.chrome.banners.context_complete": "Завершено",
+  "tui.chrome.banners.context_input_required": "Требуется ввод",
+  "tui.chrome.banners.context_interrupted": "Прервано",
+  "tui.chrome.banners.context_mixed": "Разные исходы",
+  "tui.chrome.banners.context_retired": "Обновление",
+  "tui.chrome.banners.digest_title": "{total, plural, one {{count} сессия завершена} few {{count} сессии завершены} many {{count} сессий завершено} other {{count} сессии завершены}}",
+  "tui.chrome.banners.fallback_title": "Сессия завершена"
+}
