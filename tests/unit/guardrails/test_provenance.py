@@ -2017,3 +2017,107 @@ def test_a_repo_with_linked_worktrees_is_never_a_clean_clone(home: Path) -> None
     src = _source_repo(home)
     _git_run("worktree", "add", "-q", str(home / "wt"), cwd=src)
     assert prov.clone_state(str(src)) == "dirty: has linked worktrees"
+
+
+# -- round-3 remediation -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Delete {p}?",
+        "May I delete `{p}`?",
+        "Delete {p}!",
+        "(delete {p})",
+        'Delete "{p}".',
+    ],
+)
+def test_names_path_strips_sentence_punctuation(home: Path, text: str) -> None:
+    target = home / "x" / "or.env"
+    target.parent.mkdir()
+    target.write_text("x")
+    h = str(home)
+    assert prov.names_path(text.format(p="~/x/or.env"), str(target), home=h)
+    # A parent/basename suffix still names nothing.
+    assert not prov.names_path(text.format(p="x/or.env"), str(target), home=h)
+
+
+def test_a_clone_with_a_commit_only_a_local_tag_holds_is_not_clean(home: Path) -> None:
+    clone = _child_clones(home, checkout=True)
+    _git_run("commit", "-q", "--allow-empty", "-m", "tagged only", cwd=clone)
+    _git_run("tag", "keep", cwd=clone)
+    _git_run("reset", "-q", "--hard", "HEAD~1", cwd=clone)
+    assert prov.clone_state(str(clone)).startswith("dirty: a commit")
+    assert not _clone_covered(home, clone)
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_a_clone_hiding_edits_from_status_is_not_clean(home: Path, flag: str) -> None:
+    clone = _child_clones(home, checkout=True)
+    (clone / "README").write_text("edited\n")
+    _git_run("update-index", flag, "README", cwd=clone)
+    assert prov.clone_state(str(clone)) == "dirty: files hidden from git status"
+
+
+def test_a_clone_whose_local_origin_is_gone_is_not_clean(home: Path) -> None:
+    clone = _child_clones(home, checkout=True)
+    moved = home / "elsewhere"
+    moved.mkdir()
+    os.rename(clone, moved / "c")
+    _git_run("remote", "set-url", "origin", f"file://{home}/src-gone", cwd=moved / "c")
+    assert prov.clone_state(str(moved / "c")) == "dirty: origin gone"
+    _git_run("remote", "set-url", "origin", str(home / "src-gone"), cwd=moved / "c")
+    assert prov.clone_state(str(moved / "c")) == "dirty: origin gone"
+    _git_run("remote", "set-url", "origin", str(home / "src"), cwd=moved / "c")
+    assert prov.clone_state(str(moved / "c")) == "clean"
+
+
+# -- tags: only a tag the origin lacks can hold the last copy of a commit ------------------
+
+
+def _tag_only_commit(repo: Path, tag: str, *, force: bool = False) -> None:
+    """A commit only ``tag`` names: commit, tag it, then move the branch back.
+
+    The message names the repo: within one second an identical message,
+    parent and author would make the SAME commit in source and clone, and a
+    "moved" tag would not move."""
+    _git_run("commit", "-q", "--allow-empty", "-m", f"held by {tag} in {repo.name}", cwd=repo)
+    _git_run("tag", *(["-f"] if force else []), tag, cwd=repo)
+    _git_run("reset", "-q", "--hard", "HEAD~1", cwd=repo)
+
+
+def _clone_with_source_tags(home: Path) -> Path:
+    src = _source_repo(home)
+    _tag_only_commit(src, "v1")
+    _git_run("tag", "-a", "-m", "annotated", "v2", cwd=src)
+    clone = src / ".worktrees" / "c"
+    clone.parent.mkdir()
+    _git_run("clone", "-q", "--local", ".", str(clone), cwd=src)
+    assert {"v1", "v2"} <= set(prov._tag_commits(str(clone)) or {})
+    return clone
+
+
+def test_tags_copied_from_the_source_keep_a_clone_clean(home: Path) -> None:
+    assert prov.clone_state(str(_clone_with_source_tags(home))) == "clean"
+
+
+def test_a_new_local_tag_on_a_new_commit_is_dirty(home: Path) -> None:
+    clone = _clone_with_source_tags(home)
+    _tag_only_commit(clone, "mine")
+    assert prov.clone_state(str(clone)).startswith("dirty: a commit")
+
+
+def test_a_moved_tag_is_dirty(home: Path) -> None:
+    clone = _clone_with_source_tags(home)
+    _tag_only_commit(clone, "v1", force=True)
+    assert prov.clone_state(str(clone)).startswith("dirty: a commit")
+
+
+def test_a_network_origin_judges_tags_by_loose_refs(home: Path) -> None:
+    """Never contacted: packed (cloned) tags are the origin's, loose ones local."""
+    clone = _clone_with_source_tags(home)
+    _git_run("remote", "set-url", "origin", "https://example.invalid/r.git", cwd=clone)
+    assert prov.clone_state(str(clone)) == "clean"
+    _tag_only_commit(clone, "mine")
+    assert (clone / ".git" / "refs" / "tags" / "mine").is_file()
+    assert prov.clone_state(str(clone)).startswith("dirty: a commit")

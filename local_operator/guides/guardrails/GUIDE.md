@@ -80,7 +80,11 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   destination (`C=… && git clone … $C` counts; a name in the output never
   does), and the clone must be clean — no uncommitted, untracked or
   non-regenerable ignored change, no commit that no remote-tracking ref
-  contains, no stash, no nested repository, and no linked worktrees. A
+  contains, no stash, no nested repository, and no linked worktrees. Tags count
+  only when the origin lacks them: against a local origin the tag must name the
+  same commit there; with a network origin (never contacted) a loose tag under
+  `.git/refs/tags/` is local work and a packed one came with the clone — so a
+  `git pack-refs` after tagging hides a local tag (an accepted limitation). A
   `--no-checkout` clone that was never checked out has no work tree to lose.
   The judge sees that state in its facts.
   Descendants come from the harness-written lineage registry

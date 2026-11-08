@@ -775,6 +775,61 @@ def _source_checkout() -> str | None:
     return here if os.path.exists(os.path.join(here, ".git")) else None
 
 
+def _tag_commits(repo: str) -> dict[str, str] | None:
+    """``tag name -> peeled commit`` for every tag in ``repo`` (one call)."""
+    out = _git(
+        ["for-each-ref", "--format=%(refname:strip=2) %(*objectname) %(objectname)", "refs/tags"],
+        repo,
+    )
+    if out is None:
+        return None
+    tags: dict[str, str] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            # An annotated tag peels to ``%(*objectname)``; a lightweight one
+            # leaves it empty, so its own object is the commit.
+            tags[parts[0]] = parts[1] if len(parts) == 3 else parts[-1]
+    return tags
+
+
+def _local_tag_commits(real: str) -> set[str] | None:
+    """Commits of the clone's tags that did NOT come from its origin.
+
+    WHY. A local clone copies every tag of its source (861 on this machine's
+    field clone), many on commits no branch holds, so counting all tags made
+    every real clone dirty. Only a tag the origin lacks can be the last name
+    for a commit:
+      * origin is a local path or ``file://`` that exists: a tag is the
+        origin's when its commit there is the same (both sides listed with
+        one ``for-each-ref``, compared here);
+      * otherwise (a network origin; never contacted): ``git clone`` writes
+        tags to ``packed-refs`` and ``git tag`` writes a LOOSE ref under
+        ``.git/refs/tags/``, so the loose ones are local work.
+    Accepted limitation: a ``git pack-refs`` after tagging makes a local tag
+    look cloned under a network origin.
+    """
+    tags = _tag_commits(real)
+    if tags is None:
+        return None
+    if not tags:
+        return set()
+    url = (_git(["config", "--get", "remote.origin.url"], real) or "").strip()
+    local = url[len("file://") :] if url.startswith("file://") else url
+    if local.startswith(("/", "~", ".")):
+        origin = os.path.join(real, os.path.expanduser(local))
+        theirs = _tag_commits(origin) if os.path.isdir(origin) else None
+        if theirs is None:
+            return None
+        return {sha for name, sha in tags.items() if theirs.get(name) != sha}
+    loose_root = os.path.join(real, ".git", "refs", "tags")
+    loose: set[str] = set()
+    for dirpath, _dirs, files in os.walk(loose_root):
+        for name in files:
+            loose.add(os.path.relpath(os.path.join(dirpath, name), loose_root))
+    return {sha for name, sha in tags.items() if name in loose}
+
+
 def clone_state(path: str) -> str:
     """``clean`` when deleting the standalone clone at ``path`` loses nothing.
 
@@ -789,7 +844,8 @@ def clone_state(path: str) -> str:
         ``--no-checkout`` clone (no index, nothing but ``.git``), no work
         tree at all, whose "staged deletions" are only files never written;
       * every local branch and HEAD reachable from a remote-tracking ref
-        (``refs/remotes``), so no commit exists only here;
+        (``refs/remotes``), and so is every tag the origin lacks
+        (``_local_tag_commits``), so no commit exists only here;
       * no stash, and no nested repository in the work tree.
     Anything else is ``dirty: <why>`` (or ``unknown``), and the clone stays
     unowned: the ordinary ranking, with this state in the judge's facts.
@@ -814,7 +870,24 @@ def clone_state(path: str) -> str:
         )
     except OSError:
         return "unknown"
+    # A local remote that is gone means the remote-tracking refs below name
+    # commits nothing else holds any more (review M2).
+    remotes = _git(["config", "--get-regexp", r"^remote\..*\.url$"], real) or ""
+    for line in remotes.splitlines():
+        url = line.split(" ", 1)[1].strip() if " " in line else ""
+        local = url[len("file://") :] if url.startswith("file://") else url
+        if local.startswith(("/", "~", ".")):
+            where = os.path.join(real, os.path.expanduser(local))
+            if not os.path.exists(where):
+                return "dirty: origin gone"
     if not never_checked_out:
+        # assume-unchanged (lowercase tag) and skip-worktree (``S``) entries
+        # hide edits from ``git status`` (review M1).
+        flags = _git(["ls-files", "-v"], real)
+        if flags is None:
+            return "unknown"
+        if any(ln[:1] == "S" or ln[:1].islower() for ln in flags.splitlines()):
+            return "dirty: files hidden from git status"
         status = _git(["status", "--porcelain", "--untracked-files=all"], real)
         if status is None:
             return "unknown"
@@ -835,11 +908,20 @@ def clone_state(path: str) -> str:
     if _git(["rev-parse", "-q", "--verify", "refs/stash"], real) is not None:
         return "dirty: a stash"
     # One walk, not a ``--contains`` per ref: commits reachable from HEAD or a
-    # local branch but from no remote-tracking ref exist only here. (Tags are
-    # left out: a clone copies every tag of its source, which keeps them.)
+    # local branch but from no remote-tracking ref exist only here.
     unpushed = _git(["rev-list", "--count", "HEAD", "--branches", "--not", "--remotes"], real)
     if unpushed is None or not unpushed.strip().isdigit():
         return "unknown"
+    if int(unpushed) == 0:
+        local = _local_tag_commits(real)
+        if local is None:
+            return "unknown"
+        if local:
+            # A tag the origin lacks may be the only name for its commit
+            # (review M1). Copied tags are not: a local clone copies hundreds.
+            unpushed = _git(["rev-list", "--count", *sorted(local), "--not", "--remotes"], real)
+            if unpushed is None or not unpushed.strip().isdigit():
+                return "unknown"
     if int(unpushed) > 0:
         return "dirty: a commit no remote-tracking ref contains"
     return "clean"
@@ -1193,7 +1275,10 @@ def names_path(
             candidates.add("~" + cand[len(home.rstrip("/")) :])
     protected = {os.path.normpath(p) for p in protected}
     for match in _PATHISH.finditer(text):
-        word = match.group(1).rstrip("/.:")
+        # Sentence punctuation and closing quotes/brackets end a word in prose
+        # ("Delete ~/x/or.env?"); a trailing ``?`` there is a question mark,
+        # not a one-character glob.
+        word = match.group(1).rstrip("/.:?!,;)]}'\"`")
         if not word:
             continue
         if not _GLOBISH.search(word):
