@@ -12,8 +12,8 @@ Keep internal gate evidence out of user-facing notes.
 ## Allocate once, inspect narrowly
 
 - A manager owns routine bounded technical allocations inside the authorized
-  task. Choose a reversible implementation and a bounded test lease; do not
-  escalate ordinary library, layout, test or lane choices. Escalate genuine
+  task: a reversible implementation, a bounded test lease, ordinary library,
+  layout, test or lane choices. Escalate genuine
   access/security decisions, destructive actions, operator preferences and
   material scope changes. Authorization to fix is not authorization to delete.
 - Give each slice one owner identified by stable session ID, scope, acceptance
@@ -31,45 +31,52 @@ Coder children edit within ~10 calls; after ~40 without an edit, return the
 blocker. A repeat "explored, nothing landed" needs a smaller brief after checking
 for a harness cut-off (cut children end named).
 
+## Budgets
+
+Classify each lane at its start; record class and budget in the project.
+
+| Class | hotfix | fix/patch | feature | very significant | codebase refactor |
+|---|---|---|---|---|---|
+| Budget | <=30 min | <2 h | <=3 h impl. | 3-4 h | 8 h+, rare, reason stated |
+
+At budget, report to the delegator: elapsed, critical path, what remains,
+options. Continue only with that receipt; never overrun silently. The lane keeps
+working while a wave or CI runs.
+
 ## Preflight before expensive dispatch
 
-Before native/browser/hardware dispatch, plan changed surfaces,
-commands, dependencies, source/binary identity, isolation, expected outputs and a
-negative control. Verify compiled source identity and success/failure detection;
-source-only checks are not native proof. Failed setup stops dispatch: report the
-prerequisite and bounded repair. Use the harness browser, no second stack; follow
-AGENTS.md's HOME/config, CMUX stripping and exact-process-group teardown rules.
+Before native/browser/hardware dispatch, plan changed surfaces, commands,
+dependencies, compiled source identity, isolation, expected outputs, success/
+failure detection and a negative control; source-only checks are not native proof. Failed setup stops dispatch: report the
+prerequisite and bounded repair. Harness browser only; AGENTS.md owns HOME/config
+isolation, CMUX stripping and exact-process-group teardown.
 
 **Budget costly evidence.** A native, simulator, device or hosted E2E lane gets
-3 failed-or-cancelled attempts OR 6 h from first dispatch — the same budget
-measured two ways: PR #156 (local-operator-mobile) saw 36 failures at a 118 min
-median cadence. Attempts lost to our own harness count. Spent, stop dispatching
-and escalate with each option's consequence: merge on unit/contract tests plus
-manual device QA; split the harness into its own PR; drop the row; or extend by a
-stated amount for a stated reason. No new mechanism and no retry while the
-escalation is open. A lane never once succeeding in 3 attempts is a harness
-problem until shown otherwise — 20 of those 36 failures, 41.4 h, came after the
-last product commit.
+3 failed-or-cancelled attempts OR 6 h from first dispatch (local-operator-mobile
+PR #156: 36 failures, 118 min median cadence); harness-lost attempts count.
+Spent, stop and escalate with each option's consequence: merge on unit/contract
+tests plus manual device QA; split the harness out; drop the row; or extend by a
+stated amount for a stated reason. No new mechanism or retry meanwhile. A lane
+never succeeding in 3 attempts is a harness problem until shown otherwise.
 
 **Measure before you cap; name the invariant.** No new timeout, cap, threshold or
 retry count without the distribution it bounds (n, median, max, source) and a
 setting above the observed max; every mechanism (cache, reuse, skip, fixture,
 gate) and shortcut names its invariant and the check proving it — no check, no
-shortcut. PR #156 capped hierarchy reads at 20 s over a measured 66–173 s, and
-reused a candidate app on a fixture port that was ephemeral: a round-36 blocker.
+shortcut (PR #156 capped reads at 20 s over a measured 66–173 s).
 
 ## Worktrees
 
 The manager (or lead coder) owns ONE PR worktree in `<repo>/.worktrees/` from
 latest origin/main, briefs its absolute path and SHA, and freezes the head while
 readers work. Reviewer/QA/UX/design/copy/i18n reuse it read-only every round
-(`git checkout --detach <head>`, `git diff/show`, targeted tests, shared deps):
-no clone, install or new worktree, and no full-tree copies into scratch. Python:
+(`git checkout --detach <head>`, targeted tests, shared deps): no clone,
+install, new worktree or full-tree copy into scratch. Python:
 `PYTHONPATH=<worktree>` with the primary `.venv`; `python -c 'import
 local_operator;print(local_operator.__file__)'` must print a worktree path.
 Exception, with a manager lease: a conflicting commit author or an isolated
 mutable build collision gets a detached-SHA worktree on shared deps, bounded and
-creator-removed. Keep isolated HOME/config. Remove clean
+creator-removed. Remove clean
 worktrees on merge/close; the manager verifies (`scripts/worktree_janitor.py`).
 
 ## Never use a live peer as the revoke test
@@ -82,73 +89,68 @@ peer, and record it. Authorization to test is not authorization to delete.
 
 ## Spend coverage once
 
-Iterate with targeted tests/lints; heavy runs bounded/serial. Full coverage once
-at the terminal head: when CI runs the same suite, use it, not a duplicate local
-run. Run omitted required surfaces bounded and record them. Merge needs actual
-checks and independent review/QA; CI never replaces real-path QA. Resource
-holds forbid hold-class runs, not evidence. Read CI once at the terminal merge
-gate, never sleep-poll it mid-cycle; investigate even out-of-slice fails.
+**Local test lease.** The coder runs only the test files covering changed code
+and lints changed files, each run <= 10 min; reviewers and QA run only the
+diff's own tests. Whole-directory, whole-suite and `make check-changed` runs are
+CI's when CI runs the same suite (#3575: ~3.7 h of rc=124 local pytest).
+
+**CI is concurrent, never awaited.** CI runs on every push alongside review/QA.
+Read it once, non-blocking, when collecting each wave's reports; fold failures
+into that wave's one remediation. Never `--watch`, sleep-poll or wait on it
+mid-cycle; the merge gate blocks only on required checks (#3575 read CI after 3
+clean rounds: 4 failures, +2.3 h). Run omitted required surfaces bounded and
+record them; CI never replaces real-path QA. Resource holds forbid hold-class
+runs, not evidence. Investigate even out-of-slice fails.
 
 ## Converge, do not restart
 
 **Converge the base once, at the merge gate.** Do not merge or rebase the base
-into a PR mid-review; the one exception is GitHub reporting DIRTY where a required
-run cannot start — prefer `workflow_dispatch` on the branch ref, because a
-`pull_request` workflow gets no merge ref on a conflicting PR and never starts.
+into a PR mid-review, except when GitHub reports DIRTY and a required run cannot
+start — prefer `workflow_dispatch` on the branch ref (a conflicting PR's
+`pull_request` workflow gets no merge ref).
 At the gate: converge, rebase proof, ONE round on files upstream also touched, CI.
-PR #156 merged main 13 times, each a proof, a pin recompute and often a round.
 
 **Harness-only delta: no numbered round.** After a clean round on head R, delta
 R..H takes no `### Agent review — round N` when
-`scripts/harness_delta_proof.py R H` exits 0: same merge-base;
-`.github/harness-paths` present and unchanged; every changed path (added,
-modified, deleted, both sides of a rename, mode) under a `harness:` glob; nothing
-ship-reachable. That proves the one invariant: *no byte the shipping pipeline
-consumes differs between R and H*. Instead, ONE `### Harness delta check — R..H`
-at the merge gate by an independent reviewer reading for gate weakening (deleted
-or loosened assertions, skips, widened tolerances, `continue-on-error`, a probe
-that cannot fail) AND for any harness change that runs with release triggers,
-secrets, signing or publishing, plus the script output the merger re-runs; QA
-retained, shipped bytes unchanged. Anything unreadable, unresolvable or
-unclassifiable is a round or exit 2, never a pass.
-
-Honest yield: it exempts only manifest-declared harness files nothing in the ship
-closure names — a reachability classifier made safe by failing closed, not a proof
-that a harness change cannot alter behaviour.
+`scripts/harness_delta_proof.py R H` exits 0 (same merge-base,
+`.github/harness-paths` unchanged, every changed path under a `harness:` glob,
+nothing ship-reachable): *no byte the shipping pipeline consumes differs*.
+Instead, ONE `### Harness delta check — R..H` at the merge gate by an independent
+reviewer reading for gate weakening (loosened assertions, skips, widened
+tolerances, `continue-on-error`, a probe that cannot fail) and harness changes
+running with release triggers, secrets, signing or publishing; QA retained. Anything unreadable, unresolvable or unclassifiable is a round or exit
+2, never a pass: a fail-closed reachability classifier, not a behaviour proof.
 
 **Split when the harness outgrows the feature.** At each review request compare
 added lines under harness globs with all others (`--split` prints both); harness
 above product moves the harness to its own PR (review plus its own negative
-control, no product QA), leaving the feature a minimal proof. PR #156 crossed at
-round 1 (2,787 vs 2,764 lines) and stayed crossed from round 11 (9,780 vs 4,730).
-
-Complete every applicable initial stream (code, independent real-path QA,
-design, UX, security) across its full in-scope surface before remediation.
-Early BLOCKER alerts must say incomplete. Review runs asynchronously with CI.
+control, no product QA), leaving the feature a minimal proof.
 
 Manager collects all reports into ONE deduplicated severity/evidence ledger and
 batches clarifications before edits. Implementer verifies claims, then fixes
 accepted IDs in ONE pass, answering each with fixed SHA, rejection evidence, or
-deferral reason. Default ONE commit; no per-finding commit/review cycles.
+deferral reason. Default ONE commit; no per-finding commit/review cycles. Brief a
+FRESH coder child with the ledger; never resume a long-idle big-context coder
+(#3565: 13 resumes at 226k context, $17.8 cold-cache). Every fix
+ships a regression test; a fix in a bypass-prone area (parsers, denylists)
+checks its own new code for the same class before pushing.
 
 Follow up on `<previous_reviewed_head>..<new_head>` plus direct regression
-neighbors, never unchanged re-audits. Late BLOCKER/MAJOR needs a concrete code
-path/reproducer in changed/direct-neighbor scope. Retain evidence only with
+neighbors; a late BLOCKER/MAJOR needs a concrete code path/reproducer there.
+Retain evidence only with
 byte/source compatibility proof; backend response-shape changes may need rendered
 proof. Provenance-only addenda reset nothing.
 
-After two unsuccessful cycles, freeze severity/evidence ledger, root-transition/
-authority matrix (failing state, intended transition, authoritative owner/source)
-and exit criteria BEFORE more patches. An unknown persisting twice escalates to
+After two unsuccessful cycles, freeze the ledger, a root-transition/authority
+matrix (failing state, intended transition, owner) and exit criteria first. An unknown persisting twice escalates to
 its owner. This checkpoint never waives unresolved BLOCKER/MAJOR or evidence gates.
 
 A moved base (rebase OR merge of main) is NOT a blind re-pin: post
 `scripts/rebase_proof.py`'s `### Rebase proof` (range-diff `=`, byte-identical
 patch, no file overlap). MECHANICAL keeps the last clean code and QA rounds; CI
 on the new head guards cross-file breaks. Otherwise run one `old-head..new-head`
-round on the files it names. Follow `AGENTS.md`'s SHA-freshness rules and PR
-comment format. Fix real BLOCKER/MAJOR before merge; delta scope never waives
-correctness, security or regression risk. MINOR/NIT do not force another round.
+round on the files it names, per `AGENTS.md`'s SHA-freshness rules. Delta scope
+never waives correctness, security or regression risk.
 
 ## Review economy
 
@@ -161,11 +163,18 @@ correctness, security or regression risk. MINOR/NIT do not force another round.
   introduced or worsened are listed `out of scope — pre-existing` and never gate.
   No redesigns or extra features. No speculative findings: without a code path
   or repro a "might" is a lead, never BLOCKER/MAJOR.
-- **Waves.** All applicable streams run round 1 on the SAME pushed head and
-  report before remediation; ONE ledger, ONE remediation commit, ONE follow-up
-  wave on that delta. Target <= 2 waves; a third needs a named open BLOCKER/MAJOR.
-- **Minors.** Fold accepted MINOR/NIT into the majors' commit or defer them.
-  Never a minors-only commit after all streams are terminal: it re-stales the head.
+- **Waves.** Every applicable stream (code, real-path QA, design, UX, copy,
+  security) starts round 1 on the SAME pushed head and completes its full
+  in-scope surface before remediation (a stream joining at round 2 forced a
+  round 3: +70 min); early BLOCKER alerts say incomplete. ONE ledger, ONE
+  remediation commit, ONE follow-up wave. Target <= 2 waves; a third needs a
+  named open BLOCKER/MAJOR.
+- **Clean is terminal.** Fold accepted MINOR/NIT into the majors' commit or
+  defer them in the thread. Once all streams are clean, a new commit lands only
+  for a red required check or a real BLOCKER/MAJOR, never minors folded into new
+  code (#3565: clean at round 7, rounds 8-12 reopened so, +3.9 h).
+- **Non-shipping artifacts** (design notes, docs, evidence) freeze at no
+  BLOCKER/MAJOR, <= 2 rounds; minors accepted (one note took 13 rounds).
 - **Freshness.** A delta round is `### Agent review — round <N>`, `Scope:
   <prev-head>..<head>`, by an independent reviewer. MECHANICAL rebase/merge of
   main (`scripts/rebase_proof.py`) keeps rounds fresh on its proof, and so does
@@ -173,16 +182,15 @@ correctness, security or regression risk. MINOR/NIT do not force another round.
   ONLY extra exemption. A clean stream is NOT re-run when the delta misses its
   surface: a test-only, docs-only, CI-fix or comment-only commit after clean
   rounds gets at most a delta code check, no QA/design/UX round. `tests/` is
-  product here, so a test change never takes the harness-only carve-out —
-  weakening a test weakens the gate — and it still needs only that delta code
-  check, not a numbered round. Executable code needs a delta round plus QA
+  product (weakening a test weakens the gate): never harness-only, yet still
+  just that delta code check. Executable code needs a delta round plus QA
   re-testing prior FAIL rows and the surfaces it moved; other rows stay
   `retained (<sha>)`.
 - **Hygiene.** Rounds only on pushed heads; one comment per stream per round; no
   `re-pin`/`addendum` comments. Amend your own round (`gh api -X PATCH`) only
   for provenance/typos, before any remediation reply; never change `Scope:`.
-- **Tone.** Collaborative: problem, evidence, suggested fix. No retraction
-  theatre; disagree once, with evidence, then settle.
+- **Tone.** Collaborative: problem, evidence, suggested fix. Disagree once, with
+  evidence, then settle.
 - **Stop.** Past 3 waves or ~2x review-driven diff growth, split follow-on scope
   into another PR; never an open BLOCKER/MAJOR.
 
@@ -196,5 +204,4 @@ work around it. A missing required independent round blocks; never invent one.
 
 Seeds update only unedited, install-recorded rows. Pilot via `agent op=show
 <role>` plus a fresh `task(agent=<role>)`, not `load_seed`. Merge into local
-prompts: back up, keep edits, security/approval policy, tools, model/effort;
-read back.
+prompts: back up, keep edits, policy, tools, model/effort; read back.
