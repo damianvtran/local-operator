@@ -193,10 +193,11 @@ RECIPIENT_NAME_SHAPE = '{"name": "<display name>"}'
 SEND_RECIPIENT_DESCRIPTION = (
     f"Who receives it: {RECIPIENT_ACCOUNT_SHAPE} or {RECIPIENT_ENDPOINT_SHAPE}, "
     f"the bare account id, or {RECIPIENT_NAME_SHAPE} — trimmed, case-insensitive, "
-    f"WHOLE display name only (never a handle, email or substring). A name resolves "
-    f"in that op's own scope: channel_post inside the conversation's active members, "
-    f"send/reply inside your own send allowlist. One match delivers; none or several "
-    f"refuse. Ids come from the bridge directory; dm takes ids only."
+    f"WHOLE display name (no handle, email or substring). A name resolves "
+    f"in its op's scope: channel_post in the room's active members, "
+    f"send/reply in your send allowlist. One match delivers; none or several "
+    f"refuse. Ids: the bridge directory. dm takes ids only, in to OR "
+    f"top-level endpoint_id/account_id."
 )
 
 
