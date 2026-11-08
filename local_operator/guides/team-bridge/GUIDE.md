@@ -44,9 +44,8 @@ creates duplicate, conflicting threads that no one can verify — do not.
   `send`/`channel_post` receipt and the read-back ops (`take_up`, or
   `channel_history` on the room, or on a `dm`'s own conversation id) — or tell
   the user the bridge looks lossy. Do not duplicate the content into Slack, email
-  or the pair inbox "so it
-  lands": a copy nobody can verify is worse than a reported failure, and it
-  splits the thread in two.
+  or the pair inbox "so it lands": a copy nobody can verify is worse than a
+  reported failure, and it splits the thread in two.
 - **Reply where it arrived.** A bridge message is answered on the bridge, a
   Slack message on Slack. Never move a thread without the user's say-so, and
   never relay a person-to-person ask arriving through an agent onto another

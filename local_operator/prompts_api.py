@@ -1208,6 +1208,17 @@ def build_system_blocks(
             # This is also the operator constraint that keeps a solo or
             # signed-out user's prompt byte-identical: absent tool, absent
             # clause, no stray newline (the marker sits inline in the template).
+            #
+            # The PRODUCTION caller (``session_factory``) passes the flag itself,
+            # because membership is only HALF the answer: the clause names
+            # ``guide://team-bridge``, and that guide is gated on ``requires:
+            # radient-team`` through a cached, fail-closed catalogue. The caller
+            # ANDs membership with the guide's presence in its own
+            # ``guides_by_name``, so the sentence and the thing it points at stay
+            # one unit — a tool without the guide used to name a guide the
+            # resolver answers ``Unknown guide: team-bridge`` for. Falling back
+            # to membership here keeps every OTHER caller (a child's prompt, a
+            # benchmark) on the exact shape it had before this flag existed.
             "has_bridge": (
                 any(tool.name == "bridge" for tool in tools) if has_bridge is None else has_bridge
             ),

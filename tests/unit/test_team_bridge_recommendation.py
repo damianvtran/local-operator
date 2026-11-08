@@ -409,3 +409,46 @@ async def test_the_ungated_guide_index_does_not_route_the_incident_turn(tmp_path
     await index.build()
     for query in (INCIDENT, "Coordinate with Damian's chief of staff on the QA plan"):
         assert "team-bridge" not in {guide.name for guide in await index.select(query)}, query
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_clause_and_the_bridge_guide_are_one_unit(tmp_path: Path) -> None:
+    """QA round 2, Q2: the clause must not name a guide this session does not have.
+
+    ``has_bridge`` was derived from tool MEMBERSHIP alone, while the guide it
+    names carries ``requires: radient-team`` and is gated on the cached,
+    fail-closed ``hub/org_catalogue.json``. A session holding the tool with an
+    absent, expired or other-base cache therefore rendered ``guide://team-bridge``
+    on every turn while reading it answered ``Unknown guide: team-bridge`` — the
+    same dead end the recommendation trigger was fixed for above, one surface
+    over. The clause and the guide are ONE unit, so the clause takes the same
+    answer the resolver and the trigger take.
+
+    All three states are pinned through the PRODUCTION closure
+    (``_make_system_blocks_provider``), on a tool and a catalogue both built from
+    the real persisted path, never a hand-set flag.
+    """
+    from local_operator.session.transcript import Transcript
+    from local_operator.session_factory import _make_system_blocks_provider
+
+    _runtime, tool, _probe = _session_probe(tmp_path, enrolled=True)
+    assert tool is not None
+
+    async def _head(tools: list[Any], *, guide: bool) -> str:
+        provider = _make_system_blocks_provider(
+            tools, Transcript(tmp_path / "prompt"), _hooks(None, guide=guide)
+        )
+        return (await provider())[0]
+
+    # tool + guide: the common case (enrolled, fresh cache) is unchanged.
+    both = await _head([tool], guide=True)
+    assert both.count("guide://team-bridge") == 1, both
+    # tool, no guide: the defect. No clause, so no pointer into an unreadable guide.
+    tool_only = await _head([tool], guide=False)
+    assert "guide://team-bridge" not in tool_only, tool_only
+    # no tool: the guide half cannot conjure the clause on its own...
+    guide_only = await _head([], guide=True)
+    assert "guide://team-bridge" not in guide_only, guide_only
+    # ...and adds nothing of its own, so a solo or signed-out session stays
+    # byte-identical to a prompt that never knew the clause existed.
+    assert guide_only == await _head([], guide=False)
