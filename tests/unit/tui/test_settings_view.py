@@ -28,7 +28,7 @@ from local_operator.settings_io import Kind
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.settings_view import SettingsView
-from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.test_app_pilot import FakeSession, _factory, _settle
 
 
 @pytest.fixture(autouse=True)
@@ -5667,7 +5667,11 @@ async def test_settings_team_rows_paint_label_first_with_the_key(tmp_path: Path)
 
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 32)) as pilot:
-        await pilot.pause()
+        # THE SESSION IS BOUND BY THE ASYNC BOOT WORKER, not by mount (#3610):
+        # ``_settings_team_rows`` reads ``app._session.team_registry`` and
+        # answers ``[]`` while no session is bound, so a single ``pause`` raced
+        # the worker on a loaded runner. Wait on the condition the rows depend on.
+        assert await _settle(pilot, lambda: app._session is session), "session never bound"
         rows = app._settings_team_rows()
 
     assert rows == [("Data Quality", "0 members", "Finds issues")]
