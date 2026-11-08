@@ -40,7 +40,7 @@ pooled, load-balanced, and used with the prompt cache in mind.
   <a href="#-contributing">Contribute</a>
 </div>
 
-## 📊 Reproducible cost and effectiveness benchmarks
+## 📊 Reproducible harness-cost benchmarks
 
 **Inspect the evidence, not just the headline.** The
 [public harness-cost kit](benchmarks/harness_cost/README.md) includes metered
@@ -54,13 +54,14 @@ It also builds a checksummed ZIP for independent review.
 > [corrections](benchmarks/harness_cost/CORRECTIONS.md). These results do not
 > establish equal task effectiveness or a general cost advantage. Expanded,
 > public-loadout experiments must clear their methodology and reproducibility
-> gates before any new claim is published.
+> gates before any new claim is published. This is not a promotional benchmark:
+> the kit states that its author develops Local Operator.
 
 **Exploratory full-loadout sample — the same 24 tasks, one run per task.**
 Costs below are USD per task. The cold column is a counterfactual estimate,
 not a measured cold run. Logged passes do not establish equivalent effectiveness.
 
-| Harness | Observed USD/task | Cold estimate USD/task | Passed / tasks |
+| Harness | Observed USD/task | Historical cold estimate USD/task | Passed / tasks |
 |---|---:|---:|---:|
 | Local Operator | $0.043441 | $0.110046 | 16 / 24 |
 | omp | $0.068227 | $0.158845 | 17 / 24 |
@@ -72,6 +73,10 @@ long tasks (3 / 4 passed; observed $5.752039 per task), with an incorrect model
 catalog and repeated compaction. It is not a valid current-performance
 comparison. The [complete accessible tables](benchmarks/harness_cost/generated/cost-per-task-table.md)
 include all populations, both cold estimates, and the same figures' data.
+The figure below opens with the separate **clean 16-task** arm, where Local
+Operator ranks third of five on observed cost and fourth on the historical cold
+estimate; that arm is the smaller, cleaner comparison, and this table's full-arm
+row is not a ranking.
 
 <p align="center">
   <img src="./benchmarks/harness_cost/generated/fig1-cost-per-task.png"
@@ -98,6 +103,7 @@ for the exact commands, populations, limitations, and packaging instructions.
 
 ## 📚 Table of Contents
 
+- [📊 Reproducible harness-cost benchmarks](#-reproducible-harness-cost-benchmarks)
 - [✨ Why Local Operator](#-why-local-operator)
 - [🚀 Quickstart](#-quickstart)
 - [🪟 Desktop App (local-operator-ui)](#-desktop-app-local-operator-ui)
@@ -749,6 +755,10 @@ harness treats the provider prompt cache as a resource to be managed:
   load only when read; MCP servers advertise a bounded summary and individual
   tool schemas enter the context only when enabled; `wait` returns on job
   settle or message arrival so a long job costs one round trip, not twelve.
+
+For measured per-task cost across harnesses — and the confounds that keep the
+historical numbers exploratory — see
+[Reproducible harness-cost benchmarks](#-reproducible-harness-cost-benchmarks).
 
 ## 🖥️ A Tour of the Terminal UI (TUI)
 
