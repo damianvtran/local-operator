@@ -198,10 +198,14 @@ def _assert_queued(result, gate):
         assert gate.cards == []
 
 
-def _queued_record(stores, result):
+def _queued_record(stores, result, *, root=None):
     from local_operator.network import approvals as A
 
-    return A._load_raw(result.details["approval_id"], stores["account"].config_dir)
+    # ``root`` is the store the filing landed in: it is the intent's OWN registry
+    # root, which is the team store's config dir for a team write.
+    return A._load_raw(
+        result.details["approval_id"], root or stores["account"].config_dir
+    )
 
 
 def _approve_queued(root, record):
@@ -233,6 +237,14 @@ def _snapshot(stores) -> str:
 
 def _text(result) -> str:
     return "".join(getattr(block, "text", "") for block in result.content)
+
+
+def _team_roster(stores) -> list[dict]:
+    """The team's slots and their pins, serialized as a write would store them."""
+    return [
+        member.model_dump(mode="json")
+        for member in stores["teams"].get_team_by_name("lopdev").members
+    ]
 
 
 def _answered_ask() -> CustomMessage:
@@ -814,3 +826,185 @@ async def test_profile_mentions_are_not_definition_edit_consent(stores, owner_te
         assert _snapshot(stores) == before
     finally:
         await session.dispose()
+
+
+# -- the seam's own failure classes (incident, 2026-11-08) --------------------
+
+
+def _intent(**overrides: Any) -> DurableWriteIntent:
+    """The minimal intent the seam is asked about, for the reason tests."""
+    fields: dict[str, Any] = dict(
+        kind="team", operation="update", name="lopdev", changes=("instructions",), summary=""
+    )
+    fields.update(overrides)
+    return DurableWriteIntent(**fields)
+
+
+class _SeamContext:
+    """A ``ToolContext`` whose consent seam is exactly this behavior."""
+
+    def __init__(self, behavior) -> None:
+        if behavior is not None:
+            self.authorize_durable_write = behavior
+
+
+@pytest.mark.asyncio
+async def test_nested_eval_tool_call_id_files_an_approval_instead_of_failing(stores) -> None:
+    """A nested ``eval`` call id contains ``:``; filing must survive that.
+
+    THE INCIDENT: ``harness/loop.py``'s ``dispatch_tool`` bridge mints a nested
+    call id ``"<outer>:<uuid4 hex>"``, so ``tool("team", op="update", ...)``
+    from a Python cell handed ``profile_approval.build`` an id ``Token`` cannot
+    carry. ``model_validate`` raised ``ValidationError``, the seam's blanket
+    ``except`` turned it into ``error``, and the run was told "the confirmation
+    channel failed before the user could answer" — a save that was impossible
+    from inside ``eval`` and said nothing about it.
+    """
+    import uuid
+
+    from local_operator.profile_approval import request_token
+
+    session = _session(stores, gate=None)
+    try:
+        _start_run(session)
+        nested_id = f"call_00_ET_eBN6EjMAI7AMruqfWNYv2438:{uuid.uuid4().hex}"
+        result = await execute_team(
+            nested_id,
+            {"op": "update", "name": "lopdev", "instructions": "Ship carefully."},
+            None,
+            None,
+            _context(session, stores),
+        )
+        assert not result.is_error, _text(result)
+        assert result.details is not None and result.details["status"] == "queued"
+        record = _queued_record(stores, result, root=stores["teams"].config_dir)
+        filed = record["requested_by"]["tool_call_id"]
+        assert ":" not in filed
+        assert filed == request_token(nested_id)
+        assert stores["teams"].get_team_by_name("lopdev").instructions == "Ship."
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_team_wording_edit_from_the_owner_message_saves_with_no_approval_surface(
+    stores,
+) -> None:
+    """PATH A FOR TEAMS, in the incident's condition: NO approval surface at all.
+
+    The owner's own typed message names the team and asks for the definition
+    field, so the save needs no card — and it records who asked plus a backup,
+    never a silent success.
+    """
+    session = _session(stores, gate=None)
+    try:
+        _start_run(session, Message.user("Update lopdev instructions to ship carefully."))
+        result = await execute_team(
+            "tc-team-a",
+            {"op": "update", "name": "lopdev", "instructions": "Ship carefully."},
+            None,
+            None,
+            _context(session, stores),
+        )
+        assert not result.is_error, _text(result)
+        assert result.details is not None
+        authorized_by = result.details["authorized_by"]
+        assert authorized_by.startswith("owner-prompt:")
+        assert authorized_by.endswith(f"@{int(session._run_started_at * 1000)}")
+        backup_id = result.details["backup_id"]
+        assert backup_id
+        assert stores["teams"].get_team_by_name("lopdev").instructions == "Ship carefully."
+        backups = list((Path(stores["session_dir"])).rglob(f"*{backup_id}*"))
+        assert backups, "a granted save must leave a backup on disk"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"members": ["coder", "qa-tester"]},
+        {"members": ["coder:2"]},
+    ],
+)
+async def test_team_roster_and_pin_changes_still_need_the_card(stores, args) -> None:
+    """A name mention is not permission to change the roster or its pins.
+
+    The owner message names the team and asks for a roster change; only WORDING
+    fields may take the no-card path, so this one is filed for the card and the
+    roster is untouched.
+    """
+    session = _session(stores, gate=None)
+    try:
+        _start_run(session, Message.user("Update lopdev to add a coder and a qa-tester."))
+        before = _team_roster(stores)
+        result = await execute_team(
+            "tc-team-roster",
+            {"op": "update", "name": "lopdev", **args},
+            None,
+            None,
+            _context(session, stores),
+        )
+        assert not result.is_error, _text(result)
+        assert result.details is not None and result.details["status"] == "queued"
+        assert _team_roster(stores) == before
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_seam_reason_classes_are_named_and_keep_their_sentences(caplog) -> None:
+    """All four reasons, their exact sentences, and the fault an ``error`` names.
+
+    ``unavailable`` (nobody can be asked) must never read as ``error`` (the run
+    broke) and vice versa: the incident's confusion was a fault wearing the
+    "nobody to ask" costume.
+    """
+    import logging
+
+    from local_operator.network.types import MeshRefusal
+
+    caplog.set_level(logging.WARNING, logger="local_operator.profile_scope")
+    intent = _intent()
+
+    origin, reason = await durable_write_decision(_SeamContext(None), intent)
+    assert origin is None and reason == "no_seam"
+    assert durable_write_refusal(intent, reason) == durable_write_refusal(intent, "no_seam")
+    assert "no way to ask" in durable_write_refusal(intent, reason)
+
+    async def unavailable(_intent):
+        raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no attached surface")
+
+    origin, reason = await durable_write_decision(_SeamContext(unavailable), intent)
+    assert origin is None and reason == "unavailable"
+    assert "no one is attached to approve it" in durable_write_refusal(intent, reason)
+
+    async def anchorless(_intent):
+        raise MeshRefusal("approval_anchor_unavailable", "set up local operator authority")
+
+    origin, reason = await durable_write_decision(_SeamContext(anchorless), intent)
+    assert origin is None and reason == "unavailable"
+
+    async def no(_intent):
+        return None
+
+    origin, reason = await durable_write_decision(_SeamContext(no), intent)
+    assert origin is None and reason == "declined"
+    assert durable_write_refusal(intent, reason).startswith(
+        "the user declined to save this team for every conversation"
+    )
+
+    async def boom(_intent):
+        raise RuntimeError("seam exploded")
+
+    origin, reason = await durable_write_decision(_SeamContext(boom), intent)
+    assert origin is None and reason == "error"
+    sentence = durable_write_refusal(intent, reason)
+    assert sentence.startswith("the confirmation channel failed before the user could answer")
+    assert "RuntimeError" in sentence, "the fault type must be legible in the refusal"
+    assert any(
+        "durable-write consent seam failed: RuntimeError" in record.getMessage()
+        for record in caplog.records
+    ), "the fault type must also be in the log line"
+    assert any(record.exc_info for record in caplog.records), "the traceback must stay logged"

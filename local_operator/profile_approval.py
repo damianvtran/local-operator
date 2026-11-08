@@ -8,6 +8,7 @@ verify_for_run over this exact signed request, rechecked under the write lock.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -111,6 +112,43 @@ def _refuse(code: str, message: str) -> MeshRefusal:
     return MeshRefusal(code, message)
 
 
+#: ``Token``'s character set and bound, spelled once so :func:`request_token`
+#: cannot drift from the field it has to satisfy.
+_TOKEN_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+_TOKEN_MAX = 160
+
+
+def request_token(value: str) -> str:
+    """A ``Token``-shaped spelling of a HOST-supplied identity, stable per input.
+
+    WHY THIS EXISTS (measured incident, 2026-11-08). A nested ``eval`` tool call
+    is minted with the id ``"<outer id>:<uuid4 hex>"`` (``harness/loop.py``'s
+    ``dispatch_tool`` bridge), so ``tool("team", op="update", ...)`` from inside
+    a Python cell carried a COLON into :func:`build`. ``Token`` forbids it,
+    ``model_validate`` raised ``ValidationError``, and the seam's blanket
+    ``except Exception`` reported that as ``error`` — "the confirmation channel
+    failed" — for a request whose only defect was its spelling. The save was
+    impossible from inside ``eval`` and nothing said so.
+
+    Normalising here is safe because this id is RECORDED (card, journal, applied
+    tool result) and never matched against a live call; it is not authority. It
+    runs in :func:`build`, the one constructor every producer goes through.
+    ``session_id`` is deliberately NOT normalised: ``applied_tool_result``
+    compares it verbatim against the conversation that asks for the receipt, so
+    rewriting it would refuse a legitimate apply.
+
+    An id that already satisfies ``Token`` comes back BYTE-IDENTICAL, so no
+    existing request id, receipt or journal changes. Anything else keeps a
+    readable sanitised prefix plus a digest of the raw value, so ids that differ
+    only in characters the pattern forbids cannot collide.
+    """
+    if value and len(value) <= _TOKEN_MAX and set(value) <= _TOKEN_CHARS:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    prefix = "".join(char if char in _TOKEN_CHARS else "-" for char in value)
+    return prefix[: _TOKEN_MAX - len(digest) - 1] + "-" + digest
+
+
 def snapshot(root: Path, kind: str, target_id: str) -> dict[str, Any] | None:
     """Fresh bounded authored image; runtime state is never replayed by a save."""
     TokenModel = AgentImage if kind == "agent" else TeamImage
@@ -159,6 +197,10 @@ def build(
             "approval_anchor_unavailable", "set up local operator authority before filing this save"
         )
     now = time.time()
+    # The harness may hand us an id ``Token`` cannot carry (see
+    # :func:`request_token`); the RECORD keeps a Token-shaped derivation rather
+    # than crashing the filing on a colon.
+    tool_call_id = request_token(tool_call_id)
     receipt = commitment([session_id, tool_call_id, profile_kind, target_id, before, after]).split(
         ":"
     )[1]
