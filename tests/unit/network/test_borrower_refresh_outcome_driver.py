@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -132,3 +133,100 @@ async def test_the_first_failing_turn_ends_on_the_owners_answer_not_the_bare_401
     app._session = MagicMock(model_label=f"{STUB_PROVIDER}/claude-opus-5-5")  # noqa: SLF001
     tui = app._with_recovery_hint(first)  # noqa: SLF001
     assert tui == first, tui
+
+
+@pytest.mark.asyncio
+async def test_a_401_after_the_owner_signed_that_row_in_again_reaches_the_owner(
+    borrowed: Any, idp: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3616 QA follow-up, end to end: a re-signed-in login is reported, so the
+    OWNER's remedy — never this device's own ``To fix: /login …``.
+
+    The defect this reproduces: the owner's report window was keyed on the ROW, and a
+    re-sign-in on the owner reuses the row. So the first 401 on the bearer MINTED
+    after that sign-in was answered ``coalesced`` with nothing probed; the borrower got
+    no owner answer, no hold, and its turn ended on ``authentication failed (HTTP
+    401): invalid api key`` — to which the TUI and headless renderers append the LOCAL
+    re-login remedy, sending the person to fix the wrong device. That is the class
+    #3616 closed on its other paths.
+
+    Both halves are asserted here: the owner really was asked (the probe's POST is the
+    evidence, and it is refused because this IdP `still` refuses the grant), and what
+    the two display surfaces make of the resulting text.
+    """
+    owner = borrowed.owner
+    owner.auth.delete_credential(borrowed.row_b.id)  # A is the only login
+    # A WITH A REFRESH TOKEN, so the owner's probe can really ask the IdP. Without one
+    # the store refuses before any POST and the reply would be about a row it cannot
+    # refresh at all, which is a different arm from the one under test.
+    owner.auth.upsert_credential(
+        STUB_PROVIDER,
+        {
+            "type": "oauth",
+            "access": "bearer-a",
+            "expires": int(time.time() * 1000) + 3_600_000,
+            "refresh": "refresh-0",
+            "email": "owner@example.test",
+        },
+    )
+    # The IdP refuses the grant: the owner's probe is answered `invalid_grant`, so its
+    # verdict — not the provider's, not this device's — is what the turn must carry.
+    idp.invalid = True
+    stub = _Refuses401("bearer-a", "bearer-a2")
+
+    with pytest.raises(ProviderError) as lost:
+        await _turn(borrowed.store, stub, STUB_PROVIDER, "sess-401")
+    assert "HTTP 401" not in str(lost.value), str(lost.value)
+    assert borrowed.client.refresh_hold(STUB_PROVIDER, borrowed.row_a.id) is not None
+    posts_after_first = len(idp.posts)
+    assert posts_after_first >= 1, "the owner never asked the IdP anything"
+
+    # THE OPERATOR SIGNS IN AGAIN on the owner, onto the same row: same id, new
+    # material, and the store's own tombstone is cleared by the interactive write.
+    # The bearer written here is the one the borrower is lent next.
+    owner.auth.upsert_credential(
+        STUB_PROVIDER,
+        {
+            "type": "oauth",
+            "access": "bearer-a2",
+            "expires": int(time.time() * 1000) + 3_600_000,
+            "refresh": "refresh-1",
+            "email": "owner@example.test",
+        },
+    )
+    assert [str(row.id) for row in owner.auth.list_credentials(STUB_PROVIDER)] == [
+        str(borrowed.row_a.id)
+    ], "the re-sign-in must reuse the row, which is what made the window span two logins"
+
+    with pytest.raises(ProviderError) as after:
+        await _turn(borrowed.store, stub, STUB_PROVIDER, "sess-401")
+    text = str(after.value)
+
+    # THE REPORT WAS MADE. ``coalesced`` would have probed nothing, so the POST count
+    # is the discriminating number: on the defect the second turn adds zero.
+    assert len(idp.posts) == posts_after_first + 1, idp.posts
+    assert "bearer-a2" in stub.seen, stub.seen
+    # What the person reads: the owner's own remedy, not this device's.
+    assert "HTTP 401" not in text, text
+    assert "on owner-laptop" in text and f"'lop login {STUB_PROVIDER}'" in text, text
+    assert "To fix:" not in text, text
+
+    # The two display paths that append the LOCAL auth hint, fed the turn's text.
+    from rich.console import Console
+
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.headless_print import PrintRenderer
+    from local_operator.providers.failover import append_auth_recovery
+
+    assert append_auth_recovery(text, STUB_PROVIDER) == text
+    sink = io.StringIO()
+    PrintRenderer(Console(file=sink, width=400, highlight=False)).handle(AgentEndEvent(error=text))
+    headless = sink.getvalue()
+    assert text in headless and "To fix:" not in headless, headless
+
+    from local_operator.tui.app import OperatorApp
+
+    monkeypatch.delenv("RADIENT_API_KEY", raising=False)
+    app = OperatorApp(lambda: None)  # type: ignore[arg-type]
+    app._session = MagicMock(model_label=f"{STUB_PROVIDER}/claude-opus-5-5")  # noqa: SLF001
+    assert app._with_recovery_hint(text) == text  # noqa: SLF001

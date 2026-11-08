@@ -755,6 +755,81 @@ def test_a_repeated_401_report_inside_the_window_costs_no_second_post(
     assert len(idp.posts) == 2, idp.posts
 
 
+def _resign_in_the_row(owner: Any) -> int:
+    """The operator signing in again HERE, onto the same row (#3616 QA follow-up).
+
+    ``upsert_credential`` is the interactive write, and the identity key does not
+    change — so the row keeps its ID while the payload is replaced wholesale and the
+    store mints a fresh ``login_incarnation``. The reused ID is exactly why a report
+    window keyed on it spanned two different logins.
+    """
+    row_id = int(owner.row.id)
+    owner.auth.upsert_credential(
+        STUB_PROVIDER,
+        {
+            "type": "oauth",
+            # LIVE, because the borrower is lent this bearer next; a 401 on it is a
+            # 401 on material minted after the previous report was answered.
+            "access": "access-resigned",
+            "expires": int(time.time() * 1000) + 3_600_000,
+            "refresh": "refresh-resigned",
+            "email": "owner@example.test",
+        },
+    )
+    rows = owner.auth.list_credentials(STUB_PROVIDER)
+    assert [int(row.id) for row in rows] == [row_id], rows
+    return row_id
+
+
+def test_a_401_after_the_owner_signed_that_row_in_again_is_reported_promptly(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """#3616 QA follow-up: A RE-SIGN-IN IS NEW MATERIAL, so the next 401 is reported.
+
+    Reproduced on #3616's head: the window was keyed on the row ID, a re-sign-in
+    reuses that ID, so the FIRST report about the login the operator had just
+    replaced was answered ``coalesced`` with nothing probed. The borrower then had no
+    owner answer at all and its turn fell back to the provider's bare 401 plus THIS
+    device's own ``To fix: /login …`` — sending the person to re-sign-in on the wrong
+    device, which is the class #3616 closed for its other paths.
+    """
+    _borrow_live(owner, idp)
+    first = _report(owner, BORROWER_DEVICE, "unauthorized")
+    assert first["action"] == "refreshed", first
+    posts_before = len(idp.posts)
+
+    row_id = _resign_in_the_row(owner)
+    again = _report(owner, BORROWER_DEVICE, "unauthorized", credential_id=row_id)
+
+    assert again["action"] != "coalesced", again
+    assert len(idp.posts) == posts_before + 1, idp.posts
+
+
+def test_two_401s_on_one_new_bearer_still_produce_exactly_one_report(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """THE BOUND STILL HOLDS for the login actually in place (#3616 QA follow-up).
+
+    Keying the window on the SIGN-IN must not key it on the bearer: a report itself
+    provokes a rotation, so a window that moved with the token would make every report
+    a fresh one and drop the bound §2.3 exists for. The re-signed-in login is probed
+    once, and a repeat inside its own window — from either device — is coalesced.
+    """
+    _borrow_live(owner, idp)
+    _report(owner, BORROWER_DEVICE, "unauthorized")
+    row_id = _resign_in_the_row(owner)
+    posts_before = len(idp.posts)
+
+    first = _report(owner, BORROWER_DEVICE, "unauthorized", credential_id=row_id)
+    second = _report(owner, BORROWER_DEVICE, "unauthorized", credential_id=row_id)
+    another = _report(owner, BORROWER_TWO, "unauthorized", credential_id=row_id)
+
+    assert first["action"] != "coalesced", first
+    assert second["action"] == "coalesced", second
+    assert another["action"] == "coalesced", another
+    assert len(idp.posts) == posts_before + 1, idp.posts
+
+
 def test_a_dead_grant_on_the_forced_refresh_answers_the_relogin_remedy_once(
     owner: Any, idp: RotatingIdP
 ) -> None:
