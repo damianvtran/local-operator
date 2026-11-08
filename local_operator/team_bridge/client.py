@@ -2056,18 +2056,27 @@ class TeamBridgeClient:
         body: dict[str, Any],
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """``_send`` for an ack/admit body that may carry the observe-only block.
+        """``_send`` for a conversation ADMIT body that may carry the observe-only block.
 
         A 400 to a body that carried ``screening_observation`` is answered by
         sending the SAME request once more without it — the exact pre-#332
-        body, same ``client_ref``. A pre-#332 hub refuses the unknown key at
-        decode, before recording anything, so the resend is the request it
-        would have accepted. Without it the 400 became a hold, and the hold's
-        re-drive retires and re-screens an unsent fallback allow: a paid call
-        caused by telemetry (review Q-2). ``_send`` has already latched the
-        block off, so the resend and every request meanwhile omit it. A body
-        without the block is sent exactly once, as before; a resend that 400s
-        too is raised as the hub's answer.
+        body: same method, path, params and identity, same body minus that one
+        key. The pre-#332 ADMIT decoder is strict and
+        refuses the unknown key at decode, before recording anything, so the
+        resend is the request it would have accepted. Without it the 400 became
+        a hold, and the hold's re-drive retires and re-screens an unsent
+        fallback allow: a paid call caused by telemetry (review Q-2). ``_send``
+        has already latched the block off, so the resend and every request
+        meanwhile omit it. A body without the block is sent exactly once, as
+        before; a resend that 400s too is raised as the hub's answer.
+
+        Admit only (review S-r3-1, QA O-1): the pair-lane ACK decoder is plain
+        ``json.Unmarshal`` both before and after #332, so a pre-#332 ack
+        ACCEPTS the unknown key and no hub version 400s an ack because of the
+        block. An ack 400 is therefore always about the body, and a block-free
+        resend would only repeat the refusal. ``ack`` uses ``_send``, which
+        still arms the latch on that 400 — latching off is the safe direction
+        whatever caused it, and costs only telemetry.
         """
 
         try:
@@ -2075,6 +2084,14 @@ class TeamBridgeClient:
         except BridgeRefusal as refusal:
             if refusal.http_status != 400 or _observation.WIRE_KEY not in body:
                 raise
+        # The origin only — never the body, verdict, account or model — so the
+        # line is safe at INFO and still tells an operator that the refusal
+        # they may see next is the second of two sends (review S-r3-2).
+        logger.info(
+            "team_bridge: hub %s refused an admit carrying the screening observation;"
+            " resending once without it",
+            _observation.hub_origin(self.base_url),
+        )
         resend = {k: v for k, v in body.items() if k != _observation.WIRE_KEY}
         return await self._send(method, path, body=resend, **kwargs)
 
@@ -2346,13 +2363,14 @@ class TeamBridgeClient:
 
         ``screening_observation`` is TELEMETRY beside the verdict, never in it
         (agent-server §8.5): attached only when this hub advertised the block,
-        and only a 400 to a body carrying it is read back (it latches the block
-        off and the ack is resent once without it, ``_send_observed``).
+        and only a 400 to a body carrying it is read back: it latches the block
+        off, but the ack is NOT resent — no hub version's ack decoder refuses
+        the block, so that 400 is about the body (``_send_observed``).
         """
 
         body = {"state": state, "screening": dict(screening), "client_ref": client_ref}
         _attach_observation(body, self.base_url, screening_observation)
-        return await self._send_observed(
+        return await self._send(
             "POST",
             f"/messaging/messages/{message_id}/ack",
             params={"tenant_id": tenant_id},

@@ -646,6 +646,63 @@ async def test_a_400_to_a_request_without_the_block_changes_nothing(monkeypatch)
     assert obs.hub_accepts(client.base_url) is True
 
 
+@pytest.mark.asyncio
+async def test_an_ack_400_with_the_block_latches_but_is_never_resent() -> None:
+    """S-r3-1: no hub version 400s an ack BECAUSE of the block.
+
+    The ack decoder is tolerant both before and after #332, so a 400 there is
+    about the body itself and a block-free resend would only repeat it. The
+    latch still arms (it costs only telemetry); the refusal is raised after
+    exactly one request.
+    """
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/messaging/status"):
+            return _ok({"features": {obs.OBSERVATION_FEATURE: 1}})
+        return httpx.Response(400, json=_INVALID)
+
+    client = _make_client(handler)
+    await client.status()
+    with pytest.raises(tb_client.BridgeRefusal) as refused:
+        await _ack(client, PREFERRED)
+    assert refused.value.http_status == 400
+    acks = [r for r in seen if r.url.path.endswith("/ack")]
+    assert [_carried(r) for r in acks] == [True]
+    await client.status()
+    assert obs.hub_accepts(client.base_url) is False
+
+
+@pytest.mark.asyncio
+async def test_the_latch_and_the_resend_each_log_one_origin_only_line(caplog) -> None:
+    """S-r3-2: an operator can see the latch arm and the resend fire.
+
+    Each line names the hub ORIGIN and nothing else — no body, verdict,
+    account or model — so the exact rendered messages are pinned here.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messaging/status"):
+            return _ok({"features": {obs.OBSERVATION_FEATURE: 1}})
+        if _carried(request):
+            return httpx.Response(400, json=_INVALID)
+        return _ok({"status": "recorded"})
+
+    client = _make_client(handler)
+    await client.status()
+    caplog.set_level("INFO", logger="local_operator.team_bridge")
+    assert await _admit(client, PREFERRED) == {"status": "recorded"}
+    lines = [r.getMessage() for r in caplog.records if r.name.startswith("local_operator")]
+    assert lines == [
+        "team_bridge: hub https://hub.example refused the screening observation;"
+        " latched off for this origin",
+        "team_bridge: hub https://hub.example refused an admit carrying the screening"
+        " observation; resending once without it",
+    ]
+
+
 # -- the pull lane: the block rides the first send of an intent only --------
 
 
