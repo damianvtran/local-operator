@@ -34,7 +34,9 @@ callers differ; the tool also reuses bounded, confirmed same-turn receipts
 
 > **Not for people.** `send` reaches this account's own local sessions. To
 > message a teammate or their agent on a Radient team, use the `bridge` tool as
-> the one channel (guide://team-bridge).
+> the one channel — its own guide carries the rule, and it is listed in a session
+> only when that session holds the tool, so this page never points at a guide a
+> solo or signed-out session cannot open.
 
 **Trust boundary is the account.** The discovery record is mode `0600` under a
 `0700` directory, so anything that can read a session's control key is already

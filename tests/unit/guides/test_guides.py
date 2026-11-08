@@ -273,6 +273,37 @@ def test_every_guide_cross_reference_resolves() -> None:
     assert not self_refs, f"a guide must not tell the model to read itself: {self_refs}"
 
 
+def test_an_ungated_guide_never_references_a_gated_one() -> None:
+    """The same dead end, one level up: an ineligible session's dangling link.
+
+    ``requires:`` frontmatter drops a gated guide from ``guides_by_name`` BEFORE
+    the name map and the resolver are built (see the session-factory build), so a
+    ``guide://`` reference from an UNGATED guide resolves for a team member and
+    answers ``Unknown guide`` for everyone else. The cross-reference walk above
+    cannot see it: it compares against ``discover_guides()``, which still LISTS
+    the gated guide, so both halves look present and the corpus stays green while
+    a solo or signed-out user is handed a link that cannot open. Found in review
+    round 1 on ``peer-messaging -> guide://team-bridge``, which every session
+    reads.
+
+    Gated -> gated is fine (both vanish together); gated -> ungated is the
+    direction every other guide already relies on.
+    """
+    guides = discover_guides()
+    gated = {guide.name for guide in guides if guide.requires}
+    assert gated, "no gated guide discovered: this guard would pass vacuously"
+    dangling: list[str] = []
+    for guide in guides:
+        if guide.requires:
+            continue
+        body = guide.file_path.read_text(encoding="utf-8", errors="replace")
+        for target in set(re.findall(r"guide://([a-zA-Z0-9_-]+)", body)):
+            if target in gated:
+                dangling.append(f"{guide.name} -> guide://{target}")
+
+    assert not dangling, f"an ungated guide points at a gated one: {dangling}"
+
+
 def test_a_guide_section_named_by_another_guide_exists() -> None:
     """A guide that sends a reader to another guide's section must land there.
 
@@ -1176,6 +1207,17 @@ def test_team_bridge_guide_is_gated_on_team_membership_and_routes_by_coordinatio
     assert "untrusted" in guide.description
     # ...and the receiver still named, so setup/troubleshooting still reaches it.
     assert "receiver" in guide.description and "agent messages" in guide.description
+    # The platform/headless routing signals the coordination-first rewrite dropped:
+    # a "set up the receiver on Linux" turn stopped matching anything. Restored as
+    # the fewest characters that carry an OS word; the summary is TURN-LEVEL cost
+    # (paid every time the catalogue is listed), so its length is recorded here —
+    # 176, the same as the rewrite it replaces, so the restoration cost nothing —
+    # and any growth is a decision rather than drift. The 40..180 catalogue bound
+    # in test_packaged_catalog_is_small_and_descriptions_are_prompt_sized still holds it.
+    assert len(guide.description) == 176
+    for platform in ("Linux", "macOS", "Windows"):
+        assert platform in guide.description
+    assert "set up or fix" in guide.description
 
     monkeypatch.setattr(eligibility, "is_eligible", lambda _root: True)
     assert "team-bridge" in {g.name for g in guides_available(guides, tmp_path)}
