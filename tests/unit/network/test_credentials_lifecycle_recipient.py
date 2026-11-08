@@ -460,6 +460,11 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # Widens what the existing ``net_memory`` op may carry (512-content items);
         # a sender withholds larger facts from a peer lacking it. No new op.
         wire.MEMORY_ITEM_512,
+        # Reframes the answer to the existing ``net_member_list`` op — a bare
+        # ``unchanged`` instead of the whole table when the asker's digest matches —
+        # and the ask condition only adds ``if_digest`` to that same frame. A peer
+        # lacking it keeps receiving full tables. No new dispatchable op.
+        wire.MEMBER_LIST_DIGEST_V1,
     }
     assert set(wire.LINK_CAPABILITIES) == set(handlers) | pure_features
     server = relay.RelayServer(root=rig.root, identity=rig.own)
