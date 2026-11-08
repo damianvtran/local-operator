@@ -77,9 +77,23 @@ def _notices(app: OperatorApp) -> list[str]:
 
 def _language_notices(app: OperatorApp) -> list[str]:
     """The command's own receipts — every one must fit the 70-cell budget."""
-    return [
-        n for n in _notices(app) if n.startswith("language:") or n.startswith("unknown language")
-    ]
+    # The receipts are keyed copy (wire.language_receipts), so once a locale
+    # carries them the prefix is that locale's word for "language". Matching
+    # only the English prefixes would silently stop enforcing the 70-cell bound
+    # the moment a translated receipt exists; list every shipped locale's
+    # prefix instead (en, fr, es, zh-CN, ru, vi, ur, hi).
+    prefixes = (
+        "language:",
+        "unknown language",
+        "langue",
+        "idioma",
+        "语言",
+        "язык",
+        "ngôn ngữ",
+        "زبان",
+        "भाषा",
+    )
+    return [n for n in _notices(app) if n.startswith(prefixes)]
 
 
 def _choice_map(picker) -> dict[str, ArgumentChoice]:
@@ -122,10 +136,15 @@ async def test_bare_language_names_the_active_language(config_dir: Path) -> None
             await pilot.pause()
             app._run_slash_command("/language")
             await pilot.pause()
+            # The switch re-renders the receipt in the chosen locale (the keyed
+            # wire.language_receipts.show_terminal), so the stable parts are
+            # the resolved tag with its display name and the literal command
+            # shape, which every catalogue preserves. The English-only literal
+            # is pinned for ``en`` by the assertions above.
+            shown = "en" if value == "auto" else value
             assert any(
-                text.startswith(f"language: {'en' if value == 'auto' else value} (")
-                and "/language <value>; space browses" in text
-                for text in _notices(app)
+                f" {shown} (" in text and "/language <value>" in text
+                for text in _language_notices(app)
             ), (value, _notices(app))
         for text in _language_notices(app):
             assert cell_len(text) <= 70, text
@@ -262,8 +281,11 @@ async def test_a_shipped_wave_locale_switches_and_persists(config_dir: Path) -> 
         app._run_slash_command("/language fr")
         await pilot.pause()
         assert _stored(config_dir) == "fr"
+        # The fr receipt is the shipped wire.language_receipts.saved copy, with
+        # French typography (a narrow no-break space before the colon).
         assert any(
-            text.startswith("language: fr saved — active fr (Français)") for text in _notices(app)
+            text.startswith("langue\u202f: fr enregistrée — fr (Français) active")
+            for text in _notices(app)
         ), _notices(app)
         for text in _language_notices(app):
             assert cell_len(text) <= 70, text
