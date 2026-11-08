@@ -565,6 +565,54 @@ def render_repair_notice(peer_name: str, key: str, *, name: str = "") -> str:
     )
 
 
+def render_owner_refresh_outcome(
+    key: str, owner: str, *, code: str, retry_after_ms: int | float | None = None
+) -> str:
+    """The BORROWER's sentence when the owner could not refresh a refused sign-in.
+
+    Reached from ``MeshCredentialClient._note_refresh_outcome``: the provider
+    refused a borrowed bearer here, this device reported it, and the owner's forced
+    refresh did not produce a new token (#3560's ``refresh_failed`` / ``unchanged``
+    reply). It is the turn's error text (``failover._no_credential_error`` renders
+    it verbatim), so it must carry the whole remedy on its own:
+
+    * WHERE to act — the owner, by the name the operator gave it, because nothing
+      on this device can refresh a login whose refresh token never leaves there;
+    * WHAT to run there — :func:`repair_command`, the one spelling the owner-side
+      repair notice also uses;
+    * WHEN this device asks again — the owner's ``retry_after`` (or its report
+      window), during which neither a report nor a borrow is sent.
+
+    ``code`` is the owner's reason. Only ``grant_invalid`` is the IdP's own verdict,
+    so only it says flatly that the sign-in has expired; the other reasons (a
+    transient refresh failure, a row the owner cannot refresh, a refresh that
+    produced nothing) say what was observed and offer the same remedy as the fix
+    if it does not clear. Takes no credential value, so none can be interpolated.
+    """
+    label = render_key_name(key) or "that credential"
+    command = repair_command(key)
+    if code == "grant_invalid":
+        head = f"The '{label}' sign-in on {owner} has expired and could not be refreshed there"
+    elif code == "refresh_failed":
+        head = (
+            f"The provider refused the '{label}' sign-in borrowed from {owner}, and {owner} "
+            "could not refresh it just now"
+        )
+    else:
+        head = (
+            f"The provider refused the '{label}' sign-in borrowed from {owner}, and {owner} "
+            "could not get a new token for it"
+        )
+    sentence = f"{head}. Sign in again on {owner}: run '{command}' there."
+    left = render_retry_after(retry_after_ms)
+    if left:
+        # No "or as soon as it signs in": that holds only for an owner that
+        # announces its lifecycle (``refresh_hold``'s fence), and an owner that does
+        # not would make the promise false.
+        sentence += f" This device asks {owner} again in {left}."
+    return sentence
+
+
 #: THE ONE COMMITMENT THE DESIGN MAKES ABOUT ENDING A COPY (§2.3). These exact lines close
 #: ``credential revoke`` on a stored secret, every ``member rm`` ending, and the network
 #: guide's credentials section. Two surfaces say the same thing in their own words instead:

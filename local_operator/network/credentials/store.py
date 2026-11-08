@@ -106,7 +106,7 @@ class CredentialSource(Protocol):
         model_id: str = "",
         retry_after_ms: int = 0,
         block_scope: str = "",
-    ) -> None: ...
+    ) -> BrokerError | None: ...
 
     def close(self) -> None: ...
 
@@ -615,6 +615,17 @@ class MeshAwareAuthStore:
                 return None
         elif not mesh.should_borrow(key):
             return None
+        # THE OWNER SAID IT CANNOT REFRESH THIS YET (``client.refresh_hold``). Asking
+        # again before its ``retry_after`` would be answered with the same dead
+        # bearer, spending a dial on the owner and a refused request on the
+        # provider for each retry; the held refusal is the answer, and its
+        # sentence is what ``no_credential_reason`` gives the turn. Duck-typed:
+        # a client without holds (an older build, a test stand-in) dials as before.
+        hold_for = getattr(mesh, "refresh_hold", None)
+        held = hold_for(key) if callable(hold_for) else None
+        if isinstance(held, BrokerError):
+            self._refusals[key] = held
+            return held
         pair = (key, session_id)
         # An explicit repair must not join an ordinary resolve already in flight.
         # The owner uses the same force discriminator for its refresh lease.
@@ -779,7 +790,9 @@ class MeshAwareAuthStore:
                 )
             )
         self._note_lent_failure(pair, error, api_key)
-        self._report_failure(pair[0], error=error, session_id=session_id or "", model_id=model_id)
+        outcome = self._report_failure(
+            pair[0], error=error, session_id=session_id or "", model_id=model_id
+        )
         # THE HEALING RE-ASK, AND WHY IT BELONGS ON THIS LINE. A failed borrowed
         # bearer is the one moment this device knows the owner's answer may have
         # moved: the token died under us, or the owner re-signed-in after the last
@@ -799,6 +812,15 @@ class MeshAwareAuthStore:
             except Exception:  # noqa: BLE001 — a cache repair must not fail the turn
                 pass
         self._refusals.pop(pair[0], None)
+        if outcome is not None:
+            # THE OWNER COULD NOT REFRESH IT, and said so (operator ask, 2026-11-08).
+            # Recorded AFTER the pop above, which is about a stale refusal from an
+            # earlier borrow, not this answer. The driver's re-resolve that follows
+            # is answered by ``_borrow``'s hold without a dial, comes back empty, and
+            # ``failover._no_credential_error`` shows this sentence — owner, the
+            # command to run there, when this device asks again — instead of the
+            # provider's bare 401 on the same dead bearer.
+            self._refusals[pair[0]] = outcome
         # Still ``False``: there is no LOCAL sibling. The driver's rotation leg
         # re-resolves regardless, and the demotion noted above is what moves that
         # re-ask to another of the owner's rows on a server-side fault.
@@ -1108,7 +1130,7 @@ class MeshAwareAuthStore:
 
     def _report_failure(
         self, key: str, *, error: BaseException, session_id: str, model_id: str
-    ) -> None:
+    ) -> BrokerError | None:
         """Classify the provider's own error and report it, using the driver's helpers.
 
         The classification is the failover driver's, not this module's: the same
@@ -1117,7 +1139,7 @@ class MeshAwareAuthStore:
         here would let the two disagree about what an error means.
         """
         if self._mesh is None:
-            return
+            return None
         from local_operator.providers.failover import retry_after_ms_from_error
 
         kind = report_kind_for(error)
@@ -1129,7 +1151,7 @@ class MeshAwareAuthStore:
         # still runs unconditionally: ``report_sync`` drops before dialling, and this
         # explicit one also covers its early return when this device is no longer a
         # holder — so the failed bearer is never served again either way.
-        self._mesh.report_sync(
+        outcome = self._mesh.report_sync(
             key,
             kind=kind,
             session_id=session_id,
@@ -1137,6 +1159,9 @@ class MeshAwareAuthStore:
             retry_after_ms=int(retry_after_ms_from_error(error) or 0),
         )
         self._mesh.grants.drop(key, session_id)
+        # Only the client's refusal type is believed: an older or stand-in client
+        # returns ``None`` and keeps the pre-existing silent report.
+        return outcome if isinstance(outcome, BrokerError) else None
 
     # -- the read-through surface keyed by credential_id --------------------
 

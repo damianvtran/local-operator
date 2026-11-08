@@ -86,6 +86,29 @@ _TRANSIENT_REFUSALS: frozenset[str] = frozenset(
     {"internal", "rate_limited", "quota_blocked", "unsupported"}
 )
 
+#: The report kinds that ask the owner for a forced refresh (``owner.py``'s
+#: ``_one_owner_refresh``), and so the only ones whose answer can say the owner
+#: could not refresh. ``report_kind_for`` in ``store.py`` spells them.
+AUTH_REPORT_KINDS: frozenset[str] = frozenset({"unauthorized", "invalid"})
+
+
+@dataclasses.dataclass(frozen=True)
+class _RefreshOutcomeHold:
+    """The owner's answer "I could not refresh this" to a 401 report, held.
+
+    ``until`` is on the MONOTONIC clock (a wall-clock step must not end or extend
+    it); ``fence`` is :meth:`MeshCredentialClient._lifecycle_fence` taken when the
+    answer arrived, so a sign-in on the owner ends the hold at once; ``code`` is the
+    owner's own reason (``grant_invalid``, ``not_refreshable``, ``refresh_failed``
+    or ``unchanged``), kept to re-render the sentence. Carries no credential value.
+    """
+
+    until: float
+    fence: frozenset[Any]
+    code: str
+    error: BrokerError
+
+
 #: The borrower's whole budget for one borrow, in seconds. Below the local secret
 #: broker's 10 s (see this module's docstring) and far below the owner-side
 #: deadline registered for ``net_broker`` (75 s): a borrower that gave up first
@@ -345,6 +368,12 @@ class MeshCredentialClient:
         #: The sync engine used by the CLI's direct fallback. Built lazily; the
         #: runtime never reaches it (it asks its own relay, leg 1).
         self._engine: Any = None
+        #: Per key: the owner said it could NOT refresh after this device's 401
+        #: report (:meth:`report_sync`). Process memory only — a restart re-asks
+        #: once, which is the cheap direction to be wrong in. See
+        #: :class:`_RefreshOutcomeHold` for what ends one.
+        self._refresh_holds: dict[str, _RefreshOutcomeHold] = {}
+        self._refresh_holds_lock = threading.Lock()
 
     # -- construction -------------------------------------------------------
 
@@ -1525,8 +1554,15 @@ class MeshCredentialClient:
         model_id: str = "",
         retry_after_ms: int = 0,
         block_scope: str = "",
-    ) -> None:
+    ) -> BrokerError | None:
         """Tell the owner a borrowed bearer failed. BLOCKING, best effort.
+
+        RETURNS THE OWNER'S "I COULD NOT REFRESH IT" for an auth report
+        (``unauthorized``/``invalid``) as a :class:`BrokerError` whose ``message`` is
+        the sentence for the person, and ``None`` for everything else — a
+        ``refreshed`` answer, a non-auth report, an owner that did not answer. While
+        that refusal's hold is live (:meth:`refresh_hold`) a further auth report is
+        answered from it without dialling the owner.
 
         ``kind`` is what the PROVIDER said, never a verdict about the credential:
         ``quota`` for a usage limit, ``invalid`` for an ``invalid_grant``,
@@ -1547,8 +1583,20 @@ class MeshCredentialClient:
         only when the field is absent (an older peer, or no grant left to attribute).
         """
         if not self.should_borrow(key):
-            return
+            return None
         credential_id = self._reported_credential_id(key, session_id)
+        auth_report = kind in AUTH_REPORT_KINDS
+        if auth_report:
+            held = self.refresh_hold(key)
+            if held is not None:
+                # THE OWNER ALREADY ANSWERED THIS (operator ask, 2026-11-08: "if
+                # something expires on a remote device is it able to refresh from
+                # local"). It said it cannot refresh, and named when trying again
+                # can help; another report before then is a dial the owner would
+                # only coalesce, repeated on every provider retry. The failed
+                # bearer is still dropped so it is never served again.
+                self.grants.drop(key)
+                return held
         if kind == "quota":
             self._cool_lent_row(
                 key,
@@ -1565,8 +1613,8 @@ class MeshCredentialClient:
 
             record = store.find_own_relay(self.root)
             if record is None:
-                return
-            control_request(
+                return None
+            reply = control_request(
                 record,
                 "credential_report",
                 timeout=self.deadline_s,
@@ -1579,7 +1627,120 @@ class MeshCredentialClient:
                 credential_id=credential_id,
             )
         except Exception:  # noqa: BLE001 — a failed report must not raise into a turn
-            return
+            return None
+        detail = reply.get("detail") if isinstance(reply, dict) else None
+        if not isinstance(detail, dict):
+            return None
+        if auth_report:
+            return self._note_refresh_outcome(key, detail)
+        return None
+
+    def _note_refresh_outcome(self, key: str, detail: dict[str, Any]) -> BrokerError | None:
+        """Read the owner's answer to a 401 report; a refusal to refresh becomes a hold.
+
+        #3560 made the owner say what its forced refresh did (``refreshed``,
+        ``unchanged``, ``refresh_failed`` with a ``code`` and maybe a
+        ``retry_after_ms``), and this device threw that answer away, so a borrower
+        whose owner could not refresh saw only the provider's next 401, with no
+        remedy. Now:
+
+        * ``refreshed`` (and ``coalesced``, ``noted`` — nothing new to say) clears
+          any hold and returns ``None``: the caller's re-ask fetches the new bearer;
+        * ``refresh_failed`` / ``unchanged`` record a hold until ``retry_after_ms``
+          (validated at this boundary like every peer number) or, absent one, the
+          owner's own report window — the span inside which another report would
+          only be ``coalesced`` — and return the refusal whose ``message`` is the
+          sentence the session shows.
+
+        Nothing here can refresh anything: the remedy is a command for a person on
+        the OWNER, and the owner's refresh token never leaves it. The command is
+        composed HERE from the key, never echoed from the peer's ``remedy`` field,
+        so a peer cannot put words in this device's mouth.
+        """
+        from local_operator.network.credentials.messages import (
+            render_owner_refresh_outcome,
+        )
+        from local_operator.network.credentials.owner import (
+            REPORT_REFRESH_MIN_INTERVAL_S,
+        )
+        from local_operator.network.credentials.types import peer_int
+
+        action = str(detail.get("action") or "")
+        if action not in ("refresh_failed", "unchanged"):
+            if action == "refreshed":
+                with self._refresh_holds_lock:
+                    self._refresh_holds.pop(key, None)
+            return None
+        code = str(detail.get("code") or "") if action == "refresh_failed" else "unchanged"
+        retry_after_ms = peer_int(detail.get("retry_after_ms"), maximum=MAX_PEER_RETRY_AFTER_MS)
+        hold_ms = retry_after_ms or int(REPORT_REFRESH_MIN_INTERVAL_S * 1000)
+        owner = self.owner_of(key)
+        owner_name = self.owner_label(key) or str(detail.get("owner_device_name") or "")
+        error = BrokerError(
+            code="grant_invalid" if code == "grant_invalid" else "refresh_failed",
+            key=key,
+            owner_device=owner,
+            owner_device_name=owner_name,
+            retry_after_ms=hold_ms,
+            message=render_owner_refresh_outcome(
+                key, owner_name or owner or "the owner device", code=code, retry_after_ms=hold_ms
+            ),
+        )
+        with self._refresh_holds_lock:
+            self._refresh_holds[key] = _RefreshOutcomeHold(
+                until=time.monotonic() + hold_ms / 1000.0,
+                fence=self._lifecycle_fence(key),
+                code=code,
+                error=error,
+            )
+        logger.info(
+            "owner %s could not refresh borrowed %s after a 401 report (%s); "
+            "holding reports and borrows for %.0f s",
+            owner,
+            key,
+            code,
+            hold_ms / 1000.0,
+        )
+        return error
+
+    def refresh_hold(self, key: str) -> BrokerError | None:
+        """The owner's live "I could not refresh it" for ``key``, or ``None``.
+
+        ENDS ON EITHER OF TWO EVENTS, whichever comes first: the hold's time passes
+        (the owner's ``retry_after``), or the owner's announced lifecycle for the
+        key moves — a login, logout or rotation there (``_lifecycle_fence``) is
+        exactly the operator running the remedy, and must not wait out a timer.
+        An owner that announces no lifecycle has an empty fence on both sides, so
+        only the time ends its hold.
+        """
+        with self._refresh_holds_lock:
+            hold = self._refresh_holds.get(key)
+        if hold is None:
+            return None
+        if time.monotonic() >= hold.until or self._lifecycle_fence(key) != hold.fence:
+            with self._refresh_holds_lock:
+                if self._refresh_holds.get(key) is hold:
+                    del self._refresh_holds[key]
+            return None
+        from local_operator.network.credentials.messages import (
+            render_owner_refresh_outcome,
+        )
+
+        # The countdown is re-rendered, never the first sentence repeated: a "this
+        # device tries again in 5 min" read four minutes later is the stale-claim
+        # class ``render_retry_after`` already guards against.
+        left_ms = max(0, int((hold.until - time.monotonic()) * 1000))
+        error = hold.error
+        return dataclasses.replace(
+            error,
+            retry_after_ms=left_ms,
+            message=render_owner_refresh_outcome(
+                key,
+                error.owner_device_name or error.owner_device or "the owner device",
+                code=hold.code,
+                retry_after_ms=left_ms,
+            ),
+        )
 
     def _cool_lent_row(
         self,
