@@ -27,12 +27,23 @@ Describe the impact of these changes on the codebase:
 - What specific scenarios were validated?
 - Mention any automated tests that were added or updated.
 
+## Targeted test evidence
+
+PR CI runs only the fast guard tests; this block is the test gate. Re-run on the final head.
+If `make test-affected` prints `WIDE:`, dispatch `gh workflow run full-suite.yml --ref <branch>` and cite it.
+
+- Scope: `<base-sha>..<head-sha>`
+- Command(s): `make test-affected` (or `scripts/affected_tests.py --since <base> --run --evidence`) plus additions by judgement
+- Result: `<N passed, M failed>` in `<wall time>`; other interpreter (3.12/3.13) if version/OS-sensitive
+- WIDE dispatch run (if any): <url>
+- Not run, and why:
+
 ## Checklist
 
 - [ ] My code follows the style guidelines of this project.
 - [ ] I have performed a self-review of my code.
 - [ ] I have added tests that prove my changes work as intended.
-- [ ] All new and existing tests pass.
+- [ ] Targeted tests for this diff pass on the final head, recorded above (never the full suite).
 - [ ] I have run formatting (black/isort), linting (flake8), and type checks (pyright), and they pass.
 - [ ] I have updated the documentation when required.
 - [ ] Security considerations are addressed (especially for code execution features).

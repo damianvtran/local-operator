@@ -77,8 +77,10 @@ it under `tests/unit/tui`** — and it runs beside ~25 concurrent agent sessions
 this host, so the same command lands anywhere in that range (and it is the reason
 `tests/durations.json` exists as the sharder's input). Do not treat the whole suite
 as a routine inner-loop step: run the targeted command for what you changed (see
-"Scoping the inner loop" below, and note which jobs still narrow), and let CI's
-six shards be the whole-tree run.
+"Scoping the inner loop" below, and note which jobs still narrow). PR CI runs no
+unit tests: select with `make test-affected` (`scripts/affected_tests.py`), record
+`## Targeted test evidence` on the PR, and let `.github/workflows/full-suite.yml`
+(main tip + nightly) be the whole-tree run.
 
 **Every pytest invocation in this file is isolated, and that is not decoration.**
 Each block also carries its own `ISO=$(mktemp -d)`, because the variable lives in
@@ -660,8 +662,9 @@ narrowest scope that could hold the answer, and widen only when it shows nothing
 
 ### Running the suite locally: what it costs, and how to read a stall
 
-**CI's six shards are the whole-tree gate. A local whole-tree run is not one, and
-no session should block on it.** Measured 2026-09-24 at load average 140-200, the
+**`full-suite.yml` on main (post-merge + nightly) is the whole-tree gate; PRs carry
+targeted evidence instead. A local whole-tree run is not one, and no session
+should block on it.** Measured 2026-09-24 at load average 140-200, the
 whole tree is **~84 minutes projected at the four workers this host's hook resolved**
 — the run's own line is `pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4,
 …)`, and it reached 0% to 12% in 13 min, 43% at 38 min, then **69% at ~58 min,
