@@ -15,10 +15,10 @@ read its transcript and plan (the reader's keys and limits are in
 [docs/subagent-reader.md](../../docs/subagent-reader.md)).
 
 <p align="center">
-  <img src="../../static/ui-subagents.png" alt="The desktop app's run pane mid-fan-out: two subagents running — 'Summarise the findings' (writer, drafting the summary) and an audit running pytest (reviewer) — each with elapsed time, context use, and spend, above the shared to-do list; beside them, the conversation shows the reconcile request and a Read invoices/march.csv receipt." width="720">
+  <img src="../../static/ui-subagents.png" alt="The desktop app's run pane mid-fan-out, 2 running and 1 queued: 'Summarise the findings' (writer, writing reports/unpaid-march.md) and an audit of the March invoices against the ledger (reviewer, checked 448 of 452 ledger rows), each with elapsed time, context use and spend, with 'Publish the summary' queued behind them, above the shared to-do list; beside them, the conversation shows the reconcile request and its Read invoices/march.csv and reconcile.py receipts" width="720">
 </p>
 
-<p align="center"><i>Two workers mid-run in the run pane — one drafting, one auditing — each with its role, elapsed time, context use, and spend, above the to-do list they share.</i></p>
+<p align="center"><i>Two workers mid-run in the run pane — one drafting, one checking the ledger — and a third queued, each with its role, elapsed time, context use, and spend, above the to-do list they share.</i></p>
 
 **Roles are capability boundaries.** A subagent launched as `reviewer` carries
 vetted review guidance *and loses the tools to edit code*. It can read and run

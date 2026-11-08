@@ -26,50 +26,43 @@ MIT licensed.
 
 ## Get it
 
-| Surface | How |
+| Surface | Where |
 | --- | --- |
-| **Desktop app** (macOS, Windows, Linux) | [Latest release](https://github.com/damianvtran/local-operator-ui/releases/latest) (always the newest build) · [local-operator.com/download](https://local-operator.com/download) · or `npx local-operator-ui`. The app checks for new releases itself (and updates its bundled backend) and installs one when you confirm. |
-| **Terminal (TUI)**, macOS / Linux | `curl -LsSf https://raw.githubusercontent.com/damianvtran/local-operator/main/scripts/install.sh \| sh` |
-| **Terminal (TUI)**, Windows | `powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/damianvtran/local-operator/main/scripts/install.ps1 \| iex"` |
-| **Terminal (TUI)**, package manager | `uv tool install local-operator` or `pipx install local-operator` |
-| **Phone** | [`lop mobile`](#phone-access) serves a web client from your own machine today. The native [iOS/Android app](https://github.com/damianvtran/local-operator-mobile) is **in development** and not yet in any app store. |
-| **Browser extension** | [Chrome Web Store](https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof): let agents drive the Chromium browser you already use. |
+| **Desktop app** (macOS, Windows, Linux) | [Latest release](https://github.com/damianvtran/local-operator-ui/releases/latest) (always the newest build) · [project website](https://local-operator.com/download) · or via npm, [below](#install-the-desktop-app-from-npm) |
+| **Terminal UI (TUI)** (macOS, Linux, Windows) | One-line installer, [below](#install-the-terminal-ui) |
+| **Phone** | [`lop mobile`](#phone-access) web relay, available now · native [iOS/Android app](https://github.com/damianvtran/local-operator-mobile) **in development**, not yet in any app store |
+| **Browser extension** | [Chrome Web Store](https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof): let agents drive the Chromium browser you already use |
 
-<table>
-  <tr>
-    <td width="50%"><img src="./static/ui-desktop-app.png" alt="The Local Operator desktop app: a navigation rail with chats, agents and teams, a session transcript with tool receipts, and a run pane with subagents and a to-do list" width="720"></td>
-    <td width="50%"><img src="./static/tui-welcome.png" alt="The Local Operator terminal UI welcome screen with tips and the composer ready for a first prompt" width="720"></td>
-  </tr>
-  <tr>
-    <td align="center"><i>Desktop app</i></td>
-    <td align="center"><i>Terminal UI</i></td>
-  </tr>
-</table>
+### Install the desktop app from npm
 
-## Contents
+```bash
+npx local-operator-ui
+```
 
-[Quickstart](#quickstart) ·
-[Desktop app](#desktop-app) ·
-[Agent organizations](#agent-organizations) ·
-[Cross-agent messaging](#cross-agent-messaging) ·
-[Agent mesh](#agent-mesh) ·
-[Always on](#always-on) ·
-[Phone access](#phone-access) ·
-[Browser extension](#browser-extension) ·
-[Subscriptions and providers](#subscriptions-and-providers) ·
-[Terminal UI](#terminal-ui) ·
-[Tools](#what-the-agent-can-do) ·
-[Headless and server](#headless-and-server) ·
-[Configuration](#configuration-and-credentials) ·
-[Benchmarks](#benchmarks) ·
-[Safety](#safety-model) ·
-[Contributing](#contributing) ·
-[Credits](#credits)
+### Install the terminal UI
+
+No Python needed: the installers use [uv](https://docs.astral.sh/uv/), which
+brings Python 3.12+.
+
+macOS / Linux:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/damianvtran/local-operator/main/scripts/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/damianvtran/local-operator/main/scripts/install.ps1 | iex"
+```
+
+With a package manager:
+
+```bash
+uv tool install local-operator    # or: pipx install local-operator
+```
 
 ## Quickstart
-
-Run one of the TUI installers above (no Python needed: it uses
-[uv](https://docs.astral.sh/uv/), which brings Python 3.12+), then:
 
 ```bash
 lop                  # opens the setup screen
@@ -82,12 +75,32 @@ and local server (LM Studio, Ollama, vLLM, llama.cpp). After sign-in **Aida**,
 your chief of staff, says hello and helps you set up your first agents and
 teams. `esc` stops the agent, `/help` lists commands, `lop update` upgrades.
 
+<p align="center">
+  <img src="./static/ui-desktop-app.png" alt="The Local Operator desktop app: a navigation rail with chats, agents and teams, a session transcript with tool receipts, and a run pane with subagents and a to-do list" width="720">
+</p>
+<p align="center"><i>Desktop app</i></p>
+
+<p align="center">
+  <img src="./static/tui-welcome.png" alt="The Local Operator terminal UI welcome screen with tips and the composer ready for a first prompt" width="860">
+</p>
+<p align="center"><i>Terminal UI (TUI)</i></p>
+
 More → [getting started](docs/guide/getting-started.md) (plain `pip`,
 local models, first-run details) · [why Local Operator](docs/guide/overview.md)
 
+**Sections:**
+[Desktop app](#desktop-app) ·
+[Agent organizations](#agent-organizations) ·
+[Agent mesh](#agent-mesh) ·
+[Always on](#always-on) ·
+[Phone access](#phone-access) ·
+[Subscriptions and providers](#subscriptions-and-providers) ·
+[Terminal UI](#terminal-ui) ·
+[Safety](#safety-model)
+
 ## Desktop app
 
-[**Local Operator UI**](https://github.com/damianvtran/local-operator-ui)
+The desktop app, [Local Operator UI](https://github.com/damianvtran/local-operator-ui),
 drives the same sessions, teams, schedules and configuration as the TUI, and
 adds what a terminal cannot draw:
 
@@ -95,19 +108,18 @@ adds what a terminal cannot draw:
 - a **file canvas** for markdown, code, HTML, images, PDFs, spreadsheets, audio and video;
 - **pages** for agents, teams, projects, schedules, the Agent Hub, the mesh and settings, behind a command palette.
 
-The app bundles its own backend (or uses an existing `lop` install) and
-updates itself from GitHub Releases.
+The app bundles its own backend (or uses an existing `lop` install). It checks
+GitHub Releases for new versions and installs one when you confirm.
 
-<table>
-  <tr>
-    <td width="50%"><img src="./static/ui-projects-board.png" alt="The desktop app's Projects board: tracked workstreams grouped into status columns, each card showing its title, progress and linked sessions" width="720"></td>
-    <td width="50%"><img src="./static/ui-agent-hub.png" alt="The desktop app's Agent Hub: a grid of shareable agent profiles with names, descriptions and categories" width="720"></td>
-  </tr>
-  <tr>
-    <td align="center"><i>Projects board</i></td>
-    <td align="center"><i>Agent Hub</i></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="./static/ui-projects-board.png" alt="The desktop app's Projects board: tracked workstreams grouped into status columns, each card showing its title, progress and linked sessions" width="720">
+</p>
+<p align="center"><i>Projects board</i></p>
+
+<p align="center">
+  <img src="./static/ui-agent-hub.png" alt="The desktop app's Agent Hub: a grid of shareable agent profiles with names, descriptions and categories" width="720">
+</p>
+<p align="center"><i>Agent Hub</i></p>
 
 <p align="center">
   <img src="./static/ui-media-in-conversation.png" alt="A desktop app conversation with images inline: a pasted chart, a tool receipt for the plotting script, and the bar chart the agent rendered above its write-up" width="720">
@@ -206,14 +218,21 @@ build is published in any app store yet.
 
 <table>
   <tr>
-    <td align="center"><img src="./static/mobile-relay-list.png" alt="The lop mobile web client on a phone: the list of live sessions on the computer with their status" width="220"></td>
-    <td align="center"><img src="./static/mobile-relay-session.png" alt="The lop mobile web client on a phone: a live session transcript with streamed text, tool cards and the composer" width="220"></td>
-    <td align="center"><img src="./static/mobile-app-sessions.png" alt="The native Local Operator Mobile app: the session list split into active and previous sessions" width="220"></td>
-    <td align="center"><img src="./static/mobile-app-session.png" alt="The native Local Operator Mobile app: a session transcript with tool rows, to-do and subagent strips, and the composer with model and effort chips" width="220"></td>
+    <td align="center" valign="top"><img src="./static/mobile-relay-list.png" alt="The lop mobile web relay on a phone: the Conversations list with All, Needs you · 2 and Unread · 2 filters, Pinned and Active sections whose rows carry tags, working spinners, new, not answering and 2 asks markers, and a New button" width="300"></td>
+    <td align="center" valign="top"><img src="./static/mobile-relay-session.png" alt="The lop mobile web relay on a phone: the Relay redesign review session, Working · 1m41s, with a transcript of code and measurement tables, a pinned working line with Stop, chips for 1 question, Agents 1/3 · 1 failed and Tasks 2/6, and the Steer the agent composer showing the model, context use and spend" width="300"></td>
   </tr>
   <tr>
     <td align="center" colspan="2"><i>Web relay (<code>lop mobile</code>), available now</i></td>
-    <td align="center" colspan="2"><i>Native app, in development</i></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td align="center" valign="top"><img src="./static/mobile-app-sessions.png" alt="The native Local Operator Mobile app: the conversations drawer with running and older sessions across several computers (Studio mini, Laptop, Build mini), the computer switcher, Team Bridge, and an Inbox, Past, Projects, Schedules and Library bar" width="300"></td>
+    <td align="center" valign="top"><img src="./static/mobile-app-session.png" alt="The native Local Operator Mobile app: the Refactor the relay client session, Working · 2m 09s, with tool rows, a cross-session message from the release owner, parent and subagent hand-offs, a pinned working line with stop, Tasks 3/5 and Agents 1/6 strips, 2 queued messages, and the composer with a mic button" width="300"></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><i>Native app, in development (not yet in any store)</i></td>
   </tr>
 </table>
 
@@ -368,7 +387,7 @@ More → [safety model](docs/guide/safety.md) · [endpoint protection](docs/ENDP
 See [CONTRIBUTING.md](CONTRIBUTING.md) for bug reports, development setup and
 pull requests; [AGENTS.md](./AGENTS.md) is the working guide for agents
 changing this codebase, and [docs/REWRITE.md](./docs/REWRITE.md) covers the
-architecture.
+architecture; `docs/` also holds the benchmarks and verification evidence.
 
 ## Credits
 

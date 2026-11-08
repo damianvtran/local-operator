@@ -51,7 +51,7 @@ Work keeps moving after you walk away.
   `lop update` restarts the daemon when the LaunchAgent is installed.
 
 <p align="center">
-  <img src="../../static/ui-schedules.png" alt="The desktop app's Schedules page listing recurring wakes by conversation — Invoices workspace (a nightly ledger sync and a morning report), Release crew ops (a nightly CI queue check), Standup notes, and Weekly finance digest — each with its cadence, run count, and next fire time, above the page's note that wakes fire whether or not the window is open." width="720">
+  <img src="../../static/ui-schedules.png" alt="The desktop app's Schedules page grouping wakes by conversation: Site uptime watch (every 15 minutes, run 42 times), Invoices workspace (a one-off email summary), Weekly finance digest, Competitor news (four wakes, one folded under Show 1 more wake), Standup notes and Nightly cleanup, each wake with its next fire time, cadence, run count and prompt, above a Legacy schedules panel for the older agent-schedule engine" width="720">
 </p>
 
-<p align="center"><i>The Schedules page: the recurring wakes a workspace runs, and the desktop app's reminder that they fire whether or not the window is open.</i></p>
+<p align="center"><i>The Schedules page: every conversation's wakes, repeating or once, with when each fires next and how often it has run.</i></p>
