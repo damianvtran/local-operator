@@ -1755,3 +1755,54 @@ def test_append_into_another_pad_is_high(home: Path) -> None:
     verdict = _verdict(home, f"echo x >> {PAD_FILE}")
     assert verdict.risk is Risk.HIGH
     assert verdict.reasons == ["another session's files"]
+
+
+# -- ``..`` is judged where the kernel lands it (round-1 amendment) -----------------------
+
+
+def _own_pad(home: Path) -> Path:
+    pad = home / ".local-operator" / "sessions" / SID / "scratchpad"
+    (pad / "rig").mkdir(parents=True, exist_ok=True)
+    return pad
+
+
+def _own_verdict(home: Path, command: str):
+    return classify_bash(
+        command,
+        cwd=str(home),
+        env=_env(home),
+        scratchpad=str(_own_pad(home)),
+        session_id=SID,
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["rm -f {pad}/rig/../x", "cd {pad}/rig && rm -f ../x", "echo f >> {pad}/rig/../log"],
+)
+def test_own_pad_dotdot_resolving_inside_it_stays_low(home: Path, command: str) -> None:
+    """Agents tidy their scratch with ``rig/../x``; CRITICAL there is unliftable."""
+    pad = _own_pad(home)
+    (pad / "x").write_text("x")
+    assert _own_verdict(home, command.format(pad=pad)).risk is Risk.LOW
+
+
+def test_own_pad_dotdot_through_a_link_into_evidence_stays_critical(home: Path) -> None:
+    """``sub`` -> another session's pad: ``sub/../transcript.jsonl`` is its transcript."""
+    pad = _own_pad(home)
+    other = home / ".local-operator" / "sessions" / OTHER
+    (other / "scratchpad").mkdir(parents=True, exist_ok=True)
+    (other / "transcript.jsonl").write_text("{}\n")
+    (pad / "sub").symlink_to(other / "scratchpad")
+    for op in ("rm -f {}", "echo f >> {}"):
+        command = op.format(f"{pad}/sub/../transcript.jsonl")
+        assert _own_verdict(home, command).risk is Risk.CRITICAL, command
+
+
+def test_other_pad_dotdot_resolving_inside_it_is_high(home: Path) -> None:
+    _other_pad_file(home)
+    word = f"~/.local-operator/sessions/{OTHER}/scratchpad/qa344/../qa344/or.env"
+    for op in ("rm -f {}", "echo x >> {}"):
+        verdict = _verdict(home, op.format(word))
+        assert verdict.risk is Risk.HIGH, op
+        assert "another session's files" in verdict.reasons

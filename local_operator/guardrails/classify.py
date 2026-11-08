@@ -395,12 +395,82 @@ def _hardlinked_file(path: str | None) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
 
 
+def _kernel_path(raw: str | None) -> str | None:
+    """Where the kernel lands ``raw`` (absolute, un-normalised), resolving
+    ``..`` AFTER links as path lookup does; ``None`` if that is unknowable.
+
+    ``os.path.realpath`` of the nearest EXISTING ancestor, plus the remaining
+    components. Those must hold no ``..``: below a missing directory the
+    lookup itself fails, and a guess there must not grant an exemption.
+    """
+    if not raw or not raw.startswith("/"):
+        return None
+    parts = [c for c in raw.split("/") if c and c != "."]
+    for cut in range(len(parts), -1, -1):
+        head = "/" + "/".join(parts[:cut])
+        try:
+            exists = os.path.lexists(head) if cut == len(parts) else os.path.isdir(head)
+        except OSError:
+            exists = False
+        if not exists:
+            continue
+        rest = parts[cut:]
+        if ".." in rest:
+            return None
+        try:
+            return os.path.join(os.path.realpath(head), *rest)
+        except OSError:
+            return None
+    return None
+
+
+def _kernel_reason(target: Target, prot: _Protected) -> str | None:
+    """``_touch_reason`` for a word written with ``..`` (``Target.dotdot``).
+
+    The lexical normal form lies about such a word (``<pad>/sub/../<id>/
+    asks.jsonl`` with ``sub`` -> a session dir reads as inside the pad; review
+    R1-MAJOR-1), so it is judged ONLY where the kernel lands it: inside this
+    session's own pad stays exempt (agents tidying their scratch with
+    ``rig/../x`` must not hit an unliftable CRITICAL), inside another pad is
+    ``OTHER_SCRATCHPAD`` (HIGH), and anything else under ``sessions/`` or
+    ``guardrails/`` — or a landing that cannot be known — is CRITICAL.
+    """
+    kernel = _kernel_path(target.raw_path)
+    if kernel is None:
+        # Opaque, globbed or unresolvable: no exemption, so the literal path
+        # decides; under session state that is CRITICAL.
+        lexical = target.path or ""
+        for state in prot.state_roots:
+            if _under_evidence(lexical, os.path.join(state, _LEDGER_DIRNAME)):
+                return "the guardrail's own records"
+            if _under_evidence(lexical, os.path.join(state, _SESSIONS_DIRNAME)):
+                return "session state (transcripts, lineage, ask stores)"
+        return None
+    linked = _hardlinked_file(kernel)
+    other_pad = False
+    for spelled in _spellings(kernel):
+        for state in prot.state_roots:
+            sessions = os.path.join(state, _SESSIONS_DIRNAME)
+            if _under_evidence(spelled, os.path.join(state, _LEDGER_DIRNAME)):
+                return "the guardrail's own records"
+            if not _under_evidence(spelled, sessions):
+                continue
+            if not linked and _in_own_pad(spelled, prot):
+                continue
+            if not linked and _in_session_scratchpad(spelled, sessions):
+                other_pad = True
+                continue
+            return "session state (transcripts, lineage, ask stores)"
+    return OTHER_SCRATCHPAD if other_pad else None
+
+
 def _own_pad_exemptible(target: Target) -> bool:
-    """May this session's OWN scratchpad exempt ``target``? Not when the word
-    as written climbs (``Target.dotdot``): ``<pad>/sub/../<id>/asks.jsonl``
-    normalises into the pad but, with ``sub`` a link, lands in a session's ask
-    store (review R1-MAJOR-1). Nor for a hardlinked regular file, whose other
-    name may be evidence (R1-MINOR-1)."""
+    """May this session's OWN scratchpad exempt ``target``'s LEXICAL path?
+    Not when the word as written has ``..`` (``Target.dotdot``): its normal
+    form may not be where it lands, so a plain literal word of that shape is
+    judged by ``_kernel_reason`` instead, and an opaque/globbed one gets no
+    exemption (review R1-MAJOR-1). Nor for a hardlinked regular file, whose
+    other name may be evidence (R1-MINOR-1)."""
     if target.dotdot:
         return False
     return not _hardlinked_file(target.raw_path or target.path)
@@ -458,6 +528,8 @@ def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -
         _SESSIONS_DIRNAME in p.casefold() or _LEDGER_DIRNAME in p.casefold() for p in lexical
     ):
         return None
+    if target.dotdot and not target.climbs and not target.opaque and target.pattern is None:
+        return _kernel_reason(target, prot)
     exemptible = _pad_exemptible(target)
     own_ok = _own_pad_exemptible(target)
     own_prefix = bool(path) and any(_under_evidence(path, pad) for pad in prot.own_scratchpad)

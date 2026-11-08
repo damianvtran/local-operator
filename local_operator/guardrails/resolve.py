@@ -813,9 +813,9 @@ class Target:
     #: lexically, but the kernel resolves ``..`` physically AFTER following a
     #: link, so ``<pad>/sub/../<id>/asks.jsonl`` with ``sub`` -> a session dir
     #: lands in that session's ask store while ``path`` reads as inside the
-    #: pad (review R1-MAJOR-1, PR #3602). ``classify`` therefore never grants
-    #: a scratchpad exemption — any pad, this session's own included — to a
-    #: target carrying this flag; see ``classify._pad_exemptible``.
+    #: pad (review R1-MAJOR-1, PR #3602). ``classify`` therefore decides a
+    #: scratchpad exemption for such a word ONLY from where the kernel lands
+    #: it (``classify._kernel_reason``), never from ``path``.
     dotdot: bool = False
     #: The absolute but UN-normalised join of the word (``None`` for a glob or
     #: opaque word). ``os.path.realpath`` of it resolves ``..`` physically, so

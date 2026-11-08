@@ -88,9 +88,11 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   scratchpad from bash ranks HIGH ("another session's files"), so the judge or
   a verified ask naming the path can lift it — unless the path resolves through
   a link into that session's transcript, lineage or ask store, is a hardlinked
-  file, is written with a `..` component (the kernel resolves `..` after
-  following a link, so no pad, your own included, is exempt then), or an
-  unknowable part (`$(...)`) could leave the pad; those stay CRITICAL. The
+  file, or an unknowable part (`$(...)`) could leave the pad; those stay
+  CRITICAL. A path written with `..` is judged where the kernel lands it
+  (`..` resolves after following links): inside your own scratchpad it stays
+  LOW, inside another session's scratchpad HIGH, anywhere else in session
+  state CRITICAL. The
   `write`/`edit` file tools are not ranked HIGH there: they refuse only the
   evidence files, so a plain file in another session's scratchpad is not
   refused by them. CRITICAL here means every redirection (`>`, `>>`, `>|`,
