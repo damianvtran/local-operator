@@ -650,6 +650,16 @@
         "effort": "default",
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "77755b5d142f25f79c90239cea6a7ca93b68a9e5",
+        "version": "1.3.12",
+        "instructions_sha256": "14c6953a51c62e73d93babf3ea6e14ec4943523d375caf54e645f1e074dfdc76",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": "default",
+        "delegate": false,
+        "class": null
       }
     ],
     "copy-reviewer": [
@@ -1612,6 +1622,27 @@
         "effort": null,
         "delegate": true,
         "class": null
+      },
+      {
+        "sha": "77755b5d142f25f79c90239cea6a7ca93b68a9e5",
+        "version": "1.6.17",
+        "instructions_sha256": "bee43978cbec58c75963b7c07588930419178e203e1c4941f8e596ee8ed06414",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
       }
     ],
     "qa-tester": [
@@ -1913,6 +1944,27 @@
         "sha": "ea9e4766b66894f19f7ff2a9caf58229c8cc8625",
         "version": "1.0.13",
         "instructions_sha256": "4107a6bfc8e80796f814fe7e10a25b6d3a1f8efc09afc042f2e9ede212a2ab79",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "77755b5d142f25f79c90239cea6a7ca93b68a9e5",
+        "version": "1.0.14",
+        "instructions_sha256": "ca87b91c8a0df4cca60eade5adca4e802733572a20d13dd9d3b53d3d644f199b",
         "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
         "tools": [
           "read",
@@ -2452,6 +2504,27 @@
         "sha": "ea9e4766b66894f19f7ff2a9caf58229c8cc8625",
         "version": "1.3.18",
         "instructions_sha256": "7369d66f72218004b90b8f8b784b1fc1212f97ed8a8070121c9ffd68ce1bad6a",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "77755b5d142f25f79c90239cea6a7ca93b68a9e5",
+        "version": "1.3.19",
+        "instructions_sha256": "59826d99d0e8c510501cd8f0afe9037dbc92e4fcc57eccbc288806748aa6fb66",
         "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
         "tools": [
           "read",

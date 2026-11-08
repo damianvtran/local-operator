@@ -467,6 +467,48 @@ def test_run_command_result_ties_the_exit_code_to_the_timeout() -> None:
         RunCommandResult.model_validate(_command_result(exit_code=None, timed_out=False))
 
 
+def test_run_command_result_carries_the_targets_own_failure() -> None:
+    """A command the target could not run is a RESULT the model can react to.
+
+    The sealed run ``t27b-t003-20261108-090532`` lost an episode because the
+    adapter raised instead of answering; ``error`` is the field that lets it
+    answer. It is the ONLY way ``exit_code`` may be None without a timeout.
+    """
+
+    from local_operator.evaluation.adapters.api import RunCommandResult
+
+    unrun = RunCommandResult.model_validate(
+        _command_result(exit_code=None, timed_out=False, error="the wrapper was killed")
+    )
+    assert (unrun.exit_code, unrun.timed_out) == (None, False)
+    assert unrun.error == "the wrapper was killed"
+    # An empty error is not an answer: None-with-no-reason stays invalid.
+    with pytest.raises(ValidationError):
+        RunCommandResult.model_validate(
+            _command_result(exit_code=None, timed_out=False, error="   ")
+        )
+
+
+def test_an_absent_error_does_not_move_a_clean_results_wire_bytes() -> None:
+    """Successful commands keep the canonical bytes they had before the field.
+
+    The field was added to an existing result shape, so a bump would be owed
+    if every clean answer grew ``"error": null``. It does not: the null is
+    omitted, exactly as ``AdapterSelector`` omits an absent ``core_source``.
+    """
+
+    from local_operator.evaluation.adapters.api import RunCommandResult
+
+    clean = RunCommandResult.model_validate(_command_result())
+    assert b"error" not in clean.to_canonical_json()
+    reported = RunCommandResult.model_validate(
+        _command_result(exit_code=None, timed_out=False, error="boom")
+    )
+    assert b'"error":"boom"' in reported.to_canonical_json()
+    # ...and the canonical round trip still holds with the key present.
+    assert RunCommandResult.from_canonical_json(reported.to_canonical_json()) == reported
+
+
 def test_run_command_params_are_bounded() -> None:
     from local_operator.evaluation.adapters.api import (
         MAX_COMMAND_LENGTH,

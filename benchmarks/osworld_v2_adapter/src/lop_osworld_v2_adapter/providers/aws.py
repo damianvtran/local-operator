@@ -50,7 +50,6 @@ import asyncio
 import json
 import logging
 import os
-import signal
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -88,6 +87,11 @@ from lop_osworld_v2_adapter.providers.base import (
     transport_retry_delay,
 )
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
+
+# Re-exported: ``remote_command`` owns the guest-exit vocabulary now, because
+# the wrapper-failure answer names a signal too. The diagnostics here and the
+# tests that pin them keep reading it from this module.
+from lop_osworld_v2_adapter.remote_command import _exit_description
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
 from local_operator.evaluation.adapters.api import RunCommandParams, RunCommandResult
@@ -267,37 +271,6 @@ class GuestExecutionError(RuntimeError):
         super().__init__(message)
         self.delivery = delivery
         self.nothing_sent = nothing_sent
-
-
-def _exit_description(returncode: int) -> str:
-    """Describe a guest exit status: an ordinary code, or death by signal.
-
-    ``subprocess`` reports a signal-killed child as a NEGATIVE returncode, so
-    ``exit -15`` in a diagnostic is really "SIGTERM killed it" wearing a
-    misleading costume. A reader who does not know that convention reads -15 as
-    an exit code and looks for a program that returned one; naming the signal
-    removes a research step that has already cost a full investigation.
-
-    Deliberately says WHAT happened and not WHY. A signal death has many
-    possible originators — the OS, a supervisor, another process, or the
-    command's own actions — and this layer cannot distinguish them. Naming a
-    specific cause here would encode a guess into every future incident report,
-    which is the failure mode that made the last one expensive.
-
-    Leaks nothing: the output is a signal NAME from the stdlib's fixed
-    enumeration or a bare integer, never command text, guest stdout, or stderr.
-    That is the same discipline ``execute`` applies to transport errors.
-    """
-
-    if returncode >= 0:
-        return f"exit {returncode}"
-    try:
-        name = signal.Signals(-returncode).name
-    except ValueError:
-        # An unrecognised signal number is still worth reporting as a signal
-        # rather than as a negative exit code.
-        return f"terminated by signal {-returncode}"
-    return f"terminated by signal {name}"
 
 
 class ReadinessTimeout(AllocationError):
@@ -1511,16 +1484,74 @@ class AwsProvider:
         return guest_supervisor.empty_restart("result_unavailable")
 
     async def run_command(self, params: RunCommandParams) -> RunCommandResult:
-        """One bounded guest shell; transport errors escape without retries."""
-        from lop_osworld_v2_adapter.remote_command import decode_result, payload_for
+        """One bounded guest shell; only a reply that never came escapes.
+
+        Two things the target says are decoded rather than raised on, because
+        both mean it ANSWERED: its command answer (``{status, output, error,
+        returncode}``), and its exception envelope (``{"status": "error",
+        "message": ...}``, status 500) which is what its own deadline fires --
+        ``subprocess.TimeoutExpired`` is one of the exceptions that handler
+        catches, so the command outcome that handler reports is one this layer
+        must not turn into a channel failure. Re-raising either poisoned the
+        session and lost the episode (sealed run
+        ``t27b-t003-20261108-090532``: ``score: null``).
+
+        A 2xx body that cannot be read at all (not JSON, not an object) is the
+        same class: ``http_post_json`` raises before ``decode_result`` sees it,
+        and an unreadable answer is not a lost reply.
+
+        A genuine channel failure still escapes without retries: connection
+        refused, a lost reply, a redirect, a body that is not the guest's
+        protocol answer at all. A command that may already have run must never
+        be replayed, and that ambiguity is the session's to end, not this
+        layer's to paper over.
+        """
+        import requests  # local, like ``build_clients``: the HTTP client is optional
+        from lop_osworld_v2_adapter.remote_command import (
+            answer_from_error_body,
+            decode_result,
+            payload_for,
+            unreadable_answer,
+        )
 
         url = f"http://{self._public_ip}:{GUEST_PORT}{_EXECUTE_PATH}"
-        body = await asyncio.to_thread(
-            self._clients.http_post_json,
-            url,
-            payload_for(params),
-            params.timeout_s + 10,
-        )
+        # Built OUTSIDE the ``try`` below, so the ``ValueError`` arm can only ever
+        # mean the transport answered something unreadable.
+        payload = payload_for(params)
+        try:
+            body = await asyncio.to_thread(
+                self._clients.http_post_json,
+                url,
+                payload,
+                params.timeout_s + 10,
+            )
+        except requests.HTTPError as error:
+            response = error.response
+            if response is None:
+                raise
+            answered = None
+            try:
+                answered = answer_from_error_body(response.content)
+            except Exception:  # noqa: BLE001 - an unreadable body is not an answer
+                answered = None
+            if answered is None:
+                raise
+            # Logged, not silent: every other guest anomaly in this module is,
+            # and a command answered with an error STATUS is the moment the
+            # control server is degrading. The model gets a result either way.
+            logger.warning(
+                "guest answered %s for a command; decoded as a result",
+                response.status_code,
+            )
+            body = answered
+        except ValueError as error:
+            # ``requests.JSONDecodeError`` and ``UnicodeDecodeError`` are both
+            # ``ValueError``s, and so is ``http_post_json``'s own non-object
+            # check, so this arm is the whole "2xx but unreadable" class. It is
+            # NOT a lost reply: the target answered, so it must not poison the
+            # session.
+            logger.warning("guest answered an unreadable 2xx body for a command: %r", error)
+            return unreadable_answer(error)
         return decode_result(body, params)
 
     def _run_guest_command(

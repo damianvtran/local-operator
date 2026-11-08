@@ -1,28 +1,55 @@
 name: Main Full Suite
 
-# THE FULL UNIT SUITE, OFF THE PULL-REQUEST PATH.
+# THE FULL UNIT SUITE, AND THE PULL-REQUEST MERGE GATE.
 #
 # Pull-request CI used to run every unit shard on every push. Measured over
 # 2026-10-24..11-07 (gh API): 89% of ci.yml's runner time was the unit suites
 # (six `test` shards at 25.6 min mean, `tui-e2e`, `coverage-report`), the job
 # queue they created had a 15.6 min median / 77 min p90 wait, and 25% of red
-# outcomes went green on a plain re-run. A PR now carries targeted local
-# evidence (`scripts/affected_tests.py --evidence`) plus ci.yml's fast `guards`
-# job; this workflow is the safety net that still runs EVERYTHING, on `main`.
+# outcomes went green on a plain re-run. So the full suite left the PUSH path:
+# a PR carries targeted local evidence (`scripts/affected_tests.py --evidence`)
+# plus ci.yml's fast `guards` job, and this workflow runs EVERYTHING once — on
+# `main` as the post-merge safety net, and on a PR when a human or agent says
+# the head is ready to merge.
+#
+# THE MERGE GATE. `merge-gate` below is the SECOND required check, alongside
+# ci.yml's `CI Gate`: a PR cannot merge until the whole suite is green on its
+# final head. Why a label-gated run and not a merge queue: GitHub's merge queue
+# is unavailable to this repository — `repository.mergeQueue` is null via
+# GraphQL, `enableMergeQueue` does not exist on it, and the feature is limited
+# to public repos owned by an ORGANISATION (this one is user-owned) or
+# Enterprise Cloud private orgs. The label is the queue, and the aggregate job
+# is the gate.
+#
+# The three ways this design could report a PASS it did not earn, each closed
+# below (the reasoning lives in comments, not only in the code):
+#   1. A job that can be SKIPPED must never own a required check name, because
+#      GitHub counts `skipped` as satisfying a required status check. So no
+#      suite job and no aggregate carries a label-name `if:` — any label starts
+#      one full run, and an accidental label then costs a run, never a false
+#      pass.
+#   2. A required check that never reports sits in "Expected" and blocks. That
+#      is the intended block, but it must always be exitable: the documented
+#      ritual (`make merge-gate PR=<n>`, which removes and re-adds the label)
+#      always produces a run.
+#   3. A push after the gate ran leaves the check on the OLD head, which blocks
+#      again — the ritual re-arms it on the final head.
 #
 # The job definitions below were MOVED here from ci.yml, not rewritten: their
 # timeouts, watchdogs, serial-control lists and artifact steps are measured and
 # pinned by tests/unit/test_ci_hygiene.py and the shard-stall tests, which now
 # read this file for those jobs. The only edits are the ones the move forces:
-# the python matrix is both legs unconditionally (no `pull_request` leg exists
-# here) and `tui-e2e` no longer needs lint/type-check (PR-only jobs).
+# the python matrix is both legs unconditionally (no `pull_request` leg of the
+# old push-triggered run exists here) and `tui-e2e` no longer needs
+# lint/type-check (PR-only jobs).
 #
 # What this run catches that targeted PR runs cannot, and why each needs a FULL
 # run rather than a bigger selection: matrix-version bugs (3.13 only), cross-test
 # state leaks that only show under sharded `-n auto` worksteal ordering, and any
-# test the diff-to-test mapping did not reach. It does NOT block a PR: a red run
-# files (or updates) one `ci-main-red` issue via the `report` job, and a later
-# green run closes it.
+# test the diff-to-test mapping did not reach. On `main` it does NOT block a
+# PR: a red run files (or updates) one `ci-main-red` issue via the `report`
+# job, and a later green run closes it. On a PR it DOES block, through the
+# `merge-gate` aggregate below.
 
 on:
   push:
@@ -34,6 +61,13 @@ on:
     # congested and drops or delays `schedule` events.
     - cron: "17 7 * * *"
   workflow_dispatch:
+  # THE MERGE GATE TRIGGER. ONLY `labeled`. `opened`/`synchronize`/`reopened`
+  # would put the full suite back on every push and every review round — the
+  # cost this workflow exists to avoid — so review rounds run ci.yml's fast
+  # checks and nothing else. `labeled` is the operator's "ready to merge"
+  # signal; `make merge-gate PR=<n>` is how it is re-armed after a push.
+  pull_request:
+    types: [labeled]
 
 # ONE running plus the NEWEST pending, never a queue. GitHub keeps a single
 # pending run per group and a newer arrival replaces it, so with
@@ -49,6 +83,12 @@ on:
 # with `gh workflow run full-suite.yml --ref <branch>`. The group is keyed by
 # ref, so a branch dispatch can never evict main's pending run; on `main` the
 # key is the fixed `full-suite-main`.
+#
+# PR runs are keyed by `refs/pull/<n>/merge`, which is already distinct per PR,
+# so a gate run cannot evict another PR's run either. `cancel-in-progress:
+# false` matters most here: a queued gate run must never be evicted by the
+# nightly schedule or by a later merge onto main — an evicted run reports no
+# verdict, and the PR's required check would sit "Expected".
 concurrency:
   group: ${{ github.ref == 'refs/heads/main' && 'full-suite-main' || format('full-suite-{0}', github.ref) }}
   cancel-in-progress: false
@@ -58,9 +98,12 @@ permissions:
 
 jobs:
   # Same classifier job as ci.yml (kept identical; a hygiene test compares the
-  # two). For a non-`pull_request` event every flag is true, so on this
-  # workflow's triggers it never skips anything; it exists so the moved jobs
-  # keep their `needs: [changes]` + flag wiring byte-for-byte.
+  # two). Off `pull_request` every flag is true, so a push/schedule/dispatch
+  # run never skips anything. A labeled PR is a real PR diff, and classifying
+  # it is WANTED: a docs-only head may skip the unit matrix and still pass the
+  # merge gate (a skip is a verdict, not a silent pass — the gate refuses a
+  # failed or cancelled job). It exists here so the moved jobs keep their
+  # `needs: [changes]` + flag wiring byte-for-byte.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -967,4 +1010,70 @@ jobs:
             echo "::notice::jobs cancelled ($cancelled); leaving ci-main-red as it is"
           elif [ -n "$open" ]; then
             gh issue close "$open" --comment "Full suite green at $SHA: $RUN_URL"
+          fi
+
+  # THE SECOND REQUIRED CHECK: nothing merges until the whole suite is green.
+  #
+  # Shape copied from ci.yml's `ci-gate` on purpose — one stable check name, an
+  # `always()` aggregate over every job in its own workflow, fail-closed on
+  # `failure`/`cancelled` and passing on `skipped` (a hygiene test compares the
+  # two scripts). Splitting the two checks is what keeps review cheap: `CI Gate`
+  # is the slim PR path, this is the one-time full run at the gate.
+  #
+  # NO EVENT GUARD, AND NO LABEL CONDITION — THOSE ARE THE ONLY SAFE SHAPES.
+  #
+  # GitHub counts a `skipped` job as SATISFYING a required status check, so any
+  # `if:` that can be false on a run which publishes this job's check to the PR
+  # head SHA is a merge hole. Both known holes are closed by plain `always()`:
+  #
+  # - The event guard this job used to carry
+  #   (`always() && github.event_name == 'pull_request'`) skipped the gate on
+  #   every non-PR event — and this workflow is DISPATCHED on PR branches, which
+  #   is the documented `WIDE:` route. Measured on PR #3631's head: run
+  #   42501880282 (a `workflow_dispatch` on the branch) left
+  #   `Merge gate (full suite)` = `skipped` on the head while its own suite ran
+  #   RED. Off `pull_request` every classifier flag is true (scripts/ci_scope.py),
+  #   so such a run executed the whole suite and its verdict IS evidence for the
+  #   SHA — worth publishing, never worth discarding in favour of a skip.
+  # - A label condition (`contains(github.event.pull_request.labels.*.name,
+  #   'ready-to-merge')`) would skip the gate on a run started by a DIFFERENT
+  #   label — same hole, another door.
+  #
+  # So this is `if: always()`, exactly like ci.yml's `ci-gate`: every run of this
+  # workflow publishes an honest verdict built from its OWN `needs`, whatever
+  # started it. On `main` that mirrors this workflow's own `report` job
+  # (harmless — both state the same verdict); on a branch dispatch it is the
+  # real full-suite result. `labeled` is still the only PR trigger above, so the
+  # gate intent cannot start a run this misses, and a mislabel spends a run
+  # rather than manufacturing a pass. tests/unit/test_ci_hygiene.py pins both
+  # halves: the `if:` here, and that NO job in this file carries a condition on
+  # the triggering event or on the label.
+  #
+  # `if: always()` so it REPORTS even when a needed job died. A required check
+  # that never reports is "Expected" forever and blocks a PR with no
+  # explanation; this one always lands a verdict.
+  #
+  # `needs` must list every job above: one omitted job is a suite that runs, can
+  # go red, and still passes the gate.
+  merge-gate:
+    name: Merge gate (full suite)
+    if: always()
+    needs:
+      - changes
+      - test
+      - coverage-report
+      - tui-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail on any failed or cancelled needed job
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')"
+          if [ -n "$bad" ]; then
+            echo "::error title=Merge gate (full suite)::failed or cancelled: $(echo "$bad" | tr '\n' ' ')"
+            exit 1
           fi

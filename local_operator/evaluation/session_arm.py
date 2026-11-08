@@ -1808,6 +1808,13 @@ class ActionBridge:
             f"exit_code: {result.exit_code if result.exit_code is not None else 'none'}\n"
             f"timed_out: {str(result.timed_out).lower()}\n"
         )
+        # The target's own explanation of a command it could not run. Without
+        # this line the result would read "exit_code: none / timed_out: false"
+        # and say nothing about WHY -- the model would be told a command failed
+        # and be unable to react to it, which is the state this field exists to
+        # end (see ``RunCommandResult.error``).
+        if result.error is not None:
+            text += f"error: {result.error}\n"
         for stream in ("stdout", "stderr"):
             text += f"{stream}:\n{getattr(result, stream)}\n"
             if getattr(result, f"{stream}_truncated"):

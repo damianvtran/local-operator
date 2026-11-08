@@ -53,10 +53,11 @@ from scripts import check_serial_controls, ci_scope, run_bounded, shard_tests
 REPO = Path(__file__).resolve().parents[2]
 CI_YML = REPO / ".github" / "workflows" / "ci.yml"
 #: The unit suites (`test`, `coverage-report`, `tui-e2e`) moved here from
-#: ci.yml; it runs on `main` only. See `_ci_jobs` for how the pins follow them.
+#: ci.yml; it runs on `main` plus the merge gate's `labeled` pull request. See
+#: `_ci_jobs` for how the pins follow them.
 FULL_SUITE_YML = REPO / ".github" / "workflows" / "full-suite.yml"
 #: Jobs that live in full-suite.yml, not ci.yml. `changes` is in both.
-FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "report"})
+FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "report", "merge-gate"})
 PYPROJECT = REPO / "pyproject.toml"
 MAKEFILE = REPO / "Makefile"
 
@@ -3383,7 +3384,9 @@ def test_agents_doc_states_the_check_count_a_release_bump_pr_runs() -> None:
     """
     scope = _scope()
     bump = scope.classify(["pyproject.toml"], VERSION_BUMP_DIFF)
-    # ci.yml's rows only: full-suite.yml never runs on a pull request.
+    # ci.yml's rows only: the PR check list is `CI Gate`; the full suite runs
+    # at the merge gate (`Merge gate (full suite)`), which a version-only bump
+    # PR never labels.
     pr_jobs = set(_pr_jobs())
     ci_rows = [
         job for job, verdict in scope.job_plan(bump).items() if verdict == "run" and job in pr_jobs
@@ -3430,22 +3433,38 @@ def test_shard_plugin_bootstrap_does_not_export_a_cwd_pythonpath():
     assert "PYTHONPATH=" not in run
 
 
-# --- slim PR CI: the unit suites live on `main`, PRs keep fast gates --------
+# --- slim PR CI: the unit suites run at the merge gate ----------------------
 #
 # The PR path dropped `test`, `coverage-report` and `tui-e2e` (89% of its
 # runner time, measured 2026-10-24..11-07) in favour of targeted local
-# evidence (`scripts/affected_tests.py`) plus a `guards` job; the full suite
-# runs post-merge/nightly in full-suite.yml and files a `ci-main-red` issue.
-# These pins keep each half of that bargain from eroding silently.
+# evidence (`scripts/affected_tests.py`) plus a `guards` job. The full suite
+# then runs ONCE, at the merge gate (`pull_request: [labeled]`), and
+# post-merge/nightly on `main` (which files a `ci-main-red` issue). These pins
+# keep each half of that bargain from eroding silently.
 
 
 def test_pull_requests_do_not_run_the_unit_suites() -> None:
-    """The moved jobs exist ONLY in full-suite.yml, which never runs on a PR."""
+    """The moved jobs exist ONLY in full-suite.yml, and run on a PR only when
+    the merge gate asks for them.
+
+    The bargain has two halves: review rounds stay cheap (no unit matrix on
+    `opened`/`synchronize`), and `main` cannot go without the full suite. Both
+    are pinned here — the trigger list is what keeps the first, and the
+    aggregate (`test_merge_gate_aggregates_every_full_suite_job`) is what keeps
+    the second from being a red pipeline reaching `main` through the label.
+    """
     pr_jobs = _pr_jobs()
     assert not ({"test", "coverage-report", "tui-e2e"} & set(pr_jobs)), sorted(pr_jobs)
     full = yaml.safe_load(FULL_SUITE_YML.read_text())
     triggers = full.get("on", full.get(True))
-    assert "pull_request" not in triggers and "pull_request_target" not in triggers
+    # `labeled` ONLY: `opened`, `synchronize` and `reopened` are the three that
+    # would put the matrix back on every push, so they are refused by name.
+    assert triggers["pull_request"] == {"types": ["labeled"]}, (
+        "full-suite.yml's pull_request trigger widened: the full suite is a "
+        "merge-gate run, not a per-push one "
+        f"(pull_request={triggers.get('pull_request')!r})"
+    )
+    assert "pull_request_target" not in triggers
     assert triggers["push"]["branches"] == ["main"]
     assert triggers["schedule"] and "workflow_dispatch" in triggers
     assert set(full["jobs"]) == FULL_SUITE_JOBS | {"changes"}
@@ -3453,6 +3472,441 @@ def test_pull_requests_do_not_run_the_unit_suites() -> None:
         needs = job.get("needs") or []
         needs = [needs] if isinstance(needs, str) else needs
         assert not (set(needs) & FULL_SUITE_JOBS), f"a PR job still needs a moved job: {needs}"
+
+
+# --- the merge gate: the full suite runs ONCE, for a labeled PR ------------
+#
+# Review rounds must not pay for the full suite, and a red pipeline must never
+# reach `main`. Merge queue is not available to this repository (user-owned,
+# so `enableMergeQueue` does not exist and `repository.mergeQueue` is null), so
+# the gate is a `labeled`-triggered run plus one required aggregate check. The
+# pins below keep the trigger narrow, the aggregate unskippable, and the re-arm
+# ritual present: each is a way the gate could be made to *look* green.
+
+
+def test_merge_gate_aggregates_every_full_suite_job() -> None:
+    """One stable required name, `always()`, unconditional, over every suite job.
+
+    `needs` is derived, not listed: a new suite job that the aggregate does not
+    wait on is a job that can go red while the required check stays green —
+    the whole defect this gate exists to prevent. `report` is the one
+    exclusion, and it is structural: it is the `ci-main-red` issue filer, it
+    acts only on `refs/heads/main`, and making the PR gate wait on it would put
+    an issue-writing job on the merge path.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    gate = jobs["merge-gate"]
+    assert gate["name"] == "Merge gate (full suite)", (
+        f"the required check name drifted to {gate['name']!r}: branch protection "
+        "names this exact string, and a rename stops gating silently"
+    )
+    assert gate["if"] == "always()", (
+        "the aggregate must report on EVERY run of this workflow, whatever event "
+        "started it — a condition that can be false publishes `skipped`, which "
+        f"satisfies a required check (if: {gate['if']!r})"
+    )
+    assert set(gate["needs"]) == set(jobs) - {"merge-gate", "report"}, (
+        "merge-gate must need every job that can go red, or a red suite passes "
+        f"it (needs={gate['needs']!r}, jobs={sorted(jobs)!r})"
+    )
+    assert not gate.get(
+        "continue-on-error"
+    ), "continue-on-error makes a required check report success for a red run"
+    run = gate["steps"][-1]["run"]
+    assert (
+        '"failure"' in run and '"cancelled"' in run and "exit 1" in run
+    ), "the aggregate must fail on a failed or cancelled need"
+    assert '"skipped"' not in run, (
+        "a classifier skip must pass the gate: a docs-only head legitimately "
+        "skips the matrix and must still be mergeable"
+    )
+
+
+def test_no_merge_gate_job_is_conditional_on_the_label_name() -> None:
+    """Hostile case: GitHub counts `skipped` as a passed required check.
+
+    A job whose `if:` read the label would report `skipped` on a run started by
+    ANY OTHER label, and a red PR would then merge on a check that never ran.
+    The invariant is about the label CONTEXT, so both spellings are refused:
+    `github.event.label.name` (singular, one label) is as good a hole as
+    `github.event.pull_request.labels.*.name`, and so is any `contains(` written
+    over either — a name test can be built from any of them. Asserted over
+    EVERY job, not just the aggregate: a conditional suite job skips the
+    coverage while the gate goes on reporting `success` for it.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    for job_id, job in jobs.items():
+        condition = str(job.get("if") or "")
+        assert not re.search(r"\blabels?\b", condition), (
+            f"full-suite `{job_id}` tests the pull-request label in its `if:` "
+            f"({condition!r}). A label-gated job reports `skipped` on a run "
+            "started by another label, and `skipped` satisfies a required "
+            "status check — a red PR would merge"
+        )
+        assert not re.search(r"contains\([^()]*\blabels?\b", condition), (
+            f"full-suite `{job_id}` builds a label-name test with `contains(` "
+            f"({condition!r}); the same `skipped` hole, written the long way"
+        )
+        # The ritual's own label, named directly: the context rules above are the
+        # invariant, this is the instance the repository actually uses.
+        assert "ready-to-merge" not in condition, (
+            f"full-suite `{job_id}` names the re-arm label in its `if:` " f"({condition!r})"
+        )
+
+
+def test_no_full_suite_job_is_conditional_on_the_triggering_event() -> None:
+    """A job `if:` must never depend on WHICH event started the run.
+
+    This workflow starts on four events (`labeled` PRs, `push`, `schedule`,
+    `workflow_dispatch`) and every run publishes its checks on its OWN SHA, so
+    an event condition is a way to publish `skipped` on a head whose suite ran
+    red — and GitHub counts `skipped` as a satisfied required check. The
+    aggregate carried exactly that hole until PR #3631: `if: always() &&
+    github.event_name == 'pull_request'` left `Merge gate (full suite)` =
+    `skipped` on a PR head after the documented `WIDE:` `workflow_dispatch`,
+    while that dispatch's suite was red (run 42501880282).
+
+    What stays legitimate is data about the DIFF, not about the event:
+    `always()`, `!cancelled()` and the `needs.changes.outputs.*` classifier
+    flags. Those may skip a job — the aggregate passes a classifier skip on
+    purpose, because a docs-only head must stay mergeable.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    for job_id, job in jobs.items():
+        condition = str(job.get("if") or "")
+        assert "github." not in condition, (
+            f"full-suite `{job_id}` conditions its `if:` on the triggering event "
+            f"or the repo context ({condition!r}). Every run lands its checks on "
+            "the SHA it ran on and a `skipped` job satisfies a required status "
+            "check, so a job must be scheduled by the classifier "
+            "(`needs.changes.outputs.*`), never by which event ran"
+        )
+    assert (
+        jobs["merge-gate"]["if"] == "always()"
+    ), "the aggregate is the required check: it must be unconditional"
+
+
+def test_the_makefile_rearms_the_merge_gate_with_the_label_ritual() -> None:
+    """Hostile cases: a push after the gate, and a ritual that arms nothing.
+
+    A push AFTER the gate leaves the check on the old head, where it blocks the
+    merge — the intended block, but it has to be exitable by an agent with no
+    UI access and no way to re-point a check at a SHA. Removing and re-adding
+    the label is that exit, so the target is pinned like any other gate.
+
+    It is also pinned for the opposite failure (QA round 1, Q-3): a ritual that
+    PRINTS success without arming anything. `.[0]` on an empty run list renders
+    `null`, `--limit 1` returns the PREVIOUS run on any re-arm (so `gh run
+    watch` exits on an old verdict immediately), and an `|| true` removal leaves
+    the label on, which makes the add a no-op, fires no `labeled` event and
+    strands the head in "Expected".
+    """
+    makefile = MAKEFILE.read_text()
+    assert re.search(r"^merge-gate: ##", makefile, re.M), (
+        "`make merge-gate PR=<n>` is gone: after a push the required check "
+        "sits in Expected forever with no documented way out"
+    )
+    recipe = _makefile_recipe_blocks()["merge-gate"]
+    for needle in (
+        "--remove-label ready-to-merge",
+        "--add-label ready-to-merge",
+        "gh label create ready-to-merge",
+        "gh run watch",
+        "gh pr checks",
+        "PR=<number>",
+    ):
+        assert needle in recipe, f"the merge-gate ritual lost {needle!r}"
+    # Remove-THEN-add is load-bearing, not cosmetic: `--add-label` on a label
+    # that is already present is a no-op, so no `labeled` event fires and the
+    # head stays in "Expected" while the ritual reports success.
+    assert recipe.index("--remove-label ready-to-merge") < recipe.index(
+        "--add-label ready-to-merge"
+    ), "the ritual must remove the label before adding it, or no event fires"
+    # It must be able to TELL whether it armed anything: the PR is validated
+    # open first, the new run is resolved by head SHA + created-after (never by
+    # row order), and a missing run is a non-zero exit with the next commands,
+    # not a `gh run watch null`.
+    assert '!= "OPEN"' in recipe, "a closed or nonexistent PR must be refused"
+    assert "headRefOid" in recipe, "the ritual must know the PR's head SHA"
+    assert (
+        "headSha" in recipe and "createdAt" in recipe
+    ), "the new run must be resolved by head SHA + created-after, not row order"
+    assert (
+        'jq -r --arg sha "$$head_sha"' in recipe
+    ), "the run list must be filtered by the system `jq`, which does accept `--arg`"
+    assert '--arg prev "$$prev"' in recipe, "the previous run's id must not match"
+    # R6, measured on gh 2.100.0: `gh` has NO `--arg` flag and its `--jq` takes
+    # exactly one token, so `--jq --arg sha … --arg since … --arg prev …` exits 1
+    # with `unknown flag: --arg`. The recipe discarded that stderr, so `prev`
+    # was always empty and the poll — which passed the same flags — never
+    # matched: the success branch was unreachable and every arming reported
+    # failure. The values must travel to `jq` by pipe, never to `gh`.
+    for segment in re.split(r"[|;\n]", recipe):
+        if re.search(r"\bgh\s+\w", segment):
+            assert "--arg" not in segment, (
+                "`gh` has no `--arg` flag (`unknown flag: --arg` on 2.100.0); a "
+                f"jq argument must go to `jq`, not to gh: {segment.strip()!r}"
+            )
+    assert "--jq --" not in recipe, (
+        "`--jq` takes exactly one token, so `--jq --arg` hands gh a flag it does "
+        "not have and the query never runs"
+    )
+    # The bound is arithmetic the failure message promises out loud: 12 polls
+    # 5 s apart is the "60 s" an operator reads when it gives up.
+    attempts = int(re.search(r"-lt (\d+)", recipe).group(1))
+    poll_pause = int(re.findall(r"sleep (\d+)", recipe)[-1])
+    assert attempts * poll_pause == 60, (
+        f"the poll is {attempts} attempts x {poll_pause} s = {attempts * poll_pause} s "
+        "but its failure message promises 60 s"
+    )
+    assert "within 60 s" in recipe, "the bound must be stated where it fails"
+    assert (
+        "--limit 1\n" not in recipe and "--limit 1 " not in recipe
+    ), "`--limit 1` cannot tell the new run from the previous one"
+    assert "exit 1" in recipe, "arming nothing must exit non-zero, not print null"
+    # The removal is the one call that may NOT be softened: `|| true` there is
+    # what let a failed removal pass as a successful arm (QA round 1, Q-3).
+    assert (
+        "could not remove ready-to-merge" in recipe
+    ), "a failed label removal must fail loudly, not be swallowed"
+    assert recipe.count("|| true") == 1, (
+        "the only tolerated soft failure is the idempotent `gh label create`; a "
+        "swallowed `--remove-label` leaves the label on, so the add is a no-op, "
+        "no event fires and the ritual still reports success"
+    )
+
+
+#: The head SHA the stubbed `gh` reports. Hex, as GitHub's `headRefOid` is.
+_MERGE_GATE_SHA = "0123456789abcdef0123456789abcdef01234567"
+#: Format-identical to the recipe's `date -u +%Y-%m-%dT%H:%M:%SZ` (which is what
+#: it compares `createdAt` against): one run comfortably after that instant and
+#: one comfortably before it, so both of the poll's predicates are exercised
+#: rather than the test racing the wall clock.
+_MERGE_GATE_AFTER = "2999-01-01T00:00:00Z"
+_MERGE_GATE_BEFORE = "2000-01-01T00:00:00Z"
+#: A stubbed `gh`: records every call, answers with the OUTPUT of the queries the
+#: ritual reads, and reproduces the one flag real `gh` does not have (R6). On gh
+#: 2.100.0 `gh run list … --jq --arg sha …` exits 1 with `unknown flag: --arg`;
+#: the recipe discarded that stderr, so `prev` stayed empty, the poll matched
+#: nothing and the ritual reported failure for every run it armed. The stub
+#: rejects `--arg` the same way, so a regression fails here instead of only on a
+#: real arming. Its `run list` answers raw JSON with no `--jq` applied — the
+#: recipe filters it itself, with the real `jq`.
+_MERGE_GATE_GH_BODY = """
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+with Path(os.environ["STUB_LOG"]).open("a") as handle:
+    handle.write(" ".join(args) + "\\n")
+
+
+def answer(message, code):
+    print(message, file=sys.stderr if code else sys.stdout)
+    raise SystemExit(code)
+
+
+if "--arg" in args:
+    answer("unknown flag: --arg", 1)
+
+if args[:2] == ["pr", "view"]:
+    if "state,headRefOid,headRefName" in args:
+        if os.environ.get("STUB_PR_MISSING") == "1":
+            answer("graphql: Could not resolve to a PullRequest", 1)
+        print(os.environ["STUB_STATE"], os.environ["STUB_SHA"], os.environ["STUB_HEAD"])
+        raise SystemExit(0)
+    if "labels" in args:
+        for label in os.environ.get("STUB_LABELS", "").split():
+            print(label)
+        raise SystemExit(0)
+    answer("unexpected pr view: " + " ".join(args), 3)
+
+if args[:2] == ["label", "create"]:
+    answer("Label already exists", 1)
+
+if args[:2] == ["pr", "edit"]:
+    if "--remove-label" in args and os.environ.get("STUB_REMOVE_FAIL") == "1":
+        answer("could not update label", 1)
+    raise SystemExit(0)
+
+if args[:2] == ["run", "list"]:
+    counter = Path(os.environ["STUB_RUN_LIST_COUNT"])
+    calls = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(calls + 1))
+    # Call 1 is the pre-arm lookup for the run to exclude; every later call is
+    # one attempt of the bounded poll.
+    print(os.environ["STUB_PREV_RUNS" if calls == 0 else "STUB_POLL_RUNS"])
+    raise SystemExit(0)
+
+answer("unexpected gh call: " + " ".join(args), 3)
+"""
+
+
+def _merge_gate_runs(*runs: tuple[int, str]) -> str:
+    """A `gh run list --json databaseId,url,headSha,createdAt` payload."""
+    return json.dumps(
+        [
+            {
+                "databaseId": run_id,
+                "url": "https://github.com/damianvtran/local-operator/actions/runs/" f"{run_id}",
+                "headSha": _MERGE_GATE_SHA,
+                "createdAt": created_at,
+            }
+            for run_id, created_at in runs
+        ]
+    )
+
+
+def _arm_merge_gate(
+    tmp_path: Path,
+    *,
+    state: str = "OPEN",
+    labels: str = "",
+    remove_fail: str = "0",
+    pr_missing: str = "0",
+    prev_runs: str = "[]",
+    poll_runs: str = "[]",
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run the REAL `make merge-gate` target with a stubbed `gh` on PATH.
+
+    `make` runs it, not the extracted recipe text: `$$` is make's escape for a
+    literal `$`, so a shell handed that text directly would read every variable
+    as its own process id. `sleep` is stubbed as well — the real bound is 12
+    attempts 5 s apart plus a 3 s pause after a removal, which is 63 s per case;
+    the bound's ARITHMETIC is pinned in the test above instead.
+
+    Returns the process and every `gh` invocation, in order, as argv joined by
+    spaces.
+    """
+    shim = tmp_path / "bin"
+    shim.mkdir(exist_ok=True)
+    (shim / "gh").write_text(f"#!{sys.executable}\n{_MERGE_GATE_GH_BODY}")
+    (shim / "gh").chmod(0o755)
+    (shim / "sleep").write_text(f"#!{sys.executable}\n")
+    (shim / "sleep").chmod(0o755)
+    (tmp_path / "home").mkdir(exist_ok=True)
+    log = tmp_path / "gh.log"
+    env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith("CMUX_")},
+        "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}",
+        "HOME": str(tmp_path / "home"),
+        "STUB_LOG": str(log),
+        "STUB_RUN_LIST_COUNT": str(tmp_path / "runlist.count"),
+        "STUB_SHA": _MERGE_GATE_SHA,
+        "STUB_HEAD": "ci/merge-gate-merge-gate",
+        "STUB_STATE": state,
+        "STUB_LABELS": labels,
+        "STUB_REMOVE_FAIL": remove_fail,
+        "STUB_PR_MISSING": pr_missing,
+        "STUB_PREV_RUNS": prev_runs,
+        "STUB_POLL_RUNS": poll_runs,
+    }
+    proc = subprocess.run(
+        ["make", "-f", str(MAKEFILE), "merge-gate", "PR=3631"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    return proc, (log.read_text().splitlines() if log.exists() else [])
+
+
+def test_the_merge_gate_ritual_prints_the_run_it_armed(tmp_path: Path) -> None:
+    """The success branch must be reachable: it prints the NEW run's URL.
+
+    R6, as a behaviour. The poll used to hand jq's own flags to `gh`
+    (`--jq --arg sha …`), which exits 1 with `unknown flag: --arg`; the recipe
+    assigned empty on failure, so no attempt of the bounded poll could ever
+    match and the ritual reported "armed … but no NEW run" for an arming it had
+    just performed. Mutation that must fail this: put `--arg` back on the `gh`
+    call, or drop the `!= prev` / `createdAt >= since` predicates.
+    """
+    previous, armed = 1111, 2222
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        # Already labelled, so the remove-then-add order is exercised too: a
+        # `--add-label` over a present label is a no-op, fires no `labeled`
+        # event and strands the head in "Expected" while printing success.
+        labels="ready-to-merge",
+        prev_runs=_merge_gate_runs((previous, _MERGE_GATE_BEFORE)),
+        poll_runs=_merge_gate_runs((armed, _MERGE_GATE_AFTER), (previous, _MERGE_GATE_BEFORE)),
+    )
+    assert proc.returncode == 0, f"the ritual failed: {proc.stdout}\n{proc.stderr}"
+    url = f"https://github.com/damianvtran/local-operator/actions/runs/{armed}"
+    assert url in proc.stdout, (
+        f"the ritual did not print the URL of the run it armed ({url}); it said: " f"{proc.stdout}"
+    )
+    assert (
+        f"gh run watch {armed} --exit-status" in proc.stdout
+    ), f"the follow command must name the armed run, not the previous one: {proc.stdout}"
+    assert (
+        f"runs/{previous}" not in proc.stdout
+    ), f"the ritual printed the PREVIOUS run on this head: {proc.stdout}"
+    edits = [call for call in calls if call.startswith("pr edit")]
+    assert (
+        edits[:1] and "--remove-label" in edits[0]
+    ), f"a present label must be removed first, or no event fires: {calls}"
+    assert len(edits) > 1 and "--add-label" in edits[1], f"the add must follow the removal: {calls}"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "stub", "expected", "arms"),
+    [
+        (
+            "no-new-run",
+            {
+                "prev_runs": _merge_gate_runs((1111, _MERGE_GATE_BEFORE)),
+                # The only run for this head is the OLD one: created before the
+                # arm time and equal to `prev`, so neither predicate matches.
+                "poll_runs": _merge_gate_runs((1111, _MERGE_GATE_BEFORE)),
+            },
+            "no NEW full-suite",
+            # This one DOES arm — the add runs — and then cannot confirm the
+            # run; the error must then name what to check, not claim success.
+            True,
+        ),
+        (
+            "removal-fails",
+            {"labels": "ready-to-merge", "remove_fail": "1"},
+            "could not remove ready-to-merge",
+            False,
+        ),
+        ("pr-missing", {"pr_missing": "1"}, "not found (gh pr view failed)", False),
+        ("pr-closed", {"state": "CLOSED"}, "not OPEN", False),
+    ],
+)
+def test_the_merge_gate_ritual_refuses_without_arming(
+    tmp_path: Path, scenario: str, stub: dict[str, str], expected: str, arms: bool
+) -> None:
+    """Every refusal is non-zero, actionable, and happens BEFORE the add.
+
+    A ritual that prints success without arming anything is the failure mode
+    this target exists to prevent (QA round 1, Q-3), and a failed `--remove-label`
+    must abort: with the label still on, the add is a no-op. Mutation that must
+    fail this: swallow the removal (`|| true`), drop the bounded poll's non-zero
+    exit, or skip the PR state check.
+    """
+    proc, calls = _arm_merge_gate(tmp_path, **stub)
+    assert (
+        proc.returncode != 0
+    ), f"{scenario}: the ritual reported success after arming nothing: {proc.stdout}"
+    assert (
+        expected in proc.stderr
+    ), f"{scenario}: expected {expected!r} on stderr, got {proc.stderr!r}"
+    if not arms:
+        assert not [
+            call for call in calls if "--add-label" in call
+        ], f"{scenario}: a refusal before the add must leave the label alone: {calls}"
+        assert (
+            "re-armed the merge gate" not in proc.stdout
+        ), f"{scenario}: a failed ritual must not print the success line: {proc.stdout}"
+    if scenario.startswith("pr-"):
+        assert calls == [
+            call for call in calls if call.startswith("pr view")
+        ], f"{scenario}: a PR that cannot be re-armed must not be mutated: {calls}"
 
 
 def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
@@ -3470,7 +3924,10 @@ def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
     report = full["jobs"]["report"]
     assert report["if"] == "always()"
     assert report["permissions"] == {"issues": "write"}
-    assert set(report["needs"]) == set(full["jobs"]) - {"report"}
+    # `merge-gate` is excluded deliberately: on `main` it mirrors this job's
+    # verdict, so the issue filer stays the aggregate that narrates main's
+    # health (and the gate must never wait on an issue-writing job).
+    assert set(report["needs"]) == set(full["jobs"]) - {"report", "merge-gate"}
     run = report["steps"][0]["run"]
     assert (
         'if [ "$GITHUB_REF" != "refs/heads/main" ]' in run

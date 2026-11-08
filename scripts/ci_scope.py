@@ -416,12 +416,13 @@ FLAGS = (
 #: `FLAGS` and the job's `if:` must read each of them (asserted A1).
 #:
 #: `test` and `tui-e2e` (and `coverage-report` below) now live in
-#: `.github/workflows/full-suite.yml`, which runs on `main` only and carries
-#: the same `changes` job, so their gating is unchanged where they run. They
-#: stay in this map because `make check-changed` still runs them locally (the
-#: scoped pytest arms below); on a pull request their flag rows describe the
-#: local plan, not a ci.yml job. `guards` is the PR-path slice of the unit
-#: suite and takes the `unit` flag the moved matrix used.
+#: `.github/workflows/full-suite.yml`, which runs on `main` plus a labeled pull
+#: request (the merge gate) and carries the same `changes` job, so their gating
+#: is unchanged where they run. They stay in this map because `make
+#: check-changed` still runs them locally (the scoped pytest arms below); on a
+#: pull request their flag rows describe the local plan, not a ci.yml job.
+#: `guards` is the PR-path slice of the unit suite and takes the `unit` flag the
+#: moved matrix used.
 JOB_FLAGS: dict[str, tuple[str, ...]] = {
     "lint": ("lint",),
     "type-check": ("types",),
@@ -463,6 +464,13 @@ UNGATED_JOBS: dict[str, str] = {
     "report": (
         "full-suite.yml's `if: always()` issue filer: it exists to report a "
         "red or green main run, so no scope flag may skip it"
+    ),
+    "merge-gate": (
+        "full-suite.yml's `if: always()` aggregate, the second required check: "
+        "it must report on every pull_request run and it passes skipped needs "
+        "(a classifier skip is a verdict, not a pass), so no scope flag — and "
+        "above all no label-name test, which would report `skipped` on a run "
+        "started by another label and let a red PR merge — may gate it"
     ),
     "coverage-report": (
         "no `if:` at all, `needs: test` only: GitHub's 'a skipped need skips the "

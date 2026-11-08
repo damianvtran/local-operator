@@ -77,10 +77,12 @@ it under `tests/unit/tui`** — and it runs beside ~25 concurrent agent sessions
 this host, so the same command lands anywhere in that range (and it is the reason
 `tests/durations.json` exists as the sharder's input). Do not treat the whole suite
 as a routine inner-loop step: run the targeted command for what you changed (see
-"Scoping the inner loop" below, and note which jobs still narrow). PR CI runs no
-unit tests: select with `make test-affected` (`scripts/affected_tests.py`), record
-`## Targeted test evidence` on the PR, and let `.github/workflows/full-suite.yml`
-(main tip + nightly) be the whole-tree run.
+"Scoping the inner loop" below, and note which jobs still narrow). PR CI runs the
+fast `guards` slice, not the unit matrix: select with `make test-affected`
+(`scripts/affected_tests.py`), record `## Targeted test evidence` on the PR, and
+let `.github/workflows/full-suite.yml` be the whole-tree run — it runs **once at
+the merge gate** (a `labeled` pull request, see "Who may merge: two tiers") and
+on `main`'s tip plus nightly.
 
 **Every pytest invocation in this file is isolated, and that is not decoration.**
 Each block also carries its own `ISO=$(mktemp -d)`, because the variable lives in
@@ -1323,10 +1325,11 @@ changes the `version =` line fails unless its title starts with
 unaffected — the guard reads the version line, not the file.
 
 It makes the violation loud; it does not make it impossible. `main`'s ruleset
-requires one approving review but configures **no required status checks**, and
-admins hold a configured bypass (see "Who may merge: two tiers"), so an
-`--admin` merge lands over a red guard. Treat a failing
-`version-bump-guard` as a stop signal rather than an obstacle to route around:
+requires one approving review and one required status check, `CI Gate` (plus
+`Merge gate (full suite)` once that context is added — see "Who may merge: two
+tiers"), and admins hold a configured bypass, so an `--admin` merge lands over a
+red guard. Treat a failing `version-bump-guard` as a stop signal rather than an
+obstacle to route around:
 the job is the reviewer's missing memory, not a lock.
 
 **A release PR's green is narrow.** Change-scope gating classifies a diff
@@ -1335,7 +1338,10 @@ bump runs seven checks, not the matrix: `changes`, `version-bump-guard` and
 `CI Gate` from `ci.yml`, plus `Release invariants` and `Build and start the release
 artifact` on Python 3.12, 3.13 and 3.14 from `release-gate.yml` (among its
 triggers, a push to `release-next`/`release-next-*`, the runbook's bump
-branch). Every other `ci.yml` job reports skipping. The classifier keys on
+branch). Every other `ci.yml` job reports skipping. The second required check,
+`Merge gate (full suite)`, is deliberately not armed on a bump PR — no
+`ready-to-merge` label is added, and a version-only diff classifies the matrix
+out anyway — so neither a missing nor a skipped gate is a defect here. The classifier keys on
 the diff but the Release Gate keys on the branch name, so a bump pushed from
 any other branch shows only the two `ci.yml` checks: the artifact gate never
 ran, which is a reason to use the mandated branch, not a green. That is the
@@ -1533,6 +1539,9 @@ pypi/support#12738 and pypi/support#12882.
    `pyproject.toml` diff classifies as a release bump, so from `ci.yml` only
    `changes`, `version-bump-guard` and `CI Gate` run and every other job reports
    skipping — the whole job set would be gating code this PR does not touch.
+   The other required check, `Merge gate (full suite)`, is not armed on a bump
+   PR at all (no `ready-to-merge` label, and the version-only diff would
+   classify the matrix out anyway), so seven is the complete list.
    The other four come from `.github/workflows/release-gate.yml`, which fires
    on the push to `release-next` (its triggers also include `release-next-*`,
    pushes to `main`, and `workflow_dispatch`): `Release invariants` (the
@@ -2722,6 +2731,35 @@ to fail — an all-green verdict built that way proves nothing about the shards.
 Grep whole lines for `fail`/`pending` (or read `--json`). Measured 2026-10-01: a
 merged-red landed 20 s after its shard failed, under a verdict built from
 `awk '{print $2}'`.
+
+**Two required checks: `CI Gate`, and the merge gate that runs the whole suite
+once.** Review rounds stay cheap — `ci.yml`'s fast jobs are all a push or a
+review round pays for — and the full suite runs on a pull request **only** for a
+`labeled` event (`pull_request: types: [labeled]` in `full-suite.yml`). The
+ritual, in order: rounds clean and the head **final** → add `ready-to-merge` →
+`Merge gate (full suite)` runs the entire suite on that head → merge once it is
+green. A red gate blocks the merge, and that is the point: no red pipeline
+reaches `main`. A push **after** the gate revokes that green — the check belongs
+to the SHA it ran on, so the new head sits in "Expected" — and
+`make merge-gate PR=<n>` re-arms it (remove + re-add the label, then print the
+triggered run and `gh run watch`/`gh pr checks`). Never test the label's NAME in
+a job `if:`: GitHub counts a `skipped` job as satisfying a required status check,
+so a job conditional on the label reports `skipped` on a run started by any
+*other* label and a red PR would merge. Any label therefore starts one full run:
+a mislabel costs a run, never a false pass. A gate green is evidence about the
+PR's own head, not about its merge result: the branch is not forced up to date,
+so `main`'s own full-suite run remains the backstop for a semantic conflict
+with a moved base. A merge queue would be the natural
+tool and is unavailable here — GitHub restricts it to org-owned public
+repositories and Enterprise Cloud private ones, and this repository is
+user-owned (`repository.mergeQueue` is null; `enableMergeQueue` does not exist).
+The second context has to be in the ruleset for the block to bite:
+`gh api repos/damianvtran/local-operator/rulesets/3622629` shows
+`required_status_checks` carrying `CI Gate` alone, and
+`Merge gate (full suite)` is added with a `PUT` on that ruleset — until it is
+there, the gate is a comment rather than a lock. Add it **after** the workflow
+that reports it has merged, and never before: a required context that nothing
+reports sits in "Expected" and blocks every PR in the fleet.
 
 **Tier 2 — the PR is anyone else's.** An outside contributor's PR needs **both**
 an approving review **and** a clean agent review round. The approval is the
