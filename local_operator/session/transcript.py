@@ -2980,7 +2980,14 @@ class Transcript:
             preserve_mtime=preserve_mtime,
         )
 
-    async def append_prune(self, target_entry_id: str, notice: str) -> TranscriptEntry:
+    async def append_prune(
+        self,
+        target_entry_id: str,
+        notice: str,
+        *,
+        replacement: Message | None = None,
+        entry_id: str | None = None,
+    ) -> TranscriptEntry:
         """Journal that compaction blanked the tool result at ``target_entry_id``.
 
         Without this the transcript and the live context disagree the moment
@@ -2990,7 +2997,24 @@ class Transcript:
         of rewriting the row keeps the store append-only on the hot path;
         :meth:`compact_file` folds the journal in later, off the hot path.
         """
-        return await self._append(ENTRY_PRUNE, {"target": target_entry_id, "notice": notice})
+        payload: dict[str, Any] = {"target": target_entry_id, "notice": notice}
+        if replacement is not None:
+            # Continuations replace a queued result, not its call or identity.
+            # Reuse the append-only overlay so forks/readers never see a second
+            # orphan tool result or a half-rewritten conversation.
+            target = next(row for row in self._entries if row.id == target_entry_id)
+            if (
+                target.payload.get("role") != "tool"
+                or replacement.role != "tool"
+                or target.payload.get("tool_call_id") != replacement.tool_call_id
+                or target.payload.get("tool_name") != replacement.tool_name
+            ):
+                raise ValueError("a result replacement must preserve its tool identity")
+            payload["replacement"] = {
+                "kind": CUSTOM_KIND_MESSAGE,
+                **encode_message_payload(replacement, self._attachments),
+            }
+        return await self._append(ENTRY_PRUNE, payload, entry_id=entry_id)
 
     async def _append(
         self,
@@ -3739,16 +3763,9 @@ class Transcript:
                 )
         return rows
 
-    def pending_prunes(self) -> dict[str, str]:
-        """``{target entry id: notice}`` for every un-folded prune entry.
-
-        Later entries win, so a target blanked twice keeps the newest notice.
-        """
-        return {
-            str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
-            for entry in self._entries
-            if entry.type == ENTRY_PRUNE and entry.payload.get("target")
-        }
+    def pending_prunes(self) -> dict[str, str | dict[str, Any]]:
+        """Latest append-only result replacement for each original message id."""
+        return collect_prunes(self._entries)
 
     def build_llm_history(self, *, through_id: str | None = None) -> list[AgentMessage]:
         """Replay the transcript into LLM-visible messages.
@@ -3967,7 +3984,7 @@ class Transcript:
         return None
 
 
-def _pruned_entry(entry: TranscriptEntry, notice: str) -> TranscriptEntry:
+def _pruned_entry(entry: TranscriptEntry, notice: str | dict[str, Any]) -> TranscriptEntry:
     """``entry`` with its content folded down to ``notice``.
 
     A fresh entry rather than a mutation: ``reclaimable_bytes`` measures the
@@ -3976,6 +3993,14 @@ def _pruned_entry(entry: TranscriptEntry, notice: str) -> TranscriptEntry:
     and dropping an assistant message's calls would break call/result pairing
     for every provider.
     """
+    if isinstance(notice, dict):
+        if (
+            entry.payload.get("role") == notice.get("role") == "tool"
+            and entry.payload.get("tool_call_id") == notice.get("tool_call_id")
+            and entry.payload.get("tool_name") == notice.get("tool_name")
+        ):
+            return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=dict(notice))
+        return entry
     payload = dict(entry.payload)
     payload["content"] = [TextContent(text=notice).model_dump()]
     provider_payload = dict(payload.get("provider_payload") or {})
@@ -4051,7 +4076,7 @@ def _compaction_marker(entry: TranscriptEntry) -> CustomMessage:
     )
 
 
-def collect_prunes(entries: Sequence[TranscriptEntry]) -> dict[str, str]:
+def collect_prunes(entries: Sequence[TranscriptEntry]) -> dict[str, str | dict[str, Any]]:
     """Map pruned message id -> notice, over the WHOLE journal.
 
     Exported because :func:`audit_slice` must not re-derive this from its own
@@ -4063,7 +4088,9 @@ def collect_prunes(entries: Sequence[TranscriptEntry]) -> dict[str, str]:
     a ``type ==`` test over already-parsed objects, so it costs no rehydration.
     """
     return {
-        str(entry.payload.get("target")): str(entry.payload.get("notice", ""))
+        str(entry.payload.get("target")): entry.payload.get(
+            "replacement", str(entry.payload.get("notice", ""))
+        )
         for entry in entries
         if entry.type == ENTRY_PRUNE and entry.payload.get("target")
     }
@@ -4364,7 +4391,7 @@ def audit_slice(
     *,
     end_index: int,
     limit: int,
-    prunes: dict[str, str] | None = None,
+    prunes: dict[str, str | dict[str, Any]] | None = None,
 ) -> tuple[list[AgentMessage], list[int], int]:
     """Replay a bounded backward window of the FULL journal, for audit reading.
 
@@ -4424,7 +4451,7 @@ def audit_slice(
 def _replay_row(
     entry: TranscriptEntry,
     attachments: AttachmentStore | None,
-    prunes: dict[str, str],
+    prunes: dict[str, str | dict[str, Any]],
 ) -> AgentMessage | None:
     """Rehydrate one journal row for either replay mode.
 
@@ -5158,7 +5185,7 @@ def _entry_to_message(
         return None
 
 
-def _apply_prune(message: Message, notice: str) -> None:
+def _apply_prune(message: Message, notice: str | dict[str, Any]) -> None:
     """Blank ``message`` the way ``compaction.pruning._blank`` blanked it live.
 
     Deliberately mirrors that function's shape (notice as the whole content,
@@ -5167,5 +5194,16 @@ def _apply_prune(message: Message, notice: str) -> None:
     pruned — including for the pruning pass itself, which skips anything
     already flagged and would otherwise re-blank it every turn.
     """
+    if isinstance(notice, dict):
+        if (
+            message.role == notice.get("role") == "tool"
+            and message.tool_call_id == notice.get("tool_call_id")
+            and message.tool_name == notice.get("tool_name")
+        ):
+            replacement = Message.model_validate({k: v for k, v in notice.items() if k != "kind"})
+            message.content = replacement.content
+            message.provider_payload = replacement.provider_payload
+            message.is_error = replacement.is_error
+        return
     message.content = [TextContent(text=notice)]
     message.provider_payload = {**(message.provider_payload or {}), "pruned": True}

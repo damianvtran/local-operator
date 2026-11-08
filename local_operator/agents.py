@@ -43,6 +43,7 @@ from local_operator.agent_profiles import (
     marker_value,
     profile_from_agent,
 )
+from local_operator.definition_transaction import definition_writer
 from local_operator.display_labels import default_label, normalize_label, validate_label
 from local_operator.jsonl import read_jsonl, write_jsonl
 from local_operator.model.suggestion import ModelNotice, resolve_model_suggestion
@@ -1021,6 +1022,7 @@ class AgentRegistry:
         self._agents, self._incomplete_agent_dirs = self._scan_agents_metadata()
         self._metadata_complete = not self._incomplete_agent_dirs
 
+    @definition_writer
     def create_agent(self, agent_edit_metadata: AgentEditFields) -> AgentData:
         """
         Create a new agent with the provided metadata and initialize its conversation history.
@@ -1085,6 +1087,7 @@ class AgentRegistry:
 
         return self.save_agent(agent_metadata)
 
+    @definition_writer
     def save_agent(self, agent_metadata: AgentData) -> AgentData:
         """Save an agent's metadata to the registry.
 
@@ -1163,6 +1166,7 @@ class AgentRegistry:
 
         return agent_metadata
 
+    @definition_writer
     def update_agent(
         self,
         agent_id: str,
@@ -1355,6 +1359,7 @@ class AgentRegistry:
 
         return current_metadata_obj
 
+    @definition_writer
     def set_agent_avatar(self, agent_id: str, data: bytes) -> AgentAvatarMeta:
         """Normalise ``data`` into the agent's stored picture and record it.
 
@@ -1409,6 +1414,7 @@ class AgentRegistry:
         agent_avatar.emit(agent_id, agent_dir, meta)
         return meta
 
+    @definition_writer
     def clear_agent_avatar(self, agent_id: str) -> bool:
         """Remove the agent's picture; ``True`` when there was one to remove.
 
@@ -1446,6 +1452,7 @@ class AgentRegistry:
             return None
         return agent_avatar.stored_path(self.agents_dir / agent_id, row.avatar)
 
+    @definition_writer
     def delete_agent(self, agent_id: str) -> None:
         """
         Delete an agent and its associated files.
@@ -1471,6 +1478,7 @@ class AgentRegistry:
             except Exception as e:
                 raise Exception(f"Failed to delete agent directory: {str(e)}")
 
+    @definition_writer
     def clone_agent(self, agent_id: str, new_name: str) -> AgentData:
         """
         Clone an existing agent with a new name, copying over all its files.
@@ -1927,6 +1935,7 @@ class AgentRegistry:
             agent_system_prompt=agent_system_prompt,
         )
 
+    @definition_writer
     def save_agent_state(
         self,
         agent_id: str,
@@ -1988,7 +1997,15 @@ class AgentRegistry:
                 with instruction_file.open("w", encoding="utf-8") as f:
                     f.write(agent_state.instruction_details)
 
-            if agent_state.agent_system_prompt is not None:
+            # A conversation snapshot may predate an approved profile edit.
+            # State/autosave never owns a reusable profile's authored prompt;
+            # its explicit definition writer is the only supported mutation.
+            self._refresh_agents_metadata()
+            from local_operator.agent_profiles import is_role, is_specialist
+
+            row = self._agents[agent_id]
+            authored_profile = is_role(row) or is_specialist(row)
+            if agent_state.agent_system_prompt is not None and not authored_profile:
                 try:
                     self.set_agent_system_prompt(agent_id, agent_state.agent_system_prompt)
                 except Exception as e:
@@ -2592,6 +2609,7 @@ class AgentRegistry:
             with zip_ref.open(member, "r") as source, target_path.open("wb") as target:
                 shutil.copyfileobj(source, target)
 
+    @definition_writer
     def import_agent(self, zip_path: Path, *, auth_store: Any | None = None) -> "AgentImport":
         """
         Import an agent from a ZIP file.
@@ -3183,6 +3201,7 @@ class AgentRegistry:
             shutil.rmtree(temp_dir)
             raise Exception(f"Error exporting agent: {str(e)}")
 
+    @definition_writer
     def update_agent_state(
         self,
         agent_id: str,
@@ -3298,6 +3317,7 @@ class AgentRegistry:
             logging.error(f"Error reading system prompt for agent {agent_id}: {str(e)}")
             raise IOError(f"Failed to read system prompt: {str(e)}")
 
+    @definition_writer
     def set_agent_system_prompt(self, agent_id: str, system_prompt: str) -> None:
         """
         Set the system prompt for an agent.

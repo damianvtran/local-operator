@@ -39,6 +39,7 @@ from starlette.background import BackgroundTask
 from starlette.types import Receive, Scope, Send
 
 from local_operator.harness.types import ModelSpec
+from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.media import (
     SUPPORTED_AUDIO_MIME_TYPES,
@@ -1404,6 +1405,14 @@ class Command(Input):
         return self
 
 
+class ProfileActionStatus(Input):
+    action_id: str = Field(pattern=r"^prv_[A-Za-z0-9_-]{32}$")
+    receipt_id: str = Field(min_length=1, max_length=160)
+    tool_call_id: str = Field(min_length=1, max_length=160)
+    profile_kind: Literal["agent", "team"]
+    profile_name: str = Field(min_length=1, max_length=128)
+
+
 class Answer(Input):
     """Answer a gate, or a QUEUED ask (design ``docs/design/ask-nonblocking.md`` §4).
 
@@ -1432,6 +1441,7 @@ class Answer(Input):
     request_id: str = Field(default="", max_length=128)
     value: str | None = Field(default=None, max_length=32768)
     approved: StrictBool | None = None
+    remember: Literal[False] = False
     question_index: int | None = Field(default=None, ge=0, strict=True)
     #: A queued ask's id (``a-3f9c``). Its presence selects the third shape.
     ask_id: str | None = Field(default=None, max_length=128)
@@ -4768,6 +4778,17 @@ async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, bo
 
 
 @router.post(
+    "/v1/desktop/sessions/{session_id}/profile-action-status",
+    response_model=CRUDResponse[dict[str, str]],
+)
+async def profile_action_status(session_id: str, body: ProfileActionStatus, request: Request):
+    """Read only a bound action's live state; origin is this authenticated route."""
+    async with errors(request), host(request).session(session_id, read=True) as bridge:
+        assert bridge.remote is not None
+        return reply(await bridge.remote.profile_action_status(**body.model_dump()))
+
+
+@router.post(
     "/v1/desktop/sessions/{session_id}/answers", response_model=CRUDResponse[AnswerReceipt]
 )
 async def answer(session_id: str, body: Answer, request: Request):
@@ -4848,6 +4869,31 @@ async def answer(session_id: str, body: Answer, request: Request):
             return reply({"detail": detail})
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, _wd.answer_epoch_mismatch().envelope())
+        if body.request_id.startswith("prv_"):
+            if (
+                type(body.approved) is not bool
+                or body.value is not None
+                or body.question_index is not None
+            ):
+                raise HTTPException(
+                    409,
+                    _wd.desktop_refusal(error="profile_action_answer_mismatch").envelope(
+                        code="profile_action_answer_mismatch"
+                    ),
+                )
+            try:
+                detail = await bridge.remote.answer_profile_action(body.request_id, body.approved)
+            except OperatorAuthorityRequired as error:
+                # This is not a conversational gate: do not invent still_pending.
+                raise HTTPException(
+                    422, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+                ) from None
+            if detail["state"] not in {"succeeded", "pending"}:
+                reason = {"stale": _pa.stale_reason, "failed": _pa.failed_reason}.get(
+                    detail["state"], _pa.unavailable_reason
+                )
+                raise HTTPException(409, reason().envelope(code="profile_action_unavailable"))
+            return reply({"detail": detail["state"]})
         try:
             detail = await bridge.remote.answer_gate(
                 body.request_id,

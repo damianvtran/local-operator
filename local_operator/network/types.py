@@ -820,6 +820,7 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     "slash": "slash",
     # view — reading the session
     "snapshot": "view",
+    "profile_action_status": "view",  # Identity-bound read only; never activation authority.
     "watch": "view",
     "unwatch": "view",
     # list — liveness only

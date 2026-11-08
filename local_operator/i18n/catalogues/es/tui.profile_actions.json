@@ -1,0 +1,13 @@
+{
+  "tui.profile_actions.available": "[ Revertir ({shortcut}) ]",
+  "tui.profile_actions.check_status": "[ Comprobar estado ({shortcut}) ]",
+  "tui.profile_actions.checking": "[ Comprobando reversión… ]",
+  "tui.profile_actions.failed": "[ Reversión incompleta ]",
+  "tui.profile_actions.failed_reason": "No se pudo completar la reversión. Revisa el perfil actual antes de solicitar otro cambio.",
+  "tui.profile_actions.reverted": "[ Revertido ]",
+  "tui.profile_actions.reverting": "[ Revirtiendo… ]",
+  "tui.profile_actions.stale": "[ Revertir · perfil modificado ]",
+  "tui.profile_actions.stale_reason": "El perfil cambió después de guardarlo. Revisa su versión actual; esta acción no deshará cambios posteriores.",
+  "tui.profile_actions.unavailable": "[ Reversión no disponible ]",
+  "tui.profile_actions.unavailable_reason": "Esta sesión no puede verificar esta acción. Revisa el perfil actual antes de solicitar otro cambio."
+}

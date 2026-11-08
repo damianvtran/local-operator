@@ -1011,6 +1011,13 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     if yolo:
 
         async def auto_approve(tool_name: str, description: str) -> bool:
+            # --yolo approves tool calls, never an account profile save: that
+            # card must reach a person (``never_auto_approved``), so it takes
+            # the interactive path — a y/N on a tty, a typed refusal without.
+            from local_operator.harness.approval import never_auto_approved
+
+            if never_auto_approved(tool_name):
+                return await _make_request_approval(False)(tool_name, description)
             return True
 
         return auto_approve
@@ -6447,6 +6454,7 @@ async def create_session(
     _force_local_takeover: bool = False,
     defer_mcp_wiring: bool = False,
     mcp_publication_gate: "PublicationGate | None" = None,
+    owner_prompt_consent: bool = False,
 ) -> "SessionProtocol":
     """Build a fully-wired harness session from parsed CLI args.
 
@@ -6607,6 +6615,7 @@ async def create_session(
                         has_ui=True,
                         cwd=effective_cwd,
                         _force_local_takeover=True,
+                        owner_prompt_consent=owner_prompt_consent,
                     )
 
                 return await AttachedSession.connect(
@@ -6624,6 +6633,11 @@ async def create_session(
         cwd=effective_cwd,
         world_root=world_root,
     )
+    if owner_prompt_consent:
+        # Only the hosts that put a person in front of the session (the CLI
+        # headless run, the runtime behind the TUI/desktop/phone) opt in; the
+        # SDK keeps the ``no_seam`` refusal. See ``Session.__init__``.
+        plan.session_kwargs["owner_prompt_consent"] = True
     try:
         session = Session(**plan.session_kwargs)
     except BaseException:

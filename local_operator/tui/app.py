@@ -97,6 +97,7 @@ from local_operator.harness.approval import (
     LOOSENING_REFUSED_NOTICE,
     REARM_KEPT_BY_AUTO_NOTICE,
     loosening_is_authorised,
+    never_auto_approved,
 )
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
@@ -9090,7 +9091,14 @@ class OperatorApp(App[None]):
                 # opposite question.
                 return False
             return self._ask_screen is None and self._approval is None
-        if gate.kind == "approval" and bool(source.draft.approve_all) and not require_card:
+        if (
+            gate.kind == "approval"
+            and bool(source.draft.approve_all)
+            and not require_card
+            # An account profile save is never auto-approved, so approve-all
+            # does not discharge it: the card is still owed to a person.
+            and not never_auto_approved(str(getattr(gate, "title", "") or ""))
+        ):
             return True
         card = self._ask_screen if gate.kind == "ask" else self._approval
         return bool(
@@ -17103,6 +17111,94 @@ class OperatorApp(App[None]):
         from local_operator.harness.rows import queued_ask_engine_live
 
         return queued_ask_engine_live(self._session)
+
+    async def _read_profile_action_status(self, card, source):
+        action = card._profile_action
+        if action is None:
+            return {"state": "unavailable"}
+        identity = {
+            key: getattr(action, key)
+            for key in ("action_id", "receipt_id", "profile_kind", "profile_name")
+        }
+        identity["tool_call_id"] = card.tool_call_id
+        client = getattr(source, "_client", None)
+        if client is not None:
+            return await client.profile_action_status(**identity)
+        return source._profile_actions.status(**identity)
+
+    def on_tool_card_profile_action_check(self, event) -> None:
+        event.stop()
+        self.run_worker(
+            self._refresh_profile_action(event.card, self._session),
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _refresh_profile_action(self, card, source) -> None:
+        expected = card._profile_action
+        if expected is None:
+            return
+        try:
+            result = await self._read_profile_action_status(card, source)
+        except Exception:
+            if source is self._session and card.is_mounted and card._profile_action == expected:
+                card.set_profile_action_state(
+                    "unavailable"
+                    if not card._profile_action_checked
+                    else card._profile_action_state
+                )
+            return  # No live proof: never infer availability from saved flags.
+        if (
+            source is self._session
+            and card.is_mounted
+            and card._profile_action == expected
+            and result.get("action_id") == expected.action_id
+        ):
+            card._profile_action_source = source
+            card._profile_action_live = expected if result.get("state") == "available" else None
+            card.set_profile_action_state(result.get("state", "unavailable"))
+
+    def on_tool_card_profile_revert_requested(self, event) -> None:
+        event.stop()
+        card = event.card
+        source = card._profile_action_source
+        if (
+            source is None
+            or source is not self._session
+            or event.action != card._profile_action
+            or event.action != card._profile_action_live
+        ):
+            card._profile_activation_inflight = False
+            card.set_profile_action_state("unavailable")
+            return
+        # Network ACKs must not park Textual's message pump/composer. The card
+        # latched pending before posting, so this worker cannot double-submit.
+        self.run_worker(
+            self._activate_profile_action(card, source, event.action),
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _activate_profile_action(self, card, source, action) -> None:
+        try:
+            client = getattr(source, "_client", None)
+            if client is not None:
+                await client.profile_revert(action.action_id)
+            else:
+                await asyncio.to_thread(
+                    source._profile_actions.activate,
+                    action.action_id,
+                    approved=True,
+                    remember=False,
+                )
+        except Exception:
+            pass  # A dropped reply may follow a completed mutation: reconcile.
+        finally:
+            card._profile_activation_inflight = False
+            if card.is_mounted and card._profile_action_state == "pending":
+                card._refresh_row()
+        if card._profile_action == action:
+            await self._refresh_profile_action(card, source)
 
     def _drop_tool_card(self, card: ToolCard) -> None:
         """Remove a tool card's row from the transcript (the ask gate's drop).
@@ -28100,7 +28196,9 @@ class OperatorApp(App[None]):
         gate_key = self._sidebar_gate_identity(source)
         if job_id is None and self._source_approvals_are_denied(source, epoch):
             return False
-        if bool(source.draft.approve_all):
+        # Approve-all never covers an account profile save (see
+        # ``harness.approval.never_auto_approved``): that card always shows.
+        if bool(source.draft.approve_all) and not never_auto_approved(tool_name):
             return True
         # ADOPT THE CARD THE REVEAL ALREADY MOUNTED FOR THIS GATE, if there is
         # one. It is not a competing prompt — it IS this gate's card, built by
@@ -28139,7 +28237,7 @@ class OperatorApp(App[None]):
             # denied on waking by a latch that has nothing to do with it.
             if job_id is None and self._source_approvals_are_denied(source, epoch):
                 return False
-            if bool(source.draft.approve_all):
+            if bool(source.draft.approve_all) and not never_auto_approved(tool_name):
                 return True
         # The prompt is a transcript block, and the subagent page hides the
         # transcript — mounted behind it the question was invisible while
@@ -30676,7 +30774,9 @@ class OperatorApp(App[None]):
         pending = getattr(source.session, "pending_gate", None)
         if pending is None or getattr(pending, "kind", None) != "approval":
             return
-        if bool(source.draft.approve_all):
+        if bool(source.draft.approve_all) and not never_auto_approved(
+            str(getattr(pending, "title", "") or "")
+        ):
             return
         if self._source_approvals_are_denied(source, source.turn.epoch):
             return
@@ -64436,7 +64536,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 150
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 152
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

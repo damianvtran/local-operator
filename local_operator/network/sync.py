@@ -372,6 +372,7 @@ ATTACHMENT_SIDECAR_SUFFIX = ".json"
 #: ``tests/unit/network/test_sync_copy_set.py``, which also proves that every
 #: entry the retention module calls bookkeeping is on one list or the other.
 EXCLUDED_ENTRIES: dict[str, str] = {
+    "profile-backups": "origin-local before-images; never portable approval or action authority",
     # THE INBOX'S TWO TRANSPORT LOCKS (``session/runtime/inbox``): empty
     # coordination files whose only meaning is "a writer/reader on THIS device is
     # inside the spool transaction". Copying one would carry a lock with no

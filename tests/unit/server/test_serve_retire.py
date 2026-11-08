@@ -1018,6 +1018,18 @@ class _DoorRoute:
 #: daemon. The list was the mechanism then and is the TEST now.
 REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
     _DoorRoute(
+        "profile_action_status",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/profile-action-status",
+        {
+            "action_id": "prv_" + "x" * 32,
+            "receipt_id": "receipt",
+            "profile_kind": "agent",
+            "profile_name": "reviewer",
+            "tool_call_id": "trusted-call",
+        },
+    ),
+    _DoorRoute(
         "create_session",
         "POST",
         "/v1/desktop/sessions",

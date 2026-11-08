@@ -31,6 +31,7 @@ from typing import Any, Awaitable, Callable, Literal, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
+from local_operator.harness.approval import never_auto_approved
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
 from local_operator.harness.types import (
@@ -87,6 +88,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
+from local_operator.profile_actions import ProfileActionReply
 from local_operator.providers.local import LOCAL_PROVIDER_IDS
 from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
 from local_operator.session.cold_metadata import (
@@ -3752,6 +3754,34 @@ class AttachedSession:
             await asyncio.wait_for(client.desktop_withdraw(), timeout=bound)
         except Exception:  # noqa: BLE001 — a lost withdrawal is a cost, not a defect
             logger.debug("desktop watch withdrawal failed", exc_info=True)
+
+    async def profile_action_status(
+        self,
+        *,
+        action_id: str,
+        receipt_id: str,
+        profile_kind: str,
+        profile_name: str,
+        tool_call_id: str,
+    ) -> ProfileActionReply:
+        client = self._client
+        if client is None or not client.connected:
+            return {"action_id": action_id, "state": "unavailable"}
+        return await client.profile_action_status(
+            action_id=action_id,
+            receipt_id=receipt_id,
+            profile_kind=profile_kind,
+            profile_name=profile_name,
+            tool_call_id=tool_call_id,
+        )
+
+    async def answer_profile_action(self, action_id: str, approved: bool) -> ProfileActionReply:
+        client = self._client
+        if client is None or not client.connected:
+            raise ValueError("the action's live session is unavailable")
+        # The same owner-authenticated approval_answer transport, not a made-up
+        # conversational gate or a profile-editor mutation bypass.
+        return await client.profile_revert(action_id, approved=approved)
 
     async def answer_gate(
         self,
@@ -7717,8 +7747,14 @@ class AttachedSession:
                 pending.request_id,
             )
             return
+        # An account profile save is never answered by the background
+        # auto-approve: with gates detached it stays parked for a person
+        # (``harness.approval.never_auto_approved``).
         background = (
-            self._gates_detached and self._background_approval and pending.kind == "approval"
+            self._gates_detached
+            and self._background_approval
+            and pending.kind == "approval"
+            and not never_auto_approved(pending.title)
         )
         if self._gates_detached and not background:
             logger.debug(
@@ -7869,11 +7905,17 @@ class AttachedSession:
         #: the gate would spin (issue #1310, UX review round 3, U12).
         answered_without_a_person = True
         try:
+            if self._gates_detached and never_auto_approved(pending.title):
+                return
             handler = self._approval_handler
             client = self._client
             if client is None:
                 return
-            if self._gates_detached and self._background_approval:
+            if (
+                self._gates_detached
+                and self._background_approval
+                and not never_auto_approved(pending.title)
+            ):
                 approved = True
             elif handler is not None:
                 answered_without_a_person = False
