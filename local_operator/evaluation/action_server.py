@@ -112,7 +112,9 @@ COMMAND_TOOL_DESCRIPTION = (
     "computer instead of typing commands into a terminal on its screen. The "
     "command runs non-interactively in a shell on the remote computer, not in "
     "your local workspace; it cannot answer prompts or open windows you can "
-    "type into. Output beyond the cap is cut, and the result says so."
+    "type into. Output beyond the cap is cut, and the result says so. A "
+    "command the remote computer could not run at all still comes back as a "
+    "result, saying why in its own words."
 )
 
 #: The model-facing timeout bounds. The ceiling stays well inside the
