@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from collections.abc import Iterator
 
 import pytest
 
@@ -39,7 +40,7 @@ LABEL = {"en": "Scheduled (1 wake)", "fr": "Planifié (1 réveil)", "es": "Progr
 
 
 @pytest.fixture(autouse=True)
-def isolated(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Path:
+def isolated(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[pathlib.Path]:
     """Own config dir and a fixture catalogue; no ambient language source."""
     config = tmp_path / "cfg"
     config.mkdir()
