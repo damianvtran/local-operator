@@ -11,12 +11,15 @@ estimate is durable money, but NOT a provider receipt"), and nothing wrote it,
 so a sealed record could not tell "this call was free" apart from "nobody ever
 priced this call" by reading the usage alone.
 
-The three-way split these tests pin:
+The split these tests pin:
 
 - a provider receipt is never overwritten and never invented;
 - a priced route with no receipt records the shared table's estimate;
 - an UNPRICED route records nothing at all — ``0.0`` would be a bill, and the
-  whole point is that "we did not look" must stay distinguishable from "free".
+  whole point is that "we did not look" must stay distinguishable from "free";
+- so does a priced route whose COUNTERS the provider never stated: the adapters
+  zero-fill a missing counter for display and flag it, and pricing that
+  placeholder is the same lie by another route (review B1, QA Q-F1).
 """
 
 from __future__ import annotations
@@ -25,7 +28,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from local_operator.harness.types import ModelSpec, StreamUsageEvent, Usage
+from local_operator.harness.types import (
+    ChatRequest,
+    Message,
+    ModelSpec,
+    StreamUsageEvent,
+    Usage,
+)
 from local_operator.model.costs import cost_summary
 from local_operator.providers.failover import _stamp_serving_spec
 
@@ -71,11 +80,21 @@ def test_provider_receipt_is_never_replaced_by_an_estimate():
 
 
 def test_unpriced_route_records_unknown_not_zero():
-    """No receipt AND no price row stays unknown; a 0.0 here would be a lie."""
-    usage = _stamp("acme", "unlisted-model", Usage(input_tokens=1_000_000))
+    """No receipt AND no price stays unknown; a 0.0 here would be a lie.
 
-    assert usage.usd_cost is None
-    assert usage.estimated_usd_cost is None
+    BOTH unpriced shapes, because the contract names two and only one was
+    pinned (review n1): ``acme`` has no registry row at all, while the Google
+    row SHIPS with no prices -- a resolvable row that ``turn_cost`` still
+    cannot price, which is the branch the docstring actually describes.
+    """
+    for provider, model_id in (
+        ("acme", "unlisted-model"),
+        ("google", "gemini-2.0-flash-lite-preview-02-05"),
+    ):
+        usage = _stamp(provider, model_id, Usage(input_tokens=1_000_000))
+
+        assert usage.usd_cost is None
+        assert usage.estimated_usd_cost is None, (provider, model_id)
 
 
 def test_sealed_record_keeps_money_and_provenance_apart():
@@ -95,6 +114,95 @@ def test_sealed_record_keeps_money_and_provenance_apart():
     assert unknown is False
     assert total == pytest.approx(0.30)
     assert stamped.usd_cost is None
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens"),
+    [(0, 0), (5_000, 0), (0, 120)],
+)
+def test_unreported_counters_are_never_priced(input_tokens: int, output_tokens: int):
+    """A placeholder zero is not a measurement, so it cannot become money.
+
+    The wire adapters replace a missing or malformed counter with a display-safe
+    ``0`` and record that they did (``Usage._token_counts_reported``), so these
+    numbers are placeholders. Pricing them stamped a durable ``0.0`` (or a
+    partial-token number) that ``_recorded_cost`` then reported as KNOWN money:
+    an unmeasured call reading as a settled, and cheap, one -- the exact
+    "we could not look" -> "this cost nothing" collapse the unpriced branch
+    exists to prevent, arriving by a second route (review B1, QA Q-F1). The
+    evaluation runner's own pricer already refuses this shape
+    (``runner/provider_client._usage_from`` -> ``known=False``); this pins the
+    record to the same answer.
+    """
+    usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+    usage._token_counts_reported = False
+
+    stamped = _stamp("deepseek", "deepseek-flash", usage)
+
+    assert stamped.usd_cost is None
+    assert stamped.estimated_usd_cost is None
+    assert cost_summary([stamped], recorded_only=True) == (None, True)
+
+
+def test_counters_the_provider_reported_as_zero_are_priced():
+    """The paired control: a REAL zero is a price, and must stay one.
+
+    Without this the guard above could be reading "all-zero tokens" instead of
+    "nobody stated the tokens", and a provider that genuinely served nothing --
+    or stated an explicit zero -- would lose its (correct) $0.00.
+    """
+    usage = Usage(input_tokens=0, output_tokens=0)
+    usage._token_counts_reported = True
+
+    stamped = _stamp("deepseek", "deepseek-flash", usage)
+
+    assert stamped.usd_cost is None
+    assert stamped.estimated_usd_cost == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_anthropic_turn_without_stated_counters_stays_unknown():
+    """The reachable shape, driven through the REAL adapter and then the seam.
+
+    Anthropic's ``message_start``/``message_delta`` frames carry ``usage`` and
+    the adapter yields whatever they hold, so a body that states no counters
+    (``{}`` / ``{}``) arrives at the seam flagged incomplete. Hand-building a
+    ``Usage`` would prove only that the guard reads an attribute; this pins that
+    the adapter actually sets it on this body, and that the priced route -- the
+    one that produced a confident $0.00 before the guard -- prices nothing.
+    """
+    import httpx
+
+    from local_operator.providers.clients import AnthropicClient
+    from tests.unit.providers.test_clients import _collect, _spec, _sse
+
+    body = _sse(
+        [
+            {"type": "message_start", "message": {"usage": {}}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {}},
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = AnthropicClient(http_client=http)
+        events = await _collect(
+            client.stream(
+                ChatRequest(model=_spec(provider="anthropic"), messages=[Message.user("hi")]),
+                "synthetic",
+            )
+        )
+    usage = next(event.usage for event in events if isinstance(event, StreamUsageEvent))
+    assert usage._token_counts_reported is False
+
+    stamped = _stamp("deepseek", "deepseek-flash", usage)
+
+    assert stamped.usd_cost is None
+    assert stamped.estimated_usd_cost is None
+    assert cost_summary([stamped], recorded_only=True) == (None, True)
 
 
 @pytest.mark.asyncio

@@ -147,7 +147,7 @@ def stamp_record_estimate(usage: Any, provider: str, model_id: str) -> Any:
     ("a record-time table estimate is durable money, but NOT a provider
     receipt") and had no writer on the wire path.
 
-    THE THREE-WAY SPLIT IS THE WHOLE CONTRACT, so each branch is deliberate:
+    THE BRANCHES BELOW ARE THE WHOLE CONTRACT, so each is deliberate:
 
     - A provider receipt is left completely alone. OpenRouter bills the request
       itself; an estimate must never shadow or overwrite a real bill.
@@ -157,6 +157,10 @@ def stamp_record_estimate(usage: Any, provider: str, model_id: str) -> Any:
     - An UNPRICED route is left untouched -- no field at all. ``0.0`` would read
       as a free call, and "we could not look" must stay distinguishable from
       "this cost nothing"; that distinction is what the budget caps need.
+    - A usage whose COUNTERS the provider never stated is left untouched for
+      the same reason the unpriced route is: the adapters zero-fill a missing
+      counter for display and flag it, so pricing those zeros would stamp a
+      confident estimate for tokens nobody measured. See the guard below.
 
     PAINT-SAFE BY CONSTRUCTION: :func:`turn_cost` resolves from the warm memo or
     the static registry and schedules a background refresh on a miss (the same
@@ -174,6 +178,23 @@ def stamp_record_estimate(usage: Any, provider: str, model_id: str) -> Any:
         if getattr(usage, "estimated_usd_cost", None) is not None:
             return usage
         if not provider or not model_id:
+            return usage
+        # AN UNREPORTED COUNTER IS NOT A ZERO. The wire adapters replace a
+        # missing or malformed counter with a display-safe ``0`` and record
+        # that they did (``Usage._token_counts_reported``), so the numbers on
+        # this usage are placeholders, not measurements: pricing them writes a
+        # durable ``estimated_usd_cost`` for tokens nobody stated, and
+        # ``_recorded_cost`` then reports it as known money. That is exactly
+        # the "we could not look" -> "this cost nothing" collapse the unpriced
+        # branch above exists to prevent, arriving by a second route. The
+        # evaluation runner's sibling pricer already refuses this shape
+        # (``runner/provider_client._usage_from`` returns ``known=False``);
+        # this seam must agree with it, or the record and the cap disagree
+        # about the same call. ``None`` is left alone: that is a usage no wire
+        # adapter built (a manual client's explicit counters), not a flagged
+        # one, and the every-adapter-sets-it invariant is what makes the flag
+        # authoritative here.
+        if getattr(usage, "_token_counts_reported", None) is False:
             return usage
         estimate = turn_cost(f"{provider}/{model_id}", usage)
         if estimate is None:
