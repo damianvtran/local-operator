@@ -1470,6 +1470,10 @@ class MeshCredentialClient:
         skipped: list[dict[str, str]] = []
         #: Members that answered the pull with a refusal (see the loop below).
         refused_by: list[str] = []
+        #: ``{device: code}`` for the same members: the refusal's machine-readable
+        #: token, ``""`` for a codeless one (the authoriser's, or a transient such as
+        #: a full slow-op pool). The cadence parks only on a policy code.
+        refused_codes: dict[str, str] = {}
         asked = 0
         members = self._other_active_members()
         if only_device:
@@ -1522,6 +1526,10 @@ class MeshCredentialClient:
                 # an unreadable document, but the cadence must know to back off
                 # (``sync._pull_past_stale_self_view``).
                 refused_by.append(device)
+                code = reply.get("code")
+                if not code and isinstance(detail, dict):
+                    code = detail.get("code")
+                refused_codes[device] = str(code or "")
                 continue
             if isinstance(document, dict):
                 # AN ANSWERED PULL ENDS A PARKED REFUSAL (review round 1, n1), whoever
@@ -1585,6 +1593,7 @@ class MeshCredentialClient:
             result["skipped"] = skipped
         if refused_by:
             result["refused_by"] = refused_by
+            result["refused_codes"] = refused_codes
         return result
 
     def _borrowable_now(self) -> dict[str, Any]:

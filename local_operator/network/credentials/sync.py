@@ -2402,14 +2402,17 @@ def credentials_sync_step(step_server: "RelayServer", device_id: str) -> str | N
     # member would wait for somebody to run the CLI, which is the exact defect
     # this slice exists to remove. ONE peer, one bounded dial, on the tick's own
     # 15/60 s floor: no tight loop is possible.
-    try:
-        from local_operator.network.credentials.client import MeshCredentialClient
-
-        placement_client = MeshCredentialClient.for_relay(server)
-        if placement_client is not None:
-            placement_client.pull_placement(only_device=device_id)
-    except Exception:  # noqa: BLE001 — a cadence reports; it never raises into the tick
-        logger.debug("credentials sync: placement pull for %s failed", device_id, exc_info=True)
+    #
+    # AND A PEER THAT ANSWERED "NO" IS PARKED HERE TOO (mesh perf matrix, A→B
+    # placement pulls): a member that owns nothing has no broker, so its
+    # ``net_broker`` answers every pull with the by-name ``not_implemented``
+    # refusal (``owner.relay_handler``). This step's answer is discarded by the
+    # tick's independent-step loop, so nothing ever parked it and the pull was
+    # refused once per tick for as long as the membership existed. The park is
+    # the stale-self-view branch's own, re-armed the same ways: a new relay
+    # instance or build behind the link (a peer that gained the capability by
+    # updating restarted to do it), or the peer's share push / served document.
+    _pull_placement_unless_parked(server, device_id, park_codes=_POLICY_PULL_REFUSALS)
     pulled = document_engine.enqueue_placement_pull(device_id)
     # The exchange's own word stays the tick's answer whenever it did anything:
     # existing callers (and the wipe/removal tests) branch on it, and both jobs
@@ -2425,15 +2428,28 @@ _OWNER_REFUSED_ATTR = "_credential_owner_refused_until"
 
 
 def _live_owner_instance(server: Any, device_id: str) -> str:
-    """The relay INSTANCE behind a live link to ``device_id`` now, or ``""`` (never dials).
+    """The relay INSTANCE (and build) behind a live link to ``device_id``, or ``""``.
 
-    The instance id is minted once per relay process and carried in the handshake
-    (``PeerLink.instance_id``), so it changes when the owner's relay restarts and NOT
-    when the same process is simply re-linked — which is the distinction the park needs.
+    Never dials. The instance id is minted once per relay process and carried in the
+    handshake (``PeerLink.instance_id``), so it changes when the owner's relay restarts
+    and NOT when the same process is simply re-linked — which is the distinction the
+    park needs. The handshake's build stamp (``PeerLink.peer_build``) is folded in so
+    a park also names the build that refused: a ``not_implemented`` answer is a fact
+    about one build, and an update is the usual way a peer gains the capability. (An
+    update restarts the relay, so the instance already changes; the build makes the
+    reason explicit rather than incidental.)
     """
     for link in list((getattr(server, "links", None) or {}).values()):
         if getattr(link, "device_id", "") == device_id and getattr(link, "alive", False):
-            return str(getattr(link, "instance_id", "") or "")
+            instance = str(getattr(link, "instance_id", "") or "")
+            if not instance:
+                return ""
+            build = getattr(link, "peer_build", None) or {}
+            if not isinstance(build, dict):
+                return instance
+            return "|".join(
+                (instance, str(build.get("version") or ""), str(build.get("source_ref") or ""))
+            )
     return ""
 
 
@@ -2479,9 +2495,36 @@ def _pull_past_stale_self_view(server: Any, engine: Any, device_id: str, blocked
     The owner EXCHANGE (what this device lends) keeps the self-view skip: it is not
     what the share defect is about, and its answer is reported unchanged.
     """
+    skip = f"skipped:no_{blocked}"
+    result = _pull_placement_unless_parked(server, device_id, park_codes=None)
+    if result is None:
+        return skip
+    return engine.enqueue_placement_pull(device_id)
+
+
+#: The refusal codes that park the UNBLOCKED branch's placement pull: a capability
+#: or authorisation answer, which does not change between ticks. Everything else an
+#: owner can answer codelessly on the same instance is transient — a full slow-op
+#: pool (``relay._dispatch_slow``), an op past its deadline — and main retried those
+#: on the next 15 s tick; parking them for 30 min was a regression (review round 1,
+#: m1). The stale-self-view branch keeps parking every refusal (``park_codes=None``):
+#: its refusal IS the authoriser's codeless answer, and #3561 parks exactly that.
+_POLICY_PULL_REFUSALS: frozenset[str] = frozenset({"not_implemented", "not_authorised"})
+
+
+def _pull_placement_unless_parked(
+    server: Any, device_id: str, *, park_codes: frozenset[str] | None
+) -> dict[str, Any] | None:
+    """Pull ``device_id``'s placement document unless its last answer was a refusal.
+
+    Returns the pull's reply when the peer was asked and did NOT refuse, else
+    ``None`` (parked, refused, or no answer). Shared by both branches of
+    :func:`credentials_sync_step` so the one park has one policy; ``park_codes``
+    narrows which refusals park (``None``: every refusal), and a refusal outside it is
+    simply asked again on the next tick.
+    """
     from local_operator.network import definitions
 
-    skip = f"skipped:no_{blocked}"
     parked = _owner_refusals(server)
     now = time.monotonic()
     held = parked.get(device_id)
@@ -2497,7 +2540,7 @@ def _pull_past_stale_self_view(server: Any, engine: Any, device_id: str, blocked
     if held is not None and held[0] > now:
         current = _live_owner_instance(server, device_id)
         if not current or current == held[1]:
-            return skip
+            return None
         parked.pop(device_id, None)
     try:
         from local_operator.network.credentials.client import MeshCredentialClient
@@ -2506,17 +2549,20 @@ def _pull_past_stale_self_view(server: Any, engine: Any, device_id: str, blocked
         result = client.pull_placement(only_device=device_id) if client is not None else None
     except Exception:  # noqa: BLE001 — a cadence reports; it never raises into the tick
         logger.debug("credentials sync: placement pull for %s failed", device_id, exc_info=True)
-        return skip
+        return None
     if not isinstance(result, dict):
-        return skip
+        return None
     if device_id in (result.get("refused_by") or ()):
+        code = str((result.get("refused_codes") or {}).get(device_id) or "")
+        if park_codes is not None and code not in park_codes:
+            return None
         parked[device_id] = (
             now + definitions.REFUSED_MIN_INTERVAL_S,
             _live_owner_instance(server, device_id),
         )
-        return skip
+        return None
     parked.pop(device_id, None)
-    return engine.enqueue_placement_pull(device_id)
+    return result
 
 
 def install() -> None:

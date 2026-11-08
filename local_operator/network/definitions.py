@@ -2139,18 +2139,91 @@ class DefinitionsSyncer(threading.Thread):
         #: REFUSED_MIN_INTERVAL_S.
         self._refused_at: dict[str, float] = {}
         self._tick_s = _tick_seconds(server.root)
+        #: First-contact nudges (:meth:`nudge`): members whose link just came up and
+        #: that the thread has not served yet, plus the monotonic moment each was
+        #: last ACCEPTED, which is the debounce. Guarded by ``_lock``.
+        self._nudged: set[str] = set()
+        self._nudged_at: dict[str, float] = {}
+        self._wake = threading.Event()
 
     def stop(self) -> None:
         self._stop_event.set()
+        # The loop may be parked on the nudge event rather than the stop event.
+        self._wake.set()
+
+    def nudge(self, device_id: str, *, now: float | None = None) -> bool:
+        """Serve ``device_id`` on this thread NOW instead of on the next timed tick.
+
+        WHY (mesh perf matrix, "pairing → first definitions/MCP sync"): pairing
+        completes in ~0.36 s, but nothing told this cadence a member had appeared,
+        so a freshly paired device waited for the next 15 s tick plus a dial —
+        10.8 s median, 13.7 s p90 — before its agents, teams, MCP servers and
+        placement document arrived. The relay calls this from its link-up hook
+        (:func:`_on_link_up`); the thread then runs ONE ordinary :meth:`tick`
+        narrowed to the nudged members, so a first contact costs one round trip.
+
+        NO NEW CADENCE AND NO NEW POLICY: the narrowed tick passes the same
+        capability skip, refusal park and push floors as a timed one, and the timed
+        ticks keep their own schedule. Called on the relay's handshake/accept
+        thread, so it only records and signals — it never dials.
+
+        FIRST CONTACT ONLY, AND DEBOUNCED PER MEMBER (``NUDGE_MIN_INTERVAL_S``): a
+        member whose last push succeeded is not nudged at all, and a member whose
+        first attempt failed is nudged again at most once per interval, so a flapping
+        link cannot wake the thread many times a minute (the push floor already stops
+        repeat pushes, but the independent steps such as the credential placement
+        pull only have the tick's own floor). Returns whether the nudge was taken.
+        """
+        if not device_id:
+            return False
+        moment = time.monotonic() if now is None else now
+        with self._lock:
+            if self._last_ok.get(device_id):
+                # FIRST CONTACT ONLY. A member this syncer has already brought in
+                # sync is the timed cadence's to keep current; re-serving it on every
+                # re-link would move work the tick does anyway onto a moment nobody
+                # chose, for no gain the 60 s push floor would not cancel.
+                return False
+            last = self._nudged_at.get(device_id)
+            if last is not None and moment - last < NUDGE_MIN_INTERVAL_S:
+                return False
+            self._nudged_at[device_id] = moment
+            self._nudged.add(device_id)
+        self._wake.set()
+        return True
+
+    def _take_nudged(self) -> frozenset[str]:
+        with self._lock:
+            taken = frozenset(self._nudged)
+            self._nudged.clear()
+        return taken
 
     def run(self) -> None:
-        while not self._stop_event.wait(self._tick_s):
+        # The timed schedule is a DEADLINE, not a fresh ``wait(tick_s)`` per wake:
+        # a nudge served mid-interval must not push the next timed tick back, or a
+        # steady trickle of link-ups could starve every other member's cadence.
+        deadline = time.monotonic() + self._tick_s
+        while not self._stop_event.is_set():
+            self._wake.wait(max(0.0, deadline - time.monotonic()))
+            if self._stop_event.is_set():
+                return
+            self._wake.clear()
+            nudged = self._take_nudged()
+            due = time.monotonic() >= deadline
             try:
-                self.tick()
+                if due:
+                    # The full walk covers the nudged members too.
+                    self.tick()
+                elif nudged:
+                    self.tick(only=nudged)
             except Exception:  # noqa: BLE001 — a syncer must never kill the relay
                 logger.debug("definitions: sync tick failed", exc_info=True)
+            if due:
+                deadline = time.monotonic() + self._tick_s
 
-    def tick(self, *, now: float | None = None) -> list[tuple[str, str]]:
+    def tick(
+        self, *, now: float | None = None, only: "frozenset[str] | None" = None
+    ) -> list[tuple[str, str]]:
         """One pass over the network's MEMBERS. Returns ``(device, outcome)``.
 
         IT DIALS, and that is what makes this a cadence rather than a decoration. The
@@ -2189,7 +2262,10 @@ class DefinitionsSyncer(threading.Thread):
             ident: moment for ident, moment in independent.items() if ident[1] in targets
         }
         self._independent_attempts = independent
-        for device_id in targets:
+        # ``only`` NARROWS THE WALK, NEVER THE FLOORS (first-contact nudge, see
+        # :meth:`nudge`): the pruning above still sees every member, and each member
+        # below still passes the same refusal park and push floors as a timed tick.
+        for device_id in targets if only is None else [t for t in targets if t in only]:
             # Independent protocols must not inherit definitions' admin gate or
             # its refusal parking. Legacy siblings retain their existing floors.
             independent = getattr(self, "_independent_attempts", {})
@@ -2199,7 +2275,15 @@ class DefinitionsSyncer(threading.Thread):
                 ident = (step, device_id)
                 if moment - independent.get(ident, float("-inf")) < self._tick_s:
                     continue
-                independent[ident] = moment
+                # A NUDGED (``only``) PASS READS THE FLOOR BUT NEVER WRITES IT (QA
+                # round 1, Q1). The timed ticks keep their own deadline, so the first
+                # one after a nudge always lands < ``tick_s`` later; a recorded nudge
+                # attempt made it skip this member's share retry, credential and
+                # lifecycle steps once — a missed share restored near pairing then
+                # arrived at ~22 s against ~10 s on main. The nudge's own extra run is
+                # bounded by ``NUDGE_MIN_INTERVAL_S``, not by this floor.
+                if only is None:
+                    independent[ident] = moment
                 try:
                     step(self._server, device_id)
                 except Exception:  # noqa: BLE001 — one protocol cannot stop siblings
@@ -2300,6 +2384,12 @@ class DefinitionsSyncer(threading.Thread):
 #: next tick instead of being parked for this whole interval — see
 #: ``DefinitionsSyncer.tick`` for why one floor for both outcomes was wrong.
 STATE_MIN_INTERVAL_S = 60.0
+
+#: The per-member debounce on first-contact nudges (``DefinitionsSyncer.nudge``).
+#: The push floor's own number, deliberately: within it a second push to a member
+#: that just answered would be refused by that floor anyway, so a shorter debounce
+#: buys nothing, and a longer one would delay the re-sync after a genuine re-link.
+NUDGE_MIN_INTERVAL_S = STATE_MIN_INTERVAL_S
 
 #: The floor for a member whose attempt was REFUSED BY THE PEER, as opposed to one
 #: that failed on the wire. The two are different facts: a failed dial is transient
@@ -2495,4 +2585,23 @@ def install(server: "RelayServer") -> None:
         slow={"net_definitions": DEFINITIONS_OP_DEADLINE_S},
         on_start={"mesh-definitions": lambda: ensure_syncer(server)},
         on_stop={"mesh-definitions": lambda: stop_syncer(server)},
+        on_link_up={"mesh-definitions": lambda link: _on_link_up(server, link)},
     )
+
+
+def _on_link_up(server: "RelayServer", link: Any) -> None:
+    """Relay link-up hook: nudge this relay's syncer toward the member just linked.
+
+    Fires on the first link between this relay and a member's RELAY, in either
+    direction — for a fresh pairing, the joiner's relay linking to the inviter right
+    after it starts. NOT on the pairing ceremony's own link: that is the joiner CLI's
+    socket, admitted with ``PeerLink.link_up_hooks = False`` because it closes the
+    moment the ceremony ends (``relay._run_pair_listener``). READS the registry rather than
+    calling :func:`ensure_syncer`: a hook must never start a thread on a relay whose
+    start hooks have not run (or that is stopping) — no syncer means no cadence to
+    nudge, and the start hook's first tick serves the member anyway.
+    """
+    with _syncer_lock:
+        syncer = _syncers.get(id(server))
+    if syncer is not None and syncer.is_alive():
+        syncer.nudge(str(getattr(link, "device_id", "") or ""))
