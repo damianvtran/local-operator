@@ -3905,8 +3905,15 @@ async def child_transcript(
     request: Request,
     before_id: str | None = Query(default=None, max_length=128),
     limit: int = Query(default=100, ge=1, le=CHILD_PAGE_LIMIT),
+    entry_id: str | None = Query(default=None, max_length=128),
 ):
     """One page of a subagent's own transcript, read through its parent.
+
+    ``entry_id`` asks for ONE row by id instead of a page: the reader's way to
+    fetch a busy child's launch row (``subagent-launch:<job>``, the full brief)
+    when it sits far above the tail page, without paging the whole history in.
+    An older runtime ignores the unknown parameter and answers its tail page,
+    so a caller must check the returned id rather than trust the shape.
 
     The sidebar's child reader, and the ONLY door to a child's conversation:
     the renderer sends ids and never a ``session_dir``, so the backend (see
@@ -3926,7 +3933,7 @@ async def child_transcript(
     async with errors(request):
         return reply(
             await host(request).child_transcript(
-                session_id, child_id, before_id=before_id, limit=limit
+                session_id, child_id, before_id=before_id, limit=limit, entry_id=entry_id
             )
         )
 

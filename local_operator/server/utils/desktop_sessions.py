@@ -156,6 +156,7 @@ from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
 from local_operator.session.transcript import (
     custom_type_proven_absent,
+    read_entry_by_id,
     read_latest_custom,
     read_latest_custom_entry,
     validate_page_request,
@@ -8429,8 +8430,19 @@ class DesktopSessions:
         *,
         before_id: str | None = None,
         limit: int = 100,
+        entry_id: str | None = None,
     ) -> dict[str, Any]:
         """One page of a child's RAW transcript, in the parent's envelope.
+
+        ``entry_id`` turns the page into a POINT READ: the envelope carries the
+        one row with that id (``[]`` when absent) and ``has_more: False``. It
+        exists for the run-details reader, whose tail page (100 rows) does not
+        reach a busy child's launch row, while the roster only ships a 200-char
+        clip of the brief (``JOB_LAUNCH_PROMPT_WIRE_CHARS``). Paging the whole
+        history in to read one row would make opening a long child cost a full
+        scan per page; ``read_entry_by_id`` is a backward byte scan that stops
+        at the match. It is exclusive with ``before_id`` — a cursor and a point
+        read are two different questions — and refuses both together.
 
         The rows come from ``read_transcript_page`` on the child's own
         directory and go out VERBATIM, which is what lets the renderer fold
@@ -8485,9 +8497,19 @@ class DesktopSessions:
                 return _absent_child_page("pending", before_id=before_id)
             return child_dir
 
+        if entry_id is not None and before_id is not None:
+            raise ValueError("entry_id and before_id are mutually exclusive")
         child_dir = await asyncio.to_thread(probe)
         if isinstance(child_dir, dict):
             return child_dir
+        if entry_id is not None:
+            entry = await asyncio.to_thread(read_entry_by_id, child_dir, entry_id)
+            return {
+                "entries": [] if entry is None else [json.loads(entry.to_json())],
+                "has_more": False,
+                "cursor_missing": False,
+                "state": "ready",
+            }
         try:
             page = await load_transcript_page(child_dir, before_id=before_id, limit=limit)
         except FileNotFoundError:
