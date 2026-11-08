@@ -112,16 +112,6 @@ The app bundles its own backend (or uses an existing `lop` install). It checks
 GitHub Releases for new versions and installs one when you confirm.
 
 <p align="center">
-  <img src="./static/ui-projects-board.png" alt="The desktop app's Projects board: tracked workstreams grouped into status columns, each card showing its title, progress and linked sessions" width="720">
-</p>
-<p align="center"><i>Projects board</i></p>
-
-<p align="center">
-  <img src="./static/ui-agent-hub.png" alt="The desktop app's Agent Hub: a grid of shareable agent profiles with names, descriptions and categories" width="720">
-</p>
-<p align="center"><i>Agent Hub</i></p>
-
-<p align="center">
   <img src="./static/ui-media-in-conversation.png" alt="A desktop app conversation with images inline: a pasted chart, a tool receipt for the plotting script, and the bar chart the agent rendered above its write-up" width="720">
 </p>
 
