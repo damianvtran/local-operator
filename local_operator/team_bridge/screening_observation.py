@@ -33,14 +33,16 @@ INVARIANTS (each pinned in tests/unit/team_bridge/test_screening_observation.py)
   that carried the block (a stale advertisement after a rollback, or a rolling
   update serving both decoders behind one origin). It latches the block OFF
   for that origin for :data:`REFUSAL_COOLDOWN_S`, outranking every fresh
-  advertisement meanwhile, and the request that drew it is sent ONCE more
+  advertisement meanwhile, and an admit that drew it is sent ONCE more
   without the block (``client._send_observed``) so telemetry never costs a
-  message its admission; nothing else in an ack/admit response is read.
+  message its admission — an ack is not, because no hub's ack decoder refuses
+  the block; nothing else in an ack/admit response is read.
 """
 
 from __future__ import annotations
 
 import functools
+import logging
 import threading
 import time
 from collections.abc import Mapping
@@ -49,6 +51,8 @@ from urllib.parse import urlsplit
 
 from local_operator.providers.registry import credential_provider_id
 from local_operator.team_bridge.types import OBSERVATION_STAGES, ScreeningObservation
+
+logger = logging.getLogger(__name__)
 
 #: The block's wire version (§8.5). Any other version is dropped by the hub.
 OBSERVATION_VERSION = 1
@@ -93,13 +97,34 @@ REFUSAL_COOLDOWN_S = 15 * 60.0
 _monotonic = time.monotonic
 
 
-def _hub_key(base_url: str) -> str:
+def hub_origin(base_url: str) -> str:
+    """The lower-cased, userinfo-free ``scheme://host[:port]`` the gate is held under.
+
+    It is also the only part of the base the INFO lines name, so it must never
+    carry ``user:password@``: a non-canonical base admitted through
+    ``RADIENT_ORG_ALLOW_NONCANONICAL_BASE`` (a QA, staging or self-hosted hub
+    behind URL basic auth) would otherwise print its credential to the log.
+
+    This is NOT the comparison ``pull._guard_destination`` makes: that guard
+    compares the raw ``netloc``, userinfo included, which is the stricter key a
+    destination check needs. Do not reuse this value as a trust check.
+    """
+
     # Keyed by ORIGIN, not the full base: the pull lane's default client and
     # the status fetcher's owner-pinned client may spell the same hub with and
-    # without its ``/v1`` path (``pull._guard_destination`` accepts that), and
-    # the origin is the trust boundary those guards already use.
+    # without its ``/v1`` path (``pull._guard_destination`` accepts that).
+    # Dropping userinfo also merges spellings that differ only in credentials
+    # onto one latch entry, which is the safe direction for an off-switch.
     parts = urlsplit(str(base_url or "").strip())
-    return f"{parts.scheme}://{parts.netloc}".lower()
+    host = parts.hostname or ""  # ``hostname`` strips userinfo and lower-cases
+    if ":" in host:  # IPv6: re-bracket, or the port would be ambiguous
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:  # a non-numeric or out-of-range port: keep no port
+        port = None
+    authority = host if port is None else f"{host}:{port}"
+    return f"{parts.scheme}://{authority}".lower()
 
 
 def note_hub_status(base_url: str, payload: Any) -> None:
@@ -111,7 +136,7 @@ def note_hub_status(base_url: str, payload: Any) -> None:
     # read as version 1 of a contract it does not name.
     supported = type(version) is int and version == OBSERVATION_VERSION
     with _HUB_LOCK:
-        _HUB_SUPPORT[_hub_key(base_url)] = supported
+        _HUB_SUPPORT[hub_origin(base_url)] = supported
 
 
 def note_hub_refused(base_url: str) -> None:
@@ -136,16 +161,25 @@ def note_hub_refused(base_url: str) -> None:
     a second paid call that may land on another model (review S-1/m1).
     """
 
-    key = _hub_key(base_url)
+    key = hub_origin(base_url)
     with _HUB_LOCK:
         _HUB_SUPPORT[key] = False
         _REFUSED_UNTIL[key] = _monotonic() + REFUSAL_COOLDOWN_S
+    # One line per arm, the ORIGIN only (no body, verdict, account or model),
+    # so an operator can tell telemetry to this hub is off for the cool-down
+    # rather than silently missing (review S-r3-2). Every block-carrying 400
+    # re-arms and logs, and each already cost a request, so the line count
+    # tracks real refusals rather than adding a noise source of its own.
+    logger.info(
+        "team_bridge: hub %s refused the screening observation; latched off for this origin",
+        key,
+    )
 
 
 def hub_accepts(base_url: str) -> bool:
     """Whether THIS hub advertised the block and no refusal latch masks it."""
 
-    key = _hub_key(base_url)
+    key = hub_origin(base_url)
     with _HUB_LOCK:
         until = _REFUSED_UNTIL.get(key)
         if until is not None:
