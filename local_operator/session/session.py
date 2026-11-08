@@ -463,7 +463,11 @@ def _notice(
     client keeps rendering what it rendered before; the id and parameters let
     a locale-aware viewer re-render without parsing the sentence.
     """
-    body = message.envelope()
+    # PINNED to ``en`` (see ``i18n.messages.envelope``): a NoticeEvent is written
+    # to the transcript and replayed, so its ``text`` must not depend on the
+    # language the process happened to have when it was emitted. ``code`` and
+    # ``params`` let a locale-aware viewer re-render.
+    body = message.envelope(locale="en")
     return NoticeEvent(
         text=body["text"],
         code=body["code"],
@@ -474,8 +478,12 @@ def _notice(
 
 
 def _text(message: Msg) -> str:
-    """The English text of a catalogue message (fragments and headlines)."""
-    return message.envelope()["text"]
+    """The English text of a catalogue message (fragments and headlines).
+
+    Pinned to ``en`` for the same reason as :func:`_notice`: these fragments
+    compose into transcript-persisted notices and model-facing text.
+    """
+    return message.envelope(locale="en")["text"]
 
 
 #: Transcript custom-entry type recording which model is ACTUALLY serving

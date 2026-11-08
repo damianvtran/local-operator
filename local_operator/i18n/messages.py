@@ -99,12 +99,31 @@ def envelope(
 ) -> dict[str, Any]:
     """``{code, params, text}`` for a message id.
 
-    ``locale=None`` renders ``text`` in ``en`` — the default keeps this
-    function free of configuration reads, so callers on hot paths choose when
-    to pay for resolution. A caller that already knows the resolved locale
-    passes it; anything unshipped or unknown renders from ``en``, which
-    :func:`render` enforces through the generated shipped set.
+    ``locale=None`` renders ``text`` in the process's ACTIVE locale
+    (:func:`local_operator.i18n.text.active_locale`), because the envelope's
+    ``text`` is what the desktop UI paints for a server-originated refusal
+    (``detail.text`` -> ``DesktopControlError.message``) and the active locale
+    is the only language the server knows: boot resolution, ``/language`` and
+    the settings write path (``follow_language``) all keep it in step with the
+    ``language`` setting. Before this default every route envelope rendered
+    English whatever the operator had selected. An unmoved process is ``en``,
+    so English-default output is byte-identical to the old behaviour.
+
+    ``locale="en"`` is the explicit PIN, and a call site whose text is
+    persisted or model-facing MUST pass it (transcript notices, prompts, tool
+    results, exception strings fed to a model). That rule is enforced by
+    ``tests/unit/i18n/test_envelope_locale_ratchet.py``. Any other explicit
+    locale renders in that locale; anything unshipped or unknown renders from
+    ``en``, which :func:`render` enforces through the generated shipped set.
+
+    ``code`` and ``params`` never depend on the locale: only ``text`` does.
     """
+    if locale is None:
+        # Lazy: ``text`` imports this module at import time (``Msg``), so the
+        # reverse edge can only exist inside the function.
+        from .text import active_locale
+
+        locale = active_locale()
     params = dict(params or {})
     text = render(code, params, locale=locale)
     return {"code": code, "params": params, "text": text}

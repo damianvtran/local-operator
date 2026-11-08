@@ -434,7 +434,10 @@ async def _model_resolution_window(deadline: float) -> AsyncIterator[None]:
             # TimeoutError otherwise becomes the unhelpful "cannot switch model: ".
             from local_operator.i18n.keys.relay_asks import card_timed_out_badge
 
-            raise TimeoutError(card_timed_out_badge().envelope()["text"]) from error
+            # PINNED to ``en``: the only consumer interpolates this into the
+            # English "cannot switch model: {error}" slash result, so a
+            # localised suffix would make a mixed-language sentence.
+            raise TimeoutError(card_timed_out_badge().envelope(locale="en")["text"]) from error
 
 
 #: Upper bound on access-claim reads ONE publish performs while receipts keep

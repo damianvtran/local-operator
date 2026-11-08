@@ -161,9 +161,10 @@ class SoundRejected(Exception):
     def text(self) -> str:
         """The refusal in the process's ACTIVE locale (what the CLI prints).
 
-        ``envelope()`` stays en-by-default like every route envelope (the
-        desktop keys on ``code``); a terminal line has no client to localize
-        it, so it renders here (QA round 2, Q6).
+        ``envelope()`` renders under the active locale like every route
+        envelope (the desktop keys on ``code``); this property passes it
+        explicitly because a terminal line has no client to localize it
+        (QA round 2, Q6).
         """
         from local_operator.i18n.text import active_locale
 
