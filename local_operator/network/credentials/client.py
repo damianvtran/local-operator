@@ -957,6 +957,15 @@ class MeshCredentialClient:
             return self._held_or(
                 outcome, key, session_id, force_refresh=force_refresh, prior_status=prior_status
             )
+        # The owner LENT a ``grant_invalid``-held login (the only kind left visible to
+        # the ask, because the owner's cascade refuses a dead grant on its own): it
+        # has a working sign-in for that login again, so the hold is stale (#3616 QA
+        # observation) and a 401 on the new bearer must be reported, not held.
+        slot = (key, int(outcome.credential_ref.credential_id or 0))
+        with self._refresh_holds_lock:
+            hold = self._refresh_holds.get(slot)
+            if hold is not None and hold.code == "grant_invalid":
+                del self._refresh_holds[slot]
         return outcome
 
     def _policy(self) -> Any:
@@ -2869,12 +2878,15 @@ class MeshCredentialClient:
             grant = self._bounded(Grant.from_detail(detail))
             return self._adopt_online(grant, key, session_id, request_stamp, selection=selection)
         refused = BrokerError.from_detail(detail)
+        # THE COOLDOWN EXPLANATION FIRST (#3616 review m1): when a resting sibling
+        # was excluded too, its return time is the wait that is actually true for
+        # this ask; the hold's "try again in about 5 min" would be wrong for it.
+        if resting and refused.is_holder_exclusion:
+            return self._resting_refusal(key, label, resting)
         if refresh_held is not None and (
             refused.is_holder_exclusion or refused.code in _NOTHING_LEFT_TO_LEND
         ):
             return refresh_held
-        if resting and refused.is_holder_exclusion:
-            return self._resting_refusal(key, label, resting)
         error = self._render(refused, key, label)
         self._remember(key, error)
         return error

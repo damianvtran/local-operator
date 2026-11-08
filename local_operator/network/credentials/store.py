@@ -162,6 +162,11 @@ def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | No
     return MeshAwareAuthStore(local, mesh=client, config_dir=config_dir)
 
 
+#: The refusal codes :meth:`MeshAwareAuthStore.borrowed_refresh_refusal` may restate:
+#: the held refusal's own two (``client._note_refresh_outcome``).
+_REFRESH_REFUSAL_CODES: frozenset[str] = frozenset({"refresh_failed", "grant_invalid"})
+
+
 class MeshAwareAuthStore:
     """An ``AuthStore`` with one added rung, consulted last."""
 
@@ -741,6 +746,12 @@ class MeshAwareAuthStore:
         refusal = self._refusals.get(key)
         hold_for = getattr(self._mesh, "refresh_hold", None)
         if refusal is None or not refusal.message or not callable(hold_for):
+            return None
+        # ONLY A REFUSAL ABOUT A REFRESH (#3616 review m2). A live hold for one login
+        # does not make every refusal this key gets about it: an owner-offline or a
+        # withdrawn share after a sibling's 401 must keep its own sentence and its
+        # own retryable class, never be re-labelled as the owner's refresh failure.
+        if refusal.code not in _REFRESH_REFUSAL_CODES:
             return None
         try:
             held = hold_for(key)

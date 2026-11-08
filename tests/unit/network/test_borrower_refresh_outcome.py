@@ -197,6 +197,9 @@ def test_a_dead_grant_with_nothing_else_to_lend_says_sign_in_on_the_owner(
         rig.rows = {7: NEW_BEARER}
         assert rig.borrow() == NEW_BEARER
         assert rig.store.no_credential_reason("openai") is None
+        # The owner lent login 7 again: the stale ``grant_invalid`` hold is gone, so
+        # a 401 on the NEW bearer is reported rather than answered from it.
+        assert rig.client.refresh_hold("openai", 7) is None
     finally:
         rig.close()
 
@@ -376,3 +379,58 @@ def test_the_sentences_are_short_and_never_echo_the_peers_remedy() -> None:
     assert longest.count("n" * 46) == 2, longest
     mcp = render_owner_refresh_outcome("mcp:https://x.test/mcp", "box", code="grant_invalid")
     assert "'/mcp login <name>'" in mcp and "https://" not in mcp.split("'")[-2], mcp
+
+
+def test_a_held_login_never_relabels_an_unrelated_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3616 review m2: only a refresh refusal is restated by the failover hook."""
+    from local_operator.providers.failover import _borrowed_refresh_refusal
+
+    rig = _Rig(tmp_path, monkeypatch, _owner_reply("unchanged"), rows={7: DEAD_BEARER})
+    try:
+        assert rig.borrow() == DEAD_BEARER
+        rig.provider_refuses(DEAD_BEARER)
+        assert rig.client.refresh_hold("openai", 7) is not None
+        rig.store._refusals["openai"] = BrokerError(  # noqa: SLF001
+            code="owner_offline", key="openai", message="studio-mac is offline"
+        )
+        assert rig.store.borrowed_refresh_refusal("openai") is None
+        assert _borrowed_refresh_refusal(rig.store, "openai") is None
+    finally:
+        rig.close()
+
+
+def test_a_resting_siblings_return_time_wins_over_the_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3616 review m1: login 7 held, sibling 8 rate-limited — the 429's wait is shown."""
+    rig = _Rig(
+        tmp_path,
+        monkeypatch,
+        _owner_reply("refresh_failed", code="refresh_failed", retry_after_ms=300_000),
+        rows={7: DEAD_BEARER, 8: NEW_BEARER},
+    )
+    try:
+        assert rig.borrow() == DEAD_BEARER
+        rig.provider_refuses(DEAD_BEARER)
+        assert rig.borrow() == NEW_BEARER
+        # Sibling 8 answers a usage limit: the real cooldown path rests it.
+        rig.client.report_sync("openai", kind="quota", session_id="sess-1", retry_after_ms=120_000)
+        assert rig.borrow() is None
+        assert sorted(rig.asks[-1]) == [7, 8]
+        reason = str(rig.store.no_credential_reason("openai"))
+        assert "rate-limited" in reason and "could not refresh" not in reason, reason
+    finally:
+        rig.close()
+
+
+def test_an_unnamed_owner_does_not_open_the_sentence_in_lowercase() -> None:
+    """#3616 design D7 / review n1."""
+    from local_operator.network.credentials.messages import render_owner_refresh_outcome
+
+    for code in ("refresh_failed", "unchanged"):
+        text = render_owner_refresh_outcome("openai", "", code=code, retry_after_ms=30_000)
+        assert text.startswith("The owner device "), text
+    named = render_owner_refresh_outcome("openai", "damians-mbp", code="refresh_failed")
+    assert named.startswith("damians-mbp could not"), named

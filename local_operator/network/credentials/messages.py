@@ -598,7 +598,12 @@ def render_owner_refresh_outcome(
     bidi and zero-width characters cannot repaint the error or forge a second
     line, and the name is bounded like a notice label. Takes no credential value.
     """
-    owner = _one_line_device_name(owner) or "the owner device"
+    named = _one_line_device_name(owner)
+    owner = named or "the owner device"
+    # The temporary arms START with the owner, so the unnamed fallback must not open
+    # the sentence in lowercase (#3616 design D7). A name the operator chose keeps
+    # its own case, even at the start.
+    lead = named or "The owner device"
     label = render_key_name(key) or "that credential"
     command = mcp_login_command(key) if key.startswith("mcp:") else f"lop login {label}"
     if code == "grant_invalid":
@@ -609,9 +614,9 @@ def render_owner_refresh_outcome(
     left = render_retry_after(retry_after_ms)
     when = f"Try again in about {left}" if left else "Try again shortly"
     if code == "refresh_failed":
-        head = f"{owner} could not refresh the '{label}' sign-in just now."
+        head = f"{lead} could not refresh the '{label}' sign-in just now."
     else:
-        head = f"{owner} has no newer '{label}' token than the one the provider refused."
+        head = f"{lead} has no newer '{label}' token than the one the provider refused."
     return f"{head} {when}; if it keeps failing, run '{command}' on {owner}."
 
 

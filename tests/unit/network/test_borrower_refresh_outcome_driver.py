@@ -11,8 +11,11 @@ heard the owner's answer still ended on the bare provider 401 (Q2).
 
 from __future__ import annotations
 
+import io
 import json
+from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -86,15 +89,46 @@ async def test_a_dead_login_the_owner_cannot_refresh_never_blocks_its_sibling(
 
 @pytest.mark.asyncio
 async def test_the_first_failing_turn_ends_on_the_owners_answer_not_the_bare_401(
-    borrowed: Any,
+    borrowed: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#3616 QA Q2: the turn that hears the owner's answer shows its remedy."""
+    """#3616 QA Q2 + design D6: the first turn says the owner's remedy, and only that.
+
+    The first failing turn reaches the sentence through the failover hook, later
+    turns through ``_no_credential_error``; both must read IDENTICALLY, and neither
+    may carry the LOCAL re-login hint ("To fix: /login …" here), which the TUI and
+    headless renderers add to anything that renders under the auth label.
+    """
     borrowed.owner.auth.delete_credential(borrowed.row_b.id)  # A is the only login
     stub = _Refuses401("bearer-a")
 
     with pytest.raises(ProviderError) as raised:
         await _turn(borrowed.store, stub, STUB_PROVIDER, "sess-401")
-    text = str(raised.value)
-    assert "HTTP 401" not in text, text
-    assert "owner-laptop" in text and f"'lop login {STUB_PROVIDER}'" in text, text
+    first = str(raised.value)
+    assert "HTTP 401" not in first, first
+    assert "on owner-laptop" in first and f"'lop login {STUB_PROVIDER}'" in first, first
     assert stub.seen.count("bearer-a") >= 1, stub.seen
+
+    with pytest.raises(ProviderError) as again:
+        await _turn(borrowed.store, stub, STUB_PROVIDER, "sess-401")
+    assert str(again.value) == first, (str(again.value), first)
+
+    # The two display paths that append the local auth hint, fed the turn's text.
+    from rich.console import Console
+
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.headless_print import PrintRenderer
+    from local_operator.providers.failover import append_auth_recovery
+
+    assert append_auth_recovery(first, STUB_PROVIDER) == first
+    sink = io.StringIO()
+    PrintRenderer(Console(file=sink, width=400, highlight=False)).handle(AgentEndEvent(error=first))
+    headless = sink.getvalue()
+    assert first in headless and "To fix:" not in headless, headless
+
+    from local_operator.tui.app import OperatorApp
+
+    monkeypatch.delenv("RADIENT_API_KEY", raising=False)
+    app = OperatorApp(lambda: None)  # type: ignore[arg-type]
+    app._session = MagicMock(model_label=f"{STUB_PROVIDER}/claude-opus-5-5")  # noqa: SLF001
+    tui = app._with_recovery_hint(first)  # noqa: SLF001
+    assert tui == first, tui
