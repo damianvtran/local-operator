@@ -1559,3 +1559,618 @@ def test_concurrent_stamp_migration_is_tolerated(home: Path) -> None:
     conn.close()
     with sqlite3.connect(db) as check:
         assert "stamp" in {row[1] for row in check.execute("PRAGMA table_info(created)")}
+
+
+# -- another session's scratchpad is not evidence (v0.101.22 false refusal) ---------------
+#
+# The operator approved, through a verified ask, deleting a leftover key file in
+# ANOTHER session's scratchpad; the guard refused it CRITICAL as "session state",
+# which no ask can lift. A scratchpad holds working files, never provenance: it
+# ranks HIGH ("another session's files") like any other liftable target, while
+# the evidence files, whole session dirs and links into them stay CRITICAL.
+
+PAD_FILE = f"~/.local-operator/sessions/{OTHER}/scratchpad/qa344/or.env"
+PAD_QUESTION = f"May I delete the leftover key file `{PAD_FILE}`?"
+
+
+def _other_pad_file(home: Path) -> Path:
+    path = home / ".local-operator" / "sessions" / OTHER / "scratchpad" / "qa344" / "or.env"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("SYNTHETIC=1\n")
+    return path
+
+
+def test_other_scratchpad_delete_is_high_not_critical(home: Path) -> None:
+    _other_pad_file(home)
+    verdict = _verdict(home, f"rm -f {PAD_FILE}")
+    assert verdict.risk is Risk.HIGH
+    assert verdict.reasons == ["another session's files"]
+
+
+@pytest.mark.asyncio
+async def test_other_scratchpad_delete_allowed_by_a_verified_ask(home: Path) -> None:
+    _other_pad_file(home)
+    _ask_log(home, SID, "a-0344", PAD_QUESTION, "Delete them", "desktop")
+    # The answer lands in the transcript as an ask-response row naming its id.
+    answer = CustomMessage(custom_type=ASK_RESPONSE_MESSAGE_TYPE, details={"ask_id": "a-0344"})
+    ok = await _check(home, f"rm -f {PAD_FILE}", _Judge("ALLOW ask=a-0344"), [answer])
+    assert ok is not None and not ok.blocked, ok
+    assert "named by ask a-0344" in ok.warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_other_scratchpad_delete_without_evidence_is_refused_high(home: Path) -> None:
+    _other_pad_file(home)
+    refused = await _check(home, f"rm -f {PAD_FILE}", _Judge("ALLOW ask=a-0344"))
+    assert refused is not None and refused.blocked and refused.risk == "high"
+
+
+def _pad_link_to_transcript(home: Path) -> str:
+    other = home / ".local-operator" / "sessions" / OTHER
+    (other / "transcript.jsonl").write_text("{}\n")
+    (other / "scratchpad" / "x").symlink_to(other / "transcript.jsonl")
+    return f"~/.local-operator/sessions/{OTHER}/scratchpad/x"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"rm -f ~/.local-operator/sessions/{OTHER}/transcript.jsonl",
+        f"rm -f ~/.local-operator/sessions/{OTHER}/origin.json",
+        f"rm -f ~/.local-operator/sessions/{OTHER}/asks.jsonl",
+        f"echo x > ~/.local-operator/sessions/{OTHER}/asks.jsonl",
+        f"rm -rf ~/.local-operator/sessions/{OTHER}",
+        "rm -f ~/.local-operator/guardrails/created.sqlite",
+        # ``..`` and globbed ``scratch*`` components can leave the pad.
+        "rm -f ~/.local-operator/sessions/*/scratch*/../transcript.jsonl",
+        "rm -f ~/.local-operator/sessions/*/scratch*/x",
+        # An unknowable part may print ``../transcript.jsonl``: fail closed.
+        f"rm -f ~/.local-operator/sessions/{OTHER}/scratchpad/$(cat name)",
+    ],
+)
+def test_evidence_beside_a_scratchpad_stays_critical(home: Path, command: str) -> None:
+    assert _verdict(home, command).risk is Risk.CRITICAL, command
+
+
+@pytest.mark.parametrize("op", ["rm -f {}", "echo x > {}", "rm -f {}*"])
+def test_scratchpad_link_into_evidence_stays_critical(home: Path, op: str) -> None:
+    link = _pad_link_to_transcript(home)
+    assert _verdict(home, op.format(link)).risk is Risk.CRITICAL
+
+
+def test_scratchpad_glob_is_high_unless_a_match_resolves_into_evidence(home: Path) -> None:
+    _other_pad_file(home)
+    (home / ".local-operator" / "sessions" / OTHER / "scratchpad" / "k.env").write_text("x")
+    glob = "rm -f ~/.local-operator/sessions/*/scratchpad/*.env"
+    assert _verdict(home, glob).risk is Risk.HIGH
+    _pad_link_to_transcript(home)
+    linked = home / ".local-operator" / "sessions" / OTHER / "scratchpad" / "y.env"
+    linked.symlink_to(home / ".local-operator" / "sessions" / OTHER / "transcript.jsonl")
+    assert _verdict(home, glob).risk is Risk.CRITICAL
+
+
+def test_own_scratchpad_delete_stays_low(home: Path) -> None:
+    scratch = home / ".local-operator" / "sessions" / SID / "scratchpad"
+    (scratch / "or.env").write_text("x")
+    verdict = classify_bash(
+        f"rm -f {scratch}/or.env",
+        cwd=str(home),
+        env=_env(home),
+        scratchpad=str(scratch),
+        session_id=SID,
+    )
+    assert verdict.risk is Risk.LOW
+
+
+@pytest.mark.asyncio
+async def test_file_tools_may_write_another_sessions_scratchpad_but_not_through_a_link(
+    home: Path,
+) -> None:
+    """``evidence_write_verdict`` already ranks only the evidence files: a
+    write into another pad is not refused CRITICAL, a write through a pad link
+    into the transcript still is (it resolves every spelling)."""
+    ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=SID)
+    _other_pad_file(home)
+    plain = await check_tool_call(
+        "write", {"path": PAD_FILE, "content": "x"}, ctx, judge=None, settings=GuardSettings()
+    )
+    assert plain is None or not plain.blocked
+    link = _pad_link_to_transcript(home)
+    forged = await check_tool_call(
+        "write", {"path": link, "content": "x"}, ctx, judge=None, settings=GuardSettings()
+    )
+    assert forged is not None and forged.blocked and forged.risk == "critical"
+
+
+# -- round-1 remediation (PR #3602): ``..`` through a link, hardlinks, appends -------------
+
+
+def _pad_sub_link_to_sessions(home: Path, owner: str) -> tuple[Path, Path]:
+    """``sessions/<owner>/scratchpad/sub`` -> ``sessions/<OTHER>``, and OTHER's
+    ask store: ``<pad>/sub/../<OTHER>/asks.jsonl`` normalises lexically into
+    the pad, but the kernel resolves ``..`` after following ``sub``, so it
+    lands in ``sessions/<OTHER>/asks.jsonl`` (review R1-MAJOR-1)."""
+    sessions = home / ".local-operator" / "sessions"
+    pad = sessions / owner / "scratchpad"
+    pad.mkdir(parents=True, exist_ok=True)
+    (sessions / OTHER).mkdir(parents=True, exist_ok=True)
+    asks = sessions / OTHER / "asks.jsonl"
+    asks.write_text("{}\n")
+    (pad / "sub").symlink_to(sessions / OTHER)
+    return pad, asks
+
+
+@pytest.mark.parametrize("op", ["echo f >> {}", "echo f > {}", "rm -f {}"])
+def test_dotdot_through_a_link_in_another_pad_stays_critical(home: Path, op: str) -> None:
+    pad, _ = _pad_sub_link_to_sessions(home, OTHER)
+    word = f"{pad}/sub/../{OTHER}/asks.jsonl"
+    assert _verdict(home, op.format(word)).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize("op", ["echo f >> {}", "rm -f {}"])
+def test_dotdot_through_a_link_in_own_pad_stays_critical(home: Path, op: str) -> None:
+    pad, _ = _pad_sub_link_to_sessions(home, SID)
+    word = f"{pad}/sub/../{OTHER}/asks.jsonl"
+    verdict = classify_bash(
+        op.format(word), cwd=str(home), env=_env(home), scratchpad=str(pad), session_id=SID
+    )
+    assert verdict.risk is Risk.CRITICAL
+
+
+@pytest.mark.asyncio
+async def test_dotdot_append_through_a_link_is_refused(home: Path) -> None:
+    """The reviewer's exact forgery reached ``check_tool_call`` as allowed."""
+    pad, _ = _pad_sub_link_to_sessions(home, OTHER)
+    refused = await _check(
+        home, f"echo f >> {pad}/sub/../{OTHER}/asks.jsonl", _Judge("ALLOW ask=a-0344")
+    )
+    assert refused is not None and refused.blocked and refused.risk == "critical"
+
+
+def test_hardlinked_file_under_sessions_is_not_exempt(home: Path) -> None:
+    """``realpath`` cannot see a hardlink: a second name for a transcript in
+    a pad is evidence, not scratch (review R1-MINOR-1)."""
+    sessions = home / ".local-operator" / "sessions"
+    (sessions / OTHER / "scratchpad").mkdir(parents=True, exist_ok=True)
+    transcript = sessions / OTHER / "transcript.jsonl"
+    transcript.write_text("{}\n")
+    for owner in (OTHER, SID):
+        pad = sessions / owner / "scratchpad"
+        pad.mkdir(parents=True, exist_ok=True)
+        os.link(transcript, pad / "h")
+        verdict = classify_bash(
+            f"echo f >> {pad}/h",
+            cwd=str(home),
+            env=_env(home),
+            scratchpad=str(sessions / SID / "scratchpad"),
+            session_id=SID,
+        )
+        assert verdict.risk is Risk.CRITICAL, owner
+
+
+def test_append_into_another_pad_is_high(home: Path) -> None:
+    """An append there is another session's files, like ``>`` and ``rm``
+    (review R1-MINOR-2), and still liftable — never CRITICAL."""
+    _other_pad_file(home)
+    verdict = _verdict(home, f"echo x >> {PAD_FILE}")
+    assert verdict.risk is Risk.HIGH
+    assert verdict.reasons == ["another session's files"]
+
+
+# -- ``..`` is judged where the kernel lands it (round-1 amendment) -----------------------
+
+
+def _own_pad(home: Path) -> Path:
+    pad = home / ".local-operator" / "sessions" / SID / "scratchpad"
+    (pad / "rig").mkdir(parents=True, exist_ok=True)
+    return pad
+
+
+def _own_verdict(home: Path, command: str):
+    return classify_bash(
+        command,
+        cwd=str(home),
+        env=_env(home),
+        scratchpad=str(_own_pad(home)),
+        session_id=SID,
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["rm -f {pad}/rig/../x", "cd {pad}/rig && rm -f ../x", "echo f >> {pad}/rig/../log"],
+)
+def test_own_pad_dotdot_resolving_inside_it_stays_low(home: Path, command: str) -> None:
+    """Agents tidy their scratch with ``rig/../x``; CRITICAL there is unliftable."""
+    pad = _own_pad(home)
+    (pad / "x").write_text("x")
+    assert _own_verdict(home, command.format(pad=pad)).risk is Risk.LOW
+
+
+def test_own_pad_dotdot_through_a_link_into_evidence_stays_critical(home: Path) -> None:
+    """``sub`` -> another session's pad: ``sub/../transcript.jsonl`` is its transcript."""
+    pad = _own_pad(home)
+    other = home / ".local-operator" / "sessions" / OTHER
+    (other / "scratchpad").mkdir(parents=True, exist_ok=True)
+    (other / "transcript.jsonl").write_text("{}\n")
+    (pad / "sub").symlink_to(other / "scratchpad")
+    for op in ("rm -f {}", "echo f >> {}"):
+        command = op.format(f"{pad}/sub/../transcript.jsonl")
+        assert _own_verdict(home, command).risk is Risk.CRITICAL, command
+
+
+def test_other_pad_dotdot_resolving_inside_it_is_high(home: Path) -> None:
+    _other_pad_file(home)
+    word = f"~/.local-operator/sessions/{OTHER}/scratchpad/qa344/../qa344/or.env"
+    for op in ("rm -f {}", "echo x >> {}"):
+        verdict = _verdict(home, op.format(word))
+        assert verdict.risk is Risk.HIGH, op
+        assert "another session's files" in verdict.reasons
+
+
+# -- the legacy window closes when the guard went live, not at the registry's birth --------
+#
+# Field case (2026-11-08): a ``task`` child spawned by a pre-registry runtime
+# cloned ``.worktrees/lop-update-clone-869dea``; its parent could not delete
+# it, because ``lineage.jsonl`` had been created EARLIER by a dev/QA run, so
+# the child was born after the registry and outside the origin.json window.
+
+
+def _generation(home: Path, name: str, *, guarded: bool) -> Path:
+    gen = home / ".local" / "share" / "lop" / "generations" / name
+    pkg = gen / "tools" / "local-operator" / "lib" / "python3.14" / "site-packages"
+    guard = pkg / "local_operator" / "guardrails"
+    guard.mkdir(parents=True)
+    if guarded:
+        (guard / "provenance.py").write_text("# synthetic\n")
+    return gen
+
+
+def _clone_child(home: Path, sid: str, clone: Path) -> None:
+    """``sid`` (origin.json → SID, no registry row) ran the measured clone.
+
+    The directory gets no ``.git``: a directory holding one is a primary
+    checkout, which history never vouches for (``evidence.covers``, #3565),
+    so this pins lineage only."""
+    start = time.time() - 1
+    command = (
+        f"cd {clone.parent.parent} && C=.worktrees/{clone.name}"
+        " && git clone -q --local --no-checkout . $C"
+    )
+    clone.mkdir(parents=True)
+    _write_transcript(
+        home,
+        sid,
+        [
+            _row(start, _call("b1", "bash", {"command": command})),
+            _row(time.time() + 1, _result("b1", "bash", "exit code: 0")),
+        ],
+        parent=SID,
+    )
+
+
+def test_legacy_window_runs_to_the_first_guarded_generation(home: Path) -> None:
+    state = home / ".local-operator"
+    prov._GUARD_LIVE_CACHE.clear()
+    ev_mod._TREE_CACHE.clear()
+    # A dev run creates the registry early; an unguarded generation is older still.
+    _generation(home, "20261101T000000Z-old", guarded=False)
+    assert prov.ensure_lineage_registry(state) is not None
+    time.sleep(0.05)
+    clone = home / "repo" / ".worktrees" / "lop-update-clone-869dea"
+    _clone_child(home, "869deaa18c49", clone)
+    time.sleep(0.05)
+    live = _generation(home, "20261108T053357Z-guarded", guarded=True)
+    time.sleep(0.05)
+    _generation(home, "20261109T000000Z-later", guarded=True)
+    st = live.stat()
+    born = getattr(st, "st_birthtime", st.st_ctime)  # Linux has no birth time
+    assert prov.guard_live_at() == pytest.approx(born)
+    _write_transcript(home, SID, [_row(time.time() - 600, {"role": "user", "content": []})])
+    target = os.path.realpath(clone)
+    found = ev_mod.gather([target], session_id=SID, env=_env(home), stop=_stop(home))
+    assert found.covers.get(target), found
+    assert "869deaa18c49" in found.listed[found.covers[target][0]].label
+
+
+def test_child_born_after_the_guard_went_live_adopts_nothing(home: Path) -> None:
+    """Born after the guard could refuse the plant, no registry row: no evidence,
+    even though the registry file (a dev run's) is older than the child."""
+    state = home / ".local-operator"
+    prov._GUARD_LIVE_CACHE.clear()
+    ev_mod._TREE_CACHE.clear()
+    assert prov.ensure_lineage_registry(state) is not None
+    _generation(home, "20261108T053357Z-guarded", guarded=True)
+    time.sleep(0.05)
+    late = home / "repo" / ".worktrees" / "lop-update-clone-late"
+    _clone_child(home, "869deaa18c50", late)
+    _write_transcript(home, SID, [_row(time.time() - 600, {"role": "user", "content": []})])
+    assert "869deaa18c50" not in ev_mod.session_tree(state, SID)
+    target = os.path.realpath(late)
+    found = ev_mod.gather([target], session_id=SID, env=_env(home), stop=_stop(home))
+    assert not found.covers.get(target)
+
+
+def test_legacy_window_falls_back_to_the_registry_without_generations(home: Path) -> None:
+    state = home / ".local-operator"
+    prov._GUARD_LIVE_CACHE.clear()
+    registry = prov.ensure_lineage_registry(state)
+    assert prov.guard_live_at() is None
+    assert prov.legacy_lineage_cutoff(state) == registry
+
+
+def test_task_job_children_get_a_registry_row(home: Path) -> None:
+    """The CURRENT runtime's ``task`` spawn stamps origin through
+    ``resume.mark_session_origin``, which appends the registry row."""
+    from local_operator.resume import mark_session_origin
+
+    state = home / ".local-operator"
+    child = state / "sessions" / "cccccccccc77"
+    mark_session_origin(child, "subagent", parent=SID)
+    assert prov.read_lineage(state)["cccccccccc77"]["parent"] == SID
+
+
+# -- ``cd -P`` / ``set -P`` follow the kernel (review R2-MINOR-2) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "prefix", ["cd -P {pad}/sub/..", "set -P; cd {pad}/sub/..", "set -o physical; cd {pad}/sub/.."]
+)
+def test_physical_cd_through_a_link_cannot_forge_an_ask_store(home: Path, prefix: str) -> None:
+    pad, asks = _pad_sub_link_to_sessions(home, OTHER)
+    command = prefix.format(pad=pad) + f" && echo f >> {OTHER}/asks.jsonl"
+    command = command.replace("; cd", " && cd")
+    assert _verdict(home, command).risk is Risk.CRITICAL, command
+
+
+def test_logical_cd_dotdot_stays_lexical(home: Path) -> None:
+    """Plain ``cd a/..`` is resolved lexically by bash itself: the pad."""
+    pad, _ = _pad_sub_link_to_sessions(home, OTHER)
+    (pad / OTHER).mkdir()
+    verdict = _verdict(home, f"cd {pad}/sub/.. && echo f >> {OTHER}/x.log")
+    assert verdict.risk is Risk.HIGH  # another session's pad, not its ask store
+
+
+# -- a clean clone its creator made may be vouched for (PR #3602, manager decision) -------
+#
+# The operator's spec lists "a clone" among what its creator may delete; a
+# ``.git`` directory used to end history evidence outright, so the field task
+# child's ``C=… && git clone -q --local --no-checkout . $C`` could never be
+# handed back. Now: B1 only (the resolver pins the clone destination), born in
+# the window, and ``provenance.clone_state`` clean.
+
+_GIT_ID = ["-c", "user.name=QA", "-c", "user.email=qa@example.invalid"]
+
+
+def _git_run(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", *_GIT_ID, *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _source_repo(home: Path) -> Path:
+    src = home / "src"
+    src.mkdir()
+    _git_run("init", "-q", "-b", "main", cwd=src)
+    (src / "README").write_text("hi\n")
+    _git_run("add", "README", cwd=src)
+    _git_run("commit", "-q", "-m", "init", cwd=src)
+    return src
+
+
+def _child_clones(home: Path, *, checkout: bool, command: str | None = None) -> Path:
+    """A task child (origin.json → SID) runs the field-shaped clone for real."""
+    src = _source_repo(home)
+    clone = src / ".worktrees" / "lop-update-clone-test"
+    flag = "" if checkout else " --no-checkout"
+    cmd = command or f"cd {src} && C=.worktrees/{clone.name} && git clone -q --local{flag} . $C"
+    start = time.time()
+    clone.parent.mkdir()
+    _git_run(
+        "clone", "-q", "--local", *([] if checkout else ["--no-checkout"]), ".", str(clone), cwd=src
+    )
+    _write_transcript(
+        home,
+        CHILD,
+        [
+            _row(start, _call("b1", "bash", {"command": cmd})),
+            _row(time.time(), _result("b1", "bash", f"exit code: 0\n--- stdout ---\n{clone}\n")),
+        ],
+        parent=SID,
+    )
+    _write_transcript(home, SID, [_row(start - 600, {"role": "user", "content": []})])
+    ev_mod._TREE_CACHE.clear()
+    return clone
+
+
+def _clone_covered(home: Path, clone: Path) -> bool:
+    target = os.path.realpath(clone)
+    found = ev_mod.gather([target], session_id=SID, env=_env(home), stop=_stop(home))
+    return bool(found.covers.get(target))
+
+
+@pytest.mark.parametrize("checkout", [False, True])
+def test_a_clean_clone_its_child_made_is_vouched_for(home: Path, checkout: bool) -> None:
+    clone = _child_clones(home, checkout=checkout)
+    assert prov.clone_state(str(clone)) == "clean"
+    assert _clone_covered(home, clone)
+
+
+def test_a_clone_with_an_unpushed_commit_is_not(home: Path) -> None:
+    clone = _child_clones(home, checkout=True)
+    _git_run("commit", "-q", "--allow-empty", "-m", "only here", cwd=clone)
+    assert prov.clone_state(str(clone)).startswith("dirty: a commit")
+    assert not _clone_covered(home, clone)
+
+
+def test_a_clone_with_an_untracked_file_is_not(home: Path) -> None:
+    clone = _child_clones(home, checkout=True)
+    (clone / "notes.txt").write_text("mine\n")
+    assert prov.clone_state(str(clone)).startswith("dirty: uncommitted")
+    assert not _clone_covered(home, clone)
+
+
+def test_a_clone_named_only_in_output_is_not(home: Path) -> None:
+    """B2 (name/full path + birth time) never vouches for a repository."""
+    clone = _child_clones(home, checkout=False, command="touch /dev/null; ls ~/src/.worktrees")
+    assert prov.clone_state(str(clone)) == "clean"
+    assert not _clone_covered(home, clone)
+
+
+def test_a_repo_with_linked_worktrees_is_never_a_clean_clone(home: Path) -> None:
+    src = _source_repo(home)
+    _git_run("worktree", "add", "-q", str(home / "wt"), cwd=src)
+    assert prov.clone_state(str(src)) == "dirty: has linked worktrees"
+
+
+# -- round-3 remediation -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Delete {p}?",
+        "May I delete `{p}`?",
+        "Delete {p}!",
+        "(delete {p})",
+        'Delete "{p}".',
+    ],
+)
+def test_names_path_strips_sentence_punctuation(home: Path, text: str) -> None:
+    target = home / "x" / "or.env"
+    target.parent.mkdir()
+    target.write_text("x")
+    h = str(home)
+    assert prov.names_path(text.format(p="~/x/or.env"), str(target), home=h)
+    # A parent/basename suffix still names nothing.
+    assert not prov.names_path(text.format(p="x/or.env"), str(target), home=h)
+
+
+def test_a_clone_with_a_commit_only_a_local_tag_holds_is_not_clean(home: Path) -> None:
+    clone = _child_clones(home, checkout=True)
+    _git_run("commit", "-q", "--allow-empty", "-m", "tagged only", cwd=clone)
+    _git_run("tag", "keep", cwd=clone)
+    _git_run("reset", "-q", "--hard", "HEAD~1", cwd=clone)
+    assert prov.clone_state(str(clone)).startswith("dirty: a commit")
+    assert not _clone_covered(home, clone)
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_a_clone_hiding_edits_from_status_is_not_clean(home: Path, flag: str) -> None:
+    clone = _child_clones(home, checkout=True)
+    (clone / "README").write_text("edited\n")
+    _git_run("update-index", flag, "README", cwd=clone)
+    assert prov.clone_state(str(clone)) == "dirty: files hidden from git status"
+
+
+def test_a_clone_whose_local_origin_is_gone_is_not_clean(home: Path) -> None:
+    clone = _child_clones(home, checkout=True)
+    moved = home / "elsewhere"
+    moved.mkdir()
+    os.rename(clone, moved / "c")
+    _git_run("remote", "set-url", "origin", f"file://{home}/src-gone", cwd=moved / "c")
+    assert prov.clone_state(str(moved / "c")) == "dirty: origin gone"
+    _git_run("remote", "set-url", "origin", str(home / "src-gone"), cwd=moved / "c")
+    assert prov.clone_state(str(moved / "c")) == "dirty: origin gone"
+    _git_run("remote", "set-url", "origin", str(home / "src"), cwd=moved / "c")
+    assert prov.clone_state(str(moved / "c")) == "clean"
+
+
+# -- tags: only a tag the origin lacks can hold the last copy of a commit ------------------
+
+
+def _tag_only_commit(repo: Path, tag: str, *, force: bool = False) -> None:
+    """A commit only ``tag`` names: commit, tag it, then move the branch back.
+
+    The message names the repo: within one second an identical message,
+    parent and author would make the SAME commit in source and clone, and a
+    "moved" tag would not move."""
+    _git_run("commit", "-q", "--allow-empty", "-m", f"held by {tag} in {repo.name}", cwd=repo)
+    _git_run("tag", *(["-f"] if force else []), tag, cwd=repo)
+    _git_run("reset", "-q", "--hard", "HEAD~1", cwd=repo)
+
+
+def _clone_with_source_tags(home: Path) -> Path:
+    src = _source_repo(home)
+    _tag_only_commit(src, "v1")
+    _git_run("tag", "-a", "-m", "annotated", "v2", cwd=src)
+    clone = src / ".worktrees" / "c"
+    clone.parent.mkdir()
+    _git_run("clone", "-q", "--local", ".", str(clone), cwd=src)
+    assert {"v1", "v2"} <= set(prov._tag_commits(str(clone)) or {})
+    return clone
+
+
+def test_tags_copied_from_the_source_keep_a_clone_clean(home: Path) -> None:
+    assert prov.clone_state(str(_clone_with_source_tags(home))) == "clean"
+
+
+def test_a_new_local_tag_on_a_new_commit_is_dirty(home: Path) -> None:
+    clone = _clone_with_source_tags(home)
+    _tag_only_commit(clone, "mine")
+    assert prov.clone_state(str(clone)).startswith("dirty: a commit")
+
+
+def test_a_moved_tag_is_dirty(home: Path) -> None:
+    clone = _clone_with_source_tags(home)
+    _tag_only_commit(clone, "v1", force=True)
+    assert prov.clone_state(str(clone)).startswith("dirty: a commit")
+
+
+def test_a_network_origin_judges_tags_by_loose_refs(home: Path) -> None:
+    """Never contacted: packed (cloned) tags are the origin's, loose ones local."""
+    clone = _clone_with_source_tags(home)
+    _git_run("remote", "set-url", "origin", "https://example.invalid/r.git", cwd=clone)
+    assert prov.clone_state(str(clone)) == "clean"
+    _tag_only_commit(clone, "mine")
+    assert (clone / ".git" / "refs" / "tags" / "mine").is_file()
+    assert prov.clone_state(str(clone)).startswith("dirty: a commit")
+
+
+# -- round-4 remediation -------------------------------------------------------------------
+
+
+def test_names_path_strips_one_prose_mark_never_a_run(home: Path) -> None:
+    target = home / "x" / "or.env"
+    target.parent.mkdir()
+    target.write_text("x")
+    h = str(home)
+    assert prov.names_path("Delete ~/x/or.env?", str(target), home=h)
+    assert not prov.names_path("Delete ~/x/or.env??", str(target), home=h)
+    # The as-written glob reading survives: a trailing ``?`` still globs.
+    (home / "x" / "qa-r5-dg-1").mkdir()
+    assert prov.names_path("Delete ~/x/qa-r5-dg-?", str(home / "x" / "qa-r5-dg-1"), home=h)
+
+
+@pytest.mark.parametrize("replacement", ["empty", "files"])
+def test_an_origin_that_is_no_longer_a_repo_is_gone(home: Path, replacement: str) -> None:
+    """``mv src src-old && mkdir src``: the path exists but holds no commits."""
+    clone = _child_clones(home, checkout=True)
+    moved = home / "elsewhere"
+    moved.mkdir()
+    os.rename(clone, moved / "c")
+    os.rename(home / "src", home / "src-old")
+    (home / "src").mkdir()
+    if replacement == "files":
+        (home / "src" / "README").write_text("not a repo\n")
+    assert prov.clone_state(str(moved / "c")) == "dirty: origin gone"
+
+
+def test_a_plain_dir_inside_another_repo_is_not_a_repo(home: Path) -> None:
+    src = _source_repo(home)
+    (src / "sub").mkdir()
+    assert prov._is_repo_at(str(src)) and not prov._is_repo_at(str(src / "sub"))
+
+
+def test_a_sparse_clone_is_not_hiding_files(home: Path) -> None:
+    src = _source_repo(home)
+    for d in ("a", "b"):
+        (src / d).mkdir()
+        (src / d / "f").write_text(d)
+    _git_run("add", "a", "b", cwd=src)
+    _git_run("commit", "-q", "-m", "dirs", cwd=src)
+    sparse = home / "sparse"
+    _git_run("clone", "-q", "--sparse", str(src), str(sparse), cwd=home)
+    assert prov.clone_state(str(sparse)) == "clean"
+    # assume-unchanged still counts inside a sparse checkout.
+    (sparse / "README").write_text("edited\n")
+    _git_run("update-index", "--assume-unchanged", "README", cwd=sparse)
+    assert prov.clone_state(str(sparse)) == "dirty: files hidden from git status"

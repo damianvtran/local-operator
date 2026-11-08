@@ -166,6 +166,73 @@ def ensure_lineage_registry(state_root: str | os.PathLike[str] | None = None) ->
     return float(getattr(st, "st_birthtime", st.st_ctime))
 
 
+#: The module whose arrival on this machine made the plant-blocking guard
+#: live: a generation carrying it ranks every shell write into ``sessions/``
+#: CRITICAL. Globbed relative to a generation root (``update`` layout:
+#: ``<gen>/tools/<tool>/lib/python3.X/site-packages/...``).
+_GUARD_MODULE_GLOB = "tools/*/lib/python*/site-packages/local_operator/guardrails/provenance.py"
+#: ``generations_dir`` → cutoff. Generations are written once and never
+#: touched, so one scan per process is enough.
+_GUARD_LIVE_CACHE: dict[str, float | None] = {}
+
+
+def guard_live_at() -> float | None:
+    """Birth time of the EARLIEST installed generation carrying the guard.
+
+    ``None`` when no generation carries it (an editable/dev run, or a layout
+    from before the generation installer); callers then fall back to the
+    registry file's birth.
+    """
+    from local_operator.update import generations_dir
+
+    root = generations_dir()
+    key = str(root)
+    if key in _GUARD_LIVE_CACHE:
+        return _GUARD_LIVE_CACHE[key]
+    births: list[float] = []
+    try:
+        entries = [e for e in os.scandir(root) if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        entries = []
+    for entry in entries:
+        try:
+            if not any(Path(entry.path).glob(_GUARD_MODULE_GLOB)):
+                continue
+            st = entry.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        births.append(float(getattr(st, "st_birthtime", st.st_ctime)))
+    value = min(births) if births else None
+    _GUARD_LIVE_CACHE[key] = value
+    return value
+
+
+def legacy_lineage_cutoff(state_root: str | os.PathLike[str] | None = None) -> float | None:
+    """Children born before this may be adopted from ``origin.json`` alone.
+
+    WHY THE INSTALL, NOT THE REGISTRY FILE. The window exists for children
+    spawned by a runtime too old to write registry rows. It closes when the
+    plant-blocking guard went live HERE — from then on a shell write into
+    ``sessions/`` (a forged ``origin.json``) is CRITICAL, so a later legacy
+    child cannot have been planted from the shell. The registry file's birth
+    was a proxy for that, and a bad one: a dev or QA run against real state
+    created ``lineage.jsonl`` early (Nov 7, before any guarded runtime was
+    installed), which shrank the window and orphaned a real ``task`` child
+    spawned by a pre-registry runtime, so its parent could not delete the
+    clone the child made. Generation dirs live in the install layout, which
+    is CRITICAL to shell writes, so their birth cannot be moved by an agent's
+    shell. An interpreter computing paths itself remains the documented
+    ceiling (see ``evidence`` module doc).
+
+    ``None`` when the registry cannot be created/read: no legacy adoption.
+    """
+    registry_born = ensure_lineage_registry(state_root)
+    if registry_born is None:
+        return None
+    live = guard_live_at()
+    return live if live is not None else registry_born
+
+
 def read_lineage(state_root: str | os.PathLike[str] | None = None) -> dict[str, dict[str, Any]]:
     """``child → row``; the FIRST row for a child wins (a later row cannot re-parent it)."""
     out: dict[str, dict[str, Any]] = {}
@@ -684,6 +751,216 @@ def worktree_state(path: str) -> str:
     return "clean"
 
 
+def _ignored_unregenerable(real: str) -> bool:
+    """An ignored entry outside :data:`_REGENERABLE`, or a nested repository
+    in one (``None`` from git counts: fail closed)."""
+    ignored = _git(["status", "--porcelain", "--ignored"], real)
+    if ignored is None:
+        return True
+    for line in ignored.splitlines():
+        if not line.startswith("!! "):
+            continue
+        entry = line[3:].strip().strip('"').rstrip("/")
+        name = os.path.basename(entry)
+        if name not in _REGENERABLE and not fnmatch.fnmatchcase(name, "*.pyc"):
+            return True
+        if _holds_git(os.path.join(real, entry)):
+            return True
+    return False
+
+
+def _source_checkout() -> str | None:
+    """The checkout this code runs from, when it runs from one (a dev run)."""
+    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    return here if os.path.exists(os.path.join(here, ".git")) else None
+
+
+def _is_repo_at(where: str) -> bool:
+    """Is ``where`` ITSELF a git repository (work tree, bare, or linked)?
+
+    ``git -C`` discovers upward, so a plain directory inside some other
+    repository would pass ``rev-parse`` alone: the git dir found must be
+    ``where`` (bare), ``where/.git``, or belong to a work tree rooted there.
+    """
+    if not os.path.isdir(where):
+        return False
+    real = os.path.realpath(where)
+    git_dir = _git(["rev-parse", "--absolute-git-dir"], real)
+    if git_dir is None:
+        return False
+    found = os.path.realpath(git_dir.strip())
+    if found in (real, os.path.join(real, ".git")):
+        return True
+    top = _git(["rev-parse", "--show-toplevel"], real)
+    return top is not None and os.path.realpath(top.strip()) == real
+
+
+def _tag_commits(repo: str) -> dict[str, str] | None:
+    """``tag name -> peeled commit`` for every tag in ``repo`` (one call)."""
+    out = _git(
+        ["for-each-ref", "--format=%(refname:strip=2) %(*objectname) %(objectname)", "refs/tags"],
+        repo,
+    )
+    if out is None:
+        return None
+    tags: dict[str, str] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            # An annotated tag peels to ``%(*objectname)``; a lightweight one
+            # leaves it empty, so its own object is the commit.
+            tags[parts[0]] = parts[1] if len(parts) == 3 else parts[-1]
+    return tags
+
+
+def _local_tag_commits(real: str) -> set[str] | None:
+    """Commits of the clone's tags that did NOT come from its origin.
+
+    WHY. A local clone copies every tag of its source (861 on this machine's
+    field clone), many on commits no branch holds, so counting all tags made
+    every real clone dirty. Only a tag the origin lacks can be the last name
+    for a commit:
+      * origin is a local path or ``file://`` that exists: a tag is the
+        origin's when its commit there is the same (both sides listed with
+        one ``for-each-ref``, compared here);
+      * otherwise (a network origin; never contacted): ``git clone`` writes
+        tags to ``packed-refs``, while ``git tag`` — and a later ``fetch`` —
+        write LOOSE refs under ``.git/refs/tags/``. Loose ones are treated as
+        possibly local; that is safe because their commits are then judged by
+        ``--not --remotes``, so a fetched tag on a pushed commit stays clean.
+    Accepted limitation: a ``git pack-refs`` after tagging makes a local tag
+    look cloned under a network origin.
+    """
+    tags = _tag_commits(real)
+    if tags is None:
+        return None
+    if not tags:
+        return set()
+    url = (_git(["config", "--get", "remote.origin.url"], real) or "").strip()
+    local = url[len("file://") :] if url.startswith("file://") else url
+    if local.startswith(("/", "~", ".")):
+        origin = os.path.join(real, os.path.expanduser(local))
+        theirs = _tag_commits(origin) if os.path.isdir(origin) else None
+        if theirs is None:
+            return None
+        return {sha for name, sha in tags.items() if theirs.get(name) != sha}
+    loose_root = os.path.join(real, ".git", "refs", "tags")
+    loose: set[str] = set()
+    for dirpath, _dirs, files in os.walk(loose_root):
+        for name in files:
+            loose.add(os.path.relpath(os.path.join(dirpath, name), loose_root))
+    return {sha for name, sha in tags.items() if name in loose}
+
+
+def clone_state(path: str) -> str:
+    """``clean`` when deleting the standalone clone at ``path`` loses nothing.
+
+    WHY. The operator's delete spec lists "a clone" among what its creator may
+    remove, but a primary checkout (a ``.git`` DIRECTORY) may hold the only
+    copy of work. History may vouch for one (``evidence.covers``) only when
+    this says ``clean``: ALL of
+      * not a repository with linked worktrees (the operator's checkouts,
+        ``~/local-operator`` with its ``.worktrees/``, look like that) and
+        not the checkout this code itself runs from;
+      * no tracked, untracked or non-regenerable ignored change — or, for a
+        ``--no-checkout`` clone (no index, nothing but ``.git``), no work
+        tree at all, whose "staged deletions" are only files never written;
+      * every local branch and HEAD reachable from a remote-tracking ref
+        (``refs/remotes``), and so is every tag the origin lacks
+        (``_local_tag_commits``), so no commit exists only here;
+      * no stash, and no nested repository in the work tree.
+    Anything else is ``dirty: <why>`` (or ``unknown``), and the clone stays
+    unowned: the ordinary ranking, with this state in the judge's facts.
+    Read-only git, same environment as :func:`worktree_state`.
+    """
+    try:
+        real = os.path.realpath(path)
+        if not os.path.isdir(os.path.join(real, ".git")):
+            return "not-a-clone"
+        if real == _source_checkout():
+            return "dirty: the running harness's own checkout"
+    except OSError:
+        return "unknown"
+    listing = _git(["worktree", "list", "--porcelain"], real)
+    if listing is None:
+        return "unknown"
+    if sum(ln.startswith("worktree ") for ln in listing.splitlines()) > 1:
+        return "dirty: has linked worktrees"
+    try:
+        never_checked_out = not os.path.exists(os.path.join(real, ".git", "index")) and (
+            os.listdir(real) == [".git"]
+        )
+    except OSError:
+        return "unknown"
+    # A local remote that is gone means the remote-tracking refs below name
+    # commits nothing else holds any more (review M2).
+    remotes = _git(["config", "--get-regexp", r"^remote\..*\.url$"], real) or ""
+    for line in remotes.splitlines():
+        url = line.split(" ", 1)[1].strip() if " " in line else ""
+        local = url[len("file://") :] if url.startswith("file://") else url
+        if local.startswith(("/", "~", ".")):
+            where = os.path.join(real, os.path.expanduser(local))
+            # A repository, not merely a path: ``mv src src-old && mkdir src``
+            # leaves a directory that holds none of the commits the
+            # remote-tracking refs name (review round 4, MAJOR-1).
+            if not _is_repo_at(where):
+                return "dirty: origin gone"
+    if not never_checked_out:
+        # assume-unchanged (lowercase tag) and skip-worktree (``S``) entries
+        # hide edits from ``git status`` (review M1).
+        flags = _git(["ls-files", "-v"], real)
+        if flags is None:
+            return "unknown"
+        # A sparse checkout marks every path outside its cone ``S``: there is
+        # no work-tree copy to hide, so only assume-unchanged counts there
+        # (review round 4, MINOR-1).
+        sparse = (_git(["config", "--bool", "core.sparseCheckout"], real) or "").strip()
+        hidden_tags = "" if sparse == "true" else "S"
+        if any(
+            (hidden_tags and ln[:1] == hidden_tags) or ln[:1].islower() for ln in flags.splitlines()
+        ):
+            return "dirty: files hidden from git status"
+        status = _git(["status", "--porcelain", "--untracked-files=all"], real)
+        if status is None:
+            return "unknown"
+        if status.strip():
+            return "dirty: uncommitted or untracked changes"
+        if _ignored_unregenerable(real):
+            return "dirty: ignored files that are not regenerable"
+        try:
+            nested = any(
+                _holds_git(e.path)
+                for e in os.scandir(real)
+                if e.name != ".git" and e.is_dir(follow_symlinks=False)
+            )
+        except OSError:
+            return "unknown"
+        if nested:
+            return "dirty: a nested repository"
+    if _git(["rev-parse", "-q", "--verify", "refs/stash"], real) is not None:
+        return "dirty: a stash"
+    # One walk, not a ``--contains`` per ref: commits reachable from HEAD or a
+    # local branch but from no remote-tracking ref exist only here.
+    unpushed = _git(["rev-list", "--count", "HEAD", "--branches", "--not", "--remotes"], real)
+    if unpushed is None or not unpushed.strip().isdigit():
+        return "unknown"
+    if int(unpushed) == 0:
+        local = _local_tag_commits(real)
+        if local is None:
+            return "unknown"
+        if local:
+            # A tag the origin lacks may be the only name for its commit
+            # (review M1). Copied tags are not: a local clone copies hundreds.
+            # (A tag on a tree or blob fails or counts here too: fail closed,
+            # whatever the message says.)
+            unpushed = _git(["rev-list", "--count", *sorted(local), "--not", "--remotes"], real)
+            if unpushed is None or not unpushed.strip().isdigit():
+                return "unknown"
+    if int(unpushed) > 0:
+        return "dirty: a commit no remote-tracking ref contains"
+    return "clean"
+
+
 def is_primary_checkout(path: str) -> bool:
     try:
         return os.path.isdir(os.path.join(path, ".git"))
@@ -1000,6 +1277,30 @@ def _expand_word(word: str, home: str, cwd: str | None) -> str | None:
     return os.path.normpath(word)
 
 
+#: One trailing character prose may put after a path. Closing quotes,
+#: backticks, commas, semicolons and ``)`` already end a word in ``_PATHISH``.
+_PROSE_END = frozenset("?!:]}")
+
+
+def _path_readings(text: str) -> list[tuple[str, bool]]:
+    """``(word, may_be_a_glob)`` readings of every path-looking word in ``text``.
+
+    Two per word. As written (``rstrip("/.:")``), where a trailing ``?`` is a
+    glob, so ``~/qa-r5-dg-?`` still covers its matches. As prose, at most ONE
+    trailing sentence mark is dropped ("Delete ~/x/or.env?") and the rest is
+    compared LITERALLY, never as a glob, so a repeated run (``or.env??``)
+    never names ``or.env`` (review round 4, MINOR-2).
+    """
+    out: list[tuple[str, bool]] = []
+    for match in _PATHISH.finditer(text):
+        raw = match.group(1)
+        out.append((raw.rstrip("/.:"), True))
+        stripped = raw[:-1].rstrip("/.:") if raw[-1:] in _PROSE_END else ""
+        if len(stripped) > 1:
+            out.append((stripped, False))
+    return out
+
+
 def names_path(
     text: str,
     path: str,
@@ -1031,11 +1332,10 @@ def names_path(
         if cand.startswith(home.rstrip("/") + "/"):
             candidates.add("~" + cand[len(home.rstrip("/")) :])
     protected = {os.path.normpath(p) for p in protected}
-    for match in _PATHISH.finditer(text):
-        word = match.group(1).rstrip("/.:")
+    for word, as_glob in _path_readings(text):
         if not word:
             continue
-        if not _GLOBISH.search(word):
+        if not as_glob or not _GLOBISH.search(word):
             if word in candidates or word.rstrip("/") in candidates:
                 return True
             expanded = _expand_word(word, home, cwd)

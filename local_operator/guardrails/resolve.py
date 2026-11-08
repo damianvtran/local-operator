@@ -809,6 +809,18 @@ class Target:
     #: ABOVE ``path`` by an unknown amount (S4/S2-5b), so ``path`` must not be
     #: presented to the judge as where the deletion lands.
     climbs: bool = False
+    #: The word as WRITTEN has a ``..`` component. ``path`` is normalised
+    #: lexically, but the kernel resolves ``..`` physically AFTER following a
+    #: link, so ``<pad>/sub/../<id>/asks.jsonl`` with ``sub`` -> a session dir
+    #: lands in that session's ask store while ``path`` reads as inside the
+    #: pad (review R1-MAJOR-1, PR #3602). ``classify`` therefore decides a
+    #: scratchpad exemption for such a word ONLY from where the kernel lands
+    #: it (``classify._kernel_reason``), never from ``path``.
+    dotdot: bool = False
+    #: The absolute but UN-normalised join of the word (``None`` for a glob or
+    #: opaque word). ``os.path.realpath`` of it resolves ``..`` physically, so
+    #: ``classify`` adds that spelling to the ones it judges.
+    raw_path: str | None = None
     # A judge cannot approve a root deliberately hidden for privacy. Keep this
     # distinct from ordinary opaque substitutions that can receive review.
     credential_derived: bool = False
@@ -850,6 +862,40 @@ class _State:
     cwd: str | None
     home: str
     private_cwd: bool = False
+    #: ``set -P`` / ``set -o physical``: every later ``cd`` resolves ``..``
+    #: physically, as ``cd -P`` does (review R2-MINOR-2).
+    physical: bool = False
+
+
+def kernel_path(raw: str | None) -> str | None:
+    """Where the kernel lands ``raw`` (absolute, un-normalised), resolving
+    ``..`` AFTER links as path lookup does; ``None`` if that is unknowable.
+
+    ``os.path.realpath`` of the nearest EXISTING ancestor, plus the remaining
+    components. Those must hold no ``..``: below a missing directory the
+    lookup itself fails, and a guess there must not grant an exemption
+    (so ``mkdir -p <pad>/n && rm -f <pad>/n/../x`` is judged unknowable at
+    check time, before ``n`` exists — deliberately).
+    """
+    if not raw or not raw.startswith("/"):
+        return None
+    parts = [c for c in raw.split("/") if c and c != "."]
+    for cut in range(len(parts), -1, -1):
+        head = "/" + "/".join(parts[:cut])
+        try:
+            exists = os.path.lexists(head) if cut == len(parts) else os.path.isdir(head)
+        except OSError:
+            exists = False
+        if not exists:
+            continue
+        rest = parts[cut:]
+        if ".." in rest:
+            return None
+        try:
+            return os.path.join(os.path.realpath(head), *rest)
+        except OSError:
+            return None
+    return None
 
 
 def _absolute(text: str, cwd: str | None) -> tuple[str | None, bool]:
@@ -859,6 +905,14 @@ def _absolute(text: str, cwd: str | None) -> tuple[str | None, bool]:
     if cwd is None:
         return None, True
     return os.path.normpath(os.path.join(cwd, text)), False
+
+
+def _joined(text: str, cwd: str | None) -> str | None:
+    """The absolute join of ``text`` WITHOUT normalising: ``..`` survives so
+    ``realpath`` can resolve it physically (see ``Target.raw_path``)."""
+    if text.startswith("/"):
+        return text
+    return None if cwd is None else os.path.join(cwd, text)
 
 
 def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
@@ -898,8 +952,10 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
             base = state.cwd or ""
             pattern = pattern if pattern.startswith("/") else os.path.join(base, pattern)
             pattern = os.path.normpath(pattern) if not unknown else None
+        raw_path = None
     else:
         path, unknown = _absolute(text or ".", state.cwd)
+        raw_path = _joined(text or ".", state.cwd)
     is_temp = (
         exp.temp
         and opaque
@@ -930,6 +986,8 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
         glob_all=glob_all,
         temp=is_temp,
         climbs=climbs,
+        dotdot=".." in exp.text.split("/"),
+        raw_path=None if is_temp else raw_path,
     )
 
 
@@ -1352,6 +1410,7 @@ class _Snapshot:
     cwd: str | None
     home: str
     private_cwd: bool = False
+    physical: bool = False
 
 
 class _Walker:
@@ -1376,11 +1435,12 @@ class _Walker:
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
         st = self.state
-        return _Snapshot(dict(st.env), st.cwd, st.home, st.private_cwd)
+        return _Snapshot(dict(st.env), st.cwd, st.home, st.private_cwd, st.physical)
 
     def _restore(self, snap: _Snapshot) -> None:
         self.state.env, self.state.cwd, self.state.home = snap.env, snap.cwd, snap.home
         self.state.private_cwd = snap.private_cwd
+        self.state.physical = snap.physical
 
     def _isolated_walk(self, command: str, depth: int) -> None:
         """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
@@ -1562,6 +1622,9 @@ class _Walker:
                 # this resolver does not model (review R6-MINOR-2).
                 st.env["CDPATH"] = OPAQUE_MARK
             self._cd(words[1:])
+            return
+        if name == "set":
+            self._set_options(words[1:])
             return
         if name == "popd":
             st.cwd = None
@@ -1923,8 +1986,39 @@ class _Walker:
                     )
                 return
 
+    def _set_options(self, args: list[Expanded]) -> None:
+        """Track ``set -P``/``set +P``/``set -o physical``: physical mode
+        changes where a later ``cd a/..`` lands (review R2-MINOR-2)."""
+        st = self.state
+        i = 0
+        while i < len(args):
+            text = args[i].text
+            if args[i].opaque:
+                # ``set $X``: may switch physical mode on; assume the worse.
+                st.physical = True
+            elif text in ("-o", "+o") and i + 1 < len(args):
+                if args[i + 1].opaque or args[i + 1].text == "physical":
+                    st.physical = text == "-o"
+                i += 1
+            elif text == "--" or not text.startswith(("-", "+")):
+                break
+            elif "P" in text[1:]:
+                st.physical = text[0] == "-"
+            i += 1
+
     def _cd(self, args: list[Expanded]) -> None:
         st = self.state
+        # ``cd -P`` (or ``set -P``) resolves ``..`` AFTER following links, so
+        # ``cd -P <pad>/sub/..`` with ``sub`` -> a session dir lands in
+        # ``sessions/``, not the pad (review R2-MINOR-2). ``-L``/``-P``: the
+        # last one wins, as in bash.
+        physical = st.physical
+        for w in args:
+            if w.text == "--" or not w.text.startswith("-") or len(w.text) == 1:
+                break
+            for flag in w.text[1:]:
+                if flag in "LP":
+                    physical = flag == "P"
         operands = [w for w in args if not (w.text.startswith("-") and len(w.text) > 1)]
         previous = st.cwd
         # A privacy-hidden cd leaves relative deletion roots uninspectable too.
@@ -1954,6 +2048,13 @@ class _Walker:
                 # leak it. An untracked/relative value still fails closed.
                 oldpwd = st.env.get("OLDPWD", "")
                 path = os.path.normpath(oldpwd) if oldpwd.startswith("/") else None
+            elif physical:
+                # Where the kernel lands it, links resolved: physical mode also
+                # sets ``$PWD`` to that, so a later logical ``cd ..`` climbs
+                # from the real directory. ``None`` (unknown cwd, which ranks
+                # later relative words HIGH) when it cannot be pinned.
+                raw = _joined(w.text, st.cwd)
+                path = kernel_path(raw) if raw is not None else None
             else:
                 path, _unknown = _absolute(w.text, st.cwd)
         try:

@@ -40,8 +40,9 @@ A call covers a target ``T`` when (all of):
   log, not a creation (review R1-MAJOR-2).
 
 The window and the name together rule out a directory another session
-created meanwhile. CRITICAL targets and primary checkouts never reach this
-module (``classify`` ranks them first; the caller re-checks).
+created meanwhile. CRITICAL targets never reach this module (``classify``
+ranks them first; the caller re-checks). A primary checkout is vouched for
+only as a clean clone the call itself made (``_vouches_for_clone``).
 
 WHERE THE CALLS COME FROM. The CURRENT session's calls come from the
 harness's in-memory rows (``extract_live``), never its own transcript file.
@@ -54,13 +55,15 @@ same one as ``python -c 'shutil.rmtree(...)'``.
 DESCENDANTS. Found, recursively, from the harness-written lineage registry
 (``provenance.read_lineage``, under ``<state>/guardrails/``) — not from the
 parent's roster, which is pruned. ``origin.json`` parent pointers are a
-MIGRATION fallback only, for child directories born before the registry file
-itself was (sessions that predate this change, such as the 2026-11-07 QA
-field case): a directory planted later is born after the registry existed,
-so it cannot use the fallback. That is a narrowing, not a seal — macOS
-``utimes`` can move a birth time backwards, and an interpreter write is the
-same ceiling as above. Symlinked session directories, transcripts and
-``origin.json`` files are never read.
+MIGRATION fallback only, for child directories born before the guard went
+live on this machine — the birth of the earliest installed generation that
+carries it, else (dev/editable runs) the registry file's own birth
+(``provenance.legacy_lineage_cutoff``; sessions that predate this
+change, such as the 2026-11-07 QA field case): a directory planted later is
+born after the guard could refuse the plant, so it cannot use the fallback.
+That is a narrowing, not a seal — macOS ``utimes`` can move a birth time
+backwards, and an interpreter write is the same ceiling as above. Symlinked
+session directories, transcripts and ``origin.json`` files are never read.
 """
 
 from __future__ import annotations
@@ -194,8 +197,9 @@ def session_tree(state_root: str | os.PathLike[str], session_id: str) -> list[st
     """``session_id`` followed by every descendant.
 
     Registry children are trusted as recorded. A legacy ``origin.json`` child
-    is adopted only when its directory was born BEFORE the lineage registry
-    was (the migration window) AND no earlier than the parent's
+    is adopted only when its directory was born BEFORE the guard went live
+    on this machine (``provenance.legacy_lineage_cutoff``: the migration
+    window) AND no earlier than the parent's
     ``created_at`` (slack allowed). A session whose own creation time cannot
     be read adopts no legacy children (fail closed: no evidence, the old
     ranking). Forgery is narrowed elsewhere (``classify._touch_reason``): a
@@ -208,13 +212,10 @@ def session_tree(state_root: str | os.PathLike[str], session_id: str) -> list[st
     """
     if not session_id:
         return []
-    from local_operator.guardrails.provenance import (
-        ensure_lineage_registry,
-        read_lineage,
-    )
+    from local_operator.guardrails.provenance import legacy_lineage_cutoff, read_lineage
 
     sessions = Path(state_root) / "sessions"
-    cutoff = ensure_lineage_registry(state_root)
+    cutoff = legacy_lineage_cutoff(state_root)
     registry: dict[str, list[str]] = {}
     for child, row in read_lineage(state_root).items():
         for parent in (row.get("parent"), row.get("opener")):
@@ -507,6 +508,37 @@ def _b1(ev: Evidence, anchor: str, env: Mapping[str, str]) -> bool:
     return False
 
 
+def _vouches_for_clone(ev: Evidence, repo: str, env: Mapping[str, str]) -> bool:
+    """Did ``ev`` make the standalone clone at ``repo``, and may it go?
+
+    The operator's spec lets a creator delete "a clone". Three conditions,
+    all required (PR #3602): the call re-resolves to ``git clone`` whose
+    destination is EXACTLY ``repo`` (variables assigned earlier in the same
+    command, ``C=… && git clone … $C``, are followed by the resolver; one
+    it cannot pin does not qualify), the clone was born in the call's window,
+    and ``provenance.clone_state`` says ``clean`` (nothing only here, not an
+    operator checkout with linked worktrees).
+    """
+    if ev.tool != "bash":
+        return False
+    born = _born(repo)
+    if born is None or not _in_window(born, ev):
+        return False
+    from local_operator.guardrails.provenance import clone_state
+    from local_operator.guardrails.resolve import resolve_command
+
+    home = env.get("HOME") or os.path.expanduser("~")
+    try:
+        res = resolve_command(ev.command, cwd=None, env=env, home=home)
+    except Exception:  # noqa: BLE001
+        return False
+    made = any(
+        c.kind == "clone" and c.path is not None and os.path.realpath(c.path) == repo
+        for c in res.created
+    )
+    return made and clone_state(repo) == "clean"
+
+
 def _anchors(target: str, stop: Iterable[str]) -> list[str]:
     """``target`` and its ancestors, stopping BEFORE any protected root."""
     stops = {s.rstrip("/") or "/" for s in stop}
@@ -536,10 +568,12 @@ def covers(
         return False
     texts: list[str] | None = None
     for anchor in _anchors(target, stop):
-        if not os.path.isdir(anchor) or os.path.isdir(os.path.join(anchor, ".git")):
-            # A primary checkout is never vouched for by history.
-            if os.path.isdir(os.path.join(anchor, ".git")):
-                return False
+        if os.path.isdir(os.path.join(anchor, ".git")):
+            # A primary checkout may hold the only copy of work, so history
+            # vouches for one only as a clean clone THIS call made, pinned
+            # by the resolver — never by name and birth time (B2) alone.
+            return _vouches_for_clone(ev, anchor, env)
+        if not os.path.isdir(anchor):
             continue
         born = _born(anchor)
         if born is None or not _in_window(born, ev):

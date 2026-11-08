@@ -954,6 +954,43 @@ async def test_both_poles_of_the_allowance_through_the_real_prune(
         await parent.dispose()
 
 
+@pytest.mark.asyncio
+async def test_a_task_child_gets_a_guardrail_lineage_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``task`` spawn path records child -> parent in ``lineage.jsonl``.
+
+    The delete guard adopts a child's history evidence from that registry; a
+    child spawned by a runtime that predated it was orphaned in the field
+    (PR #3602: ``869deaa18c49`` could not hand its clone to its parent). This
+    pins that the CURRENT build path writes the row, through the one choke
+    point ``resume.mark_session_origin``.
+    """
+    from local_operator.guardrails.provenance import read_lineage
+    from local_operator.harness.subagent import _build_child_session, _resolve_role
+
+    parent = await _factory_session(tmp_path, monkeypatch)
+    assert isinstance(parent, Session)
+    try:
+        child = await _build_child_session(
+            label="probe-lineage",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job-lineage",
+            agent="coder",
+            profile=_resolve_role("coder", parent),
+        )
+        try:
+            row = read_lineage(tmp_path / ".local-operator").get(child.session_id)
+            assert row is not None, "the task child has no registry row"
+            assert row["parent"] == parent.session_id and row["origin"] == "subagent"
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
+
+
 def _stdout_block(result: ToolResult) -> str:
     """The stdout section of a tool result, without the wrapper or the exit line."""
     assert not result.is_error, result.text

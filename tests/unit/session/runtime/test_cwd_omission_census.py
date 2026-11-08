@@ -37,6 +37,9 @@ SAFE_DEFAULTS = {
     ("guardrails/evidence.py", "_b1"): (
         "HOME expands ~ while re-resolving a cited call's creation targets"
     ),
+    ("guardrails/evidence.py", "_vouches_for_clone"): (
+        "HOME expands ~ while re-resolving a cited call's git clone destination"
+    ),
     ("guardrails/evidence.py", "_names_full_path"): (
         "HOME spells the ~-form of a target to compare against call text"
     ),

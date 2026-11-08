@@ -75,15 +75,47 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   a script the same session wrote and the call ran, names it (its basename, or
   the literal prefix that produced it, such as `qa-r5-dg-` in
   `f"qa-r5-dg-{os.getpid()}"`), or its output prints the directory's full path.
+  A git repository (a `.git` directory) is vouched for only as a clone the call
+  itself made: the command must resolve to `git clone` with exactly that
+  destination (`C=… && git clone … $C` counts; a name in the output never
+  does), and the clone must be clean — no uncommitted, untracked or
+  non-regenerable ignored change, no commit that no remote-tracking ref
+  contains, no stash, no nested repository, no linked worktrees, no file
+  hidden from `git status` by `--assume-unchanged` or (outside a sparse
+  checkout) `--skip-worktree`, and no local or `file://` remote that is gone or
+  no longer a git repository ("origin gone"). Tags count
+  only when the origin lacks them: against a local origin the tag must name the
+  same commit there; with a network origin (never contacted) a loose tag under
+  `.git/refs/tags/` is local work and a packed one came with the clone — so a
+  `git pack-refs` after tagging hides a local tag (an accepted limitation). A
+  `--no-checkout` clone that was never checked out has no work tree to lose.
+  The judge sees that state in its facts.
   Descendants come from the harness-written lineage registry
   (`<config_dir>/guardrails/lineage.jsonl`, appended when the harness spawns a
   subagent or opens an agent session). `origin.json` parent pointers are only a
-  migration fallback for child directories born before that registry file was:
-  a directory planted later is born after it. That is a narrowing, not a seal —
+  migration fallback for child directories born before the guard went live on
+  this machine (the earliest installed `lop` generation carrying it; a dev run
+  falls back to the registry file's birth): a directory planted later is born
+  after the guard could refuse the plant. That is a narrowing, not a seal —
   macOS `utimes` can move a birth time backwards. Symlinked session directories,
   transcripts and `origin.json` files are never read.
-  Writes into `<config_dir>/sessions/` (outside your own scratchpad) or
-  `<config_dir>/guardrails/` are CRITICAL: every redirection (`>`, `>>`, `>|`,
+  Writes into `<config_dir>/sessions/` (outside every session's scratchpad) or
+  `<config_dir>/guardrails/` are CRITICAL. A scratchpad holds working files,
+  not evidence: deleting, overwriting or appending (`>>`) in another session's
+  scratchpad from bash ranks HIGH ("another session's files"), so the judge or
+  a verified ask naming the path can lift it — unless the path resolves through
+  a link into that session's transcript, lineage or ask store, is a hardlinked
+  file, or an unknowable part (`$(...)`) could leave the pad; those stay
+  CRITICAL. A path written with `..` is judged where the kernel lands it
+  (`..` resolves after following links): inside your own scratchpad it stays
+  LOW, inside another session's scratchpad HIGH, anywhere else in session
+  state CRITICAL. Where it cannot be pinned at check time — a `..` below a directory that
+  does not exist yet, as in `mkdir -p <pad>/n && rm -f <pad>/n/../x` — it is
+  deliberately CRITICAL: write `rm -f <pad>/x` instead. `cd -P` (or `cd` after
+  `set -P`/`set -o physical`) is followed to the directory the kernel resolves. The
+  `write`/`edit` file tools are not ranked HIGH there: they refuse only the
+  evidence files, so a plain file in another session's scratchpad is not
+  refused by them. CRITICAL here means every redirection (`>`, `>>`, `>|`,
   `&>`, `>&`), the destination of a known writer (`cp`, `mv`, `rsync`, `ditto`,
   `install`, `ln`, `tar -x -C`, `unzip -d`, `git clone`, `git worktree add`,
   `git log/show/diff --output`, `mkdir`, `touch`, `truncate`, `dd of=`, `tee`,
