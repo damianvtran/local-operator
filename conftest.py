@@ -285,13 +285,21 @@ def _under_real_store(candidate: object) -> bool:
     if _REAL_STORE is None:
         return False
     try:
-        if isinstance(candidate, pathlib.Path):
-            path = candidate
-        elif isinstance(candidate, (str, bytes, os.PathLike)):
-            path = pathlib.Path(os.fsdecode(candidate))
-        else:
+        if not isinstance(candidate, (str, bytes, os.PathLike)):
             return False
-        resolved = path.resolve()
+        # Resolve through ``os.path.realpath`` on the decoded string, NEVER
+        # ``Path.resolve()``: on the Pythons we run, ``Path.resolve`` ends with a
+        # ``Path.stat()`` call, and a test that monkeypatches ``Path.stat`` to do
+        # a guarded op (``test_indexed_source_prototype``'s
+        # ``replace_at_path_check`` calls ``.replace``) re-entered this guard
+        # from inside its own resolution — guard → resolve → patched stat →
+        # replace → guard … — until the stack blew and the run hung (measured:
+        # 195 frames, then rc=124). Only hosts with a real
+        # ``~/.local-operator/sessions`` install the guard, so CI never saw it.
+        # ``realpath`` touches only ``os.lstat``/``os.readlink``, which tests do
+        # not patch to perform file ops, and it keeps the check fully active
+        # (no re-entry pass-through that could let a nested write slip by).
+        resolved = pathlib.Path(os.path.realpath(os.fsdecode(candidate)))
     except (TypeError, ValueError, OSError, RuntimeError):
         # ``RuntimeError`` is what ``Path.resolve`` raises for a symlink LOOP,
         # and this guard is deciding whether a path is the real store — a

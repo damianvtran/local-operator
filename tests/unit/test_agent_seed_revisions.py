@@ -26,6 +26,7 @@ import hashlib
 import json
 import re
 import subprocess
+import threading
 
 import pytest
 
@@ -89,8 +90,28 @@ def _batch_blobs(specs: list[str]) -> dict[str, str | None]:
     except OSError:  # pragma: no cover - no git on PATH
         return {spec: None for spec in specs}
     assert proc.stdin is not None and proc.stdout is not None
-    proc.stdin.write("".join(f"{spec}\n" for spec in specs).encode("utf-8"))
-    proc.stdin.close()
+    stdin = proc.stdin
+    payload = "".join(f"{spec}\n" for spec in specs).encode("utf-8")
+
+    def _feed() -> None:
+        # Writing every spec BEFORE reading any answer deadlocks once git's
+        # answers fill the stdout pipe buffer (~64 KiB): git blocks writing
+        # stdout, stops reading stdin, and our write blocks forever — measured
+        # stuck on this write for 926–1016 s in the tag sweep until the run
+        # was killed (rc=124). A writer thread keeps feeding stdin while the
+        # loop below drains stdout, so neither side waits on the other.
+        try:
+            stdin.write(payload)
+        except BrokenPipeError:  # git exited early; the reader sees EOF
+            pass
+        finally:
+            try:
+                stdin.close()
+            except BrokenPipeError:
+                pass
+
+    writer = threading.Thread(target=_feed, name="cat-file-batch-feed", daemon=True)
+    writer.start()
     results: dict[str, str | None] = {}
     out = proc.stdout
     for spec in specs:
@@ -102,8 +123,43 @@ def _batch_blobs(specs: list[str]) -> dict[str, str | None]:
         results[spec] = out.read(size).decode("utf-8", "replace")
         out.read(1)  # the record's trailing newline
     out.close()
+    writer.join(timeout=30)
     proc.wait(timeout=30)
     return results
+
+
+def test_batch_blobs_drains_output_larger_than_the_pipe_buffer() -> None:
+    """A request list bigger than the pipe buffers completes instead of hanging.
+
+    Regression for the deadlock the two deep tests hit (stuck on the stdin
+    write for 926–1016 s). It needs BOTH sides over capacity: a request list
+    git cannot swallow in one pipe-full, and answers that fill stdout before it
+    gets through them. 8,000 requests for one blob id is ~330 KB of stdin and ~12 MB of answers —
+    the old spelling hung on that from ~255 KB of stdin on the reference macOS
+    host. A bare object id, not ``HEAD:<path>``, because per-request tree
+    lookups made the path spelling ~17 s; only ``HEAD`` is needed, so this also
+    runs on CI's shallow clone.
+
+    The fetch runs on a daemon thread with a bounded join so a regression FAILS
+    here in seconds rather than hanging the shard until a watchdog kills it.
+    The fixed path measured ~2.5 s; 60 s is the headroom, not the expectation.
+    """
+
+    blob_path = ".dockerignore"
+    shown = _git("cat-file", "blob", f"HEAD:{blob_path}")
+    oid = _git("rev-parse", f"HEAD:{blob_path}")
+    if shown is None or oid is None or shown.returncode or oid.returncode:  # pragma: no cover
+        pytest.skip("git unavailable")
+    blob = oid.stdout.decode("ascii").strip()
+    specs = [blob] * 8_000 + ["HEAD:definitely/not/a/path"]
+    box: dict[str, dict[str, str | None]] = {}
+    worker = threading.Thread(target=lambda: box.update(out=_batch_blobs(specs)), daemon=True)
+    worker.start()
+    worker.join(timeout=60)
+    assert not worker.is_alive(), "_batch_blobs deadlocked on its stdin/stdout pipes"
+    results = box["out"]
+    assert results["HEAD:definitely/not/a/path"] is None
+    assert results[blob] == shown.stdout.decode("utf-8", "replace")
 
 
 def test_regeneration_reproduces_the_committed_bytes() -> None:
