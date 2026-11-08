@@ -343,3 +343,84 @@ class TestTheCountsReachTheRowFromTheRecord:
         row = SessionRow("x" * 12, NOW, "a conversation", live_state="idle", subagents_running=3)
         assert status_of(row, None) == (CatalogEntry(row).status_code, CatalogEntry(row).status)
         assert status_of(row, None) == ("delegating", "3 subagents running")
+
+
+class TestBackgroundWorkIsOrthogonalToTheCode:
+    """``SessionRow.background_work``: the Running fact every rung keeps (2026-11-07).
+
+    The live report was a parent draining for the build with one child running:
+    ``leaving`` suppressed ``delegating``, the code read ``idle``, and the
+    desktop's code-only Running rule filed it under Today. The flag must be true
+    on EVERY rung while work runs, false once it ends, and must not move the
+    status precedence at all (the collision table above still holds verbatim).
+    """
+
+    @pytest.mark.parametrize(
+        ("row", "entry_kwargs", "code"),
+        [
+            ({"live_state": "idle"}, {}, "delegating"),
+            ({"live_state": "attached"}, {}, "attached"),
+            ({"live_state": "idle", "leaving": "leaving for the build"}, {}, "idle"),
+            ({"live_state": "idle"}, {"unseen": True, "completion_kind": "complete"}, "complete"),
+            ({"live_state": "busy"}, {}, "busy"),
+        ],
+    )
+    def test_true_on_every_rung_while_a_child_runs(
+        self, row: dict[str, object], entry_kwargs: dict[str, object], code: str
+    ) -> None:
+        working = CatalogEntry(
+            SessionRow(
+                "x" * 12,
+                NOW,
+                "c",
+                subagents_running=1,
+                jobs_running=1,
+                **row,  # type: ignore[arg-type]
+            ),
+            **entry_kwargs,  # type: ignore[arg-type]
+        )
+        assert working.status_code == code
+        assert working.row.background_work is True
+        assert working.running is True
+        assert working.active is True
+
+    @pytest.mark.parametrize(
+        "counts",
+        [
+            {"jobs_running": 1},
+            {"subagents_queued": 2},
+            {"waiting_on": 1},
+            {"subagents_running": 1},
+        ],
+    )
+    def test_each_kind_of_work_counts(self, counts: dict[str, int]) -> None:
+        row = SessionRow("x" * 12, NOW, "c", **counts)  # type: ignore[arg-type]
+        assert row.background_work is True
+
+    @pytest.mark.parametrize(
+        "counts",
+        [
+            {},
+            {"subagents_running": 0, "subagents_queued": 0, "jobs_running": 0},
+            {"subagents_running": "2", "jobs_running": 4.5},  # damaged: never a claim
+        ],
+    )
+    def test_unknown_zero_or_damaged_is_never_work(self, counts: dict[str, object]) -> None:
+        row = SessionRow("x" * 12, NOW, "c", live_state="idle", **counts)  # type: ignore[arg-type]
+        assert row.background_work is False
+        assert CatalogEntry(row).running is False
+
+    def test_the_counts_keep_none_distinct_from_zero(self) -> None:
+        assert SessionRow("x" * 12, NOW, "c").background_counts == (None, None, None, 0)
+        assert SessionRow(
+            "x" * 12, NOW, "c", subagents_running=0, jobs_running=2, waiting_on=1
+        ).background_counts == (0, None, 2, 1)
+
+    def test_the_dedupe_key_moves_with_a_count_the_pair_does_not_show(self) -> None:
+        from local_operator.session.catalog import status_dedupe_key
+
+        one = SessionRow("x" * 12, NOW, "c", live_state="attached", subagents_running=1)
+        none = one._replace(subagents_running=0)
+        assert status_of(one, None) == status_of(none, None)
+        assert status_dedupe_key(one, None) != status_dedupe_key(none, None)
+        assert status_dedupe_key(one, None)[:2] == status_of(one, None)

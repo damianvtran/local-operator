@@ -2843,6 +2843,57 @@ class SessionRow(NamedTuple):
             return None
         return running, queued, jobs
 
+    @property
+    def background_counts(self) -> tuple[int | None, int | None, int | None, int]:
+        """``(subagents_running, subagents_queued, jobs_running, waiting_on)``, normalised.
+
+        The tuple every surface that ships the background-work fact ships, and
+        the term the desktop feed folds into its ``session_status`` dedupe key
+        (``session.catalog.status_dedupe_key``). The three child counts keep
+        ``None`` ("not reported") distinct from ``0`` exactly as the fields do;
+        ``waiting_on`` has always been a defaulted ``int`` and stays one, run
+        through the same validator because a record's values are whatever its
+        writer put in the file.
+        """
+        return (
+            reported_subagent_count(self.subagents_running),
+            reported_subagent_count(self.subagents_queued),
+            reported_subagent_count(self.jobs_running),
+            _counted(self.waiting_on),
+        )
+
+    @property
+    def background_work(self) -> bool:
+        """Does this session own ANY live work, whatever its ``status_code`` says?
+
+        THE RUNNING-SECTION FACT, kept ORTHOGONAL to the status precedence on
+        purpose (operator report, 2026-11-07: a session whose turn had ended
+        with "1 subagent running · 1 job running" above its composer sat under
+        Today with the idle circle). ``delegating`` is one RUNG of the
+        precedence ladder, so every louder rung — an unread completion, an
+        attached terminal, a draining runtime — hid the work completely, and the
+        desktop's Running rule (which reads ``status.code`` alone) dropped the
+        row. Re-ranking the ladder would change the glyph and words of every
+        surface that reads it; carrying the fact beside the code changes none of
+        them and lets each surface answer "is anything still running here" from
+        one backend-derived boolean instead of re-deriving it from the counts.
+
+        DIFFERENT FROM :attr:`delegating` IN ONE PLACE: ``leaving`` does not
+        suppress it. The build drain waits for exactly this work before the
+        runtime exits (``session.runtime.types.LEAVING_FOR_BUILD``), so a
+        draining parent with a child still running is the most literal case of
+        "still has work running" — the live report above was that row. The
+        ``delegating`` code keeps its leaving gate because its WORDS would then
+        contradict the "Leaving…" label; a boolean has no words to contradict.
+
+        A PARKED ``wait`` COUNTS (``waiting_on``, written by the ``wait`` tool's
+        ``note_waiting`` callback): it is the third kind of running work the
+        operator named, and it is the only wait count the backend keeps. An
+        unreported count is zero for this answer and never makes it true.
+        """
+        running, queued, jobs, waits = self.background_counts
+        return (running or 0) + (queued or 0) + (jobs or 0) + waits > 0
+
 
 #: What a DEVICE with no name is called, on every surface that has to name one.
 #:

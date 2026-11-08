@@ -173,6 +173,24 @@ class SessionRow(BaseModel):
     jobs_running: int | None = None
     subagents_running: int | None = None
     subagents_queued: int | None = None
+    #: TRUE WHILE THIS SESSION OWNS LIVE WORK — a running or queued subagent, a
+    #: running background job, or a parked ``wait`` — whatever ``status.code``
+    #: says (``resume.SessionRow.background_work``, the one derivation).
+    #:
+    #: WHY A SEPARATE FIELD AND NOT A CODE. ``status.code`` is one rung of a
+    #: precedence ladder: ``complete``, ``attached`` and a draining ``idle`` all
+    #: outrank ``delegating``, so a client that filed Running by code alone lost
+    #: every such session the moment its turn ended (operator report,
+    #: 2026-11-07). This flag is the Running-section input a client ORs with its
+    #: code rule; the four counts above are what a tooltip spells. Local rows
+    #: derive it from the live record, remote rows from the peer's projected
+    #: counts, and every live ``session_status`` frame repeats it beside the
+    #: counts so the 1 -> 0 edge is one frame.
+    #:
+    #: DEFAULTED ``False``: an unknown count can never claim work, and an older
+    #: producer that omits the key reads as "no claim", which a client already
+    #: treats as the code-only rule it had before.
+    background_work: bool = False
 
     #: When the PERSON last sent this conversation a message: epoch SECONDS
     #: (the same unit as ``mtime``/``created_at``), or ``null``.

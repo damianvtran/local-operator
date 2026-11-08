@@ -21632,6 +21632,38 @@
             "type": "boolean",
             "title": "Pinned"
           },
+          "tags": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Tags"
+          },
+          "primary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Primary"
+          },
+          "tags_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags Revision"
+          },
           "locality": {
             "type": "string",
             "enum": [
@@ -21712,6 +21744,22 @@
             "type": "boolean",
             "title": "Archived"
           },
+          "waiting_on": {
+            "type": "integer",
+            "title": "Waiting On",
+            "default": 0
+          },
+          "jobs_running": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Jobs Running"
+          },
           "subagents_running": {
             "anyOf": [
               {
@@ -21734,6 +21782,11 @@
             ],
             "title": "Subagents Queued"
           },
+          "background_work": {
+            "type": "boolean",
+            "title": "Background Work",
+            "default": false
+          },
           "last_user_at": {
             "anyOf": [
               {
@@ -21754,6 +21807,28 @@
                 "type": "null"
               }
             ]
+          },
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "avatar_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avatar Sha256"
           }
         },
         "additionalProperties": true,

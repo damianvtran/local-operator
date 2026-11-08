@@ -3979,3 +3979,58 @@ def test_a_steer_is_forwarded_once_and_says_so(tmp_path, monkeypatch) -> None:
     assert reply.json() == {"ok": True, "detail": "steering queued", "delivered_as": "steer"}
     assert [f["op"] for f in frames] == ["steer"]
     assert "wait_for_turn" not in frames[0]
+
+
+def test_summary_rows_carry_the_background_work_fact(tmp_path: Path, monkeypatch) -> None:
+    """The relay ships ``background_work`` + ``jobs_running`` + ``waiting_on`` (2026-11-07).
+
+    The same orthogonal Running fact the desktop list and feed publish, derived
+    by ``SessionRow.background_work`` over the record's counts. Unlike the
+    subagent pair it is NOT withheld for a build drain — the drain waits for
+    exactly this work — and it IS withheld (``None``/``False``) where the daemon
+    cannot vouch for the record at all.
+    """
+    from local_operator.session.runtime.types import LEAVING_FOR_BUILD, SessionRecord
+
+    cfg = tmp_path / "config"
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    (cfg / "sessions" / "s-bg").mkdir(parents=True, exist_ok=True)
+
+    def record(**extra: Any) -> SessionRecord:
+        return SessionRecord(
+            pid=4400,
+            kind="daemon",
+            session_id="s-bg",
+            conversation_name="parent",
+            cwd="/tmp",
+            model_label="test/model",
+            control_port=1,
+            control_key="k",
+            **extra,
+        )
+
+    daemon = MobileDaemon(port=0, password="pw")
+
+    def summary(rec: SessionRecord, *, degraded: bool = False) -> dict[str, Any]:
+        daemon.table.entries.clear()
+        entry = SessionEntry(rec)
+        entry.degraded = degraded
+        daemon.table.entries[rec.pid] = entry
+        return daemon.table._merge_summaries({})[0]
+
+    row = summary(record(jobs_running=1, subagents_running=0, subagents_queued=0))
+    assert (row["jobs_running"], row["waiting_on"], row["background_work"]) == (1, 0, True)
+
+    draining = summary(record(subagents_running=1, leaving=LEAVING_FOR_BUILD))
+    assert draining["background_work"] is True, draining
+    assert draining["subagents_running"] is None, "the pair keeps its own leaving gate"
+
+    finished = summary(record(jobs_running=0, subagents_running=0, subagents_queued=0))
+    assert finished["background_work"] is False
+
+    unknown = summary(record(subagents_running=2), degraded=True)
+    assert (unknown["jobs_running"], unknown["waiting_on"], unknown["background_work"]) == (
+        None,
+        None,
+        False,
+    )

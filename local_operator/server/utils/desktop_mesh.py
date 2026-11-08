@@ -595,6 +595,11 @@ def remote_session_rows(
             "jobs_running": row.jobs_running,
             "subagents_running": row.subagents_running,
             "subagents_queued": row.subagents_queued,
+            # The same orthogonal Running fact the local half publishes, derived
+            # by the same property from the PEER's projected counts (a stale
+            # peer's counts are already nulled by the projection, so a row this
+            # device cannot vouch for never claims work).
+            "background_work": row.background_work,
             "live_state": row.live_state,
             "locality": "remote",
             "owner_device": str(getattr(row, "owner_device", "") or ""),

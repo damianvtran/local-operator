@@ -390,6 +390,7 @@ def _publish(
     pid: int,
     busy: bool = False,
     detached: bool = True,
+    **extra: Any,
 ) -> None:
     """One discovery record, written through the real writer.
 
@@ -414,6 +415,7 @@ def _publish(
             control_key="0" * 64,
             busy=busy,
             detached=detached,
+            **extra,
         ),
         root,
     )
@@ -481,6 +483,31 @@ class TestARunningRowRidesTheFirstPage:
         position = decode_cursor(page.next_cursor)
         assert position is not None
         assert position.key == page.entries[2].rank
+
+    def test_an_attached_row_with_background_work_rides_the_first_page(
+        self, tmp_path: Path
+    ) -> None:
+        """Background work is a Running fact on a rung whose CODE is not Running.
+
+        ``attached`` outranks ``delegating``, so a code-only extras filter left a
+        watched parent with a running child behind the expander (operator
+        report, 2026-11-07). ``CatalogEntry.running`` is the filter now.
+        """
+        for index in range(4):
+            session_id = f"chat{index:08d}"
+            _session(tmp_path, session_id, created=5_000.0 + index, stamp=5_000.0 + index)
+            _unread(tmp_path, session_id)
+        parent = "bgwk00000001"
+        _session(tmp_path, parent, created=1_000.0, stamp=1_000.0)
+
+        with _live_pid() as pid:
+            _publish(tmp_path, parent, pid=pid, detached=False, subagents_running=1)
+            page = catalogue_page(tmp_path, limit=3)
+
+        extras = page.entries[3:]
+        assert [entry.id for entry in extras] == [parent]
+        assert extras[0].status_code == "attached"
+        assert extras[0].row.background_work is True
 
     def test_the_running_extras_ride_the_first_page_only(self, tmp_path: Path) -> None:
         """One append, not one per page -- the pin rule, for the same reason.

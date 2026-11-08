@@ -21,8 +21,10 @@ def test_badge_seed_reuses_primed_status_without_rederiving_catalogue(
     }
     monkeypatch.setattr(feed, "_snapshot", lambda: (states, 4, 5))
     feed._status_seen = {
-        "synthetic": ("approval", "Waiting"),
-        "not-in-authority": ("complete", "Done"),
+        # ``StatusKey`` is (code, label, background_counts); the snapshot reads
+        # only index 0, so the counts are a neutral synthetic tuple.
+        "synthetic": ("approval", "Waiting", (None, None, None, 0)),
+        "not-in-authority": ("complete", "Done", (None, None, None, 0)),
     }
     feed._status_revision = {"synthetic": 7}
     feed._notifications_seen = (8, 2, 1, 0)

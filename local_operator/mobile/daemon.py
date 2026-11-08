@@ -732,6 +732,47 @@ def _advertisable_counts(entry: SessionEntry | None) -> tuple[int | None, int | 
     )
 
 
+def _advertisable_background(entry: SessionEntry | None) -> dict[str, Any]:
+    """``jobs_running``, ``waiting_on`` and ``background_work`` for one relayed row.
+
+    THE SAME ORTHOGONAL RUNNING FACT the desktop list and feed publish
+    (``resume.SessionRow.background_work``, derived HERE by that one property
+    over this record's counts rather than restated), so a phone files a parent
+    whose turn ended while its children run exactly where the desktop does
+    (operator report, 2026-11-07). The mobile app adopts it on its own track; a
+    client that does not know the keys renders as before.
+
+    THE VOUCHING GATES ARE :func:`_advertisable_counts`' MINUS ``leaving``. A
+    degraded dial, an ended entry or a stale beat is a session this daemon
+    cannot speak for, so every value is unknown (``None``/``False``). A build
+    drain is different: the runtime is staying up precisely BECAUSE this work is
+    still running, so the flag stays true through it — the desktop and the TUI
+    now say so too, which retires the "terminal says Leaving…" disagreement that
+    gate guarded against for the flag. The subagent pair keeps its own gate
+    unchanged; the phone's existing chip reads it.
+    """
+    unknown: dict[str, Any] = {"jobs_running": None, "waiting_on": None, "background_work": False}
+    if entry is None or entry.ended or entry.degraded:
+        return unknown
+    record = entry.record
+    beat = float(getattr(record, "heartbeat_at", 0.0) or 0.0)
+    if beat <= 0.0 or time.time() - beat > registry.HEARTBEAT_TIMEOUT_S:
+        return unknown
+    from local_operator.resume import SessionRow
+
+    row = SessionRow(
+        "",
+        0.0,
+        "",
+        waiting_on=getattr(record, "waiting_on", 0) or 0,
+        jobs_running=getattr(record, "jobs_running", None),
+        subagents_running=getattr(record, "subagents_running", None),
+        subagents_queued=getattr(record, "subagents_queued", None),
+    )
+    _running, _queued, jobs, waits = row.background_counts
+    return {"jobs_running": jobs, "waiting_on": waits, "background_work": row.background_work}
+
+
 def _tags_stats(root: Path) -> tuple[Any, ...]:
     """A fingerprint of the two places a tag write lands, carried by every
     shape of :func:`_tags_marker` (see there for why the token alone is not
@@ -1655,6 +1696,9 @@ class SessionTable:
                     # (see ``session-list.tsx``).
                     "subagents_running": counts[0],
                     "subagents_queued": counts[1],
+                    # The orthogonal Running fact and the two counts the pair
+                    # above does not carry; see ``_advertisable_background``.
+                    **_advertisable_background(entry),
                     "ended": ended,
                     "degraded": degraded,
                     # WHO opened this conversation, when an agent did — the

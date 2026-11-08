@@ -260,9 +260,32 @@ class CatalogEntry:
     @property
     def active(self) -> bool:
         """Section membership is independent of the number of ordering categories."""
+        # ``background_work`` is folded in so a row with running children can
+        # never file as Previous: in practice a live runtime already sets
+        # ``live_state``, but the Running fact must not depend on that.
         return bool(
-            self.row.pending or self.unseen or self.row.live_state or self.row.waiting_on > 0
+            self.row.pending
+            or self.unseen
+            or self.row.live_state
+            or self.row.waiting_on > 0
+            or self.row.background_work
         )
+
+    @property
+    def running(self) -> bool:
+        """Does the desktop file this row under Running? The backend half of that rule.
+
+        A Running ``status_code`` OR live background work
+        (:attr:`resume.SessionRow.background_work`), because the code is ONE
+        rung of a precedence ladder and background work is orthogonal to it: an
+        unread completion, an attached terminal or a build drain each win the
+        code while a subagent, job or parked wait is still running, and a
+        code-only test dropped exactly those rows from the section and from the
+        first page's below-the-window extras (operator report, 2026-11-07).
+        The precedence itself is deliberately unchanged — see
+        ``SessionRow.background_work`` for why the fact rides beside it.
+        """
+        return self.status_code in RUNNING_STATUS_CODES or self.row.background_work
 
     @property
     def status_code(self) -> str:
@@ -746,7 +769,14 @@ def entry_for(row: SessionRow, attention: Mapping[str, Any] | None) -> CatalogEn
     )
 
 
-def status_dedupe_key(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
+#: The edge channel's dedupe key: ``(code, label, background_counts)``.
+#:
+#: The first two terms are :func:`status_of`'s pair; index 0 stays the code
+#: because the badge snapshot reads ``key[0]`` as one.
+StatusKey = tuple[str, str, tuple[int | None, int | None, int | None, int]]
+
+
+def status_dedupe_key(row: SessionRow, attention: Mapping[str, Any] | None) -> StatusKey:
     """``status_of``'s pair with the CLOCK term removed — the edge channel's key.
 
     WHY THE PAIR IS NOT ENOUGH (review round 1, MINOR 2). One label carries a
@@ -769,10 +799,22 @@ def status_dedupe_key(row: SessionRow, attention: Mapping[str, Any] | None) -> t
     client's own 30 s safety poll) refreshes it. A tooltip's age is not worth a
     frame a second per wedged session, which is the same trade the 15 s
     heartbeat rewrite already makes.
+
+    WHY THE BACKGROUND COUNTS RIDE THE KEY (operator report, 2026-11-07). The
+    pair alone only moves with the counts on the ``delegating`` rung, whose
+    label folds them in. On every louder rung — ``complete``, ``attached``, a
+    draining ``idle`` — a child finishing changed nothing the pair says, so no
+    frame was published and a client could not learn that the row's
+    :attr:`~local_operator.resume.SessionRow.background_work` had gone false.
+    With the counts in the key, every count edge publishes ONE frame carrying
+    the new counts, the derived flag and the (possibly unchanged) pair together,
+    so the final 1 -> 0 is a single atomic change on the client and not a code
+    frame followed by a counts frame. A heartbeat rewrite still moves none of
+    these terms and stays silent.
     """
-    if row.heartbeat_age_s is None:
-        return status_of(row, attention)
-    return status_of(row._replace(heartbeat_age_s=None), attention)
+    aged = row if row.heartbeat_age_s is None else row._replace(heartbeat_age_s=None)
+    code, label = status_of(aged, attention)
+    return code, label, row.background_counts
 
 
 def order_key_of(
@@ -808,7 +850,7 @@ def order_key_of(
 
 def status_and_order_keys(
     row: SessionRow, attention: Mapping[str, Any] | None
-) -> tuple[tuple[str, str], tuple[int, int, float, str]]:
+) -> tuple[StatusKey, tuple[int, int, float, str]]:
     """The TWO channel keys ONE ``entry_for`` build derives — dedupe pair first, placement second.
 
     The desktop feed asks for both keys for every candidate it primes or
@@ -831,8 +873,8 @@ def status_and_order_keys(
     """
     entry = entry_for(row, attention)
     if row.heartbeat_age_s is None:
-        return (entry.status_code, entry.status), entry.rank
-    return status_of(row._replace(heartbeat_age_s=None), attention), entry.rank
+        return (entry.status_code, entry.status, row.background_counts), entry.rank
+    return status_dedupe_key(row, attention), entry.rank
 
 
 def status_of(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
@@ -2403,7 +2445,8 @@ def catalogue_page(
     THE ANSWER MAY CARRY MORE ROWS THAN ``limit``, and the first page is the one
     place the number is not a bound. Besides the page, a first page carries the
     rows whose absence is the bug this guarantees against: every row below the
-    window whose ``status_code`` is in :data:`RUNNING_STATUS_CODES`, and -- on
+    window that is :attr:`CatalogEntry.running` (a Running code or live background
+    work), and -- on
     the head answer only -- the pinned rows the page does not carry. ``truncated``,
     ``next_cursor``, ``counts`` and ``limit`` keep describing the PAGE and nothing
     else, exactly as they already did for the pins, so ``len(entries) > limit``
@@ -2581,11 +2624,7 @@ def catalogue_page(
         # id-keyed, which is the design's own "a pinned row may additionally be
         # in the head".
         wanted = set(pinned_off_page) if scope is None else set()
-        entries += [
-            entry
-            for entry in ranked[limit:]
-            if entry.id in wanted or entry.status_code in RUNNING_STATUS_CODES
-        ]
+        entries += [entry for entry in ranked[limit:] if entry.id in wanted or entry.running]
     return CatalogPage(
         entries=_hydrate(directory, source, entries),
         next_cursor=next_cursor,

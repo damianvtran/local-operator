@@ -97,7 +97,6 @@ from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentSt
 from local_operator.session.attention import AttentionStore, acknowledge_session_receipt
 from local_operator.session.catalog import (
     DECORATION_ATTENTION,
-    RUNNING_STATUS_CODES,
     CatalogueScope,
     ScopeCensus,
     catalogue_page,
@@ -7438,7 +7437,8 @@ class SessionPage:
 
     THE NAME IS NOT ``pinned_off_page`` ANY MORE, and that is the honest
     consequence of two populations riding one list: the catalogue appends every
-    RUNNING row below the window (``session.catalog.RUNNING_STATUS_CODES``) on
+    RUNNING row below the window (``CatalogEntry.running``: a
+    ``session.catalog.RUNNING_STATUS_CODES`` code or ``background_work``) on
     any scope's first page, and the pinned rows the HEAD page does not carry
     (head only — a scoped answer cannot speak for the pinned set) — so a name
     that mentioned only pins would be a comment that has stopped being true. No
@@ -9219,6 +9219,11 @@ class DesktopSessions:
                     {
                         "active": entry.active,
                         "status": {"code": entry.status_code, "label": entry.status},
+                        # The orthogonal Running fact (``SessionRow.background_work``):
+                        # true while a subagent, job or parked wait runs, whatever
+                        # the code above says. The counts it is derived from ride
+                        # the row already, from ``_asdict``.
+                        "background_work": entry.row.background_work,
                         "binding": {
                             "agent": stored.agent or None if stored else None,
                             "team": stored.team or None if stored else None,
@@ -9255,7 +9260,7 @@ class DesktopSessions:
                         # than that uncached preview read.
                         "last_user_at": (
                             last_user_at(self.root / "sessions" / entry.id)
-                            if entry.status_code in RUNNING_STATUS_CODES
+                            if entry.running
                             else None
                         ),
                         # ALWAYS PRESENT, BOTH VALUES. See `SessionRow.pinned`:

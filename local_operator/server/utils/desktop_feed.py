@@ -816,7 +816,7 @@ class DesktopFeed:
         #: with the CLOCK term removed — so the one label that carries a live age
         #: (the ``wedged`` sentence) cannot turn the clock itself into an edge
         #: (review round 1, MINOR 2).
-        self._status_seen: dict[str, tuple[str, str]] = {}
+        self._status_seen: dict[str, catalog.StatusKey] = {}
         #: ``session_id -> rank tuple``, the derived ORDER KEY
         #: (``catalog.order_key_of``) as of the last edge published for that row.
         #: A change here is a change the row's own frame cannot express —
@@ -3020,8 +3020,8 @@ class DesktopFeed:
                 state = fetched.get(f"session/{session_id}")
                 if state is not None:
                     self._attention[session_id] = state
-        pending: list[tuple[str, tuple[str, str], int]] = []
-        published_keys: dict[str, tuple[str, str]] = {}
+        pending: list[tuple[str, tuple[str, str], int, SessionRow]] = []
+        published_keys: dict[str, catalog.StatusKey] = {}
         moved_positions: dict[str, tuple[int, int, float, str]] = {}
         revisions = dict(self._status_revision)
         for session_id in ids:
@@ -3057,12 +3057,30 @@ class DesktopFeed:
             pair = catalog.status_of(row, attention)
             revision = revisions.get(session_id, 0) + 1
             revisions[session_id] = revision
-            pending.append((session_id, pair, revision))
+            pending.append((session_id, pair, revision, row))
             published_keys[session_id] = key
-        for session_id, pair, revision in pending:
+        for session_id, pair, revision, row in pending:
+            running, queued, jobs, waits = row.background_counts
             self._publish(
                 "session_status",
-                {"code": pair[0], "label": pair[1], "revision": revision},
+                {
+                    "code": pair[0],
+                    "label": pair[1],
+                    "revision": revision,
+                    # THE BACKGROUND-WORK FACT TRAVELS IN THE SAME FRAME as the
+                    # pair, never in a frame of its own: the dedupe key now
+                    # includes these counts (``catalog.status_dedupe_key``), so a
+                    # child finishing on a ``complete``/``attached`` row publishes
+                    # here, and the last child's 1 -> 0 lands as ONE frame whose
+                    # counts, flag and code change together — a client applying
+                    # it has no intermediate state in which the row could leave
+                    # Running and come back. Field names match the list row's.
+                    "subagents_running": running,
+                    "subagents_queued": queued,
+                    "jobs_running": jobs,
+                    "waiting_on": waits,
+                    "background_work": row.background_work,
+                },
                 session_id=session_id,
             )
         # COMMIT LAST (see the docstring), and it applies to the POSITION map too

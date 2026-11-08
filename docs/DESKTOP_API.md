@@ -895,9 +895,9 @@ yet is a legitimate state and a name in `attachment.json` outlives the registry
 entry it came from.
 
 A first page carries TWO populations of extras, and they are different promises.
-**Every running row** below the window -- ``status_code`` in ``approval``,
-``answer``, ``busy``, ``wedged`` or ``delegating`` -- is appended to the first
-page of ANY scope, head or group: the ranking puts work in progress behind every
+**Every running row** below the window -- ``status_code`` a Running code
+(``approval``, ``answer``, ``busy``, ``wedged``, ``waiting`` or ``delegating``)
+or ``background_work`` true -- is appended to the first page of ANY scope, head or group: the ranking puts work in progress behind every
 unread completion, so a page bound can leave a live turn out of the answer
 entirely, and a row the client is never handed is one it has no way to ask for
 again. **Off-page pinned rows** are appended to the **first page of the head**
@@ -2948,7 +2948,9 @@ to.
 {"epoch":"…","seq":15,"type":"catalogue","payload":{"revision":98124}}
 {"epoch":"…","seq":16,"type":"authoring","payload":{"revision":7}}
 {"epoch":"…","seq":17,"type":"session_status","session_id":"<12 hex>",
- "payload":{"code":"approval","label":"Approval needed","revision":3}}
+ "payload":{"code":"approval","label":"Approval needed","revision":3,
+            "subagents_running":null,"subagents_queued":null,"jobs_running":null,
+            "waiting_on":0,"background_work":false}}
 {"epoch":"…","seq":18,"type":"notifications",
  "payload":{"revision":42,"unread_count":3,"waiting_count":1,"waiting_unread_count":0}}
 {"epoch":"…","seq":19,"type":"approvals","payload":{"pending":true}}
@@ -3013,6 +3015,20 @@ to.
   heartbeat, a title change or any other no-op republish publishes NOTHING.
   `revision` is monotone per session within an `epoch`, and `epoch` changes when
   the backend restarts, which is the guard's reset term.
+
+  **Background work rides the same frame.** The payload also carries the row's
+  `subagents_running`, `subagents_queued`, `jobs_running` (each `null` = not
+  reported, never zero), `waiting_on` (parked `wait` calls) and the derived
+  `background_work` boolean — the same five fields `sessions.list` ships on every
+  local AND remote row. `background_work` is true while any of those counts is
+  positive, independent of `code`: `complete`, `attached` and a draining `idle`
+  all outrank `delegating`, so a client filing its Running section must use
+  `code ∈ Running codes OR background_work`. The dedupe key therefore includes
+  the four counts, so a child finishing publishes a frame even when the pair is
+  unchanged, and the final 1 → 0 arrives as ONE frame whose counts, flag and code
+  change together. A frame from an older backend omits the keys; treat absence
+  as "no claim" and keep the code-only rule. Remote rows have no feed frame:
+  their fields arrive on the list read.
 
   It **is not a notification**: main's fan-out routes only `notification` frames
   to the banner path, and a `session_status` frame with `code: "approval"` paints
