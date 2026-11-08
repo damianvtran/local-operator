@@ -1340,9 +1340,7 @@ def test_tracked_ignored_and_unignored_shapes(tmp_path: Path) -> None:
     """Three real git states, real probes: tracked beats ignored, unignored keeps."""
     root = _project(tmp_path)
     subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
-    probes = _bo_probes(
-        tracked_files=dp.probe_tracked_files, is_git_ignored=dp.probe_git_ignored
-    )
+    probes = _bo_probes(tracked_files=dp.probe_tracked_files, is_git_ignored=dp.probe_git_ignored)
 
     # 1. TRACKED: committed build output is content, not cache.
     _shape(root)
@@ -1514,9 +1512,7 @@ def test_the_idle_window_is_six_hours_and_never_the_sixty_minute_floor(tmp_path:
 
 def test_a_truncated_walk_is_idle_unproven(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     real = dp.walk_allocated
-    monkeypatch.setattr(
-        dp, "walk_allocated", lambda root, **kw: real(root, max_entries=2, **kw)
-    )
+    monkeypatch.setattr(dp, "walk_allocated", lambda root, **kw: real(root, max_entries=2, **kw))
     root = _project(tmp_path)
     _shape(root, entries=5)
     _idle(root)
@@ -1747,9 +1743,7 @@ def test_both_readers_drop_this_process() -> None:
 
     handles = dp.read_open_handles()
     assert handles is not None, "the end-to-end cases already require a working lsof"
-    assert not [
-        entry for entry in handles if entry.startswith(f"pid:{os.getpid()}:cwd=")
-    ]
+    assert not [entry for entry in handles if entry.startswith(f"pid:{os.getpid()}:cwd=")]
     assert os.getpid() not in dp.cwds_by_pid(handles)
 
 
@@ -1919,9 +1913,7 @@ def test_the_home_comparison_is_identity_not_spelling(
 
 
 @pytest.mark.parametrize("spelling", ["documents", "DOCUMENTS", "DoCuMeNtS"])
-def test_the_data_directory_guard_does_not_depend_on_case(
-    tmp_path: Path, spelling: str
-) -> None:
+def test_the_data_directory_guard_does_not_depend_on_case(tmp_path: Path, spelling: str) -> None:
     """R2-1 regression row: ``~/documents`` is ``~/Documents`` on APFS.
 
     Measured through the shipped code in an isolated ``HOME`` before the fix: the

@@ -419,8 +419,7 @@ KEEP_HINTS: dict[str, str] = {
         "build directory corrupts an in-flight build)"
     ),
     "handles-open": (
-        "a process holds files open inside it or is working in it; stop that process "
-        "first"
+        "a process holds files open inside it or is working in it; stop that process " "first"
     ),
     "probe-failed": (
         "the liveness or provenance probes could not answer (ps/lsof/git unavailable or "
@@ -2362,9 +2361,7 @@ def assess_build_output(
         stop_at_mount=True,
         prune_names=PROTECTED_DATA_DIRS,
     )
-    evidence["newest_mtime"] = (
-        _iso(walk.newest_mtime_ns / 1e9) if walk.newest_mtime_ns else None
-    )
+    evidence["newest_mtime"] = _iso(walk.newest_mtime_ns / 1e9) if walk.newest_mtime_ns else None
     if walk.error:
         return _keep_build_output(
             candidate,
@@ -2564,9 +2561,7 @@ def plan_build_output(
             continue
         protected = protected_location_reason(root)
         if protected:
-            refusals.append(
-                {"category": CATEGORY_BUILD_OUTPUT, "path": given, "reason": protected}
-            )
+            refusals.append({"category": CATEGORY_BUILD_OUTPUT, "path": given, "reason": protected})
             continue
         if not os.path.isdir(root):
             refusals.append(
@@ -2646,12 +2641,9 @@ def revalidate_build_output(
     root = item.evidence.get("project_root") or os.path.dirname(item.path)
     protected = protected_location_reason(root)
     if protected:
-        return _keep_build_output(
-            item.path, "protected-location", protected, project_root=root
-        )
+        return _keep_build_output(item.path, "protected-location", protected, project_root=root)
     manifests = tuple(
-        item.evidence.get("manifests")
-        or BUILD_OUTPUT_SHAPES.get(os.path.basename(item.path), ())
+        item.evidence.get("manifests") or BUILD_OUTPUT_SHAPES.get(os.path.basename(item.path), ())
     )
     if not manifests:
         return _keep_build_output(
@@ -2773,9 +2765,7 @@ def remove_build_output(
     except OSError as exc:
         return f"refusing: the mount probe failed ({exc.strerror or exc})"
 
-    walk = walk_allocated(
-        item.path, stop_at_mount=True, prune_names=PROTECTED_DATA_DIRS
-    )
+    walk = walk_allocated(item.path, stop_at_mount=True, prune_names=PROTECTED_DATA_DIRS)
     if walk.error:
         return f"refusing: the tree could not be measured ({walk.error})"
     if walk.pruned:
@@ -2795,8 +2785,7 @@ def remove_build_output(
         # the boundary, so nothing past it was measured — and `_remove_tree` would
         # happily descend onto the other volume.
         return (
-            "refusing: a mount point appeared inside it at removal time "
-            f"({walk.mount_crossed})"
+            "refusing: a mount point appeared inside it at removal time " f"({walk.mount_crossed})"
         )
     item.allocated_bytes = walk.allocated_bytes
     item.bytes_truncated = walk.truncated
