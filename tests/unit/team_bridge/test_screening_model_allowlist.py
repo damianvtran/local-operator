@@ -766,3 +766,105 @@ def test_a_stored_choice_with_no_credential_still_screens_on_the_default(
     # nothing later (B4b D4).
     assert result.screener_preferred is False
     assert result.receipt.model == "gpt-6-astra"
+
+
+def test_a_stored_choice_the_route_cannot_serve_falls_through_and_delivers(
+    tmp_path, monkeypatch, credentials
+) -> None:
+    """PR #3632 review R1: a 404 on the pinned hop must not park the message.
+
+    A chosen pair whose route answers 404 -- a retired Radient route, a model
+    the owner's account is not enabled for -- is not the sender's doing and not
+    theirs to fix: no submission can make a provider report a missing model.
+    Before this, the walk stopped on the hard 4xx and every inbound message was
+    held ``provider_error`` until the owner switched back to Automatic: the very
+    state the setting created, and the opposite of the promise the shipped help
+    copy makes. The next table hop now screens, and its verdict is still a
+    PREFERRED one.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"anthropic", "openai"})
+    wire = _Wire(
+        {
+            "claude-opus-5-5": ("fail", 404),
+            "claude-sonnet-5-5": ("reply", DELIVER),
+            "gpt-6-astra": ("reply", DELIVER),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert _sends(wire) == [OPUS, SONNET]
+    assert result.disposition == "deliver"
+    assert result.screener_preferred is True
+    assert result.receipt.model == "claude-sonnet-5-5"
+    assert _rows(tmp_path, "SELECT 1 FROM screening_holds") == []
+
+
+@pytest.mark.parametrize("status", [402, 429])
+def test_a_stored_choice_out_of_credit_or_quota_still_advances(
+    tmp_path, monkeypatch, credentials, status
+) -> None:
+    """Unchanged by the 404 fix: the quota shapes already advanced.
+
+    402 is an empty Radient balance, 429 a rate limit; both were covered by the
+    operator directive of 2026-11-04 and neither decision moves here.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"anthropic", "openai"})
+    wire = _Wire(
+        {
+            "claude-opus-5-5": ("fail", status),
+            "claude-sonnet-5-5": ("reply", DELIVER),
+            "gpt-6-astra": ("reply", DELIVER),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert _sends(wire) == [OPUS, SONNET]
+    assert result.disposition == "deliver" and result.receipt.model == "claude-sonnet-5-5"
+
+
+def test_a_stored_choice_the_account_may_not_use_still_holds_as_a_credential_fault(
+    tmp_path, monkeypatch, credentials
+) -> None:
+    """PR #3632 review R1: a 403 on the pinned hop STILL HOLDS, and says why.
+
+    The split from the 404 is deliberate (see ``_NOT_FOUND_STATUSES``): ONE
+    marker-less 403 carries both a content verdict (OpenRouter's documented
+    shape) and a genuine permission error, and neither the status nor ``kind``
+    separates them. Advancing there would drop a verdict the first provider had
+    already reached AND hide a credential fault the owner must see. So the
+    message stays held, the next hop is never sent, and the record names the
+    credential (``auth_unusable``) rather than the route being unwell: the hold
+    code stays the generic one because no dedicated code exists, but the class
+    the owner's surface reads is the actionable fact.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"anthropic", "openai"})
+    wire = _Wire(
+        {
+            "claude-opus-5-5": ("fail", 403),
+            "claude-sonnet-5-5": ("reply", DELIVER),
+            "gpt-6-astra": ("reply", DELIVER),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert _sends(wire) == [OPUS], "a permission error must never fall past the walk"
+    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("auth_unusable",)]

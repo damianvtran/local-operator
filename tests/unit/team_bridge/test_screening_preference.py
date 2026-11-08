@@ -106,7 +106,6 @@ def test_a_listed_pair_splits_on_the_first_separator(tmp_path) -> None:
         "/claude-opus-5-5",
         "anthropic/",
         "/",
-        # Not a string at all: a hand-edited list, a number, an explicit null.
     ],
 )
 def test_a_value_that_is_not_a_pair_reads_as_no_choice(tmp_path, value) -> None:

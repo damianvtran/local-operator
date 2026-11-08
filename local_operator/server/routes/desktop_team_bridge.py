@@ -718,21 +718,24 @@ def _screening_models() -> list[dict[str, str]]:
     ]
 
 
-def _screening_view(config_dir: Path) -> dict[str, Any]:
+def _screening_view(preferred: tuple[str, str] | None) -> dict[str, Any]:
     """The Screening model block both local reads answer with, once.
 
-    ONE function so the status answer and the settings answer cannot disagree
-    about the same machine -- the failure mode a renderer would hit as a dropdown
-    that changes its mind between two reads. ``preferred`` is read through the
-    same reader the screening chain uses, so what this says is what screening
-    does, including the fail-closed cases (an off-table or unparseable stored
-    value reads as ``None``, exactly as the chain ignores it).
+    ONE function for the block itself, so the status answer and the settings
+    answer cannot disagree on its SHAPE or on the vetted list — the failure mode
+    a renderer hits as a dropdown that changes its mind between two reads, or
+    that offers a value the other route never shows. The caller supplies the
+    stored choice from ITS OWN source, deliberately: the settings route re-reads
+    the file, while the status route hands the process-watcher snapshot (which
+    re-parses on poll, so the two agree; on a malformed document only, the
+    watcher keeps last-good while a read yields ``None``). Both go through the
+    same selector, so what either route says is what screening does — including
+    the fail-closed cases (an off-table or unparseable stored value reads as
+    ``None``, exactly as the chain ignores it).
     """
 
-    from local_operator.team_bridge.settings import read_screening_model
-
     return {
-        "preferred": _screening_selector(read_screening_model(config_dir)),
+        "preferred": _screening_selector(preferred),
         "models": _screening_models(),
     }
 
@@ -915,9 +918,10 @@ async def status(
             # ``preferred`` is null for "no choice": the chain's own tested
             # order, which is exactly what this machine screened with before the
             # key existed. A choice RE-ORDERS that chain and removes no hop, so
-            # ``required`` is true whatever ``preferred`` says.
-            "preferred": _screening_selector(local.screening_model),
-            "models": _screening_models(),
+            # ``required`` is true whatever ``preferred`` says. The block itself
+            # comes from the SAME function the settings route uses, handed this
+            # route's own source of the stored value (the watcher snapshot).
+            **_screening_view(local.screening_model),
         },
         #: Whether the captured-account guard is ENFORCED on the mutation
         #: routes (review round 1, R6): the UI requires this receipt before an
@@ -1054,6 +1058,7 @@ async def get_settings(
         BridgeSignInRequired,
         TeamBridgeClient,
     )
+    from local_operator.team_bridge.settings import read_screening_model
 
     client = TeamBridgeClient(config_manager.config_dir)
     try:
@@ -1077,7 +1082,7 @@ async def get_settings(
             # this machine's, so the page that edits it needs the same vetted
             # list and current value the status answer carries. Without it a
             # renderer could read one shape and write another.
-            "screening": _screening_view(config_manager.config_dir),
+            "screening": _screening_view(read_screening_model(config_manager.config_dir)),
         }
     return reply(payload)
 
