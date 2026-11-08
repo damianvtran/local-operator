@@ -152,6 +152,14 @@ def test_unknown_membership_is_silent_and_offline() -> None:
         "send my manager the deck",
         "let Ben know the build is out",
         "let my manager know I'm late",
+        # The coordination arm: phrasing that names NO person. The shared-QA
+        # window is where the duplicate-thread incident actually happened, and it
+        # matched neither person arm.
+        "Coordinate the shared QA window with the QA team",
+        "Post the shared-QA update in the QA room",
+        "QA coordination is at 3pm today",
+        "ask the team which review slot works",
+        "sync with the team on the QA rotation",
     ],
 )
 def test_coordination_intent_fires(query: str) -> None:
@@ -184,6 +192,13 @@ def test_coordination_intent_fires(query: str) -> None:
         "send the teammates list to the API",
         "let it know",
         "Let teammates decide",
+        # The coordination arm stays NOUN-SHAPED: ordinary work keeps its verbs
+        # and its technical objects and must never carry the rule.
+        "coordinate the deploy",
+        "sync the branch with origin",
+        "QA the build before you ship",
+        "share the test results in the channel",
+        "set up the team channel integration",
     ],
 )
 def test_technical_and_self_addressed_turns_stay_quiet(query: str) -> None:

@@ -3427,7 +3427,8 @@ def _memory_recommendation(query: str) -> _ClassificationCandidate | None:
 #: Coordination with a PERSON or their agent. Deliberately COMPOUND: a
 #: messaging verb alone fires on "send a message to the queue", "ask the API" or
 #: "notify via webhook"; a person noun alone on "tell me about the chief of
-#: staff role". Two arms, see :func:`_team_bridge_intent`.
+#: staff role". Two person arms, plus the noun-shaped coordination arm below —
+#: see :func:`_team_bridge_intent`.
 _TEAM_BRIDGE_VERB = (
     r"(?:message|dm|ping|tell|ask|notify|e-?mail|slack|reach\s+out(?:\s+to)?|"
     r"follow\s+up(?:\s+with)?|coordinate(?:\s+with)?|loop\s+in|check\s+with|"
@@ -3490,11 +3491,37 @@ _TEAM_BRIDGE_TECHNICAL = re.compile(
     r"cron|bot)\b"
 )
 _TEAM_BRIDGE_LEAD_IN = 40
+#: Coordination phrasing that names NO person: a shared QA window, the QA room,
+#: "post it in the team channel", "sync with the team". Both arms above need a
+#: person noun or a name, so the ask where the duplicate-thread incident actually
+#: happened — a shared QA window between two teams — matched nothing and carried
+#: no rule. Deliberately NOUN-SHAPED rather than a third verb list: "coordinate
+#: the deploy", "sync the branch" and "QA the build" are ordinary work and must
+#: stay quiet, so the phrase itself has to name the room/window/team. The
+#: ``in|to|on the <x> channel|room`` arm requires the preposition for the same
+#: reason: "the team channel integration" is a config task, "in the team
+#: channel" is a post.
+_TEAM_BRIDGE_COORDINATION = re.compile(
+    r"(?i)(?:"
+    r"\bqa\s+coordination\b"
+    r"|\bshared\s+(?:qa|review|test)\s+(?:window|session|slot)\b"
+    r"|\bthe\s+qa\s+room\b"
+    r"|\b(?:in|to|into|on)\s+the\s+(?:agent|team|qa|review)\s+(?:channel|room)\b"
+    r"|\bask\s+the\s+(?:team|group)\b"
+    r"|\bsync\s+(?:up\s+)?with\s+the\s+team\b"
+    r")"
+)
 
 
 def _team_bridge_intent(text: str) -> bool:
-    """Whether some verb in ``text`` targets a person with no technical object."""
-    for arm in (_TEAM_BRIDGE_PERSON_ARM, _TEAM_BRIDGE_NAMED_ARM):
+    """Whether ``text`` targets a person, or names a coordination room, with no
+    technical object.
+
+    The third arm exists because the one-channel rule matters MOST on the turns
+    that name no person at all (a shared QA window): there the model has no
+    addressee to infer from and reaches for whatever channel it finds first.
+    """
+    for arm in (_TEAM_BRIDGE_PERSON_ARM, _TEAM_BRIDGE_NAMED_ARM, _TEAM_BRIDGE_COORDINATION):
         for match in arm.finditer(text):
             name = match.groupdict().get("name")
             if name is not None and name in _TEAM_BRIDGE_NOT_A_NAME:
