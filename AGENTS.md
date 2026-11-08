@@ -2746,7 +2746,10 @@ triggered run and `gh run watch`/`gh pr checks`). Never test the label's NAME in
 a job `if:`: GitHub counts a `skipped` job as satisfying a required status check,
 so a job conditional on the label reports `skipped` on a run started by any
 *other* label and a red PR would merge. Any label therefore starts one full run:
-a mislabel costs a run, never a false pass. A merge queue would be the natural
+a mislabel costs a run, never a false pass. A gate green is evidence about the
+PR's own head, not about its merge result: the branch is not forced up to date,
+so `main`'s own full-suite run remains the backstop for a semantic conflict
+with a moved base. A merge queue would be the natural
 tool and is unavailable here — GitHub restricts it to org-owned public
 repositories and Enterprise Cloud private ones, and this repository is
 user-owned (`repository.mergeQueue` is null; `enableMergeQueue` does not exist).

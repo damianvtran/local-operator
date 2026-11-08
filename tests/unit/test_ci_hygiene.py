@@ -3485,7 +3485,7 @@ def test_pull_requests_do_not_run_the_unit_suites() -> None:
 
 
 def test_merge_gate_aggregates_every_full_suite_job() -> None:
-    """One stable required name, `always()`, PR-only, over every suite job.
+    """One stable required name, `always()`, unconditional, over every suite job.
 
     `needs` is derived, not listed: a new suite job that the aggregate does not
     wait on is a job that can go red while the required check stays green —
@@ -3500,21 +3500,22 @@ def test_merge_gate_aggregates_every_full_suite_job() -> None:
         f"the required check name drifted to {gate['name']!r}: branch protection "
         "names this exact string, and a rename stops gating silently"
     )
-    assert gate["if"] == "always() && github.event_name == 'pull_request'", (
-        "the aggregate must always report on the merge-gate event and never on "
-        f"push/schedule/dispatch (if: {gate['if']!r})"
+    assert gate["if"] == "always()", (
+        "the aggregate must report on EVERY run of this workflow, whatever event "
+        "started it — a condition that can be false publishes `skipped`, which "
+        f"satisfies a required check (if: {gate['if']!r})"
     )
     assert set(gate["needs"]) == set(jobs) - {"merge-gate", "report"}, (
         "merge-gate must need every job that can go red, or a red suite passes "
         f"it (needs={gate['needs']!r}, jobs={sorted(jobs)!r})"
     )
-    assert not gate.get("continue-on-error"), (
-        "continue-on-error makes a required check report success for a red run"
-    )
+    assert not gate.get(
+        "continue-on-error"
+    ), "continue-on-error makes a required check report success for a red run"
     run = gate["steps"][-1]["run"]
-    assert '"failure"' in run and '"cancelled"' in run and "exit 1" in run, (
-        "the aggregate must fail on a failed or cancelled need"
-    )
+    assert (
+        '"failure"' in run and '"cancelled"' in run and "exit 1" in run
+    ), "the aggregate must fail on a failed or cancelled need"
     assert '"skipped"' not in run, (
         "a classifier skip must pass the gate: a docs-only head legitimately "
         "skips the matrix and must still be mergeable"
@@ -3526,36 +3527,81 @@ def test_no_merge_gate_job_is_conditional_on_the_label_name() -> None:
 
     A job whose `if:` read the label would report `skipped` on a run started by
     ANY OTHER label, and a red PR would then merge on a check that never ran.
-    So the only event condition allowed in this workflow is the event NAME
-    (there is no other PR trigger for it to be true under), and no job — least
-    of all one in the gate's `needs` — may name the label.
+    The invariant is about the label CONTEXT, so both spellings are refused:
+    `github.event.label.name` (singular, one label) is as good a hole as
+    `github.event.pull_request.labels.*.name`, and so is any `contains(` written
+    over either — a name test can be built from any of them. Asserted over
+    EVERY job, not just the aggregate: a conditional suite job skips the
+    coverage while the gate goes on reporting `success` for it.
     """
     jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
     for job_id, job in jobs.items():
         condition = str(job.get("if") or "")
-        assert "labels" not in condition and "ready-to-merge" not in condition, (
+        assert not re.search(r"\blabels?\b", condition), (
             f"full-suite `{job_id}` tests the pull-request label in its `if:` "
             f"({condition!r}). A label-gated job reports `skipped` on a run "
             "started by another label, and `skipped` satisfies a required "
             "status check — a red PR would merge"
         )
-    assert jobs["merge-gate"]["if"].count("github.event_name") == 1
+        assert not re.search(r"contains\([^()]*\blabels?\b", condition), (
+            f"full-suite `{job_id}` builds a label-name test with `contains(` "
+            f"({condition!r}); the same `skipped` hole, written the long way"
+        )
+
+
+def test_no_full_suite_job_is_conditional_on_the_triggering_event() -> None:
+    """A job `if:` must never depend on WHICH event started the run.
+
+    This workflow starts on four events (`labeled` PRs, `push`, `schedule`,
+    `workflow_dispatch`) and every run publishes its checks on its OWN SHA, so
+    an event condition is a way to publish `skipped` on a head whose suite ran
+    red — and GitHub counts `skipped` as a satisfied required check. The
+    aggregate carried exactly that hole until PR #3631: `if: always() &&
+    github.event_name == 'pull_request'` left `Merge gate (full suite)` =
+    `skipped` on a PR head after the documented `WIDE:` `workflow_dispatch`,
+    while that dispatch's suite was red (run 42501880282).
+
+    What stays legitimate is data about the DIFF, not about the event:
+    `always()`, `!cancelled()` and the `needs.changes.outputs.*` classifier
+    flags. Those may skip a job — the aggregate passes a classifier skip on
+    purpose, because a docs-only head must stay mergeable.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    for job_id, job in jobs.items():
+        condition = str(job.get("if") or "")
+        assert "github." not in condition, (
+            f"full-suite `{job_id}` conditions its `if:` on the triggering event "
+            f"or the repo context ({condition!r}). Every run lands its checks on "
+            "the SHA it ran on and a `skipped` job satisfies a required status "
+            "check, so a job must be scheduled by the classifier "
+            "(`needs.changes.outputs.*`), never by which event ran"
+        )
+    assert (
+        jobs["merge-gate"]["if"] == "always()"
+    ), "the aggregate is the required check: it must be unconditional"
 
 
 def test_the_makefile_rearms_the_merge_gate_with_the_label_ritual() -> None:
-    """Hostile case: a push AFTER the gate leaves the check on the old head.
+    """Hostile cases: a push after the gate, and a ritual that arms nothing.
 
-    The required check is then unreported on the new head and the merge is
-    blocked — the intended block, but it has to be exitable by an agent with no
+    A push AFTER the gate leaves the check on the old head, where it blocks the
+    merge — the intended block, but it has to be exitable by an agent with no
     UI access and no way to re-point a check at a SHA. Removing and re-adding
     the label is that exit, so the target is pinned like any other gate.
+
+    It is also pinned for the opposite failure (QA round 1, Q-3): a ritual that
+    PRINTS success without arming anything. `.[0]` on an empty run list renders
+    `null`, `--limit 1` returns the PREVIOUS run on any re-arm (so `gh run
+    watch` exits on an old verdict immediately), and an `|| true` removal leaves
+    the label on, which makes the add a no-op, fires no `labeled` event and
+    strands the head in "Expected".
     """
     makefile = MAKEFILE.read_text()
     assert re.search(r"^merge-gate: ##", makefile, re.M), (
         "`make merge-gate PR=<n>` is gone: after a push the required check "
         "sits in Expected forever with no documented way out"
     )
-    recipe = makefile.split("merge-gate: ##", 1)[1][:2000]
+    recipe = makefile.split("merge-gate: ##", 1)[1][:3000]
     for needle in (
         "--remove-label ready-to-merge",
         "--add-label ready-to-merge",
@@ -3565,7 +3611,36 @@ def test_the_makefile_rearms_the_merge_gate_with_the_label_ritual() -> None:
         "PR=<number>",
     ):
         assert needle in recipe, f"the merge-gate ritual lost {needle!r}"
-
+    # Remove-THEN-add is load-bearing, not cosmetic: `--add-label` on a label
+    # that is already present is a no-op, so no `labeled` event fires and the
+    # head stays in "Expected" while the ritual reports success.
+    assert recipe.index("--remove-label ready-to-merge") < recipe.index(
+        "--add-label ready-to-merge"
+    ), "the ritual must remove the label before adding it, or no event fires"
+    # It must be able to TELL whether it armed anything: the PR is validated
+    # open first, the new run is resolved by head SHA + created-after (never by
+    # row order), and a missing run is a non-zero exit with the next commands,
+    # not a `gh run watch null`.
+    assert '!= "OPEN"' in recipe, "a closed or nonexistent PR must be refused"
+    assert "headRefOid" in recipe, "the ritual must know the PR's head SHA"
+    assert (
+        "headSha" in recipe and "createdAt" in recipe
+    ), "the new run must be resolved by head SHA + created-after, not row order"
+    assert '"$$prev"' in recipe, "the previous run's id must not match"
+    assert (
+        "--limit 1\n" not in recipe and "--limit 1 " not in recipe
+    ), "`--limit 1` cannot tell the new run from the previous one"
+    assert "exit 1" in recipe, "arming nothing must exit non-zero, not print null"
+    # The removal is the one call that may NOT be softened: `|| true` there is
+    # what let a failed removal pass as a successful arm (QA round 1, Q-3).
+    assert (
+        "could not remove ready-to-merge" in recipe
+    ), "a failed label removal must fail loudly, not be swallowed"
+    assert recipe.count("|| true") == 1, (
+        "the only tolerated soft failure is the idempotent `gh label create`; a "
+        "swallowed `--remove-label` leaves the label on, so the add is a no-op, "
+        "no event fires and the ritual still reports success"
+    )
 
 
 def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
@@ -3583,9 +3658,9 @@ def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
     report = full["jobs"]["report"]
     assert report["if"] == "always()"
     assert report["permissions"] == {"issues": "write"}
-    # `merge-gate` is excluded deliberately: it only schedules on a pull
-    # request, so on `main` it is always skipped, and the issue filer is the
-    # aggregate that narrates main's health.
+    # `merge-gate` is excluded deliberately: on `main` it mirrors this job's
+    # verdict, so the issue filer stays the aggregate that narrates main's
+    # health (and the gate must never wait on an issue-writing job).
     assert set(report["needs"]) == set(full["jobs"]) - {"report", "merge-gate"}
     run = report["steps"][0]["run"]
     assert (

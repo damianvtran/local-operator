@@ -1020,28 +1020,44 @@ jobs:
   # two scripts). Splitting the two checks is what keeps review cheap: `CI Gate`
   # is the slim PR path, this is the one-time full run at the gate.
   #
-  # WHY THE EVENT GUARD, AND WHY IT IS THE ONLY CONDITION.
-  # `github.event_name == 'pull_request'` is not a label test, and that is the
-  # whole point: GitHub counts a `skipped` check as satisfying a required status
-  # check. A job whose `if:` read `contains(github.event.pull_request.labels.*.
-  # name, 'ready-to-merge')` would report `skipped` on a run started by a
-  # DIFFERENT label and let a red PR merge. `labeled` is the only PR trigger
-  # above, so no such run can exist, and no suite job carries a label `if:`
-  # either (asserted in tests/unit/test_ci_hygiene.py, so it cannot regress).
-  # The accepted cost: any label starts one full run. A mislabel spends a run;
-  # it can never manufacture a pass.
+  # NO EVENT GUARD, AND NO LABEL CONDITION — THOSE ARE THE ONLY SAFE SHAPES.
+  #
+  # GitHub counts a `skipped` job as SATISFYING a required status check, so any
+  # `if:` that can be false on a run which publishes this job's check to the PR
+  # head SHA is a merge hole. Both known holes are closed by plain `always()`:
+  #
+  # - The event guard this job used to carry
+  #   (`always() && github.event_name == 'pull_request'`) skipped the gate on
+  #   every non-PR event — and this workflow is DISPATCHED on PR branches, which
+  #   is the documented `WIDE:` route. Measured on PR #3631's head: run
+  #   42501880282 (a `workflow_dispatch` on the branch) left
+  #   `Merge gate (full suite)` = `skipped` on the head while its own suite ran
+  #   RED. Off `pull_request` every classifier flag is true (scripts/ci_scope.py),
+  #   so such a run executed the whole suite and its verdict IS evidence for the
+  #   SHA — worth publishing, never worth discarding in favour of a skip.
+  # - A label condition (`contains(github.event.pull_request.labels.*.name,
+  #   'ready-to-merge')`) would skip the gate on a run started by a DIFFERENT
+  #   label — same hole, another door.
+  #
+  # So this is `if: always()`, exactly like ci.yml's `ci-gate`: every run of this
+  # workflow publishes an honest verdict built from its OWN `needs`, whatever
+  # started it. On `main` that mirrors this workflow's own `report` job
+  # (harmless — both state the same verdict); on a branch dispatch it is the
+  # real full-suite result. `labeled` is still the only PR trigger above, so the
+  # gate intent cannot start a run this misses, and a mislabel spends a run
+  # rather than manufacturing a pass. tests/unit/test_ci_hygiene.py pins both
+  # halves: the `if:` here, and that NO job in this file carries a condition on
+  # the triggering event or on the label.
   #
   # `if: always()` so it REPORTS even when a needed job died. A required check
   # that never reports is "Expected" forever and blocks a PR with no
-  # explanation; this one always lands a verdict. On push/schedule/dispatch it
-  # is not scheduled at all, so it never appears in `main`'s check list (whose
-  # aggregate remains this workflow's own `report` job).
+  # explanation; this one always lands a verdict.
   #
   # `needs` must list every job above: one omitted job is a suite that runs, can
   # go red, and still passes the gate.
   merge-gate:
     name: Merge gate (full suite)
-    if: always() && github.event_name == 'pull_request'
+    if: always()
     needs:
       - changes
       - test
