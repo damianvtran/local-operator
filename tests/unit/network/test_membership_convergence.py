@@ -2276,7 +2276,11 @@ def test_an_unchanged_answer_for_another_digest_is_not_believed(tmp_path: Path) 
         def request(frame: dict[str, Any], timeout: float) -> dict[str, Any]:
             sent.append(frame)
             digest = frame["if_digest"] if echo == "same" else "0" * 64
-            return {"op": "ack", "req": frame["req"], "detail": {"unchanged": True, "digest": digest}}
+            return {
+                "op": "ack",
+                "req": frame["req"],
+                "detail": {"unchanged": True, "digest": digest},
+            }
 
         return SimpleNamespace(
             alive=True,
@@ -2295,8 +2299,6 @@ def test_an_unchanged_answer_for_another_digest_is_not_believed(tmp_path: Path) 
     assert server._pull_members(right) == ""  # noqa: SLF001
     assert right.member_pulled_at > 1.0 and right.member_pull_added == []
     assert all("if_digest" in frame for frame in sent)
-
-
 
 
 def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
@@ -2335,9 +2337,11 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
             store.save(copy, owner.root)
     both = {row.device_id for row in store.load(record.network_id, c.root).active_members()}
     both |= {row.device_id for row in store.load(record.network_id, a.root).active_members()}
-    assert net_fixtures.wait_for(
-        lambda: _members(a) == both and _members(c) == both
-    ), (_members(a), _members(c), both)
+    assert net_fixtures.wait_for(lambda: _members(a) == both and _members(c) == both), (
+        _members(a),
+        _members(c),
+        both,
+    )
     # And after convergence A's conditional pulls settle to "unchanged" (the new side
     # still saves), while every pull C made of the "old" A stayed full.
     assert net_fixtures.wait_for(

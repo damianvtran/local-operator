@@ -6343,9 +6343,7 @@ class RelayServer:
         # first pull of every link stays full so each (re)connection re-reads the
         # peer's rows whole whatever the digest says; after that a settled mesh
         # trades ~0.8-1.4 KB of identical rows per 15 s for a ~0.2 KB "unchanged".
-        conditional = (
-            wire.MEMBER_LIST_DIGEST_V1 in link.capabilities and link.member_pulled_at > 0
-        )
+        conditional = wire.MEMBER_LIST_DIGEST_V1 in link.capabilities and link.member_pulled_at > 0
         own_view = ""
         if conditional:
             own_view = member_sync_digest(listed, sender_device_id=link.device_id)
