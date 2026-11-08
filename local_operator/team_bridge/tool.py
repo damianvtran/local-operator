@@ -200,6 +200,7 @@ from .types import (
     InvalidSendRecipient,
     NameResolution,
     RecipientNameRefused,
+    decode_recipient_argument,
     is_conversation_message_id,
     validate_recipient_shape,
     validate_send_recipient,
@@ -523,8 +524,20 @@ class BridgeToolParams(BaseModel):
         The SHAPE validator, not the send one: a display name is a legal shape for
         the op that can resolve it, and this model is shared by every op. The
         op-specific refusal is the executor's, where the op is known.
+
+        A JSON-OBJECT STRING IS DECODED FIRST, by
+        :func:`~local_operator.team_bridge.types.decode_recipient_argument` — the
+        ONE decoder. The executor already applied it to the raw ``args["to"]``
+        before any op read it (so send/reply/reply-resolution see the same value
+        this model does); calling it here again is idempotent and keeps a direct
+        ``BridgeToolParams(...)`` caller on the same rule. The decoded value then
+        passes through the SAME shape rule as a real object, and an undecodable,
+        over-long or duplicate-key one refuses with the same teaching. Parsing
+        only: every op's resolver and fence still decides who may be reached.
         """
-        return None if value is None else validate_recipient_shape(value)
+        if value is None:
+            return None
+        return validate_recipient_shape(decode_recipient_argument(value))
 
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
@@ -980,9 +993,24 @@ def _not_reachable(reason: str, message: str) -> dict[str, Any]:
     return out
 
 
+def _dm_conflict(field: str) -> dict[str, Any]:
+    """The refusal for a ``to`` and a top-level id naming different recipients.
+
+    Names BOTH fields and the form that works (shape 4 of the 2026-11 report:
+    the top-level id alone), so the next call succeeds instead of guessing.
+    Values are not echoed, matching the shape refusals.
+    """
+
+    return _error(
+        f"dm `to` and top-level `{field}` name different recipients; nothing was "
+        "sent. Name the recipient once: top-level `endpoint_id` alone for an agent "
+        "(from op=directory), or `account_id` alone for a person"
+    )
+
+
 def _dm_recipient(
     params: "BridgeToolParams",
-) -> tuple["BridgeToolParams", dict[str, Any] | None]:
+) -> tuple["BridgeToolParams", dict[str, Any] | None, str]:
     """Fold dm's documented ``to`` recipient onto ``account_id``/``endpoint_id``.
 
     WHY ``to`` IS ACCEPTED (operator incident, 2026-10-29). ``to`` is the shared
@@ -1006,20 +1034,37 @@ def _dm_recipient(
     ``self_target``, the unknown-endpoint and not-a-member refusals) unchanged,
     whichever spelling arrived.
 
-    WHAT REFUSES HERE. Only what the pair itself cannot settle, in the
-    resolver's own words: a ``to`` that names a DISPLAY NAME (the shared shape
-    validator admits ``{"name": …}`` because a room post and a pair send both
-    resolve one; ``dm`` resolves against neither, so it refuses and points at
-    ``op=directory`` rather than letting the name be silently dropped beside an
-    id), an id standing beside a ``to`` that names the OTHER key ("exactly one of
-    account_id or endpoint_id"), or the same key naming two different ids. None
-    is guessed at. A fourth branch refuses a ``to`` that is not the canonical
-    one-key dict at all, which ``BridgeToolParams`` cannot produce — its validator
-    returns that dict or raises — so the branch exists to keep the type checker
-    and the runtime on the same value and to refuse rather than guess if that ever
-    changes; it reuses the same sentence. ``target`` is untouched, so
-    ``to={"endpoint_id": …}`` beside ``target="human"`` hits the resolver's
-    existing "endpoint_id addresses an agent" refusal rather than a new one.
+    WHAT REFUSES HERE. Three refusals, each for something the pair itself cannot
+    settle, in the resolver's own words; everything else passes through (no
+    ``to`` at all, or a ``to`` carried forward — alone or as a pair, below):
+
+    1. a ``to`` that is not the canonical one-key dict, which ``BridgeToolParams``
+       cannot produce (its validator returns that dict or raises) — kept so the
+       type checker and the runtime read the same value, and to refuse rather
+       than guess if that ever changes;
+    2. a ``to`` that names a DISPLAY NAME (the shared shape validator admits
+       ``{"name": …}`` because a room post and a pair send both resolve one;
+       ``dm`` resolves against neither, so it refuses and points at
+       ``op=directory`` rather than letting the name be silently dropped beside
+       an id);
+    3. the same key naming two different ids (refused naming both fields and the
+       form that works).
+
+    None is guessed at. ``target`` is untouched, so ``to={"endpoint_id": …}``
+    beside ``target="human"`` hits the resolver's existing "endpoint_id addresses
+    an agent" refusal rather than a new one.
+
+    ``to`` BESIDE THE OTHER TOP-LEVEL KEY (shape 3 of the 2026-11 report:
+    ``to=<account id>`` with ``endpoint_id=``) may name ONE recipient — a person's
+    account and their chief of staff's endpoint. Whether it does is a directory
+    fact this function cannot see, so it carries both ids forward and returns the
+    key ``to`` supplied; :func:`_resolve_dm_target` accepts the pair only when the
+    endpoint's row IS that account, and otherwise refuses naming both fields.
+    The third return value is that key, or ``""`` when no such pair exists.
+
+    NO AUTHORIZATION CHANGES HERE. This is parsing and messaging only: whichever
+    spelling arrives, the resolver's fresh directory read, reachability,
+    ``self_target`` and the hub's own checks decide who may be reached.
     """
 
     # THE DECLARED TYPE IS ``dict | str | None`` because the field also accepts a
@@ -1029,29 +1074,32 @@ def _dm_recipient(
     # SAME value: a str reaching here is refused, never guessed at.
     recipient = params.to
     if recipient is None:
-        return params, None
+        return params, None, ""
     if not isinstance(recipient, dict):
-        return params, _error("dm needs exactly one of account_id or endpoint_id")
+        return params, _error("dm needs exactly one of account_id or endpoint_id"), ""
     key = next(iter(recipient))
     if key not in ("endpoint_id", "account_id"):
-        return params, _error(
-            "dm takes an account_id or endpoint_id, not a display name: read "
-            "op=directory for the person's account id or their agent's endpoint_id"
+        return (
+            params,
+            _error(
+                "dm takes an account_id or endpoint_id, not a display name: read "
+                "op=directory for the person's account id or their agent's endpoint_id"
+            ),
+            "",
         )
     value = recipient[key]
-    other = "account_id" if key == "endpoint_id" else "endpoint_id"
-    if getattr(params, other).strip():
-        return params, _error("dm needs exactly one of account_id or endpoint_id")
     current = getattr(params, key).strip()
     if current and current != value:
-        return params, _error(f"dm to and {key} disagree; name the recipient once")
+        return params, _dm_conflict(key), ""
+    other = "account_id" if key == "endpoint_id" else "endpoint_id"
+    paired = key if getattr(params, other).strip() else ""
     # A COPY: the caller's params stay exactly as the model wrote them, and the
     # resolver never receives a ``to`` it would have to reinterpret.
-    return params.model_copy(update={key: value, "to": None}), None
+    return params.model_copy(update={key: value, "to": None}), None, paired
 
 
 async def _resolve_dm_target(
-    runtime: "BridgeRuntime", params: "BridgeToolParams"
+    runtime: "BridgeRuntime", params: "BridgeToolParams", *, paired_from_to: str = ""
 ) -> tuple[dict[str, str] | None, str, dict[str, Any] | None]:
     """``(wire member, display name, refusal)`` for a dm's recipient.
 
@@ -1063,11 +1111,18 @@ async def _resolve_dm_target(
     disabled, or a member who never enrolled) is ``not_reachable`` with the
     reason. A human target needs the person's bridge enabled for the same
     reason: an opted-out person has not chosen to be messaged here.
+
+    ``paired_from_to`` (see :func:`_dm_recipient`) names the key ``to`` supplied
+    when ``to`` and the OTHER top-level key are both set. Only then may both ids
+    arrive: the endpoint is resolved as usual and its row must BE that account,
+    else the pair is refused naming both fields. Two top-level ids with no ``to``
+    keep the exactly-one rule unchanged.
     """
 
     account_id = params.account_id.strip()
     endpoint_id = params.endpoint_id.strip()
-    if bool(account_id) == bool(endpoint_id):
+    paired = bool(paired_from_to and account_id and endpoint_id)
+    if not paired and bool(account_id) == bool(endpoint_id):
         return None, "", _error("dm needs exactly one of account_id or endpoint_id")
     if endpoint_id and params.target != "agent":
         return None, "", _error("endpoint_id addresses an agent; a human needs account_id")
@@ -1099,6 +1154,11 @@ async def _resolve_dm_target(
                     "no teammate's chief of staff has that endpoint_id; read op=directory again",
                 ),
             )
+        if paired and row["account_id"] != account_id:
+            # Refused BEFORE any write; the top-level field is the one ``to`` did
+            # not supply, so the sentence names the pair as the caller wrote it.
+            top_level = "account_id" if paired_from_to == "endpoint_id" else "endpoint_id"
+            return None, "", _dm_conflict(top_level)
         kind = "agent"
     else:
         row = next((r for r in rows if r["account_id"] == account_id), None)
@@ -1199,7 +1259,7 @@ async def _direct_message(
             "dm takes account_id, endpoint_id or to; thread_id, channel_id and "
             "members belong to the pair-inbox and room ops"
         )
-    params, refused = _dm_recipient(params)
+    params, refused, paired_from_to = _dm_recipient(params)
     if refused is not None:
         return refused
     # ``text`` was already folded onto ``body`` (or refused as a conflicting
@@ -1213,7 +1273,9 @@ async def _direct_message(
     thread_root_id = params.thread_root_id.strip()
     if thread_root_id and _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
         return _error("dm thread_root_id must be a message id (bcmsg_…)")
-    target, label, refusal = await _resolve_dm_target(runtime, params)
+    target, label, refusal = await _resolve_dm_target(
+        runtime, params, paired_from_to=paired_from_to
+    )
     if refusal is not None or target is None:
         return refusal or _error("dm target unresolved")
     # Local file checks + the hub's ``agent_upload`` capability, BEFORE the DM is
@@ -2193,6 +2255,16 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     args, refused = _normalize_message_field(op, args)
     if refused is not None:
         return refused
+    # ONE READING OF ``to`` (security review S-2, QA Q1): decode a JSON-object
+    # string here, before reply resolution, the send/reply shape check, the
+    # outbox intent and the params model all read it — otherwise send read the
+    # raw text as a bare account id while dm decoded the same text as an object.
+    # Local and network-free, so a refusal makes no read and no write.
+    if args.get("to") is not None:
+        try:
+            args = {**args, "to": decode_recipient_argument(args["to"])}
+        except InvalidSendRecipient as failure:
+            return _error(str(failure), code=failure.code)
     # CREDENTIAL GUARD (secret_guard). Here, once, for every op in
     # MESSAGE_FIELD_BY_OP (dm, channel_post, send, reply) rather than inside each
     # op: this is the last point every message body passes through BEFORE the

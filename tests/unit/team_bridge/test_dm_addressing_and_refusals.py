@@ -41,6 +41,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator.team_bridge import host as host_mod
+from local_operator.team_bridge import types as types_mod
 from local_operator.team_bridge.client import (
     ACCOUNT_MISMATCH_CODE,
     ACCOUNT_MISMATCH_SENTENCE,
@@ -300,16 +301,15 @@ async def test_dm_to_account_id_and_a_bare_id_reach_the_account_target(to: Any) 
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
-        # ``to`` naming one key beside the OTHER top-level id: the pair cannot
-        # settle two people, and the resolver's own words say so.
-        (
-            {"to": {"endpoint_id": PEER_ENDPOINT}, "account_id": PEER},
-            "dm needs exactly one of account_id or endpoint_id",
-        ),
-        # Same key, two different ids: never guessed at.
+        # ``to`` beside the OTHER top-level key is no longer refused here: when
+        # both name one agent it is one recipient (see section 3 below, which
+        # also pins the conflicting pair). Same key, two different ids: never
+        # guessed at, and the refusal names both fields and the form that works.
         (
             {"to": {"endpoint_id": PEER_ENDPOINT}, "endpoint_id": "bep_other"},
-            "dm to and endpoint_id disagree; name the recipient once",
+            "dm `to` and top-level `endpoint_id` name different recipients; nothing "
+            "was sent. Name the recipient once: top-level `endpoint_id` alone for an "
+            "agent (from op=directory), or `account_id` alone for a person",
         ),
         # The top-level form keeps its own refusal, unchanged.
         (
@@ -751,3 +751,183 @@ def test_a_trial_ended_refusal_names_its_typed_code_for_the_agent() -> None:
         "This organization's Team trial ended. Subscribe to continue; history is kept. "
         "[refusal code=team_trial_ended]"
     )
+
+
+# -- (3) the four shapes one DM took four tries to find (Aida, 439818272d84) --
+#
+# REPORTED: one DM took four calls. ``to='{"endpoint_id":"…"}'`` (a JSON
+# STRING) was refused with the shape teaching; the same value as a compact
+# string reached the ACCOUNT lookup ("no active member … has that account_id"),
+# because a whitespace-free string is a bare account id; ``to=<account id>``
+# beside ``endpoint_id=`` was refused as two recipients even though both named
+# the same agent; only the top-level ``endpoint_id=`` alone worked. Each test
+# below is one of those calls, plus the two shapes that must STAY refused.
+
+OTHER = "acc_other"
+OTHER_ENDPOINT = "bep_other"
+
+
+def _two_members() -> list[dict[str, Any]]:
+    return [_member(), _member(account_id=OTHER, label="Sam", endpoint_id=OTHER_ENDPOINT)]
+
+
+def _assert_reached_peer_agent(client: DmClient, outcome: dict[str, Any]) -> None:
+    assert outcome["ok"] is True, outcome
+    assert _created(client)["body"]["members"][1] == {
+        "account_id": PEER,
+        "kind": "agent",
+        "endpoint_id": PEER_ENDPOINT,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "to",
+    [
+        '{"endpoint_id": "bep_peer"}',  # shape 1: JSON string, as the model sent it
+        '{"endpoint_id":"bep_peer"}',  # shape 2 as it reached the account lookup
+        '  {"endpoint_id": "bep_peer"}  ',
+    ],
+)
+async def test_dm_to_as_a_json_string_is_the_endpoint_not_an_account(to: str) -> None:
+    client = DmClient(_two_members())
+    outcome = await execute_bridge(_runtime(client), _dm(to=to))
+    _assert_reached_peer_agent(client, outcome)
+
+
+@pytest.mark.asyncio
+async def test_dm_to_as_an_object_reaches_the_endpoint_lookup() -> None:
+    """Shape 2 as an object: pinned, so the endpoint never becomes an account."""
+
+    client = DmClient(_two_members())
+    outcome = await execute_bridge(_runtime(client), _dm(to={"endpoint_id": PEER_ENDPOINT}))
+    _assert_reached_peer_agent(client, outcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"to": PEER, "endpoint_id": PEER_ENDPOINT},  # shape 3 as reported
+        {"to": {"account_id": PEER}, "endpoint_id": PEER_ENDPOINT},
+        {"to": {"endpoint_id": PEER_ENDPOINT}, "account_id": PEER},
+        {"to": '{"account_id":"acc_peer"}', "endpoint_id": PEER_ENDPOINT},
+    ],
+)
+async def test_dm_to_and_a_top_level_id_naming_the_same_agent_are_one_recipient(
+    args: dict[str, Any],
+) -> None:
+    client = DmClient(_two_members())
+    outcome = await execute_bridge(_runtime(client), _dm(**args))
+    _assert_reached_peer_agent(client, outcome)
+
+
+@pytest.mark.asyncio
+async def test_dm_top_level_endpoint_id_alone_still_works() -> None:
+    """Shape 4: the one form that already worked. Pinned, not changed."""
+
+    client = DmClient(_two_members())
+    outcome = await execute_bridge(_runtime(client), _dm(endpoint_id=PEER_ENDPOINT))
+    _assert_reached_peer_agent(client, outcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args, field",
+    [
+        ({"to": PEER, "endpoint_id": OTHER_ENDPOINT}, "endpoint_id"),
+        ({"to": {"endpoint_id": OTHER_ENDPOINT}, "account_id": PEER}, "account_id"),
+        ({"to": {"endpoint_id": PEER_ENDPOINT}, "endpoint_id": OTHER_ENDPOINT}, "endpoint_id"),
+        ({"to": '{"account_id":"acc_other"}', "account_id": PEER}, "account_id"),
+    ],
+)
+async def test_dm_to_conflicting_with_a_top_level_id_refuses_naming_both(
+    args: dict[str, Any], field: str
+) -> None:
+    client = DmClient(_two_members())
+    outcome = await execute_bridge(_runtime(client), _dm(**args))
+
+    assert outcome["ok"] is False, outcome
+    assert outcome["code"] == "invalid_request"
+    error = outcome["error"]
+    assert "`to`" in error and f"`{field}`" in error, error
+    assert "different recipients" in error, error
+    # The refusal names the form that works: one top-level id, no `to`.
+    assert "top-level `endpoint_id` alone" in error, error
+    assert not [c for c in client.calls if c["method"] == "create_conversation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("to", [{"name": "Robin"}, '{"name": "Robin"}'])
+async def test_dm_to_a_name_stays_refused_and_names_the_id_fields(to: Any) -> None:
+    client = DmClient(_two_members())
+    outcome = await execute_bridge(_runtime(client), _dm(to=to))
+
+    assert outcome["ok"] is False, outcome
+    assert outcome["code"] == "invalid_request"
+    assert "account_id" in outcome["error"] and "endpoint_id" in outcome["error"]
+    assert "not a display name" in outcome["error"], outcome["error"]
+    assert client.calls == []
+
+
+def test_the_published_to_description_states_the_dm_addressing_rule() -> None:
+    assert "dm takes ids only" in SEND_RECIPIENT_DESCRIPTION
+    assert "endpoint_id" in SEND_RECIPIENT_DESCRIPTION.split("dm takes ids only")[1]
+
+
+# -- (4) a JSON-string ``to`` must settle ONE recipient on its own text --
+#
+# Security review S-1/S-3: ``json.loads`` keeps the LAST of two repeated keys,
+# so ``'{"endpoint_id":"bep_other","endpoint_id":"bep_peer"}'`` passed the
+# one-recipient rule and the DM went to ``bep_peer`` while the raw argument —
+# what an approval prompt and the transcript show — named ``bep_other`` first.
+# Each case refuses with the shape teaching before any directory read or write.
+
+_NESTING_BOMB = '{"endpoint_id":' * 200_000 + '"x"' + "}" * 200_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "to",
+    [
+        '{"endpoint_id":"bep_other","endpoint_id":"bep_peer"}',
+        '{"endpoint_id": "bep_peer", "endpoint_id": "bep_peer"}',  # even when equal
+        '{"endpoint_id": {"a": 1, "a": 2}}',  # a repeat at any depth
+        '{"endpoint_id": "bep_' + "p" * 1100 + '"}',  # over the length cap
+        _NESTING_BOMB,  # refused by the length cap before any decode
+    ],
+    ids=["duplicate", "duplicate-equal", "duplicate-nested", "too-long", "bomb"],
+)
+async def test_dm_to_json_string_that_cannot_settle_one_recipient_is_refused(to: str) -> None:
+    client = DmClient(_two_members())
+    outcome = await execute_bridge(_runtime(client), _dm(to=to))
+
+    assert outcome["ok"] is False, outcome
+    assert outcome["code"] == "invalid_request"
+    assert "a recipient is exactly one of" in outcome["error"], outcome["error"][:300]
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_dm_to_json_string_nested_under_the_cap_is_refused_before_any_read() -> None:
+    """Decoded, it is a nested object — refused by the params model like one."""
+
+    client = DmClient(_two_members())
+    outcome = await execute_bridge(
+        _runtime(client), _dm(to='{"endpoint_id":' * 50 + '"x"' + "}" * 50)
+    )
+
+    assert outcome["ok"] is False, outcome
+    assert outcome["code"] == "invalid_request"
+    assert client.calls == []
+
+
+def test_a_decoder_recursion_failure_is_the_shape_teaching_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the decoder's own guard, should the length cap ever be raised."""
+
+    monkeypatch.setattr(types_mod, "RECIPIENT_ARGUMENT_MAX_CHARS", len(_NESTING_BOMB))
+    with pytest.raises(types_mod.InvalidSendRecipient) as refused:
+        types_mod.decode_recipient_argument(_NESTING_BOMB)
+    assert "a recipient is exactly one of" in str(refused.value)

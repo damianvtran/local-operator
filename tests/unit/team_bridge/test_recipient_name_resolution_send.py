@@ -265,15 +265,9 @@ async def test_a_denied_colleague_does_not_resolve(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_a_reply_name_resolves_and_the_answer_addresses_that_account(
-    tmp_path, monkeypatch
-) -> None:
-    """A name on ``reply`` resolves AFTER admission, then the sender check applies.
+def _reply_runtime(tmp_path: Path, client: TeamBridgeClient) -> Any:
+    """A runtime whose live store holds one delivery from Ada, ``bmsg_ada``."""
 
-    The guard is relocated, never dropped: the resolved pair must be the sender of
-    the message being answered, exactly as an explicit ``account_id`` must be.
-    """
     from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
 
     owner = OwnerSnapshot(
@@ -312,11 +306,24 @@ async def test_a_reply_name_resolves_and_the_answer_addresses_that_account(
         ],
         None,
     )
+    runtime = _runtime(client, config_dir=tmp_path, endpoint_id="bep_owner")
+    runtime.owner = owner
+    return runtime
+
+
+@pytest.mark.asyncio
+async def test_a_reply_name_resolves_and_the_answer_addresses_that_account(
+    tmp_path, monkeypatch
+) -> None:
+    """A name on ``reply`` resolves AFTER admission, then the sender check applies.
+
+    The guard is relocated, never dropped: the resolved pair must be the sender of
+    the message being answered, exactly as an explicit ``account_id`` must be.
+    """
     client, requests = _client(
         _directory(ADA), _allowlist(_allow("acc_ada")), sent={"message": {"id": "bmsg_out"}}
     )
-    runtime = _runtime(client, config_dir=tmp_path, endpoint_id="bep_owner")
-    runtime.owner = owner
+    runtime = _reply_runtime(tmp_path, client)
     outcome = await execute_bridge(
         runtime,
         {"op": "reply", "message_id": "bmsg_ada", "to": {"name": "Ada Lovelace"}, "text": "ack"},
@@ -461,3 +468,78 @@ async def test_a_reply_name_that_is_not_the_sender_is_refused(tmp_path, monkeypa
     assert intents == []
     # The attempt is still on the record: it resolved, and was then refused.
     assert _audit_rows(tmp_path)[-1]["resolved_account_id"] == "acc_bo"
+
+
+# ---------------------------------------------------------------------------
+# A JSON-string ``to`` is ONE reading on every op (security S-2, QA Q1)
+# ---------------------------------------------------------------------------
+#
+# Before the shared decoder, send/reply checked the RAW ``to``: a spaced JSON
+# string was refused and a compact one was POSTed as the account id
+# ``'{"account_id":"acc_ada"}'`` — a write the model believed went to Ada. dm
+# decoded the same text as an object. Both readers now share
+# ``decode_recipient_argument``, so the wire carries the decoded account.
+
+JSON_STRING_TO = ['{"account_id":"acc_ada"}', '{"account_id": "acc_ada"}']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("to", JSON_STRING_TO)
+async def test_send_to_as_a_json_string_posts_the_decoded_account(tmp_path, to: str) -> None:
+    client, requests = _client(_directory(ADA), _allowlist(_allow("acc_ada")))
+    outcome = await execute_bridge(
+        _runtime(client, config_dir=tmp_path), {"op": "send", "to": to, "text": "hi"}
+    )
+    assert outcome["ok"] is True, outcome
+    assert [body["to"] for body in _posted(requests)] == [{"account_id": "acc_ada"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("to", JSON_STRING_TO)
+async def test_reply_to_as_a_json_string_addresses_the_decoded_sender(tmp_path, to: str) -> None:
+    client, requests = _client(
+        _directory(ADA), _allowlist(_allow("acc_ada")), sent={"message": {"id": "bmsg_out"}}
+    )
+    outcome = await execute_bridge(
+        _reply_runtime(tmp_path, client),
+        {"op": "reply", "message_id": "bmsg_ada", "to": to, "text": "ack"},
+    )
+    assert outcome["ok"] is True, outcome
+    body = _posted(requests)[-1]
+    assert body["to"] == {"account_id": "acc_ada"}
+    assert body["thread_id"] == "bth_ada"
+
+
+@pytest.mark.asyncio
+async def test_send_to_a_json_string_name_resolves_like_the_object(tmp_path) -> None:
+    client, requests = _client(_directory(ADA), _allowlist(_allow("acc_ada")))
+    outcome = await execute_bridge(
+        _runtime(client, config_dir=tmp_path),
+        {"op": "send", "to": '{"name": "Ada Lovelace"}', "text": "hi"},
+    )
+    assert outcome["ok"] is True, outcome
+    assert _posted(requests)[-1]["to"] == {"account_id": "acc_ada"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "to",
+    [
+        # Repeated key: json.loads would keep the LAST, so the text names Bo
+        # first and Ada would receive it (security S-1).
+        '{"account_id":"acc_bo","account_id":"acc_ada"}',
+        '{"account_id": "acc_' + "a" * 1100 + '"}',  # over the length cap (S-3)
+        '{"account_id": ',  # undecodable
+    ],
+)
+async def test_send_refuses_an_ambiguous_or_oversized_json_to_before_any_request(
+    tmp_path, to: str
+) -> None:
+    client, requests = _client(_directory(ADA, BO), _allowlist(_allow("acc_ada"), _allow("acc_bo")))
+    outcome = await execute_bridge(
+        _runtime(client, config_dir=tmp_path), {"op": "send", "to": to, "text": "hi"}
+    )
+    assert outcome["ok"] is False, outcome
+    assert outcome["code"] == "invalid_request"
+    assert "a recipient is exactly one of" in outcome["error"], outcome["error"]
+    assert requests == []

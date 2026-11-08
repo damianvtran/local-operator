@@ -400,7 +400,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1978 -> 1977: canonical isolated renderer re-measured after the explicit
     # generic-file schema and compact description (including lowercase `read`).
     # This records actual doc cost; the 8 KiB soft cap is deliberately unchanged.
-    "bridge": 1985,
+    # 1985 -> 1990 (+5, dm `to` addressing, Aida 439818272d84): the `to`
+    # description now says dm reads `to` OR the top-level endpoint_id/account_id.
+    # The doc sat 7 chars under the 8192 soft cap, so the name/scope clauses were
+    # tightened to pay for it (net +7 chars). Measured by this test's printed value.
+    "bridge": 1990,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
