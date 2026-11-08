@@ -98,7 +98,7 @@ class _RefreshOutcomeHold:
 
     ``until`` is on the MONOTONIC clock (a wall-clock step must not end or extend
     it); ``fence`` is :meth:`MeshCredentialClient._lifecycle_fence` taken when the
-    answer arrived, so a sign-in on the owner ends the hold at once; ``code`` is the
+    answer arrived, so an announced sign-in on the owner ends the hold; ``code`` is the
     owner's own reason (``grant_invalid``, ``not_refreshable``, ``refresh_failed``
     or ``unchanged``), kept to re-render the sentence. Carries no credential value.
     """
@@ -106,8 +106,18 @@ class _RefreshOutcomeHold:
     until: float
     fence: frozenset[Any]
     code: str
+    #: The owner's row the report named (0 when the grant carried none).
+    credential_id: int
     error: BrokerError
 
+
+#: Owner refusals that mean "no login to lend", which a live refresh hold restates
+#: with its own cause and remedy (:meth:`MeshCredentialClient._from_reply`). Not a
+#: transport answer (the owner offline is a different fact, said as such), and not
+#: a permission one (a withdrawn share is not fixed by signing in).
+_NOTHING_LEFT_TO_LEND: frozenset[str] = frozenset(
+    {"no_local_credential", "grant_invalid", "interactive_required", "refresh_failed"}
+)
 
 #: The borrower's whole budget for one borrow, in seconds. Below the local secret
 #: broker's 10 s (see this module's docstring) and far below the owner-side
@@ -372,7 +382,7 @@ class MeshCredentialClient:
         #: report (:meth:`report_sync`). Process memory only — a restart re-asks
         #: once, which is the cheap direction to be wrong in. See
         #: :class:`_RefreshOutcomeHold` for what ends one.
-        self._refresh_holds: dict[str, _RefreshOutcomeHold] = {}
+        self._refresh_holds: dict[tuple[str, int], _RefreshOutcomeHold] = {}
         self._refresh_holds_lock = threading.Lock()
 
     # -- construction -------------------------------------------------------
@@ -885,7 +895,11 @@ class MeshCredentialClient:
         prior_status = self.state.status(key)
         request_stamp = self._capture_request(key)
         resting = self.state.cooldowns(key, model_id, owner_device=self.owner_of(key))
-        excluded = sorted({int(row["credential_id"]) for row in resting})
+        # The logins the owner said it cannot refresh are hidden from this ask too,
+        # so a sibling login serves (#3616 M1); ``refresh_held`` is said only when
+        # the owner then has nothing else to lend.
+        refresh_hidden, refresh_held = self._refresh_hold_selection(key)
+        excluded = sorted({int(row["credential_id"]) for row in resting} | set(refresh_hidden))
         try:
             from local_operator.network import store
             from local_operator.network.relay import control_request
@@ -937,6 +951,7 @@ class MeshCredentialClient:
             resting=resting,
             request_stamp=request_stamp,
             selection=_selection_fields(affinity, demote_credential_ids),
+            refresh_held=refresh_held,
         )
         if isinstance(outcome, BrokerError):
             return self._held_or(
@@ -1554,6 +1569,7 @@ class MeshCredentialClient:
         model_id: str = "",
         retry_after_ms: int = 0,
         block_scope: str = "",
+        credential_id: int = 0,
     ) -> BrokerError | None:
         """Tell the owner a borrowed bearer failed. BLOCKING, best effort.
 
@@ -1584,10 +1600,12 @@ class MeshCredentialClient:
         """
         if not self.should_borrow(key):
             return None
-        credential_id = self._reported_credential_id(key, session_id)
+        # The caller's attribution (the FAILING bearer's row, ``store._lent_row_for``)
+        # wins over the cache read, which a forced re-borrow may already have dropped.
+        credential_id = int(credential_id or 0) or self._reported_credential_id(key, session_id)
         auth_report = kind in AUTH_REPORT_KINDS
         if auth_report:
-            held = self.refresh_hold(key)
+            held = self.refresh_hold(key, credential_id)
             if held is not None:
                 # THE OWNER ALREADY ANSWERED THIS (operator ask, 2026-11-08: "if
                 # something expires on a remote device is it able to refresh from
@@ -1632,10 +1650,12 @@ class MeshCredentialClient:
         if not isinstance(detail, dict):
             return None
         if auth_report:
-            return self._note_refresh_outcome(key, detail)
+            return self._note_refresh_outcome(key, detail, credential_id)
         return None
 
-    def _note_refresh_outcome(self, key: str, detail: dict[str, Any]) -> BrokerError | None:
+    def _note_refresh_outcome(
+        self, key: str, detail: dict[str, Any], credential_id: int = 0
+    ) -> BrokerError | None:
         """Read the owner's answer to a 401 report; a refusal to refresh becomes a hold.
 
         #3560 made the owner say what its forced refresh did (``refreshed``,
@@ -1644,18 +1664,24 @@ class MeshCredentialClient:
         whose owner could not refresh saw only the provider's next 401, with no
         remedy. Now:
 
-        * ``refreshed`` (and ``coalesced``, ``noted`` — nothing new to say) clears
-          any hold and returns ``None``: the caller's re-ask fetches the new bearer;
-        * ``refresh_failed`` / ``unchanged`` record a hold until ``retry_after_ms``
-          (validated at this boundary like every peer number) or, absent one, the
-          owner's own report window — the span inside which another report would
-          only be ``coalesced`` — and return the refusal whose ``message`` is the
-          sentence the session shows.
+        * ``refreshed`` clears that login's hold and returns ``None``: the caller's
+          re-ask fetches the new bearer. ``coalesced``/``noted`` say nothing new;
+        * ``refresh_failed`` / ``unchanged`` record a hold FOR THE REPORTED LOGIN
+          (``credential_id``, the owner's row the grant named) until
+          ``retry_after_ms`` — validated at this boundary like every peer number —
+          or, absent one, the owner's report window, inside which another report
+          would only be ``coalesced``. The return is the refusal whose ``message``
+          is the sentence a turn shows if the owner has nothing else to lend.
+
+        PER LOGIN, NOT PER PROVIDER (#3616 review M1 / QA Q1). The owner's answer is
+        about ONE row; a sibling login on the owner may be fine, and the owner's
+        grant cascade would lend it. A per-key hold blocked that sibling for up to
+        300 s, where the base build was served by it inside the same turn.
 
         Nothing here can refresh anything: the remedy is a command for a person on
         the OWNER, and the owner's refresh token never leaves it. The command is
         composed HERE from the key, never echoed from the peer's ``remedy`` field,
-        so a peer cannot put words in this device's mouth.
+        and the owner's name comes from this device's placement document only.
         """
         from local_operator.network.credentials.messages import (
             render_owner_refresh_outcome,
@@ -1669,13 +1695,13 @@ class MeshCredentialClient:
         if action not in ("refresh_failed", "unchanged"):
             if action == "refreshed":
                 with self._refresh_holds_lock:
-                    self._refresh_holds.pop(key, None)
+                    self._refresh_holds.pop((key, credential_id), None)
             return None
         code = str(detail.get("code") or "") if action == "refresh_failed" else "unchanged"
         retry_after_ms = peer_int(detail.get("retry_after_ms"), maximum=MAX_PEER_RETRY_AFTER_MS)
         hold_ms = retry_after_ms or int(REPORT_REFRESH_MIN_INTERVAL_S * 1000)
         owner = self.owner_of(key)
-        owner_name = self.owner_label(key) or str(detail.get("owner_device_name") or "")
+        owner_name = self.owner_label(key)
         error = BrokerError(
             code="grant_invalid" if code == "grant_invalid" else "refresh_failed",
             key=key,
@@ -1683,64 +1709,109 @@ class MeshCredentialClient:
             owner_device_name=owner_name,
             retry_after_ms=hold_ms,
             message=render_owner_refresh_outcome(
-                key, owner_name or owner or "the owner device", code=code, retry_after_ms=hold_ms
+                key, owner_name, code=code, retry_after_ms=hold_ms
             ),
         )
         with self._refresh_holds_lock:
-            self._refresh_holds[key] = _RefreshOutcomeHold(
+            self._refresh_holds[(key, credential_id)] = _RefreshOutcomeHold(
                 until=time.monotonic() + hold_ms / 1000.0,
                 fence=self._lifecycle_fence(key),
                 code=code,
+                credential_id=credential_id,
                 error=error,
             )
         logger.info(
-            "owner %s could not refresh borrowed %s after a 401 report (%s); "
-            "holding reports and borrows for %.0f s",
+            "owner %s could not refresh borrowed %s row %s after a 401 report (%s); "
+            "holding reports for that login for %.0f s",
             owner,
             key,
+            credential_id or "?",
             code,
             hold_ms / 1000.0,
         )
         return error
 
-    def refresh_hold(self, key: str) -> BrokerError | None:
+    def _live_refresh_holds(self, key: str) -> list[_RefreshOutcomeHold]:
+        """Every live hold for ``key``'s logins, latest-ending last; ended ones dropped.
+
+        A hold ENDS ON EITHER OF TWO EVENTS, whichever comes first: its time passes
+        (the owner's ``retry_after``), or the owner's announced lifecycle for the key
+        moves — a login, logout or rotation there (``_lifecycle_fence``) may be the
+        operator running the remedy, and must not wait out a timer. An owner that
+        announces no lifecycle has an empty fence on both sides, so only the time
+        ends its hold.
+        """
+        now = time.monotonic()
+        with self._refresh_holds_lock:
+            mine = [(k, h) for k, h in self._refresh_holds.items() if k[0] == key]
+        if not mine:
+            return []
+        fence = self._lifecycle_fence(key)
+        live: list[_RefreshOutcomeHold] = []
+        for slot, hold in mine:
+            if now >= hold.until or fence != hold.fence:
+                with self._refresh_holds_lock:
+                    if self._refresh_holds.get(slot) is hold:
+                        del self._refresh_holds[slot]
+            else:
+                live.append(hold)
+        return sorted(live, key=lambda hold: hold.until)
+
+    def refresh_hold(self, key: str, credential_id: int | None = None) -> BrokerError | None:
         """The owner's live "I could not refresh it" for ``key``, or ``None``.
 
-        ENDS ON EITHER OF TWO EVENTS, whichever comes first: the hold's time passes
-        (the owner's ``retry_after``), or the owner's announced lifecycle for the
-        key moves — a login, logout or rotation there (``_lifecycle_fence``) is
-        exactly the operator running the remedy, and must not wait out a timer.
-        An owner that announces no lifecycle has an empty fence on both sides, so
-        only the time ends its hold.
+        ``credential_id`` asks about ONE login (the report path: only a 401 on the
+        login the owner already answered for is suppressed); ``None`` asks whether
+        ANY of ``key``'s logins is held (the turn's error surface). The countdown
+        is re-rendered on every read, never the first sentence repeated: a "try
+        again in about 5 min" read four minutes later is the stale-claim class
+        ``render_retry_after`` already guards against.
         """
-        with self._refresh_holds_lock:
-            hold = self._refresh_holds.get(key)
-        if hold is None:
+        holds = [
+            hold
+            for hold in self._live_refresh_holds(key)
+            if credential_id is None or hold.credential_id == credential_id
+        ]
+        if not holds:
             return None
-        if time.monotonic() >= hold.until or self._lifecycle_fence(key) != hold.fence:
-            with self._refresh_holds_lock:
-                if self._refresh_holds.get(key) is hold:
-                    del self._refresh_holds[key]
-            return None
+        return self._render_refresh_hold(key, holds[-1])
+
+    def _render_refresh_hold(self, key: str, hold: _RefreshOutcomeHold) -> BrokerError:
         from local_operator.network.credentials.messages import (
             render_owner_refresh_outcome,
         )
 
-        # The countdown is re-rendered, never the first sentence repeated: a "this
-        # device tries again in 5 min" read four minutes later is the stale-claim
-        # class ``render_retry_after`` already guards against.
         left_ms = max(0, int((hold.until - time.monotonic()) * 1000))
         error = hold.error
         return dataclasses.replace(
             error,
             retry_after_ms=left_ms,
             message=render_owner_refresh_outcome(
-                key,
-                error.owner_device_name or error.owner_device or "the owner device",
-                code=hold.code,
-                retry_after_ms=left_ms,
+                key, error.owner_device_name, code=hold.code, retry_after_ms=left_ms
             ),
         )
+
+    def _refresh_hold_selection(self, key: str) -> tuple[list[int], BrokerError | None]:
+        """``(rows to hide from this ask, the held refusal to answer with)``.
+
+        The borrow half of a hold (#3616 M1). The held logins are hidden from the
+        owner's selector through the existing ``exclude_credential_ids`` field, so
+        the owner lends a SIBLING if it has one, and the held sentence is said only
+        when the owner then has nothing else (:meth:`_from_reply`). Hidden only for
+        a reason under which the owner would hand the same dead bearer back
+        (``refresh_failed``, ``unchanged``, ``not_refreshable``); a ``grant_invalid``
+        row is already refused by the owner's own cascade (its tombstone), and
+        leaving it visible is what lets a re-sign-in there serve on the very next
+        ask instead of after the lifecycle tick (#3616 QA Q4). A hold whose row id
+        is unknown (an older owner's grant) hides nothing.
+        """
+        holds = self._live_refresh_holds(key)
+        if not holds:
+            return [], None
+        hidden = sorted(
+            {h.credential_id for h in holds if h.credential_id > 0 and h.code != "grant_invalid"}
+        )
+        return hidden, self._render_refresh_hold(key, holds[-1])
 
     def _cool_lent_row(
         self,
@@ -2753,8 +2824,17 @@ class MeshCredentialClient:
         resting: list[dict[str, Any]] | None = None,
         request_stamp: Any = None,
         selection: Any = None,
+        refresh_held: BrokerError | None = None,
     ) -> Grant | BrokerError:
         """Turn a leg-1 control reply into a grant or a refusal.
+
+        ``refresh_held`` is this device's live "the owner could not refresh that
+        login" (:meth:`_refresh_hold_selection`). When the owner answers that it has
+        nothing to lend, that sentence replaces the owner's: it names the cause the
+        borrower actually observed (a 401 the owner could not repair) and its
+        remedy, where the owner's "nothing to lend" would be a consequence of the
+        exclusion. Not remembered, like the cooldown-rest answer below: the hold is
+        the record, and it ends on its own clock.
 
         ``resting`` is the cooldown set this ask excluded. When the owner answers
         that the exclusion left nothing (the owner's ``peer_excluded`` arm, marked
@@ -2789,6 +2869,10 @@ class MeshCredentialClient:
             grant = self._bounded(Grant.from_detail(detail))
             return self._adopt_online(grant, key, session_id, request_stamp, selection=selection)
         refused = BrokerError.from_detail(detail)
+        if refresh_held is not None and (
+            refused.is_holder_exclusion or refused.code in _NOTHING_LEFT_TO_LEND
+        ):
+            return refresh_held
         if resting and refused.is_holder_exclusion:
             return self._resting_refusal(key, label, resting)
         error = self._render(refused, key, label)

@@ -10,14 +10,16 @@ retry, with no remedy.
 
 What is real here: the borrower's ``MeshCredentialClient``, the mesh-aware store
 over a real ``AuthStore``, the failover driver's ``_no_credential_error``. What is
-replaced is only the wire — the relay's control socket (``control_request``) for
-the report, and ``grant_async`` for the borrow — because what is under test is what
-the BORROWER does with the owner's answer.
+replaced is only the wire — the relay's control socket (``control_request``), for the
+report and the grant ask — and the grant's adopt CAS, because what is under test is what
+the BORROWER does with the owner's answer. The cells over the real owner broker and
+the real failover driver live in test_borrower_refresh_outcome_driver.py.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from pathlib import Path
 from typing import Any
@@ -42,7 +44,7 @@ class _Unauthorized(Exception):
     """A provider 401 — classified ``unauthorized`` by ``report_kind_for``."""
 
 
-def _grant(token: str) -> Grant:
+def _grant(token: str, credential_id: int = 7) -> Grant:
     return Grant(
         access_token=token,
         kind="bearer",
@@ -53,17 +55,29 @@ def _grant(token: str) -> Grant:
             owner_device_name=OWNER_NAME,
             provider="openai",
             kind="oauth",
-            credential_id=7,
+            credential_id=credential_id,
         ),
         served_by=OWNER,
-        grant_id="g_test",
+        grant_id=f"g_{credential_id}",
     )
 
 
 class _Rig:
-    """A borrower wired to a scripted owner: report answers and grants are queued."""
+    """A borrower wired to a scripted owner with logins ``rows`` (row id -> bearer).
 
-    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch, reply: dict[str, Any]):
+    The borrower's REAL ``request_grant_sync`` builds every grant ask, so the
+    ``exclude_credential_ids`` a hold adds is what the scripted owner reads; only
+    the adopt step (membership/policy CAS, which needs a joined network) is stood
+    in for, because what is under test is what the borrower ASKS and SAYS.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reply: dict[str, Any],
+        rows: dict[int, str] | None = None,
+    ):
         from local_operator.network.identity import mint
         from local_operator.providers.auth_store import AuthStore
 
@@ -79,31 +93,57 @@ class _Rig:
             root=root, self_device=identity.device_id, network_id=NETWORK, placement=document
         )
         self.reply = reply
+        #: The owner's logins, in its selection order. ``tombstoned`` are the rows
+        #: its cascade refuses on its own (a dead grant).
+        self.rows: dict[int, str] = dict(rows or {7: DEAD_BEARER})
+        self.tombstoned: set[int] = set()
         self.reports: list[dict[str, Any]] = []
-        self.dials: list[str] = []
-        self.next_grants: list[Grant] = [_grant(DEAD_BEARER)]
+        self.asks: list[list[int]] = []
 
         def control(_record: Any, op: str, **fields: Any) -> dict[str, Any]:
+            if op == "credential_grant":
+                return {"detail": self._lend(list(fields.get("exclude_credential_ids") or []))}
             self.reports.append({"op": op, **fields})
             return {"detail": dict(self.reply)}
-
-        async def grant_async(key: str, **_: Any) -> Grant:
-            self.dials.append(key)
-            return self.next_grants[0] if len(self.next_grants) == 1 else self.next_grants.pop(0)
 
         monkeypatch.setattr(
             "local_operator.network.store.find_own_relay", lambda root=None: object()
         )
         monkeypatch.setattr("local_operator.network.relay.control_request", control)
-        monkeypatch.setattr(self.client, "grant_async", grant_async)
+
+        def adopt(grant: Grant, key: str, session_id: str, *_a: Any, **_k: Any) -> Grant:
+            # The cache write is the part of adopting the report path reads: the
+            # lent row's id travels with the report from the cached grant.
+            self.client.grants.put(key, session_id, grant)
+            return grant
+
+        monkeypatch.setattr(self.client, "_adopt_online", adopt)
         self.store = mesh_store.MeshAwareAuthStore(
             AuthStore(config_dir=root), mesh=self.client, config_dir=root
         )
 
-    def turn_fails_with_401(self) -> None:
-        """One borrowed request refused by the provider, as the driver sees it."""
-        assert asyncio.run(self.store.get_api_key("openai", "sess-1")) == DEAD_BEARER
-        assert self.store.rotate_sibling("openai", "sess-1", _Unauthorized(), DEAD_BEARER) is False
+    def _lend(self, excluded: list[int]) -> dict[str, Any]:
+        self.asks.append(excluded)
+        for row_id, bearer in self.rows.items():
+            if row_id not in excluded and row_id not in self.tombstoned:
+                return _grant(bearer, row_id).to_detail()
+        if excluded:
+            return BrokerError(
+                code="quota_blocked", key="openai", owner_device=OWNER, reason="holder_excluded"
+            ).to_detail()
+        return BrokerError(
+            code="no_local_credential",
+            key="openai",
+            owner_device=OWNER,
+            message=f"{OWNER_NAME} holds no usable credential for 'openai'",
+        ).to_detail()
+
+    def borrow(self) -> str | None:
+        return asyncio.run(self.store.get_api_key("openai", "sess-1"))
+
+    def provider_refuses(self, bearer: str) -> None:
+        """The provider's 401 on ``bearer``, as the failover driver hands it over."""
+        assert self.store.rotate_sibling("openai", "sess-1", _Unauthorized(), bearer) is False
 
     def close(self) -> None:
         self.store.close()
@@ -125,40 +165,75 @@ def _owner_reply(action: str, **fields: Any) -> dict[str, Any]:
     }
 
 
-def test_refresh_failed_is_surfaced_with_the_remedy_to_run_on_the_owner(
+def test_a_dead_grant_with_nothing_else_to_lend_says_sign_in_on_the_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The turn's error names the owner, the command to run THERE and the retry."""
-    from local_operator.providers.failover import _no_credential_error
+    """The turn's error names the owner and the command to run there, once each."""
+    from local_operator.providers.failover import _borrowed_refresh_refusal
 
     rig = _Rig(
         tmp_path,
         monkeypatch,
-        _owner_reply("refresh_failed", code="grant_invalid", remedy="/login openai"),
+        _owner_reply("refresh_failed", code="grant_invalid", remedy="/login evil"),
     )
     try:
-        rig.turn_fails_with_401()
-        # The driver's re-resolve after the rotation: answered by the hold, no dial.
-        rig.dials.clear()
-        assert asyncio.run(rig.store.get_api_key("openai", "sess-1")) is None
-        assert rig.dials == [], "the borrower re-borrowed the bearer the owner cannot refresh"
-        text = str(_no_credential_error(rig.store, "openai"))
-        assert OWNER_NAME in text, text
-        assert "'/login openai' there" in text, text
-        assert "has expired" in text, text
-        # No ``retry_after`` from the owner: the hold is the owner's report window.
-        assert "again in 5 min" in text, text
-        assert DEAD_BEARER not in text
+        assert rig.borrow() == DEAD_BEARER
+        rig.tombstoned.add(7)  # the owner's IdP refused the grant; its cascade skips it
+        rig.provider_refuses(DEAD_BEARER)
+        assert rig.borrow() is None
+        expected = (
+            f"The 'openai' sign-in on {OWNER_NAME} has expired. "
+            f"Run 'lop login openai' on {OWNER_NAME}, then try again."
+        )
+        assert rig.store.no_credential_reason("openai") == expected
+        # The text the FIRST failing turn ends on (#3616 QA Q2), not the bare 401.
+        refused = _borrowed_refresh_refusal(rig.store, "openai")
+        assert refused is not None and refused.message == expected
+        assert "evil" not in expected
+        # A ``grant_invalid`` row is NOT hidden from the ask: the owner's own cascade
+        # refuses it, and a re-sign-in there must serve on the very next ask (Q4).
+        assert rig.asks[-1] == []
+        rig.tombstoned.clear()
+        rig.rows = {7: NEW_BEARER}
+        assert rig.borrow() == NEW_BEARER
+        assert rig.store.no_credential_reason("openai") is None
     finally:
         rig.close()
 
 
-def test_retry_after_is_honoured_for_reports_and_borrows_then_released(
+def test_a_dead_login_never_blocks_a_working_sibling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Inside ``retry_after`` nothing is sent to the owner; after it, both resume."""
-    from local_operator.providers.failover import _no_credential_error
+    """#3616 M1/Q1: login 7 cannot be refreshed, login 8 works — 8 serves, no advice."""
+    from local_operator.providers.failover import _borrowed_refresh_refusal
 
+    rig = _Rig(
+        tmp_path,
+        monkeypatch,
+        _owner_reply("refresh_failed", code="refresh_failed", retry_after_ms=30_000),
+        rows={7: DEAD_BEARER, 8: NEW_BEARER},
+    )
+    try:
+        assert rig.borrow() == DEAD_BEARER
+        rig.provider_refuses(DEAD_BEARER)
+        # The owner would hand the same dead bearer back for 7, so 7 is hidden...
+        assert rig.borrow() == NEW_BEARER
+        assert rig.asks[-1] == [7]
+        # ...and nothing tells the operator to sign in while 8 serves.
+        assert rig.store.no_credential_reason("openai") is None
+        assert _borrowed_refresh_refusal(rig.store, "openai") is None
+        # A 401 on the SIBLING is still reported: the hold is login 7's alone.
+        rig.provider_refuses(NEW_BEARER)
+        assert len(rig.reports) == 2, rig.reports
+        assert [r.get("credential_id") for r in rig.reports] == [7, 8]
+    finally:
+        rig.close()
+
+
+def test_temporary_failure_leads_with_the_wait_and_retry_after_is_honoured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """IdP down: wait first, sign-in only if it persists; no repeat report inside the wait."""
     clock = [1000.0]
     monkeypatch.setattr(client_mod.time, "monotonic", lambda: clock[0])
     rig = _Rig(
@@ -167,28 +242,30 @@ def test_retry_after_is_honoured_for_reports_and_borrows_then_released(
         _owner_reply("refresh_failed", code="refresh_failed", retry_after_ms=30_000),
     )
     try:
-        rig.turn_fails_with_401()
+        assert rig.borrow() == DEAD_BEARER
+        rig.provider_refuses(DEAD_BEARER)
         assert len(rig.reports) == 1
-        text = str(_no_credential_error(rig.store, "openai"))
-        assert "could not refresh it just now" in text and "again in 30 s" in text, text
+        assert rig.borrow() is None
+        assert rig.store.no_credential_reason("openai") == (
+            f"{OWNER_NAME} could not refresh the 'openai' sign-in just now. Try again in "
+            f"about 30 s; if it keeps failing, run 'lop login openai' on {OWNER_NAME}."
+        )
 
-        # 20 s later: another 401 report is answered from the hold, not dialled, and
-        # the borrow is refused locally with the countdown re-rendered.
+        # 20 s later a repeat 401 on that login is answered from the hold, not sent,
+        # and the countdown is re-rendered.
         clock[0] += 20.0
         rig.client.grants.put("openai", "sess-1", _grant(DEAD_BEARER))
         held = rig.client.report_sync("openai", kind="unauthorized", session_id="sess-1")
         assert isinstance(held, BrokerError) and held.code == "refresh_failed"
         assert len(rig.reports) == 1, "a report inside retry_after reached the owner"
-        rig.dials.clear()
-        assert asyncio.run(rig.store.get_api_key("openai", "sess-1")) is None
-        assert rig.dials == []
-        assert "again in 10 s" in str(_no_credential_error(rig.store, "openai"))
+        assert rig.borrow() is None
+        assert "about 10 s" in str(rig.store.no_credential_reason("openai"))
 
-        # Past retry_after: the borrow dials again and the owner's new token serves.
+        # Past retry_after: login 7 is asked for again, and the owner's new token serves.
         clock[0] += 11.0
-        rig.next_grants = [_grant(NEW_BEARER)]
-        assert asyncio.run(rig.store.get_api_key("openai", "sess-1")) == NEW_BEARER
-        assert rig.dials == ["openai"]
+        rig.rows = {7: NEW_BEARER}
+        assert rig.borrow() == NEW_BEARER
+        assert rig.asks[-1] == []
     finally:
         rig.close()
 
@@ -203,7 +280,8 @@ def test_a_lifecycle_change_on_the_owner_ends_the_hold_early(
     )
     rig = _Rig(tmp_path, monkeypatch, _owner_reply("unchanged"))
     try:
-        rig.turn_fails_with_401()
+        assert rig.borrow() == DEAD_BEARER
+        rig.provider_refuses(DEAD_BEARER)
         assert isinstance(rig.client.refresh_hold("openai"), BrokerError)
         fence[0] = frozenset({("session", (2, 1), "")})  # the owner signed in again
         assert rig.client.refresh_hold("openai") is None
@@ -211,30 +289,90 @@ def test_a_lifecycle_change_on_the_owner_ends_the_hold_early(
         rig.close()
 
 
-def test_refreshed_stays_silent_and_the_retry_is_served_the_new_token(
+def test_refreshed_clears_an_existing_hold_and_the_retry_gets_the_new_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The owner fixed it: no refusal, no hold, and the re-resolve gets the new bearer."""
-    rig = _Rig(tmp_path, monkeypatch, _owner_reply("refreshed"))
+    """#3616 m3: a hold is set first, then the owner's ``refreshed`` clears it."""
+    rig = _Rig(tmp_path, monkeypatch, _owner_reply("unchanged"))
     try:
-        rig.turn_fails_with_401()
-        assert rig.store.no_credential_reason("openai") is None
+        assert rig.borrow() == DEAD_BEARER
+        rig.provider_refuses(DEAD_BEARER)
+        assert rig.client.refresh_hold("openai", 7) is not None
+
+        # The hold's time passes, the next 401 reaches the owner, which now refreshes.
+        hold = rig.client._refresh_holds[("openai", 7)]  # noqa: SLF001
+        expired = dataclasses.replace(hold, until=0.0)
+        rig.client._refresh_holds[("openai", 7)] = expired  # noqa: SLF001
+        rig.reply = _owner_reply("refreshed")
+        rig.client.grants.put("openai", "sess-1", _grant(DEAD_BEARER))
+        assert rig.client.report_sync("openai", kind="unauthorized", session_id="sess-1") is None
         assert rig.client.refresh_hold("openai") is None
-        rig.next_grants = [_grant(NEW_BEARER)]
-        rig.dials.clear()
-        assert asyncio.run(rig.store.get_api_key("openai", "sess-1")) == NEW_BEARER
-        assert rig.dials == ["openai"]
+
+        # A hold that is still LIVE is cleared by ``refreshed`` too.
+        rig.reply = _owner_reply("unchanged")
+        rig.client.grants.put("openai", "sess-1", _grant(DEAD_BEARER))
+        rig.client.report_sync("openai", kind="unauthorized", session_id="sess-1")
+        assert rig.client.refresh_hold("openai", 7) is not None
+        rig.client._note_refresh_outcome("openai", _owner_reply("refreshed"), 7)  # noqa: SLF001
+        assert rig.client.refresh_hold("openai") is None
+
+        rig.rows = {7: NEW_BEARER}
+        assert rig.borrow() == NEW_BEARER
+        assert rig.store.no_credential_reason("openai") is None
     finally:
         rig.close()
 
 
-def test_the_sentence_never_echoes_the_peers_remedy_and_names_the_owner_command() -> None:
-    """The command is composed here from the key; a peer cannot supply words."""
+@pytest.mark.parametrize(
+    "stated", [10**12, "1e400", float("inf"), -5, True, "x", None, 0, [1], {"a": 1}]
+)
+def test_a_hostile_retry_after_is_capped_or_defaulted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stated: Any
+) -> None:
+    """#3616 m2: whatever the owner sends, the hold is positive and at most 300 s."""
+    clock = [1000.0]
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: clock[0])
+    rig = _Rig(
+        tmp_path,
+        monkeypatch,
+        _owner_reply("refresh_failed", code="refresh_failed", retry_after_ms=stated),
+    )
+    try:
+        assert rig.borrow() == DEAD_BEARER
+        rig.provider_refuses(DEAD_BEARER)
+        hold = rig.client._refresh_holds[("openai", 7)]  # noqa: SLF001
+        assert 0 < hold.until - clock[0] <= 300.0, (stated, hold.until - clock[0])
+    finally:
+        rig.close()
+
+
+def test_a_hostile_owner_name_stays_one_safe_line() -> None:
+    """#3616 m1/Q5: an owner-authored name cannot repaint or forge a line."""
     from local_operator.network.credentials.messages import render_owner_refresh_outcome
 
-    text = render_owner_refresh_outcome("openai", OWNER_NAME, code="unchanged", retry_after_ms=0)
-    assert text == (
-        f"The provider refused the 'openai' sign-in borrowed from {OWNER_NAME}, and "
-        f"{OWNER_NAME} could not get a new token for it. Sign in again on {OWNER_NAME}: "
-        "run '/login openai' there."
+    hostile = "evil\x1b[31mRED\x1b[0m\nSecond line\r\u202eright-to-left\x07" + "x" * 200
+    for code in ("grant_invalid", "refresh_failed", "unchanged"):
+        text = render_owner_refresh_outcome("openai", hostile, code=code, retry_after_ms=30_000)
+        assert "\n" not in text and "\r" not in text and "\x1b" not in text, repr(text)
+        assert "\x07" not in text and "\u202e" not in text, repr(text)
+        assert text.isprintable(), repr(text)
+        assert "x" * 100 not in text, "the name was not bounded"
+
+
+def test_the_sentences_are_short_and_never_echo_the_peers_remedy() -> None:
+    """D2's measured targets, and the command composed here from the key (D3)."""
+    from local_operator.network.credentials.messages import render_owner_refresh_outcome
+
+    dead = render_owner_refresh_outcome("openai", "studio-mac-mini", code="grant_invalid")
+    assert dead == (
+        "The 'openai' sign-in on studio-mac-mini has expired. "
+        "Run 'lop login openai' on studio-mac-mini, then try again."
     )
+    assert len(dead) <= 133, len(dead)
+    longest = render_owner_refresh_outcome(
+        "alibaba-token-plan", "n" * 46, code="refresh_failed", retry_after_ms=300_000
+    )
+    assert len(longest) <= 275, (len(longest), longest)
+    assert longest.count("n" * 46) == 2, longest
+    mcp = render_owner_refresh_outcome("mcp:https://x.test/mcp", "box", code="grant_invalid")
+    assert "'/mcp login <name>'" in mcp and "https://" not in mcp.split("'")[-2], mcp

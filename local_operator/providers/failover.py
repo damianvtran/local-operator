@@ -4716,6 +4716,9 @@ async def _stream_with_failover_events(
                         current_token = last_access.access_token
                         error = None
                     else:
+                        refused = _borrowed_refresh_refusal(auth, provider)
+                        if refused is not None:
+                            record(refused, primary=is_primary, target=target)
                         break  # rotation exhausted for this provider
                 if access is None and not _provider_allows_missing(provider):
                     # "No API key configured" is only true when the provider has
@@ -5990,6 +5993,35 @@ def _mark_prewire_refusal(error: ProviderError) -> ProviderError:
 
     setattr(error, PREWIRE_REFUSAL_ATTR, True)
     return error
+
+
+def _borrowed_refresh_refusal(auth: FailoverAuthStore, provider: str) -> ProviderError | None:
+    """The OWNER's could-not-refresh sentence, for a borrowed bearer's 401, or ``None``.
+
+    Asked only where rotation is exhausted after a provider error. A borrowed
+    credential's 401 is reported to the device that owns the login; when that
+    device answers that it could not refresh it and has no other login to lend,
+    the mesh-aware store holds a sentence naming that device and the command to
+    run there (``network.credentials.store.borrowed_refresh_refusal``). Without
+    this the loop broke out on the provider's own "authentication failed (HTTP
+    401)" and the remedy appeared only on the NEXT turn (#3616 QA Q2).
+
+    Kind ``auth``, so it ranks with the 401 it explains and — recorded after it —
+    wins the report slot at equal rank (``record``'s ``>=``); a primary target's
+    failure still outranks a fallback's as before. Not retryable: the loop-back
+    sweep would only be answered by the same hold. Duck-typed like
+    :func:`_no_credential_error`'s hook: every other store lacks the method.
+    """
+    reason_for = getattr(auth, "borrowed_refresh_refusal", None)
+    if not callable(reason_for):
+        return None
+    try:
+        reason = reason_for(provider)
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return None
+    if not isinstance(reason, str) or not reason:
+        return None
+    return ProviderError(None, reason, retryable=False, kind="auth")
 
 
 def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:
