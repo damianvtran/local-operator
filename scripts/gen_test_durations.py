@@ -235,6 +235,21 @@ def _workflow_shards(workflow: str, *, require_default_checkout: bool = False) -
         raise ValueError(f"source workflow: unreadable YAML: {exc}") from exc
 
 
+#: Workflows whose `test (3.12, N)` shard jobs are admissible timing sources,
+#: with the events each one runs the default checkout for. PR #3592 moved the
+#: unit shards out of ci.yml into full-suite.yml (push to `main`, nightly
+#: `schedule`, `workflow_dispatch` on a branch); ci.yml stays listed so older
+#: runs, which still carry shard artifacts, remain reproducible inputs. Every
+#: non-PR event here checks out a branch ref the same way (`-B <branch>
+#: refs/remotes/origin/<branch>`), so they share the push binding below; a
+#: dispatch on a tag or SHA does not match it and fails closed.
+SHARD_WORKFLOWS: dict[str, frozenset[str]] = {
+    ".github/workflows/full-suite.yml": frozenset({"push", "schedule", "workflow_dispatch"}),
+    ".github/workflows/ci.yml": frozenset({"pull_request", "push"}),
+}
+LEGACY_WORKFLOW = ".github/workflows/ci.yml"
+
+
 def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int], dict[str, str]]:
     """Bind the supported default checkout to execution semantics, not job text.
 
@@ -246,7 +261,10 @@ def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int],
     is no mutable-main/PR-merge lookup or arbitrary-log provenance fallback.
     """
     event = run.get("event")
-    if event not in ("pull_request", "push"):
+    # Callers that predate full-suite.yml pass runs without a path; those were
+    # always ci.yml runs, which is the only reading that cannot widen admission.
+    workflow_path = run.get("path", LEGACY_WORKFLOW)
+    if event not in SHARD_WORKFLOWS.get(workflow_path, frozenset()):
         raise ValueError("source workflow: unsupported execution event")
     checkout_steps = [
         step for step in job.get("steps", []) if step.get("name") == "Run actions/checkout@v7"
@@ -343,11 +361,9 @@ def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int],
             parent["sha"] for parent in commit["parents"]
         ]:
             raise ValueError("source workflow: PR execution merge does not contain run head")
-    elif run.get("event") != "push" or revision != run["head_sha"]:
+    elif revision != run["head_sha"]:
         raise ValueError("source workflow: unsupported event or checkout/head mismatch")
-    source = _gh_json(
-        f"repos/damianvtran/local-operator/contents/.github/workflows/ci.yml?ref={revision}"
-    )
+    source = _gh_json(f"repos/damianvtran/local-operator/contents/{workflow_path}?ref={revision}")
     if source.get("encoding") != "base64":
         raise ValueError("source workflow: missing base64 source content")
     try:
@@ -362,8 +378,7 @@ def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int],
         # source. Divergent base/merge workflow changes are unsupported rather
         # than guessed; these historical timing sources are byte-compatible.
         head_source = _gh_json(
-            "repos/damianvtran/local-operator/contents/.github/workflows/ci.yml"
-            f"?ref={run['head_sha']}"
+            f"repos/damianvtran/local-operator/contents/{workflow_path}?ref={run['head_sha']}"
         )
         if (
             head_source.get("encoding") != "base64"
@@ -396,7 +411,7 @@ def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], di
         raise ValueError("artifact pagination required; refusing incomplete metadata")
     if run["status"] != "completed" or run["conclusion"] != "success":
         raise ValueError(f"run {run_id} attempt {attempt} did not complete successfully")
-    if run["path"] != ".github/workflows/ci.yml":
+    if run["path"] not in SHARD_WORKFLOWS:
         raise ValueError(f"not a comparable CI workflow: {run['path']}")
     shards = sorted(
         (j for j in jobs if j["name"].startswith("test (3.12, ")),

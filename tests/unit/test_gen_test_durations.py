@@ -592,3 +592,84 @@ def test_p75_uses_per_run_file_totals() -> None:
             {"tests/unit/test_new.py": 9.0},
         ]
     ) == {"tests/unit/test_new.py": 7.0}
+
+
+# PR #3592 moved the unit shards from ci.yml to full-suite.yml, which runs on
+# push to main, nightly `schedule` and branch `workflow_dispatch`. Its runs
+# must bind to full-suite.yml's OWN source, and ci.yml runs stay admissible.
+@pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch"])
+def test_full_suite_runs_bind_to_their_own_workflow_source(
+    event: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = CHECKOUT_LOG.replace(
+        "--progress --force refs/remotes/pull/1/merge",
+        "--progress --force -B main refs/remotes/origin/main",
+    ).replace(MERGE_SHA, HEAD_SHA)
+    monkeypatch.setattr(generator.subprocess, "check_output", Mock(return_value=log))
+    workflow = (
+        "jobs:\n  test:\n    strategy:\n      matrix:\n        shard: [0, 1, 2, 3, 4, 5]\n"
+        "    steps:\n      - uses: actions/checkout@v7\n"
+    )
+    fetch = Mock(
+        return_value={
+            "sha": "blob",
+            "encoding": "base64",
+            "content": base64.b64encode(workflow.encode()).decode(),
+        }
+    )
+    monkeypatch.setattr(generator, "_gh_json", fetch)
+    run = {
+        "event": event,
+        "head_sha": HEAD_SHA,
+        "head_branch": "main",
+        "path": ".github/workflows/full-suite.yml",
+    }
+    shards, source = generator._source_matrix(run, CHECKOUT_JOB)
+    assert shards == list(range(6)) and source["workflow_sha"] == HEAD_SHA
+    assert fetch.call_args.args[0] == (
+        "repos/damianvtran/local-operator/contents/.github/workflows/full-suite.yml"
+        "?ref=" + HEAD_SHA
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "event"),
+    [
+        (".github/workflows/full-suite.yml", "pull_request"),  # no PR leg exists there
+        (".github/workflows/ci.yml", "schedule"),  # legacy source: PR/push only
+        (".github/workflows/release-gate.yml", "push"),  # not a shard workflow
+    ],
+)
+def test_unlisted_workflow_event_pairs_fail_closed(
+    path: str, event: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fetch = Mock()
+    monkeypatch.setattr(generator, "_gh_json", fetch)
+    with pytest.raises(ValueError, match="unsupported execution event"):
+        generator._source_matrix(
+            {"event": event, "head_sha": HEAD_SHA, "head_branch": "main", "path": path},
+            CHECKOUT_JOB,
+        )
+    fetch.assert_not_called()
+
+
+def test_ci_run_admits_full_suite_and_rejects_other_workflows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = {"status": "completed", "conclusion": "success", "path": ".github/workflows/x.yml"}
+    monkeypatch.setattr(
+        generator,
+        "_gh_json",
+        Mock(side_effect=[run, {"jobs": []}, {"total_count": 0, "artifacts": []}]),
+    )
+    with pytest.raises(ValueError, match="not a comparable CI workflow"):
+        generator.ci_run(1, 1, tmp_path)
+    run["path"] = ".github/workflows/full-suite.yml"
+    monkeypatch.setattr(
+        generator,
+        "_gh_json",
+        Mock(side_effect=[run, {"jobs": []}, {"total_count": 0, "artifacts": []}]),
+    )
+    # Past the workflow gate: it now fails on the (empty) shard matrix instead.
+    with pytest.raises(ValueError, match="no unit shard jobs"):
+        generator.ci_run(1, 1, tmp_path)
