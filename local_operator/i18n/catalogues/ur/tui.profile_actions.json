@@ -1,0 +1,13 @@
+{
+  "tui.profile_actions.available": "[ بحال کریں ({shortcut}) ]",
+  "tui.profile_actions.check_status": "[ حیثیت جانچیں ({shortcut}) ]",
+  "tui.profile_actions.checking": "[ بحالی کی جانچ جاری… ]",
+  "tui.profile_actions.failed": "[ بحالی نامکمل ]",
+  "tui.profile_actions.failed_reason": "بحالی مکمل نہیں ہو سکی۔ نئی تبدیلی کی درخواست کرنے سے پہلے موجودہ پروفائل دیکھیں۔",
+  "tui.profile_actions.reverted": "[ بحالی مکمل ]",
+  "tui.profile_actions.reverting": "[ بحالی جاری… ]",
+  "tui.profile_actions.stale": "[ پروفائل میں تبدیلی ]",
+  "tui.profile_actions.stale_reason": "اس بار محفوظ کرنے کے بعد پروفائل میں تبدیلی ہوئی ہے۔ موجودہ ورژن دیکھیں؛ یہ عمل بعد کی تبدیلیاں واپس نہیں کرے گا۔",
+  "tui.profile_actions.unavailable": "[ بحالی دستیاب نہیں ]",
+  "tui.profile_actions.unavailable_reason": "اس سیشن میں اس عمل کی تصدیق نہیں ہو سکتی۔ نئی تبدیلی کی درخواست کرنے سے پہلے موجودہ پروفائل دیکھیں۔"
+}

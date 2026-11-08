@@ -157,8 +157,12 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
     # verdict and never reaches this frame at all.
     outcome: dict[str, str] = {"terminal": "succeeded"}
 
+    # Provenance belongs to this exec input, not to the daemon/process lifetime.
+    # A later attached operator prompt still carries its own local typed witness.
+    machine_input = os.environ.get("LOCAL_OPERATOR_AGENT_SHELL") == "1"
+
     async def submit(text: str) -> bool:
-        completed = await control.handle.run_headless_prompt(text)
+        completed = await control.handle.run_headless_prompt(text, owner_typed=not machine_input)
         if not completed:
             # A raising turn emits no error event, so the renderer has nothing
             # to print. Report the queue's recorded reason on stderr, where the

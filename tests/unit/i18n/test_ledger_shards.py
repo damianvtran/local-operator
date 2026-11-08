@@ -405,6 +405,23 @@ def test_shard_round_trips_through_aggregate_mirror(locale: str, i18n_generate) 
     assert rows[: len(shard["entries"])] == shard["entries"]
 
 
+def test_imported_profile_english_history_round_trips_without_a_legacy_shard(i18n_generate) -> None:
+    """English's stranded shard is retired, not its original two audit rows.
+
+    The immutable migration baseline never had an English legacy shard. Its
+    imported history must still survive the exact current aggregate export.
+    """
+    path = REPO / "i18n" / "audit-history" / "en" / "tui.profile_actions.json"
+    history = json.loads(path.read_text(encoding="utf-8"))["entries"]
+    rows = [
+        row
+        for row in json.loads(i18n_generate._render_aggregate())["entries"]
+        if row["locale"] == "en" and row["namespace"] == "tui.profile_actions"
+    ]
+    assert len(history) == 2 and rows == history
+    assert not (REPO / "i18n" / "ledger" / "en.json").exists()
+
+
 def _row(locale: str, namespace: str, sha: str, note: str) -> dict[str, Any]:
     return {
         "translator": {"agent": "fixture-translator", "model": "test"},

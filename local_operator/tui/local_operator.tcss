@@ -510,6 +510,13 @@ MonitorDeltaBlock.monitor-expanded, TeamBridgeBlock.bridge-expanded {
 /* State reaches the GROUND, not just the glyph: a live action sits one step
  * proud of its settled neighbours, and a failure stops being neutral. Both
  * tints sit near the surface luminance so the ledger never shouts. */
+/* A receipt action has a separate mouse target beneath the summary. The
+ * ordinary collapsed-card height:1 contract must not clip that second row. */
+ToolCard.profile-action-card, .comfortable-rows ToolCard.profile-action-card {
+    height: auto;
+    min-height: 2;
+}
+
 ToolCard.tool-running {
     background: $lo-raised;
 }

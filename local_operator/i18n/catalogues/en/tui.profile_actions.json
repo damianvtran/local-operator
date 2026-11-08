@@ -1,0 +1,13 @@
+{
+  "tui.profile_actions.available": "[ Revert ({shortcut}) ]",
+  "tui.profile_actions.check_status": "[ Check status ({shortcut}) ]",
+  "tui.profile_actions.checking": "[ Checking Revert... ]",
+  "tui.profile_actions.failed": "[ Revert · not completed ]",
+  "tui.profile_actions.failed_reason": "Revert could not be completed. Inspect the current profile before requesting another change.",
+  "tui.profile_actions.reverted": "[ Reverted ]",
+  "tui.profile_actions.reverting": "[ Reverting... ]",
+  "tui.profile_actions.stale": "[ Revert · profile changed ]",
+  "tui.profile_actions.stale_reason": "The profile changed after this save. Inspect its current version; this action will not undo later edits.",
+  "tui.profile_actions.unavailable": "[ Revert unavailable ]",
+  "tui.profile_actions.unavailable_reason": "This session cannot verify this action. Inspect the current profile before requesting another change."
+}

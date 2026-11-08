@@ -75,6 +75,7 @@ SURFACE_CLI = "cli"
 _PROVIDERS: tuple[str, ...] = (
     "local_operator.network.credentials.desktop_approval",
     "local_operator.operator.pair_op",
+    "local_operator.profile_approval",
 )
 
 

@@ -1,0 +1,13 @@
+{
+  "tui.profile_actions.available": "[ बहाल करें ({shortcut}) ]",
+  "tui.profile_actions.check_status": "[ स्थिति जाँचें ({shortcut}) ]",
+  "tui.profile_actions.checking": "[ बहाली की जाँच जारी… ]",
+  "tui.profile_actions.failed": "[ बहाली अधूरी ]",
+  "tui.profile_actions.failed_reason": "बहाली पूरी नहीं हो सकी। नए बदलाव का अनुरोध करने से पहले मौजूदा प्रोफ़ाइल जाँचें।",
+  "tui.profile_actions.reverted": "[ पिछला संस्करण बहाल ]",
+  "tui.profile_actions.reverting": "[ बहाल किया जा रहा है… ]",
+  "tui.profile_actions.stale": "[ प्रोफ़ाइल बदल गई है ]",
+  "tui.profile_actions.stale_reason": "इस बार सहेजने के बाद प्रोफ़ाइल बदल गई है। मौजूदा संस्करण जाँचें; यह कार्रवाई बाद के बदलाव वापस नहीं करेगी।",
+  "tui.profile_actions.unavailable": "[ बहाली उपलब्ध नहीं ]",
+  "tui.profile_actions.unavailable_reason": "इस सत्र में इस कार्रवाई की पुष्टि नहीं हो सकती। नए बदलाव का अनुरोध करने से पहले मौजूदा प्रोफ़ाइल जाँचें।"
+}

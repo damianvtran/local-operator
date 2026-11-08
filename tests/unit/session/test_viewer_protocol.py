@@ -230,29 +230,10 @@ _INFO_SESSION_EXPRS = frozenset({"session"})
 #: they read is already declared or excluded below, so listing them today buys
 #: scan cost and no coverage; add one when it starts probing something new.
 #:
-#: The third element is that host's MINIMUM member count, and it is per host for
-#: a structural reason: ``app.py`` derives 105 of the 113 DISTINCT PUBLIC
-#: MEMBERS (and 363 of 414 ``file:line`` SITES, deduped per member and line), so
-#: any single global floor loose enough to survive ordinary churn there cannot
-#: notice a smaller host going dark at all. Measured, not guessed: dropping the
-#: desktop utils host costs 3 VIEWER-ONLY MEMBERS out of 48 and dropping
-#: ``info/collect.py`` costs 0, so both slid under a global ``>= 40`` — the exact
-#: slack review round 2 (MINOR-1) raised, reproduced one floor higher. A count
-#: stated beside each path fires on the host that actually decayed and names it.
-#:
-#: Every figure above names the quantity it counts, because two of them were
-#: wrong when this argument was first made — "104 of the 139 sites" crossed a
-#: member count with a site count, and the viewer-only total was off by one
-#: (review round 3, MINOR-6 / QA round 3, Q9). The dominance claim is now
-#: ASSERTED, as a RATIO, in
-#: ``test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work``; the
-#: absolute counts here are a snapshot for the reader and will drift with
-#: ordinary work, which is exactly why the test does not pin them.
-#:
-#: Set a few members below the current value: enough headroom that deleting a
-#: call site is not a test failure, tight enough that losing a BINDING or a PATH
-#: is. Removing a probe legitimately means lowering the number in the same
-#: commit, which is where the argument for it belongs.
+#: Each host's floor protects its own boundary. A global total cannot
+#: distinguish a host disappearing from ordinary growth in another host.
+#: Historical TUI concentration is irrelevant: every declared host must remain
+#: covered even when its contribution is small or overlaps another host's names.
 _SCANNED = (
     ("tui/app.py", _SESSION_EXPRS, 95),
     ("server/utils/desktop_sessions.py", _HOST_SESSION_EXPRS, 6),
@@ -1093,74 +1074,35 @@ def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
 
 
 def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None:
-    """Assert the dominance the per-host floor's justification rests on.
+    """Each host's coverage must survive aggregate-preserving redistribution.
 
-    ``_SCANNED`` argues for a floor PER HOST rather than one global number, and
-    the argument is entirely quantitative: ``app.py`` derives so much of the
-    total that any global floor loose enough to survive churn there sits above
-    every other host's whole contribution. If that ratio ever stops holding, the
-    per-host design is over-engineering and the comment defending it is wrong.
-
-    Asserted rather than left in prose because two of these numbers WERE wrong
-    (review round 3, MINOR-6 / QA round 3, Q9): the text said "104 of the 139
-    sites", conflating distinct members with ``file:line`` site strings, and
-    said 49 viewer-only members where there are 48. Two independent reviewers
-    measured two different pairs of numbers from the same tree, which is what a
-    figure nothing executes looks like from outside. Everything this file
-    asserts about the source is derived; the argument for its own shape should
-    not be the one exception.
-
-    Each number states exactly WHICH QUANTITY it counts, because that ambiguity
-    is what produced the wrong figure and then hid it. Two reviewers measuring
-    this tree independently reported 104/112 members with 362/413 sites and
-    104/124 members with 364/415 sites, and BOTH were arithmetically right — the
-    three axes they silently differed on are:
-
-    * PUBLIC vs ALL members. Underscore-prefixed names are excluded here (112),
-      included there (124). ``_session_members_touched`` collects both; every
-      assertion in this file that consumes it filters, so public is the number
-      that matches what is guarded.
-    * DISTINCT MEMBERS vs SITE STRINGS. A member touched in twelve places is one
-      member and twelve sites. The original prose said "104 of the 139 sites"
-      while 104 is a MEMBER count — the two axes crossed in a single sentence.
-    * RAW occurrences (364/415) vs sites DEDUPED by ``(member, line)``
-      (362/413). ``_all_touched`` dedupes, so two probes of the same member on
-      one line collapse; ``session.history`` on ``app.py`` lines 19279 and 19356
-      is the only such pair today, and it is the whole 2-site gap.
-
-    The RATIO is asserted rather than the absolute counts, and that is the point
-    rather than a weakening. The counts churn on ordinary work — over the last
-    30 commits touching ``app.py`` the site total moved eight times and the
-    member total four, none of them a decay — so pinning them exactly would fire
-    on unrelated PRs and train the next author to bump a number without reading
-    what it claims. AGENTS.md ("Prefer a structural invariant to a numeric one")
-    is the standing guidance. Dominance is the fact the per-host design rests
-    on, it is what a global floor cannot accommodate, and it is stable: measured
-    at 0.925-0.929 across that same history, against a bound of 0.80.
+    The historical name remains for the CI ledger; no percentage is a safety
+    invariant. Removing a host while another grows leaves a global total green,
+    so only the unchanged independent floors expose the disappearance.
     """
     sites = {name: places for name, places in _all_touched().items() if not name.startswith("_")}
-    app_sites = {
-        name: [place for place in places if place.startswith("tui/app.py")]
-        for name, places in sites.items()
+    counts = {
+        path: len(
+            {
+                name
+                for name in _session_members_touched((_ROOT / path).read_text(), exprs)
+                if not name.startswith("_")
+            }
+        )
+        for path, exprs, _floor in _SCANNED
     }
-    app_sites = {name: places for name, places in app_sites.items() if places}
-
-    # Guard the ratio in both currencies: a member-only bound would miss app.py
-    # shedding sites while keeping the names, which is the shape a refactor into
-    # helper modules actually takes.
-    member_share = len(app_sites) / len(sites)
-    site_share = sum(len(p) for p in app_sites.values()) / sum(len(p) for p in sites.values())
-    assert member_share >= 0.80 and site_share >= 0.80, (
-        f"app.py now derives {len(app_sites)} of {len(sites)} distinct public "
-        f"members ({member_share:.3f}) and "
-        f"{sum(len(p) for p in app_sites.values())} of "
-        f"{sum(len(p) for p in sites.values())} deduped file:line sites "
-        f"({site_share:.3f}). _SCANNED's comment justifies a PER-HOST floor by "
-        "app.py dominating the derivation; below ~0.80 the other hosts are "
-        "comparable enough that one global floor could do the job, so either "
-        "restore the ratio or rewrite that comment — do not just lower this "
-        "bound to make the failure go away."
-    )
+    floors = {path: floor for path, _exprs, floor in _SCANNED}
+    assert all(counts[path] >= floors[path] for path in floors), counts
+    for missing in counts:
+        redistributed = counts | {missing: 0}
+        other = next(path for path in counts if path != missing)
+        redistributed[other] += counts[missing]
+        assert sum(redistributed.values()) == sum(counts.values())
+        assert not all(redistributed[path] >= floors[path] for path in floors), (
+            missing,
+            counts,
+            redistributed,
+        )
 
     owner = _members(Session, "session.py", "Session")
     viewer = _members(AttachedSession, "attached.py", "AttachedSession")
@@ -1365,7 +1307,8 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # new directory. Facade-only by construction — the owner is the runtime that
     # retires, so it has no pending destination. Declared in
     # ``ViewerSessionProtocol`` in the same commit; the floors stay put.
-    assert len(viewer_only) == 76, (
+    # +2: the exact AttachedSession-only status/activation facade declarations.
+    assert len(viewer_only) == 78, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
         "says 76, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "

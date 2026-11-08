@@ -4934,8 +4934,18 @@ async def _drain_inbox_into_claimed(handle: object, batch, *, live: bool = False
                 batch.handled.update(ordinals[id(line)])
         lines = [line for line in lines if (getattr(line, "message_id", "") or "") not in consumed]
     if requires_engagement:
-        keep = [line for line in lines if getattr(line, "source", "") != SOURCE_USER]
-        lines = [line for line in lines if getattr(line, "source", "") == SOURCE_USER]
+        keep = [
+            line
+            for line in lines
+            if getattr(line, "source", "") != SOURCE_USER
+            and getattr(line, "custom_type", "") != "profile_save_result"
+        ]
+        lines = [
+            line
+            for line in lines
+            if getattr(line, "source", "") == SOURCE_USER
+            or getattr(line, "custom_type", "") == "profile_save_result"
+        ]
         if not lines:
             logger.info(
                 "inbox drain deferred for %s: no durable history yet, so the person has "
@@ -4980,7 +4990,15 @@ async def _drain_inbox_into_claimed(handle: object, batch, *, live: bool = False
         if live and owner_row and hold_owner_prompts and getattr(line, "mode", "") != "steer":
             continue
         try:
-            if owner_row:
+            if getattr(line, "custom_type", "") == "profile_save_result":
+                if session is None:
+                    raise ValueError("profile receipt needs a live owner session")
+                await admit_batch_row(
+                    batch,
+                    ordinals[id(line)],
+                    session.receive_profile_save_result(getattr(line, "message_id", "") or ""),
+                )
+            elif owner_row:
                 await admit_batch_row(
                     batch,
                     ordinals[id(line)],
@@ -5220,6 +5238,8 @@ async def _run_owner_prompt(
         fields["wait_for_turn"] = False
     if "harness_injected" in parameters:
         fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
+    if "owner_typed" in parameters and (getattr(line, "sender", None) or {}).get("remote_origin"):
+        fields["owner_typed"] = False
     try:
         if live and getattr(line, "mode", "") == "steer":
             # A LIVE-QUEUED STEER: the user's mid-turn message that the busy
@@ -5269,6 +5289,10 @@ async def _run_owner_prompt(
         steer_fields: dict[str, Any] = {}
         if "harness_injected" in inspect.signature(steer).parameters:
             steer_fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
+        if "owner_typed" in inspect.signature(steer).parameters and (
+            getattr(line, "sender", None) or {}
+        ).get("remote_origin"):
+            steer_fields["owner_typed"] = False
         logger.info(
             "spooled prompt %s arrived mid-turn; joining the turn in flight",
             command_id or "<no id>",

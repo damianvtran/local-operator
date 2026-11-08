@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "tui.profile_actions",
+  "history_sha256": "16ea5a35dc9236b28baa4abbb106a7a2e65b6a8cf91ec594b77c4f39faa3d486",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "tui.profile_actions",
+      "source_sha256": "8179f383fc12faa9fd44fa815c1a61bebe7fa1d07f0283a874a1146216e849e1",
+      "translator": {
+        "agent": "coder 4049c4f3fd43",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "qa-tester / primary independent i18n-auditor 36011595d4e0",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent primary full 11-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/ur/profile-actions-primary/record.json (sha256 f3d4a5e9d114e0a567c5bee7419fb6d0d462d747d360deea925160146e88bfb3). Non-gating typography findings [] deferred by manager to avoid a standalone nit cycle; no wording changed. Context-completion verdict supersedes earlier blocked primary records; those are not eligibility evidence. none"
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.profile_actions",
+      "source_sha256": "8179f383fc12faa9fd44fa815c1a61bebe7fa1d07f0283a874a1146216e849e1",
+      "translator": {
+        "agent": "coder 4049c4f3fd43",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "designer / second independent safety i18n auditor 78d9864ffaac",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent secondary full 11-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/ur/profile-actions-secondary/record.json (sha256 bc745a940b78b0993200459339569aa0d683db5c17588e6e9a4aa065181a9273). Non-gating typography findings [] deferred by manager to avoid a standalone nit cycle; no wording changed. Initial anthropic/claude-opus-5-5 attempt hit quota; resumed model inherited openai/gpt-6.1-sol. All completed semantic review here served by openai/gpt-6.1-sol."
+    }
+  ]
+}

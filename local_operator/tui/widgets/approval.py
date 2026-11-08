@@ -993,9 +993,17 @@ def approval_question(tool_name: str, description: str) -> "AskQuestion":
     returns a boolean plus a scope, so a typed answer would be an invitation to
     write prose that nothing can read.
     """
+    from local_operator.harness.approval import never_auto_approved
     from local_operator.harness.types import AskOption, AskQuestion
 
-    detail = " ".join(strip_control_sequences(description).split())
+    profile_save = never_auto_approved(tool_name)
+    # Preserve the profile diff's rows; ordinary tool descriptions keep their
+    # established single-paragraph formatting.
+    detail = (
+        strip_control_sequences(description).strip()
+        if profile_save
+        else " ".join(strip_control_sequences(description).split())
+    )
     for marker in (OUTSIDE_MARKER, UNRESOLVABLE_MARKER):
         if detail.startswith(marker):
             # The hazard is stated in the QUESTION, where it belongs, rather
@@ -1009,7 +1017,9 @@ def approval_question(tool_name: str, description: str) -> "AskQuestion":
         question=question,
         options=[
             AskOption(label=label, description=consequence)
-            for label, _key, consequence in APPROVAL_CHOICES
+            for label, _key, consequence in (
+                APPROVAL_CHOICES[:2] if profile_save else APPROVAL_CHOICES
+            )
         ],
     )
 
@@ -1126,6 +1136,29 @@ class ApprovalPrompt(AskPickerScreen):
         """Refuse the key so it reaches the app's stop. See the note above."""
         raise SkipAction()
 
+    def _question_lines(self, width: int, *, reveal: bool) -> list[str]:
+        if not getattr(self, "_profile_save", False):
+            return super()._question_lines(width, reveal=reveal)
+        from local_operator.tui.widgets.tool_card import truncate_cells
+        from local_operator.tui.widgets.transcript import wrap_cells
+
+        # Unlike ordinary one-paragraph tool descriptions, profile diffs have
+        # authored rows. Wrap each separately so +/- lines stay discriminable
+        # and the existing picker budget still counts every rendered row.
+        lines = [
+            wrapped
+            for line in self.question.question.splitlines()
+            for wrapped in (wrap_cells(line, width) or [""])
+        ] or [""]
+        if reveal:
+            return lines
+        cap = self._question_bound(width, len(lines))
+        if len(lines) <= cap:
+            return lines
+        tail = truncate_cells(lines[max(0, cap - 1)], max(1, width - 2))
+        tail = tail[:-1].rstrip() if tail.endswith("…") else tail
+        return [*lines[: max(0, cap - 1)], f"{tail} …"]
+
     def _labels_must_all_fit(self) -> bool:
         """Every consequence's LABEL stays on screen; descriptions yield first.
 
@@ -1157,6 +1190,11 @@ class ApprovalPrompt(AskPickerScreen):
         on_set_session_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
         on_set_global_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
     ) -> None:
+        from local_operator.harness.approval import never_auto_approved
+
+        self._profile_save = never_auto_approved(tool_name)
+        if self._profile_save:
+            self._ANSWER_KEYS = frozenset({"y", "n"})
         super().__init__(
             [approval_question(tool_name, description)],
             self._answered,
@@ -1289,7 +1327,7 @@ class ApprovalPrompt(AskPickerScreen):
         can write a file; a second press while the first is running would be
         two writes of one gesture.
         """
-        if self._answer is not None or self._policy.saving:
+        if self._profile_save or self._answer is not None or self._policy.saving:
             return
         callback = self._on_set_session_auto if scope == "session" else self._on_set_global_auto
         if callback is None:
@@ -1384,6 +1422,12 @@ class ApprovalPrompt(AskPickerScreen):
         which is the spec's constraint 6.
         """
         plan = super()._layout(reveal=reveal)
+        if self._profile_save:
+            # No session-auto chrome or compact three-answer rail: this is a
+            # two-choice, always-human permission, regardless of tool policy.
+            self._chrome_off = True
+            self._shape = (False, False, False)
+            return plan
         width = plan.width
         budget = getattr(self, "_last_body_budget", plan.body_line_budget + 3)
         dense = self._dense(width) and budget >= 5
@@ -1673,7 +1717,7 @@ class ApprovalPrompt(AskPickerScreen):
         row moves and no budget changes.
         """
         text = super()._row_description(index)
-        if self._policy.mode == "auto" and text == ALLOW_ASK_CONSEQUENCE:
+        if not self._profile_save and self._policy.mode == "auto" and text == ALLOW_ASK_CONSEQUENCE:
             return ALLOW_AUTO_CONSEQUENCE
         return text
 
@@ -1994,6 +2038,8 @@ class ApprovalPrompt(AskPickerScreen):
         authorised. It is also where ``A`` becomes ``a``: see
         :data:`ALLOW_ALL_ANSWER`.
         """
+        if self._profile_save and key not in {"y", "n"}:
+            return
         if key == ALLOW_ALL_KEY:
             self.resolve(True, answer=ALLOW_ALL_ANSWER)
             return

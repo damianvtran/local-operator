@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -166,16 +166,19 @@ def _write_section(owner: Any) -> Iterator[None]:
     measured contention this lock exists for (two subagents creating one name) is
     a sub-millisecond critical section, so a 10 s wait is already pathological.
     """
-    lock = owner.write_lock
-    if not lock.acquire(timeout=WRITE_LOCK_TIMEOUT_S):
-        raise TimeoutError(
-            "timed out waiting for the role write lock, so nothing was written; "
-            "another write is still running — retry in a moment"
-        )
-    try:
-        yield
-    finally:
-        lock.release()
+    from local_operator.definition_transaction import definition_lock
+
+    # Global definition boundary first, then composite/local registry locks:
+    # reversing that order lets a profile transaction deadlock with a sibling
+    # composite writer waiting for the same cross-process boundary.
+    with definition_lock(Path(owner.config_dir), timeout=WRITE_LOCK_TIMEOUT_S):
+        lock = owner.write_lock
+        if not lock.acquire(timeout=WRITE_LOCK_TIMEOUT_S):
+            raise TimeoutError("timed out waiting for the role write lock; retry later")
+        try:
+            yield
+        finally:
+            lock.release()
 
 
 def shadow_refusal(kind: str, name: str, *, existing_scope: Scope) -> str:
@@ -238,9 +241,7 @@ def shadow_in_other_store(registry: Any, scope: Scope, name: str, *, kind: str) 
     return None
 
 
-async def durable_write_decision(
-    context: Any, intent: "DurableWriteIntent"
-) -> tuple[str | None, str]:
+async def durable_write_decision(context: Any, intent: "DurableWriteIntent") -> tuple[Any, str]:
     """Ask the HOST to approve a write into the account's shared store.
 
     THE ONE CONSENT SEAM (LOH-9 S2). The decision is the host's: a model must not
@@ -261,12 +262,208 @@ async def durable_write_decision(
     callback = getattr(context, "authorize_durable_write", None) if context is not None else None
     if callback is None:
         return None, "no_seam"
+    from local_operator.harness.approval import ApprovalUnavailableError
+
     try:
         origin = await callback(intent)
+    except ApprovalUnavailableError:
+        # Nobody could be asked (headless, no tty, no attached surface). Named
+        # apart from "error": the remedy is the user's own message, not a retry.
+        return None, "unavailable"
     except Exception:  # noqa: BLE001 — an unavailable consent seam is a refusal
         logger.warning("durable-write consent seam failed; refusing", exc_info=True)
         return None, "error"
+    from local_operator.harness.types import QueuedProfileWrite
+
+    if isinstance(origin, QueuedProfileWrite):
+        return origin, "queued"
     return (str(origin), "granted") if origin else (None, "declined")
+
+
+def profile_field_label(field: str) -> str:
+    """One vocabulary shared by approval, receipt and diff."""
+    return {"effort": "model/effort", "action_class": "class"}.get(field, field)
+
+
+def profile_diff_summary(summary: str) -> str:
+    """One line per changed field, keeping the revert line out of long prose."""
+    lines: list[str] = []
+    instruction_lines: list[str] = []
+    for line in summary.splitlines():
+        if line.startswith("instructions"):
+            instruction_lines = []
+            lines.append("instructions: updated")
+        elif line.startswith(("---", "+++", "@@")):
+            continue
+        elif line.startswith(("+", "-")):
+            instruction_lines.append(line)
+        elif ": " in line and not line.startswith(" "):
+            lines.append(line)
+    if instruction_lines:
+        added = sum(line.startswith("+") for line in instruction_lines)
+        removed = sum(line.startswith("-") for line in instruction_lines)
+        lines = [
+            f"instructions: +{added}/-{removed} lines" if line == "instructions: updated" else line
+            for line in lines
+        ]
+    return "\n".join(lines)
+
+
+def owner_text_requests_profile_edit(
+    text: str, names: Iterable[str], *, operation: str, fields: tuple[str, ...]
+) -> bool:
+    """A conservative explicit-edit grammar, never a semantic intent guess.
+
+    Merely mentioning a profile ("ask reviewer to look" / "what does reviewer
+    do?") is not consent. Only a direct imperative naming the profile AND the
+    changed definition fields qualifies. Other valid phrasings safely reach the
+    approval card; widening this grammar cannot be inferred by a model.
+    Revert must itself be the explicit imperative and name the target.
+    """
+    import re
+
+    for raw in names:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        target = re.escape(name)
+        prefix = r"^\s*(?:please\s+)?"
+        if operation == "revert":
+            pattern = (
+                prefix
+                + rf"revert\s+(?:(?:the|that)\s+)?{target}(?![\w-])"
+                + r"(?:\s+(?:change|update|edit))?[.!]?\s*$"
+            )
+            if re.fullmatch(pattern, text, flags=re.IGNORECASE):
+                return True
+            continue
+        # Require the entire field list before the replacement delimiter; an
+        # instruction body mentioning an unrelated field is never permission
+        # to edit that field too.
+        pattern = (
+            prefix + rf"(?:update|change|edit|revise|rewrite|replace)\s+(?:the\s+)?{target}"
+            r"(?:'s)?\s+(?:profile\s+)?"
+            r"(?P<fields>(?:instructions|description|label)"
+            + r"(?:(?:\s*(?:,|and|&)\s*)(?:instructions|description|label))*)"
+            r"\s*(?:to\b|:|=)"
+        )
+        match = re.match(pattern, text, flags=re.IGNORECASE)
+        if match:
+            requested = set(re.findall(r"instructions|description|label", match["fields"].lower()))
+            if set(fields) <= requested:
+                return True
+    return False
+
+
+def owner_text_names_profile(text: str, names: Iterable[str]) -> bool:
+    """Whether the user's own words name one of ``names`` as a whole word.
+
+    A DETERMINISTIC NARROWING, not a judgement of intent: the owner-prompt path
+    grants an account save only when the person's typed message mentions the
+    profile, so an unrelated request ("fix the TUI bug") can never authorize an
+    edit to a profile the user never spoke of. Failing it never refuses the
+    write outright — it routes the call to the approval card instead.
+    Case-insensitive; a hyphen or underscore inside a name is part of the word.
+    """
+    import re
+
+    haystack = str(text or "")
+    for raw in names:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        pattern = r"(?<![\w-])" + re.escape(name) + r"(?![\w-])"
+        if re.search(pattern, haystack, flags=re.IGNORECASE):
+            return True
+    return False
+
+
+#: Where a granted account save keeps the prior row, under the SESSION directory:
+#: the backup belongs to the conversation that made the change, and the revert
+#: call it advertises is only meaningful there.
+PROFILE_BACKUPS_DIRNAME = "profile-backups"
+
+
+def save_profile_backup(
+    session_dir: str | None, payload: dict[str, Any], *, on_saved: Any = None
+) -> str | None:
+    """Persist ``payload`` (the prior row) and return its backup id.
+
+    ``None`` when this session has no directory (an SDK host without a
+    transcript): the save still lands, the receipt just cannot offer a revert.
+    Written atomically so a crash never leaves a half backup a revert would trust.
+    """
+    import json
+    import os
+    import tempfile
+    import time
+    from pathlib import Path
+
+    if not session_dir:
+        return None
+    directory = Path(session_dir) / PROFILE_BACKUPS_DIRNAME
+    directory.mkdir(parents=True, exist_ok=True)
+    backup_id = f"{time.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    body = dict(payload, backup_id=backup_id, created_at=time.time())
+    handle, tmp = tempfile.mkstemp(dir=directory, prefix=".backup-", suffix=".json")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(body, stream, indent=2, sort_keys=True, default=str)
+        os.replace(tmp, directory / f"{backup_id}.json")
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    if on_saved is not None:
+        on_saved(body)
+    return backup_id
+
+
+def update_profile_backup(session_dir: str | None, backup_id: str, **fields: Any) -> None:
+    """Record the post-save revision on an existing backup (best effort)."""
+    import json
+    from pathlib import Path
+
+    record = load_profile_backup(session_dir, backup_id)
+    if record is None or not session_dir:
+        return
+    record.update(fields)
+    path = Path(session_dir) / PROFILE_BACKUPS_DIRNAME / f"{backup_id}.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(record, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    tmp.replace(path)
+
+
+def load_profile_backup(session_dir: str | None, backup_id: str) -> dict[str, Any] | None:
+    """The backup record, or ``None`` for an unknown/unreadable id.
+
+    The id is a bare file stem: anything with a path separator or a dot prefix
+    is refused, so a revert can only ever read this session's backups.
+    """
+    import json
+    from pathlib import Path
+
+    token = str(backup_id or "").strip()
+    if not session_dir or not token or "/" in token or "\\" in token or token.startswith("."):
+        return None
+    path = Path(session_dir) / PROFILE_BACKUPS_DIRNAME / f"{token}.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def team_revision(team: Any) -> str:
+    """The team row's definition revision (the agent's equivalent is the
+    registry's ``definition_revision_fields``).
+
+    The approval card
+    and the backup bind to it, and the write/revert re-check it under the team
+    registry's lock through ``update_team(precondition=...)``.
+    """
+    from local_operator.hub_sync.definition import definition_revision
+
+    return definition_revision("team", str(team.id), team.model_dump(mode="json"))
 
 
 async def durable_write_origin(context: Any, intent: "DurableWriteIntent") -> str | None:
@@ -296,23 +493,27 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
     the TUI verb — so the refusal never implies the agent can do it alone.
     """
     article = "an" if intent.kind == "agent" else "a"
-    if reason == "declined" and intent.operation == "promote":
-        opening = (
-            f"the user declined to copy this {intent.kind} into their account, so "
-            "nothing in their account was changed."
-        )
-    elif reason == "declined":
-        opening = (
+    if reason == "declined":
+        return (
             f"the user declined to save this {intent.kind} for every conversation, so "
-            "nothing in their account was changed."
-            if intent.operation != "sync"
-            else "the user declined the account updates, so no role saved in their "
-            "account was changed."
+            "nothing in their account was changed. Do not retry this change."
         )
-    elif reason == "error":
+    if reason == "error":
         opening = (
             "the confirmation channel failed before the user could answer, so nothing "
             "in their account was changed."
+        )
+    elif reason == "unavailable":
+        # The owner-prompt path (``Session._authorize_account_profile_write``)
+        # saves without a card when the user's own message names the profile;
+        # that is the remedy worth naming, before the manual surfaces.
+        opening = (
+            f"this {intent.kind} change was not asked for in the user's own message, and "
+            "no one is attached to approve it, so nothing in their account was changed. "
+            f"For a wording-only update, the user can ask in their own local message, "
+            f"naming {intent.name!r} and the definition fields to edit. Policy changes and "
+            "other operations need an attached "
+            "approval surface. No durable queued approval was filed."
         )
     elif intent.operation == "promote":
         opening = (

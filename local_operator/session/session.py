@@ -409,6 +409,26 @@ logger = logging.getLogger(__name__)
 BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
 
 
+#: ``provider_payload`` key on a user row whose prompt arrived over a REMOTE
+#: connection (mesh member, peer pilot, relayed phone). Invisible to the model and
+#: to providers, like the harness-injection stamp beside it, and read only by
+#: ``Session._note_run_input``: such a row is the user's turn, but it is not the
+#: owner typing at this machine, so it never authorizes a card-free account
+#: profile save (operator: "a peer ... request never authorizes an edit").
+REMOTE_PROMPT_KEY = "lop_remote_prompt"
+
+
+def _stamp_remote_prompt(message: Any) -> None:
+    payload = dict(getattr(message, "provider_payload", None) or {})
+    payload[REMOTE_PROMPT_KEY] = True
+    message.provider_payload = payload
+
+
+def _is_remote_prompt(message: Any) -> bool:
+    payload = getattr(message, "provider_payload", None)
+    return isinstance(payload, Mapping) and bool(payload.get(REMOTE_PROMPT_KEY))
+
+
 def _saver_redaction(variables: Any) -> Any:
     """The session's two redaction passes as Radient Saver's ``Redaction``, or ``None``.
 
@@ -3397,9 +3417,13 @@ class Session:
         #: conversation-only retry. Declared here so a host that CAN show an
         #: intent-specific, non-rememberable confirmation has one place to
         #: install it.
-        authorize_durable_write: (
-            Callable[["DurableWriteIntent"], Awaitable[str | None]] | None
-        ) = None,
+        authorize_durable_write: Callable[["DurableWriteIntent"], Awaitable[Any]] | None = None,
+        #: Install the session-owned account-profile consent
+        #: (:meth:`_authorize_account_profile_write`) when no explicit seam was
+        #: passed. Off by default so an SDK/embedding host keeps today's
+        #: ``no_seam`` refusal byte for byte; the CLI headless path and the
+        #: runtime that serves the TUI/desktop/phone turn it on.
+        owner_prompt_consent: bool = False,
         goal_state: GoalState | None = None,
         #: The variables surface behind list_variables/read_variable. Held by
         #: the SESSION because ``_build_tool_context`` is rebuilt every turn:
@@ -3663,6 +3687,11 @@ class Session:
             parent_session_id=parent_session_id or origin_parent_session_id(transcript.directory),
             on_notice=self._record_divergence_notice,
         )
+        from local_operator.profile_actions import ProfileActions
+
+        self._profile_actions = ProfileActions(
+            self._session_id, getattr(agent_registry, "config_dir", None)
+        )
         # Tool contexts are rebuilt per turn; presence belongs to the Session
         # so both transition updates and the serving heartbeat read one fact.
         self._waiting_on = 0
@@ -3753,6 +3782,10 @@ class Session:
         #: ineligible. Reset at the pipeline head beside ``_run_triggers``, written by
         #: ``_note_run_input``, frozen onto ``_last_run_provenance`` by ``_emit``.
         self._run_typed_user: bool = False
+        #: The owner's own typed words in THIS run (see ``_note_run_input``):
+        #: the only input that can authorize an account profile save without a
+        #: card (``_authorize_account_profile_write``). Reset at the pipeline head.
+        self._run_owner_texts: list[str] = []
         self._run_last_trigger: str | None = None
         self._run_user_text: str = ""
         #: Wall-clock start of the current pipeline (the logical turn), frozen onto the
@@ -4357,6 +4390,11 @@ class Session:
         )
         self._request_approval = request_approval
         self._authorize_durable_write = authorize_durable_write
+        if authorize_durable_write is None and owner_prompt_consent and not self._parent_session_id:
+            # TOP-LEVEL ONLY: a subagent's opening prompt is its parent's text,
+            # never the person's, so a child never gets the owner-prompt seam
+            # (and the callback re-checks the parent id at call time anyway).
+            self._authorize_durable_write = self._authorize_account_profile_write
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the
         # terminal can draw a picker, so the hook arrives from
@@ -4982,6 +5020,7 @@ class Session:
         self._tg_stack: contextlib.AsyncExitStack | None = None
         self._task_group: asyncio.TaskGroup | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._profile_result_waiters: dict[str, asyncio.Task[Any]] = {}
         self._signal: AbortSignal | None = None
         self._is_streaming = False
         #: Bang-mode receipts that completed while a turn or manual compaction
@@ -9790,8 +9829,15 @@ class Session:
         input_path: str | None = None,
         audio: Sequence[AudioContent] | None = None,
         documents: Sequence[DocumentContent] | None = None,
+        owner_typed: bool = True,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
+
+        ``owner_typed=False`` marks a person's prompt that did NOT come from a
+        local operator surface (a mesh ``drive`` member, a peer's ``sessions
+        send``, the relayed phone): it is still the user's turn for every other
+        purpose, but it never authorizes a card-free account profile save
+        (``_authorize_account_profile_write``; stamp: ``REMOTE_PROMPT_KEY``).
 
         ``input_mode``/``input_path`` are the silent input-metadata carriage
         (see ``Message.input_mode``): set by the desktop composer for a
@@ -9998,6 +10044,8 @@ class Session:
             elif input_path is not None:
                 extra["input_path"] = input_path
             user = Message.user(text, images, audio=audio, documents=documents, **extra)
+            if not owner_typed:
+                _stamp_remote_prompt(user)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -10070,8 +10118,12 @@ class Session:
         audio: Sequence[AudioContent] | None = None,
         documents: Sequence[DocumentContent] | None = None,
         harness_injected: bool = False,
+        owner_typed: bool = True,
     ) -> None:
         """Inject an identified steering message into the running turn.
+
+        ``owner_typed`` has ``prompt``'s meaning: False for a steer that did not
+        come from a local operator surface.
 
         Attachments ride along for the same reason they do on ``prompt``. The
         optional producer identity is persisted when the queue drains, letting
@@ -10130,6 +10182,8 @@ class Session:
         elif input_path is not None:
             extra["input_path"] = input_path
         message = Message.user(text, images, audio=audio, documents=documents, **extra)
+        if not owner_typed:
+            _stamp_remote_prompt(message)
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
             # row is born — the same contract ``prompt`` documents one method
@@ -10708,6 +10762,139 @@ class Session:
         await settle_read_batch(batch, body_error)
         self._peer_inbox_drained = not batch.pending_after_commit
 
+    async def _ack_profile_result_hint(self, receipt_id: str) -> None:
+        from local_operator.session.runtime.inbox import (
+            claim_read_batch_or_defer,
+            settle_read_batch,
+            try_enter_read_batch,
+        )
+
+        batch = try_enter_read_batch(self._transcript.directory)
+        if batch is None:
+            return  # An outer boot/turn drain owns this row.
+        error = None
+        try:
+            if await claim_read_batch_or_defer(batch):
+                for ordinals, line in batch.delivery_rows():
+                    if line.custom_type == "profile_save_result" and line.message_id == receipt_id:
+                        batch.handled.update(ordinals)
+        except BaseException as exc:
+            error = exc
+        await settle_read_batch(batch, error)
+
+    def queue_profile_save_result(self, receipt_id: str) -> None:
+        """Own a deduplicated continuation, independent of a socket's deadline.
+
+        The durable spool remains the restart authority until verified native
+        publication acknowledges it. Disposal cancels the owned waiter, not that
+        spool; neither this hint nor its ACK is a model/owner/wake input.
+        """
+        previous = self._profile_result_waiters.get(receipt_id)
+        if previous is not None and not previous.done():
+            return
+        task = self._spawn_background(
+            self.receive_profile_save_result(receipt_id, wait_for_boundary=True)
+        )
+        if task is None:
+            return
+        self._profile_result_waiters[receipt_id] = task
+
+        def finished(done: asyncio.Task[Any]) -> None:
+            if self._profile_result_waiters.get(receipt_id) is done:
+                self._profile_result_waiters.pop(receipt_id, None)
+
+        task.add_done_callback(finished)
+
+    async def receive_profile_save_result(
+        self, receipt_id: str, *, wait_for_boundary: bool = False
+    ) -> None:
+        """Consume a signed continuation as a native result, never owner input.
+
+        A busy turn retains its durable inbox row until a safe boundary. This
+        prevents both provider-list splicing and acknowledging an in-memory-only
+        receipt that a crash would lose.
+        """
+        from local_operator.network.types import MeshRefusal
+        from local_operator.profile_approval import applied_tool_result
+
+        root = Path(self._transcript.directory).parent.parent
+        try:
+            result = applied_tool_result(root, receipt_id, self._session_id)
+        except (MeshRefusal, ValueError, KeyError, OSError):
+            return  # A forged hint cannot become an authentic saved tool card.
+        marker = "profile-applied:" + receipt_id
+
+        def already_delivered():
+            # Compaction folds the overlay into its target and removes the
+            # overlay ID. The native applied row remains the durable identity.
+            return self._transcript.has_entry(marker) or any(
+                row.payload.get("role") == "tool"
+                and row.payload.get("tool_call_id") == result.tool_call_id
+                and ((row.payload.get("provider_payload") or {}).get("details") or {}).get(
+                    "receipt_id"
+                )
+                == receipt_id
+                and ((row.payload.get("provider_payload") or {}).get("details") or {}).get("status")
+                == "applied"
+                for row in self._transcript.entries()
+            )
+
+        if already_delivered():
+            await self._ack_profile_result_hint(receipt_id)
+            return
+        if not wait_for_boundary and (self._is_streaming or self._turn_lock.locked()):
+            raise RuntimeError("profile receipt waits for the current tool boundary")
+        async with self._turn_lock:
+            if already_delivered():
+                await self._ack_profile_result_hint(receipt_id)
+                return
+            target = next(
+                (
+                    row
+                    for row in self._transcript.entries()
+                    if row.payload.get("role") == "tool"
+                    and row.payload.get("tool_call_id") == result.tool_call_id
+                    and (row.payload.get("provider_payload") or {})
+                    .get("details", {})
+                    .get("receipt_id")
+                    == receipt_id
+                ),
+                None,
+            )
+            message = Message.tool_result(result)
+            if target is not None:
+                message.id = target.id
+                await self._transcript.append_prune(
+                    target.id, "Profile save applied.", replacement=message, entry_id=marker
+                )
+                self._context.messages = [
+                    message if getattr(old, "id", None) == message.id else old
+                    for old in self._context.messages
+                ]
+            else:
+                # The filing runtime can die before its queued result commits.
+                # A native paired receipt remains valid replay without a fake user
+                # row or a second model turn. IDs are the signed original IDs.
+                from local_operator.harness.types import ToolCall
+
+                call = Message.assistant(
+                    tool_calls=[
+                        ToolCall(id=result.tool_call_id, name=result.tool_name, arguments={})
+                    ]
+                )
+                call.id = "profile-call:" + receipt_id
+                message.id = marker
+                await self._transcript.append_messages([call, message])
+                self._context.messages.extend([call, message])
+            await self._emit(
+                ToolExecutionEndEvent(
+                    tool_call_id=result.tool_call_id, tool_name=result.tool_name, result=result
+                )
+            )
+        # Consume only this internal hint; draining unrelated owner/wake rows
+        # here could turn non-waking receipt publication into a model turn.
+        await self._ack_profile_result_hint(receipt_id)
+
     async def _drain_spooled_peer_inbox_rows(self, batch) -> None:
         """Deliver any inbox rows spooled for this session. Once per lifetime.
 
@@ -10759,6 +10946,13 @@ class Session:
         seen_owner_ids: set[str] = set()
         for line in lines:
             try:
+                if getattr(line, "custom_type", "") == "profile_save_result":
+                    await admit_batch_row(
+                        batch,
+                        ordinals[id(line)],
+                        self.receive_profile_save_result(getattr(line, "message_id", "") or ""),
+                    )
+                    continue
                 # The row's own ``wake`` is forwarded, never guessed: a row
                 # spooled by a runtime that was leaving a replaced build
                 # carries what its sender asked for, and ``send --wake`` asked
@@ -10879,6 +11073,9 @@ class Session:
             [],
             message_id=command_id or None,
             harness_injected=bool(getattr(line, "harness_injected", False)),
+            # A prompt spooled from a REMOTE connection keeps that provenance
+            # (``serving.REMOTE_ORIGIN_SENDER_KEY``): never owner-typed here.
+            owner_typed=not bool((getattr(line, "sender", None) or {}).get("remote_origin")),
         )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
@@ -10965,6 +11162,11 @@ class Session:
         # Imported in-function for the same reason ``resolve_sender_identity``
         # below is: this module must not grow a module-level dependency on the
         # mobile package.
+        if custom_type == "profile_save_result":
+            # A non-waking verified continuation, never peer/user model input.
+            # The durable spool survives cancellation while a live turn settles.
+            self.queue_profile_save_result(message_id or "")
+            return PeerReceiveDetail("profile receipt queued for verification", {})
         from local_operator.mobile.peer_send import valid_peer_message_id
 
         incoming = message_id if valid_peer_message_id(message_id) else None
@@ -14530,6 +14732,120 @@ class Session:
         resolver = self._fallback_tool_resolver
         return resolver(name) if resolver is not None else None
 
+    async def _authorize_account_profile_write(self, intent: "DurableWriteIntent") -> Any:
+        """The session-owned consent seam for tool-issued ACCOUNT profile writes.
+
+        Users ask their agents to edit agent and team profiles; before this seam
+        no host installed ``authorize_durable_write`` and every such write was
+        refused even right after the user asked. It decides from HOST-HELD state
+        only — no tool parameter and no model text grants anything:
+
+        * PATH A, the user asked: this run took in the owner's own typed,
+          non-injected message (``_run_owner_texts``; ask answers, peer and
+          Team Bridge messages, wakes, monitors, remote prompts and job results
+          never write it), the session has no parent, and that message names
+          the profile AND explicitly requests the definition fields in a direct
+          edit imperative. Only wording-only update/revert (instructions, label
+          or description) qualifies; ambiguous mentions, policy fields and every
+          other operation ask.
+          The name match narrows only: failing it routes to path B.
+        * PATH B, anything else: the host's tool-approval gate, asked with a
+          card naming the profile, the operation, the changed fields and a diff
+          summary. That gate's approve is an authority-checked answer
+          (``approval_answer`` is in ``harness.approval.AUTHORITY_OPS``) and is
+          never auto-approved (``never_auto_approved``), so ``--yolo`` and
+          approve-all cannot grant it. It pauses this one tool call, not the
+          session. The base revision on the intent is re-checked by the tool
+          under the write lock, so an approval cannot land on a moved row.
+        """
+        from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+        from local_operator.profile_scope import (
+            owner_text_requests_profile_edit,
+            profile_field_label,
+        )
+
+        # A name mention is not permission to change policy. Only ordinary
+        # wording edits and their revert may use the no-card path; every other
+        # operation or field (including a model-selected create name) asks.
+        wording_only = (
+            intent.operation in {"update", "revert"}
+            and bool(intent.changes)
+            and set(intent.changes) <= {"instructions", "description", "label"}
+        )
+        if wording_only and not self._parent_session_id and self._run_owner_texts:
+            names = [intent.name, *self._profile_labels(intent)]
+            if any(
+                owner_text_requests_profile_edit(
+                    text, names, operation=intent.operation, fields=intent.changes
+                )
+                for text in self._run_owner_texts
+            ):
+                run_ms = int(self._run_started_at * 1000)
+                return f"owner-prompt:{self._session_id or 'session'}@{run_ms}"
+        # No parked turn, and no model retry: the typed signed provider is the
+        # continuation. Filing itself confers no mutation/signing authority.
+        #
+        # OPS WITHOUT A BOUNDED PROPOSAL keep the pre-existing card path: a seed
+        # reset, a sync, a promote or an install names a packaged artefact rather
+        # than authored values, so there is nothing to state exactly in a signed
+        # payload. They are unchanged here on purpose (falls through below).
+        if intent.proposal is not None:
+            from local_operator import profile_approval
+            from local_operator.harness.types import QueuedProfileWrite
+
+            registry = self.agent_registry if intent.kind == "agent" else self.team_registry
+            if registry is None:
+                return None
+            root = Path(registry.config_dir)
+            data = profile_approval.build(
+                root,
+                session_id=self._session_id,
+                tool_call_id=intent.tool_call_id,
+                **intent.proposal,
+            )
+            record = profile_approval.file_request(root, data)
+            return QueuedProfileWrite(
+                approval_id=record["approval_id"],
+                request_digest=record["request_digest"],
+                expires_at=record["expires_at"],
+                receipt_id=data.receipt_id,
+                profile_kind=data.profile_kind,
+                profile_name=data.name,
+                changes=intent.changes,
+                diff=tuple(intent.summary.splitlines()),
+            )
+        gate = self._request_approval
+        if gate is None:
+            from local_operator.harness.approval import ApprovalUnavailableError
+
+            raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no approval surface is attached")
+        changed = (
+            ", ".join(profile_field_label(field) for field in intent.changes) or "(no fields named)"
+        )
+        card = (
+            f"Save {intent.kind} {intent.name!r} in your account ({intent.operation}).\n"
+            f"Changes: {changed}."
+        )
+        if intent.summary:
+            card += f"\n{intent.summary}"
+        if await ask_approval(gate, ACCOUNT_PROFILE_GATE, card, None):
+            return f"approval:{intent.base_revision or 'new'}"
+        return None
+
+    def _profile_labels(self, intent: "DurableWriteIntent") -> list[str]:
+        """The target row's display label, so "update the Code Reviewer" names it."""
+        try:
+            if intent.kind == "team":
+                registry = self.team_registry
+                row = registry.get_team_by_name(intent.name) if registry is not None else None
+            else:
+                registry = self.agent_registry
+                row = registry.get_agent_by_name(intent.name) if registry is not None else None
+        except Exception:  # noqa: BLE001 — a label is a convenience, never a refusal
+            return []
+        label = str(getattr(row, "label", "") or "").strip() if row is not None else ""
+        return [label] if label else []
+
     def _tool_approval_gate(self) -> ApprovalGate | None:
         """The gate this turn's tool calls are decided by.
 
@@ -16338,6 +16654,14 @@ class Session:
                 self._run_last_trigger = TRIGGER_TYPED
                 self._run_user_text = str(getattr(message, "text", "") or "")[:USER_TEXT_MAX_CHARS]
                 self._last_typed_user_text = self._run_user_text
+                # THE OWNER-PROMPT WITNESS for account profile saves. Only this
+                # branch writes it: a typed, non-injected user row with no
+                # custom type. An ask answer also sets ``_run_typed_user`` above
+                # (a person answered), but answering a question the MODEL asked
+                # is not the person requesting a profile edit, so it never lands
+                # here. Full text, untruncated: the name match must see it all.
+                if not _is_remote_prompt(message):
+                    self._run_owner_texts.append(str(getattr(message, "text", "") or ""))
 
     def _turn_is_user_directed(self) -> bool:
         """Whether a person's own message drives this run (body-exclusion gate).
@@ -18921,6 +19245,7 @@ class Session:
         self._run_catchup_unidentified = False
         self._run_aida_checkin = False
         self._run_typed_user = False
+        self._run_owner_texts = []
         self._run_last_trigger = None
         self._run_user_text = ""
         self._run_started_at = time.time()
@@ -21130,6 +21455,7 @@ class Session:
             # the session because this context is rebuilt every turn; ``None``
             # is a refusal, never a permission (see the constructor field).
             authorize_durable_write=self._authorize_durable_write,
+            register_profile_action=self._profile_actions.register,
             ask_user=self._ask_user,
             # THE QUEUED-ASK DOOR (design §2.1). ``None`` on the blocking path
             # (the flag is off, or no host installed an ask surface), which is
