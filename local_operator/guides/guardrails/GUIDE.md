@@ -75,6 +75,14 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   a script the same session wrote and the call ran, names it (its basename, or
   the literal prefix that produced it, such as `qa-r5-dg-` in
   `f"qa-r5-dg-{os.getpid()}"`), or its output prints the directory's full path.
+  A git repository (a `.git` directory) is vouched for only as a clone the call
+  itself made: the command must resolve to `git clone` with exactly that
+  destination (`C=… && git clone … $C` counts; a name in the output never
+  does), and the clone must be clean — no uncommitted, untracked or
+  non-regenerable ignored change, no commit that no remote-tracking ref
+  contains, no stash, no nested repository, and no linked worktrees. A
+  `--no-checkout` clone that was never checked out has no work tree to lose.
+  The judge sees that state in its facts.
   Descendants come from the harness-written lineage registry
   (`<config_dir>/guardrails/lineage.jsonl`, appended when the harness spawns a
   subagent or opens an agent session). `origin.json` parent pointers are only a

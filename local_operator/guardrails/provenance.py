@@ -751,6 +751,100 @@ def worktree_state(path: str) -> str:
     return "clean"
 
 
+def _ignored_unregenerable(real: str) -> bool:
+    """An ignored entry outside :data:`_REGENERABLE`, or a nested repository
+    in one (``None`` from git counts: fail closed)."""
+    ignored = _git(["status", "--porcelain", "--ignored"], real)
+    if ignored is None:
+        return True
+    for line in ignored.splitlines():
+        if not line.startswith("!! "):
+            continue
+        entry = line[3:].strip().strip('"').rstrip("/")
+        name = os.path.basename(entry)
+        if name not in _REGENERABLE and not fnmatch.fnmatchcase(name, "*.pyc"):
+            return True
+        if _holds_git(os.path.join(real, entry)):
+            return True
+    return False
+
+
+def _source_checkout() -> str | None:
+    """The checkout this code runs from, when it runs from one (a dev run)."""
+    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    return here if os.path.exists(os.path.join(here, ".git")) else None
+
+
+def clone_state(path: str) -> str:
+    """``clean`` when deleting the standalone clone at ``path`` loses nothing.
+
+    WHY. The operator's delete spec lists "a clone" among what its creator may
+    remove, but a primary checkout (a ``.git`` DIRECTORY) may hold the only
+    copy of work. History may vouch for one (``evidence.covers``) only when
+    this says ``clean``: ALL of
+      * not a repository with linked worktrees (the operator's checkouts,
+        ``~/local-operator`` with its ``.worktrees/``, look like that) and
+        not the checkout this code itself runs from;
+      * no tracked, untracked or non-regenerable ignored change — or, for a
+        ``--no-checkout`` clone (no index, nothing but ``.git``), no work
+        tree at all, whose "staged deletions" are only files never written;
+      * every local branch and HEAD reachable from a remote-tracking ref
+        (``refs/remotes``), so no commit exists only here;
+      * no stash, and no nested repository in the work tree.
+    Anything else is ``dirty: <why>`` (or ``unknown``), and the clone stays
+    unowned: the ordinary ranking, with this state in the judge's facts.
+    Read-only git, same environment as :func:`worktree_state`.
+    """
+    try:
+        real = os.path.realpath(path)
+        if not os.path.isdir(os.path.join(real, ".git")):
+            return "not-a-clone"
+        if real == _source_checkout():
+            return "dirty: the running harness's own checkout"
+    except OSError:
+        return "unknown"
+    listing = _git(["worktree", "list", "--porcelain"], real)
+    if listing is None:
+        return "unknown"
+    if sum(ln.startswith("worktree ") for ln in listing.splitlines()) > 1:
+        return "dirty: has linked worktrees"
+    try:
+        never_checked_out = not os.path.exists(os.path.join(real, ".git", "index")) and (
+            os.listdir(real) == [".git"]
+        )
+    except OSError:
+        return "unknown"
+    if not never_checked_out:
+        status = _git(["status", "--porcelain", "--untracked-files=all"], real)
+        if status is None:
+            return "unknown"
+        if status.strip():
+            return "dirty: uncommitted or untracked changes"
+        if _ignored_unregenerable(real):
+            return "dirty: ignored files that are not regenerable"
+        try:
+            nested = any(
+                _holds_git(e.path)
+                for e in os.scandir(real)
+                if e.name != ".git" and e.is_dir(follow_symlinks=False)
+            )
+        except OSError:
+            return "unknown"
+        if nested:
+            return "dirty: a nested repository"
+    if _git(["rev-parse", "-q", "--verify", "refs/stash"], real) is not None:
+        return "dirty: a stash"
+    # One walk, not a ``--contains`` per ref: commits reachable from HEAD or a
+    # local branch but from no remote-tracking ref exist only here. (Tags are
+    # left out: a clone copies every tag of its source, which keeps them.)
+    unpushed = _git(["rev-list", "--count", "HEAD", "--branches", "--not", "--remotes"], real)
+    if unpushed is None or not unpushed.strip().isdigit():
+        return "unknown"
+    if int(unpushed) > 0:
+        return "dirty: a commit no remote-tracking ref contains"
+    return "clean"
+
+
 def is_primary_checkout(path: str) -> bool:
     try:
         return os.path.isdir(os.path.join(path, ".git"))

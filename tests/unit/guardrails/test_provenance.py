@@ -1927,3 +1927,93 @@ def test_logical_cd_dotdot_stays_lexical(home: Path) -> None:
     (pad / OTHER).mkdir()
     verdict = _verdict(home, f"cd {pad}/sub/.. && echo f >> {OTHER}/x.log")
     assert verdict.risk is Risk.HIGH  # another session's pad, not its ask store
+
+
+# -- a clean clone its creator made may be vouched for (PR #3602, manager decision) -------
+#
+# The operator's spec lists "a clone" among what its creator may delete; a
+# ``.git`` directory used to end history evidence outright, so the field task
+# child's ``C=… && git clone -q --local --no-checkout . $C`` could never be
+# handed back. Now: B1 only (the resolver pins the clone destination), born in
+# the window, and ``provenance.clone_state`` clean.
+
+_GIT_ID = ["-c", "user.name=QA", "-c", "user.email=qa@example.invalid"]
+
+
+def _git_run(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", *_GIT_ID, *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _source_repo(home: Path) -> Path:
+    src = home / "src"
+    src.mkdir()
+    _git_run("init", "-q", "-b", "main", cwd=src)
+    (src / "README").write_text("hi\n")
+    _git_run("add", "README", cwd=src)
+    _git_run("commit", "-q", "-m", "init", cwd=src)
+    return src
+
+
+def _child_clones(home: Path, *, checkout: bool, command: str | None = None) -> Path:
+    """A task child (origin.json → SID) runs the field-shaped clone for real."""
+    src = _source_repo(home)
+    clone = src / ".worktrees" / "lop-update-clone-test"
+    flag = "" if checkout else " --no-checkout"
+    cmd = command or f"cd {src} && C=.worktrees/{clone.name} && git clone -q --local{flag} . $C"
+    start = time.time()
+    clone.parent.mkdir()
+    _git_run(
+        "clone", "-q", "--local", *([] if checkout else ["--no-checkout"]), ".", str(clone), cwd=src
+    )
+    _write_transcript(
+        home,
+        CHILD,
+        [
+            _row(start, _call("b1", "bash", {"command": cmd})),
+            _row(time.time(), _result("b1", "bash", f"exit code: 0\n--- stdout ---\n{clone}\n")),
+        ],
+        parent=SID,
+    )
+    _write_transcript(home, SID, [_row(start - 600, {"role": "user", "content": []})])
+    ev_mod._TREE_CACHE.clear()
+    return clone
+
+
+def _clone_covered(home: Path, clone: Path) -> bool:
+    target = os.path.realpath(clone)
+    found = ev_mod.gather([target], session_id=SID, env=_env(home), stop=_stop(home))
+    return bool(found.covers.get(target))
+
+
+@pytest.mark.parametrize("checkout", [False, True])
+def test_a_clean_clone_its_child_made_is_vouched_for(home: Path, checkout: bool) -> None:
+    clone = _child_clones(home, checkout=checkout)
+    assert prov.clone_state(str(clone)) == "clean"
+    assert _clone_covered(home, clone)
+
+
+def test_a_clone_with_an_unpushed_commit_is_not(home: Path) -> None:
+    clone = _child_clones(home, checkout=True)
+    _git_run("commit", "-q", "--allow-empty", "-m", "only here", cwd=clone)
+    assert prov.clone_state(str(clone)).startswith("dirty: a commit")
+    assert not _clone_covered(home, clone)
+
+
+def test_a_clone_with_an_untracked_file_is_not(home: Path) -> None:
+    clone = _child_clones(home, checkout=True)
+    (clone / "notes.txt").write_text("mine\n")
+    assert prov.clone_state(str(clone)).startswith("dirty: uncommitted")
+    assert not _clone_covered(home, clone)
+
+
+def test_a_clone_named_only_in_output_is_not(home: Path) -> None:
+    """B2 (name/full path + birth time) never vouches for a repository."""
+    clone = _child_clones(home, checkout=False, command="touch /dev/null; ls ~/src/.worktrees")
+    assert prov.clone_state(str(clone)) == "clean"
+    assert not _clone_covered(home, clone)
+
+
+def test_a_repo_with_linked_worktrees_is_never_a_clean_clone(home: Path) -> None:
+    src = _source_repo(home)
+    _git_run("worktree", "add", "-q", str(home / "wt"), cwd=src)
+    assert prov.clone_state(str(src)) == "dirty: has linked worktrees"

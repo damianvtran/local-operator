@@ -40,8 +40,9 @@ A call covers a target ``T`` when (all of):
   log, not a creation (review R1-MAJOR-2).
 
 The window and the name together rule out a directory another session
-created meanwhile. CRITICAL targets and primary checkouts never reach this
-module (``classify`` ranks them first; the caller re-checks).
+created meanwhile. CRITICAL targets never reach this module (``classify``
+ranks them first; the caller re-checks). A primary checkout is vouched for
+only as a clean clone the call itself made (``_vouches_for_clone``).
 
 WHERE THE CALLS COME FROM. The CURRENT session's calls come from the
 harness's in-memory rows (``extract_live``), never its own transcript file.
@@ -507,6 +508,37 @@ def _b1(ev: Evidence, anchor: str, env: Mapping[str, str]) -> bool:
     return False
 
 
+def _vouches_for_clone(ev: Evidence, repo: str, env: Mapping[str, str]) -> bool:
+    """Did ``ev`` make the standalone clone at ``repo``, and may it go?
+
+    The operator's spec lets a creator delete "a clone". Three conditions,
+    all required (PR #3602): the call re-resolves to ``git clone`` whose
+    destination is EXACTLY ``repo`` (variables assigned earlier in the same
+    command, ``C=… && git clone … $C``, are followed by the resolver; one
+    it cannot pin does not qualify), the clone was born in the call's window,
+    and ``provenance.clone_state`` says ``clean`` (nothing only here, not an
+    operator checkout with linked worktrees).
+    """
+    if ev.tool != "bash":
+        return False
+    born = _born(repo)
+    if born is None or not _in_window(born, ev):
+        return False
+    from local_operator.guardrails.provenance import clone_state
+    from local_operator.guardrails.resolve import resolve_command
+
+    home = env.get("HOME") or os.path.expanduser("~")
+    try:
+        res = resolve_command(ev.command, cwd=None, env=env, home=home)
+    except Exception:  # noqa: BLE001
+        return False
+    made = any(
+        c.kind == "clone" and c.path is not None and os.path.realpath(c.path) == repo
+        for c in res.created
+    )
+    return made and clone_state(repo) == "clean"
+
+
 def _anchors(target: str, stop: Iterable[str]) -> list[str]:
     """``target`` and its ancestors, stopping BEFORE any protected root."""
     stops = {s.rstrip("/") or "/" for s in stop}
@@ -536,10 +568,12 @@ def covers(
         return False
     texts: list[str] | None = None
     for anchor in _anchors(target, stop):
-        if not os.path.isdir(anchor) or os.path.isdir(os.path.join(anchor, ".git")):
-            # A primary checkout is never vouched for by history.
-            if os.path.isdir(os.path.join(anchor, ".git")):
-                return False
+        if os.path.isdir(os.path.join(anchor, ".git")):
+            # A primary checkout may hold the only copy of work, so history
+            # vouches for one only as a clean clone THIS call made, pinned
+            # by the resolver — never by name and birth time (B2) alone.
+            return _vouches_for_clone(ev, anchor, env)
+        if not os.path.isdir(anchor):
             continue
         born = _born(anchor)
         if born is None or not _in_window(born, ev):

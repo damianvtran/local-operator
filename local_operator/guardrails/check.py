@@ -478,7 +478,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         if os.path.exists(os.path.join(path, ".git")):
             tree = f"; git: {prov.worktree_state(path)}"
             if prov.is_primary_checkout(path):
-                tree += " (primary checkout)"
+                tree += f" (primary checkout; as a clone: {prov.clone_state(path)})"
         facts.append(
             f"{path}: created by this session or its subagents: "
             + (", ".join(ids) if ids else "no evidence")
