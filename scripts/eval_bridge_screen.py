@@ -23,6 +23,16 @@ USAGE
     python scripts/eval_bridge_screen.py --trials /tmp/tb-screen/trials.jsonl \\
         --compare bridge-screen-v2 cand --out /tmp/tb-screen
 
+``--split`` DEFAULTS TO ``all``: THE HAZARD IS AN EXPLICIT NARROWER VALUE. A run
+that omits the flag runs every row. But on a corpus registered as a whole
+held-out set (``ho2``, ``ho3``, ``ho4``), the flag **partitions rather than
+filters** - ``dev``/``heldout`` is ``sha256(id) mod 2`` - so ``--split heldout``
+on ``ho4`` silently runs 40 of its 72 rows and ``--split dev`` runs 32, both with
+exit 0: an evaluator who reaches for the flag on a file called a held-out split
+gets a 40-row run that looks like a finished result. ``ho4`` is registered to run
+whole, with ``--split all`` (PROTOCOL-ho4.md, amendment A9c); record the
+invocation verbatim alongside any number reported from it.
+
 WHAT IT TOUCHES. Never ``~/.local-operator/team_bridge`` (no store, budget or
 receipts). Provider credentials are read from the operator's config dir through
 the same plain ``AuthStore`` the production screening connector builds
@@ -96,7 +106,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repeat", type=int, default=5, help="trials per (message, model, template)"
     )
-    parser.add_argument("--split", choices=("dev", "heldout", "all"), default="all")
+    parser.add_argument(
+        "--split",
+        choices=("dev", "heldout", "all"),
+        default="all",
+        help=(
+            "which derived split to run (default: all, i.e. every row). An EXPLICIT narrower "
+            "value partitions a whole-held-out corpus instead of filtering it: dev/heldout is "
+            "sha256(id) mod 2, so --split heldout on ho4 runs 40 of 72 rows, silently, exit 0. "
+            "ho2/ho3/ho4 are registered to run whole with --split all."
+        ),
+    )
     parser.add_argument("--workers", type=int, default=4, help="concurrent screens")
     parser.add_argument("--out", type=Path, help="output directory")
     parser.add_argument(
