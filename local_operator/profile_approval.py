@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import time
@@ -28,6 +29,8 @@ OP = "profile_save"
 Token = Annotated[str, Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_-]+$")]
 Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 Text = Annotated[str, Field(max_length=100_000)]
+
+logger = logging.getLogger(__name__)
 
 
 class _Closed(BaseModel):
@@ -138,9 +141,27 @@ def request_token(value: str) -> str:
     rewriting it would refuse a legitimate apply.
 
     An id that already satisfies ``Token`` comes back BYTE-IDENTICAL, so no
-    existing request id, receipt or journal changes. Anything else keeps a
-    readable sanitised prefix plus a digest of the raw value, so ids that differ
-    only in characters the pattern forbids cannot collide.
+    existing request id, receipt or journal changes. Anything else becomes a
+    Token-shaped derivation of AT MOST 160 bytes and nothing more: the value with
+    every character ``Token`` forbids replaced by ``-`` (pure ASCII, so bytes and
+    characters agree), truncated to its first 143 bytes, then one separating
+    ``-``, then the first 16 hex characters of the sha256 of the RAW value. At
+    the truncation boundary that is exactly a 143-byte prefix plus 16 hex (160
+    bytes); for a shorter value it is that much shorter, since the prefix is
+    never padded.
+
+    That trailing digest is the only unmasked evidence that two inputs differ,
+    so the collision guarantee is exactly a 64-BIT digest — a birthday bound of
+    about 2**32 inputs — not the 256-bit width of a full sha256. Collision-
+    resistant, not collision-free; nothing wider is claimed here.
+
+    It is also NOT injective across the whole input space, and nothing relies on
+    its being so: a raw id that already spells another raw id's sanitised form
+    maps to the same token, and the map is idempotent (every output is itself
+    ``Token``-valid), so the two stay indistinguishable from that point on. What
+    separates two requests is the receipt's content tuple — ``session_id``, kind,
+    target, before, after — never the id's spelling; a shared token over an
+    identical tuple is the same logical request by construction.
     """
     if value and len(value) <= _TOKEN_MAX and set(value) <= _TOKEN_CHARS:
         return value
@@ -200,7 +221,20 @@ def build(
     # The harness may hand us an id ``Token`` cannot carry (see
     # :func:`request_token`); the RECORD keeps a Token-shaped derivation rather
     # than crashing the filing on a colon.
-    tool_call_id = request_token(tool_call_id)
+    raw_tool_call_id = tool_call_id
+    tool_call_id = request_token(raw_tool_call_id)
+    if tool_call_id != raw_tool_call_id:
+        # AUDIT (round 1, nit): the record now holds only the derivation, so the
+        # harness's own id for this call would be retained NOWHERE and "which call
+        # filed this card" becomes unanswerable from the store alone. The id is
+        # minted by the harness, carries no secret and is not authority, so naming
+        # both is a trail rather than a leak. ``info``, not ``debug``: a normalised
+        # id is abnormal by definition, and a trail nobody writes is not one.
+        logger.info(
+            "profile request normalised tool_call_id %s to %s for filing",
+            raw_tool_call_id,
+            tool_call_id,
+        )
     receipt = commitment([session_id, tool_call_id, profile_kind, target_id, before, after]).split(
         ":"
     )[1]

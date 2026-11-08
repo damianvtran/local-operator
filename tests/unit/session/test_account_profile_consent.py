@@ -18,6 +18,7 @@ and its callback) against the real agent/team tools and registries.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -203,9 +204,7 @@ def _queued_record(stores, result, *, root=None):
 
     # ``root`` is the store the filing landed in: it is the intent's OWN registry
     # root, which is the team store's config dir for a team write.
-    return A._load_raw(
-        result.details["approval_id"], root or stores["account"].config_dir
-    )
+    return A._load_raw(result.details["approval_id"], root or stores["account"].config_dir)
 
 
 def _approve_queued(root, record):
@@ -239,7 +238,7 @@ def _text(result) -> str:
     return "".join(getattr(block, "text", "") for block in result.content)
 
 
-def _team_roster(stores) -> list[dict]:
+def _team_roster(stores: dict[str, Any]) -> list[dict[str, Any]]:
     """The team's slots and their pins, serialized as a write would store them."""
     return [
         member.model_dump(mode="json")
@@ -849,7 +848,9 @@ class _SeamContext:
 
 
 @pytest.mark.asyncio
-async def test_nested_eval_tool_call_id_files_an_approval_instead_of_failing(stores) -> None:
+async def test_nested_eval_tool_call_id_files_an_approval_instead_of_failing(
+    stores, caplog
+) -> None:
     """A nested ``eval`` call id contains ``:``; filing must survive that.
 
     THE INCIDENT: ``harness/loop.py``'s ``dispatch_tool`` bridge mints a nested
@@ -860,10 +861,12 @@ async def test_nested_eval_tool_call_id_files_an_approval_instead_of_failing(sto
     channel failed before the user could answer" — a save that was impossible
     from inside ``eval`` and said nothing about it.
     """
+    import logging
     import uuid
 
     from local_operator.profile_approval import request_token
 
+    caplog.set_level(logging.INFO, logger="local_operator.profile_approval")
     session = _session(stores, gate=None)
     try:
         _start_run(session)
@@ -881,9 +884,54 @@ async def test_nested_eval_tool_call_id_files_an_approval_instead_of_failing(sto
         filed = record["requested_by"]["tool_call_id"]
         assert ":" not in filed
         assert filed == request_token(nested_id)
+        # The record keeps only the derivation, so the RAW id has to survive
+        # somewhere or the filing cannot be traced back to the call that made it.
+        assert any(
+            nested_id in logged.getMessage() for logged in caplog.records
+        ), "the raw harness id must be logged when it is normalised"
         assert stores["teams"].get_team_by_name("lopdev").instructions == "Ship."
     finally:
         await session.dispose()
+
+
+def test_request_token_shape_matches_its_documented_guarantee() -> None:
+    """The docstring's claim is MEASURED here, not decorative (round 1, nit).
+
+    The docs promised a wider guarantee than the code delivers, so the numbers
+    they now state are pinned: a ``Token``-valid id is BYTE-IDENTICAL, anything
+    else is a sanitised prefix of at most 143 bytes plus a separator plus 16 hex
+    of the raw value's sha256 (160 bytes at the truncation boundary, shorter
+    below it and never padded), every output is itself ``Token``-valid and
+    idempotent, and inputs differing only in a forbidden character stay apart.
+    """
+    from local_operator.profile_approval import request_token
+
+    # Token-valid input: byte-identical, so no receipt, request id or journal
+    # row of an existing filing changes.
+    assert request_token("call_00_ET_abc-def") == "call_00_ET_abc-def"
+
+    # At the truncation boundary: exactly 143 prefix bytes + "-" + 16 hex.
+    long_token = request_token("x" * 400)
+    assert len(long_token) == 160
+    assert long_token[:143] == "x" * 143
+    assert long_token[143] == "-"
+    assert long_token[144:] == hashlib.sha256(b"x" * 400).hexdigest()[:16]
+
+    # Below it: prefix + separator + digest, never padded to 160.
+    short_token = request_token("abc:def")
+    assert short_token == "abc-def-" + hashlib.sha256(b"abc:def").hexdigest()[:16]
+
+    # Differing only in a character the pattern forbids still separates them.
+    assert request_token("outer:abc") != request_token("outer;abc")
+
+    # Every output is Token-valid (so it can never fail the record's field) and
+    # the map is idempotent, so re-filing the same id is stable.
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+    for raw in ("", "-", "x" * 161, "\u00e9:\u00fc", "abc.def", "outer:abc"):
+        token = request_token(raw)
+        assert token and len(token) <= 160
+        assert set(token) <= allowed
+        assert request_token(token) == token
 
 
 @pytest.mark.asyncio
@@ -985,6 +1033,15 @@ async def test_seam_reason_classes_are_named_and_keep_their_sentences(caplog) ->
 
     origin, reason = await durable_write_decision(_SeamContext(anchorless), intent)
     assert origin is None and reason == "unavailable"
+    # Round 1 (security): this path shares ``unavailable`` with the sentence above,
+    # but the FACTS differ — the owner may well have asked, and only the anchor
+    # that proves this machine's operator authority was missing. Claiming "not
+    # asked for in the user's own message" here is untruthful and sends the model
+    # after a request that already happened.
+    anchor_sentence = durable_write_refusal(intent, reason)
+    assert "could not reach the account's operator authority" in anchor_sentence
+    assert "set up operator authority" in anchor_sentence, "the remedy must be named"
+    assert "was not asked for in the user's own message" not in anchor_sentence
 
     async def no(_intent):
         return None

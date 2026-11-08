@@ -562,6 +562,26 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
                 "this call unchanged."
             )
     elif reason == "unavailable":
+        fault = getattr(reason, "fault", "")
+        if fault == "approval_anchor_unavailable":
+            # AN ANCHOR FAULT IS NOT AN UNASKED REQUEST (round 1, security). Two
+            # different entry points reach ``unavailable``: the owner-prompt path
+            # below, where nobody can be asked and the owner's own message is the
+            # remedy, and a rejected filing, where the owner may well have asked
+            # and only the anchor proving THIS machine's operator authority was
+            # missing (``profile_approval.build`` → ``local_anchor_trio``). Claiming
+            # the first for both sent the model hunting for a request that already
+            # happened, so this path names the prerequisite that actually failed
+            # and returns rather than appending the manual-surface remedy: the
+            # remedy here is ONE concrete act, and it is not a retyped message.
+            return (
+                f"this run could not reach the account's operator authority, so the "
+                f"{intent.kind} change could not be filed as a request and nothing in "
+                "their account was changed. The request itself is not the problem — the "
+                "owner may well have asked for it. Ask Local Operator to set up operator "
+                "authority on this machine first; the same change can be filed once that "
+                "anchor is installed."
+            )
         # The owner-prompt path (``Session._authorize_account_profile_write``)
         # saves without a card when the user's own message names the profile;
         # that is the remedy worth naming, before the manual surfaces.
