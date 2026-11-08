@@ -1626,10 +1626,13 @@ The bump branch lives in a throwaway worktree so the root checkout's branch
 is untouched, but `lop-update` itself runs against `~/local-operator`: it
 gates on `-d "$REPO/.git"`, and a worktree's `.git` is a *file*, so pointing
 `LOCAL_OPERATOR_REPO` at a worktree fails with `local-operator repository not
-found` (reproduced). The owner fetches and advances the root checkout's
-`main` ref, then runs the install there — on this host an immutable
-generation install that needs no drained fleet (see "Installing over a live
-fleet"). The order matters: the bump PR is opened
+found` (reproduced). That refusal binds the WRAPPER only: the updater itself
+archives a ref out of the directory it runs in, so a dirty root installs from a
+worktree by invoking `lop update --from-snapshot` directly inside it — see "When
+the root checkout is dirty". The owner fetches and advances the root checkout's
+`main` ref, then runs the install there — on this host an immutable generation
+install that needs no drained fleet (see "Installing over a live fleet"). The
+order matters: the bump PR is opened
 first as the lock, merged only after every PR in the window has merged, and
 nothing is installed until the tag exists. The claim and the bump are ONE
 commit on ONE branch: the owner amends and force-pushes with
@@ -1733,17 +1736,24 @@ cd /tmp && ~/.local/bin/lop --version
 #     is not evidence either way; the symbol is.
 
 # 5b. DIRTY-ROOT VARIANT ONLY (see "When the root checkout is dirty" below):
-#    once BOTH checks above confirm the NEW build, delete the clean clone THIS
-#    RUN created — by its literal path, never a glob and never a variable.
-#    Nothing else tracks that clone, and a leftover one holds 250 MB to several
-#    GiB on the volume whose low headroom is often why it was made this way.
-rm -rf ~/workspace/lop-release-clone-<suffix>
+#    once the pointer check and the `--version` check above both report the
+#    NEW build, reclaim the source THIS RUN installed from — by its exact
+#    path. Literal paths only, never a glob and never a variable: this runs
+#    unattended at the tail of a release, and a wildcard would take a source
+#    another session is installing from — or something unrelated — with it.
+#    Re-run the install rather than guess at a path. One line per route; the
+#    worktree route is the preferred one:
+git -C ~/local-operator worktree remove \
+  ~/local-operator/.worktrees/lop-update-<suffix>              # preferred route
+rm -rf ~/local-operator/.worktrees/lop-update-clone-<suffix>   # clone fallback only
 
-# 6. Reclaim the worktree (also on an aborted release: a stranded one is
-#    what `scripts/worktree_janitor.py` reports), and confirm no clean clone
-#    survived 5b: this must print nothing (a read-only glob; the deletion above
-#    still names one literal path).
-ls -d ~/workspace/lop-release-*clone* 2>/dev/null
+# 6. Reclaim the release worktree (also on an aborted release: a stranded one
+#    is what `scripts/worktree_janitor.py` reports), then REPORT — never
+#    delete — any install source an earlier dirty-root run stranded. Read-only
+#    `find`, bounded to one level: it must print nothing. A hit that 5b did not
+#    create is another run's clone: tell the operator, do not remove it.
+find ~/local-operator/.worktrees ~/workspace -maxdepth 1 -type d \
+  \( -name 'lop-update-clone-*' -o -name 'lop-release-*' \) 2>/dev/null
 git -C ~/local-operator worktree remove ~/local-operator/.worktrees/release-next
 ```
 
@@ -1798,20 +1808,54 @@ directory name also carries the commit or version it was built from
 (`…/generations/<timestamp>-<sha-or-version>`), so every build is auditable
 after the fact, including when the marker is the `pypi <version>` form.
 
-**When the root checkout is dirty, run the update from a clean clone — and
-advance that clone's own `main` BEFORE updating.** If `~/local-operator` holds
-staged or uncommitted work that is not yours, do not clear it and do not run an
-update against it: point the updater at a separate clean clone with
-`LOCAL_OPERATOR_REPO=<scratch clone> lop-update <ref>`. Use a real clone, never
-a worktree — a worktree's `.git` is a file and fails the `-d "$REPO/.git"`
-gate described at the top of this section. The clone's OWN local `main` must
-then be advanced to `origin/main` before the update runs — `git -C <clone>
-fetch origin main && git -C <clone> update-ref refs/heads/main origin/main`, or
-`git reset --hard origin/main` in a scratch clone — because `lop-update`
-archives the NAMED ref out of the repository it runs in, and a `fetch` moves
-only the remote-tracking ref, never the local branch. The clone's own `main`
-starts where its SOURCE's does, so a stale one is inherited from the shared
-checkout, not from any clone mode — and a `--local` clone against a shallow
+**When the root checkout is dirty, install from a linked WORKTREE at the
+release ref — a clone is only the fallback.** If `~/local-operator` holds staged
+or uncommitted work that is not yours, do not clear it and do not install out of
+it. The preferred route needs no clone and no network: a worktree at the exact
+ref, then the updater invoked from INSIDE it.
+
+```sh
+# Literal worktree path, literal SHA. `--detach` because a SHA is not a branch,
+# and the SHA rather than `main` because a stale local `main` is the failure
+# measured below — a commit cannot be stale.
+git -C ~/local-operator worktree add --detach \
+  ~/local-operator/.worktrees/lop-update-<suffix> <the release SHA from step 4>
+cd ~/local-operator/.worktrees/lop-update-<suffix>
+~/.local/share/lop/current/bin/lop update --from-snapshot <the same SHA>
+```
+
+That calls `lop update` directly instead of `lop-update` because the WRAPPER is
+what refuses a worktree, not the updater ("Why the wrapper's `.git` gate does
+not bound what the updater can do" below). Everything step 5 verifies is
+unchanged — the same generation build, the same atomic pointer flip, the same
+`--version` check — and so is the macOS rule that a ref which IS a published
+release installs the published wheel rather than a source build. Name the two
+routes so they stay distinguishable in `.worktrees/`:
+`lop-update-<suffix>` for a worktree, `lop-update-clone-<suffix>` for a clone.
+Then remove the worktree by its exact path (`git -C ~/local-operator worktree
+remove ~/local-operator/.worktrees/lop-update-<suffix>`) — step 5b; it refuses
+while the tree has local changes, and that refusal is the safety: resolve it on
+your own tree, never widen the delete.
+
+The clone remains the fallback when a worktree is not available — a broken or
+locked worktree registry, or a source you cannot add one to. A real clone at
+this literal path, never a worktree handed to the wrapper:
+
+```sh
+git clone https://github.com/damianvtran/local-operator.git \
+  ~/local-operator/.worktrees/lop-update-clone-<suffix>
+```
+
+A full clone's `.git` is a directory, so `LOCAL_OPERATOR_REPO=~/local-operator
+/.worktrees/lop-update-clone-<suffix> lop-update <ref>` passes the wrapper's
+`-d "$REPO/.git"` check. The clone's OWN local `main` must then be advanced to
+`origin/main` before the update runs — `git -C <clone> fetch origin main &&
+git -C <clone> update-ref refs/heads/main origin/main`, or `git reset --hard
+origin/main` in a scratch clone — because `lop-update` archives the NAMED ref
+out of the repository it runs in, and a `fetch` moves only the remote-tracking
+ref, never the local branch. The clone's own `main` starts where its SOURCE's
+does, so a stale one is inherited from the shared checkout, not from any clone
+mode — and a `--local` clone against a shallow
 source is a separate caveat, not the cause: `--local` is ignored there (git
 prints "source repository is shallow, ignoring --local"), so the clone shares no
 objects and is itself shallow. Measured on 2026-10-05, the stale start is what
@@ -1821,50 +1865,57 @@ and the update archived the stale ref — installing a 0.64.4 build under a
 in the clone and a re-run put it right in about two minutes. Since the
 downgrade gate that install is refused before it starts (0.64.4 is strictly
 older than the pointer's install), so the mistake is loud — the fix is
-unchanged, advance the clone's own `main` first.
+unchanged, advance the clone's own `main` first. The worktree route has no local
+branch in play at all: `--detach` creates none, and the literal SHA cannot be
+stale, which is the other reason it is the preferred one.
 
-**There is no lighter no-clone route today, and the `-d "$REPO/.git"` gate is
-why.** `lop-update` installs a ref parsed out of the repository it RUNS IN (it
-`cd`s there and hands the ref to `lop update --from-snapshot`, which archives it
-with `git archive`), so archiving needs a real `.git` directory to point at — a
-worktree supplies a file, not a directory. One route exists in the updater's API
-but is NOT equivalent and is not used by this checklist: `--from-snapshot` also
-accepts a directory, so `LOCAL_OPERATOR_REPO=<real repo> lop-update <worktree
-path>` does reach a worktree today — but the directory shape installs the tree
-as it STANDS, uncommitted files included, and records that tree's `HEAD` as the
-commit marker. That is
-the opposite of the "committed ref, nothing from the working tree" guarantee
-this section relies on. A lighter clone form integrated into `lop-update` would
-need a script change, which a docs fix does not make; until then the real clone
-stands and its cleanup is mandatory.
+**Why the wrapper's `.git` gate does not bound what the updater can do.** The
+gate is `[ ! -d "$REPO/.git" ]` in `~/.local/bin/lop-update`, and it exists
+because that wrapper resolves a DEFAULT repository and then runs the install
+from inside it; a linked worktree fails the check because its `.git` is a file
+holding `gitdir: …`. The updater underneath has no such requirement:
+`resolve_snapshot` takes `repo = Path.cwd()` and archives the ref with `git
+archive` out of whatever repository the process is standing in
+(`local_operator/update.py:5920` and `:5930`). So the refusal is about which
+repository the WRAPPER picks, not about anything a worktree cannot supply —
+which is why the worktree route above skips the wrapper rather than fighting
+it, and why it needs no script change. Measured read-only on 2026-11-08 from a
+linked worktree at `24968d5eec66` (`.git` an 84-byte file):
+`LOCAL_OPERATOR_REPO=<that worktree> ~/.local/bin/lop-update` prints
+`lop-update: local-operator repository not found: <that worktree>`, while
+`resolve_snapshot('24968d5eec66…')` in the same directory returns that commit
+as both commit and ref, version 0.101.22, a snapshot with `pyproject.toml`
+present, and `temporary=True` — the archive-and-extract the install consumes.
 
-**Reclaim the clone once the install is verified — nothing else does.** The
-clone exists only to be installed from, and this procedure named it and then
-left it behind, so every dirty-root release leaked one. Measured on this host on
-2026-11-08: two were still sitting in `~/workspace`
-(`lop-release-clone-861845`, 287 MB; `lop-release-0.94.22-clone`, 253 MB) while
-the volume showed about 12 GiB free. Size is not the point of the rule — a clone
+One `--from-snapshot` shape IS worth ruling out explicitly, because it looks
+like the same thing: a DIRECTORY argument. `lop update --from-snapshot
+<worktree path>` installs that tree as it STANDS — uncommitted files included —
+and records the tree's `HEAD` as the commit marker, the opposite of the
+"committed ref, nothing from the working tree" guarantee this section relies on.
+Pass the ref or the SHA, never the path; the directory form exists for a caller
+that built its own tree (a bundle build, a patch set, a CI artifact).
+
+**Reclaim the install source once the install is verified — nothing else does.**
+The clone or worktree exists only to be installed from, and this procedure named
+it and then left it behind, so dirty-root releases leaked both. Measured on this
+host on 2026-11-08: `~/local-operator/.worktrees/lop-update-clone-869dea` — the
+same day's run, a full clone with `.git` a DIRECTORY and not in `git worktree
+list` — still held **5.4 GiB** while the volume showed about 12 GiB free, and two
+older clones sat in `~/workspace` (`lop-release-clone-861845`, 287 MB;
+`lop-release-0.94.22-clone`, 253 MB). The clone figure is the argument: a clone
 that cannot share objects pays for a copy of this repository's object store
 (~5 GiB on 2026-11-08: 3.58 GiB packed plus 1.44 GiB loose, per `git
-count-objects -vH`) plus a fresh working-tree checkout. Name the clone
-`~/workspace/lop-release-clone-<suffix>` when you make it, so this deletion and
-step 6's check both name one path shape instead of a guess. Delete it only AFTER
-step 5's two checks put the new build live
-(`readlink ~/.local/share/lop/current` naming the NEW generation and
-`~/.local/bin/lop --version` reporting the new version), and delete the EXACT
-path this run created:
-
-```sh
-# Literal path, as recorded when the clone was made. Never a glob, never a
-# variable: this runs unattended at the tail of a release, and a wildcard here
-# would take a clone another session is installing from — or something
-# unrelated — with it. Re-run the install rather than guess at a path.
-rm -rf ~/workspace/lop-release-clone-<suffix>
-```
+count-objects -vH`) plus a fresh working-tree checkout, where a worktree pays
+for the checkout alone. Delete only AFTER the pointer check and the `--version`
+check put the new build live (`readlink ~/.local/share/lop/current` naming the
+NEW generation and `~/.local/bin/lop --version` reporting the new version), and
+delete the EXACT path this run created. The two literal commands live in step
+5b, one per route, with the why: there is no second copy of them here, on
+purpose — a delete command duplicated in prose diverges from the one that runs.
 
 Sooner than the verification and there is nothing left to re-run the install
-from if it turns out wrong; later and an aborted release strands the clone,
-which is exactly why step 6 lists leftovers. Only the clone THIS run created is
+from if it turns out wrong; later and an aborted release strands the source,
+which is exactly why step 6 lists leftovers. Only the source THIS run created is
 in scope — a leftover it did not make is reported to the operator, never deleted
 by the next release's session.
 
