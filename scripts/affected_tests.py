@@ -507,6 +507,9 @@ def select(root: Path, paths: Sequence[str], *, include_guards: bool = True) -> 
             # data such as `i18n/audit-history/`, where `"wire.settings.json"`
             # in i18n/test_messages.py is a fixture of its own (QA Q2).
             scoped: re.Pattern[str] | None = None
+            # Bound on every path so the `scoped is not None` guard below is the
+            # only gate on reading it; `()` is never consulted while `scoped` is None.
+            pkg: tuple[str, ...] = ()
             name = rel.rsplit("/", 1)[-1]
             if shared_name and rel.startswith("local_operator/") and name not in _GENERIC_BASENAMES:
                 scoped = re.compile(rf"^{re.escape(name)}$", re.MULTILINE)
