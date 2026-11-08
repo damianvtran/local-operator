@@ -1,6 +1,6 @@
 ---
 name: delivery
-description: "Allocate bounded engineering delivery, brief so a child can land, preflight costly evidence, and converge review and QA without duplicating full-suite gates."
+description: "Allocate bounded engineering delivery, brief so a child can land, preflight costly evidence, target tests, converge review and QA."
 ---
 
 # Bounded delivery
@@ -91,15 +91,17 @@ peer, and record it. Authorization to test is not authorization to delete.
 
 ## Spend coverage once
 
-**Local test lease.** The coder runs only the test files covering changed code
-and lints changed files, each run bounded; reviewers and QA run the same tests
-covering the diff. Whole-directory, whole-suite and `make check-changed` runs are
-CI's when CI runs the same suite (#3575: ~3.7 h of rc=124 local pytest).
+**Local test lease.** PR CI runs no unit tests; never run or request the full
+suite (#3575: ~3.7 h of rc=124 local pytest). Test the diff:
+`make test-affected` plus judged callers, neighbours, contracts;
+version/OS-sensitive changes also on the other interpreter. Post fresh-on-head
+`## Targeted test evidence` (SHA, commands, counts, wall time, not run + why).
+Open `ci-main-red`: fix forward; merges in that area wait.
 
 **CI is concurrent** with review/QA on every push. Read it once per wave,
-non-blocking, folding failures into that wave's remediation. No `--watch`, no
-waiting before the merge gate, and never sleep-poll it mid-cycle; at the gate
-required checks must be green (#3575 read CI after 3 clean rounds: 4 failures,
+non-blocking, folding failures into that wave's remediation. No `--watch` or
+sleep-polling before the merge gate; at the gate
+`CI Gate` must be green (#3575 read CI after 3 clean rounds: 4 failures,
 +2.3 h). Run omitted required surfaces bounded and record them; CI never
 replaces real-path QA. Resource holds forbid hold-class runs, not evidence.
 Investigate even out-of-slice fails.

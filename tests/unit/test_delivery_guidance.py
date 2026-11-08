@@ -34,10 +34,14 @@ def _fields(**overrides):
 # The review-economy pointers (context contract, scope, freshness, round
 # hygiene) raised coder/manager/designer/ux/qa slightly after trimming the
 # duplicated coverage prose; reviewer stayed inside its 3500 by trimming.
+# The targeted-test-evidence rule (PR CI runs no unit tests, so the PR's
+# `## Targeted test evidence` block is the test gate) replaced the shorter
+# "whole-suite runs are CI's" lines and raised coder/reviewer/manager by the
+# measured ~165/120/115 chars: each role must state its half of that gate.
 BUDGETS = {
-    "coder": 2400,
-    "reviewer": 3500,
-    "manager": 3450,
+    "coder": 2600,
+    "reviewer": 3650,
+    "manager": 3600,
     "designer": 5650,
     "ux-reviewer": 4650,
     "aida": 8000,
@@ -60,7 +64,9 @@ def test_loaded_role_routes_to_bounded_delivery_authority(name, budget):
 def test_delivery_authority_keeps_cost_and_safety_controls_together():
     policy = (ROOT / "local_operator/guides/delivery/GUIDE.md").read_text()
     for required in (
-        "CI runs the same suite",
+        "make test-affected",
+        "Targeted test evidence",
+        "ci-main-red",
         "negative control",
         "source-only",
         "stable session ID",
@@ -125,7 +131,7 @@ def test_custom_manager_team_boundary_carries_delivery_controls():
         created_date=datetime.now(timezone.utc),
     )
     prompt = team.manager_preamble()
-    assert "CI runs the same suite" in prompt
+    assert "Targeted test evidence" in prompt
     assert "independent real-path QA" in prompt
     assert "stable session ID" in prompt
     assert "guide://delivery" in prompt

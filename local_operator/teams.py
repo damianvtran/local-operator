@@ -663,10 +663,11 @@ class Team(BaseModel):
         # allocation/coverage boundary here; detailed procedure is on demand.
         parts.append(
             "Derive it, or say where it came from: every number and status you "
-            "report is one you derived here or one whose source you name. Iterate "
-            "with affected tests/lints; full coverage once terminally. When CI runs "
-            "the same suite, do not duplicate it locally; independent real-path QA "
-            "still applies. Bound/serialize heavy runs; read CI asynchronously."
+            "report is one you derived here or one whose source you name. PR CI "
+            "runs no unit tests: never run or request the full suite; test the diff "
+            "(`make test-affected` plus judged neighbours) and require fresh "
+            "`## Targeted test evidence` on head; independent real-path QA still "
+            "applies. Bound/serialize heavy runs; read CI asynchronously."
         )
         parts.append(
             "Own routine bounded allocations within authorization; escalate genuine "
