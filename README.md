@@ -206,7 +206,7 @@ The native [Local Operator Mobile](https://github.com/damianvtran/local-operator
 app for iOS and Android talks to the same relay. It is **in development**: no
 build is published in any app store yet.
 
-<table>
+<table width="100%">
   <tr>
     <td align="center" valign="top"><img src="./static/mobile-relay-list.png" alt="The lop mobile web relay on a phone: the Conversations list with All, Needs you · 2 and Unread · 2 filters, Pinned and Active sections whose rows carry tags, working spinners, new, not answering and 2 asks markers, and a New button" width="300"></td>
     <td align="center" valign="top"><img src="./static/mobile-relay-session.png" alt="The lop mobile web relay on a phone: the Relay redesign review session, Working · 1m41s, with a transcript of code and measurement tables, a pinned working line with Stop, chips for 1 question, Agents 1/3 · 1 failed and Tasks 2/6, and the Steer the agent composer showing the model, context use and spend" width="300"></td>
@@ -216,7 +216,7 @@ build is published in any app store yet.
   </tr>
 </table>
 
-<table>
+<table width="100%">
   <tr>
     <td align="center" valign="top"><img src="./static/mobile-app-sessions.png" alt="The native Local Operator Mobile app: the conversations drawer with running and older sessions across several computers (Studio mini, Laptop, Build mini), the computer switcher, Team Bridge, and an Inbox, Past, Projects, Schedules and Library bar" width="300"></td>
     <td align="center" valign="top"><img src="./static/mobile-app-session.png" alt="The native Local Operator Mobile app: the Refactor the relay client session, Working · 2m 09s, with tool rows, a cross-session message from the release owner, parent and subagent hand-offs, a pinned working line with stop, Tasks 3/5 and Agents 1/6 strips, 2 queued messages, and the composer with a mic button" width="300"></td>
@@ -331,21 +331,6 @@ Nix and Docker are covered too.
 
 More → [installation options, configuration, credentials and shell environment](docs/guide/configuration.md)
 
-## Benchmarks
-
-A [public harness-cost kit](benchmarks/harness_cost/README.md) holds metered
-request records, manifests, pricing calculations, an independent methodology
-review and a one-command regeneration of every table and plot.
-
-> **Exploratory results, not a current-performance ranking.** The initial study
-> used unequal private loadouts and uncontrolled cross-run cache warmth, and
-> Codex used incorrect model metadata; see the
-> [corrections](benchmarks/harness_cost/CORRECTIONS.md). The results do not
-> establish equal task effectiveness or a general cost advantage, and the kit
-> states that its author develops Local Operator.
-
-More → [results summary and figures](docs/guide/harness-cost-benchmarks.md)
-
 ## Safety model
 
 - **Approval-gated by default**: reads run; writes, commands and scheduled
@@ -377,7 +362,8 @@ More → [safety model](docs/guide/safety.md) · [endpoint protection](docs/ENDP
 See [CONTRIBUTING.md](CONTRIBUTING.md) for bug reports, development setup and
 pull requests; [AGENTS.md](./AGENTS.md) is the working guide for agents
 changing this codebase, and [docs/REWRITE.md](./docs/REWRITE.md) covers the
-architecture; `docs/` also holds the benchmarks and verification evidence.
+architecture; `benchmarks/` holds the exploratory benchmark kit and `docs/`
+the verification evidence.
 
 ## Credits
 

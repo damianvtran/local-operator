@@ -24,6 +24,5 @@ harness treats the provider prompt cache as a resource to be managed:
   tool schemas enter the context only when enabled; `wait` returns on job
   settle or message arrival so a long job costs one round trip, not twelve.
 
-For measured per-task cost across harnesses — and the confounds that keep the
-historical numbers exploratory — see
-[Reproducible harness-cost benchmarks](harness-cost-benchmarks.md#reproducible-harness-cost-benchmarks).
+An exploratory harness-cost kit, with its methodology and known confounds, lives in
+[benchmarks/harness_cost](../../benchmarks/harness_cost/README.md).
