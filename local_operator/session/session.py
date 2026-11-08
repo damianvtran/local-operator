@@ -10723,8 +10723,10 @@ class Session:
                 # acquiring a peer's provenance envelope (see
                 # ``_run_spooled_owner_prompt``).
                 if getattr(line, "source", "") == SOURCE_USER:
-                    self._run_spooled_owner_prompt(line, seen=seen_owner_ids)
-                    batch.handled.update(ordinals[id(line)])
+                    # A row that is a live-queued steer's INSURANCE stays in the
+                    # spool (not ``handled``): see ``_run_spooled_owner_prompt``.
+                    if self._run_spooled_owner_prompt(line, seen=seen_owner_ids):
+                        batch.handled.update(ordinals[id(line)])
                 else:
                     await admit_batch_row(
                         batch,
@@ -10756,8 +10758,13 @@ class Session:
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
 
-    def _run_spooled_owner_prompt(self, line: Any, *, seen: set[str]) -> None:
+    def _run_spooled_owner_prompt(self, line: Any, *, seen: set[str]) -> bool:
         """Join one spooled OWNER prompt to the turn already running.
+
+        Returns whether the drain may consume the row. False exactly when the
+        row is the insurance of a steer this process still owes (see the
+        ``_steer_is_live_queued`` arm below): that row is the message's only
+        durable copy until the boundary writes the transcript row.
 
         The owner's own message, spooled by a runtime that was leaving a
         replaced build, arriving at a successor that is ALREADY mid-turn — the
@@ -10788,10 +10795,10 @@ class Session:
         command_id = str(getattr(line, "command_id", "") or "")
         if command_id and command_id in seen:
             logger.info("spooled prompt %s is a repeat within this batch; skipping", command_id)
-            return
+            return True
         if command_id and self.has_admitted_command(command_id):
             logger.info("spooled prompt already in the transcript; not steering it twice")
-            return
+            return True
         if command_id and self._steer_is_live_queued(command_id):
             # THE SAME MESSAGE, ALREADY OWED BY THIS PROCESS. ``has_admitted_command``
             # only answers once the row is durable, and a queued steer is not
@@ -10800,7 +10807,19 @@ class Session:
             # here and was steered a SECOND time: two queue entries with one id,
             # two ``MessageStartEvent``s, the text twice in the model request.
             logger.info("spooled prompt is already on the steering queue; not steering it twice")
-            return
+            # AND NOT CONSUMED: the row is that queued steer's insurance
+            # (``ServingSessionHandle._admit_steer`` spools before it acks), the
+            # only durable copy until ``_drain_steering`` writes the row and
+            # ``_forget_spooled_steer`` removes it. Consuming it here left the
+            # acked steer in memory only, so a runtime lost before that boundary
+            # lost the message. The process live drain keeps the same rule
+            # (``process._run_owner_prompt``'s ``_LeaveQueued``, PR #3447 B1);
+            # this is the first-turn drain's copy of it. Reached whenever the
+            # boot drain steers a replayed row into the prompt it just admitted
+            # (``wait_for_turn=False`` refusing behind a queued command, #3566),
+            # and by an idle steer that opened its own turn. A removal lost to a
+            # crash is deduped at replay by ``has_admitted_command``.
+            return False
         self.steer(
             line.text,
             [],
@@ -10813,6 +10832,7 @@ class Session:
         # 2, MINOR-2).
         if command_id:
             seen.add(command_id)
+        return True
 
     def _steer_is_live_queued(self, command_id: str) -> bool:
         """Whether a steer with this producer id is already owed by this process.

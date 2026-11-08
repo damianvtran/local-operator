@@ -364,3 +364,78 @@ async def test_a_live_queued_steer_keeps_its_backup_across_later_ticks(tmp_path:
     finally:
         parked.release.set()
         await _stop_quietly(live)
+
+
+async def _queued_steer_backed_up_across_ticks(tmp_path: Path):
+    """The live owner after three ticks over a queued ``mode=steer`` owner row.
+
+    The premise of the cell below, the same three ticks as the cell above: the
+    tick steers the row into the turn in flight (whose ``_admit_steer`` re-spools
+    it as ``mailbox`` insurance), and the next ticks must leave both backups alone.
+    """
+    from tests.unit.session.runtime.test_steer_durability import (
+        _live_turn_with_a_queued_steer,
+    )
+
+    _, live, parked, directory = await _live_turn_with_a_queued_steer(tmp_path, "existing-1")
+    append_inbox(directory, _owner_row("queued steer", "queued-steer-1", mode="steer"))
+    assert await child_mod._drain_inbox_into(live, live=True) == 1
+    for _ in range(2):
+        assert await child_mod._drain_inbox_into(live, live=True) == 0
+    rows = peek_inbox(directory)
+    assert [r.command_id for r in rows] == ["existing-1", "queued-steer-1"]
+    assert all(r.mode == "mailbox" for r in rows), "both are durability backups now"
+    return live, parked, directory
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_steer_keeps_its_backup_until_its_boundary(tmp_path: Path) -> None:
+    """The successor's FIRST-TURN drain must not eat a replayed steer's insurance.
+
+    The successor's boot drain steers ``queued-steer-1`` into the turn its
+    ``existing-1`` replay opens, and ``_admit_steer`` spools it as insurance. The
+    first-turn drain (``Session._drain_spooled_peer_inbox``) that next opens a
+    turn meets that row while the steer is still only on the in-memory queue; on
+    the unfixed tree it answered "already on the steering queue" AND consumed the
+    row, so a successor lost before the steer's row was written took an
+    acknowledged message with it: the third runtime below found 0 rows.
+
+    The successor is parked inside ``existing-1``'s provider call, which holds
+    exactly that state (steer queued, no row, insurance spooled), and the drain is
+    called there directly: in production it runs at the open of the next turn,
+    and whether that turn's own drain wins the inbox lease against the boot
+    drain's batch is a scheduling race this cell must not depend on.
+    """
+    from tests.unit.session.runtime.test_steer_durability import (
+        STEER_TEXT,
+        _boot_successor,
+        _ParkedStream,
+        _rows_produced_by,
+        _stop_quietly,
+    )
+
+    live, parked, directory = await _queued_steer_backed_up_across_ticks(tmp_path)
+    stream = _ParkedStream([text_turn(f"parked {i}") for i in range(4)], park_on=STEER_TEXT)
+    session = build_session(directory, stream)
+    successor = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    successor._maybe_name_conversation = lambda text: None
+    try:
+        await child_mod._drain_inbox_into(successor)
+        await asyncio.wait_for(stream.entered.wait(), 5)
+        assert [getattr(m, "id", None) for m in session.queued_steering()] == ["queued-steer-1"]
+        assert _rows_produced_by(directory, "queued-steer-1") == [], "premise: before the boundary"
+        assert [r.command_id for r in peek_inbox(directory)] == ["queued-steer-1"]
+        await session._drain_spooled_peer_inbox()
+        assert [r.command_id for r in peek_inbox(directory)] == [
+            "queued-steer-1"
+        ], "the replayed steer's only durable copy was consumed by the first-turn drain"
+        _, third, _ = await _boot_successor(tmp_path)
+        try:
+            assert len(_rows_produced_by(directory, "queued-steer-1")) == 1
+        finally:
+            await _stop_quietly(third)
+    finally:
+        stream.release.set()
+        parked.release.set()
+        await _stop_quietly(successor)
+        await _stop_quietly(live)
