@@ -39,8 +39,8 @@
     },
     {
       "path": "experimental/ADAPTERS.md",
-      "bytes": 13327,
-      "sha256": "4bff45ffacf57b181e4433cd759a082f7d4b97cf1439778b1adadba7a0193db9"
+      "bytes": 15835,
+      "sha256": "f4f84a87922eafcea89453ab721adc464beccf17de590c742a3171d653eaf8b7"
     },
     {
       "path": "experimental/CACHE-QUALIFICATION.md",
@@ -50,7 +50,7 @@
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
       "bytes": 11886,
-      "sha256": "a4e27696a8f0f05700d699bb716cb8a7a847f3f0d722209f2bdfa9dcbf244507"
+      "sha256": "ad65c994d65141c170f6a0a5ff091ea74460f4d55c972d6cfce3fdcc6263c1b6"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
@@ -59,8 +59,8 @@
     },
     {
       "path": "experimental/PREREGISTRATION.md",
-      "bytes": 43945,
-      "sha256": "60d42a981642c6d51b279fbf963a67958db9f8068e3adc1530bc24613b993a60"
+      "bytes": 44250,
+      "sha256": "4cf5979661145897cc275f90fbf126b275977e223c52e59459005016c8a31bbc"
     },
     {
       "path": "experimental/README.md",
@@ -184,8 +184,8 @@
     },
     {
       "path": "experimental/coding/driver.py",
-      "bytes": 55271,
-      "sha256": "66f302e9c6857e8af5ef8b84739922cbafc24493e91df3a839cf5e7bef0a47e2"
+      "bytes": 60274,
+      "sha256": "2ec9c78b78841d0ae0ef9b6829ef8d957d477bafda0a8ff12abcb10a4c52e56f"
     },
     {
       "path": "experimental/coding/egress.py",
@@ -264,13 +264,13 @@
     },
     {
       "path": "experimental/coding/test_driver_safety.py",
-      "bytes": 16018,
-      "sha256": "f4bcb46e8f09c3b112e4fe5939e2834c1b9ff81131b4cc8dac40a479883c4bbd"
+      "bytes": 19233,
+      "sha256": "eedddf27459f0ff7bd54ed94c86415ee5590ddb1dd43e9f576e720fcf39d274b"
     },
     {
       "path": "experimental/coding/test_guard.py",
-      "bytes": 13361,
-      "sha256": "5011fcaa72ef3ed1b534778ff142abc2dc25af85a6c5aae63469521f6fb47d40"
+      "bytes": 15555,
+      "sha256": "a65fbf2eae5fe40c79eab920af23359ec19a0d78821399c95cb607685e91a78f"
     },
     {
       "path": "experimental/coding/test_harbor_integration.py",
@@ -349,8 +349,8 @@
     },
     {
       "path": "experimental/meter_proxy.py",
-      "bytes": 44366,
-      "sha256": "b91f7716622fda9fd433a52e95345b730453c94b42f5ccd6af49aadf48116bd1"
+      "bytes": 49422,
+      "sha256": "a1c1f91d6501eb4c338a33a054c1bf3e2d6c8fab84477ab704f3743a78baf8b8"
     },
     {
       "path": "experimental/package_egress.py",
@@ -389,8 +389,8 @@
     },
     {
       "path": "experimental/test_adapters.py",
-      "bytes": 43885,
-      "sha256": "ae282d84ef9da6305979d00f0bc8a588ad3eb3c95d065135fddee219b2cfe39b"
+      "bytes": 51397,
+      "sha256": "3181754c4779d2d7216db6d8ec9f9299da01eadc87cb80976886370b62415efa"
     },
     {
       "path": "experimental/test_bridge_sse.py",

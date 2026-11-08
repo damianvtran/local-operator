@@ -34,6 +34,7 @@ import sys
 import time
 import tomllib
 from contextlib import contextmanager
+from decimal import Decimal
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -867,11 +868,113 @@ def wire_rows(log, run_id):
     for line in log.read_text().splitlines():
         row = json.loads(line)
         if row.get("run_id") == run_id:
-            cost = (row.get("usage") or {}).get("cost")
-            if cost is None or not math.isfinite(float(cost)) or float(cost) < 0:
-                raise ValueError("missing/invalid exact-run billing evidence")
+            row_cost(row)  # refuses a row that is not complete billing evidence
             rows.append(row)
     return rows
+
+
+def row_cost(row):
+    """One meter row's billed USD: the provider's bill, else our derivation.
+
+    WHY (S10): an unbilled response whose tokens are all priceable at the frozen
+    rate card settles from them, so its row carries ``settled_from_tokens`` and
+    ``cost_derivation`` instead of ``usage.cost``. A row may never be quietly
+    treated as free: anything without one of those two forms is refused, and a
+    derivation must reproduce its own number from its own counts and rates.
+    """
+    usage = row.get("usage")
+    cost = usage.get("cost") if isinstance(usage, dict) else None
+    if cost is not None:
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+            raise ValueError("invalid exact-run billing evidence")
+        if not math.isfinite(float(cost)) or float(cost) < 0:
+            raise ValueError("invalid exact-run billing evidence")
+        return float(cost)
+    if row.get("settled_from_tokens") is not True:
+        raise ValueError("missing/invalid exact-run billing evidence")
+    return derived_cost(row.get("cost_derivation"))
+
+
+def derived_cost(derivation):
+    """Recompute a settled row's charge from its recorded tokens and rates."""
+    if not isinstance(derivation, dict):
+        raise ValueError("missing/invalid exact-run billing evidence")
+    tokens, rates, usd = (derivation.get(k) for k in ("tokens", "rates_usd_per_m", "usd"))
+    if not isinstance(tokens, dict) or not isinstance(rates, dict):
+        raise ValueError("derived charge is not reproducible from its own counts")
+    if isinstance(usd, bool) or not isinstance(usd, (int, float)) or not math.isfinite(usd):
+        raise ValueError("derived charge is not a finite amount")
+    total = Decimal(0)
+    for field, count in tokens.items():
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("derived charge is not reproducible from its own counts")
+        rate = rates.get(field)
+        if rate is None:
+            if count:
+                raise ValueError("derived charge leaves charged tokens unpriced")
+            continue
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+            raise ValueError("derived charge carries an unusable rate")
+        if not math.isfinite(rate) or rate < 0:
+            raise ValueError("derived charge carries an unusable rate")
+        total += Decimal(count) * Decimal(str(rate))
+    if any(field not in tokens for field in rates):
+        raise ValueError("derived charge prices tokens it does not count")
+    if abs(total / 1_000_000 - Decimal(str(usd))) > Decimal("1e-12"):
+        raise ValueError("derived charge does not match its own tokens and rates")
+    return float(usd)
+
+
+# One disclosed note per image this lane could not remove (S10).
+IMAGE_RETENTION = "image-retention.jsonl"
+# Docker's conflict text when a container still references a lane's image:
+# "image is being used by stopped container <id>" for a bare image, or
+# "container <id> is using its referenced image <id>" for a repository tag.
+# Both name a container this lane does not own, so the image must stay.
+_FOREIGN_HOLD = re.compile(
+    r"image is being used by (?:running |stopped )?container|container [0-9a-f]{6,} is using",
+    re.IGNORECASE,
+)
+
+
+def retire_image(image, output, run_docker=None):
+    """Remove this lane's exact image; a foreign container keeps it, disclosed.
+
+    WHY (S10, DEV pilot 255f6035): the DEV image could not be deleted because
+    another session's stopped container ``vulnerable-secret__qp7fm4l`` still
+    referenced it, and ``docker rmi`` then raised CalledProcessError out of the
+    lane's cleanup -- killing a run whose trials had already completed. Removing
+    the image is disk hygiene, not evidence, so when only foreign containment
+    blocks it we keep the image, write one disclosed note beside the run
+    records, and carry on. We never remove a container we do not own, not even a
+    stopped one: another session's trial state is not ours to delete.
+
+    ``run_docker`` is injectable so the tolerance is testable without Docker; the
+    AST guard still sees every docker call arrive through a ``run_docker``.
+    """
+    if run_docker is None:
+        import egress
+
+        run_docker = egress.run_docker
+    try:
+        run_docker(["docker", "rmi", image], check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or b""
+        detail = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr)
+        if not _FOREIGN_HOLD.search(detail):
+            raise
+        note = {
+            "ts": time.time(),
+            "image": image,
+            "retained": True,
+            "reason": "a container this lane does not own references the image",
+            "docker_error": detail.strip(),
+        }
+        with (output / IMAGE_RETENTION).open("a") as stream:
+            stream.write(json.dumps(note) + "\n")
+        print("image retained, foreign container: " + image)
+        return note
+    return None
 
 
 def run_trial(args, harness, task, provenance=None):
@@ -1132,7 +1235,7 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
         "disk_stop": disk_stop,
         "wall_s": time.time() - started,
         "billing_tier": args.billing_tier,
-        "cost_usd": sum(float(r["usage"]["cost"]) for r in rows),
+        "cost_usd": sum(row_cost(r) for r in rows),
         "requests": len(rows),
         "verified": bool(rows) and reward is not None and not disk_stop and code == 0,
         "public_provenance_sha256": provenance_sha,
@@ -1232,8 +1335,9 @@ def main():
                         run_trial(args, harness, task, provenance)
                 finally:
                     config.write_text(original)
-                    # Only this lane's exact image, never global prune.
-                    egress.run_docker(["docker", "rmi", image], check=True, capture_output=True)
+                    # Only this lane's exact image, never global prune. A foreign
+                    # container holding it keeps it, disclosed (retire_image).
+                    retire_image(image, args.output)
     except (ValueError, OSError, KeyError, RuntimeError) as exc:
         ap.error(str(exc))
 

@@ -48,6 +48,9 @@ catalog = load("codex_catalog")
 
 
 RATE = "0.000001"  # 1 USD per million tokens, per-token as OpenRouter states it
+# The DEV pilot's live card (255f6035): what a real run was metered under.
+PILOT_RATES = {"prompt": "0.000002", "completion": "0.00001",
+               "input_cache_write": "0.0000025", "input_cache_read": "0.0000001"}
 
 
 def fake_listing(**overrides: dict[str, str]) -> bytes:
@@ -241,7 +244,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         # Real Sonnet-class rates make the 128k reservation $2.176 > $1.30 headroom.
         card = Path(self.tmp.name) / "list-rate-card.json"
         rates = {"prompt": "0.000003", "completion": "0.000015",
-                 "input_cache_write": "0.00000375"}
+                 "input_cache_write": "0.00000375", "input_cache_read": "0.00000015"}
         write_rate_card(card, json.dumps({"data": [
             {"id": mid, "pricing": rates} for mid in meter.NATIVE_MODELS]}).encode())
         self.serve(BENCH_RATE_CARD=str(card), BENCH_TRIAL_BUDGET_USD="5",
@@ -619,6 +622,134 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ledger["usd"], 0.02)
         self.assertTrue(ledger["blocked"])
         self.assertEqual(ledger["pending"], {})
+
+    async def test_unbilled_refusal_settles_from_its_own_tokens(self):
+        # DEV pilot 255f6035: Sonnet's first vulnerable-secret call came back 200
+        # with stop_reason refusal, 0 output tokens and NO usage.cost. The input
+        # and cache write are billed whatever the output, and this row carries
+        # those counts, so the charge is derivable -- not unknown spend.
+        card = Path(os.environ["BENCH_RATE_CARD"])
+        write_rate_card(card, fake_listing(**{m: dict(PILOT_RATES) for m in meter.NATIVE_MODELS}))
+        self.serve(BENCH_BUDGET_USD="40", BENCH_TRIAL_BUDGET_USD="5")
+        self.response = {
+            "model": "anthropic/claude-sonnet-5.5",
+            "stop_reason": "refusal",
+            "usage": {
+                "input_tokens": 2, "output_tokens": 0, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 27164,
+                "cache_creation": {"ephemeral_5m_input_tokens": 27164,
+                                   "ephemeral_1h_input_tokens": 0},
+            },
+        }
+        self.assertEqual((await self.post()).status_code, 200)
+        ledger = self.ledger()
+        # 2 prompt at 2.0 + 27164 cache-write at 2.5, 0 output, 0 cache read.
+        self.assertAlmostEqual(ledger["usd"], 0.067914, delta=1e-12)
+        self.assertAlmostEqual(ledger["trials"]["trial"], 0.067914, delta=1e-12)
+        self.assertEqual(ledger["pending"], {})
+        self.assertFalse(ledger["blocked"])
+        self.assertNotIn("trial", ledger["voids"])
+        row = json.loads(meter.LOG.read_text().splitlines()[-1])
+        self.assertTrue(row["settled_from_tokens"])
+        self.assertEqual(row["stop_reason"], "refusal")
+        self.assertEqual(row["cost_derivation"]["tokens"], {
+            "input_tokens": 2, "output_tokens": 0, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 27164,
+        })
+        self.assertEqual(set(row["cost_derivation"]["rates_usd_per_m"]),
+                         set(row["cost_derivation"]["tokens"]))
+        self.assertAlmostEqual(row["cost_derivation"]["usd"], 0.067914, delta=1e-12)
+        # Nothing latched: the next trial on the shared ledger is admitted.
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {"cost": 0.01}}
+        self.assertEqual((await self.post("next")).status_code, 200)
+
+    async def test_unbilled_response_without_usable_token_counts_still_latches(self):
+        for usage in ({}, {"cache_read_input_tokens": 5}, {"input_tokens": 10},
+                      {"input_tokens": 10, "output_tokens": True}):
+            with self.subTest(usage=usage):
+                Path(os.environ["BENCH_SPEND_FILE"]).unlink(missing_ok=True)
+                self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": usage}
+                await self.post()
+                ledger = self.ledger()
+                self.assertTrue(ledger["blocked"])
+                self.assertIn("unbilled", " ".join(ledger["voids"]["trial"]))
+                row = json.loads(meter.LOG.read_text().splitlines()[-1])
+                self.assertNotIn("settled_from_tokens", row)
+                self.assertNotIn("cost_derivation", row)
+
+    async def test_unpriceable_usage_field_latches_even_with_derivable_tokens(self):
+        # F23 keeps its meaning: a field the meter cannot price means the bill is
+        # not whole, so token arithmetic may not stand in for it.
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {
+            "input_tokens": 10, "output_tokens": 0, "service_tier": "priority"}}
+        await self.post()
+        ledger = self.ledger()
+        self.assertTrue(ledger["blocked"])
+        self.assertIn("unbilled", " ".join(ledger["voids"]["trial"]))
+        row = json.loads(meter.LOG.read_text().splitlines()[-1])
+        self.assertEqual(row["unpriced_usage"], ["service_tier"])
+        self.assertNotIn("settled_from_tokens", row)
+
+    async def test_a_cache_rate_the_card_does_not_price_is_not_settled_at_zero(self):
+        # An absent rate is not a free rate: silence would under-bill the lane.
+        card_path = Path(os.environ["BENCH_RATE_CARD"])
+        card = json.loads(card_path.read_text())
+        for rates in card["models"].values():
+            rates.pop("input_cache_read", None)
+        card_path.write_text(json.dumps(card))
+        self.serve()
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {
+            "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 5}}
+        await self.post()
+        ledger = self.ledger()
+        self.assertTrue(ledger["blocked"])
+        self.assertIn("unbilled", " ".join(ledger["voids"]["trial"]))
+        # Zero cache-read tokens cost nothing whatever the rate, so the same gap
+        # settles: the omission is about the arithmetic, not the field's shape.
+        Path(os.environ["BENCH_SPEND_FILE"]).unlink(missing_ok=True)
+        self.response["usage"]["cache_read_input_tokens"] = 0
+        await self.post()
+        self.assertFalse(self.ledger()["blocked"])
+
+    async def test_an_unpriced_cache_write_ttl_is_not_settled_at_the_short_rate(self):
+        # The card prices the 5-minute write only; a 1-hour write bills at double.
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {
+            "input_tokens": 2, "output_tokens": 0, "cache_creation_input_tokens": 100,
+            "cache_creation": {"ephemeral_5m_input_tokens": 100,
+                               "ephemeral_1h_input_tokens": 100}}}
+        await self.post()
+        self.assertTrue(self.ledger()["blocked"])
+        # A breakdown that does not add up to the top-level count is not a bill.
+        Path(os.environ["BENCH_SPEND_FILE"]).unlink(missing_ok=True)
+        self.response["usage"]["cache_creation"] = {"ephemeral_5m_input_tokens": 99}
+        await self.post()
+        self.assertTrue(self.ledger()["blocked"])
+
+    async def test_unbilled_refusal_stream_settles_from_its_own_tokens(self):
+        # The refusal that latched the pilot was on the streaming path too, where
+        # message_start carries the input counts and message_delta the stop.
+        chunks = (
+            b'data: {"type":"message_start","message":{"model":"anthropic/claude-sonnet-5.5",'
+            b'"usage":{"input_tokens":2,"cache_read_input_tokens":0,'
+            b'"cache_creation_input_tokens":27164}}}\n\n'
+            b'data: {"type":"message_delta","delta":{"stop_reason":"refusal"},'
+            b'"usage":{"output_tokens":0}}\n\n'
+        )
+        self.upstream._transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=httpx.ByteStream(chunks)
+            )
+        )
+        response = await self.post(stream=True)
+        self.assertEqual(response.content, chunks)
+        ledger = self.ledger()
+        self.assertAlmostEqual(ledger["usd"], 0.027166, delta=1e-12)
+        self.assertFalse(ledger["blocked"])
+        self.assertNotIn("trial", ledger["voids"])
+        row = json.loads(meter.LOG.read_text().splitlines()[-1])
+        self.assertTrue(row["settled_from_tokens"])
+        self.assertEqual(row["stop_reason"], "refusal")
+        self.assertTrue(row["stream"])
 
     def test_main_output_cap_below_native_128000_is_refused_at_startup(self):
         with patch.dict(os.environ, {"BENCH_MAX_OUTPUT_TOKENS": "127999"}):

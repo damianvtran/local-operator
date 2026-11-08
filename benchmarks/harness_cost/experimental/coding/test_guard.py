@@ -264,6 +264,43 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             driver.wire_rows(path, self.run_id)
 
+    def test_a_token_settled_refusal_is_billing_evidence_not_a_void(self):
+        # S10: the meter settles an unbilled response from its own tokens, so the
+        # refusal row has no usage.cost but is still a complete, summable bill.
+        # Grading is Harbor's (reward 0 stands); only the billing evidence differs.
+        derivation = {
+            "tokens": {"input_tokens": 2, "output_tokens": 0,
+                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 27164},
+            "rates_usd_per_m": {"input_tokens": 2.0, "output_tokens": 10.0,
+                                "cache_read_input_tokens": 0.1,
+                                "cache_creation_input_tokens": 2.5},
+            "usd": 0.067914,
+        }
+        row = {"run_id": self.run_id, "stop_reason": "refusal", "status": 200,
+               "settled_from_tokens": True, "cost_derivation": derivation,
+               "usage": derivation["tokens"]}
+        path = self.root / "meter.jsonl"
+        path.write_text(json.dumps(row) + "\n")
+        self.assertEqual(driver.row_cost(row), 0.067914)
+        self.assertEqual(driver.wire_rows(path, self.run_id)[0]["stop_reason"], "refusal")
+        # A claim is not arithmetic: the row's own numbers must reproduce its bill.
+        for broken in (
+            {**derivation, "usd": 0.01},
+            {**derivation, "rates_usd_per_m": {"input_tokens": 2.0}},
+            {**derivation, "tokens": {**derivation["tokens"], "output_tokens": -1}},
+            {**derivation, "rates_usd_per_m": {**derivation["rates_usd_per_m"],
+                                               "output_tokens": "free"}},
+        ):
+            with self.subTest(broken=broken):
+                path.write_text(json.dumps({**row, "cost_derivation": broken}) + "\n")
+                with self.assertRaises(ValueError):
+                    driver.wire_rows(path, self.run_id)
+        # Without the flag the derivation is not billing evidence.
+        path.write_text(json.dumps({k: v for k, v in row.items()
+                                    if k != "settled_from_tokens"}) + "\n")
+        with self.assertRaises(ValueError):
+            driver.wire_rows(path, self.run_id)
+
 
 if __name__ == "__main__":
     unittest.main()

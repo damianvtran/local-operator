@@ -28,6 +28,7 @@ import re
 import time
 import uuid
 from contextlib import contextmanager
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -147,10 +148,14 @@ def rate_card_from_models_listing(
         prompt = _per_million(pricing, "prompt", required=True)
         completion = _per_million(pricing, "completion", required=True)
         write = _per_million(pricing, "input_cache_write", required=False)
+        # Carried because a card that cannot price a cached read cannot settle an
+        # unbilled response from its tokens without under-billing the lane (S10).
+        read = _per_million(pricing, "input_cache_read", required=True)
         models[model] = {
             "prompt": prompt,
             "completion": completion,
             "input_cache_write": write,
+            "input_cache_read": read,
             "reserve_input": max(prompt, write),
         }
     return {
@@ -181,6 +186,16 @@ def _load_rate_card(path: Path) -> dict[str, dict[str, float]]:
                 or value < 0
             ):
                 raise ValueError("rate card holds a non-finite or negative rate")
+        # Optional for a card frozen before S10; an absent rate is not a free one
+        # (settlement refuses a charged field the card cannot price).
+        read = rates.get("input_cache_read")
+        if read is not None and (
+            isinstance(read, bool)
+            or not isinstance(read, (int, float))
+            or not math.isfinite(read)
+            or read < 0
+        ):
+            raise ValueError("rate card holds a non-finite or negative rate")
     return models
 
 
@@ -679,6 +694,82 @@ def unpriced_usage(usage: object) -> list[str]:
     )
 
 
+# Every usage field a bill is made of, and the card key that prices it. A charge
+# is the sum of these terms; a term the card cannot price is not zero (S10).
+TOKEN_RATE_KEYS = {
+    "input_tokens": "prompt",
+    "output_tokens": "completion",
+    "cache_read_input_tokens": "input_cache_read",
+    "cache_creation_input_tokens": "input_cache_write",
+}
+# The cache-write rate the card carries is the 5-minute TTL. A 1-hour write
+# bills at double, so a breakdown naming one is money this card cannot price.
+CACHE_BREAKDOWN = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+
+
+def _token_count(value: object) -> int | None:
+    """A billable token count, or ``None`` when it is not one."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def settled_charge(rates: dict[str, float], usage: object) -> dict[str, object] | None:
+    """Price a response that states no bill from its own token counts.
+
+    WHY (S10, DEV pilot 255f6035): a refusal came back 200 with
+    ``stop_reason: refusal``, 0 output tokens and NO ``usage.cost``. The provider
+    bills the input and the cache write whatever the output, and the response
+    carries those counts, so the charge is derivable -- treating it as unknown
+    spend latched the campaign on a ~$0.068 call and blocked every later
+    admission. This is the frozen rate card's arithmetic, not an estimate: every
+    token term priced here has a card rate, and a charge this meter cannot price
+    still latches through ``unpriced_usage``. Nothing here reads ``stop_reason``:
+    an unbilled response settles the same way whatever ended it.
+
+    Returns ``{tokens, rates_usd_per_m, usd}`` or ``None`` when the counts are
+    not a whole bill: no input/output count, a count that is not a nonnegative
+    integer, a nonzero count the card has no rate for, or a cache breakdown
+    naming a TTL this card does not price or disagreeing with the top-level
+    count. ``None`` keeps the pre-S10 behaviour: unbilled -> latch.
+    """
+    if not isinstance(usage, dict):
+        return None
+    counts: dict[str, int] = {}
+    for field in TOKEN_RATE_KEYS:
+        if field not in usage:
+            continue
+        value = _token_count(usage[field])
+        if value is None:
+            return None
+        counts[field] = value
+    if "input_tokens" not in counts or "output_tokens" not in counts:
+        return None
+    breakdown = usage.get("cache_creation")
+    if breakdown is not None:
+        if not isinstance(breakdown, dict) or any(k not in CACHE_BREAKDOWN for k in breakdown):
+            return None
+        one_hour = _token_count(breakdown.get("ephemeral_1h_input_tokens", 0))
+        five_min = _token_count(breakdown.get("ephemeral_5m_input_tokens", 0))
+        if one_hour is None or five_min is None or one_hour != 0:
+            return None
+        if "ephemeral_5m_input_tokens" in breakdown and (
+            five_min != counts.get("cache_creation_input_tokens", 0)
+        ):
+            return None
+    priced: dict[str, float] = {}
+    total = Decimal(0)
+    for field, count in counts.items():
+        rate = rates.get(TOKEN_RATE_KEYS[field])
+        if rate is None or isinstance(rate, bool) or not math.isfinite(rate) or rate < 0:
+            if count:
+                return None  # charged tokens at a rate this card does not carry
+            continue
+        priced[field] = float(rate)
+        total += Decimal(count) * Decimal(str(rate))
+    return {"tokens": counts, "rates_usd_per_m": priced, "usd": float(total / 1_000_000)}
+
+
 def _merge_usage(acc: WireObject, usage: WireObject | None) -> None:
     if not usage:
         return
@@ -856,7 +947,19 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         ) -> None:
             # OpenRouter returns the billed amount in usage.cost: it feeds the
             # hard budget stop and is reported beside our list-price computation.
-            guard.settle(reservation, usage.get("cost"), qualified=not unpriced)
+            cost = usage.get("cost")
+            if cost is None and not unpriced:
+                # An unbilled response is not automatically unknown spend: when
+                # every token it consumed is priceable at the frozen card, the
+                # charge is arithmetic (S10). A response this meter cannot price
+                # -- no counts, or an ``unpriced_usage`` field -- is unchanged
+                # and still latches.
+                derivation = settled_charge(guard.rates.get(priced_model, {}), usage)
+                if derivation is not None:
+                    cost = derivation["usd"]
+                    row["settled_from_tokens"] = True
+                    row["cost_derivation"] = derivation
+            guard.settle(reservation, cost, qualified=not unpriced)
             if unpriced:
                 row["unpriced_usage"] = sorted(unpriced)
             if _provider_fault(status):

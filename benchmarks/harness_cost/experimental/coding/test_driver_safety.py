@@ -383,5 +383,64 @@ class DriverSafetyTests(unittest.TestCase):
                     self.assertEqual(list(Path(tmp).iterdir()), [path])
 
 
+class ImageRetirementTests(unittest.TestCase):
+    """S10: a container we do not own must not turn image cleanup into a failure."""
+
+    IMAGE = "alexgshaw/vulnerable-secret@sha256:" + "6" * 64
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=os.environ["LOCAL_OPERATOR_SCRATCHPAD"])
+        self.addCleanup(self.temp.cleanup)
+        self.output = Path(self.temp.name)
+        self.calls = []
+
+    def runner(self, stderr: str, code: int = 1):
+        def run(argv, **kwargs):
+            self.calls.append((argv, kwargs))
+            if code:
+                raise subprocess.CalledProcessError(code, argv, b"", stderr.encode())
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        return run
+
+    def test_a_foreign_container_keeps_the_image_and_is_disclosed(self):
+        conflict = ("Error response from daemon: conflict: unable to delete 61ebb40454dd "
+                    "(must be forced) - image is being used by stopped container 3f2a1b0c9d4e")
+        note = driver.retire_image(self.IMAGE, self.output, run_docker=self.runner(conflict))
+        self.assertEqual(note["image"], self.IMAGE)
+        self.assertIn("3f2a1b0c9d4e", note["docker_error"])
+        written = [json.loads(line) for line in
+                   (self.output / driver.IMAGE_RETENTION).read_text().splitlines()]
+        self.assertEqual(written, [note])
+        # The disclosure names the blocker and never claims the image went away.
+        self.assertIn("container", note["docker_error"])
+        # We never touch a container we do not own: the only verb is this image.
+        self.assertEqual([argv for argv, _ in self.calls], [["docker", "rmi", self.IMAGE]])
+
+    def test_a_repository_reference_conflict_is_also_tolerated(self):
+        conflict = ("Error response from daemon: conflict: unable to remove repository "
+                    "reference alexgshaw/vulnerable-secret (must force) - container "
+                    "3f2a1b0c9d4e is using its referenced image 61ebb40454dd")
+        note = driver.retire_image(self.IMAGE, self.output, run_docker=self.runner(conflict))
+        self.assertEqual(note["image"], self.IMAGE)
+
+    def test_any_other_docker_failure_still_stops_the_lane(self):
+        for stderr in ("Cannot connect to the Docker daemon",
+                       "permission denied while trying to connect to the Docker daemon socket",
+                       "Error response from daemon: No such image: nowhere"):
+            with self.subTest(stderr=stderr):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    driver.retire_image(self.IMAGE, self.output, run_docker=self.runner(stderr))
+        self.assertFalse((self.output / driver.IMAGE_RETENTION).exists())
+
+    def test_a_clean_removal_records_nothing(self):
+        note = driver.retire_image(self.IMAGE, self.output, run_docker=self.runner("", 0))
+        self.assertIsNone(note)
+        self.assertFalse((self.output / driver.IMAGE_RETENTION).exists())
+
+    def test_the_lane_calls_retirement_instead_of_a_bare_rmi(self):
+        source = (driver.HERE / "driver.py").read_text()
+        self.assertNotIn('["docker", "rmi"', source.split("def retire_image")[0])
+
+
 if __name__ == "__main__":
     unittest.main()
