@@ -747,8 +747,12 @@ def _one(
         return _conflict_row(run, item, on_conflict)
     except Exception as error:  # noqa: BLE001 - per-item failures never stop the batch
         logger.warning("org pull of %s %s failed", item.kind, item.hub_id, exc_info=True)
+        from local_operator.hub_sync.identity import refusal_text_en
+
         cause = getattr(error, "code", None)
-        text = str(error)[:300]
+        # PullOutcome.detail is read by the model through the org_pull tool
+        # result, so a catalogued LinkError sentence is pinned to English.
+        text = refusal_text_en(error)[:300]
         return (
             PullOutcome(
                 item.kind, item.hub_id, item.name, "failed", f"{cause}: {text}" if cause else text

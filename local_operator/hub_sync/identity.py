@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from typing import Any, Literal, Mapping, cast
 from urllib.parse import urlsplit, urlunsplit
 
+from local_operator.i18n.messages import Msg
+
 logger = logging.getLogger(__name__)
 
 Kind = Literal["agent", "team", "skill"]
@@ -29,11 +31,36 @@ _LINK_ID = re.compile(r"^[a-f0-9]{64}$")
 
 
 class LinkError(ValueError):
-    """A named refusal whose message contains no document or credential bytes."""
+    """A named refusal whose message contains no document or credential bytes.
 
-    def __init__(self, code: str, message: str) -> None:
+    ``str(error)`` is what the human-facing consumers (desktop 409/422 detail,
+    CLI/TUI refusal line) paint, so a catalogued sentence is rendered in the
+    ACTIVE locale when the error is raised. The same exception also reaches
+    consumers that must stay English: the model-read ``org_pull`` / ``skill``
+    tool results and the hub-state ``last_error`` persisted for the Windows
+    projection fallback. Those cannot re-render a finished string, so a
+    catalogued refusal also carries its :class:`~local_operator.i18n.messages.Msg`
+    and they call :func:`refusal_text_en`, which re-renders from code/params
+    pinned to ``en`` (the same split ``i18n.messages.envelope`` documents).
+    """
+
+    def __init__(self, code: str, message: str, *, msg: Msg | None = None) -> None:
         self.code = code
+        self.msg = msg
         super().__init__(message)
+
+
+def refusal_text_en(error: BaseException) -> str:
+    """The English sentence for ``error``: the pinned re-render, else ``str(error)``.
+
+    Only a :class:`LinkError` raised from a catalogued :class:`Msg` has anything
+    to re-render; every other exception (and every hand-written English
+    LinkError) already reads as English, so it passes through unchanged.
+    """
+    msg = getattr(error, "msg", None)
+    if isinstance(msg, Msg):
+        return str(msg.envelope(locale="en")["text"])
+    return str(error)
 
 
 def _digest(value: Any) -> str:

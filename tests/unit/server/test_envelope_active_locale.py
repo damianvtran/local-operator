@@ -160,3 +160,99 @@ def test_session_notices_and_fragments_stay_english_under_fr() -> None:
         assert notice.text == english
         assert (notice.code, notice.params) == (ASIDE_LIMIT, {})
     assert session_module._text(probe) == english
+
+
+def test_model_switch_timeout_suffix_stays_english_under_fr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The only consumer interpolates the suffix into an English slash result.
+
+    ``card_timed_out_badge`` really differs between ``en`` and ``fr``, so the
+    assertion fails if the ``locale="en"`` pin at the raise site is removed.
+    """
+    import asyncio
+
+    from local_operator.i18n.keys.relay_asks import card_timed_out_badge
+    from local_operator.session.runtime import serving
+
+    english = card_timed_out_badge().envelope(locale="en")["text"]
+    assert card_timed_out_badge().envelope(locale="fr")["text"] != english
+    # Expire immediately; the window must convert the empty TimeoutError.
+    monkeypatch.setattr(serving, "_MODEL_SWITCH_RESOLVE_S", 0.0)
+
+    async def run() -> None:
+        async with serving._model_resolution_window(time.monotonic() + 1):
+            await asyncio.sleep(1)
+
+    text.set_active_locale("fr")
+    with pytest.raises(TimeoutError) as raised:
+        asyncio.run(run())
+    assert str(raised.value) == english
+
+
+def _unsupported_projection(config_dir: Any) -> Any:
+    """The REAL LinkError raised by the managed-skill storage on this refusal."""
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+    storage = ManagedSkillStorage(config_dir)
+    storage._projection_supported = lambda: False  # type: ignore[method-assign]
+    with pytest.raises(LinkError) as raised:
+        storage._require_projection_support()
+    return raised.value
+
+
+def test_link_error_paints_localized_but_model_and_persisted_consumers_get_english(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The three catalogued hub_sync refusals serve two audiences from one error.
+
+    ``str(error)`` is what the desktop/CLI/TUI paint (active locale); the
+    org_pull tool result, the skill tool result and the persisted hub-state
+    ``last_error`` re-render from ``code``/``params`` pinned to ``en``.
+    Reproduces the review finding: before the pin, ``PullOutcome.detail`` carried
+    the French sentence into a model-read tool result.
+    """
+    from local_operator.hub_org import pull
+    from local_operator.hub_sync.identity import refusal_text_en
+
+    key = "wire.skill_adoption.projection_unsupported"
+    english = _catalogue("en", "wire.skill_adoption", key)
+    french = _catalogue("fr", "wire.skill_adoption", key)
+    assert french != english
+
+    text.set_active_locale("fr")
+    error = _unsupported_projection(tmp_path)
+    assert error.code == "projection-unsupported"
+    assert str(error) == french  # the human-facing consumers keep the locale
+    assert refusal_text_en(error) == english
+
+    # org_pull path: a per-item failure becomes PullOutcome.detail.
+    def boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(pull, "_pull_skill", boom)
+    item = pull.CatalogueItem("skill", "hub-1", "demo", "", "", "absent", None)
+    outcome, _ = pull._one(None, item, on_conflict="skip", subscribe=True)  # type: ignore[arg-type]
+    assert outcome.outcome == "failed"
+    assert outcome.detail == f"projection-unsupported: {english[:300]}"
+    assert french[:40] not in outcome.detail
+
+
+def test_adoption_refusals_carry_their_message_and_other_errors_pass_through() -> None:
+    from local_operator.hub_sync.identity import LinkError, refusal_text_en
+    from local_operator.hub_sync.skill_adoption_service import _refusal
+
+    for code, key in (
+        ("alias-occupied", "wire.skill_adoption.preview_required"),
+        ("adoption-preview-changed", "wire.skill_adoption.preview_changed"),
+        ("adoption-needs-choice", "wire.skill_adoption.needs_choice"),
+    ):
+        text.set_active_locale("fr")
+        error = _refusal(code, "unused")
+        assert str(error) == _catalogue("fr", "wire.skill_adoption", key)
+        assert refusal_text_en(error) == _catalogue("en", "wire.skill_adoption", key)
+    # A hand-written English LinkError and a foreign exception are unchanged.
+    assert refusal_text_en(_refusal("something-else", "plain english")) == "plain english"
+    assert refusal_text_en(LinkError("x", "plain")) == "plain"
+    assert refusal_text_en(ValueError("boom")) == "boom"

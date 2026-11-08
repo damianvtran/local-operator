@@ -549,7 +549,7 @@ async def execute_skill(
     context: ToolContext | None = None,
 ) -> ToolResult:
     """List, read, create and revise the operator's own skills."""
-    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.identity import LinkError, refusal_text_en
     from local_operator.hub_sync.skill_document import SkillValidationError
     from local_operator.hub_sync.transactions import TransactionError
 
@@ -567,8 +567,10 @@ async def execute_skill(
         text = await asyncio.to_thread(_work, params, config_dir, context)
     except (LinkError, SkillValidationError, TransactionError) as error:
         code = getattr(error, "code", "") or ""
-        hint = _hint(code, params.op, str(error))
-        message = f"{code}: {error}" + (f". {hint}" if hint else "")
+        # Model-facing tool result: catalogued refusals are pinned to English.
+        sentence = refusal_text_en(error)
+        hint = _hint(code, params.op, sentence)
+        message = f"{code}: {sentence}" + (f". {hint}" if hint else "")
         return _error(tool_call_id, _TOOL, message, details={"code": code})
     return _text(tool_call_id, _TOOL, text)
 

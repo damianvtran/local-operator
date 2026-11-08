@@ -63,6 +63,7 @@ from local_operator.hub_sync.identity import (
     LinkOrigin,
     Visibility,
     link_origin,
+    refusal_text_en,
 )
 from local_operator.hub_sync.merge import (
     FieldInput,
@@ -1620,7 +1621,9 @@ def _apply_skill(
         )
     except (LinkError, TransactionError) as exc:
         code = getattr(exc, "code", "hub-error")
-        return fail(str(code), str(exc))
+        # last_error is persisted (Windows) and shown by the model-read status,
+        # so a catalogued LinkError sentence is re-rendered pinned to English.
+        return fail(str(code), refusal_text_en(exc))
     except (ValueError, KeyError) as exc:
         return fail("merge-refused", f"the result was refused: {exc}", "refused")
     except Exception as exc:  # noqa: BLE001 - one item's failure never ends the run
@@ -1839,7 +1842,9 @@ def _apply_skill_bundle(
         )
     except (LinkError, TransactionError) as exc:
         code = getattr(exc, "code", "hub-error")
-        return fail(str(code), str(exc))
+        # last_error is persisted (Windows) and shown by the model-read status,
+        # so a catalogued LinkError sentence is re-rendered pinned to English.
+        return fail(str(code), refusal_text_en(exc))
     except (ValueError, KeyError) as exc:
         return fail("merge-refused", f"the result was refused: {exc}", "refused")
     except Exception as exc:  # noqa: BLE001 - one item's failure never ends the run
