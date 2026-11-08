@@ -1680,3 +1680,78 @@ async def test_file_tools_may_write_another_sessions_scratchpad_but_not_through_
         "write", {"path": link, "content": "x"}, ctx, judge=None, settings=GuardSettings()
     )
     assert forged is not None and forged.blocked and forged.risk == "critical"
+
+
+# -- round-1 remediation (PR #3602): ``..`` through a link, hardlinks, appends -------------
+
+
+def _pad_sub_link_to_sessions(home: Path, owner: str) -> tuple[Path, Path]:
+    """``sessions/<owner>/scratchpad/sub`` -> ``sessions/<OTHER>``, and OTHER's
+    ask store: ``<pad>/sub/../<OTHER>/asks.jsonl`` normalises lexically into
+    the pad, but the kernel resolves ``..`` after following ``sub``, so it
+    lands in ``sessions/<OTHER>/asks.jsonl`` (review R1-MAJOR-1)."""
+    sessions = home / ".local-operator" / "sessions"
+    pad = sessions / owner / "scratchpad"
+    pad.mkdir(parents=True, exist_ok=True)
+    (sessions / OTHER).mkdir(parents=True, exist_ok=True)
+    asks = sessions / OTHER / "asks.jsonl"
+    asks.write_text("{}\n")
+    (pad / "sub").symlink_to(sessions / OTHER)
+    return pad, asks
+
+
+@pytest.mark.parametrize("op", ["echo f >> {}", "echo f > {}", "rm -f {}"])
+def test_dotdot_through_a_link_in_another_pad_stays_critical(home: Path, op: str) -> None:
+    pad, _ = _pad_sub_link_to_sessions(home, OTHER)
+    word = f"{pad}/sub/../{OTHER}/asks.jsonl"
+    assert _verdict(home, op.format(word)).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize("op", ["echo f >> {}", "rm -f {}"])
+def test_dotdot_through_a_link_in_own_pad_stays_critical(home: Path, op: str) -> None:
+    pad, _ = _pad_sub_link_to_sessions(home, SID)
+    word = f"{pad}/sub/../{OTHER}/asks.jsonl"
+    verdict = classify_bash(
+        op.format(word), cwd=str(home), env=_env(home), scratchpad=str(pad), session_id=SID
+    )
+    assert verdict.risk is Risk.CRITICAL
+
+
+@pytest.mark.asyncio
+async def test_dotdot_append_through_a_link_is_refused(home: Path) -> None:
+    """The reviewer's exact forgery reached ``check_tool_call`` as allowed."""
+    pad, _ = _pad_sub_link_to_sessions(home, OTHER)
+    refused = await _check(
+        home, f"echo f >> {pad}/sub/../{OTHER}/asks.jsonl", _Judge("ALLOW ask=a-0344")
+    )
+    assert refused is not None and refused.blocked and refused.risk == "critical"
+
+
+def test_hardlinked_file_under_sessions_is_not_exempt(home: Path) -> None:
+    """``realpath`` cannot see a hardlink: a second name for a transcript in
+    a pad is evidence, not scratch (review R1-MINOR-1)."""
+    sessions = home / ".local-operator" / "sessions"
+    (sessions / OTHER / "scratchpad").mkdir(parents=True, exist_ok=True)
+    transcript = sessions / OTHER / "transcript.jsonl"
+    transcript.write_text("{}\n")
+    for owner in (OTHER, SID):
+        pad = sessions / owner / "scratchpad"
+        pad.mkdir(parents=True, exist_ok=True)
+        os.link(transcript, pad / "h")
+        verdict = classify_bash(
+            f"echo f >> {pad}/h",
+            cwd=str(home),
+            env=_env(home),
+            scratchpad=str(sessions / SID / "scratchpad"),
+            session_id=SID,
+        )
+        assert verdict.risk is Risk.CRITICAL, owner
+
+
+def test_append_into_another_pad_is_high(home: Path) -> None:
+    """An append there is another session's files, like ``>`` and ``rm``
+    (review R1-MINOR-2), and still liftable — never CRITICAL."""
+    _other_pad_file(home)
+    verdict = _verdict(home, f"echo x >> {PAD_FILE}")
+    assert verdict.risk is Risk.HIGH
+    assert verdict.reasons == ["another session's files"]

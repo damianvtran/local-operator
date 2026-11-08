@@ -809,6 +809,18 @@ class Target:
     #: ABOVE ``path`` by an unknown amount (S4/S2-5b), so ``path`` must not be
     #: presented to the judge as where the deletion lands.
     climbs: bool = False
+    #: The word as WRITTEN has a ``..`` component. ``path`` is normalised
+    #: lexically, but the kernel resolves ``..`` physically AFTER following a
+    #: link, so ``<pad>/sub/../<id>/asks.jsonl`` with ``sub`` -> a session dir
+    #: lands in that session's ask store while ``path`` reads as inside the
+    #: pad (review R1-MAJOR-1, PR #3602). ``classify`` therefore never grants
+    #: a scratchpad exemption — any pad, this session's own included — to a
+    #: target carrying this flag; see ``classify._pad_exemptible``.
+    dotdot: bool = False
+    #: The absolute but UN-normalised join of the word (``None`` for a glob or
+    #: opaque word). ``os.path.realpath`` of it resolves ``..`` physically, so
+    #: ``classify`` adds that spelling to the ones it judges.
+    raw_path: str | None = None
     # A judge cannot approve a root deliberately hidden for privacy. Keep this
     # distinct from ordinary opaque substitutions that can receive review.
     credential_derived: bool = False
@@ -861,6 +873,14 @@ def _absolute(text: str, cwd: str | None) -> tuple[str | None, bool]:
     return os.path.normpath(os.path.join(cwd, text)), False
 
 
+def _joined(text: str, cwd: str | None) -> str | None:
+    """The absolute join of ``text`` WITHOUT normalising: ``..`` survives so
+    ``realpath`` can resolve it physically (see ``Target.raw_path``)."""
+    if text.startswith("/"):
+        return text
+    return None if cwd is None else os.path.join(cwd, text)
+
+
 def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
     text = exp.text
     pattern = exp.pattern
@@ -898,8 +918,10 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
             base = state.cwd or ""
             pattern = pattern if pattern.startswith("/") else os.path.join(base, pattern)
             pattern = os.path.normpath(pattern) if not unknown else None
+        raw_path = None
     else:
         path, unknown = _absolute(text or ".", state.cwd)
+        raw_path = _joined(text or ".", state.cwd)
     is_temp = (
         exp.temp
         and opaque
@@ -930,6 +952,8 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
         glob_all=glob_all,
         temp=is_temp,
         climbs=climbs,
+        dotdot=".." in exp.text.split("/"),
+        raw_path=None if is_temp else raw_path,
     )
 
 

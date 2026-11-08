@@ -31,6 +31,7 @@ import fnmatch
 import functools
 import os
 import re
+import stat
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -355,9 +356,13 @@ def _in_session_scratchpad(path: str, sessions: str, *, pattern: bool = False) -
 
     Callers pass every spelling, the realpath included, so a link in a
     scratchpad resolving into evidence is still caught by its resolved
-    spelling. Fail closed on anything that could leave the pad: a ``.``/``..``
-    component, a ``**`` session component (globstar spans levels), or a
-    glob in place of the literal ``scratchpad`` component.
+    spelling. Fail closed on a ``**`` session component (globstar spans
+    levels) or a glob in place of the literal ``scratchpad`` component.
+
+    ``..`` never reaches here: callers pass normalised spellings, which is
+    exactly why a lexical check cannot see a ``..`` that the kernel resolves
+    physically through a link. It is decided on the word as written instead
+    (``Target.dotdot``, refused by ``_pad_exemptible``; review R1-MAJOR-1).
     """
     fold = _case_insensitive(sessions)
     p, root = (path.casefold(), sessions.casefold()) if fold else (path, sessions)
@@ -366,8 +371,6 @@ def _in_session_scratchpad(path: str, sessions: str, *, pattern: bool = False) -
         return False
     rel = [c for c in p[len(root) + 1 :].split("/") if c]
     if len(rel) < 2 or rel[1] != _SCRATCHPAD_DIRNAME:
-        return False
-    if any(c in (".", "..") for c in rel):
         return False
     return not (pattern and "**" in rel[0])
 
@@ -379,11 +382,45 @@ def _in_session_scratchpad(path: str, sessions: str, *, pattern: bool = False) -
 OTHER_SCRATCHPAD = "another session's files"
 
 
+def _hardlinked_file(path: str | None) -> bool:
+    """Is ``path`` a regular file with more than one name? ``realpath`` cannot
+    see a hardlink, so ``<pad>/h`` linked to a ``transcript.jsonl`` looks like
+    scratch; appending to it forges the transcript (review R1-MINOR-1)."""
+    if not path:
+        return False
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink > 1
+
+
+def _own_pad_exemptible(target: Target) -> bool:
+    """May this session's OWN scratchpad exempt ``target``? Not when the word
+    as written climbs (``Target.dotdot``): ``<pad>/sub/../<id>/asks.jsonl``
+    normalises into the pad but, with ``sub`` a link, lands in a session's ask
+    store (review R1-MAJOR-1). Nor for a hardlinked regular file, whose other
+    name may be evidence (R1-MINOR-1)."""
+    if target.dotdot:
+        return False
+    return not _hardlinked_file(target.raw_path or target.path)
+
+
 def _pad_exemptible(target: Target) -> bool:
-    """Can ``target``'s literal path stand for where it lands? Not when an
-    unknowable part may print ``..`` or a ``..`` follows one (``climbs``):
-    then a path inside a scratchpad may really be the transcript beside it."""
-    return not target.climbs and (not target.opaque or target.opaque_contained)
+    """Can ``target``'s literal path stand for where it lands, in ANY
+    session's scratchpad? Not when an unknowable part may print ``..`` or a
+    ``..`` follows one (``climbs``), when the word as written has a ``..`` at
+    all, or for a hardlinked file (``_own_pad_exemptible``): then a path
+    inside a scratchpad may really be the transcript beside it."""
+    return (
+        _own_pad_exemptible(target)
+        and not target.climbs
+        and (not target.opaque or target.opaque_contained)
+    )
+
+
+def _in_own_pad(path: str, prot: _Protected) -> bool:
+    return any(_under_evidence(path, pad) for pad in prot.own_scratchpad)
 
 
 def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -> str | None:
@@ -407,15 +444,22 @@ def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -
         return None
     lexical = {path, target.pattern or path}
     # Cheap prefilter: realpath/F_GETPATH only for words that could be there.
-    try:
-        lexical.add(os.path.realpath(path))
-    except OSError:
-        pass
+    # The raw (un-normalised) word's realpath resolves ``..`` physically, the
+    # way the kernel will, so a ``sub/../`` through a link is judged where it
+    # really lands (review R1-MAJOR-1).
+    for spelled in (path, target.raw_path):
+        if not spelled:
+            continue
+        try:
+            lexical.add(os.path.realpath(spelled))
+        except OSError:
+            pass
     if target.pattern is None and not any(
         _SESSIONS_DIRNAME in p.casefold() or _LEDGER_DIRNAME in p.casefold() for p in lexical
     ):
         return None
     exemptible = _pad_exemptible(target)
+    own_ok = _own_pad_exemptible(target)
     own_prefix = bool(path) and any(_under_evidence(path, pad) for pad in prot.own_scratchpad)
     if (
         target.pattern is not None
@@ -440,14 +484,14 @@ def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -
             if (
                 exemptible
                 and _in_session_scratchpad(spelled, sessions)
-                and not any(_under_evidence(spelled, pad) for pad in prot.own_scratchpad)
+                and not (own_ok and _in_own_pad(spelled, prot))
             ):
                 other_pad = True
             if _under_evidence(spelled, os.path.join(state, _LEDGER_DIRNAME)):
                 return "the guardrail's own records"
             if (
                 _under_evidence(spelled, sessions)
-                and not any(_under_evidence(spelled, pad) for pad in prot.own_scratchpad)
+                and not (own_ok and _in_own_pad(spelled, prot))
                 and not (exemptible and _in_session_scratchpad(spelled, sessions))
             ):
                 return "session state (transcripts, lineage, ask stores)"
@@ -456,7 +500,11 @@ def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -
             # A glob cannot climb out of its literal directory (``*`` never
             # crosses ``/``), so one rooted in this session's scratchpad stays
             # there.
-            if prefix and any(_under_evidence(prefix, pad) for pad in prot.own_scratchpad):
+            if (
+                prefix
+                and own_ok
+                and any(_under_evidence(prefix, pad) for pad in prot.own_scratchpad)
+            ):
                 return None
             for state in prot.state_roots:
                 if _pattern_hits(
@@ -914,11 +962,19 @@ def classify_targets(
             + list(targets)
             + [Target(path=c.path, op="write", program=c.kind) for c in created]
         )
+        pad_hits: set[str | None] = set()
         for t in writes:
             reason = _touch_reason(t, prot, globstar=globstar)
             if reason == OTHER_SCRATCHPAD:
-                # Not evidence: ``_rank`` decides (HIGH for a destroying op,
-                # liftable by the judge or a verified ask).
+                # Not evidence, but another session's files: every write there
+                # — an append included, which ``_rank`` leaves LOW because it
+                # destroys nothing — is HIGH, liftable by the judge or a
+                # verified ask (review R1-MINOR-2). A delete/overwrite also
+                # gets ``_rank``'s HIGH row; the (path, risk) dedup keeps one.
+                # A redirection is both a target and a touched write: one row.
+                if t.path not in pad_hits:
+                    pad_hits.add(t.path)
+                    evidence_hits.append(RankedTarget(t, Risk.HIGH, OTHER_SCRATCHPAD))
                 continue
             if reason is not None:
                 risk = Risk.HIGH if reason == GLOB_TOO_WIDE else Risk.CRITICAL

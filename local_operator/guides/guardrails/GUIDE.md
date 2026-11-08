@@ -84,11 +84,16 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   transcripts and `origin.json` files are never read.
   Writes into `<config_dir>/sessions/` (outside every session's scratchpad) or
   `<config_dir>/guardrails/` are CRITICAL. A scratchpad holds working files,
-  not evidence: deleting or writing in another session's scratchpad ranks HIGH
-  ("another session's files"), so the judge or a verified ask naming the path
-  can lift it — unless the path resolves through a link into that session's
-  transcript, lineage or ask store, or an unknowable part (`$(...)`, `..`)
-  could leave the pad; those stay CRITICAL. CRITICAL here means every redirection (`>`, `>>`, `>|`,
+  not evidence: deleting, overwriting or appending (`>>`) in another session's
+  scratchpad from bash ranks HIGH ("another session's files"), so the judge or
+  a verified ask naming the path can lift it — unless the path resolves through
+  a link into that session's transcript, lineage or ask store, is a hardlinked
+  file, is written with a `..` component (the kernel resolves `..` after
+  following a link, so no pad, your own included, is exempt then), or an
+  unknowable part (`$(...)`) could leave the pad; those stay CRITICAL. The
+  `write`/`edit` file tools are not ranked HIGH there: they refuse only the
+  evidence files, so a plain file in another session's scratchpad is not
+  refused by them. CRITICAL here means every redirection (`>`, `>>`, `>|`,
   `&>`, `>&`), the destination of a known writer (`cp`, `mv`, `rsync`, `ditto`,
   `install`, `ln`, `tar -x -C`, `unzip -d`, `git clone`, `git worktree add`,
   `git log/show/diff --output`, `mkdir`, `touch`, `truncate`, `dd of=`, `tee`,
