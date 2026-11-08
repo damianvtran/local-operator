@@ -210,3 +210,13 @@ no model has been called for it.
   the spent set). Written before generation; the corpus digest is recorded in
   `PROTOCOL.md`'s A9 entry and in the manifest, both after generation and before
   any screening call.
+- A9a (2026-11-08, after generation, before any screening): correction to the
+  reproduction section above, made as an amendment because the pre-registration
+  was already committed and this file may not be edited in place once the split
+  exists. The corpus reproduces **byte-for-byte** at any path. The manifest
+  reproduces byte-for-byte only when written to the **same two paths**, because
+  it records the split's path in `split.path`; the shape of every other field is
+  fixed. Measured, not assumed: a rebuild into a scratch directory produced a
+  byte-identical corpus (`19bdef8b…3992b`) and a manifest differing in that path
+  field; a `--force` rebuild in place reproduced the manifest exactly.
+  This correction changes no size, seed, frame, exclusion rule or decision rule.

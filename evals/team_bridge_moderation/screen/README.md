@@ -6,7 +6,12 @@ rates it reports are described in
 
 - [`PROTOCOL.md`](PROTOCOL.md): the pre-registered evaluation protocol and its
   amendments (A1 corpora sealed, A2 candidates frozen, A3 rule correction).
-- [`corpus/`](corpus/): the sealed `adv`, `legit` and `replay` corpora.
+- [`PROTOCOL-ho4.md`](PROTOCOL-ho4.md): A9 — the pre-registration for the fresh
+  held-out split `ho4`, written before it was generated. Its frame, size, seed,
+  leakage rule, decision rule and reproduction command all live there.
+- [`corpus/`](corpus/): the sealed `adv`, `legit` and `replay` corpora, the fresh
+  held-out sets `ho2`, `ho3` and `ho4`, and `_manifest-ho4.json` — the split's
+  provenance, seeds, per-item source and body hashes, and its reserved rows.
 - [`templates/`](templates/): the embedded `bridge-screen-v2` bytes and, under
   `candidates/`, the two REJECTED candidates kept as a record.
 - [`results/2026-10-31/`](results/2026-10-31/): the runs, summaries and write-ups.

@@ -420,3 +420,29 @@ finding, with any fix as a separate change.
     causal test of the rule. The second pass remains unadopted; any adoption requires a fresh
     held-out split, rendered conversation-path QA and independent security review.
 - Results (2026-10-31): `results/2026-10-31/`. Baseline v2 per model. Patch C REJECTED on held-out (PR #3120 comment 6540394766). Variant D REJECTED on held-out (comment 6540480270). The template is unchanged.
+- A9 (2026-11-08): fresh held-out split `corpus/ho4.jsonl`, 72 items (36 `legit`, 36
+  `adv`), sha256 `19bdef8b0a78ccbc6714e113459538202d70eca7ff084c3b4489a67df863992b`,
+  pre-registered in [PROTOCOL-ho4.md](PROTOCOL-ho4.md) BEFORE it was generated and
+  before any screening call. That file is the study's own record; this entry puts the
+  digest where every other corpus digest sits, and was written after generation.
+  - Source: the committed moderation case set at
+    `evals/team_bridge_moderation/cases/` — 17 in-frame files, 214 rows, 196 after the
+    single-message rule, 195 after one duplicate body collapses (89 `allow`, 106
+    `refuse`). Nothing in it was authored for a screener or for this study, which is
+    the property `ho2` and `ho3` both lacked.
+  - Leakage: **0 of the 72 bodies match any of the 268 distinct body hashes** in
+    `adv`/`legit`/`replay`/`ho2`/`ho3`/`relay` (normalised sha256, whitespace
+    collapsed), and 0 row ids collide. The builder treats an overlap as a hard
+    failure rather than a trim; to prove the gate fires, a re-wrapped `ho3` body was
+    injected into a scratch frame and the builder exited 2 having written nothing.
+  - Realised mix: 36 `legit` (`work_ownership` 11, `work_status` 12,
+    `work_coordination` 5, `work_how` 4, `work_progress_summary` 4) and 36 `adv`, of
+    which **31 are in the unsafe set** after A8's `new_work` (2) and `other_org` (3)
+    exclusions. At N=5 that is 155 unsafe trials per arm, so a clean result reports a
+    95% Wilson upper bound of 2.42% — the power the registered size actually buys.
+    **123 frame items stay unspent** (53 `allow`, 70 `refuse`), listed by case id in
+    `corpus/_manifest-ho4.json` so a later split can prove what it did not touch.
+  - `ho4` is **unspent** and unmeasured: no model has been called on it. Reproduce it
+    with the command in `PROTOCOL-ho4.md`; `tests/unit/team_bridge/`
+    `test_moderation_eval_screenbench.py` pins the digest, the manifest and the
+    zero-overlap claim, so an edit fails CI instead of silently moving a result.

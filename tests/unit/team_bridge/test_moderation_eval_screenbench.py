@@ -631,6 +631,88 @@ def test_sealed_corpora_load_as_a_plan() -> None:
     assert len(items) == 131 and set(digests.values()) == set(SEALED.values())
 
 
+# -- ho4: the fresh split registered by PROTOCOL-ho4.md (amendment A9) ------------
+
+CORPUS_DIR = REPO / "evals" / "team_bridge_moderation" / "screen" / "corpus"
+HO4_SHA = "19bdef8b0a78ccbc6714e113459538202d70eca7ff084c3b4489a67df863992b"
+HO4_MANIFEST = CORPUS_DIR / "_manifest-ho4.json"
+#: Explicit, never a glob: after this split lands, a glob would also count
+#: ``ho4.jsonl`` as spent and make the leakage check refuse its own split.
+SPENT_FOR_HO4 = (
+    "adv.jsonl",
+    "legit.jsonl",
+    "replay.jsonl",
+    "ho2.jsonl",
+    "ho3.jsonl",
+    "relay.jsonl",
+)
+
+
+def _body_sha(text: str) -> str:
+    """The builder's normalisation: whitespace-collapsed, so a re-wrapped spent
+    body still counts as the same message."""
+
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()
+
+
+def test_ho4_is_the_registered_split_and_never_drifts() -> None:
+    """PROTOCOL-ho4.md registers the size and the digest before any screening, and
+    the split is judged once. An edit here must fail CI rather than quietly move a
+    result - the same rule the A1 corpora already have."""
+
+    raw = (CORPUS_DIR / "ho4.jsonl").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == HO4_SHA
+    items, _ = sb.load_corpus([CORPUS_DIR / "ho4.jsonl"], organization="Minerva")
+    by_label = {label: sum(1 for item in items if item.label == label) for label in sb.LABELS}
+    assert len(items) == 72
+    assert by_label == {"adv": 36, "legit": 36}
+
+
+def test_ho4_manifest_describes_the_committed_bytes() -> None:
+    """A manifest that does not match its corpus is worse than none: it is the
+    artifact a future reader uses to prove the split was not re-drawn."""
+
+    manifest = json.loads(HO4_MANIFEST.read_text(encoding="utf-8"))
+    raw = (CORPUS_DIR / "ho4.jsonl").read_bytes()
+    assert manifest["schema"] == "tb-screen-split-v1"
+    assert manifest["split"]["sha256"] == hashlib.sha256(raw).hexdigest() == HO4_SHA
+    assert manifest["split"]["rows"] == 72
+    assert manifest["split"]["by_label"] == {"adv": 36, "legit": 36}
+    assert manifest["seed"] == 20261108
+    assert manifest["spent_set"]["overlap"] == 0
+    # Every manifest item must be a row that is actually in the file, with the
+    # hash the file has.
+    rows = {json.loads(line)["id"]: json.loads(line) for line in raw.decode().splitlines() if line}
+    assert {item["id"] for item in manifest["items"]} == set(rows)
+    for item in manifest["items"]:
+        assert _body_sha(rows[item["id"]]["body"]) == item["body_sha256"]
+
+
+def test_ho4_shares_no_message_with_the_spent_set() -> None:
+    """The freshness claim, enforced every CI run instead of once at build time:
+    zero overlap by normalised body hash, and no reused row id. This is the check
+    the whole split exists for - if it fails, ho4 is not fresh and cannot be
+    cited."""
+
+    spent_bodies: dict[str, str] = {}
+    spent_ids: set[str] = set()
+    for name in SPENT_FOR_HO4:
+        for line in (CORPUS_DIR / name).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            spent_ids.add(row["id"])
+            spent_bodies[_body_sha(row["body"])] = f"{name}#{row['id']}"
+    ho4 = [json.loads(line) for line in (CORPUS_DIR / "ho4.jsonl").read_text().splitlines() if line]
+    shared = [
+        (row["id"], spent_bodies[_body_sha(row["body"])])
+        for row in ho4
+        if _body_sha(row["body"]) in spent_bodies
+    ]
+    assert shared == []
+    assert {row["id"] for row in ho4} & spent_ids == set()
+
+
 def test_only_screening_and_the_eval_reference_the_private_renderer() -> None:
     """Review r1 n1: ``_render_with_template`` performs no trust check on its
     template, so a live caller would let unembedded bytes screen real traffic. The
