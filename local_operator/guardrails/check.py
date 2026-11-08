@@ -342,6 +342,35 @@ class DeleteCase:
 
         return names_path(words.text, path, home=self.home, cwd=self.cwd, protected=self.stop)
 
+    def evidence_basis(self) -> str:
+        """The basis when re-verified creation evidence ALONE covers every target.
+
+        WHY THIS SKIPS THE JUDGE. Live incident 2026-11-08 (session
+        7cca523c604c, lop 0.101.24): ``rm -rf -- ~/local-operator/.worktrees/
+        lop-update-clone-869dea`` reached the forked judge with ``e1`` (the
+        subagent's ``git clone``) and ``as a clone: clean`` in its facts, and
+        the judge still answered BLOCK — the shipped rule's question asks only
+        whether *the user's request* called for the paths, and its policy says
+        a repository root needs the user's explicit request, so a model that
+        answers the question it was asked refuses every repo-root cleanup the
+        evidence route exists to allow. When :meth:`verify` would accept
+        ``ALLOW evidence=<every listed id>`` the judge's answer can only be
+        that ALLOW or a false refusal, so the checkpoint decides it here.
+
+        Same bar as a cited ALLOW, nothing looser: every concrete target must
+        re-verify through :func:`evidence.verify` (fresh birth-time and name
+        checks, and for a primary checkout ``clone_state == clean`` inside
+        ``covers``); any unverifiable target (opaque, unresolved, an empty
+        glob) or operator-only target (an overridden CRITICAL) keeps the judge.
+        """
+        if self.unverifiable or self.operator_only or not self.paths:
+            return ""
+        listed = list(getattr(self.evidence, "listed", {}) or {})
+        if not listed:
+            return ""
+        basis, missing = self.verify("ALLOW evidence=" + ",".join(listed))
+        return "" if missing else basis
+
     def verify(self, answer: str) -> tuple[str, str]:
         """``(basis, missing)``: what verified each path, and what did not verify.
 
@@ -590,6 +619,17 @@ async def _dangerous_delete(
             destructive=True,
         )
     case = build_delete_case(verdict, ctx)
+    risk_name = "critical-overridden" if risk is Risk.CRITICAL else "high"
+    # Provable creation settles the call without a model (see
+    # ``DeleteCase.evidence_basis``): the judge could only agree or refuse falsely.
+    proven = case.evidence_basis()
+    if proven:
+        _journal(DANGEROUS_DELETE_RULE, risk_name, "allow", 0.0, targets, proven)
+        outcome = GuardOutcome(
+            blocked=False, rule=DANGEROUS_DELETE_RULE, risk=risk_name, destructive=True
+        )
+        outcome.warnings.append(f"Guardrail {DANGEROUS_DELETE_RULE}: allowed — {proven}.")
+        return outcome
     result = await run_judge(
         JudgeBrief(
             tool="bash",
@@ -610,7 +650,6 @@ async def _dangerous_delete(
         (forked_judge or judge) if not case.unverifiable else judge,
         timeout=settings.judge_timeout_s,
     )
-    risk_name = "critical-overridden" if risk is Risk.CRITICAL else "high"
     basis = ""
     reason = result.reason
     if result.allowed:

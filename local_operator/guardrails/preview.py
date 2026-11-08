@@ -340,9 +340,16 @@ def preview_tool_call(
                 builtin_facts = (*case.facts, *case.evidence.describe())
                 if case.excluded:
                     builtin_facts += (f"excluded as untrusted: {case.excluded}",)
-                builtin_text = review_text(
-                    DANGEROUS_DELETE_RULE, "<judge reason>", _targets_text(verdict)
-                )
+                proven = case.evidence_basis()
+                if proven:
+                    # The checkpoint allows this without the judge
+                    # (``DeleteCase.evidence_basis``); report that branch.
+                    effect = BUILTIN_PASS
+                    builtin_facts += (f"allowed without the judge: {proven}",)
+                else:
+                    builtin_text = review_text(
+                        DANGEROUS_DELETE_RULE, "<judge reason>", _targets_text(verdict)
+                    )
 
     elif tool_name in FILE_DESTINATION_TOOLS:
         # The checkpoint refuses a write/edit of the guard's own evidence
