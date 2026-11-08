@@ -562,24 +562,52 @@ def covers(
     stop: Iterable[str],
 ) -> bool:
     """Does ``ev`` verifiably cover ``target`` (see the module docstring)?"""
-    if ev.tool not in _CREATING_TOOLS:
-        return False
+    return bool(_coverage(ev, target, writes=writes, env=env, stop=stop))
+
+
+def _refused(ev: Evidence) -> bool:
+    """Was ``ev``'s result a guardrail refusal (nothing ran)?
+
+    WHY (PR #3614 review R1-MINOR-1). A refused call's window is still a time
+    span with a command naming paths, so a directory another actor made while
+    it was being refused matched by name and birth time. A call that never ran
+    created nothing; its result begins with ``check.BLOCK_MARKER`` (spelled
+    here to keep this module free of the checkpoint import).
+    """
+    return re.match(r"\s*BLOCKED by guardrail\b", ev.output or "") is not None
+
+
+def _coverage(
+    ev: Evidence,
+    target: str,
+    *,
+    writes: Sequence[Evidence],
+    env: Mapping[str, str],
+    stop: Iterable[str],
+) -> str:
+    """How ``ev`` covers ``target``: ``clone``, ``b1``, ``b2`` or ``""`` (not at all).
+
+    The kind matters to :func:`covers_alone`: only resolver-pinned coverage
+    (``clone``, ``b1``) may settle a delete without the judge.
+    """
+    if ev.tool not in _CREATING_TOOLS or _refused(ev):
+        return ""
     if ev.tool == "bash" and _read_only(ev.command):
-        return False
+        return ""
     texts: list[str] | None = None
     for anchor in _anchors(target, stop):
         if os.path.isdir(os.path.join(anchor, ".git")):
             # A primary checkout may hold the only copy of work, so history
             # vouches for one only as a clean clone THIS call made, pinned
             # by the resolver — never by name and birth time (B2) alone.
-            return _vouches_for_clone(ev, anchor, env)
+            return "clone" if _vouches_for_clone(ev, anchor, env) else ""
         if not os.path.isdir(anchor):
             continue
         born = _born(anchor)
         if born is None or not _in_window(born, ev):
             continue
         if _b1(ev, anchor, env):
-            return True
+            return "b1"
         if texts is None:
             # Basename/prefix matches count only where THIS call said what to
             # make: its own arguments, or a script this session wrote and the
@@ -588,7 +616,72 @@ def covers(
             texts = [ev.command, *_scripts_named(ev, writes)]
         name = os.path.basename(anchor)
         if any(_names(t, name) for t in texts) or _names_full_path(ev.output, anchor, env):
+            return "b2"
+    return ""
+
+
+def covers_alone(
+    ev: Evidence,
+    target: str,
+    *,
+    writes: Sequence[Evidence],
+    env: Mapping[str, str],
+    stop: Iterable[str],
+) -> bool:
+    """May ``ev`` settle the delete of ``target`` with NO judge (``DeleteCase.evidence_basis``)?
+
+    Stricter than :func:`covers` (PR #3614 review). The judge still sees every
+    weaker match listed as evidence; this only decides when the checkpoint may
+    skip it:
+
+    * the coverage is resolver-pinned — a clean clone this call made, or B1
+      (the call's command re-resolves to creating that exact directory or an
+      ancestor). A B2 basename/prefix/output match only says a name appeared
+      in a call whose window overlapped the birth (R1-MINOR-1: an unrelated
+      ``pytest -k build`` "covered" ``~/build``);
+    * nothing below ``target`` is a git work tree or repository the clone
+      check did not vouch for (R1-MAJOR-1) — the ledger route's
+      ``provenance._foreign_inside`` rule: a ``git init`` another actor ran
+      inside a directory this session made holds work that is not ours.
+      A vouched clone is exempt from the walk: ``clone_state == clean``
+      already rules out a nested repository at any depth (``git status``
+      lists one as untracked, ``_holds_git`` scans the rest).
+    """
+    kind = _coverage(ev, target, writes=writes, env=env, stop=stop)
+    if kind == "clone":
+        return True
+    return kind == "b1" and not _git_below(os.path.realpath(target))
+
+
+def _git_below(real: str) -> bool:
+    """A ``.git`` at or below ``real`` — or a tree too big or deep to tell (fail closed).
+
+    Same bounds as ``provenance._foreign_inside``. Unlike that walk, a
+    directory left unscanned at the depth limit counts as "maybe": the
+    consequence here is only a judge call, never a refusal.
+    """
+    from local_operator.guardrails.provenance import _WALK_DEPTH, _WALK_ENTRIES
+
+    if not os.path.isdir(real) or os.path.islink(real):
+        return False
+    seen = 0
+    stack: list[tuple[str, int]] = [(real, 0)]
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
             return True
+        seen += len(entries)
+        if seen > _WALK_ENTRIES:
+            return True
+        for entry in entries:
+            if entry.name == ".git":
+                return True
+            if entry.is_dir(follow_symlinks=False):
+                if depth >= _WALK_DEPTH:
+                    return True
+                stack.append((entry.path, depth + 1))
     return False
 
 
@@ -740,20 +833,23 @@ def verify(
     *,
     env: Mapping[str, str],
     stop: Iterable[str],
+    alone: bool = False,
 ) -> dict[str, str]:
     """``target -> covering call label`` for targets a CITED id re-verifies.
 
     Re-runs :func:`covers` rather than trusting ``gather``'s map, so a target
     swapped between gather and the answer (a new inode, a new birth time)
-    no longer verifies.
+    no longer verifies. ``alone`` applies the judge-free bar
+    (:func:`covers_alone`) instead.
     """
     writes = [c for c in evidence.calls if c.tool == "write"]
     stop = list(stop)
+    check = covers_alone if alone else covers
     out: dict[str, str] = {}
     for target in targets:
         for eid in cited:
             ev = evidence.listed.get(eid)
-            if ev is not None and covers(ev, target, writes=writes, env=env, stop=stop):
+            if ev is not None and check(ev, target, writes=writes, env=env, stop=stop):
                 out[target] = ev.label
                 break
     return out
