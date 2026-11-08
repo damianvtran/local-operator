@@ -80,7 +80,10 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   destination (`C=… && git clone … $C` counts; a name in the output never
   does), and the clone must be clean — no uncommitted, untracked or
   non-regenerable ignored change, no commit that no remote-tracking ref
-  contains, no stash, no nested repository, and no linked worktrees. Tags count
+  contains, no stash, no nested repository, no linked worktrees, no file
+  hidden from `git status` by `--assume-unchanged` or (outside a sparse
+  checkout) `--skip-worktree`, and no local or `file://` remote that is gone or
+  no longer a git repository ("origin gone"). Tags count
   only when the origin lacks them: against a local origin the tag must name the
   same commit there; with a network origin (never contacted) a loose tag under
   `.git/refs/tags/` is local work and a packed one came with the clone — so a

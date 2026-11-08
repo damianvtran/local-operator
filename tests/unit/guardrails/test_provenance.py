@@ -2121,3 +2121,54 @@ def test_a_network_origin_judges_tags_by_loose_refs(home: Path) -> None:
     _tag_only_commit(clone, "mine")
     assert (clone / ".git" / "refs" / "tags" / "mine").is_file()
     assert prov.clone_state(str(clone)).startswith("dirty: a commit")
+
+
+# -- round-4 remediation -------------------------------------------------------------------
+
+
+def test_names_path_strips_one_prose_mark_never_a_run(home: Path) -> None:
+    target = home / "x" / "or.env"
+    target.parent.mkdir()
+    target.write_text("x")
+    h = str(home)
+    assert prov.names_path("Delete ~/x/or.env?", str(target), home=h)
+    assert not prov.names_path("Delete ~/x/or.env??", str(target), home=h)
+    # The as-written glob reading survives: a trailing ``?`` still globs.
+    (home / "x" / "qa-r5-dg-1").mkdir()
+    assert prov.names_path("Delete ~/x/qa-r5-dg-?", str(home / "x" / "qa-r5-dg-1"), home=h)
+
+
+@pytest.mark.parametrize("replacement", ["empty", "files"])
+def test_an_origin_that_is_no_longer_a_repo_is_gone(home: Path, replacement: str) -> None:
+    """``mv src src-old && mkdir src``: the path exists but holds no commits."""
+    clone = _child_clones(home, checkout=True)
+    moved = home / "elsewhere"
+    moved.mkdir()
+    os.rename(clone, moved / "c")
+    os.rename(home / "src", home / "src-old")
+    (home / "src").mkdir()
+    if replacement == "files":
+        (home / "src" / "README").write_text("not a repo\n")
+    assert prov.clone_state(str(moved / "c")) == "dirty: origin gone"
+
+
+def test_a_plain_dir_inside_another_repo_is_not_a_repo(home: Path) -> None:
+    src = _source_repo(home)
+    (src / "sub").mkdir()
+    assert prov._is_repo_at(str(src)) and not prov._is_repo_at(str(src / "sub"))
+
+
+def test_a_sparse_clone_is_not_hiding_files(home: Path) -> None:
+    src = _source_repo(home)
+    for d in ("a", "b"):
+        (src / d).mkdir()
+        (src / d / "f").write_text(d)
+    _git_run("add", "a", "b", cwd=src)
+    _git_run("commit", "-q", "-m", "dirs", cwd=src)
+    sparse = home / "sparse"
+    _git_run("clone", "-q", "--sparse", str(src), str(sparse), cwd=home)
+    assert prov.clone_state(str(sparse)) == "clean"
+    # assume-unchanged still counts inside a sparse checkout.
+    (sparse / "README").write_text("edited\n")
+    _git_run("update-index", "--assume-unchanged", "README", cwd=sparse)
+    assert prov.clone_state(str(sparse)) == "dirty: files hidden from git status"

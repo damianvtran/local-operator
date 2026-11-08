@@ -775,6 +775,26 @@ def _source_checkout() -> str | None:
     return here if os.path.exists(os.path.join(here, ".git")) else None
 
 
+def _is_repo_at(where: str) -> bool:
+    """Is ``where`` ITSELF a git repository (work tree, bare, or linked)?
+
+    ``git -C`` discovers upward, so a plain directory inside some other
+    repository would pass ``rev-parse`` alone: the git dir found must be
+    ``where`` (bare), ``where/.git``, or belong to a work tree rooted there.
+    """
+    if not os.path.isdir(where):
+        return False
+    real = os.path.realpath(where)
+    git_dir = _git(["rev-parse", "--absolute-git-dir"], real)
+    if git_dir is None:
+        return False
+    found = os.path.realpath(git_dir.strip())
+    if found in (real, os.path.join(real, ".git")):
+        return True
+    top = _git(["rev-parse", "--show-toplevel"], real)
+    return top is not None and os.path.realpath(top.strip()) == real
+
+
 def _tag_commits(repo: str) -> dict[str, str] | None:
     """``tag name -> peeled commit`` for every tag in ``repo`` (one call)."""
     out = _git(
@@ -804,8 +824,10 @@ def _local_tag_commits(real: str) -> set[str] | None:
         origin's when its commit there is the same (both sides listed with
         one ``for-each-ref``, compared here);
       * otherwise (a network origin; never contacted): ``git clone`` writes
-        tags to ``packed-refs`` and ``git tag`` writes a LOOSE ref under
-        ``.git/refs/tags/``, so the loose ones are local work.
+        tags to ``packed-refs``, while ``git tag`` — and a later ``fetch`` —
+        write LOOSE refs under ``.git/refs/tags/``. Loose ones are treated as
+        possibly local; that is safe because their commits are then judged by
+        ``--not --remotes``, so a fetched tag on a pushed commit stays clean.
     Accepted limitation: a ``git pack-refs`` after tagging makes a local tag
     look cloned under a network origin.
     """
@@ -878,7 +900,10 @@ def clone_state(path: str) -> str:
         local = url[len("file://") :] if url.startswith("file://") else url
         if local.startswith(("/", "~", ".")):
             where = os.path.join(real, os.path.expanduser(local))
-            if not os.path.exists(where):
+            # A repository, not merely a path: ``mv src src-old && mkdir src``
+            # leaves a directory that holds none of the commits the
+            # remote-tracking refs name (review round 4, MAJOR-1).
+            if not _is_repo_at(where):
                 return "dirty: origin gone"
     if not never_checked_out:
         # assume-unchanged (lowercase tag) and skip-worktree (``S``) entries
@@ -886,7 +911,14 @@ def clone_state(path: str) -> str:
         flags = _git(["ls-files", "-v"], real)
         if flags is None:
             return "unknown"
-        if any(ln[:1] == "S" or ln[:1].islower() for ln in flags.splitlines()):
+        # A sparse checkout marks every path outside its cone ``S``: there is
+        # no work-tree copy to hide, so only assume-unchanged counts there
+        # (review round 4, MINOR-1).
+        sparse = (_git(["config", "--bool", "core.sparseCheckout"], real) or "").strip()
+        hidden_tags = "" if sparse == "true" else "S"
+        if any(
+            (hidden_tags and ln[:1] == hidden_tags) or ln[:1].islower() for ln in flags.splitlines()
+        ):
             return "dirty: files hidden from git status"
         status = _git(["status", "--porcelain", "--untracked-files=all"], real)
         if status is None:
@@ -919,6 +951,8 @@ def clone_state(path: str) -> str:
         if local:
             # A tag the origin lacks may be the only name for its commit
             # (review M1). Copied tags are not: a local clone copies hundreds.
+            # (A tag on a tree or blob fails or counts here too: fail closed,
+            # whatever the message says.)
             unpushed = _git(["rev-list", "--count", *sorted(local), "--not", "--remotes"], real)
             if unpushed is None or not unpushed.strip().isdigit():
                 return "unknown"
@@ -1243,6 +1277,30 @@ def _expand_word(word: str, home: str, cwd: str | None) -> str | None:
     return os.path.normpath(word)
 
 
+#: One trailing character prose may put after a path. Closing quotes,
+#: backticks, commas, semicolons and ``)`` already end a word in ``_PATHISH``.
+_PROSE_END = frozenset("?!:]}")
+
+
+def _path_readings(text: str) -> list[tuple[str, bool]]:
+    """``(word, may_be_a_glob)`` readings of every path-looking word in ``text``.
+
+    Two per word. As written (``rstrip("/.:")``), where a trailing ``?`` is a
+    glob, so ``~/qa-r5-dg-?`` still covers its matches. As prose, at most ONE
+    trailing sentence mark is dropped ("Delete ~/x/or.env?") and the rest is
+    compared LITERALLY, never as a glob, so a repeated run (``or.env??``)
+    never names ``or.env`` (review round 4, MINOR-2).
+    """
+    out: list[tuple[str, bool]] = []
+    for match in _PATHISH.finditer(text):
+        raw = match.group(1)
+        out.append((raw.rstrip("/.:"), True))
+        stripped = raw[:-1].rstrip("/.:") if raw[-1:] in _PROSE_END else ""
+        if len(stripped) > 1:
+            out.append((stripped, False))
+    return out
+
+
 def names_path(
     text: str,
     path: str,
@@ -1274,14 +1332,10 @@ def names_path(
         if cand.startswith(home.rstrip("/") + "/"):
             candidates.add("~" + cand[len(home.rstrip("/")) :])
     protected = {os.path.normpath(p) for p in protected}
-    for match in _PATHISH.finditer(text):
-        # Sentence punctuation and closing quotes/brackets end a word in prose
-        # ("Delete ~/x/or.env?"); a trailing ``?`` there is a question mark,
-        # not a one-character glob.
-        word = match.group(1).rstrip("/.:?!,;)]}'\"`")
+    for word, as_glob in _path_readings(text):
         if not word:
             continue
-        if not _GLOBISH.search(word):
+        if not as_glob or not _GLOBISH.search(word):
             if word in candidates or word.rstrip("/") in candidates:
                 return True
             expanded = _expand_word(word, home, cwd)
