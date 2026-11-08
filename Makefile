@@ -174,10 +174,21 @@ test-affected: ## Run the tests this branch's diff affects; print PR evidence
 # run within the bounded poll is an error with the next commands to run, not a
 # `gh run watch null`.
 #
+# The run list is filtered by the SYSTEM `jq`, not by `gh --jq`: `gh` has no
+# `--arg` flag and its `--jq` takes exactly one token, so a query needing three
+# parameters cannot be expressed there at all. Measured on gh 2.100.0,
+# `--jq --arg sha … --arg since … --arg prev …` exits 1 with `unknown flag:
+# --arg`, and since the failed lookup was swallowed, `prev` stayed empty and the
+# poll matched nothing — the ritual armed a real run and then reported that it
+# had armed none, on every arming. `jq --arg` is the supported way to bind the
+# values, and gh's `--json` output is what it consumes.
+#
 # Prints the triggered run and how to follow it.
 merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	@set -e; \
 	if [ -z "$(PR)" ]; then echo "usage: make merge-gate PR=<number>" >&2; exit 2; fi; \
+	command -v jq >/dev/null 2>&1 \
+	  || { echo "make merge-gate: jq is required (the run list is filtered with 'jq --arg', which gh's --jq cannot take); install it, e.g. 'brew install jq'" >&2; exit 1; }; \
 	spec="$$(gh pr view "$(PR)" --json state,headRefOid,headRefName \
 	  --jq '.state + " " + .headRefOid + " " + .headRefName')" \
 	  || { echo "make merge-gate: PR #$(PR) not found (gh pr view failed); pass the number, e.g. PR=3631" >&2; exit 1; }; \
@@ -186,8 +197,8 @@ merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	  echo "make merge-gate: PR #$(PR) is $$state, not OPEN; only an open PR can be re-armed" >&2; exit 1; \
 	fi; \
 	prev="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" --limit 20 \
-	  --json databaseId,headSha --jq --arg sha "$$head_sha" \
-	  '[.[] | select(.headSha == $$sha)] | .[0].databaseId // empty' 2>/dev/null)" || prev=""; \
+	  --json databaseId,headSha \
+	  | jq -r --arg sha "$$head_sha" '[.[] | select(.headSha == $$sha)] | .[0].databaseId // empty')" || prev=""; \
 	since="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
 	gh label create ready-to-merge --color 0E8A16 \
 	  --description "Run the full-suite merge gate on this PR" 2>/dev/null || true; \
@@ -202,9 +213,8 @@ merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	  i=$$((i + 1)); \
 	  run="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" --limit 20 \
 	    --json databaseId,url,headSha,createdAt \
-	    --jq --arg sha "$$head_sha" --arg since "$$since" --arg prev "$$prev" \
-	    '[.[] | select(.headSha == $$sha and .createdAt >= $$since and ((.databaseId | tostring) != $$prev))] | .[0] | select(. != null) | "\(.databaseId) \(.url)"' \
-	    2>/dev/null)" || run=""; \
+	    | jq -r --arg sha "$$head_sha" --arg since "$$since" --arg prev "$$prev" \
+	      '[.[] | select(.headSha == $$sha and .createdAt >= $$since and ((.databaseId | tostring) != $$prev))] | .[0] | select(. != null) | "\(.databaseId) \(.url)"')" || run=""; \
 	  if [ -n "$$run" ]; then break; fi; \
 	  sleep 5; \
 	done; \

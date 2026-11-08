@@ -3606,7 +3606,7 @@ def test_the_makefile_rearms_the_merge_gate_with_the_label_ritual() -> None:
         "`make merge-gate PR=<n>` is gone: after a push the required check "
         "sits in Expected forever with no documented way out"
     )
-    recipe = makefile.split("merge-gate: ##", 1)[1][:3000]
+    recipe = _makefile_recipe_blocks()["merge-gate"]
     for needle in (
         "--remove-label ready-to-merge",
         "--add-label ready-to-merge",
@@ -3631,7 +3631,35 @@ def test_the_makefile_rearms_the_merge_gate_with_the_label_ritual() -> None:
     assert (
         "headSha" in recipe and "createdAt" in recipe
     ), "the new run must be resolved by head SHA + created-after, not row order"
-    assert '"$$prev"' in recipe, "the previous run's id must not match"
+    assert (
+        'jq -r --arg sha "$$head_sha"' in recipe
+    ), "the run list must be filtered by the system `jq`, which does accept `--arg`"
+    assert '--arg prev "$$prev"' in recipe, "the previous run's id must not match"
+    # R6, measured on gh 2.100.0: `gh` has NO `--arg` flag and its `--jq` takes
+    # exactly one token, so `--jq --arg sha … --arg since … --arg prev …` exits 1
+    # with `unknown flag: --arg`. The recipe discarded that stderr, so `prev`
+    # was always empty and the poll — which passed the same flags — never
+    # matched: the success branch was unreachable and every arming reported
+    # failure. The values must travel to `jq` by pipe, never to `gh`.
+    for segment in re.split(r"[|;\n]", recipe):
+        if re.search(r"\bgh\s+\w", segment):
+            assert "--arg" not in segment, (
+                "`gh` has no `--arg` flag (`unknown flag: --arg` on 2.100.0); a "
+                f"jq argument must go to `jq`, not to gh: {segment.strip()!r}"
+            )
+    assert "--jq --" not in recipe, (
+        "`--jq` takes exactly one token, so `--jq --arg` hands gh a flag it does "
+        "not have and the query never runs"
+    )
+    # The bound is arithmetic the failure message promises out loud: 12 polls
+    # 5 s apart is the "60 s" an operator reads when it gives up.
+    attempts = int(re.search(r"-lt (\d+)", recipe).group(1))
+    poll_pause = int(re.findall(r"sleep (\d+)", recipe)[-1])
+    assert attempts * poll_pause == 60, (
+        f"the poll is {attempts} attempts x {poll_pause} s = {attempts * poll_pause} s "
+        "but its failure message promises 60 s"
+    )
+    assert "within 60 s" in recipe, "the bound must be stated where it fails"
     assert (
         "--limit 1\n" not in recipe and "--limit 1 " not in recipe
     ), "`--limit 1` cannot tell the new run from the previous one"
@@ -3646,6 +3674,239 @@ def test_the_makefile_rearms_the_merge_gate_with_the_label_ritual() -> None:
         "swallowed `--remove-label` leaves the label on, so the add is a no-op, "
         "no event fires and the ritual still reports success"
     )
+
+
+#: The head SHA the stubbed `gh` reports. Hex, as GitHub's `headRefOid` is.
+_MERGE_GATE_SHA = "0123456789abcdef0123456789abcdef01234567"
+#: Format-identical to the recipe's `date -u +%Y-%m-%dT%H:%M:%SZ` (which is what
+#: it compares `createdAt` against): one run comfortably after that instant and
+#: one comfortably before it, so both of the poll's predicates are exercised
+#: rather than the test racing the wall clock.
+_MERGE_GATE_AFTER = "2999-01-01T00:00:00Z"
+_MERGE_GATE_BEFORE = "2000-01-01T00:00:00Z"
+#: A stubbed `gh`: records every call, answers with the OUTPUT of the queries the
+#: ritual reads, and reproduces the one flag real `gh` does not have (R6). On gh
+#: 2.100.0 `gh run list … --jq --arg sha …` exits 1 with `unknown flag: --arg`;
+#: the recipe discarded that stderr, so `prev` stayed empty, the poll matched
+#: nothing and the ritual reported failure for every run it armed. The stub
+#: rejects `--arg` the same way, so a regression fails here instead of only on a
+#: real arming. Its `run list` answers raw JSON with no `--jq` applied — the
+#: recipe filters it itself, with the real `jq`.
+_MERGE_GATE_GH_BODY = """
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+with Path(os.environ["STUB_LOG"]).open("a") as handle:
+    handle.write(" ".join(args) + "\\n")
+
+
+def answer(message, code):
+    print(message, file=sys.stderr if code else sys.stdout)
+    raise SystemExit(code)
+
+
+if "--arg" in args:
+    answer("unknown flag: --arg", 1)
+
+if args[:2] == ["pr", "view"]:
+    if "state,headRefOid,headRefName" in args:
+        if os.environ.get("STUB_PR_MISSING") == "1":
+            answer("graphql: Could not resolve to a PullRequest", 1)
+        print(os.environ["STUB_STATE"], os.environ["STUB_SHA"], os.environ["STUB_HEAD"])
+        raise SystemExit(0)
+    if "labels" in args:
+        for label in os.environ.get("STUB_LABELS", "").split():
+            print(label)
+        raise SystemExit(0)
+    answer("unexpected pr view: " + " ".join(args), 3)
+
+if args[:2] == ["label", "create"]:
+    answer("Label already exists", 1)
+
+if args[:2] == ["pr", "edit"]:
+    if "--remove-label" in args and os.environ.get("STUB_REMOVE_FAIL") == "1":
+        answer("could not update label", 1)
+    raise SystemExit(0)
+
+if args[:2] == ["run", "list"]:
+    counter = Path(os.environ["STUB_RUN_LIST_COUNT"])
+    calls = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(calls + 1))
+    # Call 1 is the pre-arm lookup for the run to exclude; every later call is
+    # one attempt of the bounded poll.
+    print(os.environ["STUB_PREV_RUNS" if calls == 0 else "STUB_POLL_RUNS"])
+    raise SystemExit(0)
+
+answer("unexpected gh call: " + " ".join(args), 3)
+"""
+
+
+def _merge_gate_runs(*runs: tuple[int, str]) -> str:
+    """A `gh run list --json databaseId,url,headSha,createdAt` payload."""
+    return json.dumps(
+        [
+            {
+                "databaseId": run_id,
+                "url": "https://github.com/damianvtran/local-operator/actions/runs/" f"{run_id}",
+                "headSha": _MERGE_GATE_SHA,
+                "createdAt": created_at,
+            }
+            for run_id, created_at in runs
+        ]
+    )
+
+
+def _arm_merge_gate(
+    tmp_path: Path,
+    *,
+    state: str = "OPEN",
+    labels: str = "",
+    remove_fail: str = "0",
+    pr_missing: str = "0",
+    prev_runs: str = "[]",
+    poll_runs: str = "[]",
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run the REAL `make merge-gate` target with a stubbed `gh` on PATH.
+
+    `make` runs it, not the extracted recipe text: `$$` is make's escape for a
+    literal `$`, so a shell handed that text directly would read every variable
+    as its own process id. `sleep` is stubbed as well — the real bound is 12
+    attempts 5 s apart plus a 3 s pause after a removal, which is 63 s per case;
+    the bound's ARITHMETIC is pinned in the test above instead.
+
+    Returns the process and every `gh` invocation, in order, as argv joined by
+    spaces.
+    """
+    shim = tmp_path / "bin"
+    shim.mkdir(exist_ok=True)
+    (shim / "gh").write_text(f"#!{sys.executable}\n{_MERGE_GATE_GH_BODY}")
+    (shim / "gh").chmod(0o755)
+    (shim / "sleep").write_text(f"#!{sys.executable}\n")
+    (shim / "sleep").chmod(0o755)
+    (tmp_path / "home").mkdir(exist_ok=True)
+    log = tmp_path / "gh.log"
+    env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith("CMUX_")},
+        "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}",
+        "HOME": str(tmp_path / "home"),
+        "STUB_LOG": str(log),
+        "STUB_RUN_LIST_COUNT": str(tmp_path / "runlist.count"),
+        "STUB_SHA": _MERGE_GATE_SHA,
+        "STUB_HEAD": "ci/merge-gate-merge-gate",
+        "STUB_STATE": state,
+        "STUB_LABELS": labels,
+        "STUB_REMOVE_FAIL": remove_fail,
+        "STUB_PR_MISSING": pr_missing,
+        "STUB_PREV_RUNS": prev_runs,
+        "STUB_POLL_RUNS": poll_runs,
+    }
+    proc = subprocess.run(
+        ["make", "-f", str(MAKEFILE), "merge-gate", "PR=3631"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    return proc, (log.read_text().splitlines() if log.exists() else [])
+
+
+def test_the_merge_gate_ritual_prints_the_run_it_armed(tmp_path: Path) -> None:
+    """The success branch must be reachable: it prints the NEW run's URL.
+
+    R6, as a behaviour. The poll used to hand jq's own flags to `gh`
+    (`--jq --arg sha …`), which exits 1 with `unknown flag: --arg`; the recipe
+    assigned empty on failure, so no attempt of the bounded poll could ever
+    match and the ritual reported "armed … but no NEW run" for an arming it had
+    just performed. Mutation that must fail this: put `--arg` back on the `gh`
+    call, or drop the `!= prev` / `createdAt >= since` predicates.
+    """
+    previous, armed = 1111, 2222
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        # Already labelled, so the remove-then-add order is exercised too: a
+        # `--add-label` over a present label is a no-op, fires no `labeled`
+        # event and strands the head in "Expected" while printing success.
+        labels="ready-to-merge",
+        prev_runs=_merge_gate_runs((previous, _MERGE_GATE_BEFORE)),
+        poll_runs=_merge_gate_runs((armed, _MERGE_GATE_AFTER), (previous, _MERGE_GATE_BEFORE)),
+    )
+    assert proc.returncode == 0, f"the ritual failed: {proc.stdout}\n{proc.stderr}"
+    url = f"https://github.com/damianvtran/local-operator/actions/runs/{armed}"
+    assert url in proc.stdout, (
+        f"the ritual did not print the URL of the run it armed ({url}); it said: " f"{proc.stdout}"
+    )
+    assert (
+        f"gh run watch {armed} --exit-status" in proc.stdout
+    ), f"the follow command must name the armed run, not the previous one: {proc.stdout}"
+    assert (
+        f"runs/{previous}" not in proc.stdout
+    ), f"the ritual printed the PREVIOUS run on this head: {proc.stdout}"
+    edits = [call for call in calls if call.startswith("pr edit")]
+    assert (
+        edits[:1] and "--remove-label" in edits[0]
+    ), f"a present label must be removed first, or no event fires: {calls}"
+    assert len(edits) > 1 and "--add-label" in edits[1], f"the add must follow the removal: {calls}"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "stub", "expected", "arms"),
+    [
+        (
+            "no-new-run",
+            {
+                "prev_runs": _merge_gate_runs((1111, _MERGE_GATE_BEFORE)),
+                # The only run for this head is the OLD one: created before the
+                # arm time and equal to `prev`, so neither predicate matches.
+                "poll_runs": _merge_gate_runs((1111, _MERGE_GATE_BEFORE)),
+            },
+            "no NEW full-suite",
+            # This one DOES arm — the add runs — and then cannot confirm the
+            # run; the error must then name what to check, not claim success.
+            True,
+        ),
+        (
+            "removal-fails",
+            {"labels": "ready-to-merge", "remove_fail": "1"},
+            "could not remove ready-to-merge",
+            False,
+        ),
+        ("pr-missing", {"pr_missing": "1"}, "not found (gh pr view failed)", False),
+        ("pr-closed", {"state": "CLOSED"}, "not OPEN", False),
+    ],
+)
+def test_the_merge_gate_ritual_refuses_without_arming(
+    tmp_path: Path, scenario: str, stub: dict[str, str], expected: str, arms: bool
+) -> None:
+    """Every refusal is non-zero, actionable, and happens BEFORE the add.
+
+    A ritual that prints success without arming anything is the failure mode
+    this target exists to prevent (QA round 1, Q-3), and a failed `--remove-label`
+    must abort: with the label still on, the add is a no-op. Mutation that must
+    fail this: swallow the removal (`|| true`), drop the bounded poll's non-zero
+    exit, or skip the PR state check.
+    """
+    proc, calls = _arm_merge_gate(tmp_path, **stub)
+    assert (
+        proc.returncode != 0
+    ), f"{scenario}: the ritual reported success after arming nothing: {proc.stdout}"
+    assert (
+        expected in proc.stderr
+    ), f"{scenario}: expected {expected!r} on stderr, got {proc.stderr!r}"
+    if not arms:
+        assert not [
+            call for call in calls if "--add-label" in call
+        ], f"{scenario}: a refusal before the add must leave the label alone: {calls}"
+        assert (
+            "re-armed the merge gate" not in proc.stdout
+        ), f"{scenario}: a failed ritual must not print the success line: {proc.stdout}"
+    if scenario.startswith("pr-"):
+        assert calls == [
+            call for call in calls if call.startswith("pr view")
+        ], f"{scenario}: a PR that cannot be re-armed must not be mutated: {calls}"
 
 
 def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
