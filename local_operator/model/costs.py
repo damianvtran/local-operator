@@ -131,6 +131,58 @@ def turn_cost(model_label: str, usage: Any) -> float | None:
         return None
 
 
+def stamp_record_estimate(usage: Any, provider: str, model_id: str) -> Any:
+    """Attach the table's price to a wire usage that carries no receipt.
+
+    WHY A RECORD-TIME STAMP RATHER THAN A RENDER-TIME LOOKUP. Every consumer that
+    can price a call today (the TUI band, a job row, the session arm's close-out
+    ``requests`` row) does so by CALLING BACK into the price table with a model
+    label it happens to hold. That answer is never written down, so the one
+    durable artefact -- the provider usage on the sealed turn -- says only
+    ``usd_cost: null`` on every direct route, which is indistinguishable from
+    "nobody priced this". Measured: OSWorld ``t27a-t001`` (route
+    ``deepseek/deepseek-flash``) sealed 56 ``message_end`` rows with real token
+    counts and no money at all, while the SAME usages priced to $0.026 from the
+    table at close-out. ``Usage.estimated_usd_cost`` exists for exactly this
+    ("a record-time table estimate is durable money, but NOT a provider
+    receipt") and had no writer on the wire path.
+
+    THE THREE-WAY SPLIT IS THE WHOLE CONTRACT, so each branch is deliberate:
+
+    - A provider receipt is left completely alone. OpenRouter bills the request
+      itself; an estimate must never shadow or overwrite a real bill.
+    - A priced route with no receipt gets ``estimated_usd_cost`` and keeps
+      ``usd_cost`` at ``None``, so ``_recorded_cost``/``cost_summary`` can count
+      the money while the receipt field still says the provider did not bill it.
+    - An UNPRICED route is left untouched -- no field at all. ``0.0`` would read
+      as a free call, and "we could not look" must stay distinguishable from
+      "this cost nothing"; that distinction is what the budget caps need.
+
+    PAINT-SAFE BY CONSTRUCTION: :func:`turn_cost` resolves from the warm memo or
+    the static registry and schedules a background refresh on a miss (the same
+    policy the TUI and the runner's evidence pricing use), so this can run on the
+    event loop for every usage event without ever blocking on discovery.
+
+    Returns the usage unchanged when nothing can be priced, and never raises: a
+    pricing concern must not be able to drop a provider's usage event.
+    """
+    if usage is None:
+        return usage
+    try:
+        if getattr(usage, "usd_cost", None) is not None:
+            return usage
+        if getattr(usage, "estimated_usd_cost", None) is not None:
+            return usage
+        if not provider or not model_id:
+            return usage
+        estimate = turn_cost(f"{provider}/{model_id}", usage)
+        if estimate is None:
+            return usage
+        return usage.model_copy(update={"estimated_usd_cost": estimate})
+    except Exception:  # noqa: BLE001 — an unpriceable call is not a stream error
+        return usage
+
+
 def _recorded_cost(usage: Any) -> float | None:
     from local_operator.model.configure import _usage_cost
 
