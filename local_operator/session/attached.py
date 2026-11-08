@@ -5910,10 +5910,35 @@ class AttachedSession:
                     window.has_more,
                 )
             if not self._owner.placement.is_local:
+                # THREE ENVELOPES, THREE VERDICTS. A non-ok status is NOT a
+                # synonym for "old peer": the owner answered, and it answered
+                # this build (the DTO it just sent carries a field list only
+                # this release emits). Each arm names the remedy its own cause
+                # actually has, because a viewer on another device cannot paper
+                # over either of them with a local replay.
                 if window is not None and window.status == "full_required":
                     raise ConnectionError(
                         "this session's newest history is too large to send here; "
                         "open the conversation on the device that holds it"
+                    )
+                if window is not None and window.status == "reset":
+                    # A CURSOR THAT STOPPED RESOLVING, not an old peer. The
+                    # capture raced a compaction or a prune (``history_window``
+                    # answers a dead ``through_id``, a moved generation, or an
+                    # unresolvable anchor with this status), and the remedy its
+                    # own callers use is a re-sync, not an update and not a
+                    # smaller page. Nothing shrinks on retry, and nothing here is
+                    # stale code — telling the user to update a peer on this
+                    # build sends them after a version that does not exist.
+                    #
+                    # Reopening IS the re-sync for a viewer: every bind funnels
+                    # back through this method with a window the owner mints
+                    # from its CURRENT generation, while the raise below abandons
+                    # the facade (``connect`` discards the rejected client)
+                    # rather than retrying in place.
+                    raise ConnectionError(
+                        "this conversation's history changed on the device that holds it; "
+                        "reopen the conversation to reload it"
                     )
                 raise ConnectionError(
                     "this peer's runtime is too old to serve history over the mesh; update it"
