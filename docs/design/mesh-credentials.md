@@ -806,7 +806,15 @@ before:
 
 - not MCP, not `github` (own path, unchanged), not device-bound; not `force_refresh`;
 - the slot is outside the 120 s re-ask margin and younger than
-  `grant_ttl_s/2` (450 s at the default) on the borrower's monotonic clock;
+  `grant_ttl_s/2` (450 s at the default), measured on the borrower on BOTH a
+  sleep-inclusive monotonic clock (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME`
+  on Linux, else `time.monotonic()`) and wall time; either age past the bound,
+  or a wall clock stepped behind the stamp, ends reuse. Plain `time.monotonic()`
+  is `mach_absolute_time()` on macOS and stops while the machine sleeps, so a
+  laptop that slept through a revoke would otherwise wake reusing a grant that
+  looked seconds old (PR #3581 review R1-B1). Below `grant_ttl_s` = 240 s the
+  120 s re-ask margin, not the half-life, ends reuse first (the window is
+  `grant_ttl_s - 120` s), and at 120 s or less there is no reuse at all;
 - it was stored with a **non-empty lifecycle fence**: the set of
   `(scope, (login_chain_revision, material_generation), state)` this device has
   observed for `(owner, key)` in `lifecycle.json`, captured in
@@ -828,9 +836,13 @@ owner-unreachable hold live in one helper, `_hold_admission`.
 reason was that a grant TTL is not an upstream credential generation. The
 forward-only lifecycle generations (`e422250f678`, the next day) are exactly
 that generation, announced by the owner on the 15 s tick. **Coverage gaps fail
-closed:** an owner login with no lifecycle stamp or a link that never
-negotiated `credential-lifecycle-v1` leaves the fence empty, and that key dials
-on every call as before. An unprovable `lifecycle.json` stays a refusal
+closed:** a key with no *stored* lifecycle observation for its
+`(owner, key)` — an owner login with no lifecycle stamp, or a link that never
+negotiated `credential-lifecycle-v1` — has an empty fence and dials on every call
+as before. The fence reads stored observations, not the link's current
+capability: an owner that later stops announcing (a downgrade, a re-login path
+that writes no stamp) keeps its last fence, so that key is reused like a lost
+update, for at most `grant_ttl_s/2`. An unprovable `lifecycle.json` stays a refusal
 (`consent_unverifiable`), as it was.
 
 **Unchanged.** No wire field, no owner change, no refresh token on the
@@ -847,6 +859,7 @@ the PR for raw rows.
 | Warm call | median 36.5 ms | median 6.2 ms |
 | `credential revoke` on A → B's first refused call | median 0.19 s (max 0.40 s) | median 10.6 s (max 14.0 s): B's placement tick |
 | Owner logout (`run_logout`) → B's first refused call | median 0.15 s (max 0.37 s) | median 7.6 s (max 13.4 s): the lifecycle announce tick |
+| `credential revoke` with B's placement pull failing, so only A's lifecycle `withdrawn` announce reaches B | — | median 4.4 s (max 13.7 s); B's placement still named it a holder, its lifecycle state read `withdrawn` |
 | Owner frozen (link up, grant requests unanswered), 20 s of calls every 0.5 s | 3 calls, each 8.0 s (the deadline), then `held_offline` | 26–28 calls, all served at ~3 ms; one 8 s dial when the owner's post-refresh rotation was announced, then `held_offline` |
 
 The lost-update ceiling (`grant_ttl_s/2`) is pinned by unit test, not measured
@@ -986,7 +999,7 @@ does not surface, add it as a purely additive method there (§8 Q2).
   | What stops | When |
   |---|---|
   | New grants | Now: the owner refuses the next ask. |
-  | A grant a covered provider key is reusing (revoke, withdraw, owner logout or rotation) | About one placement/lifecycle tick (15 s); at most `grant_ttl_s/2` if that update is lost while the owner is reachable. Measured on loopback: revoke median 10.6 s, logout median 7.6 s (n = 5). |
+  | A grant a covered provider key is reusing (revoke, withdraw, owner logout or rotation) | About one tick (15 s) on whichever path arrives first: B's placement pull (revoke) or A's lifecycle announce (revoke as `withdrawn`, logout, rotation). Measured on loopback, n = 5: revoke median 10.6 s (max 14.0 s), logout 7.6 s (max 13.4 s), revoke via the lifecycle announce alone 4.4 s (max 13.7 s). Both paths run on their device's definitions-tick thread, so a peer request hung on that thread delays the next tick: a black-holed `net_broker` request waits out its 75 s owner deadline plus 5 s margin, which is how a rig that dropped placement frames measured 83 s (median) for the lifecycle-only path. In every case, at most `grant_ttl_s/2` (450 s at the default) after the grant was fetched, if the update is lost while the owner is reachable. |
   | Any other lent grant, honest borrower | At its next ask, which the owner refuses; held while the owner is unreachable, but never past the grant's expiry (within `grant_ttl_s`). |
   | A copied bearer | Only when the token expires or is revoked at the provider. |
 

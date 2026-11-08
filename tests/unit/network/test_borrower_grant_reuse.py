@@ -104,6 +104,7 @@ class _Owner:
         self.grants: list[dict[str, Any]] = []
         self.reports: list[dict[str, Any]] = []
         self.offline = offline
+        self.refuse = ""
         monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda _root: {})
         monkeypatch.setattr("local_operator.network.relay.control_request", self.control)
 
@@ -112,8 +113,9 @@ class _Owner:
             self.reports.append(fields)
             return {"op": "ack"}
         self.grants.append(fields)
-        if self.offline:
-            return {"op": "ack", "detail": {"kind": "error", "code": "owner_offline"}}
+        if self.offline or self.refuse:
+            code = self.refuse or "owner_offline"
+            return {"op": "ack", "detail": {"kind": "error", "code": code}}
         excluded = set(fields.get("exclude_credential_ids") or ())
         credential_id = 2 if 1 in excluded else 1
         grant = _grant(f"synthetic-bearer-{len(self.grants)}", credential_id)
@@ -121,16 +123,31 @@ class _Owner:
 
 
 class _Clock:
-    """``client_mod.time`` with a movable monotonic clock; the rest is real time."""
+    """``client_mod.time`` with three movable offsets; everything else is real ``time``.
+
+    ``offset`` is time spent AWAKE: every clock moves. ``asleep`` is time the machine
+    spent sleeping: ``time.monotonic()`` (macOS ``mach_absolute_time``) does NOT see
+    it, while ``clock_gettime`` (``CLOCK_MONOTONIC`` on Darwin, ``CLOCK_BOOTTIME`` on
+    Linux) and wall time do. ``wall_step`` moves only ``time.time()`` (an NTP or
+    manual step). Only ``client.py`` sees this shim; other modules keep real time.
+    """
 
     def __init__(self) -> None:
         self.offset = 0.0
+        self.asleep = 0.0
+        self.wall_step = 0.0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
 
     def time(self) -> float:
-        return time.time()
+        return time.time() + self.offset + self.asleep + self.wall_step
 
     def monotonic(self) -> float:
         return time.monotonic() + self.offset
+
+    def clock_gettime(self, clock_id: int) -> float:
+        return time.clock_gettime(clock_id) + self.offset + self.asleep
 
 
 def _resolve(client: MeshCredentialClient, key: str = "openai", **kw: Any) -> Any:
@@ -310,6 +327,61 @@ def test_a_grant_older_than_half_the_ttl_dials_and_holds_if_the_owner_is_gone(
     assert len(owner.grants) == 2
     assert isinstance(held, Grant) and held.held_offline
     assert held.access_token == first.access_token
+    client.close()
+
+
+@pytest.mark.parametrize("moved", ["asleep", "wall_step_forward", "wall_step_back"])
+def test_reuse_age_counts_sleep_and_wall_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, moved: str
+) -> None:
+    """R1-B1 / QA Q1: a borrower that slept through a revoke must not wake up reusing.
+
+    ``time.monotonic()`` stands still here, as it does across macOS sleep. The
+    reuse age must still reach ``grant_ttl_s/2`` through the sleep-inclusive clock,
+    and the wall-clock age is checked too: either clock past the bound, or a wall
+    clock stepped behind the stamp, ends reuse. The owner's update is "lost"
+    (nothing changes on disk), so only the age can stop the serve.
+    """
+    from local_operator.network.credentials import grant_ttl_s
+
+    clock = _Clock()
+    monkeypatch.setattr(client_mod, "time", clock)
+    client = _client(tmp_path)
+    _observe(tmp_path)
+    owner = _Owner(monkeypatch)
+    _warm(client, owner)
+    half = grant_ttl_s(tmp_path) / 2
+    if moved == "asleep":
+        clock.asleep = half
+    elif moved == "wall_step_forward":
+        clock.wall_step = half
+    else:
+        clock.wall_step = -60.0
+    _resolve(client)
+    assert len(owner.grants) == 2, f"{moved}: a stale slot was reused without a dial"
+    client.close()
+
+
+def test_a_lifecycle_bump_with_the_owner_refusing_drops_the_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-m2: the other half of keeping the slot on a fence change.
+
+    The slot survives a fence change only so ``_held_or`` can hold it while the
+    owner is UNREACHABLE. A reachable owner that refuses (logged out) must leave
+    nothing behind to serve, on this call or the next.
+    """
+    client = _client(tmp_path)
+    _observe(tmp_path)
+    owner = _Owner(monkeypatch)
+    _warm(client, owner)
+    _observe(tmp_path, generation=2, state="absent")
+    owner.refuse = "no_local_credential"
+    refused = _resolve(client)
+    assert isinstance(refused, BrokerError) and refused.code == "no_local_credential"
+    assert client.grants.peek("openai", SESSION) is None
+    assert not isinstance(_resolve(client), Grant)
+    assert len(owner.grants) == 3
     client.close()
 
 

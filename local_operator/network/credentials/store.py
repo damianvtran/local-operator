@@ -591,12 +591,11 @@ class MeshAwareAuthStore:
         by ``_serve_cached`` while the owner's announced lifecycle generation for it
         is unchanged since before the fetching dial, for at most ``grant_ttl_s/2``
         (operator-approved C5 window). A grant TTL alone is not an upstream
-        credential generation (0385927ab9), so an uncovered provider key (no
-        lifecycle stamps, or no ``credential-lifecycle-v1`` on the link) still dials
-        the owner on every resolve. ``MeshCredentialClient._held_or`` serves a
-        still-live cached grant marked ``held_offline`` when the owner is
-        unreachable, which is why ``grant_ttl_s`` still bounds what this device can
-        serve unasked.
+        credential generation (0385927ab9), so a provider key with no stored
+        lifecycle observation for its owner still dials the owner on every resolve.
+        ``MeshCredentialClient._held_or`` serves a still-live cached grant marked
+        ``held_offline`` when the owner is unreachable, which is why ``grant_ttl_s``
+        still bounds what this device can serve unasked.
 
         ``test_native_hot_access.test_live_grant_and_old_login_refusal_do_not_short_circuit_owner``
         pins the uncovered dial-per-call and ``test_borrower_grant_reuse`` the

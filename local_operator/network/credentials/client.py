@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import sys
 import threading
 import time
 from contextlib import suppress
@@ -99,6 +100,32 @@ CLIENT_DEADLINE_S = 8.0
 #: that the owner's refresh (if any) happens on the owner's clock.
 REASK_MARGIN_MS = 120_000
 
+
+def _sleep_inclusive_clock() -> float:
+    """Seconds on a clock that KEEPS COUNTING while this machine sleeps.
+
+    The reuse age (``MeshCredentialClient._serve_cached``) bounds how long a
+    revoked or logged-out grant can be served when the update that would stop
+    it is lost: the operator approved "at most ``grant_ttl_s/2``". On macOS
+    ``time.monotonic()`` is ``mach_absolute_time()``, which STOPS during sleep,
+    so a laptop that slept through a revoke woke up with a grant that looked
+    seconds old and served it until its wall-clock expiry (review R1-B1, QA Q1:
+    179.7 s served at TTL 300 against a 150 s bound). ``CLOCK_MONOTONIC`` on
+    Darwin and ``CLOCK_BOOTTIME`` on Linux are monotonic AND include sleep.
+    Elsewhere this falls back to ``time.monotonic()``; the wall-clock age check
+    beside it still bounds reuse there.
+    """
+    clock_id = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock_id is None and sys.platform == "darwin":
+        clock_id = getattr(time, "CLOCK_MONOTONIC", None)
+    if clock_id is not None:
+        try:
+            return time.clock_gettime(clock_id)
+        except OSError:
+            pass
+    return time.monotonic()
+
+
 #: The TTL of an ``unsupported`` observation, i.e. "this peer's build cannot do
 #: this". Session-scoped in effect: it cannot change while the build does not, so
 #: it is cached until the process exits rather than re-asked per call.
@@ -122,11 +149,12 @@ class GrantCache:
         self._policy_fences: dict[tuple[str, str], Any] = {}
         # What a hot provider read (``MeshCredentialClient._serve_cached``) must
         # find unchanged before it may hand a grant out without dialling the owner:
-        # ``(stored_at monotonic, lifecycle fence, selection inputs)``. Kept beside
+        # ``(stored_at sleep-inclusive, stored_at wall, lifecycle fence, selection
+        # inputs)``. Kept beside
         # the grant and dropped with it at every eviction site, so a slot can never
         # outlive the evidence that licensed reusing it. Absent = never reusable
         # (a put without a fence, i.e. an uncovered owner or an older caller).
-        self._reuse: dict[tuple[str, str], tuple[float, Any, Any]] = {}
+        self._reuse: dict[tuple[str, str], tuple[float, float, Any, Any]] = {}
 
     def get(self, key: str, session_id: str) -> Grant | None:
         """The cached grant when it is still usable, else ``None``.
@@ -175,16 +203,23 @@ class GrantCache:
             self._grants[(key, session_id)] = grant
             self._policy_fences[(key, session_id)] = policy_fence
             if lifecycle_fence:
-                self._reuse[(key, session_id)] = (time.monotonic(), lifecycle_fence, selection)
+                self._reuse[(key, session_id)] = (
+                    _sleep_inclusive_clock(),
+                    time.time(),
+                    lifecycle_fence,
+                    selection,
+                )
             else:
                 self._reuse.pop((key, session_id), None)
 
-    def reuse_stamp(self, key: str, session_id: str) -> tuple[float, Any, Any] | None:
-        """``(stored_at, lifecycle_fence, selection)`` recorded with the slot, or ``None``.
+    def reuse_stamp(self, key: str, session_id: str) -> tuple[float, float, Any, Any] | None:
+        """``(stored_at, stored_wall, lifecycle_fence, selection)`` for the slot, or ``None``.
 
-        ``stored_at`` is ``time.monotonic()`` on THIS device: the reuse age is a
-        borrower-local bound, so neither the owner's clock nor a wall-clock step
-        can stretch it.
+        Two stamps from THIS device, never the owner's clock. ``stored_at`` is
+        :func:`_sleep_inclusive_clock` (counts sleep, immune to wall steps);
+        ``stored_wall`` is ``time.time()``. The reader requires BOTH ages under the
+        bound, so neither a clock that stalls in sleep nor a wall-clock step back
+        can stretch reuse past what the operator approved.
         """
         with self._lock:
             return self._reuse.get((key, session_id))
@@ -771,9 +806,9 @@ class MeshCredentialClient:
         # live grant alone never licenses skipping the owner: rotation/logout must
         # not hide behind it. ``_serve_cached`` reuses one only while the OWNER's
         # announced lifecycle generation for this key is unchanged since before the
-        # dial that fetched it, for at most ``grant_ttl_s/2``; an uncovered owner
-        # (no lifecycle stamps, link without ``credential-lifecycle-v1``) still
-        # re-resolves on every request. Refusal observations are for diagnosis, not
+        # dial that fetched it, for at most ``grant_ttl_s/2``; a key with no stored
+        # lifecycle observation for (owner, key) still re-resolves on every
+        # request. Refusal observations are for diagnosis, not
         # a login-negative cache: the owner may have signed in since the last
         # request. Forced refresh therefore always reaches the sole refresh owner.
         if not self.should_borrow(key):
@@ -938,10 +973,13 @@ class MeshCredentialClient:
         that the upstream credential a cached grant came from is still the current
         one — the evidence whose absence made 0385927ab94 stop reusing grants.
 
-        EMPTY MEANS "NOT COVERED" AND DISABLES REUSE: no observation (an owner whose
-        logins carry no lifecycle stamp, a link that never negotiated
-        ``credential-lifecycle-v1``), an unprovable file (``needs_baseline``) or a
-        pending restriction. Those keys keep re-resolving on every request.
+        EMPTY MEANS "NOT COVERED" AND DISABLES REUSE: no stored observation for
+        ``(owner, key)`` (an owner whose logins carry no lifecycle stamp, a link
+        that never negotiated ``credential-lifecycle-v1``), an unprovable file
+        (``needs_baseline``) or a pending restriction. Those keys keep re-resolving
+        on every request. This reads STORED observations, not the link's current
+        capability: an owner that later stops announcing keeps its last fence, which
+        is bounded by the same ``grant_ttl_s/2`` age as a lost update (R1-m1).
         """
         from local_operator.network.credentials import lifecycle
 
@@ -1002,7 +1040,11 @@ class MeshCredentialClient:
         * the slot is outside the re-ask margin (:meth:`GrantCache.get`), younger
           than ``grant_ttl_s/2`` (the soft refresh that keeps a later
           ``held_offline`` window at least that long), and was stored with a
-          non-empty lifecycle fence;
+          non-empty lifecycle fence. Both ages are measured on THIS device, on a
+          sleep-inclusive clock and on wall time, and both must be under the
+          bound. Below ``grant_ttl_s`` = 240 s the 120 s re-ask margin, not the
+          half-life, ends reuse: the window shrinks to ``grant_ttl_s - 120`` s,
+          and at 120 s or less ``get`` never serves, so reuse is off (QA Q3);
         * the selection inputs (``affinity``/``demote_credential_ids``) equal the
           dial's, so a new demotion is never masked;
         * the lent row is not cooling for ``model_id`` — another process's 429
@@ -1025,8 +1067,12 @@ class MeshCredentialClient:
         reuse = self.grants.reuse_stamp(key, session_id)
         if held is None or reuse is None:
             return None
-        stored_at, fence, stored_selection = reuse
-        if time.monotonic() - stored_at >= grant_ttl_s(self.root) / 2:
+        stored_at, stored_wall, fence, stored_selection = reuse
+        half_life = grant_ttl_s(self.root) / 2
+        # BOTH clocks must agree the slot is young (R1-B1): either one past the
+        # bound, or a wall clock stepped behind the stamp, stops reuse.
+        wall_age = time.time() - stored_wall
+        if _sleep_inclusive_clock() - stored_at >= half_life or not 0 <= wall_age < half_life:
             return None
         if stored_selection != selection:
             return None
