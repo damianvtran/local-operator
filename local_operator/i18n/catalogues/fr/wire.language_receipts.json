@@ -1,0 +1,10 @@
+{
+  "wire.language_receipts.show_terminal": "langue : {tag} ({name}) — /language <value> ; barre d’espace : liste",
+  "wire.language_receipts.show_options": "langue : {tag} ({name}) — {options}",
+  "wire.language_receipts.unknown_terminal": "langue inconnue {echo} — barre d’espace pour lister",
+  "wire.language_receipts.unknown_options": "langue inconnue {echo} — disponibles : {options}",
+  "wire.language_receipts.already": "langue : {key} déjà définie — correspond à {tag} ({name})",
+  "wire.language_receipts.unregistered": "langue : le paramètre n’est pas enregistré dans ce build",
+  "wire.language_receipts.save_failed": "langue : impossible d’enregistrer {key} — {error}",
+  "wire.language_receipts.saved": "langue : {key} enregistrée — {tag} ({name}) active"
+}

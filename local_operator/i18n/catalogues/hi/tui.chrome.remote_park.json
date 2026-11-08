@@ -1,0 +1,17 @@
+{
+  "tui.chrome.remote_park.approval_title": "{device} पर स्वीकृति की प्रतीक्षा",
+  "tui.chrome.remote_park.ask_title": "{device} पर आपके जवाब की प्रतीक्षा",
+  "tui.chrome.remote_park.approval_lead": "इसे अस्वीकार करने के लिए सत्र यहाँ खोलें।",
+  "tui.chrome.remote_park.approval_attached_lead": "इसका स्वीकृति कार्ड अभी इस स्क्रीन पर नहीं पहुँचा है — पहुँचते ही इसे यहीं से अस्वीकार करें।",
+  "tui.chrome.remote_park.approval_remainder": "अनुमति {device} पर (Touch ID से) या उससे पेयर किए गए फ़ोन पर दी जाती है। अगर वहाँ कुछ भी हस्ताक्षर की जाँच नहीं कर सकता: Local Operator से वहाँ ऑपरेटर का अधिकार सेट अप करने को कहें (एक स्वीकृति और एक एडमिन पासवर्ड प्रॉम्प्ट) — अगर वह डिवाइस पुराने बिल्ड पर चल रहा है, तो उसे अपडेट करने से यही ठीक होता है।",
+  "tui.chrome.remote_park.approval_remedy": "अनुमति {device} पर (Touch ID से) या उससे पेयर किए गए फ़ोन पर दी जाती है। अगर {device} अभी हस्ताक्षर की जाँच नहीं कर सकता, तो इस मशीन का ऑपरेटर एंकर वहाँ इंस्टॉल नहीं है: इस मशीन पर `lop operator anchor export --file anchor.json` चलाएँ, वह फ़ाइल {device} पर कॉपी करें, फिर {device} पर एक बार `lop operator install --from anchor.json` चलाएँ (एक एडमिन पासवर्ड प्रॉम्प्ट)। इससे {device} इस मशीन पर किया गया हस्ताक्षर जाँच सकता है; इसके अलावा कोई और अधिकार नहीं मिलता।",
+  "tui.chrome.remote_park.ask_body": "इसका जवाब देने के लिए सत्र यहाँ खोलें।",
+  "tui.chrome.remote_park.approval_banner": "{device} पर स्वीकृति की प्रतीक्षा — वहाँ या पेयर किए फ़ोन पर अनुमति दें; अस्वीकार खोलकर करें।",
+  "tui.chrome.remote_park.ask_banner": "{device} पर आपके जवाब की प्रतीक्षा — जवाब देने के लिए इसे खोलें।",
+  "tui.chrome.remote_park.approval_hint_phone": "{device} पर चल रहा है — अनुमति वहाँ (Touch ID) या पेयर किए फ़ोन पर दें; अस्वीकार यहाँ से हो सकता है",
+  "tui.chrome.remote_park.approval_hint_touch_id": "{device} पर चल रहा है — अनुमति वहाँ (Touch ID) पर दें; अस्वीकार यहाँ से हो सकता है",
+  "tui.chrome.remote_park.approval_hint_there": "{device} पर चल रहा है — अनुमति वहाँ दें; अस्वीकार यहाँ से हो सकता है",
+  "tui.chrome.remote_park.approval_hint_floor": "{device} पर चल रहा है",
+  "tui.chrome.remote_park.ask_hint_answer": "{device} पर चल रहा है — जवाब यहीं से दें",
+  "tui.chrome.remote_park.ask_hint_floor": "{device} पर चल रहा है"
+}

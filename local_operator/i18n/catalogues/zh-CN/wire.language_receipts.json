@@ -1,0 +1,10 @@
+{
+  "wire.language_receipts.show_terminal": "语言：{tag}（{name}）——/language <value>；按空格键浏览",
+  "wire.language_receipts.show_options": "语言：{tag}（{name}）——{options}",
+  "wire.language_receipts.unknown_terminal": "未知语言{echo}——按空格键查看可选值",
+  "wire.language_receipts.unknown_options": "未知语言{echo}——可选值：{options}",
+  "wire.language_receipts.already": "语言：已是{key}——对应{tag}（{name}）",
+  "wire.language_receipts.unregistered": "语言：此版本未注册该设置",
+  "wire.language_receipts.save_failed": "语言：无法保存{key}——{error}",
+  "wire.language_receipts.saved": "语言：已保存{key}——当前使用{tag}（{name}）"
+}

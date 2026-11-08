@@ -1,0 +1,5 @@
+{
+  "wire.harness_import_detail.omp_missing": "không tìm thấy thư mục tác nhân omp",
+  "wire.harness_import_detail.claude_missing": "không tìm thấy kho Claude tại {path}",
+  "wire.harness_import_detail.codex_missing": "không tìm thấy kho Codex tại {path}"
+}

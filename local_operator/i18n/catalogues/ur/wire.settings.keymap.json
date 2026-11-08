@@ -1,0 +1,12 @@
+{
+  "wire.settings.keymap.new_session.label": "نیا سیشن",
+  "wire.settings.keymap.new_session.help": "نئی گفتگو شروع کرتا ہے، بالکل /new کی طرح۔",
+  "wire.settings.keymap.resume.label": "سیشن جاری رکھیں",
+  "wire.settings.keymap.resume.help": "حالیہ گفتگوؤں کا انتخاب کھولتا ہے، بالکل /resume کی طرح۔",
+  "wire.settings.keymap.quick_send.label": "فوری پیغام بھیجیں",
+  "wire.settings.keymap.quick_send.help": "دوسری ایپس کے اوپر چھوٹا کمپوزر کھولتا ہے؛ پیغام چیف آف اسٹاف کو جاتا ہے۔",
+  "wire.settings.keymap.push_to_talk.label": "دبا کر بولیں",
+  "wire.settings.keymap.push_to_talk.help": "بولنے کے لیے دبائے رکھیں (ڈیسک ٹاپ)؛ روکنے کے لیے چھوڑ دیں۔",
+  "wire.settings.keymap.start_recording.label": "ریکارڈنگ شروع کریں",
+  "wire.settings.keymap.start_recording.help": "ڈیسک ٹاپ ونڈو میں آواز سے متن کی ریکارڈنگ شروع کرتا ہے۔"
+}

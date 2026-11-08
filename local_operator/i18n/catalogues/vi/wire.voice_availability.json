@@ -1,0 +1,13 @@
+{
+  "wire.voice_availability.radient_signed_in": "Đã đăng nhập Radient.",
+  "wire.voice_availability.radient_signed_out": "Chưa đăng nhập Radient.",
+  "wire.voice_availability.elevenlabs_stored": "Đã lưu khóa API ElevenLabs.",
+  "wire.voice_availability.elevenlabs_missing": "Chưa lưu khóa API ElevenLabs.",
+  "wire.voice_availability.openai_stored": "Đã lưu khóa API OpenAI.",
+  "wire.voice_availability.openai_missing": "Chưa lưu khóa API OpenAI.",
+  "wire.voice_availability.no_tts_provider": "Không có nhà cung cấp chuyển văn bản thành giọng nói nào khả dụng: hãy đăng nhập Radient, hoặc lưu khóa API ElevenLabs hoặc OpenAI.",
+  "wire.voice_availability.fal_stored": "Đã lưu khóa FAL.",
+  "wire.voice_availability.fal_missing": "Chưa lưu khóa FAL.",
+  "wire.voice_availability.route_available": "Khả dụng.",
+  "wire.voice_availability.route_unavailable": "Không khả dụng."
+}

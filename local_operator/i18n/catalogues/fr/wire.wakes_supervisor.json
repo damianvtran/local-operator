@@ -1,0 +1,3 @@
+{
+  "wire.wakes_supervisor.shared_unit_mismatch": "ce stockage n’est pas celui que dessert l’unité partagée ; launchd ne peut pas le superviser"
+}

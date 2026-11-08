@@ -1,0 +1,17 @@
+{
+  "tui.chrome.remote_park.approval_title": "Ждёт одобрения на {device}",
+  "tui.chrome.remote_park.ask_title": "Ждёт вашего ответа на {device}",
+  "tui.chrome.remote_park.approval_lead": "Откройте сессию здесь, чтобы отклонить запрос.",
+  "tui.chrome.remote_park.approval_attached_lead": "Карточка одобрения ещё не появилась на этом экране — отклоните запрос здесь, как только она появится.",
+  "tui.chrome.remote_park.approval_remainder": "Разрешить запрос можно на {device} (Touch ID) или на сопряжённом с ним телефоне. Если там нечем проверить подпись, попросите Local Operator настроить там полномочия оператора (одно одобрение и один запрос пароля администратора); если на том устройстве установлена более старая сборка, поможет её обновление.",
+  "tui.chrome.remote_park.approval_remedy": "Разрешить запрос можно на {device} (Touch ID) или на сопряжённом с ним телефоне. Если {device} пока не может проверить подпись, якорь оператора этой машины там не установлен: выполните `lop operator anchor export --file anchor.json` на этой машине, скопируйте файл на {device}, затем один раз выполните на {device} `lop operator install --from anchor.json` (один запрос пароля администратора). Так {device} сможет проверять подпись, сделанную на этой машине; больше это ничего не даёт.",
+  "tui.chrome.remote_park.ask_body": "Откройте сессию здесь, чтобы ответить.",
+  "tui.chrome.remote_park.approval_banner": "Ждёт одобрения на {device} — разрешите там или с сопряжённого телефона; отклонить — открыв сессию.",
+  "tui.chrome.remote_park.ask_banner": "Ждёт вашего ответа на {device} — откройте сессию, чтобы ответить.",
+  "tui.chrome.remote_park.approval_hint_phone": "выполняется на {device} — разрешите там (Touch ID) или на сопряжённом телефоне; отклонить можно здесь",
+  "tui.chrome.remote_park.approval_hint_touch_id": "выполняется на {device} — разрешите там (Touch ID); отклонить можно здесь",
+  "tui.chrome.remote_park.approval_hint_there": "выполняется на {device} — разрешите там; отклонить можно здесь",
+  "tui.chrome.remote_park.approval_hint_floor": "выполняется на {device}",
+  "tui.chrome.remote_park.ask_hint_answer": "выполняется на {device} — ответьте отсюда",
+  "tui.chrome.remote_park.ask_hint_floor": "выполняется на {device}"
+}

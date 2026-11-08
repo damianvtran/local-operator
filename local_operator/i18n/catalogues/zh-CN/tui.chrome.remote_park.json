@@ -1,0 +1,17 @@
+{
+  "tui.chrome.remote_park.approval_title": "等待{device}上的审批",
+  "tui.chrome.remote_park.ask_title": "等待你在{device}上回答",
+  "tui.chrome.remote_park.approval_lead": "在此处打开该会话即可拒绝。",
+  "tui.chrome.remote_park.approval_attached_lead": "其审批卡片尚未显示在此视图中 — 显示后即可在此拒绝。",
+  "tui.chrome.remote_park.approval_remainder": "需在{device}（Touch ID）或与其配对的手机上允许。若那里无法校验签名：请让Local Operator在那里设置操作者权限（需一次审批和一次管理员密码确认）— 若该设备运行的是旧版本，更新它即可解决。",
+  "tui.chrome.remote_park.approval_remedy": "需在{device}（Touch ID）或与其配对的手机上允许。若{device}尚无法校验签名，说明本机的操作者锚点未安装到那里：在本机运行`lop operator anchor export --file anchor.json`，把该文件复制到{device}，再在{device}上运行一次`lop operator install --from anchor.json`（会提示一次管理员密码）。这样{device}即可校验本机生成的签名，不会授予任何其他权限。",
+  "tui.chrome.remote_park.ask_body": "在此处打开该会话即可回答。",
+  "tui.chrome.remote_park.approval_banner": "等待{device}上的审批 — 在该设备或其配对手机上允许；打开后可拒绝",
+  "tui.chrome.remote_park.ask_banner": "等待你在{device}上回答 — 打开后即可回答",
+  "tui.chrome.remote_park.approval_hint_phone": "在{device}上运行 — 在该设备（Touch ID）或其配对手机上允许；此处可拒绝",
+  "tui.chrome.remote_park.approval_hint_touch_id": "在{device}上运行 — 在该设备（Touch ID）上允许；此处可拒绝",
+  "tui.chrome.remote_park.approval_hint_there": "在{device}上运行 — 在该设备上允许；此处可拒绝",
+  "tui.chrome.remote_park.approval_hint_floor": "在{device}上运行",
+  "tui.chrome.remote_park.ask_hint_answer": "在{device}上运行 — 可在此回答",
+  "tui.chrome.remote_park.ask_hint_floor": "在{device}上运行"
+}

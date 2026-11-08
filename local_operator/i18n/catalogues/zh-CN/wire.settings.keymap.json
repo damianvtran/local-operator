@@ -1,0 +1,12 @@
+{
+  "wire.settings.keymap.new_session.label": "新会话",
+  "wire.settings.keymap.new_session.help": "开始新对话，与/new作用相同。",
+  "wire.settings.keymap.resume.label": "恢复会话",
+  "wire.settings.keymap.resume.help": "打开最近对话的选择器，与/resume作用相同。",
+  "wire.settings.keymap.quick_send.label": "快速发送",
+  "wire.settings.keymap.quick_send.help": "在其他应用上方打开小型输入框，向幕僚长发送消息。",
+  "wire.settings.keymap.push_to_talk.label": "按住说话",
+  "wire.settings.keymap.push_to_talk.help": "按住听写（桌面端），松开停止。",
+  "wire.settings.keymap.start_recording.label": "开始录音",
+  "wire.settings.keymap.start_recording.help": "在桌面窗口中开始语音转文字录音。"
+}

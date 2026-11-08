@@ -1,0 +1,13 @@
+{
+  "wire.voice_availability.radient_signed_in": "Radient میں سائن اِن ہیں۔",
+  "wire.voice_availability.radient_signed_out": "Radient میں سائن اِن نہیں ہیں۔",
+  "wire.voice_availability.elevenlabs_stored": "ElevenLabs API کلید محفوظ ہے۔",
+  "wire.voice_availability.elevenlabs_missing": "کوئی ElevenLabs API کلید محفوظ نہیں۔",
+  "wire.voice_availability.openai_stored": "OpenAI API کلید محفوظ ہے۔",
+  "wire.voice_availability.openai_missing": "کوئی OpenAI API کلید محفوظ نہیں۔",
+  "wire.voice_availability.no_tts_provider": "متن سے آواز کا کوئی فراہم کنندہ دستیاب نہیں: Radient میں سائن اِن کریں، یا ElevenLabs یا OpenAI API کلید محفوظ کریں۔",
+  "wire.voice_availability.fal_stored": "FAL کلید محفوظ ہے۔",
+  "wire.voice_availability.fal_missing": "کوئی FAL کلید محفوظ نہیں۔",
+  "wire.voice_availability.route_available": "دستیاب ہے۔",
+  "wire.voice_availability.route_unavailable": "دستیاب نہیں۔"
+}

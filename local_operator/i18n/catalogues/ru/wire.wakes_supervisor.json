@@ -1,0 +1,3 @@
+{
+  "wire.wakes_supervisor.shared_unit_mismatch": "это хранилище не то, которое обслуживает общий юнит; launchd не может взять его под управление"
+}

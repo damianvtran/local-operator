@@ -1,0 +1,13 @@
+{
+  "wire.voice_availability.radient_signed_in": "Connecté à Radient.",
+  "wire.voice_availability.radient_signed_out": "Non connecté à Radient.",
+  "wire.voice_availability.elevenlabs_stored": "Une clé API ElevenLabs est enregistrée.",
+  "wire.voice_availability.elevenlabs_missing": "Aucune clé API ElevenLabs n’est enregistrée.",
+  "wire.voice_availability.openai_stored": "Une clé API OpenAI est enregistrée.",
+  "wire.voice_availability.openai_missing": "Aucune clé API OpenAI n’est enregistrée.",
+  "wire.voice_availability.no_tts_provider": "Aucun fournisseur de lecture à voix haute n’est disponible : connectez-vous à Radient ou enregistrez une clé API ElevenLabs ou OpenAI.",
+  "wire.voice_availability.fal_stored": "Une clé FAL est enregistrée.",
+  "wire.voice_availability.fal_missing": "Aucune clé FAL n’est enregistrée.",
+  "wire.voice_availability.route_available": "Disponible.",
+  "wire.voice_availability.route_unavailable": "Indisponible."
+}

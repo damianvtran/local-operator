@@ -1,0 +1,10 @@
+{
+  "wire.language_receipts.show_terminal": "idioma: {tag} ({name}) — /language <value>; espacio para explorar",
+  "wire.language_receipts.show_options": "idioma: {tag} ({name}) — {options}",
+  "wire.language_receipts.unknown_terminal": "idioma desconocido {echo} — pulsa espacio para ver los valores",
+  "wire.language_receipts.unknown_options": "idioma desconocido {echo} — disponibles: {options}",
+  "wire.language_receipts.already": "idioma: ya está en {key} — equivale a {tag} ({name})",
+  "wire.language_receipts.unregistered": "idioma: el ajuste no está registrado en esta compilación",
+  "wire.language_receipts.save_failed": "idioma: no se pudo guardar {key} — {error}",
+  "wire.language_receipts.saved": "idioma: {key} guardado — activo {tag} ({name})"
+}

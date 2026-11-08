@@ -1,0 +1,12 @@
+{
+  "wire.settings.keymap.new_session.label": "Phiên mới",
+  "wire.settings.keymap.new_session.help": "Bắt đầu cuộc trò chuyện mới, giống /new.",
+  "wire.settings.keymap.resume.label": "Tiếp tục một phiên",
+  "wire.settings.keymap.resume.help": "Mở trình chọn các cuộc trò chuyện gần đây, giống /resume.",
+  "wire.settings.keymap.quick_send.label": "Gửi nhanh",
+  "wire.settings.keymap.quick_send.help": "Mở khung soạn tin nhỏ trên các ứng dụng khác; nhắn cho chánh văn phòng.",
+  "wire.settings.keymap.push_to_talk.label": "Nhấn để nói",
+  "wire.settings.keymap.push_to_talk.help": "Giữ để nhập bằng giọng nói (desktop); thả ra để dừng.",
+  "wire.settings.keymap.start_recording.label": "Bắt đầu ghi âm",
+  "wire.settings.keymap.start_recording.help": "Bắt đầu ghi âm chuyển giọng nói thành văn bản trong cửa sổ desktop."
+}

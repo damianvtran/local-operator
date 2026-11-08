@@ -1,0 +1,17 @@
+{
+  "tui.chrome.remote_park.approval_title": "Đang chờ phê duyệt trên {device}",
+  "tui.chrome.remote_park.ask_title": "Đang chờ bạn trả lời trên {device}",
+  "tui.chrome.remote_park.approval_lead": "Mở phiên tại đây để từ chối.",
+  "tui.chrome.remote_park.approval_attached_lead": "Thẻ phê duyệt của nó chưa hiện trong khung xem này — hãy từ chối tại đây khi nó hiện.",
+  "tui.chrome.remote_park.approval_remainder": "Việc cho phép diễn ra trên {device} (Touch ID) hoặc trên điện thoại đã ghép nối với nó. Nếu ở đó chưa có gì kiểm tra được chữ ký: hãy nhờ Local Operator thiết lập quyền của người vận hành tại đó (một lần phê duyệt và một lần nhập mật khẩu quản trị) — nếu thiết bị đó đang chạy bản dựng cũ hơn, cập nhật nó mới là cách khắc phục.",
+  "tui.chrome.remote_park.approval_remedy": "Việc cho phép diễn ra trên {device} (Touch ID) hoặc trên điện thoại đã ghép nối với nó. Nếu {device} chưa kiểm tra được chữ ký, tức là operator anchor của máy này chưa được cài ở đó: chạy `lop operator anchor export --file anchor.json` trên máy này, sao chép tệp đó sang {device}, rồi chạy `lop operator install --from anchor.json` trên {device} một lần (một lần nhập mật khẩu quản trị). Việc này cho phép {device} kiểm tra chữ ký tạo trên máy này; ngoài ra không cấp thêm quyền nào.",
+  "tui.chrome.remote_park.ask_body": "Mở phiên tại đây để trả lời.",
+  "tui.chrome.remote_park.approval_banner": "Đang chờ phê duyệt trên {device} — cho phép ở đó hoặc qua điện thoại ghép nối; từ chối sau khi mở.",
+  "tui.chrome.remote_park.ask_banner": "Đang chờ bạn trả lời trên {device} — mở phiên để trả lời.",
+  "tui.chrome.remote_park.approval_hint_phone": "chạy trên {device} — cho phép ở đó (Touch ID) hoặc trên điện thoại đã ghép nối; từ chối được tại đây",
+  "tui.chrome.remote_park.approval_hint_touch_id": "chạy trên {device} — cho phép ở đó (Touch ID); từ chối được tại đây",
+  "tui.chrome.remote_park.approval_hint_there": "chạy trên {device} — cho phép ở đó; từ chối được tại đây",
+  "tui.chrome.remote_park.approval_hint_floor": "chạy trên {device}",
+  "tui.chrome.remote_park.ask_hint_answer": "chạy trên {device} — trả lời được từ đây",
+  "tui.chrome.remote_park.ask_hint_floor": "chạy trên {device}"
+}

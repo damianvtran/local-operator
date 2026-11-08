@@ -1,0 +1,13 @@
+{
+  "wire.voice_availability.radient_signed_in": "Radient में साइन इन है।",
+  "wire.voice_availability.radient_signed_out": "Radient में साइन इन नहीं है।",
+  "wire.voice_availability.elevenlabs_stored": "ElevenLabs API कुंजी सहेजी गई है।",
+  "wire.voice_availability.elevenlabs_missing": "कोई ElevenLabs API कुंजी सहेजी नहीं गई है।",
+  "wire.voice_availability.openai_stored": "OpenAI API कुंजी सहेजी गई है।",
+  "wire.voice_availability.openai_missing": "कोई OpenAI API कुंजी सहेजी नहीं गई है।",
+  "wire.voice_availability.no_tts_provider": "कोई टेक्स्ट-टू-स्पीच प्रोवाइडर उपलब्ध नहीं है: Radient में साइन इन करें, या ElevenLabs अथवा OpenAI की API कुंजी सहेजें।",
+  "wire.voice_availability.fal_stored": "FAL कुंजी सहेजी गई है।",
+  "wire.voice_availability.fal_missing": "कोई FAL कुंजी सहेजी नहीं गई है।",
+  "wire.voice_availability.route_available": "उपलब्ध।",
+  "wire.voice_availability.route_unavailable": "उपलब्ध नहीं।"
+}

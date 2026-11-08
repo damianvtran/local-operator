@@ -1,0 +1,17 @@
+{
+  "tui.chrome.remote_park.approval_title": "{device} پر منظوری کا انتظار",
+  "tui.chrome.remote_park.ask_title": "{device} پر آپ کے جواب کا انتظار",
+  "tui.chrome.remote_park.approval_lead": "انکار کرنے کے لیے سیشن یہاں کھولیں۔",
+  "tui.chrome.remote_park.approval_attached_lead": "اس کا منظوری کارڈ ابھی اس منظر تک نہیں پہنچا — پہنچتے ہی یہاں انکار کریں۔",
+  "tui.chrome.remote_park.approval_remainder": "اجازت دینا {device} پر (Touch ID سے) یا اس کے ساتھ جوڑے گئے فون پر ہوتا ہے۔ اگر وہاں کچھ بھی دستخط کی جانچ نہیں کر سکتا: Local Operator سے کہیں کہ وہاں آپریٹر کا اختیار سیٹ اپ کرے (ایک منظوری اور ایک ایڈمن پاس ورڈ پرامپٹ) — اگر وہ ڈیوائس پرانے بلڈ پر چل رہی ہے تو اسے اپ ڈیٹ کرنا ہی اس کا حل ہے۔",
+  "tui.chrome.remote_park.approval_remedy": "اجازت دینا {device} پر (Touch ID سے) یا اس کے ساتھ جوڑے گئے فون پر ہوتا ہے۔ اگر {device} ابھی دستخط کی جانچ نہیں کر سکتا تو اس مشین کا آپریٹر anchor وہاں انسٹال نہیں ہے: اس مشین پر `lop operator anchor export --file anchor.json` چلائیں، وہ فائل {device} پر کاپی کریں، پھر {device} پر ایک بار `lop operator install --from anchor.json` چلائیں (ایک ایڈمن پاس ورڈ پرامپٹ)۔ اس سے {device} اس مشین پر کیے گئے دستخط کی جانچ کر سکے گا؛ اس سے اور کوئی اختیار نہیں ملتا۔",
+  "tui.chrome.remote_park.ask_body": "جواب دینے کے لیے سیشن یہاں کھولیں۔",
+  "tui.chrome.remote_park.approval_banner": "{device} پر منظوری کا انتظار — وہاں یا اس کے جوڑے گئے فون سے اجازت دیں؛ کھولنے کے بعد انکار کریں۔",
+  "tui.chrome.remote_park.ask_banner": "{device} پر آپ کے جواب کا انتظار — جواب دینے کے لیے کھولیں۔",
+  "tui.chrome.remote_park.approval_hint_phone": "{device} پر چل رہا ہے — وہاں (Touch ID) یا اس سے جوڑے گئے فون سے اجازت دیں؛ یہاں سے انکار کر سکتے ہیں",
+  "tui.chrome.remote_park.approval_hint_touch_id": "{device} پر چل رہا ہے — وہاں (Touch ID) سے اجازت دیں؛ یہاں سے انکار کر سکتے ہیں",
+  "tui.chrome.remote_park.approval_hint_there": "{device} پر چل رہا ہے — وہاں اجازت دیں؛ یہاں سے انکار کر سکتے ہیں",
+  "tui.chrome.remote_park.approval_hint_floor": "{device} پر چل رہا ہے",
+  "tui.chrome.remote_park.ask_hint_answer": "{device} پر چل رہا ہے — جواب یہیں سے دیں",
+  "tui.chrome.remote_park.ask_hint_floor": "{device} پر چل رہا ہے"
+}

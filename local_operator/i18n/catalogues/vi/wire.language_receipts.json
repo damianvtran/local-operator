@@ -1,0 +1,10 @@
+{
+  "wire.language_receipts.show_terminal": "ngôn ngữ: {tag} ({name}) — /language <value>; phím cách để duyệt",
+  "wire.language_receipts.show_options": "ngôn ngữ: {tag} ({name}) — {options}",
+  "wire.language_receipts.unknown_terminal": "ngôn ngữ {echo} không xác định — nhấn phím cách để xem các giá trị",
+  "wire.language_receipts.unknown_options": "ngôn ngữ {echo} không xác định — hiện có: {options}",
+  "wire.language_receipts.already": "ngôn ngữ: đã là {key} — ứng với {tag} ({name})",
+  "wire.language_receipts.unregistered": "ngôn ngữ: cài đặt chưa được đăng ký trong bản dựng này",
+  "wire.language_receipts.save_failed": "ngôn ngữ: không lưu được {key} — {error}",
+  "wire.language_receipts.saved": "ngôn ngữ: đã lưu {key} — đang dùng {tag} ({name})"
+}
