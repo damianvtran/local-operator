@@ -207,9 +207,11 @@ def _init_network(server: relay.RelayServer) -> types.NetworkRecord:
     return record
 
 
-def _mint_invite(server: relay.RelayServer, record: types.NetworkRecord) -> tuple[str, Any]:
+def _mint_invite(
+    server: relay.RelayServer, record: types.NetworkRecord, *, role: str = "admin"
+) -> tuple[str, Any]:
     state = store.load_secrets(record.network_id, server.root)
-    minted = invite_mod.mint(record, state.secret, role="admin", ttl_s=600.0)
+    minted = invite_mod.mint(record, state.secret, role=role, ttl_s=600.0)
     record.invites.append(minted.record)
     store.save(record, server.root)
     store.save_invite_token(minted.record.invite_id, minted.token, server.root)
@@ -256,6 +258,7 @@ def _join(
     monkeypatch: pytest.MonkeyPatch,
     settings: relay.NetworkSettings | None = None,
     confirm: bool = True,
+    role: str = "admin",
 ) -> dict[str, Any]:
     """The whole pairing: the joiner's code typed, and optionally the inviter's human.
 
@@ -270,7 +273,7 @@ def _join(
     expiry instead of the reason.
     """
     record = store.load(store.list_networks(inviter.root)[0].network_id, inviter.root)
-    token, envelope = _mint_invite(inviter.server, record)
+    token, envelope = _mint_invite(inviter.server, record, role=role)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(device.root))
     _type_the_code(monkeypatch)
     stop = threading.Event()
@@ -2070,15 +2073,36 @@ def _row(device: Device, device_id: str) -> types.MemberRecord | None:
     return record.member(device_id)
 
 
-def test_the_sync_digest_ignores_local_observations_and_moves_on_relayed_fields(
-    tmp_path: Path,
-) -> None:
-    """The validator must cover what ``adopt_members`` takes, and nothing it ignores.
+def _changed(value: Any, name: str) -> Any:
+    """A value of the same shape as ``value`` that differs from it."""
+    if name == "rotation_proof":
+        return {"old_device_id": "zz-claimed-predecessor"}
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int):
+        return value + 1
+    if isinstance(value, float) or value is None:
+        return 4242.0
+    if isinstance(value, str):
+        return value + "-moved"
+    if isinstance(value, list):
+        return [*value, "zz-extra"]
+    if isinstance(value, dict):
+        return {**value, "zz": "extra"}
+    raise AssertionError(f"no changed-value rule for {name}: {type(value)}")
 
-    ``members_digest_of`` (authority fields only) would hide an endpoint move or a
-    rename behind an "unchanged" answer; a digest over ``last_seen_at`` would never
-    match between two devices and save nothing.
+
+def test_the_sync_digest_moves_exactly_on_what_the_merge_can_act_on(tmp_path: Path) -> None:
+    """Walk EVERY ``MemberRecord`` field against the rule, in both directions.
+
+    A field the merge takes from a peer's row must move the digest (else an
+    ``unchanged`` answer would withhold it); a field the merge keeps local must NOT
+    (else two devices that legitimately disagree on it never settle — QA round 1, Q1:
+    ``capabilities`` after a ``credential share``). A new field fails this cell until
+    it is classified in ``relay.SYNC_DIGEST_*_FIELDS``.
     """
+    import dataclasses
+
     server = relay.RelayServer(
         root=tmp_path / "x",
         settings=relay.NetworkSettings(port=0),
@@ -2086,23 +2110,27 @@ def test_the_sync_digest_ignores_local_observations_and_moves_on_relayed_fields(
         audit=audit_mod.AuditLog(tmp_path / "x"),
     )
     record = _init_network(server)
+    sender = record.members[0].device_id
     record.members.append(_synthetic_row(record.members[0], "ff", endpoints=["10.0.0.1:1"]))
-    base = relay.member_sync_digest(record)
+    adopted = relay.SYNC_DIGEST_ADOPTED_FIELDS | relay.SYNC_DIGEST_PARTIAL_FIELDS
+    for index in (0, len(record.members) - 1):
+        row = record.members[index]
+        is_sender = row.device_id == sender
+        base = relay.member_sync_digest(record, sender_device_id=sender)
+        for field in dataclasses.fields(types.MemberRecord):
+            moved = replace(row, **{field.name: _changed(getattr(row, field.name), field.name)})
+            record.members[index] = moved
+            try:
+                after = relay.member_sync_digest(record, sender_device_id=sender)
+            finally:
+                record.members[index] = row
+            # ``name`` is taken only from the SENDER's own row (rule N1).
+            expect = field.name in adopted and (field.name != "name" or is_sender)
+            assert (after != base) is expect, (field.name, "sender" if is_sender else "third")
+    # Capabilities, the Q1 field, in the order a writer could leave them: no effect.
     row = record.members[-1]
-
-    row.last_seen_at, row.observed_endpoint, row.last_seen_instance = 1.0, "1.2.3.4:5", "i"
-    row.duplicate_count, row.suspect = 3, True
-    assert relay.member_sync_digest(record) == base
-
-    for name, value in (("endpoints", ["10.0.0.2:1"]), ("name", "renamed")):
-        moved = replace(row, **{name: value})
-        record.members[-1] = moved
-        assert relay.member_sync_digest(record) != base, name
-        # ...and the authority digest does NOT see it, which is why it is not the validator.
-        assert relay.members_digest_of(record) == relay.members_digest_of(
-            replace(record, members=[*record.members[:-1], row])
-        )
-        record.members[-1] = row
+    record.members[-1] = replace(row, capabilities=list(reversed(row.capabilities)))
+    assert relay.member_sync_digest(record, sender_device_id=sender) == base
 
 
 def test_a_settled_link_pulls_no_rows_and_every_change_still_lands(
@@ -2163,6 +2191,112 @@ def test_a_settled_link_pulls_no_rows_and_every_change_still_lands(
     assert net_fixtures.wait_for(
         lambda: any(row["unchanged"] and row["asker"] == a.device_id for row in seen[count:])
     ), seen[count:]
+
+    # A RE-ESTABLISHED LINK STARTS FULL (review R1-m3): every connection is a new
+    # ``PeerLink`` whose first pull re-reads the peer's rows whole, digest or not.
+    for server in (a.server, c.server):
+        for item in list(server.links.values()):  # noqa: SLF001
+            item.close()
+    count = len(seen)
+    relinked, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    assert relinked is not None, reason
+    assert net_fixtures.wait_for(
+        lambda: any(r["asker"] == a.device_id and r["server"] == c.device_id for r in seen[count:])
+    ), seen[count:]
+    first = next(
+        r for r in seen[count:] if r["asker"] == a.device_id and r["server"] == c.device_id
+    )
+    assert not first["if_digest"] and first["rows"] and not first["unchanged"], first
+    assert net_fixtures.wait_for(
+        lambda: any(r["unchanged"] and r["asker"] == a.device_id for r in seen[count:])
+    ), seen[count:]
+
+
+def test_a_share_to_a_drive_device_still_settles_to_unchanged(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1: a LOCAL capability edit must not park a link on full pulls.
+
+    ``credential share`` grants ``broker_credential`` on the OWNER's copy of the
+    holder's row only (``relay.set_member_capabilities``, called by
+    ``finite_share``); ``adopt_members`` never relays it, so the two ends disagree
+    on that row's capabilities for good. A digest that hashed them never matched
+    again and both directions fell back to main's full tables (measured: 0/4
+    ``unchanged`` each way). Fails on a digest that covers ``capabilities``.
+    """
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", 1.0)
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
+    seen = _spy_member_list(monkeypatch)
+    a = _make(devices, "a", mode=DIAL_ONLY)
+    c = _make(devices, "c", mode=HUB)
+    record = _init_network(c.server)
+    joined = _join(a, inviter=c, monkeypatch=monkeypatch, role="drive")
+    assert joined["device_id"] == a.device_id
+    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    assert link is not None, reason
+
+    with store.mutate(record.network_id, c.root) as copy:
+        relay.set_member_capabilities(copy, device_id=a.device_id, grant=["broker_credential"])
+        store.save(copy, c.root)
+    held_by_c = _row(c, a.device_id)
+    held_by_a = _row(a, a.device_id)
+    assert held_by_c is not None and held_by_a is not None
+    assert "broker_credential" in held_by_c.capabilities
+    assert "broker_credential" not in held_by_a.capabilities, "the rig did not diverge"
+
+    count = len(seen)
+    for asker, server in ((a, c), (c, a)):
+        assert net_fixtures.wait_for(
+            lambda asker=asker, server=server: any(
+                r["unchanged"] and r["asker"] == asker.device_id and r["server"] == server.device_id
+                for r in seen[count:]
+            )
+        ), (asker.name, seen[count:])
+
+
+def test_an_unchanged_answer_for_another_digest_is_not_believed(tmp_path: Path) -> None:
+    """Review R1-m2: "unchanged" counts only when it echoes the digest we sent.
+
+    Anything else (a server bug, a skewed digest build) is not stamped as an answer:
+    it falls through to the full-table checks and is reported as a bad answer, so
+    the next pass asks again instead of the link silently claiming a fresh table.
+    """
+    from types import SimpleNamespace
+
+    server = relay.RelayServer(
+        root=tmp_path / "x",
+        settings=relay.NetworkSettings(port=0),
+        identity=identity.mint(tmp_path / "x", name="x"),
+        audit=audit_mod.AuditLog(tmp_path / "x"),
+    )
+    record = _init_network(server)
+    sent: list[dict[str, Any]] = []
+
+    def _link(echo: str) -> Any:
+        def request(frame: dict[str, Any], timeout: float) -> dict[str, Any]:
+            sent.append(frame)
+            digest = frame["if_digest"] if echo == "same" else "0" * 64
+            return {"op": "ack", "req": frame["req"], "detail": {"unchanged": True, "digest": digest}}
+
+        return SimpleNamespace(
+            alive=True,
+            network_id=record.network_id,
+            device_id="peer-device",
+            capabilities=frozenset({wire.MEMBER_LIST_DIGEST_V1}),
+            member_pulled_at=1.0,
+            member_pull_added=["stale"],
+            request=request,
+        )
+
+    wrong = _link("other")
+    assert server._pull_members(wrong) == "bad_answer"  # noqa: SLF001
+    assert wrong.member_pulled_at == 1.0, "a mismatched unchanged was stamped as an answer"
+    right = _link("same")
+    assert server._pull_members(right) == ""  # noqa: SLF001
+    assert right.member_pulled_at > 1.0 and right.member_pull_added == []
+    assert all("if_digest" in frame for frame in sent)
+
+
 
 
 def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(

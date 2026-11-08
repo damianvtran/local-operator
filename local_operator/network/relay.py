@@ -1814,33 +1814,60 @@ def members_digest_of(record: NetworkRecord) -> str:
     return wire.hex64(wire.sha256(wire.canonical_json(payload)))
 
 
-#: Member-row fields that are THIS device's own observation of a peer, never a
-#: statement the table relays: each device stamps its own ``last_seen_*``,
-#: ``observed_endpoint``, ``duplicate_count`` and ``suspect`` from its own links,
-#: so two devices holding the same membership never agree on them, and
-#: :func:`adopt_members` ignores all five on a row it already holds.
-_SYNC_DIGEST_LOCAL_FIELDS = frozenset(
-    {"last_seen_at", "observed_endpoint", "last_seen_instance", "duplicate_count", "suspect"}
-)
+#: The member-row fields a peer's table can change on a row this device ALREADY
+#: holds, i.e. everything :func:`adopt_members` acts on besides "a row I lack":
+#:
+#: * ``endpoints`` — taken from any row, relayed (the declaring device's answer);
+#: * ``name`` — taken ONLY from the row of the device that sent the table (rule N1),
+#:   so it is hashed for that one row (see :func:`member_sync_digest`);
+#: * the rotation claim (``previous_ids`` plus the proof's ``old_device_id``) — what
+#:   ``_rotation_retirements`` reads to decide whether a held row is retired.
+#:
+#: EVERYTHING ELSE IS KEPT LOCAL on a held row and therefore must NOT be hashed:
+#: ``role``/``capabilities`` (a ``credential share`` grants ``broker_credential`` on
+#: the owner's copy only — QA round 1, Q1: hashing them parked every link touching
+#: that owner on full pulls for good), ``public_key``, ``lifecycle``,
+#: ``removed_*`` (removals travel by ``net_epoch``/``removed_ids``, never this pull),
+#: ``added_*``, ``kind``, ``rotated_at`` and the receiver's own link observations.
+#: ``test_membership_convergence`` walks ``fields(MemberRecord)`` against this rule
+#: in both directions, so a new field must be classified here deliberately.
+SYNC_DIGEST_ADOPTED_FIELDS = frozenset({"device_id", "endpoints", "name", "previous_ids"})
+#: ``rotation_proof`` is read for ONE key only (its ``old_device_id`` claim).
+SYNC_DIGEST_PARTIAL_FIELDS = frozenset({"rotation_proof"})
 
 
-def member_sync_digest(record: NetworkRecord) -> str:
+def member_sync_digest(record: NetworkRecord, *, sender_device_id: str) -> str:
     """The validator of the conditional member pull (``wire.MEMBER_LIST_DIGEST_V1``).
 
-    NOT :func:`members_digest_of`. That digest covers the AUTHORITY fields only,
-    while :func:`adopt_members` also takes ``endpoints``, ``name`` and the
-    rotation fields from a peer's rows; an ``unchanged`` answer keyed on it would
-    swallow an endpoint or rename the full pull used to carry. So this hashes
-    every field of every row (tombstones included) EXCEPT the receiver-local
-    observations in :data:`_SYNC_DIGEST_LOCAL_FIELDS` — which is exactly the set
-    the merge ignores, so two tables with the same digest have nothing to teach
-    each other. Both ends of a link that negotiated the capability run this same
-    function, so the comparison is between like and like.
+    WHAT IT MUST MEAN: equal digests imply that a full pull would make
+    :func:`adopt_members` change NOTHING, and a difference in anything the merge
+    keeps local must NOT move it — otherwise a link whose two ends legitimately
+    disagree about a local field (a role, a share's capability) never answers
+    ``unchanged`` again. So it covers the set of row ids (tombstones included: a row
+    the asker lacks is adopted) and, per row, only :data:`SYNC_DIGEST_ADOPTED_FIELDS`
+    plus the rotation claim. ``name`` is hashed for the SENDER's row alone, because
+    that is the only row whose name the merge takes.
+
+    NOT :func:`members_digest_of`: that one covers the authority fields (role,
+    capabilities, key, lifecycle), which is the opposite set.
+
+    ``sender_device_id`` is the device whose table is being described as the merge
+    would read it: the server passes its OWN id, the asker passes the link's peer
+    id, so both ends hash the same view. A mismatch is always safe — it costs one
+    full pull, never a withheld change.
     """
-    payload = [
-        {k: v for k, v in member.to_json().items() if k not in _SYNC_DIGEST_LOCAL_FIELDS}
-        for member in sorted(record.members, key=lambda row: row.device_id)
-    ]
+    payload = []
+    for member in sorted(record.members, key=lambda row: row.device_id):
+        payload.append(
+            {
+                "device_id": member.device_id,
+                "endpoints": list(member.endpoints),
+                "claims": sorted(
+                    {str(t) for t in (*member.previous_ids, _proof_old_id(member)) if t}
+                ),
+                "name": member.name.strip() if member.device_id == sender_device_id else "",
+            }
+        )
     return wire.hex64(wire.sha256(wire.canonical_json(payload)))
 
 
@@ -6319,17 +6346,27 @@ class RelayServer:
         conditional = (
             wire.MEMBER_LIST_DIGEST_V1 in link.capabilities and link.member_pulled_at > 0
         )
+        own_view = ""
         if conditional:
-            frame["if_digest"] = member_sync_digest(listed)
+            own_view = member_sync_digest(listed, sender_device_id=link.device_id)
+            frame["if_digest"] = own_view
         reply = link.request(frame, timeout=MEMBERSHIP_PULL_TIMEOUT_S)
         if reply is None:
             return "no_answer"
         if reply.get("op") != "ack":
             return str(reply.get("code") or reply.get("op") or "refused")
         detail = reply.get("detail")
-        if conditional and isinstance(detail, dict) and detail.get("unchanged") is True:
+        if (
+            conditional
+            and isinstance(detail, dict)
+            and detail.get("unchanged") is True
+            and detail.get("digest") == own_view
+        ):
             # The peer's table hashes to ours: the answer is still a fresh answer
             # (the stamp is what `status`/`ls` age), it just has nothing to merge.
+            # The echoed digest must be the one we sent (review R1-m2): an
+            # "unchanged" for some other table is not believed, and falls through
+            # to the full-table checks below, which refuse it as a bad answer.
             link.member_pulled_at = time.time()
             link.member_pull_added = []
             return ""
@@ -8607,18 +8644,19 @@ class RelayServer:
         # rows only when the asker's table hashes exactly like ours. Any difference
         # — a member either side lacks, a moved endpoint, a rename, a tombstone —
         # gets the full table, so this can only ever withhold rows the asker holds.
+        #
+        # THE REPLY IS BARE ON PURPOSE (QA round 1, Q2): the asker reads only the flag
+        # and the echoed digest, and only a peer that negotiated the capability can
+        # ever receive this shape — an older asker never sends ``if_digest``.
         asked = frame.get("if_digest")
-        if isinstance(asked, str) and asked and asked == member_sync_digest(record):
-            return {
-                "op": "ack",
-                "req": frame.get("req"),
-                "detail": {
-                    "network_id": record.network_id,
-                    "epoch": record.epoch,
-                    "unchanged": True,
-                    "members_digest": members_digest_of(record),
-                },
-            }
+        if isinstance(asked, str) and asked:
+            mine = member_sync_digest(record, sender_device_id=record.self_device_id)
+            if asked == mine:
+                return {
+                    "op": "ack",
+                    "req": frame.get("req"),
+                    "detail": {"unchanged": True, "digest": mine},
+                }
         return {
             "op": "ack",
             "req": frame.get("req"),
