@@ -384,3 +384,179 @@ def test_infra_paths_print_wide_and_never_select_the_tree(tree: Path) -> None:
     assert line.startswith("WIDE: infra change")
     assert "gh workflow run full-suite.yml --ref" in line
     assert affected_tests.select(tree, ["local_operator/alpha.py"]).wide == ()
+
+
+# --- worker cap and --chunk (shared-host memory guard, 2026-11-08) ----------
+#
+# A 109-target selection under addopts' `-n auto` was SIGKILLed four times by
+# the host memory guard, so `--run`/`--evidence` now pass an explicit, narrow
+# `-n`. These cases pin the argv the helper builds and the chunk aggregation
+# with an injected runner: none of them fans out a real pytest subprocess.
+
+
+@pytest.mark.parametrize(
+    ("targets", "cpus", "expected"),
+    [
+        (1, 14, 0),
+        (3, 14, 0),  # SERIAL_TARGETS boundary: in-process
+        (4, 14, 4),
+        (109, 14, 4),  # the measured selection: capped at 4, not -n auto
+        (109, 2, 2),  # never more workers than cores
+        (5, 14, 4),
+    ],
+)
+def test_default_worker_cap(targets: int, cpus: int, expected: int) -> None:
+    workers, reason = affected_tests.resolve_workers(targets, env={}, cpu_count=cpus)
+    assert workers == expected
+    assert reason.startswith("default")
+
+
+def test_worker_override_precedence() -> None:
+    env = {affected_tests.WORKERS_ENV: "2"}
+    assert affected_tests.resolve_workers(109, override=1, env=env, cpu_count=14) == (
+        1,
+        "--workers",
+    )
+    assert affected_tests.resolve_workers(109, env=env, cpu_count=14) == (
+        2,
+        "$LOP_AFFECTED_WORKERS",
+    )
+    # The env var may widen past the default cap: it is an explicit choice.
+    assert (
+        affected_tests.resolve_workers(1, env={"LOP_AFFECTED_WORKERS": "6"}, cpu_count=14)[0] == 6
+    )
+    # A typo never silently re-widens to `-n auto`: the cap applies, and says why.
+    workers, reason = affected_tests.resolve_workers(
+        109, env={"LOP_AFFECTED_WORKERS": "lots"}, cpu_count=14
+    )
+    assert workers == 4 and "ignored non-integer" in reason
+    assert affected_tests.resolve_workers(9, override=-3, env={}, cpu_count=14)[0] == 0
+
+
+def test_pytest_command_places_explicit_width_before_targets() -> None:
+    argv = affected_tests.pytest_command(["tests/unit/a.py"], "py", 4)
+    assert argv[-4:] == ["-q", "-n", "4", "tests/unit/a.py"]
+    assert affected_tests.pytest_command(["t"], "py", 0)[-3:] == ["-n", "0", "t"]
+    # Listing-only path leaves addopts in charge.
+    assert "-n" not in affected_tests.pytest_command(["t"], "py")
+
+
+def test_run_chunked_sums_counts_and_names_failures() -> None:
+    outputs = {
+        "a.py": (0, "3 passed in 0.1s\n"),
+        "b.py": (1, "1 failed, 2 passed in 0.2s\n"),
+        "c.py": (5, "1 deselected in 0.0s\n"),  # all deselected: not a failure
+        "d.py": (0, "1 passed, 1 skipped in 0.1s\n"),
+    }
+    calls: list[str] = []
+
+    def run_one(target: str) -> tuple[int, str]:
+        calls.append(target)
+        return outputs[target]
+
+    result = affected_tests.run_chunked(list(outputs), run_one)
+    assert calls == list(outputs)  # serial, in selection order, one each
+    assert result.rc == 1 and result.failed == ["b.py"]
+    assert result.invocations == 4
+    assert result.counts == {"passed": 6, "failed": 1, "skipped": 1, "deselected": 1}
+    # rc 5 only when EVERY chunk collected nothing.
+    assert affected_tests.run_chunked(["x", "y"], lambda t: (5, "")).rc == 5
+    assert affected_tests.run_chunked(["x", "y"], lambda t: (5 if t == "x" else 0, "")).rc == 0
+
+
+def test_evidence_markdown_says_chunked_and_workers(tree: Path) -> None:
+    sel = affected_tests.select(tree, ["local_operator/alpha.py"])
+    chunked = affected_tests.ChunkedResult(
+        rc=1, counts={"passed": 2, "failed": 1}, invocations=3, failed=["tests/unit/test_alpha.py"]
+    )
+    md = affected_tests.evidence_markdown(
+        base="a" * 40,
+        head="b" * 40,
+        selection=sel,
+        command=["pytest", "-q", "-n", "0", "<target>"],
+        rc=1,
+        counts=chunked.counts,
+        wall=2.0,
+        workers=(0, "default: <= 3 targets run in-process"),
+        chunked=chunked,
+    )
+    assert "- workers: `-n 0` (default: <= 3 targets run in-process)" in md
+    assert "**chunked** — 3 serial pytest invocations" in md
+    assert "- failing targets: `tests/unit/test_alpha.py`" in md
+    assert "**FAIL (rc=1)** — 1 failed, 2 passed" in md
+
+
+class _FakePopen:
+    """Records the argv main() launches; prints a canned pytest summary."""
+
+    launched: list[list[str]] = []
+
+    def __init__(self, argv: list[str], **_: object) -> None:
+        type(self).launched.append(list(argv))
+        self.stdout = iter(["1 passed in 0.0s\n"])
+
+    def wait(self) -> int:
+        return 0
+
+
+def _main_argv(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], *extra: str
+) -> tuple[list[list[str]], str]:
+    _FakePopen.launched = []
+    # Popen is the module-global one, so git must not run under the fake:
+    # pin the head identity instead of letting `_head_identity` shell out.
+    monkeypatch.setattr(affected_tests, "_head_identity", lambda root: "c" * 40)
+    monkeypatch.setattr(affected_tests.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(affected_tests.os, "cpu_count", lambda: 14)
+    monkeypatch.delenv(affected_tests.WORKERS_ENV, raising=False)
+    paths = [
+        "tests/unit/test_alpha.py",
+        "tests/unit/test_alpha_more.py",
+        "tests/unit/test_alphabet.py",
+        "tests/unit/tui/test_widget.py",
+        "tests/unit/test_guard.py",
+    ]
+    rc = affected_tests.main(["--root", str(tree), "--evidence", *paths, *extra])
+    assert rc == 0
+    return _FakePopen.launched, capsys.readouterr().out
+
+
+def _width(argv: list[str]) -> str:
+    inner = argv[argv.index("--") + 1 :]
+    return inner[inner.index("-n") + 1]
+
+
+def test_main_evidence_runs_capped(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    launched, out = _main_argv(tree, monkeypatch, capsys)
+    assert len(launched) == 1 and _width(launched[0]) == "4"
+    assert "- workers: `-n 4` (default cap: min(4, 14 cpus, 5 targets))" in out
+    assert "chunked" not in out
+
+    monkeypatch.setenv(affected_tests.WORKERS_ENV, "2")
+    _FakePopen.launched = []
+    affected_tests.main(["--root", str(tree), "--evidence", "tests/unit/test_alpha.py"])
+    assert _width(_FakePopen.launched[0]) == "2"
+
+
+def test_main_chunk_runs_one_invocation_per_target(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    launched, out = _main_argv(tree, monkeypatch, capsys, "--chunk")
+    assert len(launched) == 5
+    assert all(_width(argv) == "0" for argv in launched)
+    assert sorted(argv[-1] for argv in launched) == sorted(
+        [
+            "tests/unit/test_alpha.py",
+            "tests/unit/test_alpha_more.py",
+            "tests/unit/test_alphabet.py",
+            "tests/unit/tui/test_widget.py",
+            "tests/unit/test_guard.py",
+        ]
+    )
+    assert "**chunked** — 5 serial pytest invocations" in out
+    assert "**PASS** — 5 passed" in out
+
+    launched, _ = _main_argv(tree, monkeypatch, capsys, "--chunk", "--workers", "2")
+    assert len(launched) == 5 and all(_width(argv) == "2" for argv in launched)

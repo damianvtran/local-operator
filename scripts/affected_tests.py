@@ -52,6 +52,8 @@ Usage:
     .venv/bin/python scripts/affected_tests.py --run           # run through run_bounded.py
     .venv/bin/python scripts/affected_tests.py --evidence      # run + markdown for the PR
     .venv/bin/python scripts/affected_tests.py --guards        # the guard list, one per line
+    .venv/bin/python scripts/affected_tests.py --evidence --workers 2  # explicit xdist width
+    .venv/bin/python scripts/affected_tests.py --evidence --chunk      # one pytest per target
     make test-affected                                         # == --evidence
 """
 
@@ -67,7 +69,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 # Imported as `scripts.affected_tests` (tests) or run as a script, whose own
 # directory is then `sys.path[0]`; no sys.path mutation either way.
@@ -171,6 +173,24 @@ EXPLICIT = "explicit"
 #: run_bounded's bound for `--run`, seconds. Generous on purpose — a bound that
 #: fires on a legitimately slow, loaded host is a false red — and overridable.
 DEFAULT_TIMEOUT = 3600
+
+#: WORKER CAP for `--run`/`--evidence`. The repo's addopts say `-n auto`, and
+#: even through conftest's `pytest_xdist_auto_num_workers` cap (2..8) that is
+#: too wide for a targeted run on this shared host: measured 2026-11-08, a
+#: 12-file docs/seed diff selected 109 targets, launched xdist on a 14-core /
+#: 36 GB machine, and the machine memory guard SIGKILLed the run four times at
+#: 1.1-2.0 GB per process group, so no targeted evidence could be produced at
+#: all. A targeted selection is small by construction, so a narrow pool loses
+#: little wall time and keeps the group under the guard. An explicit `-n N`
+#: on the command line overrides addopts' `-n auto` (pytest takes the last).
+MAX_DEFAULT_WORKERS = 4
+#: At or below this many targets xdist's worker start-up costs more than it
+#: buys, and `-n0` is also the cheapest memory shape: run in-process.
+SERIAL_TARGETS = 3
+#: Per-session override, same precedence slot as `--workers` but below it, so a
+#: memory-starved agent can pin the width once (`LOP_AFFECTED_WORKERS=0`)
+#: without threading a flag through `make test-affected`.
+WORKERS_ENV = "LOP_AFFECTED_WORKERS"
 
 _SUMMARY = re.compile(r"(\d+) (passed|failed|error|errors|skipped|xfailed|xpassed|deselected)")
 
@@ -569,14 +589,64 @@ def wide_directive(wide: Sequence[str]) -> str:
     )
 
 
-def pytest_command(targets: Iterable[str], python: str) -> list[str]:
+def resolve_workers(
+    targets: int,
+    *,
+    override: int | None = None,
+    env: Mapping[str, str] | None = None,
+    cpu_count: int | None = None,
+) -> tuple[int, str]:
+    """The xdist worker count for a run, and the term that decided it.
+
+    Precedence: `--workers` > `$LOP_AFFECTED_WORKERS` > the default cap
+    `min(MAX_DEFAULT_WORKERS, cpu_count, targets)`, which drops to 0 (`-n0`,
+    in-process) at `SERIAL_TARGETS` or fewer. `targets` counts selection
+    entries (a directory is one entry), so the cap can only err narrow. The
+    reason string goes into the evidence block: a reader must be able to tell
+    a capped run from an operator's explicit choice.
+    """
+    if override is not None:
+        return max(0, override), "--workers"
+    raw = (env if env is not None else os.environ).get(WORKERS_ENV, "").strip()
+    if raw:
+        try:
+            return max(0, int(raw)), f"${WORKERS_ENV}"
+        except ValueError:
+            # A typo must not silently re-widen the run to `-n auto`; fall
+            # through to the cap and say so in the reason.
+            pass
+    if targets <= SERIAL_TARGETS:
+        return 0, f"default: <= {SERIAL_TARGETS} targets run in-process"
+    cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
+    workers = min(MAX_DEFAULT_WORKERS, cpus, targets)
+    reason = f"default cap: min({MAX_DEFAULT_WORKERS}, {cpus} cpus, {targets} targets)"
+    if raw:
+        reason += f"; ignored non-integer ${WORKERS_ENV}={raw!r}"
+    return workers, reason
+
+
+def pytest_command(targets: Iterable[str], python: str, workers: int | None = None) -> list[str]:
     """The pytest argv, with the TUI suite's colour-capable terminal.
 
     `env -u NO_COLOR TERM=xterm-256color` is the documented spelling (AGENTS.md
     "TUI tests need a colour-capable terminal"): Textual pilot tests fail under
-    NO_COLOR for a reason CI never sees.
+    NO_COLOR for a reason CI never sees. `workers` (see `resolve_workers`)
+    becomes an explicit `-n`, which beats addopts' `-n auto`; None leaves
+    addopts in charge (the listing-only path prints that form).
     """
-    return ["env", "-u", "NO_COLOR", "TERM=xterm-256color", python, "-m", "pytest", "-q", *targets]
+    width = [] if workers is None else ["-n", str(workers)]
+    return [
+        "env",
+        "-u",
+        "NO_COLOR",
+        "TERM=xterm-256color",
+        python,
+        "-m",
+        "pytest",
+        "-q",
+        *width,
+        *targets,
+    ]
 
 
 def bounded_command(command: Sequence[str], python: str, timeout: int) -> list[str]:
@@ -599,6 +669,53 @@ def parse_counts(output: str) -> dict[str, int]:
     return counts
 
 
+@dataclass
+class ChunkedResult:
+    """Aggregate of `--chunk`: one serial pytest invocation per target."""
+
+    rc: int
+    counts: dict[str, int]
+    invocations: int
+    failed: list[str]
+
+
+def run_chunked(
+    targets: Sequence[str],
+    run_one: Callable[[str], tuple[int, str]],
+) -> ChunkedResult:
+    """Run each target alone, serially, and sum the pytest summaries.
+
+    `--chunk` exists for the host where even a capped pool trips the memory
+    guard: one process group at a time, each short-lived, so peak RSS is one
+    test file's, not the selection's. `run_one(target)` returns (rc, output);
+    injected so tests never fan out real subprocesses.
+
+    Exit status: pytest's 5 ("no tests collected") is normal for a lone target
+    whose tests are all deselected (`-m "not e2e"`), which a combined run would
+    never report, so it only surfaces when EVERY chunk collected nothing.
+    Otherwise the first real non-zero status wins and every failing target is
+    named, so one red file cannot hide behind the others.
+    """
+    counts: dict[str, int] = {}
+    codes: list[int] = []
+    failed: list[str] = []
+    for target in targets:
+        rc, output = run_one(target)
+        codes.append(rc)
+        if rc not in (0, 5):
+            failed.append(target)
+        for key, number in parse_counts(output).items():
+            counts[key] = counts.get(key, 0) + number
+    real = [rc for rc in codes if rc not in (0, 5)]
+    if real:
+        rc = real[0]
+    elif codes and all(rc == 5 for rc in codes):
+        rc = 5
+    else:
+        rc = 0
+    return ChunkedResult(rc=rc, counts=counts, invocations=len(codes), failed=failed)
+
+
 def evidence_markdown(
     *,
     base: str,
@@ -608,6 +725,8 @@ def evidence_markdown(
     rc: int,
     counts: Mapping[str, int],
     wall: float,
+    workers: tuple[int, str] | None = None,
+    chunked: ChunkedResult | None = None,
 ) -> str:
     verdict = "PASS" if rc == 0 else f"FAIL (rc={rc})"
     tally = ", ".join(f"{n} {k}" for k, n in sorted(counts.items())) or "no pytest summary parsed"
@@ -631,11 +750,19 @@ def evidence_markdown(
         f"(guards included: {guards}/{len(GUARD_TESTS)})",
         f"- result: **{verdict}** — {tally}",
         f"- wall time: {wall:.1f} s",
-        "",
-        "```sh",
-        " ".join(_display(command)),
-        "```",
     ]
+    if workers is not None:
+        lines.append(f"- workers: `-n {workers[0]}` ({workers[1]})")
+    if chunked is not None:
+        # Chunked counts are a SUM of separate sessions, not one pytest run:
+        # the block must say so, or a reader compares it with a combined run.
+        lines.append(
+            f"- mode: **chunked** — {chunked.invocations} serial pytest invocations, "
+            "one per target, counts summed; the command below ran once per target"
+        )
+        if chunked.failed:
+            lines.append("- failing targets: " + ", ".join(f"`{t}`" for t in chunked.failed))
+    lines += ["", "```sh", " ".join(_display(command)), "```"]
     lines.extend(f"\n> warning: {w}" for w in selection.warnings)
     if selection.wide:
         lines.append(f"\n> {wide_directive(selection.wide)}")
@@ -694,6 +821,22 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--timeout", type=int, default=DEFAULT_TIMEOUT, help="run_bounded bound, seconds"
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            f"xdist workers for --run/--evidence (0 = in-process); default "
+            f"${WORKERS_ENV}, else min({MAX_DEFAULT_WORKERS}, cpus, targets), "
+            f"0 at <= {SERIAL_TARGETS} targets"
+        ),
+    )
+    parser.add_argument(
+        "--chunk",
+        action="store_true",
+        help="run one pytest per target, serially, and sum the counts (lowest memory)",
+    )
     return parser.parse_args(argv)
 
 
@@ -744,30 +887,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     if selection.wide:
         print(wide_directive(selection.wide), file=stream)
 
-    command = pytest_command(selection.targets, args.python)
     if not (args.run or args.evidence):
+        command = pytest_command(selection.targets, args.python)
         print("command: " + " ".join(_display(command)), file=stream)
         return 0
     if not selection.targets:
         print("nothing selected; nothing to run", file=stream)
         return 0
 
+    # A chunk is one target, so the default resolves to `-n0` per chunk; an
+    # explicit --workers / env value still applies to each chunk as given.
+    workers = resolve_workers(1 if args.chunk else len(selection.targets), override=args.workers)
+    print(f"workers: -n {workers[0]} ({workers[1]})", file=stream)
     env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+
+    def run(targets: Sequence[str]) -> tuple[int, str]:
+        proc = subprocess.Popen(
+            bounded_command(
+                pytest_command(targets, args.python, workers[0]), args.python, args.timeout
+            ),
+            cwd=root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        captured: list[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            captured.append(line)
+            stream.write(line)
+        return proc.wait(), "".join(captured)
+
     started = time.monotonic()
-    proc = subprocess.Popen(
-        bounded_command(command, args.python, args.timeout),
-        cwd=root,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    captured: list[str] = []
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        captured.append(line)
-        stream.write(line)
-    rc = proc.wait()
+    chunked: ChunkedResult | None = None
+    if args.chunk:
+        chunked = run_chunked(selection.targets, lambda target: run([target]))
+        rc, counts = chunked.rc, chunked.counts
+        command = pytest_command(["<target>"], args.python, workers[0])
+    else:
+        rc, output = run(selection.targets)
+        counts = parse_counts(output)
+        command = pytest_command(selection.targets, args.python, workers[0])
     wall = time.monotonic() - started
     if args.evidence:
         print(
@@ -777,8 +938,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 selection=selection,
                 command=command,
                 rc=rc,
-                counts=parse_counts("".join(captured)),
+                counts=counts,
                 wall=wall,
+                workers=workers,
+                chunked=chunked,
             )
         )
     return rc
