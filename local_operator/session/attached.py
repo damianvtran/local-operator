@@ -5870,7 +5870,36 @@ class AttachedSession:
             # journal). Refused with the remedy named rather than
             # degrading, because the honest alternative is a session the viewer
             # cannot open until the peer is updated.
+            #
+            # TWO DIFFERENT VERDICTS ARRIVE IN THIS ONE BRANCH, and telling them
+            # apart is the point of the split below. ``None`` is the genuine OLD
+            # PEER: a runtime that predates the field serves no window at all.
+            # A non-``ok`` page is a SIZE verdict from a runtime that is already
+            # current — ``full_required`` is what the owner returns when one
+            # message group exceeds the page budget
+            # (``history_window.DISPLAY_HISTORY_BYTES`` /
+            # ``DISPLAY_HISTORY_MESSAGES``), and what both wire fallbacks
+            # substitute when the attach push frame or the ``frontend_sync``
+            # reply exceeds ``server._MAX_LINE_BYTES``. Reading that as "update
+            # the peer" sent the operator to a remedy that cannot exist: the
+            # peer is on the same build, and the only fix is arriving on the
+            # device that holds the conversation. Nothing on the wire records
+            # WHY a page came back non-ok, so the status and the counts are
+            # logged here — after the fact this line is the only way to tell
+            # size from version, and it carries no message content.
+            if window is not None:
+                logger.info(
+                    "display history page is %s (total_message_count=%s, has_more=%s)",
+                    window.status,
+                    window.total_message_count,
+                    window.has_more,
+                )
             if not self._owner.placement.is_local:
+                if window is not None:
+                    raise ConnectionError(
+                        "this session's newest history is too large to send to this "
+                        "device; open the conversation on the device that holds it"
+                    )
                 raise ConnectionError(
                     "this peer's runtime is too old to serve history over the mesh; update it"
                 )
