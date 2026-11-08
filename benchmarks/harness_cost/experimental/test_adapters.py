@@ -690,26 +690,90 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["unpriced_usage"], ["service_tier"])
         self.assertNotIn("settled_from_tokens", row)
 
-    async def test_a_cache_rate_the_card_does_not_price_is_not_settled_at_zero(self):
-        # An absent rate is not a free rate: silence would under-bill the lane.
-        card_path = Path(os.environ["BENCH_RATE_CARD"])
-        card = json.loads(card_path.read_text())
-        for rates in card["models"].values():
-            rates.pop("input_cache_read", None)
-        card_path.write_text(json.dumps(card))
-        self.serve()
-        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {
-            "input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 5}}
-        await self.post()
+    async def test_a_stream_that_resets_after_message_start_latches(self):
+        # R17 M1: this branch's own comment says "unknown -> latch". The partial
+        # usage of a broken stream is a floor, not the charge: settling it drops
+        # the latch guarantee AND under-bills every output token the provider
+        # generated before the break.
+        class Reset(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield (b'data: {"type":"message_start","message":{"model":'
+                       b'"anthropic/claude-sonnet-5.5","usage":{"input_tokens":2,'
+                       b'"output_tokens":1,"cache_read_input_tokens":0,'
+                       b'"cache_creation_input_tokens":27164}}}\n\n')
+                raise httpx.ReadError("reset mid-stream")
+
+        self.upstream._transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=Reset()
+            )
+        )
+        with contextlib.suppress(Exception):
+            await self.post(stream=True)
         ledger = self.ledger()
         self.assertTrue(ledger["blocked"])
         self.assertIn("unbilled", " ".join(ledger["voids"]["trial"]))
-        # Zero cache-read tokens cost nothing whatever the rate, so the same gap
-        # settles: the omission is about the arithmetic, not the field's shape.
-        Path(os.environ["BENCH_SPEND_FILE"]).unlink(missing_ok=True)
-        self.response["usage"]["cache_read_input_tokens"] = 0
-        await self.post()
-        self.assertFalse(self.ledger()["blocked"])
+        self.assertEqual(ledger["usd"], 0.0)
+        self.assertEqual(len(ledger["pending"]), 1)  # kept as exposure, not settled
+        row = json.loads(meter.LOG.read_text().splitlines()[-1])
+        self.assertTrue(row["incomplete"])
+        self.assertNotIn("settled_from_tokens", row)
+        self.assertNotIn("cost_derivation", row)
+        self.assertEqual((await self.post("other")).status_code, 402)
+
+    async def test_a_client_disconnect_mid_stream_latches(self):
+        # R17 M1, second trigger: the harness times out or closes mid-generation.
+        # Same branch, same guarantee -- the truncation is not a bill.
+        started = asyncio.Event()
+
+        class Hang(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield (b'data: {"type":"message_start","message":{"model":'
+                       b'"anthropic/claude-sonnet-5.5","usage":{"input_tokens":2,'
+                       b'"output_tokens":1,"cache_read_input_tokens":0,'
+                       b'"cache_creation_input_tokens":27164}}}\n\n')
+                started.set()
+                await asyncio.sleep(30)
+
+        self.upstream._transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=Hang()
+            )
+        )
+        task = asyncio.create_task(self.post(stream=True))
+        await asyncio.wait_for(started.wait(), 3)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+        await until(lambda: self.ledger()["blocked"])
+        ledger = self.ledger()
+        self.assertIn("unbilled", " ".join(ledger["voids"]["trial"]))
+        self.assertEqual(ledger["usd"], 0.0)
+        row = json.loads(meter.LOG.read_text().splitlines()[-1])
+        self.assertTrue(row["incomplete"])
+        self.assertNotIn("settled_from_tokens", row)
+
+    def test_a_card_that_cannot_price_a_token_term_is_refused_at_startup(self):
+        # R17 m1: an omitted cache-write rate priced the pilot's refusal at
+        # $0.000004 instead of $0.067914. A card must price every term the meter
+        # settles from, or the meter refuses to start rather than settle a zero.
+        for key in ("input_cache_read", "input_cache_write"):
+            with self.subTest(key=key):
+                listing = json.loads(fake_listing())
+                for row in listing["data"]:
+                    row["pricing"].pop(key, None)
+                with self.assertRaises(ValueError):
+                    meter.rate_card_from_models_listing(
+                        json.dumps(listing).encode(), source_url="offline",
+                        fetched_at=time.time())
+                card = json.loads(Path(os.environ["BENCH_RATE_CARD"]).read_text())
+                for rates in card["models"].values():
+                    rates.pop(key, None)
+                still_a_card = Path(self.tmp.name) / f"no-{key}.json"
+                still_a_card.write_text(json.dumps(card))
+                with patch.dict(os.environ, {"BENCH_RATE_CARD": str(still_a_card)}):
+                    with self.assertRaises(ValueError):
+                        meter.BudgetGuard()
 
     async def test_an_unpriced_cache_write_ttl_is_not_settled_at_the_short_rate(self):
         # The card prices the 5-minute write only; a 1-hour write bills at double.

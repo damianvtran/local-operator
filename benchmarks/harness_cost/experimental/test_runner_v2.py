@@ -539,6 +539,39 @@ class V2Tests(unittest.TestCase):
                 self.assertEqual(cost["unknown_billing_attempts"], 1)
                 self.assertIsNone(cost["total_cost_usd"])
 
+    def test_money_settled_row_is_measured_and_a_truncation_is_refused(self):
+        # R17 m3: this lane reads the same meter rows, so a row the meter settled
+        # from its own tokens is measured at that derivation -- unknown, not zero,
+        # only when the row is not a whole bill.
+        tokens = {"input_tokens": 2, "output_tokens": 0,
+                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 27164}
+        derivation = {
+            "tokens": tokens,
+            "rates_usd_per_m": {"input_tokens": 2.0, "output_tokens": 10.0,
+                                "cache_read_input_tokens": 0.1,
+                                "cache_creation_input_tokens": 2.5},
+            "usd": 0.067914,
+        }
+        settled = {"path": "v1/messages", "status": 200, "settled_from_tokens": True,
+                   "cost_derivation": derivation, "usage": dict(tokens)}
+        cost = r.money([settled], None, False)
+        self.assertTrue(cost["cost_complete"])
+        self.assertAlmostEqual(cost["total_cost_usd"], 0.067914, delta=1e-12)
+        self.assertEqual(cost["unknown_billing_attempts"], 0)
+        for broken in (
+            {**settled, "incomplete": True},
+            {**settled, "usage": {**tokens, "output_tokens": 5000}},
+            {**settled, "cost_derivation": {**derivation, "usd": 0.01}},
+            {**settled, "cost_derivation": {**derivation,
+                                            "rates_usd_per_m": {"input_tokens": 2.0}}},
+        ):
+            with self.subTest(broken=sorted(broken)):
+                cost = r.money([broken], None, False)
+                self.assertFalse(cost["cost_complete"])
+                self.assertEqual(cost["unknown_billing_attempts"], 1)
+                self.assertEqual(cost["measured_model_cost_usd"], 0.0)
+                self.assertIsNone(cost["total_cost_usd"])
+
     def test_deferred_summary_without_raw_exchanges_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Deferred capture lacks correlated"):
             r.validate_deferred_exchanges(

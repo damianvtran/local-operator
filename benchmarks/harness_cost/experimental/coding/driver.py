@@ -882,6 +882,10 @@ def row_cost(row):
     treated as free: anything without one of those two forms is refused, and a
     derivation must reproduce its own number from its own counts and rates.
     """
+    if row.get("incomplete") is True:
+        # A stream or body that ended before completion has partial usage: a
+        # floor, not the charge, whatever it claims (R17 M1).
+        raise ValueError("incomplete exact-run billing evidence")
     usage = row.get("usage")
     cost = usage.get("cost") if isinstance(usage, dict) else None
     if cost is not None:
@@ -892,11 +896,16 @@ def row_cost(row):
         return float(cost)
     if row.get("settled_from_tokens") is not True:
         raise ValueError("missing/invalid exact-run billing evidence")
-    return derived_cost(row.get("cost_derivation"))
+    return derived_cost(row.get("cost_derivation"), usage)
 
 
-def derived_cost(derivation):
-    """Recompute a settled row's charge from its recorded tokens and rates."""
+def derived_cost(derivation, usage):
+    """Recompute a settled row's charge from its recorded tokens and rates.
+
+    The derivation is checked against the row's own ``usage`` counts as well as
+    its own arithmetic (R17 m2): a cheap derivation beside an expensive usage is
+    a lie, and a priced count the derivation silently omitted is the same hole.
+    """
     if not isinstance(derivation, dict):
         raise ValueError("missing/invalid exact-run billing evidence")
     tokens, rates, usd = (derivation.get(k) for k in ("tokens", "rates_usd_per_m", "usd"))
@@ -904,6 +913,8 @@ def derived_cost(derivation):
         raise ValueError("derived charge is not reproducible from its own counts")
     if isinstance(usd, bool) or not isinstance(usd, (int, float)) or not math.isfinite(usd):
         raise ValueError("derived charge is not a finite amount")
+    if not isinstance(usage, dict):
+        raise ValueError("derived charge has no usage to agree with")
     total = Decimal(0)
     for field, count in tokens.items():
         if isinstance(count, bool) or not isinstance(count, int) or count < 0:
@@ -917,12 +928,28 @@ def derived_cost(derivation):
             raise ValueError("derived charge carries an unusable rate")
         if not math.isfinite(rate) or rate < 0:
             raise ValueError("derived charge carries an unusable rate")
+        charged = usage.get(field)
+        if isinstance(charged, bool) or not isinstance(charged, int) or charged != count:
+            raise ValueError("derived charge disagrees with the row's own usage")
         total += Decimal(count) * Decimal(str(rate))
     if any(field not in tokens for field in rates):
         raise ValueError("derived charge prices tokens it does not count")
+    for field in BILLING_TOKEN_FIELDS:
+        if field in usage and field not in tokens:
+            raise ValueError("derived charge omits a count the row reports")
     if abs(total / 1_000_000 - Decimal(str(usd))) > Decimal("1e-12"):
         raise ValueError("derived charge does not match its own tokens and rates")
     return float(usd)
+
+
+# The usage counts a token-derived charge is made of (meter_proxy.TOKEN_RATE_KEYS).
+# Repeated here because this lane reads the meter's log, never its module.
+BILLING_TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
 
 
 # One disclosed note per image this lane could not remove (S10).

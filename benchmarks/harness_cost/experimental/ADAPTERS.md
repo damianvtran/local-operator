@@ -146,9 +146,10 @@ nonnegative integers, plus any `cache_read_input_tokens` or
 `cache_creation_input_tokens` it reports — the meter settles the charge at the
 rate card frozen for that run and records `settled_from_tokens: true` with
 `cost_derivation: {tokens, rates_usd_per_m, usd}` in its request row. The card
-now carries `input_cache_read`, mapped from the same live listing as the other
-rates, so a cached read is never priced at an assumed zero. A live listing that
-omits it is a startup configuration error, not a silent zero.
+carries every rate such a settlement can be made of — `prompt`, `completion`,
+`input_cache_write` and `input_cache_read` — mapped from the same live listing; a
+listing that omits any of them is a startup configuration error, never a silent
+zero (an omitted cache-write rate priced the pilot's refusal at $0.000004).
 
 WHY: the provider bills the input and the cache write whatever the output
 turns out to be, so a response with zero output is charged. The DEV pilot
@@ -159,16 +160,20 @@ later admission. Why this is arithmetic and not a guess:
 
 * Every term comes from the card the run was frozen under, and the row records
   both the counts and the rates used, so the amount is recomputable from the row.
-* A nonzero count the card cannot price does **not** settle: an absent
-  `input_cache_read` (a card frozen before S10), or a 1-hour cache write, which
-  bills at double the 5-minute rate the card carries. A breakdown that
-disagrees with its top-level count does not settle either.
+* A count the card cannot price does **not** settle: a 1-hour cache write, which
+  bills at double the 5-minute rate the card carries. A card missing any rate is
+  refused when it is loaded, so a card frozen before S10 must be refetched. A
+  breakdown that disagrees with its top-level count does not settle either.
 * A missing `input_tokens`/`output_tokens` count does not settle: partial usage
   is not a bill. Neither does a response carrying any `unpriced_usage` field
   (F23). Both keep the pre-S10 latch exactly.
-* Nothing reads `stop_reason`: every unbilled response follows the same rule, so
-  a refusal, an ordinary stop and a harness-caused 4xx whose body happens to
-  carry counts are treated alike.
+* A response that ended before completion never settles: a truncated stream or
+  a cancelled request has partial usage, which is a floor rather than the
+  charge, so that row is written `incomplete: true` and the ledger latches as it
+  did before S10.
+* Nothing reads `stop_reason`: every unbilled, complete response follows the same
+  rule, so a refusal, an ordinary stop and a harness-caused 4xx whose body
+  happens to carry counts are treated alike.
 
 A refusal remains a primary outcome, never an infrastructure void: the attempt
 is not rerun, its native reward (0) stands, and its cost and wall time are

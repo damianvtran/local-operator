@@ -256,6 +256,53 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("error:", result.stderr)
 
+    def test_an_incomplete_row_is_never_billing_evidence(self):
+        # R17 M1: a truncated stream's partial usage is a floor, not the charge.
+        # Even a well-formed derivation on such a row must not be summed.
+        derivation = {
+            "tokens": {"input_tokens": 2, "output_tokens": 1,
+                       "cache_read_input_tokens": 0, "cache_creation_input_tokens": 27164},
+            "rates_usd_per_m": {"input_tokens": 2.0, "output_tokens": 10.0,
+                                "cache_read_input_tokens": 0.1,
+                                "cache_creation_input_tokens": 2.5},
+            "usd": 0.067924,
+        }
+        row = {"run_id": self.run_id, "status": 200, "incomplete": True,
+               "settled_from_tokens": True, "cost_derivation": derivation,
+               "usage": derivation["tokens"]}
+        with self.assertRaises(ValueError):
+            driver.row_cost(row)
+        path = self.root / "meter.jsonl"
+        path.write_text(json.dumps(row) + "\n")
+        with self.assertRaises(ValueError):
+            driver.wire_rows(path, self.run_id)
+
+    def test_a_derivation_must_agree_with_the_rows_own_usage(self):
+        # R17 m2: `usage` says what the provider consumed; the derivation says what
+        # we charged for. A cheap derivation beside an expensive usage is a lie.
+        tokens = {"input_tokens": 2, "output_tokens": 1,
+                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 27164}
+        derivation = {
+            "tokens": tokens,
+            "rates_usd_per_m": {"input_tokens": 2.0, "output_tokens": 10.0,
+                                "cache_read_input_tokens": 0.1,
+                                "cache_creation_input_tokens": 2.5},
+            "usd": 0.067924,
+        }
+        row = {"run_id": self.run_id, "status": 200, "settled_from_tokens": True,
+               "cost_derivation": derivation, "usage": dict(tokens)}
+        self.assertAlmostEqual(driver.row_cost(row), 0.067924, delta=1e-12)
+        for claimed in ({"output_tokens": 5000}, {"cache_creation_input_tokens": 1}):
+            with self.subTest(claimed=claimed):
+                with self.assertRaises(ValueError):
+                    driver.row_cost({**row, "usage": {**tokens, **claimed}})
+        # A priced count the derivation silently omitted is the same hole.
+        for omitted in ("output_tokens", "cache_creation_input_tokens"):
+            with self.subTest(omitted=omitted):
+                short = {k: v for k, v in tokens.items() if k != omitted}
+                with self.assertRaises(ValueError):
+                    driver.row_cost({**row, "cost_derivation": {**derivation, "tokens": short}})
+
     def test_cost_rows_never_treat_missing_usage_as_free(self):
         path = self.root / "meter.jsonl"
         path.write_text(json.dumps({"run_id": self.run_id, "usage": {"cost": 0.2}}) + "\n")

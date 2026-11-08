@@ -89,6 +89,15 @@ NATIVE_MODELS = ("anthropic/claude-sonnet-5.5", "anthropic/claude-haiku-5.5")
 # A card is fetched from the live price endpoint at run start; an old one may
 # not describe today's price, so it is refused rather than trusted.
 RATE_CARD_MAX_AGE_S = 6 * 3600
+# Every rate a run can be charged at: the reservation bound and the four token
+# terms a settlement is made of. A card missing any of them is refused (R17 m1).
+CARD_RATES = (
+    "prompt",
+    "completion",
+    "input_cache_write",
+    "input_cache_read",
+    "reserve_input",
+)
 # Tokens per request beyond the body bytes: role/tool framing, the system
 # prompt template and image-free provider overhead. Generous on purpose; any
 # bill above the reservation still latches at settle.
@@ -147,9 +156,11 @@ def rate_card_from_models_listing(
             raise ValueError(f"live price listing has no {model}")
         prompt = _per_million(pricing, "prompt", required=True)
         completion = _per_million(pricing, "completion", required=True)
-        write = _per_million(pricing, "input_cache_write", required=False)
-        # Carried because a card that cannot price a cached read cannot settle an
-        # unbilled response from its tokens without under-billing the lane (S10).
+        # Both cache rates are required: settlement prices cache tokens from these
+        # and an absent key would otherwise read as 0.0. A listing missing the
+        # write rate priced the pilot's refusal at $0.000004 instead of $0.067914
+        # (R17 m1), so the card refuses rather than settle a zero.
+        write = _per_million(pricing, "input_cache_write", required=True)
         read = _per_million(pricing, "input_cache_read", required=True)
         models[model] = {
             "prompt": prompt,
@@ -177,7 +188,9 @@ def _load_rate_card(path: Path) -> dict[str, dict[str, float]]:
     if not isinstance(card.get("response_sha256"), str) or not card.get("source"):
         raise ValueError("rate card lacks price provenance")
     for rates in models.values():
-        for key in ("prompt", "completion", "reserve_input"):
+        # Every term a settlement can be made of, plus the reservation rate: a card
+        # that cannot price a token term cannot settle it either (R17 m1).
+        for key in CARD_RATES:
             value = rates.get(key)
             if (
                 isinstance(value, bool)
@@ -185,17 +198,7 @@ def _load_rate_card(path: Path) -> dict[str, dict[str, float]]:
                 or not math.isfinite(value)
                 or value < 0
             ):
-                raise ValueError("rate card holds a non-finite or negative rate")
-        # Optional for a card frozen before S10; an absent rate is not a free one
-        # (settlement refuses a charged field the card cannot price).
-        read = rates.get("input_cache_read")
-        if read is not None and (
-            isinstance(read, bool)
-            or not isinstance(read, (int, float))
-            or not math.isfinite(read)
-            or read < 0
-        ):
-            raise ValueError("rate card holds a non-finite or negative rate")
+                raise ValueError(f"rate card has no usable {key} rate")
     return models
 
 
@@ -948,12 +951,14 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
             # OpenRouter returns the billed amount in usage.cost: it feeds the
             # hard budget stop and is reported beside our list-price computation.
             cost = usage.get("cost")
-            if cost is None and not unpriced:
+            if cost is None and not unpriced and not (extra or {}).get("incomplete"):
                 # An unbilled response is not automatically unknown spend: when
                 # every token it consumed is priceable at the frozen card, the
-                # charge is arithmetic (S10). A response this meter cannot price
-                # -- no counts, or an ``unpriced_usage`` field -- is unchanged
-                # and still latches.
+                # charge is arithmetic (S10). A truncated stream is excluded on
+                # purpose (R17 M1): its partial usage is a floor, not the charge,
+                # so it keeps the "unknown -> latch" rule this branch is named for.
+                # A response this meter cannot price -- no counts, or an
+                # ``unpriced_usage`` field -- is unchanged and still latches.
                 derivation = settled_charge(guard.rates.get(priced_model, {}), usage)
                 if derivation is not None:
                     cost = derivation["usd"]
@@ -1017,8 +1022,12 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
                     if not settled:
                         # Client disconnect or cancellation mid-stream: the
                         # partial usage is not a complete bill (unknown -> latch).
+                        # The accumulated unpriced fields go with it, so a
+                        # partial usage the meter could not price latches too
+                        # (R17 M1: skipping the derivation above is what keeps
+                        # this branch's guarantee).
                         write_row(usage, {"stream": True, "stop_reason": stop, "error": err,
-                                          "incomplete": True})
+                                          "incomplete": True}, frozenset(unpriced))
                         guard.abandon(reservation, "stream ended before completion")
 
             owned = False  # the generator's finally now settles or latches

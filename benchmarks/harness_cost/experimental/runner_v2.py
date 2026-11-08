@@ -1633,6 +1633,72 @@ def radient_token(lop_python: str) -> str:
     return proc.stdout.strip()
 
 
+# The usage counts a token-derived charge is made of (meter_proxy.TOKEN_RATE_KEYS).
+# Repeated here because this lane reads the meter's log, never its module.
+BILLING_TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def derived_amount(row: Mapping[str, object]) -> Decimal:
+    """A settled row's charge, recomputed; ``ValueError`` when it is not one.
+
+    WHY (R17 m3): the meter settles an unbilled response from its own token
+    counts at the run's frozen card and marks the row ``settled_from_tokens``.
+    This lane reads the same meter, so such an attempt is a measured charge, not
+    an unknown one -- counting it unknown would report a cost cell as null for
+    exactly the arms that hit a refusal. It stays unknown when the row is not a
+    whole bill: a truncated stream, a derivation that does not reproduce its own
+    number from its own counts and rates, or one that disagrees with the row's
+    own usage counts. Unknown is refused, never counted as zero.
+    """
+    from decimal import InvalidOperation
+
+    if row.get("incomplete") is True or row.get("settled_from_tokens") is not True:
+        raise ValueError("not a settled row")
+    usage = row.get("usage")
+    derivation = row.get("cost_derivation")
+    if not isinstance(usage, dict) or not isinstance(derivation, dict):
+        raise ValueError("not a settled row")
+    tokens, rates, usd = (derivation.get(k) for k in ("tokens", "rates_usd_per_m", "usd"))
+    if not isinstance(tokens, dict) or not isinstance(rates, dict):
+        raise ValueError("derivation is not reproducible")
+    if isinstance(usd, bool) or not isinstance(usd, (int, float)):
+        raise ValueError("derivation has no finite amount")
+    total = Decimal(0)
+    for field, count in tokens.items():
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("derivation is not reproducible")
+        rate = rates.get(field)
+        if rate is None:
+            if count:
+                raise ValueError("derivation leaves charged tokens unpriced")
+            continue
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+            raise ValueError("derivation carries an unusable rate")
+        charged = usage.get(field)
+        if isinstance(charged, bool) or not isinstance(charged, int) or charged != count:
+            raise ValueError("derivation disagrees with the row's own usage")
+        total += Decimal(count) * Decimal(str(rate))
+    if any(field not in tokens for field in rates):
+        raise ValueError("derivation prices tokens it does not count")
+    for field in BILLING_TOKEN_FIELDS:
+        if field in usage and field not in tokens:
+            raise ValueError("derivation omits a count the row reports")
+    try:
+        amount = Decimal(str(usd))
+    except InvalidOperation as exc:  # pragma: no cover - guarded above
+        raise ValueError("derivation has no finite amount") from exc
+    if not amount.is_finite() or amount < 0:
+        raise ValueError("derivation has no finite amount")
+    if abs(total / 1_000_000 - amount) > Decimal("1e-12"):
+        raise ValueError("derivation does not match its own tokens and rates")
+    return amount
+
+
 def money(
     rows: Sequence[Mapping[str, object]],
     classifier: Mapping[str, object] | None,
@@ -1661,11 +1727,14 @@ def money(
         usage = row.get("usage")
         value = usage.get("cost") if isinstance(usage, dict) else None
         try:
-            if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
-                raise ValueError("Invalid billed cost")
-            amount = Decimal(str(value))
-            if not amount.is_finite() or amount < 0:
-                raise ValueError("Invalid billed cost")
+            if value is None:
+                amount = derived_amount(row)
+            else:
+                if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+                    raise ValueError("Invalid billed cost")
+                amount = Decimal(str(value))
+                if not amount.is_finite() or amount < 0:
+                    raise ValueError("Invalid billed cost")
         except (InvalidOperation, ValueError, TypeError):
             unknown += 1
             continue
