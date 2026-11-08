@@ -726,7 +726,10 @@ that a borrower serves its own copy of the bearer until `expires_at - 120 s`,
 and that one turn's provider calls share one grant. Reading them as as-built is
 the divergence this note closes.
 
-**In normal operation, every provider resolve dials the owner.**
+**In normal operation, every provider resolve dials the owner** — superseded
+for *covered* keys by the 2026-11-07 note below, which reuses a grant while the
+owner's lifecycle is unchanged; what follows still holds for every key that
+note leaves uncovered.
 `request_grant_sync` (`local_operator/network/credentials/client.py`) reads the
 grant cache ahead of the dial only behind `if is_github_key(key)`, so a rotation
 or a logout on the owner is picked up by the next resolve. The grant that comes
@@ -773,7 +776,8 @@ all.
 out (`min(token_exp, now + grant_ttl_s)`) and the borrower's own copy of it. That
 one cap bounds how long a revoked peer holds a live bearer (§3.7), how long a
 provider bearer is held while its owner is unreachable, and how long the
-`github` and MCP paths serve a bearer without asking.
+`github` and MCP paths serve a bearer without asking. Half of it bounds how long
+a covered provider key reuses one (2026-11-07 note below).
 
 **The test that holds the line.**
 `tests/unit/network/test_native_hot_access.py::test_live_grant_and_old_login_refusal_do_not_short_circuit_owner`
@@ -782,7 +786,85 @@ two owner dials (`len(calls) == 2`). It is parametrised over the first resolve's
 `force_refresh`; the second resolve is always unforced. Widening the
 `is_github_key` gate to providers turns it red. It drives `MeshCredentialClient`
 directly and never reaches `_borrow`, so a `_borrow` future kept past its borrow
-— a turn-level cache — is invisible to it.
+— a turn-level cache — is invisible to it. Since 2026-11-07 it is also
+parametrised over lifecycle coverage (`none`, `other_key`): it pins that an
+*uncovered* key keeps dialling once the note below lets covered keys reuse.
+
+#### As-built note (2026-11-07): a covered provider key reuses its grant
+
+**Operator approval (C5).** Asked 2026-11-07 (ask a-1d0b). Question, verbatim:
+"Should remote devices reuse a borrowed provider login for a few minutes,
+instead of asking your Mac on every model call? The catch: after you revoke a
+share, withdraw it or log out, the remote stops within about 15 s, and at most
+7.5 min if an update is lost." Answer, verbatim: "Approve the window
+(recommended)".
+
+**What changed.** `request_grant_sync` calls `_serve_cached` where the `github`
+gate sits. For a provider key it hands back this session's cached grant without
+dialling either leg when **all** of these hold, and otherwise dials exactly as
+before:
+
+- not MCP, not `github` (own path, unchanged), not device-bound; not `force_refresh`;
+- the slot is outside the 120 s re-ask margin and younger than
+  `grant_ttl_s/2` (450 s at the default), measured on the borrower on BOTH a
+  sleep-inclusive monotonic clock (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME`
+  on Linux, else `time.monotonic()`) and wall time; either age past the bound,
+  or a wall clock stepped behind the stamp, ends reuse. Plain `time.monotonic()`
+  is `mach_absolute_time()` on macOS and stops while the machine sleeps, so a
+  laptop that slept through a revoke would otherwise wake reusing a grant that
+  looked seconds old (PR #3581 review R1-B1). Below `grant_ttl_s` = 240 s the
+  120 s re-ask margin, not the half-life, ends reuse first (the window is
+  `grant_ttl_s - 120` s), and at 120 s or less there is no reuse at all;
+- it was stored with a **non-empty lifecycle fence**: the set of
+  `(scope, (login_chain_revision, material_generation), state)` this device has
+  observed for `(owner, key)` in `lifecycle.json`, captured in
+  `_capture_request` **before** the dial, like the policy stamp;
+- the fence read now is equal (a logout, rotation, re-login or withdraw moves
+  it), there is no lifecycle restriction, and the held-policy stamp is current;
+- this device is still a member (otherwise `_invalidate_membership_scope`, as
+  on the other two paths) and still a holder (`should_borrow`; a changed
+  placement file already clears the cache in `placement()`);
+- the lent row is not cooling for this `model_id` in `placement.state.json`
+  (another process's 429), and `affinity`/`demote_credential_ids` equal the
+  ones the fetching dial sent.
+
+Any failure report (`report_sync`: 401, `invalid`, 429, 5xx) drops the key, so
+the next resolve dials. The admissibility checks shared with the
+owner-unreachable hold live in one helper, `_hold_admission`.
+
+**Why it is safe now when `0385927ab94` was right to remove it.** That commit's
+reason was that a grant TTL is not an upstream credential generation. The
+forward-only lifecycle generations (`e422250f678`, the next day) are exactly
+that generation, announced by the owner on the 15 s tick. **Coverage gaps fail
+closed:** a key with no *stored* lifecycle observation for its
+`(owner, key)` — an owner login with no lifecycle stamp, or a link that never
+negotiated `credential-lifecycle-v1` — has an empty fence and dials on every call
+as before. The fence reads stored observations, not the link's current
+capability: an owner that later stops announcing (a downgrade, a re-login path
+that writes no stamp) keeps its last fence, so that key is reused like a lost
+update, for at most `grant_ttl_s/2`. An unprovable `lifecycle.json` stays a refusal
+(`consent_unverifiable`), as it was.
+
+**Unchanged.** No wire field, no owner change, no refresh token on the
+borrower, zero borrower token POSTs, no new refresh authority; the signed
+delegation path is untouched. The grant still lives only in process memory.
+
+**Measured** (two-relay loopback rig, separate B session process, n = 5 per
+cell, before = `origin/main`, after = this change): see the table in §3.7 and
+the PR for raw rows.
+
+| Cell | Before | After |
+|---|---|---|
+| Owner dials over a 20-call session (B process, `_resolve_access_for_provider`) | 20/20 dial, 0 % reuse | 1/20 dial, **95 %** reuse (19/20, every trial) |
+| Warm call | median 36.5 ms | median 6.2 ms |
+| `credential revoke` on A → B's first refused call | median 0.19 s (max 0.40 s) | median 10.6 s (max 14.0 s): B's placement tick |
+| Owner logout (`run_logout`) → B's first refused call | median 0.15 s (max 0.37 s) | median 7.6 s (max 13.4 s): the lifecycle announce tick |
+| `credential revoke` with B's placement pull failing, so only A's lifecycle `withdrawn` announce reaches B | — | median 4.4 s (max 13.7 s); B's placement still named it a holder, its lifecycle state read `withdrawn` |
+| Owner frozen (link up, grant requests unanswered), 20 s of calls every 0.5 s | 3 calls, each 8.0 s (the deadline), then `held_offline` | 26–28 calls, all served at ~3 ms; one 8 s dial when the owner's post-refresh rotation was announced, then `held_offline` |
+
+The lost-update ceiling (`grant_ttl_s/2`) is pinned by unit test, not measured
+on the rig. The freeze is a blocked owner grant handler, not a `SIGSTOP`: both
+relays share one test process there.
 
 ### 3.6 The code seams (exact names)
 
@@ -911,10 +993,17 @@ does not surface, add it as a purely additive method there (§8 Q2).
   grant stopped at the borrower's next re-ask. `grant_ttl_s` bounds only a
   well-behaved borrower: the same bearer, copied out of the borrower's process,
   answered HTTP 200 at the provider 15 s after the grant expired, because the
-  access token lives until its own expiry at the provider. Three latencies, so
-  three statements: new grants stop now; a lent grant stops within
-  `grant_ttl_s`; a copied bearer stops only when the token expires or is
-  revoked at the provider. A shared `api-key-static` credential has no expiry,
+  access token lives until its own expiry at the provider. Four latencies, so
+  four statements (the second row is the 2026-11-07 grant-reuse window, §3.5):
+
+  | What stops | When |
+  |---|---|
+  | New grants | Now: the owner refuses the next ask. |
+  | A grant a covered provider key is reusing (revoke, withdraw, owner logout or rotation) | About one tick (15 s) on whichever path arrives first: B's placement pull (revoke) or A's lifecycle announce (revoke as `withdrawn`, logout, rotation). Measured on loopback, n = 5: revoke median 10.6 s (max 14.0 s), logout 7.6 s (max 13.4 s), revoke via the lifecycle announce alone 4.4 s (max 13.7 s). Both paths run on their device's definitions-tick thread, so a peer request hung on that thread delays the next tick: a black-holed `net_broker` request waits out its 75 s owner deadline plus 5 s margin, which is how a rig that dropped placement frames measured 83 s (median) for the lifecycle-only path. In every case, at most `grant_ttl_s/2` (450 s at the default) after the grant was fetched, if the update is lost while the owner is reachable. |
+  | Any other lent grant, honest borrower | At its next ask, which the owner refuses; held while the owner is unreachable, but never past the grant's expiry (within `grant_ttl_s`). |
+  | A copied bearer | Only when the token expires or is revoked at the provider. |
+
+  A shared `api-key-static` credential has no expiry,
   so a copy of it stops only when the key is rotated at the provider.
   `lop network credential revoke` prints the statement for the kind revoked.
 - **A malicious holder can spend the operator's quota.** `holders` is a real

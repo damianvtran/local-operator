@@ -186,11 +186,43 @@ def test_forge_cache_is_permission_bound_and_force_does_not_reuse_it(
     source.close()
 
 
+def _seed_uncovered_lifecycle(root: Path, coverage: str) -> None:
+    """Lifecycle evidence that must NOT license the borrower's hot read for ``openai``.
+
+    ``none``: no observation at all (an owner whose logins carry no lifecycle stamp,
+    or a link that never negotiated ``credential-lifecycle-v1``). ``other_key``: the
+    owner announces a different key only. (An unprovable file is not a coverage
+    gap but a refusal, ``consent_unverifiable``, pinned in the lifecycle suites.)
+    """
+    from local_operator.network.credentials import lifecycle
+
+    store = lifecycle.LifecycleStore(NETWORK, root)
+    if coverage == "other_key":
+        store.observe(
+            lifecycle.Observation(
+                owner=OWNER,
+                key="anthropic",
+                account_scope_ref="native:anthropic:c3ludGhldGlj",
+                login_chain_revision=1,
+                material_generation=1,
+                state="available",
+            )
+        )
+
+
+@pytest.mark.parametrize("coverage", ["none", "other_key"])
 @pytest.mark.parametrize("force", [False, True])
 def test_live_grant_and_old_login_refusal_do_not_short_circuit_owner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, force: bool, coverage: str
 ) -> None:
+    """An owner WITHOUT lifecycle evidence for the key keeps dial-per-call.
+
+    The borrower's hot read (``client._serve_cached``) reuses a grant only behind a
+    non-empty lifecycle fence; every ``coverage`` here leaves that fence empty, so
+    each resolve still reaches the owner and sees its next rotation.
+    """
     source = _source(tmp_path)
+    _seed_uncovered_lifecycle(tmp_path, coverage)
     source.grants.put("openai", "same-session", _native())
     source._remember("openai", BrokerError(code="no_local_credential", owner_device=OWNER))
     calls = []
