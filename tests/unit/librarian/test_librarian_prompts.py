@@ -50,7 +50,7 @@ def test_the_seed_is_the_documented_policy() -> None:
         "Skip locked assets",
         "Never delete, move or rename files",
         "No secrets",
-        "Aida",
+        "their chief of staff",
         "`library` tool",
         "global and long-term",
         "Canvas Files panel is per-session",

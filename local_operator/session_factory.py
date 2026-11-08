@@ -4076,11 +4076,29 @@ def _make_system_blocks_provider(
     from local_operator.prompts_api import host_capability_probes
 
     host_has_browser, host_has_console = host_capability_probes()
+    # THE CHIEF OF STAFF'S NAME (``build_system_blocks`` ``identity_name`` /
+    # ``renamed_to``). The answer comes from the OWNING Session through the
+    # ``cos_display_name`` probe it installs (``Session._cos_display_name``),
+    # never from an import here: this module must not import
+    # ``local_operator.aida`` at all (R17, pinned by
+    # ``tests/unit/aida/test_aida_exec_isolation.py`` — no code path from the
+    # automation shapes to her engine), and only the Session knows whether it
+    # is hers (``_aida_duty``). The probe answers ``""`` for every other
+    # session, which renders nothing.
+    #
+    # ``identity_name`` is FROZEN at the first render, with the head block
+    # (the ``language_line`` read-once discipline); later renders pass the
+    # live name as ``renamed_to`` only while it differs, so a rename reaches
+    # the NEXT turn as a one-section ``[session-state]`` delta without moving
+    # the persisted prefix and without touching (re-seeding) her profile. A
+    # new provider (a fresh session, a resume in a new process) freezes the
+    # current name into the head itself.
+    identity_name: str | None = None
     cached_key: tuple[Any, ...] | None = None
     cached_blocks: list[str] = []
 
     async def provider(model_label: str = "") -> list[str]:
-        nonlocal cached_key, cached_blocks
+        nonlocal cached_key, cached_blocks, identity_name
         # notify is wired only after Session construction. The factory's warm
         # roster lacks its door; inventory reconciliation cannot repair block
         # zero. Ask the owning Session, never infer from host type or a stub.
@@ -4165,7 +4183,22 @@ def _make_system_blocks_provider(
         # (unknown must not ship as a removal), because only that layer can see the
         # section the model is already reading (QA round 1, Q2).
         open_asks = goal_state.open_asks() if goal_state is not None else None
+        cos_probe = getattr(provider, "cos_display_name", None)
+        try:
+            live_name = str(cos_probe() or "") if callable(cos_probe) else ""
+        except Exception:  # noqa: BLE001 — a display name must never break a turn
+            logger.debug("could not read the chief of staff's name", exc_info=True)
+            live_name = ""
+        if identity_name is None:
+            identity_name = live_name
+            # Read by ``Session._settle_identity_removal`` (R1-2, Q5): it
+            # compares the name the last ``<identity>`` record was rendered
+            # for with the head's, to tell a resume (nothing ships) from a
+            # rename back (one positive line ships).
+            setattr(provider, "cos_identity_name", identity_name)
+        renamed_to = live_name if identity_name and live_name != identity_name else ""
         key = (
+            renamed_to,
             knowledge_block,
             date_str,
             goal,
@@ -4213,6 +4246,8 @@ def _make_system_blocks_provider(
             has_notify=has_notify,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
+            identity_name=identity_name,
+            renamed_to=renamed_to,
         )
         cached_key = key
         return list(cached_blocks)
@@ -4222,6 +4257,8 @@ def _make_system_blocks_provider(
     # protocol explicitly; benchmarks can still call this builder read-only.
     setattr(provider, "append_only_state", True)
     setattr(provider, "session_notify_membership", True)
+    # Asks the owning Session to install ``cos_display_name`` (see above).
+    setattr(provider, "session_cos_identity", True)
     setattr(provider, "repo_guidance", repo_guidance)
     setattr(provider, "knowledge_hooks", hooks)
     # The frozen host answer, for the session's own re-render of block 1. Two

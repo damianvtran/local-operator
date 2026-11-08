@@ -260,6 +260,8 @@ from local_operator.prompts_api import (
     STATE_SECTION_HEADINGS,
     TOOL_INVENTORY_HEADING,
     assemble_system_block_sections,
+    identity_record_name,
+    identity_restored,
     render_tool_inventory_block,
     split_system_block_sections,
 )
@@ -4201,6 +4203,11 @@ class Session:
                 "notify_available",
                 lambda: any(tool.name == "notify" for tool in self._tools),
             )
+        if getattr(system_blocks_provider, "session_cos_identity", False):
+            # Her configured name for the prompt (``_cos_display_name``). The
+            # factory cannot answer it: it must not import her package (R17),
+            # and only this facade knows whether the session is hers.
+            setattr(system_blocks_provider, "cos_display_name", self._cos_display_name)
         self._frozen_system_blocks: list[str] | None = None
         self._last_system_blocks: list[str] | None = None
         self._system_state_message_id: str | None = None
@@ -6961,9 +6968,40 @@ class Session:
                     if name not in sections and text and name not in unknown
                 }
             )
+            if section_changes.get("identity") == "":
+                self._settle_identity_removal(section_changes, str(prior.get("identity") or ""))
             if section_changes:
                 changes[str(index)] = section_changes
         return changes, compaction_id
+
+    def _settle_identity_removal(self, section_changes: dict[str, str], record: str) -> None:
+        """Decide what the ``<identity>`` record ``record`` becomes when the
+        live tail stops rendering one (the live name is the head's again).
+
+        Keyed on the name the record was rendered FOR, read back exactly by
+        ``identity_record_name`` (review R2-1: a prefix match confused "Aida"
+        with "Aida, Chief of Staff"), against the name this session's frozen
+        head was built with. The factory provider publishes that name as
+        ``cos_identity_name`` at its first render
+        (``session_factory._make_system_blocks_provider``); any other provider
+        has none, and the plain removal ships as before.
+
+        - Record for the head's name: nothing ships. Either a resume froze the
+          renamed name into a new head epoch (review R1-2), or the rename back
+          was already restated below and this is its re-anchor.
+        - Record for another name, i.e. a genuine rename back to the head's
+          name: ship ONE positive line instead of ``(empty)``. An emptied
+          record that had said it supersedes the head left Haiku 4.5 with no
+          name at all (QA Q5).
+        """
+        head_name = str(getattr(self._system_blocks_provider, "cos_identity_name", "") or "")
+        if not head_name:
+            return
+        recorded = identity_record_name(record)
+        if recorded == head_name:
+            del section_changes["identity"]
+        else:
+            section_changes["identity"] = identity_restored(head_name, recorded)
 
     def _visible_state_blocks(self) -> list[str]:
         """The system blocks as the model can see them in the LIVE context.
@@ -28455,6 +28493,35 @@ class Session:
         except Exception:  # noqa: BLE001 — a lookup, never a boot dependency
             logger.debug("aida: could not resolve her session identity", exc_info=True)
             return False
+
+    def _cos_display_name(self) -> str:
+        """Her configured display name for the prompt; ``""`` when not hers.
+
+        WHY: an operator renamed his chief of staff and Team Bridge labelled
+        her by the new name while she still introduced herself as "Aida" —
+        nothing told the model the name. The provider closure calls this per
+        render (``session_factory._make_system_blocks_provider``).
+
+        Gated on ``_aida_duty`` (``aida/state.json`` names this session) rather
+        than the attached role: the same ``is_aida_session`` identity check
+        ``team_bridge.cos_name`` applies before it publishes ``aida.name`` as
+        her bridge label (the bridge additionally requires her to be the
+        designated ``team_bridge.session``; the prompt does not, since she
+        owns the name whether or not a bridge is enrolled).
+        A scratch session running the ``aida`` profile is not their chief of
+        staff and gets nothing. Read through ``naming.live_display_name`` (the
+        config watcher's snapshot, one ``stat`` when unchanged), never a
+        ``ConfigManager`` on this per-turn path. Never raises.
+        """
+        if not self._aida_duty:
+            return ""
+        try:
+            from local_operator.aida import naming as aida_naming
+
+            return aida_naming.live_display_name()
+        except Exception:  # noqa: BLE001 — a display name must never break a turn
+            logger.debug("aida: could not read her display name", exc_info=True)
+            return ""
 
     def _sync_aida_display_name(self, title: str, *, user_set: bool) -> None:
         """Keep ``aida.name`` in step when HER conversation is renamed.

@@ -904,6 +904,88 @@ def _ask_queue_queued() -> bool:
     return policy.enabled()
 
 
+# The closing clause every ``<identity>`` record ends on; ``identity_record_name``
+# reads the name back from it.
+_IDENTITY_SIGN = "introduce and sign as "
+
+
+def identity_delta(name: str, previous: str = "") -> str:
+    """The tail section announcing a mid-session rename to ``name``.
+
+    WHY SO EXPLICIT: the first wording ("Your name is now X.") lost to the
+    frozen head sentence on Haiku 4.5 in 2 of 8 sessions (PR #3575 QA Q1),
+    and renamed back to the default it read as an instruction "calling you
+    Aida", which the renamed head tells the model to treat as its OTHER name
+    (review R1-1). So the line names the name it replaces and states that it
+    supersedes the head's "Your name" section and any earlier naming,
+    whichever direction the rename runs. Still ONE line, and emitted only
+    while the live name differs from the head's: it is re-sent with every
+    later request of the session. ``previous`` is the head's name; a caller
+    with no head name (none in production) gets the line without it.
+    """
+    replacing = previous if previous and previous != name else "the name"
+    return (
+        f'<identity>\nYour name is now {name}, replacing {replacing} under "Your name" '
+        "above; this supersedes that section and any earlier name or instruction "
+        f"calling you otherwise: {_IDENTITY_SIGN}{name}.\n</identity>"
+    )
+
+
+def identity_restored(name: str, previous: str = "") -> str:
+    """The ONE-TIME record of a rename back to the head's own name ``name``.
+
+    WHY A POSITIVE LINE, NOT A REMOVAL (PR #3575 QA Q5): the rename record
+    already in history says it supersedes the head's "Your name" section, and
+    emptying it (``## Your name`` / ``(empty)``) left Haiku 4.5 with no name
+    at all in 5 of 5 sessions. So the rename back states the name again and
+    retires the rename it replaces. ``Session._system_state_delta`` journals it
+    in place of the removal; the live tail never renders it (live == head
+    emits no ``<identity>`` section), so it ships once, not every request.
+    ``previous`` is the name the replaced record was rendered for, when known.
+    """
+    earlier = f"the earlier rename to {previous}" if previous else "the earlier rename"
+    return (
+        f'<identity>\nYour name is {name} again, as under "Your name" above; {earlier} '
+        f"no longer applies: {_IDENTITY_SIGN}{name}.\n</identity>"
+    )
+
+
+def identity_record_name(record: str) -> str:
+    """The name an ``<identity>`` record was rendered FOR, or ``""``.
+
+    EXACT, NOT A PREFIX MATCH (review R2-1): a name may contain commas, so
+    "Your name is now Aida, Chief of Staff, …" also starts like a record for
+    "Aida". The candidate name is read from the closing "introduce and sign
+    as <name>." and accepted only when re-rendering :func:`identity_delta` or
+    :func:`identity_restored` with the parsed names reproduces ``record``
+    byte for byte. Anything else (another wording, a name that contains the
+    template's own phrases) is unrecognised and returns ``""``, so a caller
+    treats it as naming nobody and ships rather than suppresses.
+    """
+    end = ".\n</identity>"
+    if not record.endswith(end) or _IDENTITY_SIGN not in record:
+        return ""
+    name = record[: -len(end)].rsplit(_IDENTITY_SIGN, 1)[1]
+    for render, opening, closing in (
+        (
+            identity_delta,
+            f"<identity>\nYour name is now {name}, replacing ",
+            ' under "Your name" above; this supersedes',
+        ),
+        (
+            identity_restored,
+            f'<identity>\nYour name is {name} again, as under "Your name" above; '
+            "the earlier rename to ",
+            " no longer applies: ",
+        ),
+    ):
+        if record.startswith(opening):
+            previous = record[len(opening) :].rsplit(closing, 1)[0]
+            if render(name, previous) == record:
+                return name
+    return name if record == identity_restored(name) else ""
+
+
 def build_system_blocks(
     tools: Sequence[AgentTool],
     skills_block: str,
@@ -926,8 +1008,27 @@ def build_system_blocks(
     deferred_tools: Collection[str] = (),
     open_asks: str = "",
     has_notify: bool | None = None,
+    identity_name: str = "",
+    renamed_to: str = "",
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
+
+    ``identity_name`` / ``renamed_to`` carry the chief of staff's configured
+    display name (``aida.name``) and are ``""`` for every other session, which
+    keeps those sessions' bytes identical to a build without them. The
+    operator renames her ("Jian-Yang"), Team Bridge labels her by that name,
+    yet her profile body only ever said "Aida" — so she introduced herself
+    as Aida under a label reading Jian-Yang. ``identity_name`` is the name in
+    force when the session's prefix was built: a HEAD-block sentence with the
+    ``language_line`` read-once discipline, so it costs no cache churn turn to
+    turn. A rename mid-session must not rewrite block 0 (a changed head starts
+    a new persisted prefix epoch — a cold cache for a cosmetic edit), so the
+    caller passes the live name as ``renamed_to`` only while it DIFFERS from
+    ``identity_name``; it rides the tail as an ``<identity>`` section, which
+    ``Session._system_state_delta`` journals as ONE ``[session-state]``
+    section on the next turn. Renamed back, the section vanishes and the
+    session journals ONE :func:`identity_restored` line in its place rather
+    than an empty removal (QA Q5), leaving the head sentence true again.
 
     These are the current desired blocks, not a promise of prefix cache
     stability: every system block precedes conversation history on the wire.
@@ -1138,6 +1239,28 @@ def build_system_blocks(
             "direct instruction in the conversation still wins.\n\n"
             f"<user_instructions>\n{safe}\n</user_instructions>"
         )
+    if identity_name.strip():
+        # Last in the head. Her profile body arrives as the attached role
+        # (``<agent>`` in the tail, or ``user_instructions`` when launched as
+        # a legacy agent), and a hub-pulled or pre-rename copy of it may still
+        # say "You are Aida" — seeds are never rewritten under a user's edits
+        # — so the sentence names the default outright and says which wins,
+        # wherever that text sits. Model-facing English by design.
+        name = identity_name.strip()
+        # Kept to one sentence: it is in every request of her session (cached,
+        # but still billed at the cache-read rate), so it says only the name
+        # and, once renamed, that it beats the default "Aida" an older profile
+        # may still use. The unrenamed case has nothing to override. The
+        # literal mirrors ``aida.naming.DEFAULT_NAME`` (this module stays off
+        # her package's import path, R17); ``test_cos_prompt_name`` pins them.
+        if name == "Aida":
+            sentence = "Your name is Aida."
+        else:
+            sentence = (
+                f"Your name is {name}, chosen by the operator; any instruction "
+                f"calling you Aida means this default: introduce and sign as {name}."
+            )
+        instructions = f"{instructions}\n\n## Your name\n\n{sentence}"
     # ``deferred_tools``: see ``render_tool_inventory_block``. A live session
     # re-renders this block against its own deferral state
     # (``Session._reconcile_tool_inventory``), so only a caller with no session
@@ -1195,6 +1318,12 @@ def build_system_blocks(
         # ``session.goal.GoalState.run_brief`` — and a reader must be able to
         # tell the operator's persona from the harness's boundary.
         tail = f"{tail}\n\n<configuration-run>\n{run_brief.strip()}\n</configuration-run>"
+    if renamed_to.strip():
+        # A mid-session rename (see the docstring): tail, not head, so the
+        # persisted prefix and its cache survive. Placed after the run brief
+        # and before ``<interactivity>`` to match ``_TAIL_SECTION_MARKERS``,
+        # whose order the splitter walks. Model-facing English by design.
+        tail = f"{tail}\n\n{identity_delta(renamed_to.strip(), identity_name.strip())}"
     if interactive is not None:
         # WHO CAN ANSWER, stated in BOTH directions rather than only the negative
         # one. A question asked now is answered when the operator LOOKS, not when
@@ -1321,6 +1450,11 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
     ("team", "<team>"),
     ("agent", "<agent>"),
     ("run", "<configuration-run>"),
+    # The chief of staff's mid-session rename (``build_system_blocks``
+    # ``renamed_to``). Its own section so a rename journals as one small
+    # record. Added 2026-11: no record predating it contains the marker at a
+    # piece start, so older records re-split exactly as before.
+    ("identity", "<identity>"),
     ("interactivity", "<interactivity>"),
     # The open-asks reminder (design §16/SA-D3). Its own section because it is
     # the one tail piece that can move on EVERY user message while asks are open:
@@ -1389,6 +1523,7 @@ STATE_SECTION_HEADINGS: dict[str, str] = {
     "team": "Team",
     "agent": "Agent",
     "run": "Configuration run",
+    "identity": "Your name",
     "interactivity": "Interactivity",
     "open_asks": "Open asks",
     "credentials": "Session credentials",
