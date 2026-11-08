@@ -206,6 +206,27 @@ class ConfigWatcher:
         """
         return self._values
 
+    @property
+    def is_polling(self) -> bool:
+        """True only while :meth:`start` has a live poll task behind this watcher.
+
+        WHY THIS IS PUBLIC. :func:`process_watcher` also hands out watchers that
+        are never started (``poll_now()`` once, then nothing — the settings
+        route, the team bridge, the COS-name read). Such a watcher's
+        :attr:`values` moves only on a ``poll_now()`` or a ``notify_local()``
+        from this process, so a write made by the CLI, the TUI or another client
+        is invisible to it forever. Readers that want "the current config" must
+        therefore trust :attr:`values` only when this is true; otherwise they
+        must read the file. A bare ``existing_watcher(...) is not None`` says
+        nothing about freshness.
+
+        Reads ``_task`` without a lock: a plain attribute load plus ``done()``
+        is safe from any thread, and a racing ``stop()`` only flips the answer
+        to False, which sends the caller to the (always-correct) file read.
+        """
+        task = self._task
+        return task is not None and not task.done()
+
     def subscribe(self, listener: Listener) -> Callable[[], None]:
         """Register ``listener``; returns its unsubscribe.
 
