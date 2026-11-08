@@ -33,13 +33,13 @@ from local_operator.i18n.messages import envelope, msg
 from local_operator.server.app import managed_desktop_boundary
 from local_operator.server.routes import settings
 from local_operator.server.routes.desktop_lifecycle import Aside
-from tests.unit.server.test_desktop_aside_route import (
+from tests.unit.server.test_desktop_aside_route import (  # noqa: F401
     REQUEST_ID,
     SESSION_ID,
     TOKEN,
     _FakeRemote,
     _install,
-    restore_app_state,  # noqa: F401  (fixture re-export, used by name)
+    restore_app_state,
 )
 
 INLINE_CREDENTIALS = "wire.errors.settings.inline_credentials"
@@ -98,7 +98,8 @@ async def test_aside_limit_refusal_text_follows_the_active_locale(
 ) -> None:
     app, _bridge = _install(monkeypatch, tmp_path, _FakeRemote())
     # 64 live panels is the route's cap; the 65th ask is the refusal under test.
-    app.state.desktop_asides = {f"existing-{n}": Aside(SESSION_ID, [], time.monotonic()) for n in range(64)}
+    now = time.monotonic()
+    app.state.desktop_asides = {f"existing-{n}": Aside(SESSION_ID, [], now) for n in range(64)}
 
     async def refused() -> dict[str, Any]:
         async with AsyncClient(
