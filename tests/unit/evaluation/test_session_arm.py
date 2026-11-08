@@ -5604,9 +5604,14 @@ class TestBridgeCommand:
         """
 
         rows: list[tuple[str, dict[str, Any]]] = []
+        # The adapter's real text for the sealed body, verbatim: a fixture that
+        # kept the retired wording (it quoted the server's ``status='success'``
+        # beside ``exit_code: none``) would model a contradiction this PR removed.
         reason = (
-            "the target command wrapper failed (status='success', "
-            "wrapper terminated by signal SIGTERM)"
+            "the target command wrapper was terminated by signal SIGTERM without "
+            "reporting a result; the command's outcome is unknown -- it may have run "
+            "already, or it may still be running on the target -- so re-issuing it "
+            "blindly could run it twice"
         )
 
         async def run_command(command: str, timeout_s: float) -> Any:
