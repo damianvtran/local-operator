@@ -1008,6 +1008,7 @@ def build_system_blocks(
     deferred_tools: Collection[str] = (),
     open_asks: str = "",
     has_notify: bool | None = None,
+    has_bridge: bool | None = None,
     identity_name: str = "",
     renamed_to: str = "",
 ) -> list[str]:
@@ -1197,6 +1198,18 @@ def build_system_blocks(
             # derive. Gated on MEMBERSHIP so a child's prompt does not move.
             "has_notify": (
                 any(tool.name == "notify" for tool in tools) if has_notify is None else has_notify
+            ),
+            # The coordination clause: which surface reaches another PERSON'S
+            # agent. Same SINGLE-flag shape as ``has_notify`` and for the same
+            # reason — a session without the tool simply has no such clause to
+            # render, so there is no contradictory half to derive and no
+            # ``no_bridge`` negation to keep in step. Gated on MEMBERSHIP, never
+            # on visibility: a hidden-but-callable ``bridge`` still coordinates.
+            # This is also the operator constraint that keeps a solo or
+            # signed-out user's prompt byte-identical: absent tool, absent
+            # clause, no stray newline (the marker sits inline in the template).
+            "has_bridge": (
+                any(tool.name == "bridge" for tool in tools) if has_bridge is None else has_bridge
             ),
         },
     )
