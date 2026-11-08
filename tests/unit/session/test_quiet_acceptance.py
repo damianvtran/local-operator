@@ -163,9 +163,35 @@ def timeout_state(session, events, steer_attempts, steer_returns):
         + (f"(quiet_accepted={event.quiet_accepted})" if isinstance(event, AgentEndEvent) else "")
         for event in events[-12:]
     )
+    def describe_task(task):
+        """Bare label plus the await chain a pending task is parked on.
+
+        A measured healthy post-end tail is ~3 ms, so an 8 s timeout is a
+        BLOCKED await, and bare ``Task-N:pending`` labels cannot name it. Walk
+        the ``cr_await`` chain (bounded, read-only) to the innermost awaiting
+        frame. Any failure degrades to the bare label, never a new exception.
+        """
+        label = f"{task.get_name()}:{'done' if task.done() else 'pending'}"
+        try:
+            chain = []
+            node = task.get_coro()
+            for _ in range(8):
+                if node is None:
+                    break
+                frame = getattr(node, "cr_frame", None) or getattr(node, "gi_frame", None)
+                name = getattr(node, "__qualname__", type(node).__name__)
+                where = f"@{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_lineno}" if frame else ""
+                chain.append(f"{name}{where}")
+                node = getattr(node, "cr_await", None) or getattr(node, "gi_yieldfrom", None)
+            if node is not None:
+                chain.append(type(node).__name__)
+            return f"{label}[{' > '.join(chain)}]" if chain else label
+        except Exception:
+            return label
+
     tasks = field(
         lambda: "; ".join(
-            f"{task.get_name()}:{'done' if task.done() else 'pending'}"
+            describe_task(task)
             for task in sorted(asyncio.all_tasks(), key=lambda task: task.get_name())[:10]
         )
     )
