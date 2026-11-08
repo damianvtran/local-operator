@@ -188,7 +188,9 @@ SHIPPED_LOCALES = ("es", "fr", "hi", "ru", "ur", "vi", "zh-CN")
 #: singled out. Chosen so each locale exercises a category English lacks: fr's
 #: ``many`` (a million) and ru's ``few``/``many`` split and its ``21 -> one``.
 PLURAL_EXPECTATIONS = {
+    "es": ((1, "one"), (1_000_000, "many")),
     "fr": ((1, "one"), (2, "other"), (1_000_000, "many")),
+    "hi": ((1, "one"),),
     "ru": ((1, "one"), (2, "few"), (5, "many"), (11, "many"), (21, "one")),
     "ur": ((1, "one"),),
 }
@@ -268,4 +270,3 @@ def test_every_shipped_locale_repaints_every_surface(locale: str) -> None:
     assert COMPOSE_BODIES["retired"] == english["retired"]
     assert completion_notice("retired")[0] == english["retired"]
     assert push_payload.count_phrase(5) == "5 conversations need you"
-
