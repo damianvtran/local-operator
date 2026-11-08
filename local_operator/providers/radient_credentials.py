@@ -161,6 +161,10 @@ def strip_base_credentials(base_url: str) -> tuple[str, bool]:
     downstream (IDNA host mapping does one) can turn either back into a real
     userinfo split. There is no ASCII ``@`` to cut at, so a value whose NFKC
     form still has an ``@`` after the last ASCII one becomes the placeholder.
+    Those two are the COMPLETE set: an exhaustive scan of U+0000..U+10FFFF
+    (security review, PR #3604) found no other code point that NFKC, NFKD,
+    NFKC+casefold or IDNA UTS-46 mapping turns into ``@``, so do not add a
+    hand-rolled lookalike list here; checking the NFKC form already covers them.
     ``%40`` is not touched: NFKC leaves percent-escapes alone, and decoding
     them is the server's business, not a credential in the URL.
 

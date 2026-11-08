@@ -548,8 +548,10 @@ def resolve_screening_chain(
     ran before the pin. Operator directive 2026-11-04: the pin must never
     block Team Bridge because a receiver has no Anthropic account or is out of
     quota. Pairs already tried in stage 1 are dropped, compared by credential
-    owner (``credential_provider_id``) so a login flavour of a tried provider
-    serving the same model is not tried again. These hops carry
+    SOURCE (``credential_source_id``): a login flavour serving the same model
+    on provably the same credential is not tried again, but one that could
+    resolve a different credential (``anthropic-key`` on ``ANTHROPIC_API_KEY``
+    beside an ``anthropic`` OAuth token) is kept. These hops carry
     ``preferred = False`` even for a listed pair, so a verdict
     they produce is stamped non-preferred: delivered normally, but never
     reused from the receipt cache and never eligible for a B4b release.
@@ -576,13 +578,17 @@ def resolve_screening_chain(
     model.
     """
 
+    # Lazy, to avoid the import cycle; one import serves both uses below.
+    from local_operator.providers.registry import (
+        credential_provider_id,
+        credential_source_id,
+    )
+
     credentialed = _credentialed_providers(config_dir)
     order = list(SCREENING_EVALUATED_MODELS)
     if preferred is not None:
         # Folded onto the table's own spelling so a login flavour
         # (``anthropic-key``) re-orders the canonical entry, never adds one.
-        from local_operator.providers.registry import credential_provider_id
-
         canonical = (credential_provider_id(preferred[0]), preferred[1])
         if canonical in order:
             order = [canonical] + [pair for pair in order if pair != canonical]
@@ -593,19 +599,24 @@ def resolve_screening_chain(
         selection = _selection_for(provider, model_id)
         if selection is not None:
             hops.append(selection)
-    # Deduped on the CREDENTIAL OWNER, not the literal provider id (#343 code
-    # review, "Where to fold the login flavour"; #3572 remediation r2): a
-    # default on a login flavour (``anthropic-key``) serves the same model on
-    # the same credential as the preferred ``anthropic`` hop, so retrying it
-    # after that hop failed re-spends the same quota refusal. Only duplicates
-    # drop: stage-2 order, its fallbacks and the stage-1 pins are untouched, so
-    # a receiver whose preferred hops are absent or exhausted still falls
-    # through to every distinct default and fallback.
-    from local_operator.providers.registry import credential_provider_id
+    # Deduped on the CREDENTIAL SOURCE, not the literal provider id (#343 code
+    # review, "Where to fold the login flavour"; #3572 remediation r2), and
+    # not on the storage owner either (#3604 S-1/A-1): ``credential_provider_id``
+    # says where stored rows live, but the env tier reads the literal id, and
+    # ``anthropic-key`` (``ANTHROPIC_API_KEY``) can run on a different
+    # credential than ``anthropic`` (``ANTHROPIC_OAUTH_TOKEN`` first). A
+    # flavour folds only when ``credential_source_id`` proves the same
+    # credential, so retrying it would re-spend the same quota refusal; when
+    # it cannot, the hop is KEPT -- one extra screening call, never a hold the
+    # receiver had a working credential for. Only duplicates drop: stage-2
+    # order, its fallbacks and the stage-1 pins are untouched.
 
-    tried = {(credential_provider_id(hop.provider), hop.model_id) for hop in hops}
+    def _key(provider: str, model_id: str) -> tuple[str, str]:
+        return credential_source_id(provider, base=config_dir), model_id
+
+    tried = {_key(hop.provider, hop.model_id) for hop in hops}
     for hop in _receiver_cascade(config_dir, settings):
-        key = (credential_provider_id(hop.provider), hop.model_id)
+        key = _key(hop.provider, hop.model_id)
         if key not in tried:
             tried.add(key)
             hops.append(hop)

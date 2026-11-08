@@ -1434,3 +1434,152 @@ def test_a_user_with_no_anthropic_account_is_screened_by_their_default(
     assert result is not None and result.disposition == "deliver"
     assert result.receipt.model == "deepseek-flash"
     assert [(s["provider"], s["model"]) for s in wire.sends] == [("deepseek", "deepseek-flash")]
+
+
+# -- (g) the dedupe folds a flavour only onto the SAME credential (#3604 S-1) --
+#
+# ``credential_provider_id`` names where stored rows live; the env tier reads
+# the literal id. ``anthropic-key`` reads ``ANTHROPIC_API_KEY`` while
+# ``anthropic`` prefers ``ANTHROPIC_OAUTH_TOKEN``, so with both exported the
+# flavour is a DIFFERENT credential and must stay in the chain: dropping it
+# held a message the receiver had a working (metered) key for.
+
+
+class _ProviderWire(_Wire):
+    """A wire scripted per ``(provider, model)``: one model id, two credentials."""
+
+    def __init__(self, script: dict[tuple[str, str], Any]) -> None:
+        super().__init__({})
+        self.by_pair = script
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        import json
+
+        payload = json.loads(request.content or b"{}")
+        self.sends.append(payload)
+        action = self.by_pair[(payload["provider"], payload["model"])]
+        if action[0] == "fail":
+            return httpx.Response(action[1], json={"error": VENDOR_CANARY})
+        return httpx.Response(200, json={"text": action[1]})
+
+
+def _no_store_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from local_operator.providers import registry
+
+    monkeypatch.setattr(registry, "provider_secret_value", lambda *_a, **_k: None)
+
+
+def test_a_flavour_on_a_different_env_credential_is_kept_and_screens(tmp_path, monkeypatch) -> None:
+    store, owner = _setup(tmp_path)
+    _no_store_rows(monkeypatch)
+    # Markers built by concatenation so no literal secret-shaped string exists.
+    monkeypatch.setenv("ANTHROPIC_OAUTH_TOKEN", "zz" + "plan-token" + "zz")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "zz" + "metered-key" + "zz")
+    from local_operator.team_bridge import model_boundary
+
+    monkeypatch.setattr(model_boundary, "_credentialed_providers", lambda _d: {"anthropic"})
+    (tmp_path / "config.yml").write_text(
+        "values:\n  hosting: anthropic-key\n  model_name: claude-sonnet-5-5\n"
+    )
+    hops = [(h.provider, h.model_id, h.preferred) for h in resolve_screening_chain(tmp_path)]
+    assert hops == [
+        ("anthropic", "claude-sonnet-5-5", True),
+        ("anthropic", "claude-opus-5-5", True),
+        # KEPT: it runs on ANTHROPIC_API_KEY, not the plan token that just 429'd.
+        ("anthropic-key", "claude-sonnet-5-5", False),
+    ]
+    wire = _ProviderWire(
+        {
+            ("anthropic", "claude-sonnet-5-5"): ("fail", 429),
+            ("anthropic", "claude-opus-5-5"): ("fail", 429),
+            ("anthropic-key", "claude-sonnet-5-5"): ("reply", DELIVER),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert result is not None and result.disposition == "deliver"
+    assert [(s["provider"], s["model"]) for s in wire.sends] == [
+        ("anthropic", "claude-sonnet-5-5"),
+        ("anthropic", "claude-opus-5-5"),
+        ("anthropic-key", "claude-sonnet-5-5"),
+    ]
+
+
+def test_a_flavour_on_the_shared_stored_row_is_still_deduped(tmp_path, monkeypatch) -> None:
+    """A real ``auth.db`` row under ``anthropic`` and no env leg: one credential.
+
+    Both ids resolve that row (stored tiers are keyed by the storage id), so the
+    ``anthropic-key`` default would only re-spend the refusal and is dropped.
+    """
+
+    from local_operator.providers.auth_store import AuthStore
+
+    _no_store_rows(monkeypatch)
+    auth = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        auth.upsert_credential(
+            "anthropic-key", {"type": "api_key", "key": "zz" + "row" + "zz", "source": "login"}
+        )
+        stored = {row.provider for row in auth.list_credentials("anthropic-key")}
+    finally:
+        auth.close()
+    assert stored == {"anthropic"}
+    _real_table_config(tmp_path, monkeypatch, "anthropic-key", "claude-sonnet-5-5", {"anthropic"})
+    assert [(h.provider, h.model_id) for h in resolve_screening_chain(tmp_path)] == [
+        ("anthropic", "claude-sonnet-5-5"),
+        ("anthropic", "claude-opus-5-5"),
+        ("openai", "gpt-5.4"),
+    ]
+
+
+def test_every_aliased_flavour_folds_only_onto_an_identical_credential(
+    tmp_path, monkeypatch
+) -> None:
+    """Registry-wide: a fold is a claim that both ids resolve the SAME value.
+
+    Every ``store_credentials_as`` flavour is checked against its owner under
+    several environments (everything exported, nothing, and each variable
+    alone) and with provider-class store rows present or absent. Whenever
+    ``credential_source_id`` folds, ``provider_env_key`` -- the cascade's own
+    env tier -- must return byte-identical values for both ids, so a future
+    flavour with a diverging leg cannot be folded silently.
+    """
+
+    from local_operator.providers import registry
+
+    flavours = [
+        d.id for d in registry.PROVIDER_REGISTRY if registry.credential_provider_id(d.id) != d.id
+    ]
+    assert "anthropic-key" in flavours and len(flavours) >= 8
+    names: set[str] = {"ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}
+    for pid in flavours + [registry.credential_provider_id(f) for f in flavours]:
+        names.update(registry.credential_file_names(pid))
+        names.update(registry.env_key_names(pid))
+    markers = {name: "zz" + name.lower() + "zz" for name in sorted(names)}
+    environments = [set(names), set()] + [{name} for name in sorted(names)]
+
+    folded_when_all_set: set[str] = set()
+    for rows in (False, True):
+        store_value = (lambda env_key, **_k: "row-" + markers.get(env_key, "")) if rows else None
+        monkeypatch.setattr(
+            registry, "provider_secret_value", store_value or (lambda *_a, **_k: None)
+        )
+        for exported in environments:
+            for name in names:
+                monkeypatch.delenv(name, raising=False)
+            for name in exported:
+                monkeypatch.setenv(name, markers[name])
+            for flavour in flavours:
+                owner = registry.credential_provider_id(flavour)
+                if registry.credential_source_id(flavour, base=tmp_path) != owner:
+                    continue
+                assert registry.provider_env_key(
+                    flavour, base=tmp_path
+                ) == registry.provider_env_key(owner, base=tmp_path), (flavour, exported, rows)
+                if exported == names and not rows:
+                    folded_when_all_set.add(flavour)
+    # The pair this guards: with both Anthropic variables set it is NOT one credential.
+    assert "anthropic-key" not in folded_when_all_set
+    assert folded_when_all_set == set(flavours) - {"anthropic-key"}

@@ -1215,6 +1215,67 @@ def credential_provider_id(provider_id: str) -> str:
     return (definition.store_credentials_as or definition.id) if definition else provider_id
 
 
+def _env_leg(provider_id: str) -> tuple[Any, tuple[str, ...]]:
+    """The INPUTS :func:`provider_env_key` resolves ``provider_id``'s env leg from.
+
+    Mirrors that function's own two choices exactly — which definition's
+    ``env_keys`` it reads (the flavour's, else its owner's) and which store-row
+    names it consults — so two ids with equal legs resolve the same value from
+    the same environment and store, by construction. A plain name is folded to a
+    one-tuple so ``"X"`` and ``("X",)`` compare equal; a callable compares by
+    identity, which is the only honest equality a resolver function has.
+    """
+    definition = get_provider_definition(provider_id)
+    if definition is None or definition.env_keys is None:
+        definition = get_provider_definition(credential_provider_id(provider_id))
+    keys: Any = None if definition is None else definition.env_keys
+    if isinstance(keys, str):
+        keys = (keys,)
+    elif isinstance(keys, list):
+        keys = tuple(keys)
+    names = tuple(env_key_names(provider_id) or credential_file_names(provider_id))
+    return keys, names
+
+
+def credential_source_id(provider_id: str, *, base: Path | None = None) -> str:
+    """``credential_provider_id`` when ``provider_id`` provably runs on its owner's credential.
+
+    WHY NOT ``credential_provider_id`` ALONE (PR #3604 S-1/A-1): that answers
+    where the STORED ROWS live, and every stored-row tier of the cascade is keyed
+    by it. The env tier is not: ``AuthStore._env_api_key`` reads the LITERAL id,
+    and a flavour may declare its own variable. ``anthropic-key`` reads
+    ``ANTHROPIC_API_KEY`` while ``anthropic`` prefers ``ANTHROPIC_OAUTH_TOKEN``,
+    so with both exported they are two credentials — one may be out of plan
+    quota while the other still works. Folding them as one is how a screening
+    dedupe dropped the only hop that could still answer and held a message.
+
+    The answer, in order, failing toward the LITERAL id (keeping a hop costs one
+    extra call; wrongly merging one can block):
+
+    1. Not a flavour → its own id.
+    2. Static parity: the flavour's env leg (:func:`_env_leg`) equals its
+       owner's, so every tier resolves identically. True today for every
+       ``store_credentials_as`` flavour except ``anthropic-key``.
+    3. Otherwise compare the env leg's resolved VALUES now, through the same
+       :func:`provider_env_key` the cascade calls (values never leave this
+       function). Equal — typically both absent, so only the shared stored rows
+       can answer — folds; different, or unreadable, keeps the literal id.
+
+    ``base`` is the config root whose provider-class store rows the env leg
+    reads, as for :func:`provider_env_key`.
+    """
+    owner = credential_provider_id(provider_id)
+    if owner == provider_id:
+        return provider_id
+    if _env_leg(provider_id) == _env_leg(owner):
+        return owner
+    try:
+        same = provider_env_key(provider_id, base=base) == provider_env_key(owner, base=base)
+    except Exception:  # noqa: BLE001 — cannot tell means they may differ: keep the hop
+        return provider_id
+    return owner if same else provider_id
+
+
 #: The provider ids whose calls spend a PLAN or QUOTA rather than metered
 #: dollars, so the client-side figure beside them is an API-EQUIVALENT, never a
 #: bill (PR-3, design §3.4). Membership is about the BILLING the id implies,
