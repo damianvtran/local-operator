@@ -436,7 +436,21 @@ async def test_an_answered_gate_reaches_the_feed_and_the_lists_stamp_agrees(
         )
         assert parked["session_id"] == session_id
         assert parked["epoch"]
-        assert parked["payload"] == {"code": "approval", "label": "Approval needed", "revision": 1}
+        # The FULL published shape, not a subset: the background-work fields ride
+        # the same frame as the pair (``DesktopFeed`` status publish) so a client
+        # never sees the code and the counts disagree. This synthetic session has
+        # no catalogue children, jobs or waits, so they read as unknown/idle — an
+        # exact match still catches a key added, dropped or renamed.
+        assert parked["payload"] == {
+            "code": "approval",
+            "label": "Approval needed",
+            "revision": 1,
+            "subagents_running": None,
+            "subagents_queued": None,
+            "jobs_running": None,
+            "waiting_on": 0,
+            "background_work": False,
+        }
 
         # ...and the answer reaches the row, which is the half the operator
         # reported as 5-10 s late.
