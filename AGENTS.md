@@ -1328,8 +1328,8 @@ the job is the reviewer's missing memory, not a lock.
 
 **A release PR's green is narrow.** Change-scope gating classifies a diff
 that is nothing but the `version =` line as a release bump, and a release
-bump runs seven checks, not the matrix: `changes` and `version-bump-guard`
-from `ci.yml`, plus `Release invariants` and `Build and start the release
+bump runs seven checks, not the matrix: `changes`, `version-bump-guard` and
+`CI Gate` from `ci.yml`, plus `Release invariants` and `Build and start the release
 artifact` on Python 3.12, 3.13 and 3.14 from `release-gate.yml` (among its
 triggers, a push to `release-next`/`release-next-*`, the runbook's bump
 branch). Every other `ci.yml` job reports skipping. The classifier keys on
@@ -1528,7 +1528,7 @@ pypi/support#12738 and pypi/support#12882.
 
    **Expect seven checks on this PR, not a matrix.** A version-only
    `pyproject.toml` diff classifies as a release bump, so from `ci.yml` only
-   `changes` and `version-bump-guard` run and every other job reports
+   `changes`, `version-bump-guard` and `CI Gate` run and every other job reports
    skipping — the whole job set would be gating code this PR does not touch.
    The other four come from `.github/workflows/release-gate.yml`, which fires
    on the push to `release-next` (its triggers also include `release-next-*`,
@@ -1549,7 +1549,7 @@ pypi/support#12738 and pypi/support#12882.
    on the merge commit and by `publish.yml`'s `wheel-smoke`, which
    `pypi-publish` waits on.
    **Seven checks appear only when the bump is pushed from a `release-next*`
-   branch.** A bump PR showing just `changes` and `version-bump-guard` means
+   branch.** A bump PR showing just `changes`, `version-bump-guard` and `CI Gate` means
    the artifact gate never ran: push from the mandated branch name rather
    than reading that as green. Do not read the seven-check list as a truncated
    pipeline, and do not "fix" it by adding an always-run job: the narrow green

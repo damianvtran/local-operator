@@ -135,6 +135,17 @@ def test_evidence_markdown_shape(tree: Path) -> None:
     assert "**PASS** — 3 passed" in md and "1.2 s" in md
     assert "1 unplaced: `docs/notes.md`" in md
     assert "pytest -q tests/unit/test_alpha.py" in md
+    # Q3 on #3592: explicit paths still name the commit they were selected at.
+    explicit = affected_tests.evidence_markdown(
+        base=affected_tests.EXPLICIT,
+        head="c" * 40,
+        selection=sel,
+        command=["pytest"],
+        rc=0,
+        counts={},
+        wall=0.0,
+    )
+    assert f"- range: explicit paths at `{'c' * 12}`" in explicit
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -237,6 +248,117 @@ def test_data_as_text_selects_tests_that_name_the_file(tree: Path) -> None:
     assert "tests/unit/test_guides.py" in guide.targets
     assert "tests/unit/test_unrelated.py" not in seeds.targets + guide.targets
     assert "tests/unit/test_cites.py" not in seeds.targets + guide.targets
+
+
+def test_name_match_is_scoped_to_the_mirroring_directory(tree: Path) -> None:
+    """R1/Q1 on #3592: a generic stem must not pull same-named tests tree-wide."""
+    _tree(
+        tree,
+        {
+            "local_operator/tunnels/__init__.py": "",
+            "local_operator/tunnels/cli.py": "",
+            "local_operator/team_bridge/__init__.py": "",
+            "local_operator/team_bridge/store.py": "",
+            "tests/unit/tunnels/test_cli.py": "",
+            "tests/unit/tunnels/sub/test_cli_more.py": "",
+            "tests/unit/test_tunnels_cli.py": "",
+            "tests/unit/i18n/test_cli_catalogue.py": "",
+            "tests/unit/i18n/test_tunnels_cli_copy.py": "",
+            "tests/unit/test_cli.py": "",
+            # Names the TOP-LEVEL cli.py by path: not a reader of tunnels/cli.py.
+            "tests/unit/asks/test_wake_row.py": 'P = "local_operator/cli.py"\n',
+            "tests/unit/team_bridge/test_store.py": "",
+            "tests/unit/analytics/test_store.py": "",
+            "tests/unit/test_tunnels.py": "",
+            "tests/unit/tunnels/test_tunnels_init.py": "",
+        },
+    )
+    cli = affected_tests.select(tree, ["local_operator/tunnels/cli.py"], include_guards=False)
+    assert set(cli.targets) == {
+        "tests/unit/tunnels/test_cli.py",
+        "tests/unit/tunnels/sub/test_cli_more.py",
+        "tests/unit/test_tunnels_cli.py",
+        "tests/unit/i18n/test_tunnels_cli_copy.py",
+    }, cli.reasons
+    store = affected_tests.select(
+        tree, ["local_operator/team_bridge/store.py"], include_guards=False
+    )
+    assert set(store.targets) == {"tests/unit/team_bridge/test_store.py"}, store.reasons
+    # A top-level module mirrors tests/unit itself: only that directory's files.
+    top = affected_tests.select(tree, ["local_operator/alpha.py"], include_guards=False)
+    assert "tests/unit/test_alpha.py" in top.targets
+    root_cli = affected_tests.select(tree, ["local_operator/cli.py"], include_guards=False)
+    assert "tests/unit/test_cli.py" in root_cli.targets
+    assert "tests/unit/i18n/test_cli_catalogue.py" not in root_cli.targets
+    assert "tests/unit/asks/test_wake_row.py" in root_cli.targets, "full path still matches"
+    # A package __init__ is tested beside the package and inside it.
+    init = affected_tests.select(tree, ["local_operator/tunnels/__init__.py"], include_guards=False)
+    assert {"tests/unit/test_tunnels.py", "tests/unit/tunnels/test_tunnels_init.py"} <= set(
+        init.targets
+    )
+
+
+def test_dotted_module_name_in_a_literal_selects(tree: Path) -> None:
+    _tree(tree, {"tests/unit/pkg/test_patch.py": 'T = "local_operator.alpha.X"\n'})
+    sel = affected_tests.select(tree, ["local_operator/alpha.py"], include_guards=False)
+    assert (
+        sel.reasons["tests/unit/pkg/test_patch.py"] == "names local_operator/alpha.py in its source"
+    )
+    near = affected_tests.select(tree, ["local_operator/beta.py"], include_guards=False)
+    assert "tests/unit/pkg/test_patch.py" not in near.targets
+
+
+def test_parent_folder_needs_a_path_shaped_literal(tree: Path) -> None:
+    """Q2 on #3592: the parent of `i18n/audit-history/hi/x.json` is `hi`."""
+    _tree(
+        tree,
+        {
+            "i18n/audit-history/hi/wire.settings.json": "{}\n",
+            "tests/unit/i18n/test_audit_history.py": 'P = "i18n/audit-history/hi/"\n',
+            "tests/unit/test_greets.py": 'MSG = "hi"\nOTHER = "say hi/bye"\n',
+            "tests/unit/test_hi_dir.py": 'D = ROOT / "locale/hi"\n',
+            # A slash command, not a path.
+            "tests/unit/test_slash.py": 'CMD = "/hi"\n',
+            # Same basename, another catalogue: not a reader of the ledger shard.
+            "tests/unit/i18n/test_messages.py": 'P = root / "en" / "wire.settings.json"\n',
+            "local_operator/guides/team-bridge/GUIDE.md": "# guide\n",
+            "tests/unit/test_setup.py": 'G = ROOT / "guides" / "team-bridge"\nT = G / "GUIDE.md"\n',
+        },
+    )
+    sel = affected_tests.select(
+        tree, ["i18n/audit-history/hi/wire.settings.json"], include_guards=False
+    )
+    for spurious in (
+        "tests/unit/test_greets.py",
+        "tests/unit/test_slash.py",
+        "tests/unit/i18n/test_messages.py",
+    ):
+        assert spurious not in sel.targets, sel.reasons
+    guide = affected_tests.select(
+        tree, ["local_operator/guides/team-bridge/GUIDE.md"], include_guards=False
+    )
+    assert "tests/unit/test_setup.py" in guide.targets, "a compound parent as a whole literal"
+    _tree(tree, {"tests/unit/test_sibling.py": 'P = "/guides/browser/GUIDE.md"\n'})
+    other = affected_tests.select(
+        tree, ["local_operator/guides/delivery/GUIDE.md"], include_guards=False
+    )
+    assert "tests/unit/test_sibling.py" not in other.targets, "a sibling guide's path"
+    # A whole `"GUIDE.md"` literal reads every guide, inside the mirror scope only.
+    _tree(
+        tree,
+        {
+            "tests/unit/guides/test_all_guides.py": 'BODY = base / "GUIDE.md"\n',
+            "tests/unit/other/test_one_guide.py": 'BODY = base / "GUIDE.md"\n',
+        },
+    )
+    every = affected_tests.select(
+        tree, ["local_operator/guides/delivery/GUIDE.md"], include_guards=False
+    )
+    assert "tests/unit/guides/test_all_guides.py" in every.targets
+    assert "tests/unit/other/test_one_guide.py" not in every.targets
+    assert "tests/unit/i18n/test_audit_history.py" in sel.targets
+    # A `/`-bounded segment inside a path literal is still a reader.
+    assert "tests/unit/test_hi_dir.py" in sel.targets
 
 
 def test_infra_paths_print_wide_and_never_select_the_tree(tree: Path) -> None:

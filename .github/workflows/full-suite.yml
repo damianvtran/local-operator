@@ -952,6 +952,14 @@ jobs:
             # shellcheck disable=SC2016 # the backticks are literal markdown
             body="$(printf 'Full suite red at %s.\n\nFailing jobs:\n%s\n\nRun: %s\n' \
               "$SHA" "$(echo "$failed" | sed 's/^/- `/; s/$/`/')" "$RUN_URL")"
+            # A red run can ALSO carry cancelled jobs (a shard at its cap);
+            # name them too, so the issue alone says which shards produced
+            # no verdict rather than leaving that to the run page.
+            if [ -n "$cancelled" ]; then
+              # shellcheck disable=SC2016 # the backticks are literal markdown
+              body="$body$(printf '\n\nCancelled jobs:\n%s\n' \
+                "$(echo "$cancelled" | sed 's/^/- `/; s/$/`/')")"
+            fi
             if [ -n "$open" ]; then
               gh issue comment "$open" --body "$body"
             else

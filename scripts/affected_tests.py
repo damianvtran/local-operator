@@ -15,7 +15,9 @@ This module is the "which tests" half of that bargain. It is deliberately
 SIMPLE and EXPLAINABLE, not complete:
 
 * the changed test files themselves;
-* `tests/unit/**/test_<stem>*.py` for every changed module `<stem>`;
+* `test_<stem>*.py` for every changed module `<stem>`, in the mirroring
+  `tests/unit/<pkg>` directory (or below/above it, never `tests/unit`
+  tree-wide), and `test_<pkg>_<stem>*.py` anywhere;
 * tests that DIRECTLY import a changed module (depth 1 — not the transitive
   closure: through hub modules that closure is most of the tree, which is the
   whole-tree run this replaces);
@@ -163,6 +165,9 @@ INFRA_PATHS: frozenset[str] = frozenset(
 #: Basenames too generic to grep for (they would select most of the tree).
 _GENERIC_BASENAMES = frozenset({"__init__.py", "conftest.py", "__main__.py", "README.md"})
 
+#: The `base` sentinel for explicit positional paths (no diff range).
+EXPLICIT = "explicit"
+
 #: run_bounded's bound for `--run`, seconds. Generous on purpose — a bound that
 #: fires on a legitimately slow, loaded host is a false red — and overridable.
 DEFAULT_TIMEOUT = 3600
@@ -199,7 +204,22 @@ def _module_of(rel: str) -> str | None:
     return ci_scope._module_name(rel)
 
 
-def _imported_names(rel: str, source: str) -> frozenset[str]:
+def _index(rel: str, source: str) -> tuple[frozenset[str], str]:
+    """A test's direct imports and its string literals, from ONE parse.
+
+    `select` walks all ~2,200 unit test files on every call, so the AST parse
+    is the bulk of its cost; parsing each file once (not once per index) is
+    what keeps a single-path call cheap (review R3/QA Q4 on #3592).
+    """
+    try:
+        tree = ast.parse(source, filename=rel)
+    except (SyntaxError, ValueError):
+        # See the two helpers: no imports, and raw source as the literals.
+        return frozenset(), source
+    return _imported_names(rel, tree), _string_literals(tree)
+
+
+def _imported_names(rel: str, tree: ast.AST) -> frozenset[str]:
     """Dotted names a file imports, DIRECT only.
 
     `from a.b import c` yields both `a.b` and `a.b.c`, because `c` may be a
@@ -208,10 +228,6 @@ def _imported_names(rel: str, source: str) -> frozenset[str]:
     Unparseable files import nothing (the changed-test rule still selects them,
     and pytest reports the syntax error).
     """
-    try:
-        tree = ast.parse(source, filename=rel)
-    except (SyntaxError, ValueError):
-        return frozenset()
     package = ci_scope._package_parts(rel)
     names: set[str] = set()
     for node in ast.walk(tree):
@@ -229,7 +245,7 @@ def _imported_names(rel: str, source: str) -> frozenset[str]:
     return frozenset(names)
 
 
-def _string_literals(rel: str, source: str) -> str:
+def _string_literals(tree: ast.AST) -> str:
     """A test's string constants, docstrings excluded, one per line.
 
     DATA-AS-TEXT matching runs over these, not the raw source: a test that
@@ -238,10 +254,6 @@ def _string_literals(rel: str, source: str) -> str:
     branch, where raw-source matching selected 190 files for a four-word
     AGENTS.md edit. Unparseable files fall back to the raw source (over-select).
     """
-    try:
-        tree = ast.parse(source, filename=rel)
-    except (SyntaxError, ValueError):
-        return source
     docstrings: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -273,25 +285,130 @@ def is_infra(rel: str) -> bool:
     return rel in INFRA_PATHS or (rel.startswith("tests/") and rel.endswith("/conftest.py"))
 
 
-def _text_needles(rel: str) -> tuple[re.Pattern[str], ...]:
-    """What a test that reads `rel` AS DATA would spell in its source.
+def _mirror_parts(rel: str) -> tuple[str, ...]:
+    """`rel`'s directory as the `tests/unit/<...>` path that would mirror it.
 
-    The repo-relative path, and the basename unless generic. A non-Python
-    file below a top-level directory also yields its parent directory name
-    as a PATH SEGMENT (a whole literal, or `/`-bounded): `local_operator/agent_seeds/coder.md`
-    is read through `SEEDS_DIR / f"{name}.md"` or `"agent_seeds"`, never by
-    its own name (test_agent_profiles.py, test_delivery_guidance.py). Not for
-    `.py` files, whose directory names (`session`, `tui`) are everywhere.
+    `local_operator/tunnels/cli.py` -> (`tunnels`,); `local_operator/cli.py`
+    -> (); `tests/unit/pkg/helpers.py` -> (`pkg`,); `scripts/x.py` ->
+    (`scripts`,). Shared by the name rule and `_nearest_test_dir`.
+    """
+    parts = rel.split("/")[:-1]
+    if parts and parts[0] in ("local_operator", "tests"):
+        parts = parts[1:]
+        if parts and parts[0] == "unit":
+            parts = parts[1:]
+    return tuple(parts)
+
+
+def _in_mirror_scope(test: str, pkg: tuple[str, ...]) -> bool:
+    """Whether `test` sits in `tests/unit/<pkg>`, below it, or in an ancestor
+    short of `tests/unit`; for `pkg == ()`, in `tests/unit` itself only."""
+    test_dir = tuple(test.split("/")[2:-1])  # below `tests/unit`
+    if not pkg:
+        return not test_dir
+    return test_dir[: len(pkg)] == pkg or (bool(test_dir) and pkg[: len(test_dir)] == test_dir)
+
+
+def _named_after(test: str, pkg: tuple[str, ...], stem: str) -> bool:
+    """Whether `test` is named for module `stem` of mirrored package `pkg`.
+
+    SCOPED, not tree-wide (review R1/QA Q1 on #3592): `test_<stem>*.py`
+    counts only where it can be about THIS module, i.e. in the mirroring
+    directory `tests/unit/<pkg>`, below it, or in one of its ancestors short
+    of `tests/unit` itself. A top-level module (`pkg == ()`) mirrors
+    `tests/unit` and matches only that directory's own files. Elsewhere a
+    test must carry the package in its name, `test_<pkg[-1]>_<stem>*.py`.
+    Without the scope a generic stem pulled every same-named test in the
+    tree: `tunnels/cli.py` selected 42 `i18n/test_cli_*` files and
+    `team_bridge/store.py` selected `analytics/test_store.py`.
+    """
+    name = test.rsplit("/", 1)[-1]
+    prefixes = [f"test_{stem}"] if _in_mirror_scope(test, pkg) else []
+    if pkg:
+        prefixes.append(f"test_{pkg[-1]}_{stem}")
+    return any(
+        name.startswith(prefix) and (len(name) == len(prefix) + 3 or name[len(prefix)] in "_.")
+        for prefix in prefixes
+    )
+
+
+def _shared_basenames(root: Path) -> frozenset[str]:
+    """Basenames that more than one tracked file carries (`GUIDE.md` x33,
+    `wire.settings.json` x15 on 2026-11-07). Without git every basename
+    counts as shared, which only narrows the bare-basename needle."""
+    rc, out, _ = ci_scope._git(["ls-files", "-z"], cwd=root)
+    if rc != 0:
+        return frozenset({"*"})
+    seen: set[str] = set()
+    shared: set[str] = set()
+    for path in out.split("\0"):
+        name = path.rsplit("/", 1)[-1]
+        (shared if name in seen else seen).add(name)
+    return frozenset(shared)
+
+
+def _text_needles(rel: str, *, shared_basename: bool = True) -> tuple[re.Pattern[str], ...]:
+    """What a test that reads `rel` AS DATA would spell in its string literals.
+
+    * The repo-relative path, always. For a `.py` file the dotted module name
+      too (`importlib.import_module("local_operator.x")`, `monkeypatch.setattr
+      ("local_operator.x.f", ...)`). A `.py` file gets NO bare-basename needle:
+      the import rule covers its real readers, and `cli.py`/`store.py` occur in
+      unrelated literals (`"local_operator/cli.py"` matched `tunnels/cli.py`;
+      review R1/QA Q1 on #3592).
+    * A non-Python file's basename unless generic. Bare when no other tracked
+      file shares it; when one does (`shared_basename`), only after its own
+      parent directory or after an ancestor plus a glob
+      (`glob("guides/*/GUIDE.md")` for `local_operator/guides/x/GUIDE.md`),
+      because `en/wire.settings.json` in a catalogue test is not a reader of
+      `i18n/audit-history/hi/wire.settings.json` (QA Q2 on #3592).
+    * A non-Python file's parent directory as a PATH SEGMENT, only inside a
+      path-shaped literal: `/`-bounded within a literal that contains a `/`
+      (`f"local_operator/agent_seeds/{name}.md"`). Never a bare word: the
+      parent of `i18n/audit-history/hi/x.json` is `hi`, and `"hi"` is a test
+      message in ~200 files (QA Q2 on #3592). The segment needs a path
+      segment before it or a `/` after it, so the slash command `"/hi"` is
+      not a path. One exception, a WHOLE literal naming the parent when its
+      name is a compound identifier (contains `_` or `-`): `tmp_path /
+      "agent_seeds"` is how test_agent_profiles.py spells the seeds it copies,
+      `... / "guides" / "team-bridge"` how test_setup_cli.py reaches its
+      guide, and a compound name is never an English word in a test message.
     """
     needles = [re.compile(re.escape(rel))]
-    name = rel.rsplit("/", 1)[-1]
-    if name not in _GENERIC_BASENAMES:
-        needles.append(re.compile(r"(?<![\w.-])" + re.escape(name) + r"(?![\w-])"))
+    module = _module_of(rel)
+    if module:
+        needles.append(re.compile(r"(?<![\w.])" + re.escape(module) + r"(?![\w])"))
+        return tuple(needles)
     parts = rel.split("/")
-    if not rel.endswith(".py") and len(parts) >= 3:
-        # Over string LITERALS (see `_string_literals`), one per line: the
-        # segment is a whole literal or bounded by `/` inside one.
-        needles.append(re.compile(r"(?:^|/)" + re.escape(parts[-2]) + r"(?:/|$)", re.MULTILINE))
+    name = parts[-1]
+    if name not in _GENERIC_BASENAMES:
+        bare = r"(?<![\w.-])" + re.escape(name) + r"(?![\w-])"
+        if not shared_basename:
+            needles.append(re.compile(bare))
+        elif len(parts) >= 3:
+            # Its own parent (`team-bridge/GUIDE.md`), or an ancestor and a
+            # glob (`guides/*/GUIDE.md`, `audit-history/**/x.json`). Another
+            # sibling's path (`/guides/browser/GUIDE.md`) is not a reader.
+            parent = re.escape(parts[-2])
+            dirs = "|".join(re.escape(d) for d in parts[1:-1])
+            needles.append(
+                re.compile(
+                    rf"(?:^|/){parent}/{bare}|(?:^|/)(?:{dirs})/[^\n]*\*[^\n]*{bare}",
+                    re.MULTILINE,
+                )
+            )
+    if len(parts) >= 3:
+        # Over string LITERALS (see `_string_literals`), one per line, so `^`
+        # and `$` bound one literal and the required `/` sits inside it.
+        segment = re.escape(parts[-2])
+        needles.append(
+            re.compile(
+                rf"(?:^|/){segment}/|[^/\s]/{segment}(?=$|/)",
+                re.MULTILINE,
+            )
+        )
+        if re.search(r"[_-]", parts[-2]):
+            needles.append(re.compile(rf"^{segment}$", re.MULTILINE))
     return tuple(needles)
 
 
@@ -302,11 +419,7 @@ def _nearest_test_dir(root: Path, rel: str) -> str | None:
     exists, else `tests/unit/tui`. Stops BEFORE `tests/unit` itself: that would
     be the whole tree, which this helper never selects implicitly.
     """
-    parts = rel.split("/")[:-1]
-    if parts and parts[0] in ("local_operator", "tests"):
-        parts = parts[1:]
-        if parts and parts[0] == "unit":
-            parts = parts[1:]
+    parts = _mirror_parts(rel)
     while parts:
         candidate = root / UNIT_ROOT / Path(*parts)
         if candidate.is_dir() and next(candidate.rglob("test_*.py"), None) is not None:
@@ -323,14 +436,23 @@ def select(root: Path, paths: Sequence[str], *, include_guards: bool = True) -> 
     sources: dict[str, str] = {}
     for rel in tests:
         try:
-            sources[rel] = (root / rel).read_text(encoding="utf-8")
+            text = (root / rel).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
-            sources[rel] = ""
-        imports[rel] = _imported_names(rel, sources[rel])
-        sources[rel] = _string_literals(rel, sources[rel])
+            text = ""
+        imports[rel], sources[rel] = _index(rel, text)
 
     reasons: dict[str, str] = {}
     unplaced: list[str] = []
+    shared: frozenset[str] | None = None
+
+    def _is_shared(rel: str) -> bool:
+        # Lazily: one `git ls-files` per call, and only when a non-Python
+        # path needs the basename rule.
+        nonlocal shared
+        if shared is None:
+            shared = _shared_basenames(root)
+        name = rel.rsplit("/", 1)[-1]
+        return "*" in shared or name in shared
 
     def add(target: str, why: str) -> None:
         reasons.setdefault(target, why)
@@ -361,11 +483,12 @@ def select(root: Path, paths: Sequence[str], *, include_guards: bool = True) -> 
             stem = rel.rsplit("/", 1)[-1][:-3]
             if stem == "__init__":
                 stem = module.rsplit(".", 1)[-1]
+            pkg = _mirror_parts(rel)
+            # A package's `__init__` is tested both beside the package
+            # (`tests/unit/test_tunnels.py`) and inside it (`tests/unit/tunnels/`).
+            scopes = (pkg, pkg[:-1]) if rel.endswith("/__init__.py") and pkg else (pkg,)
             for test in tests:
-                name = test.rsplit("/", 1)[-1]
-                if name.startswith(f"test_{stem}") and (
-                    len(name) == len(f"test_{stem}.py") or name[len(f"test_{stem}")] in "_."
-                ):
+                if any(_named_after(test, scope, stem) for scope in scopes):
                     add(test, f"named after {rel}")
                     placed = True
                 if module in imports[test]:
@@ -374,9 +497,28 @@ def select(root: Path, paths: Sequence[str], *, include_guards: bool = True) -> 
         # DATA-AS-TEXT: tests that read this file as data (a seed prompt, a
         # GUIDE.md, a catalogue) import nothing from it; their source names it.
         if not _is_test_file(rel):
-            needles = _text_needles(rel)
+            shared_name = not rel.endswith(".py") and _is_shared(rel)
+            needles = _text_needles(rel, shared_basename=shared_name)
+            # A shared basename as a WHOLE literal (`base / "GUIDE.md"`) is how
+            # a test reads EVERY file of that kind (guides/test_guides.py
+            # validates all guides through `discover_guides()`), so it counts
+            # for tests in the package's mirror scope. Only under
+            # `local_operator/`: `tests/unit` mirrors the package, not repo-root
+            # data such as `i18n/audit-history/`, where `"wire.settings.json"`
+            # in i18n/test_messages.py is a fixture of its own (QA Q2).
+            scoped: re.Pattern[str] | None = None
+            name = rel.rsplit("/", 1)[-1]
+            if shared_name and rel.startswith("local_operator/") and name not in _GENERIC_BASENAMES:
+                scoped = re.compile(rf"^{re.escape(name)}$", re.MULTILINE)
+                pkg = _mirror_parts(rel)
             for test in tests:
-                if test != rel and any(n.search(sources[test]) for n in needles):
+                if test == rel:
+                    continue
+                if any(n.search(sources[test]) for n in needles) or (
+                    scoped is not None
+                    and _in_mirror_scope(test, pkg)
+                    and scoped.search(sources[test])
+                ):
                     add(test, f"names {rel} in its source")
                     placed = True
         if not placed:
@@ -474,7 +616,13 @@ def evidence_markdown(
     lines = [
         "## Targeted test evidence",
         "",
-        f"- range: `{_short(base)}..{_short(head)}`",
+        # Explicit paths have no diff range, but the selection still depends
+        # on the tree it was computed in: name the commit (QA Q3 on #3592).
+        (
+            f"- range: explicit paths at `{_short(head)}`"
+            if base == EXPLICIT
+            else f"- range: `{_short(base)}..{_short(head)}`"
+        ),
         f"- changed paths: {len(selection.paths)}" + unplaced,
         f"- selected: {files} test files + {dirs} directories "
         f"(guards included: {guards}/{len(GUARD_TESTS)})",
@@ -504,6 +652,14 @@ def _display(command: Sequence[str]) -> list[str]:
 def _git_out(root: Path, *args: str) -> str:
     rc, out, _ = ci_scope._git(list(args), cwd=root)
     return out.strip() if rc == 0 else ""
+
+
+def _head_identity(root: Path) -> str:
+    """HEAD's SHA, `+worktree` when the tree has uncommitted changes."""
+    head = _git_out(root, "rev-parse", "HEAD") or "HEAD"
+    if _git_out(root, "status", "--porcelain"):
+        head += "+worktree"
+    return head
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -553,7 +709,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         base = head = "guards"
     elif args.paths:
         paths = [ci_scope._norm(p) for p in args.paths]
-        base = head = "explicit"
+        base = EXPLICIT
+        head = _head_identity(root)
     else:
         resolved = ci_scope.resolve_base(args.since, cwd=root)
         if resolved is None:
@@ -567,10 +724,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("affected_tests: git diff failed; pass paths explicitly", file=sys.stderr)
             return 2
         paths, base = collected, resolved
-        head = _git_out(root, "rev-parse", "HEAD") or "HEAD"
-        dirty = _git_out(root, "status", "--porcelain")
-        if dirty:
-            head += "+worktree"
+        head = _head_identity(root)
 
     selection = select(root, paths, include_guards=not args.no_guards)
     stream = sys.stderr if args.evidence else sys.stdout
