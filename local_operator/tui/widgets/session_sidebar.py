@@ -44,7 +44,9 @@ from local_operator.tui.terminal_title import SPINNER_FRAMES
 from local_operator.tui.widgets.ask_queue import ASK_MARKER
 from local_operator.tui.widgets.session_picker import (
     AIDA_MARKER,
+    ATTACHED_MARKER,
     COMPLETION_MARKERS,
+    DELEGATING_MARKER,
     aida_row_id,
     row_state_mark,
 )
@@ -2861,6 +2863,16 @@ class SessionSidebar(Widget, can_focus=True):
                 # notice gets a spinner ON THE ROW, where the eye is. The
                 # footer "Opening…" stays as the textual counterpart.
                 mark, ink = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)], "accent"
+            elif entry.shows_completion_mark and entry.row.background_work:
+                # The completion mark stands aside for the work (next branch),
+                # but the ladder ranks `attached` above the `⇉` rung, so an
+                # attached unread parent fell through to `○`: neither
+                # "finished" nor "work running" (review round 1, R1). What
+                # displaces a completion mark must be the work, so only `○` is
+                # swapped for `⇉`; a louder rung the ladder chose (`◴` for a
+                # parked wait, the wedged mark) is kept.
+                if mark == ATTACHED_MARKER:
+                    mark, ink = DELEGATING_MARKER, "accent"
             elif entry.shows_completion_mark and not entry.row.background_work:
                 # PRESENT WORK OUTRANKS THE LAST OUTCOME (operator report,
                 # 2026-11-07): an unread completion on a parent whose subagent or

@@ -5840,3 +5840,47 @@ async def test_background_work_outranks_an_unread_completion_mark_in_the_sidebar
         plain = sidebar.render().plain
         assert DELEGATING_MARKER not in plain
         assert COMPLETION_MARKERS["complete"][0] in plain
+
+
+@pytest.mark.asyncio
+async def test_background_work_on_an_attached_unread_parent_paints_the_work_mark(monkeypatch):
+    """Review round 1, R1: the completion mark stands aside for running work,
+    and on an ATTACHED parent the ladder's ``○`` used to win the fall-through —
+    a glyph saying neither "finished" nor "work running". The work rung wins."""
+    from local_operator.tui.widgets.session_picker import (
+        ATTACHED_MARKER,
+        COMPLETION_MARKERS,
+        DELEGATING_MARKER,
+        row_state_mark,
+    )
+
+    now = time.time()
+    working = CatalogEntry(
+        SessionRow("attd00000001", now, "parent", live_state="attached", subagents_running=1),
+        unseen=True,
+        completion_kind="complete",
+    )
+    assert working.shows_completion_mark
+    # The ladder alone still says "attached": the override is the sidebar's.
+    assert row_state_mark(working.row, 0)[0] == ATTACHED_MARKER
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    monkeypatch.setattr(app, "_refresh_sidebar", lambda: None)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        sidebar.set_open(True)
+        sidebar.entries = (working,)
+        await pilot.pause()
+        plain = sidebar.render().plain
+        assert DELEGATING_MARKER in plain
+        assert ATTACHED_MARKER not in plain
+        finished = CatalogEntry(
+            working.row._replace(subagents_running=0),
+            unseen=True,
+            completion_kind="complete",
+        )
+        sidebar.entries = (finished,)
+        await pilot.pause()
+        plain = sidebar.render().plain
+        assert DELEGATING_MARKER not in plain
+        assert COMPLETION_MARKERS["complete"][0] in plain

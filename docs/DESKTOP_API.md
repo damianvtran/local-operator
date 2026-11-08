@@ -895,9 +895,9 @@ yet is a legitimate state and a name in `attachment.json` outlives the registry
 entry it came from.
 
 A first page carries TWO populations of extras, and they are different promises.
-**Every running row** below the window -- ``status_code`` in ``approval``,
-``answer``, ``busy``, ``wedged`` or ``delegating`` -- is appended to the first
-page of ANY scope, head or group: the ranking puts work in progress behind every
+**Every running row** below the window -- ``status_code`` a Running code
+(``approval``, ``answer``, ``busy``, ``wedged``, ``waiting`` or ``delegating``)
+or ``background_work`` true -- is appended to the first page of ANY scope, head or group: the ranking puts work in progress behind every
 unread completion, so a page bound can leave a live turn out of the answer
 entirely, and a row the client is never handed is one it has no way to ask for
 again. **Off-page pinned rows** are appended to the **first page of the head**

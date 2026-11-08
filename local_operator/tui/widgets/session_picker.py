@@ -1157,9 +1157,10 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
         # but is caught by the louder ``⧗`` rung above.
         #
         # BELOW ``attached`` and ABOVE the armed wake, the same rung
-        # ``CatalogEntry.status_code``/``status`` place it at, read from the same
-        # row-level fact (``SessionRow.delegating``) so the glyph and the tooltip
-        # cannot disagree. Above the wake because a wake is a future fact ("this
+        # ``CatalogEntry.status_code``/``status`` place ``delegating`` at. The
+        # two can read differently on a drain alone: the tooltip says
+        # "Leaving…" while this glyph says the work it waits for is running —
+        # both true, so no one is wrong. Above the wake because a wake is a future fact ("this
         # will act at some point") and this is a present one ("work is running
         # now, one layer down") — and above ``idle``/``dormant`` for the same
         # reason ``◷`` is: bare residency is the least informative thing true of
