@@ -153,7 +153,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 # The git helpers are reused, not copied: ``_git`` runs ``git -C <repo>`` with
 # the hardened environment (``XPC_FLAGS`` dropped, repo-redirecting variables
@@ -1561,11 +1561,36 @@ def build_output_idle_minutes(min_idle_minutes: int) -> int:
     return max(int(min_idle_minutes), BUILD_OUTPUT_IDLE_MINUTES)
 
 
+def descendant_pids(forest: Mapping[int, int], root: int) -> frozenset[int]:
+    """``root`` together with every pid whose parent chain reaches it.
+
+    Pure function of a ``{pid: ppid}`` map so the relationship rule is testable
+    against a synthetic forest instead of whatever is running: the exclusion it
+    feeds is a claim about ANCESTRY, and a test that could only assert it against
+    the live process table would be asserting that no timing-dependent child
+    happens to exist. A cycle (impossible on both platforms, cheap to survive)
+    terminates because a pid already in ``found`` is never pushed twice.
+    """
+    children: dict[int, list[int]] = {}
+    for pid, parent in forest.items():
+        children.setdefault(parent, []).append(pid)
+    found = {root}
+    stack = [root]
+    while stack:
+        for child in children.get(stack.pop(), ()):
+            if child not in found:
+                found.add(child)
+                stack.append(child)
+    return frozenset(found)
+
+
 def read_process_table() -> list[tuple[int, tuple[str, ...]]] | None:
     """``[(pid, argv)]`` for every process ``ps`` reports, or ``None``.
 
-    ``ps -axo pid=,command=`` because it is present on every supported platform
-    and cheap. ``ps`` reports no cwd and does not delimit argv, so argv is
+    ``ps -axo pid=,ppid=,command=`` because it is present on every supported
+    platform and cheap — and ``ppid`` rides along in the same call, which is what
+    lets the exclusion below be a claim about ancestry rather than about one pid.
+    ``ps`` reports no cwd and does not delimit argv, so argv is
     approximated by whitespace splitting and the cwd is filled in from
     :func:`read_open_handles` (one ``lsof`` sweep already has it). Both
     approximations fail in the SAFE direction: a path containing a space can make
@@ -1576,16 +1601,26 @@ def read_process_table() -> list[tuple[int, tuple[str, ...]]] | None:
     every supported platform has at least one process, so an empty table means
     the output was not what we expect.
 
-    THIS COMMAND'S OWN PROCESS IS EXCLUDED. ``lop disk reclaim --build-output
-    <root>`` is a generic ``python`` producer, so its argv is never what
-    attributes it and the cwd rule decides — which made the planner itself the
-    live build it was looking for whenever it was run from inside the named
-    root. The row is dropped here, in the reader, so no attribution path can see
-    it; :func:`read_open_handles` drops the same pid for the same reason.
+    THIS COMMAND'S WHOLE PROCESS SUBTREE IS EXCLUDED — itself and every
+    descendant, because a child inherits the operator's cwd and is attributed by
+    exactly the same cwd rule (see :func:`read_open_handles`, which resolves the
+    ancestry from ``lsof``'s own PPID column for the same reason).
+    ``lop disk reclaim --build-output <root>`` is a generic
+    ``python`` producer, so its argv is never what attributes it and the cwd rule
+    decides — which made the planner itself the live build it was looking for
+    whenever it was run from inside the named root, and does the same to a child
+    of it that is still alive when this table is read. The rows are dropped here,
+    in the reader, so no attribution path can see them;
+    :func:`read_open_handles` drops the same set for the same reason.
+
+    ``ppid`` comes from the SAME ``ps`` call as ``pid`` and ``command``, so the
+    ancestry this filters on is the ancestry of the very snapshot being read: a
+    separate sample could describe a process tree that never coexisted with these
+    rows.
     """
     try:
         done = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            ["ps", "-axo", "pid=,command="],
+            ["ps", "-axo", "pid=,ppid=,command="],
             capture_output=True,
             text=True,
             timeout=QUICK_TIMEOUT_S,
@@ -1595,8 +1630,8 @@ def read_process_table() -> list[tuple[int, tuple[str, ...]]] | None:
         return None
     if done.returncode != 0:
         return None
-    rows: list[tuple[int, tuple[str, ...]]] = []
-    own_pid = os.getpid()
+    parsed: list[tuple[int, tuple[str, ...]]] = []
+    forest: dict[int, int] = {}
     for line in done.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -1606,10 +1641,16 @@ def read_process_table() -> list[tuple[int, tuple[str, ...]]] | None:
             pid = int(pid_text)
         except ValueError:
             return None
-        if pid == own_pid:
-            continue
-        rows.append((pid, tuple(rest.split())))
-    return rows or None
+        parent_text, _, command = rest.strip().partition(" ")
+        try:
+            forest[pid] = int(parent_text)
+        except ValueError:
+            return None
+        parsed.append((pid, tuple(command.split())))
+    if not forest:
+        return None
+    own = descendant_pids(forest, os.getpid())
+    return [(pid, argv) for pid, argv in parsed if pid not in own] or None
 
 
 def read_open_handles() -> tuple[str, ...] | None:
@@ -1638,18 +1679,30 @@ def read_open_handles() -> tuple[str, ...] | None:
     its own lsof use. Resolving tens of thousands of names per plan would cost
     more than the guard is worth on the machine this exists for.
 
-    TWO PIDS ARE EXCLUDED — this process and the ``lsof`` child it just spawned.
-    Both sit in whatever directory the operator ran the command from, ``lsof``
-    reports its OWN cwd (measured: a ``lsof`` row for the sweep itself), and a
-    cwd sentinel inside the candidate was a confident ``handles-open`` on a tree
-    nobody was using. Excluding exactly those pids keeps every OTHER process in
-    that same directory attributable, which is the direction this guard exists
-    for. The child's pid is only knowable from :class:`subprocess.Popen`, which
-    is why this is not a ``subprocess.run``.
+    THIS PROCESS AND ITS WHOLE SUBTREE ARE EXCLUDED, and the ancestry is read out
+    of ``lsof``'s OWN ``-R`` (PPID) column — from the same snapshot as the rows.
+    That detail is the whole correctness argument: this process is a ``python``
+    producer whose cwd rule attributes it, a child of it INHERITS the operator's
+    cwd (``_git`` runs ``git -C <root>`` with the cwd inherited, and anything a
+    wrapper leaves behind inherits it too), and a ``pid:<n>:cwd=<candidate>``
+    sentinel from any of them was a confident ``handles-open`` on a tree nobody
+    was using. Sampling ancestry from a SEPARATE ``ps`` — before or after the
+    sweep — cannot close it: a grandchild that comes and goes inside the sweep
+    window is in neither sample and may already be re-parented to init, so the
+    chain would not reach us even when it starts to. ``-R`` answers "who was this
+    process's parent when the row was read", which is exactly the question, and it
+    costs no second process.
+
+    Excluding exactly our own subtree keeps every OTHER process in that same
+    directory attributable, which is the direction this guard exists for: a
+    sibling or an unrelated ``git`` still blocks the candidate. A row whose PPID
+    column is missing cannot be tied to an ancestry, and dropping it would be the
+    fail-OPEN direction, so its NAME is kept as a plain path — the same evidence
+    for :func:`handles_open`, minus the pid-to-cwd mapping.
     """
     try:
         proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
-            ["lsof", "-n", "-P", "-w"],
+            ["lsof", "-n", "-P", "-w", "-R"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -1662,24 +1715,40 @@ def read_open_handles() -> tuple[str, ...] | None:
         proc.kill()
         proc.communicate()
         return None
-    own_pids = {os.getpid(), proc.pid}
+    # NAME may contain spaces, so split the fixed leading columns and keep the
+    # remainder whole: COMMAND PID PPID USER FD TYPE DEVICE SIZE/OFF NODE NAME
     paths: list[str] = []
+    parsed: list[tuple[int, list[str]]] = []
+    forest: dict[int, int] = {}
     for line in (stdout or "").splitlines():
-        # NAME may contain spaces, so split the fixed leading columns and keep
-        # the remainder whole: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
-        fields = line.split(None, 8)
-        if len(fields) != 9:
-            continue
+        fields = line.split(None, 9)
         try:
             pid = int(fields[1])
-        except ValueError:
+        except (IndexError, ValueError):
+            continue  # the header row, and anything with no usable PID column
+        if len(fields) != 10:
+            # No PPID column, so no ancestry and no pid-to-cwd mapping: keep the
+            # NAME as evidence rather than dropping a path that may be in use.
+            name = fields[-1].strip()
+            if name:
+                paths.append(os.path.normpath(name))
             continue
+        try:
+            forest[pid] = int(fields[2])
+        except ValueError:
+            name = fields[9].strip()
+            if name:
+                paths.append(os.path.normpath(name))
+            continue
+        parsed.append((pid, fields))
+    own_pids = descendant_pids(forest, os.getpid()) | {proc.pid}
+    for pid, fields in parsed:
         if pid in own_pids:
             continue
-        name = fields[8].strip()
+        name = fields[9].strip()
         if not name:
             continue
-        if fields[3] == "cwd":
+        if fields[4] == "cwd":
             paths.append(f"pid:{fields[1]}:cwd={name}")
         else:
             paths.append(os.path.normpath(name))

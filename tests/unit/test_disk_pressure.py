@@ -1729,22 +1729,148 @@ def test_a_different_live_producer_in_the_project_still_keeps_it(fx: Fx) -> None
     assert child.poll() is not None
 
 
+def _holder(where: Path) -> subprocess.Popen[bytes]:
+    """A child of THIS process, sitting in ``where``, alive until it is killed.
+
+    Held rather than scheduled: the bug this file now covers passed locally only
+    because the offending child had exited before the snapshot, so a case that
+    races the plan proves nothing in either direction.
+    """
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], cwd=where)
+
+
+def _cwds_of(pid: int) -> list[str]:
+    """The cwd ``lsof`` reports for ``pid`` — proof the holder is where it claims.
+
+    Read with ``lsof`` directly and NOT through :func:`dp.read_open_handles`: that
+    reader excludes our own subtree, which is exactly what these cells are
+    asserting about, so it cannot also be the instrument that witnesses it.
+    """
+    done = subprocess.run(
+        ["lsof", "-a", "-d", "cwd", "-n", "-P", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    found: list[str] = []
+    for line in done.stdout.splitlines():
+        fields = line.split(None, 8)
+        if len(fields) == 9 and fields[3] == "cwd":
+            found.append(os.path.normpath(fields[8].strip()))
+    return found
+
+
+def test_a_descendant_of_the_planner_working_inside_the_candidate_is_ours(fx: Fx) -> None:
+    """Ours by ANCESTRY, not by pid: a held child of the planner does not block.
+
+    The hosted-CI failure this closes. The planner's own pid was excluded and the
+    ``lsof`` child's pid was excluded, but any child of the planner INHERITS the
+    operator's cwd (the ``git`` probes run ``git -C <root>`` with the cwd
+    inherited, and a wrapper put on ``PATH`` for ``ps``/``lsof`` inherits it too),
+    so from inside the candidate that child's cwd sentinel read as
+    ``handles-open`` on a tree nobody was using. It reddened two shards and never
+    failed locally for one reason: the child had usually exited by snapshot time.
+    This cell holds one alive across the whole plan, so it fails deterministically
+    without the subtree exclusion instead of depending on how fast the machine is.
+    """
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    shape = _shape(root)
+    _idle(root)
+
+    held = _holder(shape)
+    try:
+        cwds = _cwds_of(held.pid)
+        assert len(cwds) == 1 and os.path.realpath(cwds[0]) == os.path.realpath(shape), (
+            "the holder must really sit in the candidate, or this cell proves nothing",
+            cwds,
+        )
+
+        plan = dp.plan(dp.Selection(build_output=(str(root),)), fx.cfg)
+
+        assert held.poll() is None, "the descendant must still be alive when the plan is read"
+        assert [(item.action, item.code) for item in plan.items] == [
+            (dp.ACTION_RECLAIM, "reclaim")
+        ], [(item.action, item.code, item.reason) for item in plan.items]
+    finally:
+        held.kill()
+        held.wait(timeout=30)
+    assert held.poll() is not None
+
+
+def test_a_third_party_working_inside_the_candidate_still_keeps_it(fx: Fx) -> None:
+    """Excluding our subtree must not become attribution-blindness.
+
+    Same directory, same ``cwd`` sentinel, and a ``python`` producer that looks
+    exactly like the descendant above — but this one is a SIBLING of the planner
+    (both are children of the test process), so the tree really is in use and must
+    be kept. Without this cell the ancestry rule could be widened to "ignore
+    anything that resembles us" and the suite would still be green.
+    """
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    shape = _shape(root)
+    _idle(root)
+
+    other = _holder(shape)
+    try:
+        assert _cwds_of(other.pid), "the third party must really sit in the candidate"
+        payload = _handler_payload(root, cwd=fx.root)
+        assert [item["code"] for item in payload["items"]] == ["handles-open"], payload
+    finally:
+        other.kill()
+        other.wait(timeout=30)
+    assert other.poll() is not None
+
+
+def test_the_subtree_rule_reads_the_parent_chain() -> None:
+    """``descendant_pids`` on a synthetic forest: total, and by ancestry.
+
+    No process table involved, so this is the cell that pins the RULE while the
+    two cells above pin its effect on the real command. A pid whose chain cannot
+    be walked back to us is not ours; the map is authoritative over anything
+    remembered about pids we once spawned, because re-parenting exists.
+    """
+    forest = {100: 1, 200: 100, 300: 200, 400: 1, 500: 400, 600: 300}
+    assert dp.descendant_pids(forest, 100) == frozenset({100, 200, 300, 600})
+    assert dp.descendant_pids(forest, 1) == frozenset({1, 100, 200, 300, 400, 500, 600})
+    assert dp.descendant_pids({700: 1000}, 100) == frozenset({100})
+
+
 def test_both_readers_drop_this_process() -> None:
     """The exclusion lives in the READERS, so no attribution path can see us.
 
-    What is asserted is our OWN pid's absence from both tables. The ``lsof``
-    child's pid is only knowable inside :func:`read_open_handles` (it is created
-    and reaped there), so by the time this test looks it is gone and its absence
-    proves nothing — the name says what the body can show.
+    What is asserted is our OWN pid's absence from both tables plus, with a child
+    held alive, the CHILD's absence — the case that reddened hosted CI, where the
+    child inherits this process's cwd and its cwd sentinel names a directory in
+    use. The ``lsof`` child's pid is only knowable inside
+    :func:`read_open_handles` (it is created and reaped there), so by the time
+    this test looks it is gone and its absence proves nothing — the held child is
+    what the body can show.
     """
     rows = dp.read_process_table()
     assert rows, "ps lists at least one process on every supported platform"
     assert all(pid != os.getpid() for pid, _ in rows)
 
-    handles = dp.read_open_handles()
-    assert handles is not None, "the end-to-end cases already require a working lsof"
-    assert not [entry for entry in handles if entry.startswith(f"pid:{os.getpid()}:cwd=")]
-    assert os.getpid() not in dp.cwds_by_pid(handles)
+    held = _holder(Path.cwd())
+    try:
+        rows = dp.read_process_table()
+        assert rows, "ps still answers with a child alive"
+        assert all(pid != held.pid for pid, _ in rows), "a child of ours is never a build"
+
+        handles = dp.read_open_handles()
+        assert handles is not None, "the end-to-end cases already require a working lsof"
+        assert not [entry for entry in handles if entry.startswith(f"pid:{os.getpid()}:cwd=")]
+        assert os.getpid() not in dp.cwds_by_pid(handles)
+        assert not [entry for entry in handles if entry.startswith(f"pid:{held.pid}:cwd=")]
+        assert held.pid not in dp.cwds_by_pid(handles)
+    finally:
+        held.kill()
+        held.wait(timeout=30)
+    assert held.poll() is not None
 
 
 def test_a_clone_inside_the_candidate_keeps_it(tmp_path: Path) -> None:
