@@ -125,25 +125,39 @@ def normalise_locale(tag: str | None) -> str | None:
 def config_value() -> str | None:
     """Best-effort read of the ``language`` key, without destructiveness.
 
-    Prefers the config WATCHER's already-validated snapshot (dict access) over
-    constructing a ``ConfigManager``, mirroring ``tui.settings._load``: a
-    manager's constructor can move a malformed ``config.yml`` aside, and a
-    resolution read must never be what renames a user's file. Constructing one
-    is the fallback only for processes with no watcher (CLI, tests), where
-    there is no cross-process invalidation to race with.
+    Prefers a RUNNING config watcher's already-validated snapshot (dict access),
+    mirroring ``tui.settings._load``. Otherwise reads the file through
+    ``config.read_config_values`` — stat-memoised and side-effect-free, the same
+    reader ``i18n.boot`` uses — and never builds a ``ConfigManager`` here: its
+    constructor can move a malformed ``config.yml`` aside, and a resolution read
+    must never be what renames a user's file (nor create the config directory).
+
+    WHY ``is_polling`` AND NOT ``existing_watcher(...) is not None``. The server
+    creates watchers it never starts (``process_watcher()`` at the settings
+    route, the team bridge, the COS-name read: ``poll_now()`` once, no
+    ``start()``). An unstarted watcher's ``values`` only moves on a local
+    ``notify_local()`` (the in-process PATCH fast path), so a language change
+    from the CLI/TUI/another client left every server surface — the
+    ``/v1/capabilities`` language, the desktop feed ``config`` event, the
+    sessions-list wake label — painting the old language until restart. Do NOT
+    "fix" it with ``poll_now()`` here: ``_tick`` fans out to listeners and this
+    is reached via ``asyncio.to_thread``.
+
+    An unreadable/torn file reads as ``None`` -> "no language configured", so the
+    chain falls through to ``LOP_LANG``/OS rather than raising.
     """
     try:
+        from local_operator.config import read_config_values
         from local_operator.config_watch import existing_watcher
         from local_operator.paths import config_dir
 
         directory = config_dir()
         watcher = existing_watcher(directory)
-        if watcher is not None:
+        if watcher is not None and watcher.is_polling:
             value = watcher.values.get(CONFIG_KEY)
             return value if isinstance(value, str) else None
-        from local_operator.config import ConfigManager
-
-        value = ConfigManager(directory).get_config().values.get(CONFIG_KEY)
+        values = read_config_values(directory)
+        value = values.get(CONFIG_KEY) if isinstance(values, dict) else None
         return value if isinstance(value, str) else None
     except Exception:
         return None
