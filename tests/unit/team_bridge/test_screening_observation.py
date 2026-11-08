@@ -743,34 +743,54 @@ def test_a_userinfo_only_difference_shares_one_latch() -> None:
     assert obs.hub_accepts(f"https://ops:{_USERINFO_MARKER}@hub.example/v1") is False
 
 
+def test_a_base_with_userinfo_logs_the_bare_origin(caplog) -> None:
+    """The latch's own line names the bare origin, whatever base it is handed.
+
+    Driven through ``note_hub_refused`` directly: since S-r2-1 the client
+    refuses a credentialed base before any request (``test_base_credentials``),
+    so the latch can no longer be reached through it with one. The helper keeps
+    its own guarantee for any future caller.
+
+    ONLY ``local_operator`` records are asserted on (S-r2-2): at
+    ``-o log_level=INFO`` or ``--log-file-level=DEBUG`` caplog also holds other
+    libraries' records, which this module does not own.
+    """
+
+    caplog.set_level("INFO", logger="local_operator.team_bridge")
+    obs.note_hub_refused(f"https://ops:{_USERINFO_MARKER}@hub.example/v1")
+    lines = [r.getMessage() for r in caplog.records if r.name.startswith("local_operator")]
+    assert lines == [
+        "team_bridge: hub https://hub.example refused the screening observation;"
+        " latched off for this origin",
+    ]
+    logged = "\n".join(lines)
+    assert _USERINFO_MARKER not in logged
+    assert "@" not in logged
+
+
 @pytest.mark.asyncio
-async def test_a_base_with_userinfo_logs_the_bare_origin(caplog) -> None:
+async def test_a_base_with_userinfo_is_refused_before_the_observation_lane(caplog) -> None:
+    """The admit that used to log through the latch is refused, unsent, unlogged."""
+
+    seen: list[httpx.Request] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/messaging/status"):
-            return _ok({"features": {obs.OBSERVATION_FEATURE: 1}})
-        if _carried(request):
-            return httpx.Response(400, json=_INVALID)
+        seen.append(request)
         return _ok({"status": "recorded"})
 
-    # The base is the only change from the sibling test above, so the client
-    # is built the way ``_make_client`` builds it, with this base instead.
     client = tb_client.TeamBridgeClient(
         None,
         base_url=f"https://ops:{_USERINFO_MARKER}@hub.example/v1",
         store=FakeStore(),
         transport=httpx.MockTransport(handler),
     )
-    await client.status()
     caplog.set_level("INFO", logger="local_operator.team_bridge")
-    assert await _admit(client, PREFERRED) == {"status": "recorded"}
+    with pytest.raises(tb_client.BridgeRefusal) as refused:
+        await _admit(client, PREFERRED)
+    assert refused.value.code == "bridge_destination_refused"
+    assert seen == []
     lines = [r.getMessage() for r in caplog.records if r.name.startswith("local_operator")]
-    assert lines == [
-        "team_bridge: hub https://hub.example refused the screening observation;"
-        " latched off for this origin",
-        "team_bridge: hub https://hub.example refused an admit carrying the screening"
-        " observation; resending once without it",
-    ]
-    logged = caplog.text + "\n".join(lines)
+    logged = "\n".join([*lines, str(refused.value)])
     assert _USERINFO_MARKER not in logged
     assert "@" not in logged
 

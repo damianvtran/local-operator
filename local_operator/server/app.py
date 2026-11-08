@@ -29,7 +29,11 @@ from local_operator.console import VerbosityLevel
 from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
-from local_operator.logger import configure_console_logging, get_logger
+from local_operator.logger import (
+    configure_console_logging,
+    get_logger,
+    quiet_wire_clients,
+)
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server import early_paint_hold
 from local_operator.server import registry as serve_registry
@@ -128,6 +132,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # already configured its own named loggers by the time startup runs, and
     # this only touches the root logger, so the two do not fight.
     configure_console_logging()
+    # AFTER the console call, which resets the wire clients to the root level.
+    # At LOG_LEVEL=INFO httpx otherwise logs one ``HTTP Request: <full url>``
+    # line per outbound call, and this process builds TeamBridgeClient and the
+    # provider clients (security round 2 on #3587, S-r2-1). Every other entry
+    # point (CLI, session host, file logging, relay, mobile) already pins them.
+    quiet_wire_clients()
 
     # The tokenizer's first-use cost overlaps the rest of startup. This process
     # runs sessions of its own — the stateless ``/v1/chat`` path and the

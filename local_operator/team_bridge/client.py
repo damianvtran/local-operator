@@ -123,6 +123,51 @@ from local_operator.team_bridge.types import (
 
 logger = logging.getLogger(__name__)
 
+#: The refusal for a hub base spelled with URL credentials (``user:pass@``).
+#: Deliberately quotes nothing from the base: the credential is the one part of
+#: it that must not be echoed into a CLI error, a server response or a log. No
+#: ``@`` either, so a log scan for one stays a clean leak signal.
+CREDENTIALED_BASE_REFUSED_SENTENCE = (
+    "organization operations are refused because the configured Radient hub URL "
+    "carries credentials (a user name or password before the host). The hub is "
+    "authenticated with the "
+    "signed-in account's bearer only; remove the credentials from `radient_base_url`."
+)
+
+
+def _split_base_credentials(base_url: str) -> tuple[str, bool]:
+    """``base_url`` without its URL credentials, and whether it carried any.
+
+    REFUSE, NOT LIFT INTO ``Authorization: Basic`` (security round 2 on #3587,
+    S-r2-1). This client authenticates every hub request with the signed-in
+    account's pinned ``Bearer`` (see ``_dispatch``), and a request has ONE
+    ``Authorization`` header: a Basic header lifted from the URL could only
+    replace the bearer, which is what httpx 0.28.1 already did with such a base
+    (measured: the hub received ``Basic`` and never the bearer). So a
+    credentialed base never authenticated as the account; it only leaked: httpx
+    logs ``HTTP Request: <full url>`` at INFO, credentials included.
+
+    STRIPPED AT CONSTRUCTION, refused at the destination guard: the stored base
+    is what reaches httpx, the latch key, ``base_url`` callers and the refusal
+    sentences, so none of them can carry the credential even before the guard
+    runs. Parsed by hand rather than with ``urlsplit``, which raises on a
+    malformed bracketed host and would leave such a base unstripped. The split
+    matches httpx and ``screening_observation.hub_origin``: the authority ends at
+    the first ``/``, ``?`` or ``#``, and the credentials end at its LAST ``@``
+    (so a raw ``@`` in the password is still credentials). EMPTY credentials
+    (``https://@host``) count, because httpx still sends Basic for them.
+    """
+
+    scheme, separator, rest = base_url.partition("://")
+    if not separator:
+        return base_url, False
+    ends = [index for index in (rest.find(mark) for mark in "/?#") if index >= 0]
+    end = min(ends, default=len(rest))
+    _credentials, at, host = rest[:end].rpartition("@")
+    if not at:
+        return base_url, False
+    return f"{scheme}://{host}{rest[end:]}", True
+
 
 def _attach_observation(
     body: dict[str, Any], base_url: str, observation: ScreeningObservation | None
@@ -1638,7 +1683,9 @@ class TeamBridgeClient:
         credential_id: int | None = None,
     ) -> None:
         self._config_dir = config_dir
-        self._base_url = (base_url or resolve_radient_api_base_url()).rstrip("/")
+        self._base_url, self._base_had_credentials = _split_base_credentials(
+            (base_url or resolve_radient_api_base_url()).rstrip("/")
+        )
         self._store = store
         self._transport = transport
         #: The owner pin (see the module docstring): the exact credential row
@@ -1739,8 +1786,14 @@ class TeamBridgeClient:
         ``RADIENT_ORG_ALLOW_NONCANONICAL_BASE`` opt-in (the resolvers' rule);
         without it the refusal names the configuration remedy rather than the
         sign-in one, because that is the move that works.
+
+        A base that carried URL credentials is refused FIRST, opt-in or not: the
+        opt-in accepts a host, never a second credential riding beside the
+        bearer (see :func:`_split_base_credentials`).
         """
 
+        if self._base_had_credentials:
+            raise BridgeRefusal("bridge_destination_refused", CREDENTIALED_BASE_REFUSED_SENTENCE)
         if not org_oauth_destination_allowed(self._base_url):
             raise BridgeRefusal(
                 "bridge_destination_refused",
