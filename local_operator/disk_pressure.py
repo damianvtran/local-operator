@@ -2017,6 +2017,18 @@ def symlink_in_path(path: str, *, stop_at: str) -> str | None:
     return None
 
 
+def _in_config_dir(path: str, config_root: Path) -> bool:
+    """Whether ``path`` is the config dir or anything below it.
+
+    Both spellings, like every other path comparison here: ``config_dir()`` is
+    what the caller resolved and the named root is what the operator typed.
+    """
+    root = os.path.abspath(os.path.expanduser(os.fspath(config_root)))
+    forms = (os.path.abspath(path), os.path.realpath(path))
+    roots = (root, os.path.realpath(root))
+    return any(_inside(form, base) for form in forms for base in roots)
+
+
 def manifests_present(project_root: str, manifests: Iterable[str]) -> tuple[str, ...]:
     """Which of one shape's manifests exist as files in ``project_root``.
 
@@ -2258,6 +2270,7 @@ def plan_build_output(
     *,
     now: float,
     min_idle_minutes: int,
+    config_root: Path | None = None,
     probes: BuildProbes | None = None,
 ) -> tuple[list[Item], list[dict[str, str]]]:
     """Assess every operator-named project directory. Returns ``(items, refusals)``.
@@ -2273,6 +2286,14 @@ def plan_build_output(
     Nothing is discovered. The candidates are the fixed shape names inside each
     named directory, one level deep, and no shape becomes a candidate unless the
     directory holds a manifest that proves the project owns it.
+
+    A named root inside the config dir (``config_root``) is refused by name. The
+    sessions store and every session scratchpad live there, this category's
+    remover is the one deleter in this module, and the scratchpads category
+    already reclaims what belongs below that path under its own guards (live
+    claim/lease, retention window, manifests). Refusing here is what lets the
+    no-session-deletion guard prove that nothing this module deletes can reach a
+    session directory.
     """
     resolved = probes if probes is not None else default_build_probes()
     items: list[Item] = []
@@ -2295,6 +2316,18 @@ def plan_build_output(
         if root in seen:
             continue
         seen.add(root)
+        if config_root is not None and _in_config_dir(root, config_root):
+            refusals.append(
+                {
+                    "category": CATEGORY_BUILD_OUTPUT,
+                    "path": given,
+                    "reason": (
+                        f"{given} is inside the config dir; session scratchpads are "
+                        "reclaimed by --scratchpads under its own guards"
+                    ),
+                }
+            )
+            continue
         if not os.path.isdir(root):
             refusals.append(
                 {
@@ -2446,7 +2479,11 @@ def _remove_tree(root: str) -> None:
 
 
 def remove_build_output(
-    item: Item, *, min_idle_minutes: int, probes: BuildProbes | None = None
+    item: Item,
+    *,
+    min_idle_minutes: int,
+    config_root: Path | None = None,
+    probes: BuildProbes | None = None,
 ) -> str | None:
     """Remove ONE previewed build-output tree. ``None`` on success.
 
@@ -2470,6 +2507,8 @@ def remove_build_output(
     is a failure. Both make the run exit 1, which is the honest code for "this
     previewed item did not get reclaimed".
     """
+    if config_root is not None and _in_config_dir(item.path, config_root):
+        return "refusing: it is inside the config dir"
     fresh = revalidate_build_output(item, min_idle_minutes=min_idle_minutes, probes=probes)
     if fresh.action != ACTION_RECLAIM:
         return f"no longer qualifies: [{fresh.code}] {fresh.reason}"
@@ -2594,7 +2633,10 @@ def plan(selection: Selection, config_root: Path, *, now: float | None = None) -
             result.refusals.append(refusal)
     if selection.build_output:
         items, refusals = plan_build_output(
-            selection.build_output, now=moment, min_idle_minutes=selection.min_idle_minutes
+            selection.build_output,
+            now=moment,
+            min_idle_minutes=selection.min_idle_minutes,
+            config_root=config_root,
         )
         result.items.extend(items)
         result.refusals.extend(refusals)
@@ -2828,6 +2870,7 @@ def apply(
                 error = remove_build_output(
                     item,
                     min_idle_minutes=plan_.selection.min_idle_minutes,
+                    config_root=config_root,
                     probes=build_probes,
                 )
                 if error and error.startswith(("no longer qualifies", "refusing")):

@@ -1258,6 +1258,34 @@ def test_a_missing_directory_is_a_refusal(fx: Fx, capsys: Any) -> None:
     assert "not a directory" in payload["refusals"][0]["reason"]
 
 
+def test_a_named_root_inside_the_config_dir_is_refused(fx: Fx, capsys: Any) -> None:
+    """The sessions store lives in the config dir; this category may not reach it.
+
+    This is the enforcement the repo's no-session-deletion guard points at: the
+    scratchpads category reclaims what belongs below the config dir, under its
+    own live-claim/lease and retention guards, so `--build-output` refuses the
+    whole path rather than competes with it.
+    """
+    inside = _project(fx.cfg / "sessions" / "abc123")
+    _shape(inside)
+    _idle(inside)
+
+    assert reclaim_command(_args(build_output=(str(inside),), json=True)) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["refusals"][0]["category"] == "build-output"
+    assert "inside the config dir" in payload["refusals"][0]["reason"]
+    assert (inside / "target").exists()
+
+    # ... and the remover refuses it again, for a plan that somehow carries it.
+    items, _ = plan_bo(inside)
+    assert [item.action for item in items] == [dp.ACTION_RECLAIM]
+    detail = dp.remove_build_output(
+        items[0], min_idle_minutes=60, config_root=fx.cfg, probes=_bo_probes()
+    )
+    assert detail and detail.startswith("refusing")
+    assert (inside / "target").exists()
+
+
 def test_a_worktree_whose_own_name_is_a_shape_is_kept(fx: Fx) -> None:
     """The round-1 repro: ``git worktree add .worktrees/target -b feat/wip``.
 

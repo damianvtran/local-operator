@@ -168,7 +168,10 @@ nothing collects `.next`/`build`/`dist`), so `disk_pressure.remove_build_output`
 exists, and it re-runs every predicate in this table at removal time, refuses a
 symlink or mount point that appeared in between, never follows a symlink out of
 the tree, and measures the tree immediately before deleting it. It is reachable
-only from `apply`, for items the preview approved.
+only from `apply`, for items the preview approved. A named root inside the config
+dir is refused, at plan time and again at removal time: the sessions store and
+every session scratchpad live there, and `--scratchpads` reclaims what belongs
+below that path under its own guards.
 
 There are deliberately no settings for this category: the threshold *is* the
 window above, dry-run *is* the command's default, and "enabled" *is* naming
