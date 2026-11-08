@@ -91,6 +91,7 @@ from local_operator.compaction.marker import (
     with_capture_elision_frontier,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
+from local_operator.divergence import DivergenceJudge, origin_parent_session_id
 from local_operator.harness import chrome_prompts as _chrome_prompts
 from local_operator.harness.approval import ApprovalGate, ask_approval
 from local_operator.harness.comms import SubagentComms
@@ -113,6 +114,7 @@ from local_operator.harness.message_types import (
     ASK_RELAY_MESSAGE_TYPE,
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
+    DIVERGENCE_NOTICE_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
     PEER_DELIVERABLE_CUSTOM_TYPES,
     PEER_FAMILY_INPUT_TYPES,
@@ -3626,6 +3628,25 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # The divergence observer (``local_operator/divergence.py``) is
+        # SESSION-scoped, and that is the whole reason it is built here: "fire
+        # once per novel root" and "escalate on a second turn" are facts about a
+        # session, so a run-scoped instance would re-announce the same root on
+        # every loop pass. Its notice callback paints the transcript row; the
+        # audit row is written by the judge itself.
+        #
+        # OBSERVATION ONLY. Nothing this object returns can deny, approve or
+        # delay a call — the loop invokes it after the result exists and wraps
+        # every failure. See ``harness/loop.py``'s ``_observe_divergence``.
+        self._divergence_judge = DivergenceJudge(
+            session_id=self._session_id,
+            # The constructor value when the host passed one, else the durable
+            # marker on disk: a child resumed by id has no live parent handle,
+            # and ``origin.json`` is written once by whoever created the
+            # directory — the only place that knows.
+            parent_session_id=parent_session_id or origin_parent_session_id(transcript.directory),
+            on_notice=self._record_divergence_notice,
+        )
         # Tool contexts are rebuilt per turn; presence belongs to the Session
         # so both transition updates and the serving heartbeat read one fact.
         self._waiting_on = 0
@@ -5229,6 +5250,18 @@ class Session:
         #: (a whole day's check-in lost, silently). Empty when there is no
         #: catch-up pending.
         self._resume_catchup_ids: set[str] = set()
+        #: WHO wrote the words the catch-up text folds — ``"operator"``,
+        #: ``"model"`` or ``""`` (``WakeSchedule.message_author``). THREE-VALUED
+        #: on purpose: the guard searches the aggregate as ONE blob, so the answer
+        #: is knowable only when every member agrees. All-operator is attributable;
+        #: all-model is attributable; ANY mixture — a model row among the
+        #: operator's, or a legacy row that names no author — is not, and ``""``
+        #: says so. The mixed case used to collapse to ``"model"``, which asserted a
+        #: known author for text the operator wrote and put the round-4 false
+        #: notice back on their own root (QA round 5). ``""`` makes the delivery
+        #: unattributable at the judge, which hedges instead of asserting.
+        #: ``""`` until a catch-up is prepared; cleared with the fold ids at take.
+        self._resume_catchup_author = ""
         #: The load-time fires the catch-up still owes a swallow. Seeded with
         #: the fold ids at prepare; each fire that matches consumes its id
         #: ONCE (see :meth:`_deliver_wake_catchup`). Kept SEPARATE from the
@@ -10502,7 +10535,10 @@ class Session:
                 except Exception:  # noqa: BLE001 — a display lookup must
                     # not abort the receive; absent beats guessed.
                     account_display = ""
-            from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+            from local_operator.harness.message_types import (
+                BRIDGE_CONFIG_REQUEST_RULE,
+                BRIDGE_UNTRUSTED_CLAUSE,
+            )
 
             wrapped = (
                 f"<team-bridge-message "
@@ -10512,6 +10548,8 @@ class Session:
                 # wrap, ahead of the body, so the model reads the content as
                 # data — never as instructions from a colleague's agent.
                 f"{BRIDGE_UNTRUSTED_CLAUSE}\n"
+                # B5: a teammate's config suggestion is relayed, never applied.
+                f"{BRIDGE_CONFIG_REQUEST_RULE}\n"
                 f"{Session._neutralize_bridge_tag(text)}\n"
                 "</team-bridge-message>"
             )
@@ -19770,6 +19808,7 @@ class Session:
                 capture_prepared_write=(
                     self._capture_prepared_write if self._prepared_capture_enabled else None
                 ),
+                divergence_judge=self._divergence_judge,
                 model=self._model,
                 # Re-read per provider call, so a ``set_model`` landing while
                 # this turn is running reaches its NEXT call instead of
@@ -21180,6 +21219,38 @@ class Session:
             effort=effort,
             model_selector=model,
         )
+
+    def _record_divergence_notice(self, payload: dict[str, Any]) -> None:
+        """Paint a divergence notice into the transcript, from the judge's callback.
+
+        Called SYNCHRONOUSLY from inside a live tool call (``divergence.
+        DivergenceJudge.observe_turn`` runs on the turn's own path), so it hands
+        the transcript write to the session's background group rather than
+        awaiting it there. The row is the operator's visible half of the
+        observation; the durable half is the audit row the judge already wrote.
+
+        A MESSAGE entry carrying a ``CustomMessage`` — not ``append_custom`` —
+        for the reason ``_record_gate_timeout`` names: ``build_llm_history``
+        ignores custom ENTRIES by design, so a row written the other way would
+        reach no viewer that replays the history. It stays out of the MODEL's
+        context on its own merits: ``DIVERGENCE_NOTICE_MESSAGE_TYPE`` is absent
+        from ``harness/render.py``'s injection tuple, which drops unlisted
+        custom types as bookkeeping.
+        """
+
+        async def _append() -> None:
+            try:
+                await self._transcript.append_message(
+                    CustomMessage(
+                        custom_type=DIVERGENCE_NOTICE_MESSAGE_TYPE,
+                        attribution="system",
+                        details=payload,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - a notice must never break a turn
+                logger.debug("could not record the divergence notice", exc_info=True)
+
+        self._spawn_background(_append())
 
     def _capture_prepared_write(self, call: ToolCall, result: ToolResult) -> None:
         """Private exact executed bytes; never persisted or passed to a provider.
@@ -29006,6 +29077,17 @@ class Session:
         # into the message (review round 2, R7); the leftover load-time fires
         # are tracked separately as phantoms.
         self._resume_catchup_ids = {m["schedule"].id for m in missed}
+        # The folded authors, as a SET: the guard searches the aggregate as one
+        # blob, so the only knowable answers are "every row is the operator's",
+        # "every row is the model's", and "the rows disagree" — the last one
+        # includes a row that names no author at all (a legacy row), because an
+        # attributable aggregate must not contain a line nobody can attribute.
+        catchup_authors = {m["schedule"].message_author for m in missed}
+        self._resume_catchup_author = (
+            "operator"
+            if catchup_authors == {"operator"}
+            else "model" if catchup_authors == {"model"} else ""
+        )
         if getattr(self, "_aida_duty", False):
             # Keep the original row, not the scheduler's grace-shifted copy.
             # This is spent only when the existing catch-up take accepts it.
@@ -29111,6 +29193,17 @@ class Session:
                 # set is spent below — this is the only reader of the fold set
                 # once the take has run.
                 "wake_ids": sorted(self._resume_catchup_ids),
+                # WHO WROTE the folded messages, for the divergence guard. Three
+                # values, not two: an aggregate is attributable only when every
+                # row in it agrees — all-operator or all-model — because the
+                # guard searches the delivered text as one blob and cannot see
+                # WHICH line a root came from. A mixed fold (one model row among
+                # the operator's, or a legacy row naming no author) is stamped
+                # "", so the judge folds nothing and records
+                # ``unseen=unattributed_wake``: the notice hedges instead of
+                # telling the operator their own instruction was in no user
+                # message a model row happened to travel with (QA round 5).
+                "wake_author": self._resume_catchup_author,
             },
         )
         # THE FOLD IS SPENT HERE, and only here (review round 2, R7) — AFTER
@@ -29127,6 +29220,7 @@ class Session:
             self._aida_cadence_delivered = getattr(self, "_aida_cadence_catchup", None)
             self._aida_cadence_catchup = None
         self._resume_catchup_ids = set()
+        self._resume_catchup_author = ""
         return message
 
     def _deliver_resume_catchup(self, catchup: CustomMessage) -> None:
@@ -30612,6 +30706,14 @@ class Session:
             "wake_id": due.schedule.id,
             "occurrence": due.occurrence,
             "text": text,
+            # WHO AUTHORED the message inside this text — ``operator`` for a wake
+            # the person scheduled through the CLI, the desktop route or the TUI
+            # page, ``model`` for one the agent (or an engine) scheduled. The
+            # divergence guard reads it (``divergence._wake_author``); a wake is
+            # the one carrier whose text has two possible authors, and the
+            # message here is rendered verbatim, so this bit is the only thing
+            # that can tell them apart.
+            "wake_author": due.schedule.message_author,
             # §14.4: the delivery's control parameter, read by the trigger
             # record at fold-in; never re-derived later.
             "notify": bool(due.schedule.notify),
@@ -31350,6 +31452,13 @@ class Session:
             "wake_id": due.schedule.id,
             "occurrence": due.occurrence,
             "text": text,
+            # A patience wait is armed by the AGENT that sent the message, so its
+            # fire note is model text (``patience.fire_note`` composes it from the
+            # row's note and bounds). Stamped rather than left absent so the
+            # divergence guard reads a known author instead of an unattributed
+            # carrier — the absent case is reserved for history written before
+            # the field existed.
+            "wake_author": due.schedule.message_author,
             **patience.fire_details(due.schedule),
         }
         wake_message = CustomMessage(

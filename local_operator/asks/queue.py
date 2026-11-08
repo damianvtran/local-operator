@@ -2585,6 +2585,11 @@ class AskQueue:
                 created_at=self._now(),
                 kind="ask_timeout",
                 hidden=True,
+                # ENGINE TEXT (the queue composes it), stamped rather than left
+                # unset: ``origin`` defaults to ``None`` = unattributed, which
+                # would make every deadline fire report a carrier it could not
+                # read. Nothing a person wrote is in this message.
+                origin="tool",
             )
             # The session owns ``_wake`` and its persist-and-arm path, so it owns
             # the write; the queue only mints the row (see ``Session.arm_ask_wake``).

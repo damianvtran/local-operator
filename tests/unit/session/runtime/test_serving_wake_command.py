@@ -145,6 +145,33 @@ async def test_edit_rewords_in_place_and_keeps_the_handle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_edit_replaces_a_model_rows_author_with_the_operator() -> None:
+    """R6-MAJOR-1 at the owner command.
+
+    ``origin`` is who WROTE ``message``. This branch rewords a row the model
+    armed (``tool``), so the person's replacement text is theirs — without the
+    stamp the delivery reads as model authorship and the divergence guard tells
+    the operator their own sentence is new to the session. A request that only
+    re-times the row leaves the words, and so the author, alone.
+    """
+    session = _Session([_row("w1", origin="tool"), _row("w2", origin="tool")])
+
+    reworded = await _run(
+        session, {"op": "edit", "wake_id": "w1", "request": {"message": "deploy the fix"}}
+    )
+    retimed = await _run(session, {"op": "edit", "wake_id": "w2", "request": {"in": "2h"}})
+
+    assert reworded.kind == "notice"
+    assert retimed.kind == "notice"
+    rows = {row.id: row for row in session.scheduler.schedules}
+    assert rows["w1"].message == "deploy the fix"
+    assert rows["w1"].origin == "desktop"
+    assert rows["w1"].message_author == "operator"
+    assert rows["w2"].origin == "tool", "a re-time took authorship of the model's words"
+    assert rows["w2"].message_author == "model"
+
+
+@pytest.mark.asyncio
 async def test_a_payload_this_handler_cannot_read_is_refused_not_raised() -> None:
     """The caller is our own route, so a shape it cannot produce is a protocol
     bug — refused in the same typed envelope as everything else rather than

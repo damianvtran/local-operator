@@ -119,6 +119,59 @@ def _guarded_fact_args(args: Any) -> Any:
     return {**args, "text": ""} if structural_reference(args.get("text")) else args
 
 
+#: The store's title budget for a title derived from the first line of a stored text.
+_TITLE_CHARS = 100
+
+
+#: The title used when the first line is one token with no safe cut point inside the
+#: budget. Neutral on purpose: never a raw slice of the token (see ``_derived_title``).
+_FALLBACK_TITLE = "Note"
+#: Token-internal separators a long URL or path can be cut AT without splitting a run:
+#: the cut keeps the separator's left side, which is whole path/URL components.
+_TOKEN_SEPARATORS = "/.#-_?"
+
+
+def _derived_title(text: str) -> str:
+    """The first line of ``text``, cut to the title budget without splitting a token.
+
+    The store guards ``title`` as its own field. A hard cut can split a token into a NEW
+    shape: ``…/attachments/<digest>.bin`` cut before ``.bin`` leaves a bare hex run the
+    body never had (QA round 2, Q-M2). So the cut is, in order: the last whitespace
+    within the budget; else the longest token-separator (``/ . # - _ ?``) cut the
+    store's guard admits, so a long URL or absolute path keeps whole components; else a
+    fixed neutral title. An
+    empty title is never derived for a non-empty text: the store refuses it (QA round 3,
+    Q-M3).
+    """
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    line = stripped.splitlines()[0].strip()
+    if len(line) <= _TITLE_CHARS:
+        return line
+    if line[_TITLE_CHARS].isspace():
+        return line[:_TITLE_CHARS].rstrip()
+    head = line[:_TITLE_CHARS]
+    # Candidate cuts, longest first: whitespace, then each token separator. A cut at a
+    # separator can still split a run (``<digest>.bin`` cut at the ``.``), so the first
+    # candidate the store's own guard admits wins; the text it came from already passed.
+    cuts = sorted(
+        {i for i, ch in enumerate(head) if ch.isspace()}
+        | {i for i, ch in enumerate(head) if ch in _TOKEN_SEPARATORS},
+        key=lambda i: (not head[i].isspace(), -i),
+    )
+    for cut in cuts:
+        title = head[:cut].rstrip()
+        if not title:
+            continue
+        try:
+            guard(title, field="title")
+        except MemoryError:
+            continue
+        return title
+    return _FALLBACK_TITLE
+
+
 def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
     from local_operator.memory_privacy import guard_encoded
 
@@ -127,7 +180,10 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
     # _recall_reference for why it exists and what it covers.
     reference = _recall_reference(name, args.get("path"))
     guarded = args if reference is None else {**args, "path": _guarded_path(args["path"])}
-    guard(guarded)
+    # ``guard_encoded`` alone: it guards every key and DECODED value at its field (the
+    # store's rule) and gives JSON text only the spelling pass. A plain ``guard`` over a
+    # write's JSON ``content`` string judged the opaque rule on escaped text, where
+    # ``\nCommit`` hides the word ``commit``, and refused what the store admits.
     guard_encoded(guarded)
     allowed = {"path", "i", "raw"} if name == "read" else {"path", "i", "content"}
     if name == "edit":
@@ -352,11 +408,8 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
         lifetime = _LIFETIMES[scope]
         path = "memory://" + scope
         if args["op"] == "store":
-            guard(text, opaque=True)
-            payload = {
-                "title": text.strip().splitlines()[0][:100] if text.strip() else "",
-                "body": text,
-            }
+            guard(text, field="text")
+            payload = {"title": _derived_title(text), "body": text}
             store_for(context).prepare_fact(payload)
             result = await execute_memory(
                 call_id, "write", {"path": path, "content": json.dumps(payload)}, context

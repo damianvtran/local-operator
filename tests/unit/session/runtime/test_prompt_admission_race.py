@@ -614,3 +614,152 @@ async def test_a_cancelled_admission_future_reads_as_not_ours(tmp_path: Path) ->
             waiter.cancel()
         unsubscribe()
         await handle.dispose()
+
+
+# -- wait_for_turn=False refuses NOW, so the phone relay can steer --------------
+#
+# The phone relay (``mobile/daemon.py``'s ``_deliver_continuation``) sends a live
+# prompt with ``wait_for_turn: false`` and answers ``TurnInFlight`` by steering
+# the SAME command id. That only works if the refusal arrives before the relay's
+# 15 s ack bound: on the unfixed handle a busy prompt was queued and its receipt
+# parked until the turn ahead ENDED (measured: ``504 session did not answer``).
+
+
+async def _refused_now(handle: ServingSessionHandle, text: str, command_id: str) -> BaseException:
+    """The receipt must settle within the synchronous prelude, as a refusal."""
+    from local_operator.session.errors import TurnInFlight
+
+    task = asyncio.ensure_future(handle.prompt(text, command_id=command_id, wait_for_turn=False))
+    for _ in range(5):
+        if task.done():
+            break
+        await asyncio.sleep(0)
+    assert task.done(), "a no-wait prompt parked behind the running turn"
+    exc = task.exception()
+    assert isinstance(exc, TurnInFlight), exc
+    return exc
+
+
+@pytest.mark.asyncio
+async def test_a_no_wait_prompt_during_a_turn_is_refused_at_once_and_steers_once(
+    tmp_path: Path,
+) -> None:
+    """Busy prompt → immediate refusal → steer under the same id → one delivery.
+
+    A retry of the same id afterwards (the composer's envelope replay after a
+    lost ack) is answered "already admitted" as a prompt AND as a steer, and
+    the message reaches the transcript exactly once.
+    """
+    session, handle, stream = await _deliver_a_job_result_and_hold_it(tmp_path)
+    try:
+        await _refused_now(handle, "phone hi", "phone-1")
+        assert await handle.steer("phone hi", command_id="phone-1") == "steering queued"
+        assert await handle.prompt("phone hi", command_id="phone-1", wait_for_turn=False) == (
+            "already admitted"
+        )
+        assert await handle.steer("phone hi", command_id="phone-1") == "already admitted"
+        assert [getattr(m, "id", None) for m in session.queued_steering()] == ["phone-1"]
+        stream.release.set()
+        await asyncio.wait_for(_idle(session, handle), 10)
+        assert _landed(tmp_path / "sess", "phone-1")
+        assert _user_rows(tmp_path / "sess", "phone hi") == 1
+    finally:
+        stream.release.set()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_no_wait_prompt_behind_a_queued_prompt_is_refused_at_once(tmp_path: Path) -> None:
+    """The QUEUE counts as busy, not only ``is_streaming``.
+
+    A prompt this queue already holds (here: waiting out the delivery turn) is
+    ahead of the new one, and queueing behind it would park the receipt until
+    that turn ran too. The waiting caller keeps its own wait.
+    """
+    session, handle, stream = await _deliver_a_job_result_and_hold_it(tmp_path)
+    try:
+        waiting = asyncio.ensure_future(handle.prompt("desk hi", command_id="desk-1"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not waiting.done()
+        await _refused_now(handle, "phone hi", "phone-2")
+        stream.release.set()
+        assert await asyncio.wait_for(waiting, 10) == "prompt admitted"
+    finally:
+        stream.release.set()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_ends_between_refusal_and_steer_still_delivers(tmp_path: Path) -> None:
+    """The race at turn end: refused while busy, steered once idle.
+
+    The relay's steer can land after the turn it was aimed at has finished. An
+    idle steer opens a turn for itself (``Session._ensure_steering_wake``), so
+    the message is delivered exactly once rather than parked or lost.
+    """
+    session, handle, stream = await _deliver_a_job_result_and_hold_it(tmp_path)
+    try:
+        await _refused_now(handle, "late hi", "late-1")
+        stream.release.set()
+        await asyncio.wait_for(_idle(session, handle), 10)
+        assert await handle.steer("late hi", command_id="late-1") == "steering queued"
+        for _ in range(500):
+            if _landed(tmp_path / "sess", "late-1") and not session.is_streaming:
+                break
+            await asyncio.sleep(0.01)
+        assert _landed(tmp_path / "sess", "late-1")
+        assert _user_rows(tmp_path / "sess", "late hi") == 1
+    finally:
+        stream.release.set()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_no_wait_prompt_is_admitted_as_a_prompt(tmp_path: Path) -> None:
+    """Nothing running: ``wait_for_turn=False`` changes nothing, the turn opens."""
+    stream = _GatedStream([text_turn(f"reply {i}") for i in range(4)], gate_call=99)
+    session = build_session(tmp_path / "sess", stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    try:
+        receipt = await asyncio.wait_for(
+            handle.prompt("idle hi", command_id="idle-1", wait_for_turn=False), 10
+        )
+        assert receipt == "prompt admitted"
+        await asyncio.wait_for(_idle(session, handle), 10)
+        assert _user_rows(tmp_path / "sess", "idle hi") == 1
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_no_wait_prompt_during_compaction_waits_it_out(tmp_path: Path) -> None:
+    """A compaction is waited out, not refused (review round 1, MINOR-1).
+
+    A manual compaction holds the turn lock with ``is_streaming`` False and an
+    empty queue, so the no-wait prompt is admitted; the drain must still wait
+    for the lock rather than hand it to ``Session.prompt``, whose compaction
+    refusal is not the sentence the phone relay steers on. There is no turn to
+    steer into, so the prompt lands as its own turn once compaction ends.
+    """
+    stream = _GatedStream([text_turn(f"reply {i}") for i in range(4)], gate_call=99)
+    session = build_session(tmp_path / "sess", stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    await session._turn_lock.acquire()
+    session._compacting = True
+    try:
+        receipt = asyncio.ensure_future(
+            handle.prompt("compact hi", command_id="compact-1", wait_for_turn=False)
+        )
+        await asyncio.sleep(0.3)
+        assert not receipt.done(), "admitted during compaction: must wait, not refuse"
+        session._compacting = False
+        session._turn_lock.release()
+        assert await asyncio.wait_for(receipt, 10) == "prompt admitted"
+        await asyncio.wait_for(_idle(session, handle), 10)
+        assert _user_rows(tmp_path / "sess", "compact hi") == 1
+    finally:
+        session._compacting = False
+        if session._turn_lock.locked():
+            session._turn_lock.release()
+        await handle.dispose()

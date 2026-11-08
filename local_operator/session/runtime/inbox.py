@@ -114,6 +114,16 @@ SPOOL_RECEIPT_NOTE = "held for the next runtime — read when it next opens"
 #: frame is not the place to discover a wrap.
 SPOOL_RECEIPT_PROMPT = "queued for the next runtime — it will run it"
 
+#: The receipt for a message QUEUED TO A RUNNING OWNER that was too busy to
+#: acknowledge it (``live_inbox_owner``; the desktop route's busy arm and the
+#: peer ``send`` to a ``wedged`` target). Distinct from the successor receipts
+#: above because the fact is different: no handover is involved, THIS runtime
+#: reads the row the next time its loop runs (``process._watch_live_inbox``).
+#: It must not read as delivered -- nothing is in the transcript yet -- and it
+#: tells the sender the one thing they can act on: do not send it again. Same
+#: short budget as its siblings.
+SPOOL_RECEIPT_LIVE = "queued — the session is busy; it runs when free"
+
 #: Which of the two PRODUCERS a row belongs to, carried on the row because the
 #: successor delivers them differently and cannot guess which it holds.
 #:
@@ -1646,3 +1656,44 @@ def clear_update_window(session_dir: Path) -> bool:
             "could not clear the update-window marker for %s", session_dir.name, exc_info=True
         )
         return False
+
+
+def live_inbox_owner(root: Path, session_id: str) -> Any | None:
+    """The record of a RUNNING owner that drains its inbox live, else ``None``.
+
+    The eligibility half of "queue, never refuse" (the 2026-11-04 incident: two
+    desktop messages to a busy session answered ``runtime_busy`` and never
+    reached the transcript; ``send`` refused a ``wedged`` peer). A sender that
+    could not get an acknowledgement from the owner may append the message to
+    ``inbox.jsonl`` and answer "queued" ONLY when this returns a record:
+
+    * the pid is alive — ``live`` or ``wedged``. ``wedged`` is a quiet
+      heartbeat, which ``registry.classify`` documents as degraded
+      responsiveness during long turns, not death; that is exactly the owner a
+      queue is for. ``stale`` (pid gone) is excluded: nothing would read the row
+      until some later boot, and the callers keep their own honest answers for
+      that case;
+    * the record advertises ``live-inbox-v1`` (``types.LIVE_INBOX_CAPABILITY``):
+      only a runtime child running ``process._watch_live_inbox`` reads the spool
+      while it runs. An older owner, or a TUI-hosted one, would leave the row
+      until its next boot, so the caller must not promise delivery to it.
+
+    Reads the LOCAL registry only, so a conversation a mesh peer owns never
+    matches — its spool is on the other device. Blocking file I/O: call it off
+    the event loop.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import LIVE_INBOX_CAPABILITY
+
+    try:
+        scanned = registry.scan(Path(root), reap=False)
+    except OSError:
+        return None
+    for record, state in scanned:
+        if getattr(record, "session_id", "") != session_id:
+            continue
+        if state not in ("live", "wedged"):
+            continue
+        if LIVE_INBOX_CAPABILITY in (getattr(record, "capabilities", None) or []):
+            return record
+    return None

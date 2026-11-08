@@ -43,6 +43,16 @@ SAFE_DEFAULTS = {
     ("session/frontend_state.py", "refresh_from_session"): "already-running state publication",
     ("session/runtime/launch.py", "_spawn_runtime"): "after canonical handoff resolution",
     ("session/runtime/process.py", "amain"): "final runtime cwd consumer, not a producer",
+    # The divergence guard's home is a COMPARISON base, never a directory it hands
+    # to a spawn: ``__init__`` resolves it once so an asserting path (always
+    # resolved) and ``$HOME`` (not necessarily canonical) are compared in one
+    # form, and ``_derive_skip_roots`` expands the home-relative package caches
+    # the guard's source sweep must not read. Neither writes startup/session
+    # metadata, and neither can erase a spawn omission — it holds no cwd.
+    ("divergence.py", "__init__"): (
+        "home resolved once as a path-comparison base, not a spawn cwd"
+    ),
+    ("divergence.py", "_derive_skip_roots"): "home-relative skip roots for the guard's sweep only",
 }
 DEFAULT = re.compile(
     r"\bor\s+(?:str\(Path\.home\(\)\)|Path\.home\(\)|"

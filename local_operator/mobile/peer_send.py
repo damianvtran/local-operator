@@ -894,6 +894,23 @@ def resolve_peer_target(
 
     scanned = registry.scan(config_dir())
     eligible = ("live", "wedged") if include_wedged else ("live",)
+    # A WEDGED OWNER THAT DRAINS ITS INBOX LIVE IS ADDRESSABLE, even for a plain
+    # send. ``wedged`` is a quiet heartbeat on a live pid -- ``registry.classify``
+    # documents it as degraded responsiveness during long turns (105-205 s gaps
+    # measured), not death -- and refusing it is how a message to a session that
+    # was simply mid-turn came back "has not reported for 1m, so a plain send
+    # will not dial it". Such a target now resolves, and delivery QUEUES the
+    # message to its inbox instead of dialling (``_queued_outcome``). A wedged
+    # owner from before ``live-inbox-v1`` keeps the refusal: nothing would read a
+    # queued row until it restarted. ``stale`` (pid gone) is never eligible.
+    scanned = [
+        (
+            (rec, "live" if state == "wedged" and queueable_while_wedged(rec) else state)
+            if "wedged" not in eligible
+            else (rec, state)
+        )
+        for rec, state in scanned
+    ]
     live = [(rec, state) for rec, state in scanned if state in eligible]
 
     def resolve_scanned_pid(requested_pid: int) -> tuple[Any | None, list[Any], str]:
@@ -1109,6 +1126,18 @@ def resolve_peer_target(
         # nothing for the clause to qualify.
         skipped.extend(unengaged)
     return matches[0], [], ""
+
+
+def queueable_while_wedged(record: "Any") -> bool:
+    """Whether a ``wedged`` record's owner reads its inbox while it runs.
+
+    See ``types.LIVE_INBOX_CAPABILITY``: the owner advertises it only when
+    ``process._watch_live_inbox`` is running, so a row appended to its spool is
+    delivered the next time its loop runs, de-duplicated by ``message_id``.
+    """
+    from local_operator.session.runtime.types import LIVE_INBOX_CAPABILITY
+
+    return LIVE_INBOX_CAPABILITY in (getattr(record, "capabilities", None) or [])
 
 
 def _not_dialable(label: str, record: "Any", state: str) -> str:
@@ -1681,6 +1710,25 @@ async def deliver_peer_message_outcome(
             raise RuntimeError(
                 unengaged_refusal(unengaged_label(pid=record.pid, session_id=session_id))
             )
+        if queueable_while_wedged(record) and (
+            registry.classify(record, check_zombie=False).state == "wedged"
+        ):
+            # THE OWNER IS ALIVE BUT NOT REPORTING: queue, do not dial. A dial
+            # here spends the whole retry budget (``PEER_SEND_TOTAL_BUDGET_S``)
+            # against a loop that is not answering and then reports
+            # "unconfirmed"; the inbox is read by that same loop the moment it
+            # next runs, which is the earliest any dial could have landed too.
+            return await _queued_outcome(
+                record,
+                session_id=session_id,
+                message_id=message_id,
+                text=text,
+                mode=mode,
+                wake=wake,
+                sender=sender,
+                custom_type=custom_type,
+                bridge_meta=bridge_meta,
+            )
         return await _live_outcome(
             record,
             session_id=session_id,
@@ -1732,6 +1780,99 @@ async def deliver_peer_message_outcome(
         cwd=cwd,
         custom_type=custom_type,
         bridge_meta=bridge_meta,
+    )
+
+
+async def _queued_outcome(
+    record: "Any",
+    *,
+    session_id: str,
+    message_id: str,
+    text: str,
+    mode: str,
+    wake: bool,
+    sender: "dict[str, Any]",
+    custom_type: str | None = None,
+    bridge_meta: dict[str, Any] | None = None,
+) -> DeliveryOutcome:
+    """Queue one message to a running-but-wedged owner's inbox. Never a refusal.
+
+    WIRE COMPATIBILITY (review n2): ``DELIVERY_DELIVERED`` here means the spool
+    durably accepted the message, NOT that it is in the target's transcript.
+    State-only consumers cannot distinguish those facts; consumers needing the
+    distinction must read ``route == "spool"`` and ``cause == "queued_busy"``.
+    A distinct ``queued`` state needs a coordinated renderer change: the desktop
+    ``SendDeliveryState`` / ``SEND_DELIVERY_STATES`` whitelist currently accepts
+    only delivered/mailbox/unconfirmed/failed for send, and ``request_update``
+    treats unknown states as failed. Adding a token in this backend-only slice
+    would silently lose the receipt's disposition on existing renderers. Keep
+    the cold-spool precedent until that wire/UI change is coordinated.
+
+    The receipt says QUEUED, not delivered (``inbox.SPOOL_RECEIPT_LIVE``): the
+    row is durable in the owner's spool and its live drain
+    (``process._watch_live_inbox``) runs it through ``receive_peer_message`` the
+    next time the loop runs -- quiet or wake exactly as the sender asked; a wake
+    to a session still mid-turn rides that turn, as a live dial would. The
+    STATE is ``delivered`` with ``route="spool"`` and ``cause="queued_busy"``,
+    the same shape the cold-session spool already reports
+    (:func:`_spool_quiet_note`): the message cannot be lost and must not be sent
+    again, which is what the state words drive; the detail is what keeps the
+    receipt honest about it not being in the transcript yet.
+
+    ``message_id`` rides the row, so a sender that also dialled (an older
+    resolver, a retry) is answered as a duplicate by the receiver rather than
+    writing the message twice. A wake row is recorded as an OWED turn
+    (``inbox.append_for_successor``), so an owner that dies before draining it
+    still has a successor raised for it.
+    """
+    from local_operator.session.runtime.inbox import (
+        SPOOL_RECEIPT_LIVE,
+        InboxLine,
+        append_for_successor,
+    )
+    from local_operator.wakes.spooled import await_spool_write
+
+    target = _live_target_label(record, session_id)
+    root = config_dir()
+    try:
+        written = await await_spool_write(
+            append_for_successor,
+            root,
+            root / "sessions" / session_id,
+            InboxLine(
+                text=text,
+                sender=dict(sender),
+                mode=mode,
+                written_at=time.time(),
+                wake=wake,
+                message_id=message_id,
+                custom_type=custom_type or "",
+                bridge_meta=bridge_meta or {},
+            ),
+            raise_reader=False,
+        )
+    except Exception:  # noqa: BLE001 — an unwritable spool is a failed send, reported as such
+        written = False
+    if not written:
+        return DeliveryOutcome(
+            DELIVERY_FAILED,
+            "its inbox could not be written",
+            message_id,
+            _failed_wake(wake),
+            1,
+            "spool_write_failed",
+            "spool",
+            target,
+        )
+    return DeliveryOutcome(
+        DELIVERY_DELIVERED,
+        f"{SPOOL_RECEIPT_LIVE} (id {message_id}); do not send it again",
+        message_id,
+        WAKE_UNCONFIRMED if wake else WAKE_NOT_REQUESTED,
+        1,
+        "queued_busy",
+        "spool",
+        target,
     )
 
 

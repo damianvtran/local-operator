@@ -346,6 +346,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "agent directory, never in a session directory, and is skipped by clone, "
         "export and import through the same ``.avatar.`` prefix rule",
     ),
+    "local_operator/divergence.py": (
+        2,
+        "``AUDIT_DIRNAME`` ('audit') and ``AUDIT_FILENAME`` ('divergence.jsonl'): the "
+        "divergence-guard ledger an installation keeps at <config>/audit/divergence.jsonl "
+        "(``DivergenceGuard.audit_path``), beside the config root's other machine-level "
+        "state. It is never an entry of a session directory -- so no session copy carries "
+        "it -- and it deliberately OUTLIVES the session that produced the rows, which is "
+        "the whole reason a derailed turn is recorded there instead of inside the session",
+    ),
     "local_operator/notifications/custom_sounds.py": (
         1,
         "``INDEX_FILE`` ('index.json'): the custom notification-sound index, which lives "

@@ -151,8 +151,8 @@
       "label": "Manager",
       "description": "Coordinates delegated work and reports honest status: what is done, what is in flight, what is blocked and on whom.",
       "when_to_use": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
-      "version": "1.6.11",
-      "instructions_sha256": "bc833648c4d9c9985d5e267549899edac62c5f5434025b46a9f3a393277fc622",
+      "version": "1.6.12",
+      "instructions_sha256": "bb55da40a8cce40b9ca6dd1532114382366fe168b52a5bba83596401477d18d0",
       "instructions_chars": 3430,
       "tools": [
         "read",
@@ -216,9 +216,9 @@
       "label": "Reviewer",
       "description": "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews.",
       "when_to_use": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
-      "version": "1.3.14",
-      "instructions_sha256": "aa8a2569bb7832a8cbd4f86b55087492416acfca275db86aa5d75f3084cc69dd",
-      "instructions_chars": 3474,
+      "version": "1.3.15",
+      "instructions_sha256": "25c3ecd7aaeed966bd3c6af6e17fcf1dd2274f29d2f3668a74dc02b532402b85",
+      "instructions_chars": 3497,
       "tools": [
         "read",
         "glob",

@@ -340,6 +340,55 @@ async def test_an_edit_moves_the_time_and_bounds_and_keeps_the_history(root: Pat
 
 
 @pytest.mark.asyncio
+async def test_an_edit_that_replaces_the_words_names_the_operator_who_did(root: Path) -> None:
+    """R6-MAJOR-1, through the writer the operator's surfaces call.
+
+    ``origin`` is documented as who WROTE ``message``. A desktop/TUI edit that
+    replaces a model-armed row's text therefore makes those words the
+    operator's: keeping ``tool`` delivered them as model authorship and the
+    divergence guard told the operator their own sentence was new to the
+    session. The stamp follows the WORDS — a caller that only re-times the row
+    keeps the model's authorship, which is the other half of the defect.
+    """
+    _session(
+        root,
+        "edit04",
+        [_row("w1", origin="tool"), _row("w2", origin="cli")],
+    )
+    session_dir = root / "sessions" / "edit04"
+
+    await edit_wake(
+        root,
+        "edit04",
+        "w1",
+        {"message": "check the deploy at 09:00"},
+        editor_origin="desktop",
+    )
+    await edit_wake(root, "edit04", "w2", {"in": "10m"}, editor_origin="desktop")
+
+    rows = {row["id"]: row for row in _rows_from_transcript(session_dir)}
+    assert rows["w1"]["message"] == "check the deploy at 09:00"
+    assert rows["w1"]["origin"] == "desktop", "a reword keeps the OLD author"
+    assert WakeSchedule.model_validate(rows["w1"]).message_author == "operator"
+    # Time only: the words did not move, so neither did the author.
+    assert rows["w2"]["origin"] == "cli"
+    assert WakeSchedule.model_validate(rows["w2"]).message_author == "operator"
+
+
+@pytest.mark.asyncio
+async def test_a_retimed_model_row_keeps_its_model_author(root: Path) -> None:
+    """The operator's surface must not take authorship of words it did not write:
+    moving a model-armed reminder's time leaves it model-authored."""
+    _session(root, "edit05", [_row("w1", origin="tool")])
+
+    await edit_wake(root, "edit05", "w1", {"in": "2h"}, editor_origin="tui")
+
+    row = _rows_from_transcript(root / "sessions" / "edit05")[0]
+    assert row["origin"] == "tool"
+    assert WakeSchedule.model_validate(row).message_author == "model"
+
+
+@pytest.mark.asyncio
 async def test_an_edit_that_drops_the_repeat_also_drops_its_bound(root: Path) -> None:
     """``every`` sent as null turns the row into a one-shot, and a bound with no
     repeat is refused by the shared validator rather than silently ignored."""
@@ -1010,6 +1059,11 @@ async def test_an_edit_keeps_the_rows_origin_and_a_reissue_still_settles(root: P
     assert edited["id"] == "w1"
     assert edited["message"] == "standup (edited)"
     assert edited["request_id"] == "REQ-1", "the edit cleared the row's origin"
+    # THE SAME CARRY FOR THE AUTHOR (review round 6, R6-MINOR-1: the comment in
+    # ``build_wake_edit`` and ``tui/schedule.py`` leans on this and only
+    # ``request_id`` was pinned). This writer names no editor, so the model's
+    # text stays model-authored. The operator's stamp is its own test below.
+    assert edited["origin"] == "tool", "the edit cleared the row's author"
     before = _snapshot_count(session_dir)
 
     again = await arm_wake(root, "origin01", request, request_id="REQ-1")

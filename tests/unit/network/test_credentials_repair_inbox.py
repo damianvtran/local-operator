@@ -54,6 +54,7 @@ from tests.unit.network.test_credentials_real_link import (  # noqa: F401 — fi
     _borrower_client,
     _lop_network,
     _pull,
+    _pulled_or_held,
     _share,
     mesh,
 )
@@ -165,7 +166,7 @@ def _tombstone_provider(rig: Any) -> None:
 
 def _share_mcp(rig: Any) -> None:
     assert _lop_network("credential", "share", MCP_KEY, "--with", rig.b.identity.name) == 0
-    assert MCP_KEY in _pull(rig).get("changed", [])
+    assert _pulled_or_held(rig, MCP_KEY)
 
 
 def _borrow(rig: Any, key: str = MCP_KEY, provider: str = "mcp-oauth") -> Any:
@@ -461,7 +462,11 @@ def test_row6_a_401_whose_owner_probe_finds_the_grant_dead_asks_the_owner(
 
     ack = _report(rig, "unauthorized")
 
-    assert ack.get("action") == "refreshed", ack
+    # The owner's probe found the grant dead, and the borrower is told so with the
+    # owner-side login, instead of a ``refreshed`` that nothing backed.
+    assert ack.get("action") == "refresh_failed", ack
+    assert ack.get("code") == "grant_invalid", ack
+    assert ack.get("remedy", "").startswith("/mcp login"), ack
     reports = _audit(rig.a, "credential.report")
     assert [r["detail"]["failure"] for r in reports[-2:]] == ["unauthorized", "reauth_required"]
     assert reports[-1]["detail"]["sub"] == rig.borrower

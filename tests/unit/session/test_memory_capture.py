@@ -1393,7 +1393,7 @@ GUARD_CORPUS = tuple((text, True) for text in CLEAN_CORPUS) + (
 
 @pytest.mark.parametrize("text,expect_rows", GUARD_CORPUS)
 def test_every_candidate_extract_returns_passes_the_guard_the_write_applies(text, expect_rows):
-    """PROPERTY: everything ``extract`` emits survives ``guard(x, opaque=True)``.
+    """PROPERTY: everything ``extract`` emits survives ``guard(x)`` (the one rule).
 
     This is the invariant that was violated, asserted with the exact call
     ``validate_fact`` makes on title and body, over ordinary locators AND the long
@@ -1402,8 +1402,8 @@ def test_every_candidate_extract_returns_passes_the_guard_the_write_applies(text
     """
     rows = extract("## Key Decisions\n- Record " + text)
     for row in rows:
-        guard(row["body"], opaque=True)
-        guard(row["title"], opaque=True)
+        guard(row["body"])
+        guard(row["title"])
     assert bool(rows) is expect_rows, (
         "a candidate the write would refuse was admitted anyway"
         if expect_rows

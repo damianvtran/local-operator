@@ -8419,7 +8419,12 @@ def _wake_create(args: argparse.Namespace) -> int:
     import asyncio as _asyncio
 
     try:
-        outcome = _asyncio.run(arm_wake(root, session_id, request, now_ms=now_ms))
+        # ``origin="cli"`` IS the attribution the divergence guard reads: the
+        # message is the person's own words at this keyboard, and no user turn is
+        # ever synthesised to carry them, so the fired ``wake_prompt`` is the only
+        # copy. A row that read as model-authored would let the guard claim the
+        # operator's own instruction was absent from the session.
+        outcome = _asyncio.run(arm_wake(root, session_id, request, now_ms=now_ms, origin="cli"))
     except WakeWriteError as error:
         # The refusal sentence comes from the shared validator, so the CLI, the
         # desktop route and the agent's tool say the same thing about the same

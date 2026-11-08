@@ -79,7 +79,10 @@ from typing import TYPE_CHECKING, Any
 from local_operator.network.credentials import github as github_app
 from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials.client import MeshCredentialClient
-from local_operator.network.credentials.messages import render_repair_notice
+from local_operator.network.credentials.messages import (
+    render_repair_notice,
+    repair_command,
+)
 from local_operator.network.credentials.placement import PlacementDocument
 from local_operator.network.credentials.repair import REPAIR_FAILURES
 from local_operator.network.credentials.types import (
@@ -430,6 +433,7 @@ class MeshCredentialBroker:
         time the answer is yes, and kept.
         """
         from local_operator.network.credentials import reconcile as reconcile_mod
+        from local_operator.network.credentials import share_push as share_push_mod
         from local_operator.network.relay import not_implemented_peer_op
 
         refuse = not_implemented_peer_op("net_broker")
@@ -475,6 +479,19 @@ class MeshCredentialBroker:
                         "op": "ack",
                         "req": (frame or {}).get("req"),
                         "detail": reconcile_mod.member_placement_push(server, link, frame),
+                    }
+                # THE SHARE PUSH, same reason: ``credential share`` pushes the new row
+                # to its holder, and a borrower-only holder has no broker. Routed only
+                # by its own origin marker; its receiver admits only rows naming this
+                # device as a holder (``share_push.member_share_push``).
+                if (
+                    str((frame or {}).get("kind") or "") == "placement"
+                    and (frame or {}).get("origin") == share_push_mod.SHARE_PUSH_ORIGIN
+                ):
+                    return {
+                        "op": "ack",
+                        "req": (frame or {}).get("req"),
+                        "detail": share_push_mod.member_share_push(server, link, frame),
                     }
                 return refuse(link, frame)
             return broker.on_broker(link, frame)
@@ -541,6 +558,7 @@ class MeshCredentialBroker:
             )
         kind = str(frame.get("kind") or "")
         from local_operator.network.credentials import reconcile as reconcile_mod
+        from local_operator.network.credentials import share_push as share_push_mod
         from local_operator.network.credentials.lifecycle import negotiated
 
         if kind.startswith("lifecycle_") and not negotiated(link):
@@ -566,6 +584,10 @@ class MeshCredentialBroker:
             detail = self.report(link, frame)
         elif kind == "placement" and frame.get("origin") == reconcile_mod.PUSH_ORIGIN:
             detail = reconcile_mod.member_placement_push(self._server, link, frame)
+        elif kind == "placement" and frame.get("origin") == share_push_mod.SHARE_PUSH_ORIGIN:
+            # Never the legacy ``placement_frame`` merge: that path would accept the
+            # frame without the holder narrowing the share push's receiver applies.
+            detail = share_push_mod.member_share_push(self._server, link, frame)
         elif kind == "placement":
             detail = self.placement_frame(link, frame)
         elif kind == "lifecycle_read":
@@ -1942,13 +1964,25 @@ class MeshCredentialBroker:
             if last is not None and now - last < REPORT_REFRESH_MIN_INTERVAL_S:
                 return {"kind": "ack", "key": key, "action": "coalesced"}
             self._report_refreshed[credential_id] = now
+        # THE REPLY IS WHAT THE REFRESH DID, judged by the stored bearer (mesh perf
+        # matrix, 15/15). The old arm answered ``refreshed`` whatever happened, and on
+        # a token the owner's clock still called live the probe never POSTed — so the
+        # borrower was told the fix was in while the owner kept lending the refused
+        # bearer, and every report for the next window was ``coalesced``. Comparing
+        # the row's bearer before and after is the one observation that separates "a
+        # new token exists" from "the refresh declined" or "a sibling's refresh beat
+        # us to the lease and the row already holds a new one" (both honest
+        # outcomes, and the second still counts as refreshed: the next borrow gets
+        # the new token either way).
+        before = self._stored_bearer(credential_id)
+        failure: BaseException | None = None
         try:
             self._loop.submit(
                 self._owner_refresh(key, credential_id),
                 timeout=max(1.0, self._op_deadline_s - HANDLER_WAIT_MARGIN_S),
             )
-        except Exception:  # noqa: BLE001 — a probe is a read; its failure is not an event
-            pass
+        except Exception as exc:  # noqa: BLE001 — classified into the reply below
+            failure = exc
         self._audit(
             "credential.refresh",
             actor=self.self_device,
@@ -1961,18 +1995,92 @@ class MeshCredentialBroker:
             },
         )
         # WHAT THE PROBE FOUND, after the row that proves it was spent (owner-relogin
-        # design §3.5, gap 1). Read from the STORE'S PERSISTED VERDICT rather than
-        # from the probe's exception, because neither probe raises on the case that
-        # matters: ``AuthStore.ensure_oauth_fresh`` swallows ``AuthStoreError``
-        # (``CredentialInvalidError`` included) to ``None``, and
-        # ``ensure_mcp_oauth_fresh`` leaves a failed refresh in place without
-        # raising. The tombstone is written only on the IdP's own ``invalid_grant``,
-        # so a transient outage — a 5xx, a refused connection, this probe timing out
-        # — never reads as "sign in again". Same authority as before: one probe per
-        # credential per window, and the probe's RESULT is what is newly recorded.
-        if self._grant_is_tombstoned(key, credential_id):
+        # design §3.5, gap 1). A dead grant is believed only on the IdP's OWN
+        # verdict: the tombstone the store persists on ``invalid_grant`` (the MCP
+        # probe's only signal — ``ensure_mcp_oauth_fresh`` never raises), or an
+        # ``InvalidGrantError`` in the provider probe's cause chain. NOT on
+        # ``CredentialInvalidError`` as such (#3560 review M2): the store also raises
+        # it for refusals it makes ON ITS OWN, with no IdP consulted — a forced
+        # refresh of a ``meta-muse`` key, whose account bearer was discarded at mint,
+        # raises before any POST — and recording ``reauth_required`` from that would
+        # let a peer's observation open a repair on the owner. A transient outage —
+        # a 5xx, a refused connection, this probe timing out — never reads as "sign
+        # in again" either. Same authority as before: one probe per credential per
+        # window, and the probe's RESULT is what is newly recorded.
+        from local_operator.providers.auth_store import CredentialInvalidError
+
+        grant_dead = self._grant_is_tombstoned(key, credential_id) or _caused_by_invalid_grant(
+            failure
+        )
+        if grant_dead:
             self._record_reauth_required(key, by)
-        return {"kind": "ack", "key": key, "action": "refreshed"}
+        common: dict[str, Any] = {
+            "kind": "ack",
+            "key": key,
+            "owner_device": self.self_device,
+            "owner_device_name": self.self_device_name,
+        }
+        if grant_dead:
+            # Only a login ON THE OWNER revives a grant the IdP refused, so the remedy
+            # names the owner's command (the same spelling the repair notice uses).
+            # The window stamped above keeps a borrower that keeps failing from
+            # turning this into a POST per report against the owner's IdP.
+            return {
+                **common,
+                "action": "refresh_failed",
+                "code": "grant_invalid",
+                "remedy": repair_command(key),
+            }
+        if isinstance(failure, CredentialInvalidError):
+            # The owner's store refused to refresh this row by its own rule (a key
+            # with no refresh, a delegation that ended, a family that moved). Not an
+            # IdP verdict, so nothing is recorded and no remedy is claimed; and not
+            # transient, so no retry time is offered either.
+            return {
+                **common,
+                "action": "refresh_failed",
+                "code": "not_refreshable",
+                "message": failure.__class__.__name__,
+            }
+        if failure is not None:
+            # A transport fault or this wait timing out: a retry can fix it, but not
+            # a report retry inside the window, which is coalesced, so the reply
+            # carries the earliest moment another report can provoke a refresh.
+            return {
+                **common,
+                "action": "refresh_failed",
+                "code": "refresh_failed",
+                "retry_after_ms": int(REPORT_REFRESH_MIN_INTERVAL_S * 1000),
+                "message": failure.__class__.__name__,
+            }
+        after = self._stored_bearer(credential_id)
+        if after and after != before:
+            return {**common, "action": "refreshed"}
+        # Nothing new was obtained and nothing failed: the store declined (an
+        # unsettled send holding the refresh off, a row that is gone or disabled, or
+        # an MCP row whose refresh has no force). The reply says so. No borrower
+        # reads it yet — ``report_sync`` discards the ack — so today the honest
+        # outcome serves the wire and a later borrower-side surface, not the user.
+        return {**common, "action": "unchanged"}
+
+    def _stored_bearer(self, credential_id: int) -> str:
+        """The bearer the owner's row holds right now, ``""`` when unreadable.
+
+        Compared, never returned or logged: it is what tells ``refreshed`` from
+        ``unchanged`` above. Provider rows keep it in ``access``; an MCP row keeps
+        the SDK's token model under ``tokens``.
+        """
+        try:
+            row = self._auth_store_instance().get_credential(credential_id)
+        except Exception:  # noqa: BLE001 — unreadable reads as "no new token"
+            return ""
+        data = getattr(row, "data", None)
+        if not isinstance(data, dict):
+            return ""
+        tokens = data.get("tokens")
+        if isinstance(tokens, dict):
+            return str(tokens.get("access_token") or "")
+        return str(data.get("access") or "")
 
     def _grant_is_tombstoned(self, key: str, credential_id: int) -> bool:
         """Whether this device's own row for ``key`` carries the IdP's dead-grant verdict.
@@ -2054,7 +2162,18 @@ class MeshCredentialBroker:
             return await ensure_mcp_oauth_fresh(
                 url, MCPHttpServerConfig(url=url), self._auth_store_instance()
             )
-        return await self._auth_store_instance().ensure_oauth_fresh(credential_id)
+        # FORCED, because a report is the authoritative rejection the owner's clock
+        # cannot see: the provider refused a bearer whose ``expires`` is still in
+        # the future, and the non-forced probe declined to POST for exactly that
+        # reason. ``force`` skips only the expiry pre-check — the store keeps its
+        # refresh single-flight and its tombstoned-grant refusal — and the
+        # per-credential report window above is what bounds how often a peer can
+        # reach this line. It is the owner refreshing its OWN row; the borrower
+        # gains no refresh authority. ``_or_raise`` keeps the failure's class so the
+        # reply can tell a dead grant from a transport fault.
+        return await self._auth_store_instance().ensure_oauth_fresh_or_raise(
+            credential_id, force=True
+        )
 
     # -- placement ----------------------------------------------------------
 
@@ -3206,6 +3325,29 @@ def _lifecycle_unsupported(kind: Any) -> dict[str, Any]:
         code="unsupported",
         message=f"this build does not serve {kind!r}; nothing was read or changed",
     ).to_detail()
+
+
+def _caused_by_invalid_grant(exc: BaseException | None) -> bool:
+    """Whether the IdP's own ``invalid_grant`` sits anywhere in ``exc``'s chain.
+
+    The store re-raises the provider's :class:`InvalidGrantError` as
+    ``CredentialInvalidError`` (chained ``from``), and also raises that class for
+    refusals it makes on its own rules; only the first is an IdP verdict (#3560
+    review M2). The import is local because ``callback_server`` is a heavy module
+    this one otherwise never needs. Bounded by a seen-set: a chain can cycle.
+    """
+    if exc is None:
+        return False
+    from local_operator.providers.oauth.callback_server import InvalidGrantError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, InvalidGrantError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def broker_for_relay(server: Any) -> MeshCredentialBroker | None:

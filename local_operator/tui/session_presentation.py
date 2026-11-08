@@ -1149,6 +1149,9 @@ def project_settled_rows(
         ASK_TIMEOUT_MESSAGE_TYPE as ASK_TIMEOUT_CUSTOM_TYPE,
     )
     from local_operator.harness.message_types import (
+        DIVERGENCE_NOTICE_MESSAGE_TYPE as DIVERGENCE_CUSTOM_TYPE,
+    )
+    from local_operator.harness.message_types import (
         HUB_MESSAGE_TYPE,
         PEER_MESSAGE_MESSAGE_TYPE,
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
@@ -1167,6 +1170,7 @@ def project_settled_rows(
         assistant_row_text,
         assistant_stop_notice,
         compaction_refused_notice,
+        divergence_notice,
         gate_timeout_notice,
         held_delivery_notice,
         is_ask_gate_divert_message,
@@ -1603,6 +1607,19 @@ def project_settled_rows(
                 self._append_block(
                     NoticeBlock(gate_timeout_notice(details), kind="warning", fold_width=fold_width)
                 )
+                appended = True
+                continue
+            # A DIVERGENCE notice: a turn asserted a project root nothing in
+            # this session's context named (``local_operator/divergence.py``).
+            # Its own branch for this module's stated rule — an unbranched
+            # custom row paints NOWHERE — and the TIER comes back with the text
+            # from ``harness/rows.py``: a first sighting is a ``note`` (a fact to
+            # know), an escalation or a failed audit write is a ``warning``. One
+            # hardcoded kind made those indistinguishable (design round 1, D1).
+            if getattr(message, "custom_type", None) == DIVERGENCE_CUSTOM_TYPE:
+                details = getattr(message, "details", None) or {}
+                text, kind = divergence_notice(details)
+                self._append_block(NoticeBlock(text, kind=kind, fold_width=fold_width))
                 appended = True
                 continue
             # A compaction that did NOT run. Rendered here for the same

@@ -169,6 +169,14 @@ def stub_provider(monkeypatch: pytest.MonkeyPatch, idp: RotatingIdP) -> str:
                 },
             )
         posted.append(str(creds.get("refresh") or ""))
+        if idp.invalid:
+            # A REVOKED grant, classified the way every real provider's refresh
+            # classifies RFC 6749 ``invalid_grant``: the store's permanent-failure
+            # path (tombstone, ``CredentialInvalidError``) only runs for this class.
+            # A spent rotating token below stays a plain refusal, as before.
+            from local_operator.providers.oauth.callback_server import InvalidGrantError
+
+            raise InvalidGrantError("invalid_grant")
         if response.status_code != 200:
             from local_operator.providers.auth_store import AuthStoreError
 
@@ -697,6 +705,127 @@ def test_a_report_from_a_device_that_is_not_a_holder_is_refused(
     stranger = "d_00000000000000000000000000000009"
     detail = _report(owner, stranger, "invalid")
     assert detail["code"] == "not_a_holder"
+
+
+# ---------------------------------------------------------------------------
+# A borrower's 401 against a token the OWNER still believes live
+# ---------------------------------------------------------------------------
+#
+# The fixture's row starts EXPIRED, so every report test above passed on the clock
+# alone: the non-forced probe saw a stale token and refreshed it. The measured
+# defect (mesh perf matrix, 15/15) is the other case — the owner's own clock says
+# the bearer is live, the provider has revoked it anyway, and the probe declined to
+# POST while the reply still said ``refreshed``. Each test below first borrows once,
+# which spends the expired token and leaves a LIVE ``access-1`` on the owner, so a
+# report only produces a POST if the owner forces one.
+
+
+def _borrow_live(owner: Any, idp: RotatingIdP) -> str:
+    grant = _ask_grant(owner, BORROWER_DEVICE)
+    assert grant["kind"] == "grant", grant
+    assert grant["access_token"] == "access-1", grant
+    assert len(idp.posts) == 1, idp.posts
+    return str(grant["access_token"])
+
+
+@pytest.mark.parametrize("failure", ["unauthorized", "invalid"])
+def test_a_borrowers_401_forces_one_owner_refresh_and_the_next_borrow_is_new(
+    owner: Any, idp: RotatingIdP, failure: str
+) -> None:
+    _borrow_live(owner, idp)
+    reply = _report(owner, BORROWER_DEVICE, failure)
+    assert reply["action"] == "refreshed", reply
+    assert len(idp.posts) == 2, "the owner did not refresh a token the provider refused"
+    grant = _ask_grant(owner, BORROWER_DEVICE)
+    assert grant["kind"] == "grant", grant
+    assert grant["access_token"] == "access-2", "the next borrow still lent the refused token"
+    assert len(idp.posts) == 2, "the next borrow spent another exchange"
+
+
+def test_a_repeated_401_report_inside_the_window_costs_no_second_post(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    _borrow_live(owner, idp)
+    first = _report(owner, BORROWER_DEVICE, "unauthorized")
+    second = _report(owner, BORROWER_DEVICE, "unauthorized")
+    third = _report(owner, BORROWER_TWO, "unauthorized")
+    assert first["action"] == "refreshed", first
+    assert second["action"] == "coalesced", second
+    assert third["action"] == "coalesced", "the window is per credential, not per reporter"
+    assert len(idp.posts) == 2, idp.posts
+
+
+def test_a_dead_grant_on_the_forced_refresh_answers_the_relogin_remedy_once(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """``invalid_grant`` is an honest ``refresh_failed`` naming the owner-side login.
+
+    And the failure is inside the same window: a borrower that keeps failing cannot
+    turn a dead grant into a POST per report against the owner's IdP.
+    """
+    _borrow_live(owner, idp)
+    idp.invalid = True
+    reply = _report(owner, BORROWER_DEVICE, "unauthorized")
+    assert reply["action"] == "refresh_failed", reply
+    assert reply["code"] == "grant_invalid", reply
+    assert reply["remedy"] == f"/login {STUB_PROVIDER}", reply
+    assert reply["owner_device"] == OWNER_DEVICE, reply
+    assert len(idp.posts) == 2, idp.posts
+    # The positive control for the M2 test below: this audit read DOES see the
+    # repair when the IdP itself refused the grant.
+    owner.audit.flush()
+    assert any(
+        record.get("event") == "credential.report"
+        and record.get("detail", {}).get("failure") == "reauth_required"
+        for record in owner.audit.tail(200)
+    )
+    again = _report(owner, BORROWER_DEVICE, "unauthorized")
+    assert again["action"] == "coalesced", again
+    assert len(idp.posts) == 2, "a dead grant was retried inside the window"
+
+
+def test_a_store_side_refusal_is_not_read_as_the_idps_verdict(
+    owner: Any, idp: RotatingIdP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3560 review M2: ``CredentialInvalidError`` alone opens no repair on the owner.
+
+    The store raises it for refusals of its OWN (a forced ``meta-muse`` refresh
+    raises before any POST); only the IdP's ``invalid_grant`` — a tombstone, or an
+    ``InvalidGrantError`` in the chain — is a verdict a peer's report may surface.
+    """
+    from local_operator.providers.auth_store import CredentialInvalidError
+
+    _borrow_live(owner, idp)
+
+    async def _refuses(credential_id: int, *, force: bool = False) -> None:
+        raise CredentialInvalidError("Muse Code key needs a new sign-in; run /login meta-muse.")
+
+    monkeypatch.setattr(owner.auth, "ensure_oauth_fresh_or_raise", _refuses)
+    reply = _report(owner, BORROWER_DEVICE, "unauthorized")
+    assert reply["action"] == "refresh_failed", reply
+    assert reply["code"] == "not_refreshable", reply
+    assert "remedy" not in reply, reply
+    owner.audit.flush()
+    failures = [
+        record.get("detail", {}).get("failure")
+        for record in owner.audit.tail(200)
+        if record.get("event") == "credential.report"
+    ]
+    assert "reauth_required" not in failures, failures
+    assert len(idp.posts) == 1, idp.posts
+
+
+def test_a_401_report_from_a_device_that_is_not_a_holder_refreshes_nothing(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    _borrow_live(owner, idp)
+    stranger = "d_00000000000000000000000000000009"
+    detail = _report(owner, stranger, "unauthorized")
+    assert detail["kind"] == "error" and detail["code"] == "not_a_holder", detail
+    assert len(idp.posts) == 1, "a non-holder's report spent an owner refresh"
+    # Nor did it consume the window: the real holder's report still refreshes.
+    assert _report(owner, BORROWER_DEVICE, "unauthorized")["action"] == "refreshed"
+    assert len(idp.posts) == 2, idp.posts
 
 
 # ---------------------------------------------------------------------------
@@ -1779,7 +1908,11 @@ def test_an_mcp_report_is_answered_and_blocks_nothing(
         )
         assert reply["op"] == "ack", (failure, reply)
         detail = _detail(reply)
-        assert detail["kind"] == "ack" and detail["action"] in ("noted", "refreshed"), (
+        assert detail["kind"] == "ack" and detail["action"] in (
+            "noted",
+            "refreshed",
+            "unchanged",
+        ), (
             failure,
             detail,
         )
@@ -1955,7 +2088,7 @@ def test_a_quota_report_lands_on_the_lent_row_not_the_first(owner: Any, idp: Rot
 def test_a_refresh_report_targets_the_lent_row(owner: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """The refresh arm reads the same id: the provoked refresh hits the lent row.
 
-    ``ensure_oauth_fresh`` is replaced with a recorder so the test asserts WHICH row
+    ``ensure_oauth_fresh_or_raise`` is replaced with a recorder so the test asserts WHICH row
     the arm reached, not that a refresh happened — the arm's own reply cannot tell
     the two rows apart, and that was the defect.
     """
@@ -1963,15 +2096,17 @@ def test_a_refresh_report_targets_the_lent_row(owner: Any, monkeypatch: pytest.M
     lent = _lent_row(owner)
     assert lent == row_two.id
 
-    calls: list[int] = []
+    calls: list[tuple[int, bool]] = []
 
-    async def _record(credential_id: int) -> None:
-        calls.append(credential_id)
+    async def _record(credential_id: int, *, force: bool = False) -> None:
+        calls.append((credential_id, force))
 
-    monkeypatch.setattr(owner.auth, "ensure_oauth_fresh", _record)
+    monkeypatch.setattr(owner.auth, "ensure_oauth_fresh_or_raise", _record)
     reply = _report(owner, BORROWER_DEVICE, "invalid", credential_id=lent)
-    assert reply["action"] == "refreshed", reply
-    assert calls == [row_two.id], calls
+    # The recorder obtains nothing, and the reply now says so rather than claiming
+    # a refresh it cannot know happened.
+    assert reply["action"] == "unchanged", reply
+    assert calls == [(row_two.id, True)], calls
 
 
 def test_a_report_naming_a_row_this_device_cannot_match_is_noted(owner: Any) -> None:

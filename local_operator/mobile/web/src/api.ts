@@ -547,6 +547,13 @@ export type CommandReceipt = {
 	    on this prompt/steer — additive, so a caller that ignores it reads
 	    `detail` exactly as before. Absent on a relay that does not expand. */
 	skills?: SkillExpansionReceipt;
+	/** Which channel carried a live prompt/steer: a prompt sent while a turn
+	    runs is steered into it under the same `command_id` instead of waiting
+	    the turn out (which outlived the relay's ack and answered 504). Absent
+	    on every other op, on a cold wake, on an "already admitted" retry (that
+	    reply cannot say which channel the first attempt landed on), and on an
+	    older relay. */
+	delivered_as?: "prompt" | "steer";
 };
 
 export function sendCommand(sessionId: string, op: CommandOp): Promise<CommandReceipt> {

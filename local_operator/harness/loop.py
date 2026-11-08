@@ -2089,6 +2089,24 @@ def _input_refusal_recovery_notice(recovery: Mapping[str, Any]) -> str:
     )
 
 
+def _divergence_turn_index(messages: Sequence[AgentMessage]) -> int:
+    """Which turn the call being judged belongs to, 1-based.
+
+    One turn = one assistant message that emitted text or tool calls, which is
+    the unit the false-positive baseline counted (1,642 turns over 20 sessions),
+    so a rate measured here is comparable with that measurement. The assistant
+    message carrying the calls being judged is already appended when a tool
+    runs, so the current turn's index is the count including it; every call in
+    one batch shares it, which is what makes "a SECOND turn named this root" a
+    different fact from "the same turn named it twice".
+    """
+    total = 0
+    for message in messages:
+        if getattr(message, "role", None) == "assistant":
+            total += 1
+    return total
+
+
 class AgentLoop:
     """Runs turns: model streaming, tool execution, steering re-entry.
 
@@ -5485,13 +5503,15 @@ class AgentLoop:
         # the tools exempt (a read's ``q``, a recall's ``text``) are decided here
         # too — see _plan_guard_inputs; the executor below still gets the
         # caller's own arguments.
-        from local_operator.memory_privacy import retained_arguments
+        from local_operator.memory_privacy import refusal_message
 
         guard_arguments, guard_raw = _plan_guard_inputs(
             call.name, call.arguments, call.raw_arguments
         )
-        _, _, sensitive_memory = retained_arguments(call.name, guard_arguments, guard_raw)
-        if sensitive_memory:
+        # The reason names field, kind and span (never the value), so the agent can
+        # correct the call instead of retrying blind.
+        refusal = refusal_message(call.name, guard_arguments, guard_raw)
+        if refusal is not None:
             from local_operator.memory import (
                 MEMORY_TOOL_CONTRACT_ERROR,
                 valid_memory_tool_arguments,
@@ -5505,14 +5525,7 @@ class AgentLoop:
                 tool=tool,
                 failure=self._synthetic_result(
                     call,
-                    (
-                        MEMORY_TOOL_CONTRACT_ERROR
-                        if invalid_contract
-                        else (
-                            "Sensitive value refused. Use lop secret; "
-                            "memory may hold its NAME only."
-                        )
-                    ),
+                    (MEMORY_TOOL_CONTRACT_ERROR if invalid_contract else refusal),
                     details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
                 ),
             )
@@ -6238,6 +6251,7 @@ class AgentLoop:
                 result,
                 secret_active=bool(context.one_turn_secret_leases),
             )
+            self._observe_divergence(config, context, item, tool.name)
             if (
                 real_quiet
                 and not result.is_error
@@ -6309,6 +6323,52 @@ class AgentLoop:
                 is_error=True,
                 content=[TextContent(text=f"Tool raised: {exc}")],
             )
+
+    @staticmethod
+    def _observe_divergence(
+        config: LoopConfig,
+        context: LoopContext,
+        item: _PlannedCall,
+        tool_name: str,
+    ) -> None:
+        """Hand one finished call to the session's divergence observer.
+
+        The call site is HERE (after the result exists, beside the other
+        post-result hooks) because the observer judges what the model ASSERTED —
+        and it must judge it at the moment the call happened, against the
+        history as it stood then, not against a transcript rewritten later.
+
+        ``item.args`` is the ORIGINAL argument mapping the tool ran with, not
+        the scrubbed copy ``context.messages`` retains, for the same reason the
+        guard-area recorder uses it (R3-1): the observation is about the bytes
+        the model actually emitted.
+
+        OBSERVATION ONLY. The judge never denies, approves or delays: it returns
+        events, writes audit rows, and hands the host an optional notice
+        payload. Nothing here may break a turn, so every failure is a DEBUG
+        line — a guard that can kill a turn is a gate with a disguise on.
+
+        ``divergence_judge`` is duck-typed on purpose: ``harness/types.py`` is
+        on a deliberately light import path and must not drag
+        ``local_operator.divergence`` (and its filesystem audit writer) in.
+        """
+        judge = config.divergence_judge
+        if judge is None:
+            return
+        try:
+            judge.observe_turn(
+                turn_index=_divergence_turn_index(context.messages),
+                tool=tool_name,
+                arguments=item.args,
+                call_id=item.call.id,
+                cwd=getattr(context.tool_context, "cwd", None),
+                messages=context.messages,
+                system_blocks=context.system_blocks,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - an observer must never break a turn
+            logger.debug("divergence observer failed", exc_info=True)
 
     @staticmethod
     async def _apply_post_tool_hooks(

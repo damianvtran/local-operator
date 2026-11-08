@@ -33,6 +33,7 @@ def _schedule(
     notify: bool = False,
     kind: str = "scheduled",
     hidden: bool = False,
+    origin: str | None = None,
 ) -> WakeSchedule:
     return WakeSchedule(
         id=wake_id,
@@ -46,6 +47,7 @@ def _schedule(
         notify=notify,
         kind=kind,  # type: ignore[arg-type]
         hidden=hidden,
+        origin=origin,  # type: ignore[arg-type]
     )
 
 
@@ -143,6 +145,11 @@ def test_create_builds_through_the_shared_validator_and_names_the_new_row() -> N
     assert built.notify is True
     assert result.sentence == schedule.notice_created("w1", built.next_due_at)
     assert "w1" in result.sentence
+    # The page is the person: a row created here is the operator's own words, so
+    # the delivery is folded as their instruction instead of being called new
+    # (the divergence guard). Same seam, same reason, for an EDIT below.
+    assert built.origin == "tui"
+    assert built.message_author == "operator"
 
 
 def test_create_repeats_and_bounds_reach_the_row() -> None:
@@ -237,6 +244,49 @@ def test_edit_moves_the_time_only_when_the_when_field_is_filled() -> None:
     moved = schedule.edit(schedule.FormValues(message="same", when="in 2h"), [row], "w5", NOW)
     assert moved.ok and moved.schedule is not None
     assert moved.schedule.next_due_at == NOW + 2 * 3_600_000
+
+
+def test_an_edit_that_replaces_the_words_makes_them_the_operators() -> None:
+    """R6-MAJOR-1 at the page that produces it.
+
+    A model-armed row rewired from this page carries the person's words, so the
+    row's author moves with them: keeping ``tool`` delivered the operator's own
+    sentence as model text and the divergence guard called it new to the
+    session. The page is not a different author from the row it edits when the
+    row was ALREADY the operator's — hence the carry test below.
+    """
+    values = schedule.prefilled(_schedule("w5", message="check the build", origin="tool"))
+    result = schedule.edit(
+        schedule.FormValues(
+            message="deploy the fix",
+            when=values.when,
+            repeat=values.repeat,
+            ends=values.ends,
+            notify=values.notify,
+        ),
+        [_schedule("w5", message="check the build", origin="tool")],
+        "w5",
+        NOW,
+    )
+
+    assert result.ok and result.schedule is not None
+    assert result.schedule.origin == "tui"
+    assert result.schedule.message_author == "operator"
+
+
+def test_an_edit_that_only_moves_the_time_keeps_the_rows_author() -> None:
+    """The other half: an operator re-timing a model's reminder must not take
+    authorship of words the model wrote."""
+    row = _schedule("w5", message="check the build", origin="tool")
+
+    result = schedule.edit(
+        schedule.FormValues(message="check the build", when="in 2h"), [row], "w5", NOW
+    )
+
+    assert result.ok and result.schedule is not None
+    assert result.schedule.next_due_at == NOW + 2 * 3_600_000
+    assert result.schedule.origin == "tool"
+    assert result.schedule.message_author == "model"
 
 
 def test_edit_clears_the_repeat_and_the_bound_when_their_fields_are_blank() -> None:

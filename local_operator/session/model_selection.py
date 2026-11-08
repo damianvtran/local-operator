@@ -412,7 +412,7 @@ def selection_from_payloads(payloads: Iterable[dict[str, Any]]) -> StoredModelSe
     return replace(selected, recovered=unusable) if selected is not None else None
 
 
-def _forward_payloads(directory: Path) -> Iterable[dict[str, Any]]:
+def _forward_payloads(directory: Path, *, read_only: bool = False) -> Iterable[dict[str, Any]]:
     """Every custom payload in the journal, oldest first — the original scan.
 
     Kept because it is the answer for a journal that holds no valid
@@ -430,7 +430,7 @@ def _forward_payloads(directory: Path) -> Iterable[dict[str, Any]]:
     exactly the journals whose fold here is expensive), and this is the shape it
     must stay in step with.
     """
-    path = _journal_for_read(directory)
+    path = _journal_for_read(directory, read_only=read_only)
     if path is None:
         return
     try:
@@ -454,7 +454,7 @@ def _forward_payloads(directory: Path) -> Iterable[dict[str, Any]]:
         return
 
 
-def _settled_selection(directory: Path) -> StoredModelSelection | None:
+def _settled_selection(directory: Path, *, read_only: bool = False) -> StoredModelSelection | None:
     """The newest VALID ``version == 2`` row's selection, found from EOF.
 
     WHY BACKWARD, and why it is exact. :func:`selection_from_payloads` folds
@@ -499,7 +499,7 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
     Journals this build writes cannot contain such a byte: every append encodes
     the whole row before writing it.
     """
-    path = _journal_for_read(directory)
+    path = _journal_for_read(directory, read_only=read_only)
     if path is None:
         return None
     try:
@@ -554,7 +554,7 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
     return None
 
 
-def _journal_for_read(directory: Path) -> Path | None:
+def _journal_for_read(directory: Path, *, read_only: bool = False) -> Path | None:
     """A readable journal for ``directory``, archive included, or ``None``.
 
     THE RESOLVER, so a resumed session keeps the model its journal names: a
@@ -563,11 +563,16 @@ def _journal_for_read(directory: Path) -> Path | None:
     configured hosting instead. Every reader below opens the path this returns,
     and the memo keys stat it — so the cache stays keyed on the bytes actually
     read.
+
+    ``read_only`` is ``transcript_for_read``'s: a caller that only DISPLAYS the
+    selection (the phone's session listing) must never fall through to the
+    in-place restore when the cache copy cannot be made, so it gets ``None``
+    ("no stored selection") instead of a re-inflated session.
     """
     from local_operator.session import compression
 
     try:
-        return compression.transcript_for_read(directory)
+        return compression.transcript_for_read(directory, read_only=read_only)
     except (OSError, compression.ArchiveError):
         return None
 
@@ -611,7 +616,9 @@ def _memoised(
     return value
 
 
-def read_model_selection(directory: Path) -> StoredModelSelection | None:
+def read_model_selection(
+    directory: Path, *, read_only: bool = False
+) -> StoredModelSelection | None:
     """Read only identity rows without loading message attachments or history.
 
     The settle scan first (see :func:`_settled_selection`), then today's fold
@@ -629,11 +636,17 @@ def read_model_selection(directory: Path) -> StoredModelSelection | None:
 
     THE MEMO IS WHY THIS IS A WRAPPER: the walk behind it is the per-OPEN cost
     this module's audit measured (see ``_SELECTION_MEMO``'s comment).
+
+    ``read_only=True`` is the DISPLAY-ONLY variant (see :func:`_journal_for_read`):
+    every journal resolution below refuses the in-place restore, so a compressed
+    session whose cache copy cannot be made answers ``None`` and stays
+    compressed. It shares the memo: the key is the stat of the same bytes either
+    way, so the two variants cannot disagree about one journal version.
     """
     return _memoised(
         _SELECTION_MEMO,
-        _journal_for_read(directory) or (directory / "transcript.jsonl"),
-        lambda: _read_selection(directory),
+        _journal_for_read(directory, read_only=read_only) or (directory / "transcript.jsonl"),
+        lambda: _read_selection(directory, read_only=read_only),
     )
 
 
@@ -665,7 +678,7 @@ def read_selection_reading(directory: Path) -> SelectionReading:
     return SelectionReading(selection, rules, before if before == after else None)
 
 
-def _read_selection(directory: Path) -> StoredModelSelection | None:
+def _read_selection(directory: Path, *, read_only: bool = False) -> StoredModelSelection | None:
     """Read source evidence, falling back to the unchanged settle/fold scans.
 
     The ledger is registry-independent: re-run the same fold so removed or
@@ -677,10 +690,10 @@ def _read_selection(directory: Path) -> StoredModelSelection | None:
     payloads = read_selection_payloads(directory)
     if payloads is not None:
         return selection_from_payloads(payloads)
-    settled = _settled_selection(directory)
+    settled = _settled_selection(directory, read_only=read_only)
     if settled is not None:
         return settled
-    return selection_from_payloads(_forward_payloads(directory))
+    return selection_from_payloads(_forward_payloads(directory, read_only=read_only))
 
 
 def refused_decision_only_selection(directory: Path) -> str | None:
