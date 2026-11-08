@@ -35,7 +35,9 @@ from tests.unit.network.test_credentials_owner import (  # noqa: F401 — fixtur
     stub_provider,
 )
 from tests.unit.network.test_credentials_share_push import (  # noqa: F401 — fixtures by import
+    _b_holds,
     _relink,
+    _share_json,
     _start_b,
     drive_mesh,
 )
@@ -224,3 +226,112 @@ def test_a_peer_whose_build_changed_is_asked_again(
     live[0].peer_build = {**dict(live[0].peer_build or {}), "version": "99.0.0"}
     cred_sync.credentials_sync_step(drive_mesh.a, drive_mesh.borrower)
     assert len(pulls) == 2, pulls
+
+
+def test_a_codeless_busy_refusal_is_retried_next_tick_not_parked(
+    drive_mesh: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 1, m1: a full slow-op pool answers with the relay's CODELESS refusal
+    (``relay._dispatch_slow``). That is transient on the same instance, so the next tick
+    asks again, as main did; only a policy code (``not_implemented``) parks."""
+    from local_operator.network import wire
+
+    _start_b(drive_mesh)
+    asked: list[dict[str, Any]] = []
+
+    def _busy(self: Any, target: str, frame: dict[str, Any], **kwargs: Any) -> Any:
+        asked.append(frame)
+        return wire.refusal_frame(
+            frame.get("req"),
+            "this device is already running 16 long operations for its peers; "
+            "net_broker was not started — try again in a moment",
+        )
+
+    monkeypatch.setattr(client_mod.MeshCredentialClient, "_ask_owner_directly", _busy)
+    for _ in range(3):
+        cred_sync.credentials_sync_step(drive_mesh.a, drive_mesh.borrower)
+    pulls = [f for f in asked if f.get("kind") == "placement" and f.get("want") == "pull"]
+    assert len(pulls) == 3, pulls
+    assert drive_mesh.borrower not in cred_sync._owner_refusals(drive_mesh.a)  # noqa: SLF001
+
+
+def test_a_nudged_pass_does_not_spend_the_timed_ticks_independent_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1: a nudged pass ran the independent steps (share retry, credential
+    sync, lifecycle) and RECORDED the attempt, so the next timed tick, always < 15 s
+    later, skipped them for that member — a missed share restored near pairing waited
+    ~22 s instead of ~10 s. The timed tick right after a nudge must run them."""
+    peer = "d_" + "5" * 32
+    ran: list[float] = []
+
+    def _step(_server: Any, _device: str) -> None:
+        ran.append(1.0)
+
+    setattr(_step, "independent_cadence", True)
+    monkeypatch.setattr(definitions, "_tick_steps", lambda: (_step,))
+    monkeypatch.setattr(
+        definitions, "push_to_peer", lambda *_a, **_k: {"ok": True, "code": "in_sync"}
+    )
+    syncer = definitions.DefinitionsSyncer(SimpleNamespace(root=tmp_path))  # type: ignore[arg-type]
+    monkeypatch.setattr(syncer, "_targets", lambda: [peer])
+    monkeypatch.setattr(definitions, "unholdable_capability", lambda *_a: "")
+
+    syncer.tick(now=1000.0, only=frozenset({peer}))  # the nudge
+    syncer.tick(now=1006.0)  # the next timed tick, 6 s later
+    assert len(ran) == 2, "the timed tick skipped a step the nudge had just run"
+    syncer.tick(now=1010.0)  # the timed tick's own floor still holds
+    assert len(ran) == 2
+
+
+def test_the_pairing_ceremony_link_runs_no_link_up_hook(
+    devices: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 1, n2: the ceremony's link is the joiner CLI's socket, closing as the
+    ceremony ends; a slice's ``on_link_up`` hook must not see it (``link_up_hooks``)."""
+    server_a = devices[0]
+    seen: list[Any] = []
+    ceremony: list[Any] = []
+    admit = server_a._admit_link  # noqa: SLF001
+
+    def _admit(link: Any) -> str:
+        if not getattr(link, "link_up_hooks", True):
+            ceremony.append(link)
+        return admit(link)
+
+    monkeypatch.setattr(server_a, "_admit_link", _admit)
+    monkeypatch.setattr(
+        server_a,
+        "_slice_link_up_hooks",
+        [*server_a._slice_link_up_hooks, ("spy", seen.append)],  # noqa: SLF001
+    )
+    _pair(devices, monkeypatch, role="drive")
+    assert ceremony, "the ceremony's link was not admitted through _admit_link"
+    assert not [link for link in seen if any(link is c for c in ceremony)], seen
+
+
+def test_pair_share_pull_converges_with_the_nudge_armed(
+    first_contact_nudge: None,
+    drive_mesh: Any,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review round 1, m2: the directory pins the nudge off, so ONE cell runs pair →
+    share → pull with it armed and checks the end state, not exact counts: B's
+    first-contact pull is refused (nothing shared yet) and parked, and the share still
+    reaches B and is borrowable."""
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from tests.unit.network.test_credentials_owner import STUB_PROVIDER
+
+    _start_b(drive_mesh)
+    assert net_fixtures.wait_for(
+        lambda: any(
+            link.device_id == drive_mesh.owner and link.alive
+            for link in list(drive_mesh.b.links.values())
+        )
+    ), "B's relay never linked to A"
+    _share_json(drive_mesh, capsys)
+    assert net_fixtures.wait_for(lambda: _b_holds(drive_mesh)), "the share never reached B"
+    client = MeshCredentialClient.for_this_device(drive_mesh.b.root)
+    assert client is not None and client.should_borrow(STUB_PROVIDER)

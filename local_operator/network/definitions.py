@@ -2275,7 +2275,15 @@ class DefinitionsSyncer(threading.Thread):
                 ident = (step, device_id)
                 if moment - independent.get(ident, float("-inf")) < self._tick_s:
                     continue
-                independent[ident] = moment
+                # A NUDGED (``only``) PASS READS THE FLOOR BUT NEVER WRITES IT (QA
+                # round 1, Q1). The timed ticks keep their own deadline, so the first
+                # one after a nudge always lands < ``tick_s`` later; a recorded nudge
+                # attempt made it skip this member's share retry, credential and
+                # lifecycle steps once — a missed share restored near pairing then
+                # arrived at ~22 s against ~10 s on main. The nudge's own extra run is
+                # bounded by ``NUDGE_MIN_INTERVAL_S``, not by this floor.
+                if only is None:
+                    independent[ident] = moment
                 try:
                     step(self._server, device_id)
                 except Exception:  # noqa: BLE001 — one protocol cannot stop siblings
@@ -2584,9 +2592,11 @@ def install(server: "RelayServer") -> None:
 def _on_link_up(server: "RelayServer", link: Any) -> None:
     """Relay link-up hook: nudge this relay's syncer toward the member just linked.
 
-    Covers both halves of "a member appeared": the inviter admitting a joiner (the
-    ceremony's link is admitted right after the member row is written) and any later
-    first link to a member, in either direction. READS the registry rather than
+    Fires on the first link between this relay and a member's RELAY, in either
+    direction — for a fresh pairing, the joiner's relay linking to the inviter right
+    after it starts. NOT on the pairing ceremony's own link: that is the joiner CLI's
+    socket, admitted with ``PeerLink.link_up_hooks = False`` because it closes the
+    moment the ceremony ends (``relay._run_pair_listener``). READS the registry rather than
     calling :func:`ensure_syncer`: a hook must never start a thread on a relay whose
     start hooks have not run (or that is stopping) — no syncer means no cadence to
     nudge, and the start hook's first tick serves the member anyway.

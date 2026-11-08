@@ -2412,7 +2412,7 @@ def credentials_sync_step(step_server: "RelayServer", device_id: str) -> str | N
     # the stale-self-view branch's own, re-armed the same ways: a new relay
     # instance or build behind the link (a peer that gained the capability by
     # updating restarted to do it), or the peer's share push / served document.
-    _pull_placement_unless_parked(server, device_id)
+    _pull_placement_unless_parked(server, device_id, park_codes=_POLICY_PULL_REFUSALS)
     pulled = document_engine.enqueue_placement_pull(device_id)
     # The exchange's own word stays the tick's answer whenever it did anything:
     # existing callers (and the wipe/removal tests) branch on it, and both jobs
@@ -2496,18 +2496,32 @@ def _pull_past_stale_self_view(server: Any, engine: Any, device_id: str, blocked
     what the share defect is about, and its answer is reported unchanged.
     """
     skip = f"skipped:no_{blocked}"
-    result = _pull_placement_unless_parked(server, device_id)
+    result = _pull_placement_unless_parked(server, device_id, park_codes=None)
     if result is None:
         return skip
     return engine.enqueue_placement_pull(device_id)
 
 
-def _pull_placement_unless_parked(server: Any, device_id: str) -> dict[str, Any] | None:
+#: The refusal codes that park the UNBLOCKED branch's placement pull: a capability
+#: or authorisation answer, which does not change between ticks. Everything else an
+#: owner can answer codelessly on the same instance is transient — a full slow-op
+#: pool (``relay._dispatch_slow``), an op past its deadline — and main retried those
+#: on the next 15 s tick; parking them for 30 min was a regression (review round 1,
+#: m1). The stale-self-view branch keeps parking every refusal (``park_codes=None``):
+#: its refusal IS the authoriser's codeless answer, and #3561 parks exactly that.
+_POLICY_PULL_REFUSALS: frozenset[str] = frozenset({"not_implemented", "not_authorised"})
+
+
+def _pull_placement_unless_parked(
+    server: Any, device_id: str, *, park_codes: frozenset[str] | None
+) -> dict[str, Any] | None:
     """Pull ``device_id``'s placement document unless its last answer was a refusal.
 
     Returns the pull's reply when the peer was asked and did NOT refuse, else
-    ``None`` (parked, refused — and now parked —, or no answer). Shared by both
-    branches of :func:`credentials_sync_step` so the one park has one policy.
+    ``None`` (parked, refused, or no answer). Shared by both branches of
+    :func:`credentials_sync_step` so the one park has one policy; ``park_codes``
+    narrows which refusals park (``None``: every refusal), and a refusal outside it is
+    simply asked again on the next tick.
     """
     from local_operator.network import definitions
 
@@ -2539,6 +2553,9 @@ def _pull_placement_unless_parked(server: Any, device_id: str) -> dict[str, Any]
     if not isinstance(result, dict):
         return None
     if device_id in (result.get("refused_by") or ()):
+        code = str((result.get("refused_codes") or {}).get(device_id) or "")
+        if park_codes is not None and code not in park_codes:
+            return None
         parked[device_id] = (
             now + definitions.REFUSED_MIN_INTERVAL_S,
             _live_owner_instance(server, device_id),
