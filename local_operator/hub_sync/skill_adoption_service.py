@@ -53,7 +53,8 @@ def _refusal(code: str, message: str) -> LinkError:
         "adoption-preview-changed": copy.preview_changed,
         "adoption-needs-choice": copy.needs_choice,
     }.get(code)
-    return LinkError(code, key().envelope()["text"] if key else message)
+    refusal = key() if key else None
+    return LinkError(code, refusal.envelope()["text"] if refusal else message, msg=refusal)
 
 
 def _gate(ctx: Any, resolved: Any) -> tuple[Any, Any]:

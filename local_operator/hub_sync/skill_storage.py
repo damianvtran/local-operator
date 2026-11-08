@@ -172,7 +172,8 @@ class ManagedSkillStorage:
                 projection_unsupported,
             )
 
-            raise LinkError("projection-unsupported", projection_unsupported().envelope()["text"])
+            refusal = projection_unsupported()
+            raise LinkError("projection-unsupported", refusal.envelope()["text"], msg=refusal)
 
     def _projection_windows_absent(self, alias: str, *, _kernel: Any = None) -> bool:
         """Absence-only Windows probe; existing projections need a native adapter.
@@ -263,7 +264,8 @@ class ManagedSkillStorage:
                 projection_unsupported,
             )
 
-            raise LinkError("projection-unsupported", projection_unsupported().envelope()["text"])
+            refusal = projection_unsupported()
+            raise LinkError("projection-unsupported", refusal.envelope()["text"], msg=refusal)
 
     @contextmanager
     def _projection_directory(self, *, create: bool = False) -> Iterator[int | None]:

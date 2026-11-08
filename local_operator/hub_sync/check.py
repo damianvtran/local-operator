@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 from local_operator.hub_sync import provenance as prov
+from local_operator.hub_sync.identity import refusal_text_en
 from local_operator.hub_sync.segment import norm
 
 logger = logging.getLogger(__name__)
@@ -927,7 +928,11 @@ def check_hub_skills(
                             tenant,
                             "unavailable",
                             reason="local-concurrent-edit",
-                            detail=f"could not read the local skill: {error}",
+                            # ``detail`` is persisted (status.json last_error) and read
+                            # by the model, so a catalogued LinkError from the storage
+                            # (e.g. projection-unsupported) is re-rendered pinned to
+                            # English instead of the active locale's ``str(error)``.
+                            detail=f"could not read the local skill: {refusal_text_en(error)}",
                             link_id=(
                                 record.identity.link_id if record.identity is not None else None
                             ),

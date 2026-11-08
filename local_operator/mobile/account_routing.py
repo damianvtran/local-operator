@@ -29,8 +29,10 @@ class AccountRoutingError(Exception):
 def policy_payload(root: Path, patch: Any = None, *, write: bool = False) -> dict[str, Any]:
     """Read or patch the one non-security setting through the existing facade."""
     # Resolve from the backend config owner on each request, like relay metadata;
-    # envelope() defaults to English and the TUI's ambient locale is not a
-    # request-scoped authority. Do not introduce a client language override.
+    # envelope() with no locale= renders the process's ACTIVE locale, which the
+    # TUI's ambient state can move; it is not a request-scoped authority, so
+    # the language is pinned explicitly from config below. Do not introduce a
+    # client language override.
     setting = settings_io.resolve_key(POLICY_KEY)
     if setting is None:
         raise AccountRoutingError(

@@ -159,7 +159,11 @@ def _notice(
     a locale-aware viewer re-render without parsing the sentence. Callers keep
     passing ``kind``/``headline`` exactly as they did on the raw constructor.
     """
-    body = message.envelope()
+    # PINNED to ``en`` (see ``i18n.messages.envelope``): a NoticeEvent is written
+    # to the transcript and replayed, so its ``text`` must not depend on the
+    # language the process happened to have when it was emitted. ``code`` and
+    # ``params`` let a locale-aware viewer re-render.
+    body = message.envelope(locale="en")
     return NoticeEvent(
         text=body["text"],
         code=body["code"],

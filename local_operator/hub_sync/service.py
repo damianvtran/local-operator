@@ -63,6 +63,7 @@ from local_operator.hub_sync.identity import (
     LinkOrigin,
     Visibility,
     link_origin,
+    refusal_text_en,
 )
 from local_operator.hub_sync.merge import (
     FieldInput,
@@ -1620,7 +1621,9 @@ def _apply_skill(
         )
     except (LinkError, TransactionError) as exc:
         code = getattr(exc, "code", "hub-error")
-        return fail(str(code), str(exc))
+        # last_error is persisted (Windows) and shown by the model-read status,
+        # so a catalogued LinkError sentence is re-rendered pinned to English.
+        return fail(str(code), refusal_text_en(exc))
     except (ValueError, KeyError) as exc:
         return fail("merge-refused", f"the result was refused: {exc}", "refused")
     except Exception as exc:  # noqa: BLE001 - one item's failure never ends the run
@@ -1839,7 +1842,9 @@ def _apply_skill_bundle(
         )
     except (LinkError, TransactionError) as exc:
         code = getattr(exc, "code", "hub-error")
-        return fail(str(code), str(exc))
+        # last_error is persisted (Windows) and shown by the model-read status,
+        # so a catalogued LinkError sentence is re-rendered pinned to English.
+        return fail(str(code), refusal_text_en(exc))
     except (ValueError, KeyError) as exc:
         return fail("merge-refused", f"the result was refused: {exc}", "refused")
     except Exception as exc:  # noqa: BLE001 - one item's failure never ends the run
@@ -6015,7 +6020,8 @@ def publish_skill(
             publication,
             local_id,
             (
-                str(error)
+                # safe_message is persisted in the receipt and read by the model.
+                refusal_text_en(error)
                 if isinstance(error, LinkError)
                 else "the local link could not be materialized"
             ),
@@ -6160,7 +6166,11 @@ def _local_skill_fields(ctx: HubSyncContext, record: prov.BaselineRecord) -> dic
     try:
         snapshot = adapter.snapshot(ctx.config_dir, record.local_id)
     except Exception as error:  # noqa: BLE001 - an unreadable copy is a named refusal
-        raise LinkError("local-concurrent-edit", f"could not read the local skill: {error}")
+        # The wrapped LinkError text lands in the persisted check detail / last_error,
+        # so a catalogued storage refusal is pinned to English (see refusal_text_en).
+        raise LinkError(
+            "local-concurrent-edit", f"could not read the local skill: {refusal_text_en(error)}"
+        )
     if "bundle" in (record.fields or {}):
         return dict(snapshot.fields)
     return dict(adapter.canonical_fields(snapshot.fields))
